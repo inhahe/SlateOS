@@ -22863,6 +22863,89 @@ pub fn self_test_linux_unix_sockets() -> KernelResult<()> {
     Ok(())
 }
 
+/// Descriptors passed over Unix-domain sockets from a real Linux process
+/// (`SCM_RIGHTS`, [`elf::build_linux_scm_rights_test_elf`]): a pipe's write
+/// end on a datagram and on a stream, close-on-exec, `MSG_CTRUNC`, a plain
+/// `read` releasing what it cannot hand on, `EBADF` -- every reference
+/// accounted for by its pipe's end of file.
+///
+/// # Errors
+///
+/// `InternalError` when the program does not exit `0x5F`.
+pub fn self_test_linux_scm_rights() -> KernelResult<()> {
+    /// The program's success exit.
+    const OK_EXIT: i32 = 0x5F;
+    /// The program never blocks: every pipe is non-blocking and every
+    /// receive has its message queued. This only bounds a broken run.
+    const MAX_YIELDS: usize = 1024;
+
+    serial_println!("[spawn] Running Linux SCM_RIGHTS (ring 3) integration test...");
+    let exe_elf = elf::build_linux_scm_rights_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-scm-rights"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-scm-rights",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: SCM_RIGHTS spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    for _ in 0..MAX_YIELDS {
+        crate::sched::yield_now();
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break;
+        }
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: SCM_RIGHTS (ring 3) -- not a zombie after {} yields, got {:?}",
+            MAX_YIELDS,
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(OK_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: SCM_RIGHTS (ring 3) -- exit {:?}, expected {} (0x01-0x0B a \
+             datagram: socketpair, pipe2, sendmsg, close, recvmsg, the control message's \
+             shape, FD_CLOEXEC, write through the passed end, read it, close it, no end of \
+             file; 0x0C-0x15 a stream: socketpair, pipe2, write, sendmsg, write, recvmsg not \
+             \"abcd\", not one descriptor, the bytes after, EAGAIN after closing ours, no end \
+             of file after closing the passed one; 0x16-0x1A room for one of two: pipe2, \
+             sendmsg, recvmsg, MSG_CTRUNC and the message, no end of file; 0x1B-0x1E read(2): \
+             pipe2, sendmsg, read, no end of file; 0x1F a descriptor not open not EBADF; \
+             0x20-0x25 SOCK_SEQPACKET: socketpair, the two sends, a short recvmsg not cut \
+             with MSG_TRUNC, the next read not the next message, no end of file after the \
+             peer closed, a send to it not EPIPE)",
+            exit_code,
+            OK_EXIT
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux SCM_RIGHTS (ring 3: a datagram and a stream carry a pipe's write \
+         end, MSG_CMSG_CLOEXEC, the stream's marked bytes, a held object kept once, \
+         MSG_CTRUNC, read(2) releasing, EBADF, every pipe's end of file on time; \
+         SOCK_SEQPACKET's whole messages and end of file): OK"
+    );
+    Ok(())
+}
+
 /// Where a process's program headers are (`place_phdr_table`,
 /// `pcb::main_phdr`, `AT_PHDR`): found in a loaded segment, and copied into a
 /// page of their own when no segment holds them.

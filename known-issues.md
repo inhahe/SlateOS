@@ -181499,40 +181499,128 @@ caller's filesystem uid, and its group to the caller's filesystem gid -- or
 the parent directory's gid when the parent is setgid -- in the same
 operation as the creation, as Linux's `inode_init_owner` does.
 
-### A-UNIX-SOCKETS-CARRY-NO-DESCRIPTORS-OR-CREDENTIAL-MESSAGES -- 2026-10-02 -- OPEN (lane A)
+### A-UNIX-SOCKETS-CARRY-NO-DESCRIPTORS-OR-CREDENTIAL-MESSAGES -- 2026-10-02 -- FIXED (lane A)
 
-**Status:** OPEN (lane A) -- what the first version of named Unix-domain
-sockets (design-decisions 1519) does not do yet.
+**Status:** FIXED (lane A), 2026-10-02 -- everything the first version of
+named Unix-domain sockets (design-decisions 1519) left out is done. What
+remains of descriptor passing has entries of its own.
 
-**In short:** programs can now meet at a socket's name and talk, but two
-things Linux's Unix-domain sockets also do are missing:
-- **Passing open files to another program** (`SCM_RIGHTS`). Wayland, D-Bus
-  and many servers hand descriptors across a socket. A send that tries is
-  refused with `EOPNOTSUPP`, so the program knows.
-- **`SOCK_SEQPACKET`**: still `ENOSYS`.
+**In short:** programs can meet at a socket's name, talk, pass open files,
+state their credentials, and use all three kinds -- stream, datagram and
+sequenced packets.
 
-Receive and send timeouts (`SO_RCVTIMEO`/`SO_SNDTIMEO`) were done the same
-day: a blocking call waits at most the limit and then answers `EAGAIN`, a
-signal during such a wait answers `EINTR`, and an accepted socket starts
-with its listener's limits, as on Linux.
+Done the same day:
+- **`SOCK_SEQPACKET`**: connected like a stream (`listen`, `connect`,
+  `accept`, `socketpair`), each send arriving whole like a datagram, cut to
+  the buffer with `MSG_TRUNC`; what a client sends before `accept` waits in
+  the server's socket, made at `connect` as Linux makes it; the peer's close
+  is end of file after its messages, and a send to it `EPIPE`. `SOCK_RAW`
+  makes a datagram socket, as Linux's `unix_create` does.
+- **Passing open files** (`SCM_RIGHTS`, design-decisions 1521): on a datagram,
+  and on a stream riding on the bytes their send wrote; close-on-exec on
+  request; `MSG_CTRUNC` with the surplus released; a per-user limit on
+  descriptors in flight (`ETOOMANYREFS`); sockets kept alive only by each
+  other collected as garbage. What is left of it: A-SCM-RIGHTS-DIFFERENCES,
+  A-NATIVE-PROGRAMS-CANNOT-PASS-DESCRIPTORS.
+- **Receive and send timeouts** (`SO_RCVTIMEO`/`SO_SNDTIMEO`): a blocking call
+  waits at most the limit and then answers `EAGAIN`, a signal during such a
+  wait answers `EINTR`, and an accepted socket starts with its listener's
+  limits, as on Linux.
+- **Credentials as a control message** (`SCM_CREDENTIALS` with
+  `SO_PASSCRED`): `recvmsg` hands back the sender's credentials, and a sender
+  may state its own (or, as root, another live process's) on `sendmsg`,
+  checked as Linux checks them.
 
-So was **credentials as a control message** (`SCM_CREDENTIALS` with
-`SO_PASSCRED`): `recvmsg` hands back the sender's
-credentials, and a sender may state its own (or, as root, another live
-process's) on `sendmsg`, checked as Linux checks them. One difference is
-left there: a stream reports its connection's credentials rather than each
-write's, which shows only when one connection is written by several
-processes, or root states another process's credentials on a stream.
+**Where:** `kernel/src/syscall/linux.rs` `sys_socket`, `sys_socketpair`;
+`kernel/src/ipc/unix_socket.rs`.
 
-**Where:** `kernel/src/syscall/linux.rs` -- `unix_sendmsg`
-(`parse_send_control`), `sys_socket`; `kernel/src/ipc/unix_socket.rs`.
+### A-SCM-RIGHTS-DIFFERENCES -- 2026-10-02 -- OPEN (lane A)
 
-**Proper fix:** `SCM_RIGHTS` moves each descriptor's object with the
-message, as `ipc::channel` moves capabilities -- a stream needs the rights
-attached to a byte offset, as Linux attaches them to the skb they arrive
-with (and per-write credentials would hang off the same boundaries).
-SEQPACKET: a third kind, connected like a stream with datagram boundaries
--- a channel pair is that already.
+**Status:** OPEN (lane A) -- small differences from Linux left in descriptor
+passing (design-decisions 1521). None is known to matter to a ported program.
+
+**In short:** passing open files over a Unix-domain socket works as on
+Linux, with four differences a program would have to go looking for:
+
+1. **A socket kept alive only from inside something else.** The collector
+   finds sockets that only Unix-socket queues hold. One held only by a
+   message in a SlateOS channel (capability transfer) is never collected, so
+   a cycle through a channel leaks its sockets until reboot. Linux's
+   collector has the same blind spot for its io_uring, which it
+   special-cases.
+2. **Descriptors installed but never named.** A receive checks that the
+   control buffer is writable, installs the descriptors, then writes their
+   numbers. If another thread unmaps the buffer in between, the call fails
+   with `EFAULT` and the descriptors stay installed under numbers the program
+   was never told. Linux writes each number before installing it.
+3. **The order of two refusals.** A descriptor that is not open in one
+   `SCM_RIGHTS` message, and more than 253 in total across later ones: Linux
+   answers `EBADF` (it fetches each message's descriptors as it parses),
+   here `EINVAL` (all are parsed first).
+4. **A stream's credentials** are its connection's, not each write's
+   (unchanged from before; shows only when several processes write one
+   connection, or root states another process's credentials on a stream).
+
+**Where:** 1: `kernel/src/ipc/unix_socket.rs` `take_garbage`; 2:
+`kernel/src/syscall/linux.rs` `install_rights`; 3: `parse_send_control`
+and `take_rights`; 4: `unix_socket::recv`.
+
+**Proper fix:** 1: count the references a channel's queue holds in the
+collector's reckoning -- one more kind of queue to scan, or a capability
+transfer that refuses Unix sockets. 2: install each descriptor only after
+its number is written -- the fd table needs a reserve-then-fill step for
+that. 3: take each message's references while parsing. 4: per-write
+credentials as marks, like the descriptors' (`stream_socket`).
+
+### A-NATIVE-PROGRAMS-CANNOT-PASS-DESCRIPTORS -- 2026-10-02 -- OPEN (lane A)
+
+**Status:** OPEN (lane A) -- the native half of descriptor passing, not yet
+built.
+
+**In short:** a program on SlateOS's own C library cannot pass or receive
+open files over a Unix-domain socket. The native socket calls (`SYS_UNIX_*`)
+carry bytes and credentials but no descriptors, and a native receive of a
+message that carries some releases them, as a Linux receive with no room for
+them does. Linux programs can pass them. Nothing native is known to need it
+yet; the C library's Wayland and D-Bus clients will.
+
+**Where:** `kernel/src/syscall/handlers.rs` `sys_unix_send`/`sys_unix_recv`;
+`kernel/src/ipc/passed.rs` (`Passed` holds a Linux `FdEntry`); lane D's
+`posix/` for the C library's half.
+
+**Proper fix:** a native send that takes a list of (resource type, handle)
+pairs the caller holds -- checked against its `ipc_handles`, as capability
+transfer checks -- carried as `Passed` in a native form, and a native receive
+that registers each in the receiver's `ipc_handles` and hands back the pairs
+for the C library to put in its own descriptor table. The C library keeps
+the table in the program, so the kernel never sees descriptor numbers.
+
+### A-A-BOOT-SPENDS-AN-HOUR-TESTING-SCRIPTS -- 2026-10-02 -- OPEN (lane A)
+
+**Status:** OPEN (lane A) -- a cost on every lane's boot, measured on lane A's.
+
+**In short:** a boot test of a kernel change spends about an hour before
+QEMU starts, almost all of it re-testing the boot test's own scripts, which
+the change did not touch. Boot rq31 (2026-10-02, lane A) took 4036 s: gates
+3736 s (93%), build 221 s, QEMU 30 s. The largest gates were script test
+suites: `test-selftests-are-repo-safe.py` 769 s, `test-checkers-honour-head.py`
+495 s, `test-boot-test.py` 256 s, `test-pre-push-fmt-gate.py` 139 s,
+`test-pre-push-doclinks-gate.py` 136 s -- each run untraced ("gate cache:
+SKIP") because it starts other processes, whose reads the cache cannot see.
+36,353 processes in all. Each such boot also blocks the machine for other
+work: a compile run beside the gates made one time out (rq30).
+
+**Where:** `scripts/boot-test.sh` (the gate sequence) and the gate cache
+(`scripts/run-checker.sh`, design-decisions 979); the suites themselves,
+owned by lanes A and B.
+
+**Proper fix**, to be decided with the suites' owners: either (a) a suite
+declares the files it exercises -- the scripts it tests, discovered as it
+already discovers them -- and the cache skips it while those are unchanged
+since a pass (a declared input missed is a stale pass, which is the risk the
+cache's rule exists to avoid, so the declaration would need its own check),
+or (b) the independent suites run in parallel, each in its own temp tree,
+which keeps every run and spends cores instead of wall time.
 
 ### A-SOCKETS-HAVE-NO-PENDING-ERROR -- 2026-10-02 -- OPEN (lane A)
 

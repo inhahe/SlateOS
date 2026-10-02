@@ -88,6 +88,10 @@ pub fn dispatch<E: core::fmt::Display>(name: &str, severity: Severity, result: R
         match severity {
             Severity::Integrity => {
                 serial_println!("FATAL: {} self-test failed: {}", name, e);
+                if keep_going() {
+                    serial_println!("[selftest] selftest.keep_going: carrying on past {}", name);
+                    return;
+                }
                 crate::cpu::halt_loop();
             }
             Severity::Diagnostic => {
@@ -105,12 +109,78 @@ pub fn dispatch_debug<E: core::fmt::Debug>(name: &str, severity: Severity, resul
         match severity {
             Severity::Integrity => {
                 serial_println!("FATAL: {} self-test failed: {:?}", name, e);
+                if keep_going() {
+                    serial_println!("[selftest] selftest.keep_going: carrying on past {}", name);
+                    return;
+                }
                 crate::cpu::halt_loop();
             }
             Severity::Diagnostic => {
                 serial_println!("WARNING: {} self-test failed: {:?}", name, e);
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Keeping going past a failure (`selftest.keep_going=1`)
+// ---------------------------------------------------------------------------
+
+/// Whether this boot carries on past a failed self-test: the kernel command
+/// line holds `selftest.keep_going=1`.
+///
+/// Without it a boot stops at the first failed integrity self-test, and every
+/// later test goes unrun: a change that breaks three tests takes three boots
+/// to find them -- about an hour each with the gates. With it, a failure is
+/// reported exactly as before (`FATAL: ...`, which the boot test counts as a
+/// failed boot) and the boot goes on, so one run lists every failure.
+///
+/// Nothing changes until something fails, so a boot with it set that passes
+/// is an ordinary pass. One that fails lists every failure -- but a test after
+/// a failed integrity test ran on a kernel whose invariants may already be
+/// broken, so a later failure is a lead, not a verdict, until a boot without
+/// the first one shows it again. Set it with
+/// `SLATE_CMDLINE="selftest.keep_going=1" scripts/boot-test.sh`.
+#[must_use]
+pub fn keep_going() -> bool {
+    use core::sync::atomic::{AtomicU8, Ordering};
+    /// 0 not looked yet, 1 no, 2 yes. The command line never changes.
+    static ANSWER: AtomicU8 = AtomicU8::new(0);
+    match ANSWER.load(Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => {
+            let yes = crate::boot::kernel_cmdline_bytes().is_some_and(|line| {
+                line.split(u8::is_ascii_whitespace)
+                    .any(|token| token == b"selftest.keep_going=1")
+            });
+            ANSWER.store(if yes { 2 } else { 1 }, Ordering::Relaxed);
+            yes
+        }
+    }
+}
+
+/// One part of a self-test made of many parts (`linux::self_test`'s are
+/// chained `part()?`): its failure is the whole test's at once -- or, with
+/// [`keep_going`], it is reported as `FATAL` (so the boot is still judged
+/// failed) and the next part runs.
+///
+/// # Errors
+///
+/// `part`'s own error, unless [`keep_going`].
+pub fn step<E: core::fmt::Debug>(part: Result<(), E>) -> Result<(), E> {
+    match part {
+        Err(e) if keep_going() => {
+            // "self-test failed" is what the boot test's
+            // check_selftest_failures looks for: the run still fails.
+            serial_println!(
+                "FATAL: self-test failed in one of its parts: {:?} (selftest.keep_going: \
+                 carrying on)",
+                e
+            );
+            Ok(())
+        }
+        other => other,
     }
 }
 

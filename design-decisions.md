@@ -92087,15 +92087,15 @@ not by its name, so renaming or deleting it behaves as on Linux.
 | Closing a socket leaves its node, refused to `connect` | remove the node on close | Linux leaves it, and programs expect to `unlink` before `bind`; removing it would break a server that binds, closes and rebinds the same path in a race with a client that checks for the node |
 | A full datagram queue makes the sender wait | drop the datagram | Linux waits; a syslog client that drops messages under load loses exactly the messages from the moment something went wrong |
 | Credentials are recorded by the kernel at `connect`/`listen` and per datagram; kernel context records none | report uid 0 for kernel-made sockets | as `ipc::service` records a channel's peer: "unknown" must not read as the strongest credential there is |
-| `SCM_RIGHTS` is refused (`EOPNOTSUPP`) | ignore the control message and send the data | a receiver expecting descriptors that never come fails later and more confusingly than a sender told no now |
+| `SCM_RIGHTS` is refused (`EOPNOTSUPP`) -- until §1521 built it, the same day | ignore the control message and send the data | a receiver expecting descriptors that never come fails later and more confusingly than a sender told no now |
 | Credentials a sender states are checked as Linux checks them, then carried | always the kernel's record, the statement ignored | `logger --id=PID` states a pid on root's authority so the log names the process the line is about; ignoring it would name `logger`, and a claim Linux refuses (`EPERM`) would silently succeed |
 | Native names: an absolute path or an abstract name, with a flag | the Linux `struct sockaddr_un` | native calls take absolute paths everywhere (§648: the kernel has no working directory of the C library's to resolve against); the library converts `sun_path` |
 | A new resource type, `UnixSocket` (33), for the holder's `ipc_handles` | reuse `StreamSocket` | the cleanup and fork arms dispatch on the type; a listener or a datagram socket is not a stream end |
 
 **Not done yet** (`known-issues.md` `A-UNIX-SOCKETS-CARRY-NO-DESCRIPTORS-OR-CREDENTIAL-MESSAGES`):
-descriptor passing (`SCM_RIGHTS`) and `SOCK_SEQPACKET`. (Credential control
-messages on receive and `SO_RCVTIMEO`/`SO_SNDTIMEO`, first listed here, were
-added the same day.)
+nothing, since the same day -- credential control messages on receive,
+`SO_RCVTIMEO`/`SO_SNDTIMEO`, descriptor passing (`SCM_RIGHTS`, §1521) and
+`SOCK_SEQPACKET`, all first listed here, were built then.
 
 **Revisit** if the kernel's datagram queues become a memory concern (a limit
 per process rather than per socket), or if Wayland or D-Bus arrive needing
@@ -92172,3 +92172,113 @@ library keeps.
 
 **Revisit** when real hardware shows underruns at 5 ms / 64 ms (the
 constants in `audio_out`), or when a second device wants the door.
+
+## 1521. Descriptors travel over Unix-domain sockets as kernel-held references, released through a queue, and garbage-collected as Linux collects them
+
+**Date:** 2026-10-02 · **Decided by:** Claude (autonomous) · **Lane:** A
+
+**In short:** a Linux program can now hand an open file to another over a
+Unix-domain socket (`SCM_RIGHTS`), which Wayland, D-Bus, PipeWire, tmux and
+every multi-process browser rely on. While a descriptor travels, the kernel
+holds one reference to its object, as one more process holding it would; the
+receiver gets it as a new descriptor, or, if never received, the reference is
+let go. Sockets that only keep each other alive this way are found and
+released, as Linux does. Along the way, `pidfd_getfd` stopped leaking a
+reference when a process took back a descriptor it already shared, and
+`close` stopped being able to release one reference twice.
+
+**What changed:**
+- `ipc::passed`: a `Passed` is the reference (taken with each kind's `dup`),
+  a `Bundle` the descriptors one message carries. Dropping one queues its
+  release; `passed::drain` performs the queue, called wherever one may drop,
+  once no lock is held. A user's descriptors in flight are counted; one
+  already over its `RLIMIT_NOFILE` sends no more (`ETOOMANYREFS`, root
+  exempt), as Linux's `too_many_unix_fds`.
+- Datagrams carry their bundle. On a stream the bundle is a *mark* on the
+  bytes its send wrote (`stream_socket`), and a receive that reaches the mark
+  takes it and stops at the stretch's end, as Linux's
+  `unix_stream_read_generic` stops after the skb whose descriptors it took. A
+  peek hands up a copy, from which new references are taken.
+- `unix_socket::collect_garbage`: Linux's `unix_gc` -- candidates are
+  sockets every holder of which is a reference queued somewhere; those a
+  queue outside the candidates leads to are kept; the rest have their queues
+  emptied, which ends them. Run on every close while any socket is in
+  flight, under `TABLE`, which every take of descriptors off a queue also
+  holds.
+- The receiving process holds one reference per object however many
+  descriptors name it (`close` releases with the last): installing a passed
+  descriptor whose object the process holds already keeps the descriptor and
+  drops the reference, in one step under the process table's lock
+  (`pcb::linux_fd_install_passed`). `pidfd_getfd` goes the same way, and
+  `close`, `dup2` and `close_range` judge "last" in the same step as the
+  removal (`pcb::linux_fd_take_last`).
+
+**Alternatives:**
+
+| | What changes | For | Against |
+|---|---|---|---|
+| **Release through a queue, drained once no lock is held (chosen)** | a dropped descriptor is let go a moment later, by the drain | a release can end a Unix socket, which takes `TABLE` -- and drops happen under `TABLE` and `PAIRS`; the queue also flattens a chain of sockets each carrying the next into a loop instead of a recursion as deep as an attacker makes it | every path that can drop one must drain; a missed drain delays a release until the next drain anywhere (never loses it) |
+| Release inline in `Drop` | immediate | simplest to read | deadlocks on `TABLE`, recurses without bound |
+| No `Drop`, explicit release everywhere | -- | no hidden work | a forgotten release is a leak, silently |
+
+| | What changes | For | Against |
+|---|---|---|---|
+| **A stream's descriptors as marks in `stream_socket`, under its own lock (chosen)** | bytes and descriptors move together | the offset a send's bytes land at and the mark are recorded atomically; a plain read and a marked read cannot disagree | `stream_socket` learns of a type from `ipc::passed` |
+| A side table in `unix_socket` keyed by stream offset | `stream_socket` unchanged | -- | the offset and the bytes are under different locks, so a reader could take bytes whose mark it had not seen |
+
+| | What changes | For | Against |
+|---|---|---|---|
+| **Collect garbage, as Linux (chosen)** | a socket sent to itself and closed is freed | the Linux behaviour programs and fuzzers assume; without it a loop of sends pins kernel memory without limit | a scan of every socket's queue on each close while any socket is in flight |
+| Refuse to pass Unix sockets | no cycles possible | no collector | D-Bus, systemd's socket hand-over and fd-store pass sockets |
+| Limit nesting depth only | -- | cheap | does not stop a one-step cycle (a socket sent to itself) |
+
+| | What changes | For | Against |
+|---|---|---|---|
+| **One reference per object per process, the duplicate dropped at install (chosen)** | a descriptor received for an object the process holds shares that reference | `close` already releases only with the last descriptor; keeping a second reference would hold a pipe open after its last descriptor closed | the install must check and install in one step (it does) |
+| A reference per descriptor | simpler install | -- | would change `close`, `dup` and fork's accounting everywhere |
+
+**Not done** (`known-issues.md`): native programs cannot pass descriptors
+(`A-NATIVE-PROGRAMS-CANNOT-PASS-DESCRIPTORS`); small differences from Linux
+(`A-SCM-RIGHTS-DIFFERENCES`).
+
+**Revisit** if the collector's scan shows in a profile -- Linux moved to an
+incremental graph in 6.10 for the same reason -- or when the native door is
+built (a `Passed` would then hold a native handle as well as an `FdEntry`).
+
+## 1522. A boot can carry on past failed self-tests, on request, to list every failure in one run
+
+**Date:** 2026-10-02 · **Decided by:** Claude (autonomous), beside the operator's §914, whose default it leaves as it is · **Lane:** A
+
+**In short:** a boot stops at the first failed integrity self-test (§914),
+so a change that breaks three tests takes three boots to find them -- about
+an hour each, most of it the gates (known-issues
+`A-A-BOOT-SPENDS-AN-HOUR-TESTING-SCRIPTS`). Lane A spent six boots in a row
+on 2026-10-01/02 finding one stale expectation each. Now a boot started with
+`SLATE_CMDLINE="selftest.keep_going=1"` reports each failure exactly as
+before -- `FATAL: ... self-test failed`, so the run still fails -- and goes on,
+including past the failed parts of the Linux ABI translation test's 231
+chained parts. Without the parameter nothing changes.
+
+**What changed:** `selftest::keep_going()` reads the kernel command line;
+`selftest::dispatch`/`dispatch_debug` print the `FATAL` line and, only when it
+is set, return instead of halting; `selftest::step(part)` wraps each chained
+part of `linux::self_test` -- a pass-through unless it is set.
+
+**Why this does not reopen §914.** §914 decided what a *machine* does when an
+integrity test fails: it halts, rather than run on with a broken invariant.
+That stays the behaviour of every boot that does not ask otherwise -- and the
+operator rejected skipping self-tests (option A) because a tested path that
+differs from the shipped one is the wrong thing to have on a first hardware
+boot. This skips nothing and ships nothing: it is a developer's request to see
+more of a run that has already failed. A boot with it set that passes is an
+ordinary pass, since nothing changes until something fails.
+
+| | What changes | For | Against |
+|---|---|---|---|
+| **Carry on, on request, still reported as failure (chosen)** | one failing boot lists every failure | an hour saved per failure after the first; the run's verdict is unchanged | a test after a failed integrity test ran on a kernel whose invariants may be broken, so a later failure is a lead until a boot without the first confirms it |
+| Leave it: one failure per boot | -- | nothing to explain | six boots for six stale expectations, as on 2026-10-02 |
+| Demote more tests to Diagnostic | they would log and continue always | no switch | changes §914's classification -- the operator's -- for a developer convenience |
+
+**Revisit** if failures seen only after an earlier one keep failing to
+reproduce on their own: that would mean the tests lean on each other's state,
+which is a bug in the tests, and the switch would be reporting noise.

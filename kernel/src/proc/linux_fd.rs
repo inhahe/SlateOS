@@ -268,6 +268,32 @@ impl HandleKind {
             | Self::UnixSocket => true,
         }
     }
+
+    /// The kind of object the process's `ipc_handles` records for a
+    /// descriptor of this kind -- what exit releases and fork shares -- or
+    /// `None` for the kinds with nothing behind them.
+    #[must_use]
+    pub const fn resource_type(self) -> Option<crate::cap::ResourceType> {
+        use crate::cap::ResourceType;
+        match self {
+            Self::Console | Self::PidFd | Self::AlsaControl => None,
+            Self::File => Some(ResourceType::File),
+            Self::Pipe => Some(ResourceType::Pipe),
+            Self::EventFd => Some(ResourceType::EventFd),
+            Self::MemFd => Some(ResourceType::MemFd),
+            Self::Epoll => Some(ResourceType::Epoll),
+            Self::SignalFd => Some(ResourceType::SignalFd),
+            Self::Timerfd => Some(ResourceType::Timerfd),
+            Self::Inotify => Some(ResourceType::Inotify),
+            Self::AlsaPcm => Some(ResourceType::AlsaPcm),
+            Self::DrmCard => Some(ResourceType::Drm),
+            Self::Evdev => Some(ResourceType::InputDevice),
+            Self::Socket => Some(ResourceType::NetSocket),
+            Self::Channel => Some(ResourceType::Channel),
+            Self::ServiceListener => Some(ResourceType::Service),
+            Self::UnixSocket => Some(ResourceType::UnixSocket),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

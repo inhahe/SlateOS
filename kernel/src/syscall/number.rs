@@ -6293,8 +6293,8 @@ pub const UNIX_NONBLOCK: u64 = 1 << 1;
 /// Receive flag: leave what was read in place (`MSG_PEEK`).
 pub const UNIX_PEEK: u64 = 1 << 2;
 
-/// `SYS_UNIX_SOCKET(kind)` -- a new socket: `kind` 1 stream, 2 datagram.
-/// Returns its handle.
+/// `SYS_UNIX_SOCKET(kind)` -- a new socket: `kind` 1 stream, 2 datagram, 5
+/// sequenced packets (Linux's `SOCK_*` numbers). Returns its handle.
 pub const SYS_UNIX_SOCKET: u64 = 1104;
 /// `SYS_UNIX_PAIR(kind)` -- two connected sockets of `kind` (`socketpair`).
 /// Returns both handles (the two-value return).

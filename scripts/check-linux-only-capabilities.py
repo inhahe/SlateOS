@@ -130,14 +130,11 @@ BASELINE: dict[str, str] = {
     # module's `dup`. There are zero native SYS_*PIDFD* constants: borrowing a
     # descriptor out of another process is a Linux mechanism, and this system's
     # answer is capability transfer over a channel.
-    "drm::card_fd": "reached only by pidfd_getfd's dup; no native pidfd exists",
-    "evdev_fd": "reached only by pidfd_getfd's dup; no native pidfd exists",
     # --- Linux-flavoured descriptor types, deliberate -----------------------
     # Zero native syscall numbers each, on purpose: readiness and notification
     # here are channels, not descriptors you poll.
     "ipc::epoll": "no native epoll by design -- channels, not a readiness fd",
     "ipc::inotify": "no native inotify by design -- fs watches are a service",
-    "ipc::signalfd": "no native signalfd by design -- signals are not fds here",
     "ipc::memfd": "no native memfd by design -- anonymous memory is shm + caps",
     # --- a compatibility shim over a stack native code reaches elsewhere ----
     # 46 native net handlers exist; they reach other modules. linux.rs carries
@@ -176,6 +173,16 @@ BASELINE: dict[str, str] = {
     # (SYS_DEVICE_OPEN/IOCTL/READ/WRITE/CLOSE, 1119-1123; design-decisions
     # 1520) now drives a PCM substream natively, so the entry went stale on the
     # change that made it so -- the ratchet working as intended.
+    #
+    # --- RESOLVED 2026-10-02: drm::card_fd, evdev_fd, ipc::signalfd ---------
+    # The first two were pinned as "reached only by pidfd_getfd's dup", the
+    # third as "no native signalfd by design". SCM_RIGHTS moved the per-kind
+    # dup and release into ipc::passed (pidfd_getfd uses it too), and a native
+    # Unix-socket receive drains its releases -- so native code reaches these
+    # modules now, through the reference-release path (a descriptor received
+    # and dropped), though still not through any way to open one. The check is
+    # module-granular, so the entries go; a native way to *create* a signalfd
+    # or open a DRM card is as absent as before.
 }
 
 

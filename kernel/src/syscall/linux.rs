@@ -1064,6 +1064,9 @@ pub mod errno {
     /// `ENOBUFS` -- no buffer space: a send's control data is longer than
     /// the kernel will copy in.
     pub const ENOBUFS: i32 = 105;
+    /// `ETOOMANYREFS` -- a user with more descriptors in flight than its
+    /// `RLIMIT_NOFILE` sent more (`SCM_RIGHTS`).
+    pub const ETOOMANYREFS: i32 = 109;
     pub const EALREADY: i32 = 114;
     pub const EINPROGRESS: i32 = 115;
     pub const EISCONN: i32 = 106;
@@ -1173,6 +1176,12 @@ mod msgflags {
     /// (`O_NONBLOCK`/`MSG_DONTWAIT`), in which case it degrades to a single-shot
     /// receive of whatever is available.
     pub const MSG_WAITALL: u32 = 0x100;
+    /// On the result (`msg_flags`): a control message did not fit, or was
+    /// cut -- the credentials, or descriptors that did not all fit.
+    pub const MSG_CTRUNC: u32 = 0x8;
+    /// On a receive: the descriptors an `SCM_RIGHTS` message brings are
+    /// installed close-on-exec.
+    pub const MSG_CMSG_CLOEXEC: u32 = 0x4000_0000;
 }
 
 // ---------------------------------------------------------------------------
@@ -4954,14 +4963,14 @@ fn sys_close(args: &SyscallArgs) -> SyscallResult {
 /// not open. Also how a call that installed descriptors takes them back out
 /// when it fails partway (`socketpair`).
 fn linux_close_fd(pid: u64, fd: i32) -> SyscallResult {
-    let entry = match pcb::linux_fd_take(pid, fd) {
-        Some(e) => e,
+    // Taken and judged last in one step (pcb::linux_fd_take_last), so two
+    // threads closing two descriptors for one object cannot both release it.
+    let (entry, last) = match pcb::linux_fd_take_last(pid, fd) {
+        Some(t) => t,
         None => return linux_err(errno::EBADF),
     };
     release_record_locks_on_close(pid, &entry);
-    if entry.kind.needs_kernel_close()
-        && !pcb::linux_fd_is_handle_referenced(pid, entry.kind, entry.raw_handle, -1)
-    {
+    if entry.kind.needs_kernel_close() && last {
         // No other fd still references this handle — release it.
         let _ = close_handle(entry);
     }
@@ -4997,11 +5006,9 @@ fn sys_dup2_impl(oldfd: i32, newfd: i32, cloexec: bool) -> SyscallResult {
     // If the duplicate displaced an entry, close it (refcount-aware). It is
     // a descriptor closed, so its process's record locks on the file go with
     // it, whether or not its handle survives.
-    if let Some(prev_entry) = prev {
+    if let Some((prev_entry, last)) = prev {
         release_record_locks_on_close(pid, &prev_entry);
-        if prev_entry.kind.needs_kernel_close()
-            && !pcb::linux_fd_is_handle_referenced(pid, prev_entry.kind, prev_entry.raw_handle, -1)
-        {
+        if prev_entry.kind.needs_kernel_close() && last {
             let _ = close_handle(prev_entry);
         }
     }
@@ -18676,11 +18683,9 @@ fn sys_close_range(args: &SyscallArgs) -> SyscallResult {
     for fd in first..=stop {
         #[allow(clippy::cast_possible_wrap)]
         let fd_i = fd as i32;
-        if let Some(entry) = pcb::linux_fd_take(pid, fd_i) {
+        if let Some((entry, last)) = pcb::linux_fd_take_last(pid, fd_i) {
             release_record_locks_on_close(pid, &entry);
-            if entry.kind.needs_kernel_close()
-                && !pcb::linux_fd_is_handle_referenced(pid, entry.kind, entry.raw_handle, -1)
-            {
+            if entry.kind.needs_kernel_close() && last {
                 let _ = close_handle(entry);
             }
         }
@@ -28118,257 +28123,54 @@ fn sys_pidfd_getfd(args: &SyscallArgs) -> SyscallResult {
     }
 
     // Reach into the target's Linux fd table.
-    let mut entry = match pcb::linux_fd_lookup(target_pid, target_fd) {
-        Some(e) => e,
-        None => return linux_err(errno::EBADF),
+    let Some(mut entry) = pcb::linux_fd_lookup(target_pid, target_fd) else {
+        return linux_err(errno::EBADF);
     };
 
-    // Bump the per-kind refcount on the underlying kernel resource so
-    // both processes own one ref each.  Failure here surfaces as
-    // EBADF (the target's fd just lost its backing — race with target
-    // closing the fd) and we have NOT yet allocated anything in the
-    // caller's table, so there's no rollback to do.
-    match entry.kind {
-        HandleKind::Console | HandleKind::PidFd | HandleKind::AlsaControl => {
-            // No kernel resource to refcount (stateless fd kinds).
-        }
-        HandleKind::File => {
-            if crate::fs::handle::dup_shared(entry.raw_handle).is_err() {
-                return linux_err(errno::EBADF);
-            }
-        }
-        HandleKind::Pipe => {
-            let h = crate::ipc::pipe::PipeHandle::from_raw(entry.raw_handle);
-            if crate::ipc::pipe::dup(h).is_err() {
-                return linux_err(errno::EBADF);
-            }
-        }
-        HandleKind::EventFd => {
-            let h = crate::ipc::eventfd::EventFdHandle::from_raw(entry.raw_handle);
-            if crate::ipc::eventfd::dup(h).is_err() {
-                return linux_err(errno::EBADF);
-            }
-        }
-        HandleKind::MemFd => {
-            let h = crate::ipc::memfd::MemFdHandle::from_raw(entry.raw_handle);
-            if crate::ipc::memfd::dup(h).is_err() {
-                return linux_err(errno::EBADF);
-            }
-        }
-        HandleKind::Epoll => {
-            let h = crate::ipc::epoll::EpollHandle::from_raw(entry.raw_handle);
-            if crate::ipc::epoll::dup(h).is_err() {
-                return linux_err(errno::EBADF);
-            }
-        }
-        HandleKind::SignalFd => {
-            let h = crate::ipc::signalfd::SignalFdHandle::from_raw(entry.raw_handle);
-            if crate::ipc::signalfd::dup(h).is_err() {
-                return linux_err(errno::EBADF);
-            }
-        }
-        HandleKind::Timerfd => {
-            let h = crate::ipc::timerfd::TimerFdHandle::from_raw(entry.raw_handle);
-            if crate::ipc::timerfd::dup(h).is_err() {
-                return linux_err(errno::EBADF);
-            }
-        }
-        HandleKind::Inotify => {
-            let h = crate::ipc::inotify::InotifyHandle::from_raw(entry.raw_handle);
-            if crate::ipc::inotify::dup(h).is_err() {
-                return linux_err(errno::EBADF);
-            }
-        }
-        HandleKind::AlsaPcm => {
-            let h = crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(entry.raw_handle);
-            if crate::ipc::alsa_pcm::dup(h).is_err() {
-                return linux_err(errno::EBADF);
-            }
-        }
-        HandleKind::DrmCard => {
-            let h = crate::drm::card_fd::DrmCardHandle::from_raw(entry.raw_handle);
-            if crate::drm::card_fd::dup(h).is_err() {
-                return linux_err(errno::EBADF);
-            }
-        }
-        HandleKind::Evdev => {
-            let h = crate::evdev_fd::EvdevHandle::from_raw(entry.raw_handle);
-            if crate::evdev_fd::dup(h).is_err() {
-                return linux_err(errno::EBADF);
-            }
-        }
-        HandleKind::Socket => {
-            let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
-            if crate::net::socket::dup(h).is_err() {
-                return linux_err(errno::EBADF);
-            }
-        }
-        HandleKind::Channel => {
-            let h = crate::ipc::channel::ChannelHandle::from_raw(entry.raw_handle);
-            if crate::ipc::channel::dup(h).is_err() {
-                return linux_err(errno::EBADF);
-            }
-        }
-        HandleKind::ServiceListener => {
-            let h = crate::ipc::service::ServiceListenerHandle::from_raw(entry.raw_handle);
-            if crate::ipc::service::dup_listener(h).is_err() {
-                return linux_err(errno::EBADF);
-            }
-        }
-        HandleKind::UnixSocket => {
-            if crate::ipc::unix_socket::dup(unix_handle(&entry)).is_err() {
-                return linux_err(errno::EBADF);
-            }
-        }
-    }
+    // One more reference to the object behind it, for the caller
+    // (`Passed::take`, the per-kind dup). EBADF when the target's descriptor
+    // lost its object in between -- the target closing it -- with nothing yet
+    // given to the caller.
+    let Ok(passed) = crate::ipc::passed::Passed::take(entry) else {
+        return linux_err(errno::EBADF);
+    };
 
     // Linux always sets FD_CLOEXEC on the new fd, regardless of the
     // target's per-fd flags.  We follow.
     entry.fd_flags = crate::proc::linux_fd::FD_CLOEXEC;
 
-    let caller = match caller_pid() {
-        Some(p) => p,
-        None => {
-            // Roll back the refcount we just bumped — kernel-context
-            // has no caller to install into.
-            release_handle_ref(entry.kind, entry.raw_handle);
-            return linux_err(errno::EBADF);
-        }
+    let Some(caller) = caller_pid() else {
+        // Kernel context has no table to install into: the reference goes
+        // back.
+        drop(passed);
+        crate::ipc::passed::drain();
+        return linux_err(errno::EBADF);
     };
 
-    // Register the duplicated handle in the *caller's* per-process
-    // ipc_handles list before the fd-table install.  The earlier
-    // refcount bump represents "one ref per process holding the
-    // resource"; the ipc_handles entry is what lets process-exit
-    // cleanup and fork's dup_one see that ref.  Without this the
-    // caller's reference would leak on exit and not be propagated
-    // across fork — the same class bug that batches 127–129 closed
-    // for the create paths, now applied to the cross-process dup
-    // path.  PidFd / Console map to no kernel resource, so we skip
-    // them (matches the dup-arm above and `release_handle_ref`'s
-    // no-op cases).
-    let resource = match entry.kind {
-        HandleKind::File => Some(crate::cap::ResourceType::File),
-        HandleKind::Pipe => Some(crate::cap::ResourceType::Pipe),
-        HandleKind::EventFd => Some(crate::cap::ResourceType::EventFd),
-        HandleKind::MemFd => Some(crate::cap::ResourceType::MemFd),
-        HandleKind::Epoll => Some(crate::cap::ResourceType::Epoll),
-        HandleKind::SignalFd => Some(crate::cap::ResourceType::SignalFd),
-        HandleKind::Timerfd => Some(crate::cap::ResourceType::Timerfd),
-        HandleKind::Inotify => Some(crate::cap::ResourceType::Inotify),
-        HandleKind::AlsaPcm => Some(crate::cap::ResourceType::AlsaPcm),
-        HandleKind::DrmCard => Some(crate::cap::ResourceType::Drm),
-        HandleKind::Evdev => Some(crate::cap::ResourceType::InputDevice),
-        HandleKind::Socket => Some(crate::cap::ResourceType::NetSocket),
-        HandleKind::Channel => Some(crate::cap::ResourceType::Channel),
-        HandleKind::ServiceListener => Some(crate::cap::ResourceType::Service),
-        HandleKind::UnixSocket => Some(crate::cap::ResourceType::UnixSocket),
-        HandleKind::Console | HandleKind::PidFd | HandleKind::AlsaControl => None,
-    };
-    if let Some(rt) = resource {
-        pcb::register_ipc_handle(caller, rt, entry.raw_handle);
-    }
-
-    match pcb::linux_fd_install(caller, entry, 0) {
-        Ok(new_fd) => SyscallResult::ok(i64::from(new_fd)),
-        Err(e) => {
-            // Install failed (table full) — roll back BOTH the
-            // ipc_handles entry we just added AND the refcount bump.
-            // deregister_ipc_handle is a no-op if `resource` was None;
-            // release_handle_ref for File routes through
-            // `handlers::sys_fs_close`, which itself deregisters —
-            // that's safe because deregister_ipc_handle is a no-op on
-            // a missing tuple (the explicit deregister below already
-            // removed it).
-            if let Some(rt) = resource {
-                pcb::deregister_ipc_handle(caller, rt, entry.raw_handle);
+    // Installed, and recorded in the caller's `ipc_handles` -- so exit
+    // releases it and fork shares it -- unless the caller held the object
+    // already: a process holds one reference per object however many
+    // descriptors name it, so the one brought is then dropped
+    // (`pcb::linux_fd_install_passed`). Until 2026-10-02 it was registered
+    // regardless, and the reference leaked when a process took back a
+    // descriptor it shared with the target -- after a fork, the usual case.
+    let answer = match pcb::linux_fd_install_passed(caller, entry) {
+        Ok((new_fd, held)) => {
+            if held {
+                drop(passed);
+            } else {
+                // The reference is the caller's now.
+                let _ = passed.land();
             }
-            release_handle_ref(entry.kind, entry.raw_handle);
+            SyscallResult::ok(i64::from(new_fd))
+        }
+        Err(e) => {
+            drop(passed);
             linux_err(linux_errno_for(e))
         }
-    }
-}
-
-/// Drop one reference to a handle obtained via the per-kind `dup`
-/// helper.  Used by `sys_pidfd_getfd` to roll back a successful
-/// refcount bump when the subsequent table install fails.
-///
-/// `Console` and `PidFd` have no kernel resource, so this is a no-op
-/// for them.  The other kinds delegate to their subsystem's `close`,
-/// which is the matching half of `dup` / `dup_shared`.
-fn release_handle_ref(kind: HandleKind, raw_handle: u64) {
-    match kind {
-        HandleKind::Console | HandleKind::PidFd | HandleKind::AlsaControl => {}
-        HandleKind::File => {
-            let a = SyscallArgs {
-                arg0: raw_handle,
-                arg1: 0,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            let _ = handlers::sys_fs_close(&a);
-        }
-        HandleKind::Pipe => {
-            let h = crate::ipc::pipe::PipeHandle::from_raw(raw_handle);
-            crate::ipc::pipe::close(h);
-        }
-        HandleKind::EventFd => {
-            let h = crate::ipc::eventfd::EventFdHandle::from_raw(raw_handle);
-            crate::ipc::eventfd::close(h);
-        }
-        HandleKind::MemFd => {
-            let h = crate::ipc::memfd::MemFdHandle::from_raw(raw_handle);
-            crate::ipc::memfd::close(h);
-        }
-        HandleKind::Epoll => {
-            let h = crate::ipc::epoll::EpollHandle::from_raw(raw_handle);
-            crate::ipc::epoll::close(h);
-        }
-        HandleKind::SignalFd => {
-            let h = crate::ipc::signalfd::SignalFdHandle::from_raw(raw_handle);
-            crate::ipc::signalfd::close(h);
-        }
-        HandleKind::Timerfd => {
-            let h = crate::ipc::timerfd::TimerFdHandle::from_raw(raw_handle);
-            crate::ipc::timerfd::close(h);
-        }
-        HandleKind::Inotify => {
-            let h = crate::ipc::inotify::InotifyHandle::from_raw(raw_handle);
-            crate::ipc::inotify::close(h);
-        }
-        HandleKind::AlsaPcm => {
-            let h = crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(raw_handle);
-            crate::ipc::alsa_pcm::close(h);
-        }
-        HandleKind::DrmCard => {
-            let h = crate::drm::card_fd::DrmCardHandle::from_raw(raw_handle);
-            crate::drm::card_fd::close(h);
-        }
-        HandleKind::Evdev => {
-            let h = crate::evdev_fd::EvdevHandle::from_raw(raw_handle);
-            crate::evdev_fd::close(h);
-        }
-        HandleKind::Socket => {
-            let h = crate::net::socket::SocketHandle::from_raw(raw_handle);
-            crate::net::socket::close(h);
-        }
-        HandleKind::Channel => {
-            crate::ipc::channel::close(crate::ipc::channel::ChannelHandle::from_raw(raw_handle));
-        }
-        HandleKind::ServiceListener => {
-            // Gone already is the same end state for a dropped reference.
-            let _ = crate::ipc::service::unregister(
-                crate::ipc::service::ServiceListenerHandle::from_raw(raw_handle),
-            );
-        }
-        HandleKind::UnixSocket => {
-            crate::ipc::unix_socket::close(crate::ipc::unix_socket::UnixHandle::from_raw(
-                raw_handle,
-            ));
-        }
-    }
+    };
+    crate::ipc::passed::drain();
+    answer
 }
 
 /// `process_vm_readv(pid, local_iov, liovcnt, remote_iov, riovcnt, flags)`.
@@ -38503,16 +38305,12 @@ fn sys_socket(args: &SyscallArgs) -> SyscallResult {
             _ => {}
         }
     }
-    // AF_UNIX stream and datagram sockets are the kernel's own
-    // (`ipc::unix_socket`). The gates above have checked the protocol (0 for
-    // AF_UNIX) and the flag bits. SOCK_SEQPACKET (5) still falls through to
-    // ENOSYS.
-    if domain == 1 && matches!(sock_type, 1 | 2) {
-        let kind = if sock_type == 1 {
-            crate::ipc::unix_socket::Kind::Stream
-        } else {
-            crate::ipc::unix_socket::Kind::Dgram
-        };
+    // AF_UNIX stream, datagram and sequenced-packet sockets are the kernel's
+    // own (`ipc::unix_socket`). The gates above have checked the protocol (0
+    // for AF_UNIX) and the flag bits.
+    if domain == 1
+        && let Some(kind) = unix_kind_of(sock_type)
+    {
         return match crate::ipc::unix_socket::create(kind) {
             Ok(h) => unix_install(h, sock_flags),
             Err(e) => unix_errno(e),
@@ -39258,12 +39056,9 @@ fn sys_socketpair(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = crate::mm::user::validate_user_write(args.arg3, 8) {
         return linux_err(linux_errno_for(e));
     }
-    // Stream and datagram pairs (`ipc::unix_socket::pair`); SOCK_SEQPACKET
-    // stays ENOSYS.
-    let kind = match sock_type {
-        1 => crate::ipc::unix_socket::Kind::Stream,
-        2 => crate::ipc::unix_socket::Kind::Dgram,
-        _ => return linux_err(errno::ENOSYS),
+    // Stream, datagram and sequenced-packet pairs (`ipc::unix_socket::pair`).
+    let Some(kind) = unix_kind_of(sock_type) else {
+        return linux_err(errno::ENOSYS);
     };
     let (a, b) = match crate::ipc::unix_socket::pair(kind) {
         Ok(p) => p,
@@ -39304,19 +39099,19 @@ fn sys_socketpair(args: &SyscallArgs) -> SyscallResult {
 // ---------------------------------------------------------------------------
 // AF_UNIX: Unix-domain sockets by name (`ipc::unix_socket`)
 //
-// socket(AF_UNIX, SOCK_STREAM | SOCK_DGRAM), socketpair of either, and every
-// call on the descriptors they give: bind to a path or an abstract name,
-// listen, accept, connect, send/recv in all their forms, the two names, the
-// peer's credentials, shutdown. The objects and their names are
+// socket(AF_UNIX, SOCK_STREAM | SOCK_DGRAM | SOCK_SEQPACKET) -- SOCK_RAW
+// being a datagram socket, as unix_create makes it -- socketpair of each, and
+// every call on the descriptors they give: bind to a path or an abstract
+// name, listen, accept, connect, send/recv in all their forms, the two names,
+// the peer's credentials, shutdown. The objects and their names are
 // `ipc::unix_socket`'s; this is the Linux ABI around them -- `struct
 // sockaddr_un`, the flags, and Linux's error for each refusal.
 //
 // Ancillary data: a receive on a socket with SO_PASSCRED on carries the
 // sender's credentials (SCM_CREDENTIALS) -- as the kernel recorded them, or
 // as the sender stated them on its send, checked as Linux checks them (its
-// own; for root, any live process's).
-// Not yet: SOCK_SEQPACKET (ENOSYS, as before); SCM_RIGHTS, refused with
-// EOPNOTSUPP rather than dropped.
+// own; for root, any live process's) -- and descriptors travel both ways
+// (SCM_RIGHTS: `take_rights` on a send, `install_rights` on a receive).
 // ---------------------------------------------------------------------------
 
 /// `AF_UNIX` (`AF_LOCAL`).
@@ -39507,6 +39302,19 @@ fn unix_nonblocking(entry: &FdEntry, msg_flags: u32) -> bool {
     entry.status_flags & oflags::O_NONBLOCK != 0 || msg_flags & msgflags::MSG_DONTWAIT != 0
 }
 
+/// The `ipc::unix_socket` kind a Linux `SOCK_*` type names: `SOCK_STREAM`
+/// (1), `SOCK_DGRAM` (2) -- and `SOCK_RAW` (3), which Linux's `unix_create`
+/// makes a datagram socket -- and `SOCK_SEQPACKET` (5).
+fn unix_kind_of(sock_type: u32) -> Option<crate::ipc::unix_socket::Kind> {
+    use crate::ipc::unix_socket::Kind;
+    match sock_type {
+        1 => Some(Kind::Stream),
+        2 | 3 => Some(Kind::Dgram),
+        5 => Some(Kind::SeqPacket),
+        _ => None,
+    }
+}
+
 /// The socket an `AF_UNIX` descriptor holds.
 fn unix_handle(entry: &FdEntry) -> crate::ipc::unix_socket::UnixHandle {
     crate::ipc::unix_socket::UnixHandle::from_raw(entry.raw_handle)
@@ -39608,8 +39416,10 @@ fn unix_send_bytes(
     let len = usize::try_from(len).unwrap_or(usize::MAX);
     let take = match unix_socket::kind(h) {
         Some(Kind::Stream) => len.min(UNIX_STREAM_CHUNK),
-        Some(Kind::Dgram) if len > MAX_DGRAM => return Err(linux_err(errno::EMSGSIZE)),
-        Some(Kind::Dgram) => len,
+        Some(k) if k.keeps_messages() && len > MAX_DGRAM => {
+            return Err(linux_err(errno::EMSGSIZE));
+        }
+        Some(_) => len,
         None => return Err(linux_err(errno::EBADF)),
     };
     crate::mm::user::read_user_vec(buf, take, take).map_err(|e| linux_err(linux_errno_for(e)))
@@ -39659,7 +39469,7 @@ fn unix_recv(
     let h = unix_handle(entry);
     let limit = match unix_socket::kind(h) {
         Some(Kind::Stream) => UNIX_STREAM_CHUNK,
-        Some(Kind::Dgram) => MAX_DGRAM,
+        Some(Kind::Dgram | Kind::SeqPacket) => MAX_DGRAM,
         None => return linux_err(errno::EBADF),
     };
     let room = usize::try_from(cap).unwrap_or(usize::MAX).min(limit);
@@ -39687,6 +39497,12 @@ fn unix_recv(
         if let Err(e) = unsafe { crate::mm::user::copy_to_user(kbuf.as_ptr(), buf, got.len) } {
             return linux_err(linux_errno_for(e));
         }
+    }
+    if got.rights.is_some() {
+        // Descriptors a receive without control space cannot hand on: released,
+        // as Linux's recv and read release them.
+        drop(got.rights);
+        crate::ipc::passed::drain();
     }
     if let Err(r) = write_sender_sockaddr(&got.from, addr_ptr, addrlen_ptr) {
         return r;
@@ -39738,8 +39554,9 @@ fn read_iovecs(iov_ptr: u64, count: u64) -> Result<alloc::vec::Vec<(u64, usize)>
 /// What a send's `msg_control` carries.
 #[derive(Default)]
 struct SendControl {
-    /// `SCM_RIGHTS`: descriptors to pass, which this layer cannot yet carry.
-    rights: bool,
+    /// `SCM_RIGHTS`: the descriptors to pass, in order, from every such
+    /// message -- not yet looked up.
+    rights: alloc::vec::Vec<i32>,
     /// `SCM_CREDENTIALS`: the credentials the sender states -- `pid_t`, uid,
     /// gid -- not yet checked. The last such message counts, as on Linux.
     cred: Option<(i32, u32, u32)>,
@@ -39752,9 +39569,13 @@ struct SendControl {
 /// - each header (length, level, type), aligned to 8, must cover at least
 ///   itself and no more than is left (`EINVAL`), and the walk ends where no
 ///   whole header is left;
-/// - levels other than `SOL_SOCKET` are skipped; `SCM_RIGHTS` is noted;
-///   `SCM_CREDENTIALS` must be exactly `CMSG_LEN(sizeof(struct ucred))`
-///   long (`EINVAL`); any other `SOL_SOCKET` type is `EINVAL`.
+/// - levels other than `SOL_SOCKET` are skipped; `SCM_RIGHTS` gives the whole
+///   `int`s after its header, more than [`MAX_PER_MESSAGE`] in all being
+///   `EINVAL` (Linux's `scm_fp_copy`); `SCM_CREDENTIALS` must be exactly
+///   `CMSG_LEN(sizeof(struct ucred))` long (`EINVAL`); any other `SOL_SOCKET`
+///   type is `EINVAL`.
+///
+/// [`MAX_PER_MESSAGE`]: crate::ipc::passed::MAX_PER_MESSAGE
 fn parse_send_control(control: u64, controllen: u64) -> Result<SendControl, SyscallResult> {
     const SOL_SOCKET: i32 = 1;
     const SCM_RIGHTS: i32 = 1;
@@ -39788,7 +39609,22 @@ fn parse_send_control(control: u64, controllen: u64) -> Result<SendControl, Sysc
         }
         if level == SOL_SOCKET {
             match kind {
-                SCM_RIGHTS => out.rights = true,
+                SCM_RIGHTS => {
+                    let count = len.saturating_sub(HDR) / 4;
+                    if out.rights.len().saturating_add(count) > crate::ipc::passed::MAX_PER_MESSAGE
+                    {
+                        return Err(linux_err(errno::EINVAL));
+                    }
+                    let body = at.saturating_add(HDR);
+                    for i in 0..count {
+                        let from = body.saturating_add(i.saturating_mul(4));
+                        let word = bytes
+                            .get(from..from.saturating_add(4))
+                            .and_then(|w| <[u8; 4]>::try_from(w).ok())
+                            .unwrap_or([0xFF; 4]);
+                        out.rights.push(i32::from_ne_bytes(word));
+                    }
+                }
                 SCM_CREDENTIALS => {
                     if len != CRED_LEN {
                         return Err(linux_err(errno::EINVAL));
@@ -39817,7 +39653,8 @@ fn parse_send_control(control: u64, controllen: u64) -> Result<SendControl, Sysc
 /// send (one datagram, or up to [`UNIX_STREAM_CHUNK`] of a stream), to
 /// `msg_name` if it names an address. Credentials the sender states
 /// (`SCM_CREDENTIALS`) are checked as Linux checks them and carried by a
-/// datagram; `SCM_RIGHTS` is `EOPNOTSUPP`.
+/// datagram; descriptors (`SCM_RIGHTS`) travel with the datagram, or on the
+/// bytes this send puts on a stream ([`take_rights`]).
 fn unix_sendmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
     use crate::ipc::unix_socket::{self, Kind, MAX_DGRAM};
     let mut mh = UserMsgHdr::default();
@@ -39839,11 +39676,6 @@ fn unix_sendmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
         Ok(c) => c,
         Err(r) => return r,
     };
-    if control.rights {
-        // Refused rather than sent without them: a receiver expecting
-        // descriptors that never come is worse than a sender told no.
-        return linux_err(errno::EOPNOTSUPP);
-    }
     // Checked before anything is sent, as Linux's scm_send runs first. A
     // stream checks them too, but reports its connection's (unix_socket's
     // "Credentials").
@@ -39862,7 +39694,7 @@ fn unix_sendmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
     let h = unix_handle(entry);
     let limit = match unix_socket::kind(h) {
         Some(Kind::Stream) => UNIX_STREAM_CHUNK,
-        Some(Kind::Dgram) => {
+        Some(Kind::Dgram | Kind::SeqPacket) => {
             let total = iovs
                 .iter()
                 .fold(0usize, |acc, &(_, len)| acc.saturating_add(len));
@@ -39885,8 +39717,8 @@ fn unix_sendmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
         }
     }
     let nonblocking = unix_nonblocking(entry, flags);
-    let sent = if mh.msg_name == 0 || mh.msg_namelen == 0 {
-        unix_socket::send_as(h, &data, stated, nonblocking)
+    let target = if mh.msg_name == 0 || mh.msg_namelen == 0 {
+        None
     } else {
         let addr = match read_sockaddr_un(mh.msg_name, i32::try_from(mh.msg_namelen).unwrap_or(-1))
         {
@@ -39894,9 +39726,19 @@ fn unix_sendmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
             Err(r) => return r,
         };
         match unix_target(&addr) {
-            Ok(name) => unix_socket::send_to_as(h, &data, &name, stated, nonblocking),
+            Ok(name) => Some(name),
             Err(r) => return r,
         }
+    };
+    // Last, as Linux's unix_attach_fds comes after the address and the size:
+    // a reference taken is a reference to give back.
+    let rights = match take_rights(&control.rights) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let sent = match target {
+        None => unix_socket::send_as(h, &data, stated, rights, nonblocking),
+        Some(name) => unix_socket::send_to_as(h, &data, &name, stated, rights, nonblocking),
     };
     match sent {
         Ok(n) => SyscallResult::ok(i64::try_from(n).unwrap_or(i64::MAX)),
@@ -39904,12 +39746,152 @@ fn unix_sendmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
     }
 }
 
+/// Take a reference to each descriptor `fds` names, for a send to carry
+/// (`SCM_RIGHTS`) -- `None` for none -- as Linux's `scm_fp_copy` and
+/// `unix_attach_fds` take them: each must be open (`EBADF`), and a sender
+/// whose user already has more descriptors in flight than its
+/// `RLIMIT_NOFILE` sends no more (`ETOOMANYREFS`; root is exempt, as
+/// `CAP_SYS_RESOURCE` is). What is taken counts against the sender's user
+/// until it is received or dropped ([`crate::ipc::passed`]).
+fn take_rights(fds: &[i32]) -> Result<Option<crate::ipc::passed::Bundle>, SyscallResult> {
+    use crate::ipc::passed::{self, Bundle, Passed};
+    if fds.is_empty() {
+        return Ok(None);
+    }
+    let Some(pid) = caller_pid() else {
+        return Err(linux_err(errno::EBADF));
+    };
+    let mut taken = alloc::vec::Vec::new();
+    let mut refused = None;
+    for &fd in fds {
+        let held = lookup_caller_fd(fd)
+            .and_then(|entry| Passed::take(entry).map_err(|_| linux_err(errno::EBADF)));
+        match held {
+            Ok(p) => taken.push(p),
+            Err(r) => {
+                refused = Some(r);
+                break;
+            }
+        }
+    }
+    let uid = pcb::process_uid_gid(pid).map_or(u32::MAX, |(uid, _)| uid);
+    let nofile = pcb::get_rlimit(pid, 7).map_or(u64::MAX, |(cur, _)| cur);
+    if refused.is_none() && uid != 0 && u64::from(passed::in_flight_for(uid)) > nofile {
+        refused = Some(linux_err(errno::ETOOMANYREFS));
+    }
+    if let Some(r) = refused {
+        // What was taken goes back.
+        drop(taken);
+        passed::drain();
+        return Err(r);
+    }
+    for p in &mut taken {
+        p.charge(uid);
+    }
+    Ok(Bundle::new(taken))
+}
+
+/// Install the descriptors a received message carried, and write their
+/// numbers as one `SCM_RIGHTS` control message at `at`, which has `room`
+/// bytes of control space -- as Linux's `scm_detach_fds`: as many as fit
+/// after the 16-byte header, four bytes each, in order, each at the lowest
+/// free number, close-on-exec with `MSG_CMSG_CLOEXEC`. Those that do not fit,
+/// and any after one the process has no number for (`RLIMIT_NOFILE`), are
+/// released, and the message reports `MSG_CTRUNC`. No control buffer at all
+/// (`at` 0) takes none. Returns the control space used (`CMSG_SPACE`, as far
+/// as `room` reaches) and whether the message was cut.
+fn install_rights(
+    passed: alloc::vec::Vec<crate::ipc::passed::Passed>,
+    at: u64,
+    room: u64,
+    cloexec: bool,
+) -> Result<(u64, bool), SyscallResult> {
+    /// `sizeof(struct cmsghdr)`.
+    const HDR: u64 = 16;
+    let count = passed.len();
+    let fit = if at == 0 || room <= HDR {
+        0
+    } else {
+        usize::try_from(room.saturating_sub(HDR) / 4).unwrap_or(usize::MAX)
+    };
+    let n = count.min(fit);
+    let pid = caller_pid();
+    let wanted_bytes =
+        HDR.saturating_add(4u64.saturating_mul(u64::try_from(n).unwrap_or(u64::MAX)));
+    // Where the numbers go must take them before any is installed: a
+    // descriptor installed and never told of is one the process cannot close.
+    if n > 0
+        && let Err(e) = crate::mm::user::validate_user_write(
+            at,
+            usize::try_from(wanted_bytes).unwrap_or(usize::MAX),
+        )
+    {
+        drop(passed);
+        crate::ipc::passed::drain();
+        return Err(linux_err(linux_errno_for(e)));
+    }
+    let mut fds: alloc::vec::Vec<i32> = alloc::vec::Vec::new();
+    let mut rest = passed.into_iter();
+    if let Some(pid) = pid {
+        for p in rest.by_ref().take(n) {
+            let mut entry = p.entry();
+            entry.fd_flags = if cloexec {
+                crate::proc::linux_fd::FD_CLOEXEC
+            } else {
+                0
+            };
+            match pcb::linux_fd_install_passed(pid, entry) {
+                Ok((fd, held)) => {
+                    if held {
+                        // The process holds the object already, and one
+                        // reference per object is all it keeps.
+                        drop(p);
+                    } else {
+                        // The reference is the process's now.
+                        let _ = p.land();
+                    }
+                    fds.push(fd);
+                }
+                Err(_) => {
+                    // Linux stops at the first it cannot install.
+                    drop(p);
+                    break;
+                }
+            }
+        }
+    }
+    // Whatever is left was not delivered: released.
+    drop(rest);
+    crate::ipc::passed::drain();
+    let cut = fds.len() < count;
+    if fds.is_empty() {
+        return Ok((0, cut));
+    }
+    let len = HDR.saturating_add(4u64.saturating_mul(u64::try_from(fds.len()).unwrap_or(u64::MAX)));
+    let mut msg: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    msg.extend_from_slice(&len.to_ne_bytes());
+    msg.extend_from_slice(&1i32.to_ne_bytes()); // SOL_SOCKET
+    msg.extend_from_slice(&1i32.to_ne_bytes()); // SCM_RIGHTS
+    for fd in &fds {
+        msg.extend_from_slice(&fd.to_ne_bytes());
+    }
+    // SAFETY: `msg` holds `msg.len()` initialised bytes, no more than were
+    // validated writable at `at`; copy_to_user re-checks.
+    if let Err(e) = unsafe { crate::mm::user::copy_to_user(msg.as_ptr(), at, msg.len()) } {
+        return Err(linux_err(linux_errno_for(e)));
+    }
+    // CMSG_SPACE: the message padded to 8, as far as the buffer reaches.
+    let space = len.saturating_add(7) & !7;
+    Ok((space.min(room), cut))
+}
+
 /// `recvmsg(2)` on an `AF_UNIX` descriptor: one receive scattered across the
 /// iovecs; the sender's address to `msg_name`; when the socket has
 /// `SO_PASSCRED` on, the sender's credentials as one `SCM_CREDENTIALS`
-/// control message, otherwise none (`msg_controllen` 0); `MSG_TRUNC` in
-/// `msg_flags` when a datagram was cut, `MSG_CTRUNC` when the control message
-/// was.
+/// control message; then any descriptors the message carried, installed, as
+/// one `SCM_RIGHTS` message ([`install_rights`]) -- or neither
+/// (`msg_controllen` 0); `MSG_TRUNC` in `msg_flags` when a datagram was cut,
+/// `MSG_CTRUNC` when a control message was.
 fn unix_recvmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
     use crate::ipc::unix_socket::{self, Kind, MAX_DGRAM};
     let mut mh = UserMsgHdr::default();
@@ -39927,7 +39909,7 @@ fn unix_recvmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
     let h = unix_handle(entry);
     let limit = match unix_socket::kind(h) {
         Some(Kind::Stream) => UNIX_STREAM_CHUNK,
-        Some(Kind::Dgram) => MAX_DGRAM,
+        Some(Kind::Dgram | Kind::SeqPacket) => MAX_DGRAM,
         None => return linux_err(errno::EBADF),
     };
     // Validate every destination first, so a bad pointer loses nothing.
@@ -39945,7 +39927,7 @@ fn unix_recvmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
         Ok(v) => v,
         Err(e) => return linux_err(linux_errno_for(e)),
     };
-    let got = match unix_socket::recv(
+    let mut got = match unix_socket::recv(
         h,
         &mut kbuf,
         unix_nonblocking(entry, flags),
@@ -39954,6 +39936,13 @@ fn unix_recvmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
         Ok(r) => r,
         Err(e) => return unix_errno_timed(e, h, crate::ipc::unix_socket::Direction::Receive),
     };
+    // The descriptors, as references this call now holds -- given to the
+    // process below, or released. A peek's are new ones.
+    let passed = got
+        .rights
+        .take()
+        .map(crate::ipc::passed::Bundle::into_passed)
+        .unwrap_or_default();
     let mut done = 0usize;
     for (base, len) in iovs {
         if done >= got.len {
@@ -40031,6 +40020,23 @@ fn unix_recvmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
             // The space the message takes, padding included, as Linux counts
             // it into msg_controllen.
             control_used = mh.msg_controllen.min(CRED_SPACE);
+        }
+    }
+    if !passed.is_empty() {
+        let at = if mh.msg_control == 0 {
+            0
+        } else {
+            mh.msg_control.wrapping_add(control_used)
+        };
+        let room = mh.msg_controllen.saturating_sub(control_used);
+        match install_rights(passed, at, room, flags & msgflags::MSG_CMSG_CLOEXEC != 0) {
+            Ok((used, cut)) => {
+                control_used = control_used.saturating_add(used);
+                if cut {
+                    out_flags |= msgflags::MSG_CTRUNC;
+                }
+            }
+            Err(r) => return r,
         }
     }
     // msg_controllen (offset 40): what the control messages used; msg_flags
@@ -40360,7 +40366,7 @@ fn sys_accept(args: &SyscallArgs) -> SyscallResult {
 fn unix_accept(entry: &FdEntry, addr_ptr: u64, addrlen_ptr: u64, flags: u32) -> SyscallResult {
     use crate::ipc::unix_socket::{self, Kind};
     let h = unix_handle(entry);
-    if unix_socket::kind(h) == Some(Kind::Dgram) {
+    if unix_socket::kind(h).is_some_and(|k| !k.connects()) {
         return linux_err(errno::EOPNOTSUPP);
     }
     let accepted = match unix_socket::accept(h, unix_nonblocking(entry, 0)) {
@@ -42626,6 +42632,7 @@ fn unix_getsockopt(
         so::SO_TYPE => match unix_socket::kind(h) {
             Some(Kind::Stream) => int(so::SOCK_STREAM),
             Some(Kind::Dgram) => int(so::SOCK_DGRAM),
+            Some(Kind::SeqPacket) => int(5), // SOCK_SEQPACKET
             None => return linux_err(errno::EBADF),
         },
         so::SO_DOMAIN => int(i32::from(AF_UNIX)),
@@ -61828,14 +61835,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // longer representable and there is nothing for a recorder to record.
 
     // (1) errno mapping round-trips for every variant in the table.
-    self_test_errno_mapping()?;
+    crate::selftest::step(self_test_errno_mapping())?;
 
     // (2)-(3) native↔Linux result translation round-trips.
-    self_test_native_translation()?;
+    crate::selftest::step(self_test_native_translation())?;
 
     // (4)-(7b2) basic dispatch sanity (unknown nr, sched_yield, bad-fd
     // write/writev, fd-table-less EBADF surface, dup3/pipe/pipe2 gates).
-    self_test_dispatch_basics()?;
+    crate::selftest::step(self_test_dispatch_basics())?;
 
     // ---- pipe2 flag-mask precedes fildes pointer access ----
     // Batch 476 — Linux's do_pipe2 calls __do_pipe_flags BEFORE
@@ -61860,7 +61867,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     //      surfaces as before).
     //   E. Regression: pipe2(NULL, 0) -> EFAULT  (already
     //      tested by 7b1 but include for gate-order coverage).
-    self_test_pipe2_flag_gate()?;
+    crate::selftest::step(self_test_pipe2_flag_gate())?;
 
     // (7c) openat dirfd resolution (batch 40).
     //
@@ -61869,19 +61876,19 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // than panicking or falling into ENOSYS.  Absolute paths and the
     // explicit error checks (NULL path, empty path) must short-circuit
     // before the fd lookup.
-    self_test_openat_dirfd()?;
+    crate::selftest::step(self_test_openat_dirfd())?;
 
     // (7d) translate_open_flags exhaustive cases.
-    self_test_translate_open_flags()?;
+    crate::selftest::step(self_test_translate_open_flags())?;
 
     // (8)-(8b) clock_gettime clockid validation.
-    self_test_clock_gettime_clockids()?;
+    crate::selftest::step(self_test_clock_gettime_clockids())?;
 
     // (9)-(9a) arch_prctl unknown-code reject + ARCH_SET_FS bounds matrix.
-    self_test_arch_prctl_set_fs()?;
+    crate::selftest::step(self_test_arch_prctl_set_fs())?;
 
     // (9b) arch_prctl ARCH_SET_GS / ARCH_GET_GS validation matrix.
-    self_test_arch_prctl_set_gs()?;
+    crate::selftest::step(self_test_arch_prctl_set_gs())?;
 
     // (9c) Batch 99: arch_prctl(ARCH_GET_CPUID = 0x1011) and
     // ARCH_SET_CPUID (0x1012).  glibc, gdb, lldb, rr, V8, and
@@ -61892,7 +61899,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // supported CPU would: GET always returns 1, SET accepts 1
     // (idempotent), rejects 0 with -ENODEV, and other values with
     // -EINVAL.  No MSR or PCB state needs to change.
-    self_test_arch_prctl_cpuid()?;
+    crate::selftest::step(self_test_arch_prctl_cpuid())?;
 
     // (9d) Batch 100: arch_prctl(ARCH_GET_XCOMP_SUPP = 0x1021),
     // ARCH_GET_XCOMP_PERM (0x1022), ARCH_REQ_XCOMP_PERM (0x1023).
@@ -61904,24 +61911,24 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // advertised xcr0_supported mask (CPUID leaf 0xD subleaf 0)
     // and reject bit-index requests for components the CPU does
     // not advertise.  Extracted to self_test_arch_prctl_xcomp (TD4).
-    self_test_arch_prctl_xcomp()?;
+    crate::selftest::step(self_test_arch_prctl_xcomp())?;
 
     // (9e) Batch 101: get_mempolicy returns a single-node UMA answer
     // instead of -ENOSYS.  libnuma, jemalloc, tcmalloc, and glibc's
     // NUMA tunable parser probe this at startup.  Extracted to
     // self_test_get_mempolicy (TD4).
-    self_test_get_mempolicy()?;
+    crate::selftest::step(self_test_get_mempolicy())?;
 
     // (9f) Batch 102: set_mempolicy upgraded from -ENOSYS stub to a
     // real UMA-aware accept/reject decision.  Mirrors what libnuma's
     // numa_set_preferred / numa_set_bind_policy emit at startup.
     // Extracted to self_test_set_mempolicy (TD4).
-    self_test_set_mempolicy()?;
+    crate::selftest::step(self_test_set_mempolicy())?;
 
     // (9g) Batch 103: mbind upgraded from -ENOSYS stub to UMA-aware
     // accept/reject decision.  Per-VMA equivalent of batch 102.
     // Extracted to self_test_mbind (TD4).
-    self_test_mbind()?;
+    crate::selftest::step(self_test_mbind())?;
 
     // (9g-545) Batch 545: sanitize_mpol_flags fidelity.  Linux v6.6
     // mm/mempolicy.c::sanitize_mpol_flags treats MPOL_MODE_FLAGS as
@@ -61930,42 +61937,42 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // enforces three rules in order: residual mode < MPOL_MAX, STATIC and
     // RELATIVE are mutually exclusive, and NUMA_BALANCING is only legal
     // with MPOL_BIND.  Extracted to self_test_sanitize_mpol_flags (TD4).
-    self_test_sanitize_mpol_flags()?;
+    crate::selftest::step(self_test_sanitize_mpol_flags())?;
 
     // (9g-546) Batch 546: get_nodes + mpol_new fidelity for mbind /
     // set_mempolicy.  Three verbatim corrections vs Linux v6.6
     // mm/mempolicy.c: NULL-mask=empty (not -EFAULT), 32768-bit nodemask
     // cap, and the PREFERRED_MANY/PREFERRED/LOCAL emptiness rules under
     // STATIC/RELATIVE flags.  Extracted to self_test_get_nodes_mpol_new (TD4).
-    self_test_get_nodes_mpol_new()?;
+    crate::selftest::step(self_test_get_nodes_mpol_new())?;
 
     // (9h) Batch 104: migrate_pages upgraded from -ENOSYS stub to
     // UMA-aware no-op.  Every page is already on node 0 so the
     // migration is trivially a success that moves zero pages.
     // Extracted to self_test_migrate_pages (TD4).
-    self_test_migrate_pages()?;
+    crate::selftest::step(self_test_migrate_pages())?;
 
     // (9i) Batch 105: move_pages upgraded from -ENOSYS stub to a
     // UMA-aware no-op + per-page status writer.  Verifies status[i]
     // writes for query/move modes plus the Linux gate order
     // (MOVE_ALL EPERM -> pid ESRCH -> pages EFAULT).  Extracted to
     // self_test_move_pages (TD4).
-    self_test_move_pages()?;
+    crate::selftest::step(self_test_move_pages())?;
 
     // (10)-(12b) LinuxTimespec round-trip + malformed rejection,
     // kernel_error_from_code round-trips, and execve user-marshalling
     // NULL handling (read_user_cstr / read_user_ptr_array).  Extracted
     // to self_test_timespec_and_marshalling (TD4).
-    self_test_timespec_and_marshalling()?;
+    crate::selftest::step(self_test_timespec_and_marshalling())?;
 
     // (13) dispatch_linux_with_frame routing (READ/EXECVE/FORK/CLONE
     // gate ladder, incl. CLONE_SETTLS canonical-address EPERM gate).
     // Extracted to self_test_dispatch_with_frame_routing (TD4).
-    self_test_dispatch_with_frame_routing()?;
+    crate::selftest::step(self_test_dispatch_with_frame_routing())?;
 
     // CLONE_VFORK accept / CLONE_PARENT,NEWNS,PTRACE reject. Extracted
     // to self_test_clone_vfork_parent (TD4).
-    self_test_clone_vfork_parent()?;
+    crate::selftest::step(self_test_clone_vfork_parent())?;
 
     // kill(target, sig) gate-order validation (Linux ESRCH-before-EINVAL):
     //   Linux's kill_something_info → kill_proc_info → find_vpid
@@ -62001,7 +62008,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     //     existence probe path with the same nonexistent pid).
     //   - sig = 0x1_0000_0009 (truncates to 9 = SIGKILL): not
     //     EINVAL — post-batch ESRCH via the pid gate.
-    self_test_kill_gate_order()?;
+    crate::selftest::step(self_test_kill_gate_order())?;
 
     // Batch 359: kill() pid-truncation propagation.
     //
@@ -62018,7 +62025,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // approved.  Mirrors Linux's behavior where pid is truncated
     // once via the SYSCALL_DEFINE2 ABI shim and every downstream
     // user sees the same post-ABI pid.
-    self_test_kill_pid_truncation()?;
+    crate::selftest::step(self_test_kill_pid_truncation())?;
 
     // rt_sigreturn:
     //   - misaligned user_rsp causes both candidate addresses to fail
@@ -62030,18 +62037,18 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     //   - frame.user_rip must be left untouched on the failure path
     //     so a userspace program can debug the EFAULT without losing
     //     control.
-    self_test_rt_sigreturn()?;
+    crate::selftest::step(self_test_rt_sigreturn())?;
 
     // Linux-sigaction table — round-trip + edge cases.
     //   Operates directly on the table (not via dispatch_linux),
     //   because dispatch_linux's rt_sigaction needs a live caller pid
     //   to record state, which the boot self-test doesn't have.
-    self_test_sigaction_table()?;
-    self_test_sigtimedwait_interrupters()?;
+    crate::selftest::step(self_test_sigaction_table())?;
+    crate::selftest::step(self_test_sigtimedwait_interrupters())?;
 
     // SA_RESTART core mechanism — pure restart-decision table + sentinel
     // helpers (independent of any userspace handler delivery).
-    self_test_restart_action()?;
+    crate::selftest::step(self_test_restart_action())?;
 
     // rt_sigaction validation via dispatch_linux:
     //   - sig == 0 -> EINVAL
@@ -62050,7 +62057,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     //   - unknown sa_flags bits -> EINVAL (needs an act pointer; we
     //     can't safely deref one from boot context so we only test
     //     the cheap rejects above).
-    self_test_rt_sigaction_validation()?;
+    crate::selftest::step(self_test_rt_sigaction_validation())?;
 
     // Batch 354: rt_sigprocmask gate ordering & how arithmetic.
     //
@@ -62067,7 +62074,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // distinguish.  Linux returns 0 on success regardless of the
     // signal-mask update result here, so we look for the errno
     // discriminators that pre-batch returned wrongly.
-    self_test_rt_sigprocmask()?;
+    crate::selftest::step(self_test_rt_sigprocmask())?;
 
     // mprotect argument validation — Linux gate order
     // (mm/mprotect.c::do_mprotect_pkey):
@@ -62079,7 +62086,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // We can't exercise the success path from boot context (no owning
     // Linux process), but we *can* prove the validation layer rejects
     // bad input before reaching the page-table walk.
-    self_test_mprotect_validation()?;
+    crate::selftest::step(self_test_mprotect_validation())?;
 
     // mprotect_flush_range routing: tiny range (<= MPROTECT_FULL_FLUSH_
     // PAGES) takes the per-page invlpg path; large range promotes to
@@ -62089,41 +62096,41 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // promptly on every code path including the degenerate end<=start
     // and zero-length cases.  We use a kernel-space address since the
     // function only flushes — it doesn't touch the page tables.
-    self_test_mprotect_flush_range()?;
+    crate::selftest::step(self_test_mprotect_flush_range())?;
 
-    self_test_madvise_validation()?;
+    crate::selftest::step(self_test_madvise_validation())?;
 
-    self_test_wstatus_encoding()?;
+    crate::selftest::step(self_test_wstatus_encoding())?;
 
-    self_test_wait4_dispatch()?;
+    crate::selftest::step(self_test_wait4_dispatch())?;
 
-    self_test_clock_truncation()?;
+    crate::selftest::step(self_test_clock_truncation())?;
 
-    self_test_seccomp_quotactl_truncation()?;
+    crate::selftest::step(self_test_seccomp_quotactl_truncation())?;
 
-    self_test_io_swap_membarrier_truncation()?;
+    crate::selftest::step(self_test_io_swap_membarrier_truncation())?;
 
-    self_test_membarrier_registration()?;
+    crate::selftest::step(self_test_membarrier_registration())?;
 
-    self_test_module_archprctl_truncation()?;
+    crate::selftest::step(self_test_module_archprctl_truncation())?;
 
-    self_test_itimer_getrusage_validation()?;
+    crate::selftest::step(self_test_itimer_getrusage_validation())?;
 
-    self_test_getrusage_maxrss_times()?;
+    crate::selftest::step(self_test_getrusage_maxrss_times())?;
 
-    self_test_setgroups_validation()?;
+    crate::selftest::step(self_test_setgroups_validation())?;
 
-    self_test_dup3_validation()?;
+    crate::selftest::step(self_test_dup3_validation())?;
 
-    self_test_mlockall_truncation()?;
+    crate::selftest::step(self_test_mlockall_truncation())?;
 
-    self_test_msync_truncation()?;
+    crate::selftest::step(self_test_msync_truncation())?;
 
-    self_test_default_rlimits()?;
+    crate::selftest::step(self_test_default_rlimits())?;
 
-    self_test_brk_logic()?;
+    crate::selftest::step(self_test_brk_logic())?;
 
-    self_test_prlimit64_dispatch()?;
+    crate::selftest::step(self_test_prlimit64_dispatch())?;
 
     #[inline(never)]
     fn self_test_prlimit64_dispatch() -> crate::error::KernelResult<()> {
@@ -63131,7 +63138,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_rt_sigpending_dispatch()?;
+    crate::selftest::step(self_test_rt_sigpending_dispatch())?;
 
     #[inline(never)]
     fn self_test_rt_sigpending_dispatch() -> crate::error::KernelResult<()> {
@@ -63289,7 +63296,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_tkill_tgkill_dispatch()?;
+    crate::selftest::step(self_test_tkill_tgkill_dispatch())?;
 
     #[inline(never)]
     fn self_test_tkill_tgkill_dispatch() -> crate::error::KernelResult<()> {
@@ -63444,7 +63451,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_umask_dispatch()?;
+    crate::selftest::step(self_test_umask_dispatch())?;
 
     #[inline(never)]
     fn self_test_umask_dispatch() -> crate::error::KernelResult<()> {
@@ -63574,7 +63581,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_sigaltstack_dispatch()?;
+    crate::selftest::step(self_test_sigaltstack_dispatch())?;
 
     #[inline(never)]
     fn self_test_sigaltstack_dispatch() -> crate::error::KernelResult<()> {
@@ -63807,7 +63814,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_ioctl_dispatch()?;
+    crate::selftest::step(self_test_ioctl_dispatch())?;
 
     #[inline(never)]
     fn self_test_ioctl_dispatch() -> crate::error::KernelResult<()> {
@@ -63872,7 +63879,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_prctl_dispatch()?;
+    crate::selftest::step(self_test_prctl_dispatch())?;
 
     #[inline(never)]
     fn self_test_prctl_dispatch() -> crate::error::KernelResult<()> {
@@ -64059,7 +64066,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 61: PR_SET_PDEATHSIG / PR_GET_PDEATHSIG.
@@ -64216,7 +64223,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     assert_eq!(pcb::set_pdeathsig(test_pid, 1), None);
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 66: PR_SET_DUMPABLE / PR_GET_DUMPABLE round-trip.
@@ -64336,7 +64343,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     assert_eq!(pcb::set_dumpable(test_pid, 1), None);
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 67: PR_SET_KEEPCAPS / PR_GET_KEEPCAPS round-trip.
@@ -64480,7 +64487,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     ));
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 428 — PR_SET_DUMPABLE + PR_SET_KEEPCAPS arg2 narrowing
@@ -64667,7 +64674,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
             serial_println!(
                 "[syscall/linux]   setrlimit/getrlimit unconditional copy_to/from_user EFAULT gate (Linux: legacy wrappers always touch rlim, NULL → EFAULT regardless of resource validity): OK"
@@ -64810,7 +64817,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
             serial_println!(
                 "[syscall/linux]   gettimeofday tz argument writes sys_tz=0 (Linux: deprecated struct timezone always zero on modern kernels, NULL-skip per-arg): OK"
@@ -64985,7 +64992,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     assert_eq!(pcb::set_no_new_privs(test_pid, 1), None);
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 69: PR_SET_CHILD_SUBREAPER / PR_GET_CHILD_SUBREAPER
@@ -65164,7 +65171,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     assert_eq!(pcb::set_child_subreaper(test_pid, 1), None);
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 70: PR_SET_THP_DISABLE / PR_GET_THP_DISABLE round-trip
@@ -65319,7 +65326,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     assert_eq!(pcb::set_thp_disable(test_pid, 1), None);
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 71: PR_SET_TIMERSLACK / PR_GET_TIMERSLACK round-trip
@@ -65460,7 +65467,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     assert_eq!(pcb::set_timer_slack_ns(test_pid, 1), None);
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 72: PR_SET_TSC / PR_GET_TSC round-trip with strict
@@ -65637,7 +65644,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     assert_eq!(pcb::set_tsc_mode(test_pid, 1), None);
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 73: PR_GET_TID_ADDRESS round-trip with strict
@@ -65720,7 +65727,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 74: PR_MCE_KILL / PR_MCE_KILL_GET round-trip with
@@ -65915,7 +65922,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     assert_eq!(pcb::set_mce_kill_policy(test_pid, 1), None);
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 75: PR_TASK_PERF_EVENTS_DISABLE (31) /
@@ -65948,7 +65955,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 76: PR_SET_MDWE / PR_GET_MDWE round-trip with strict
@@ -66129,7 +66136,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     assert_eq!(pcb::set_mdwe_bits(test_pid, 1), None);
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 77: PR_GET_TIMING / PR_SET_TIMING — Linux supports
@@ -66227,7 +66234,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 78: PR_GET_SECCOMP — Linux returns the current
@@ -66296,7 +66303,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 79: PR_GET_IO_FLUSHER / PR_SET_IO_FLUSHER round-trip
@@ -66464,7 +66471,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     assert_eq!(pcb::set_io_flusher(test_pid, 1), None);
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 80: PR_GET_SPECULATION_CTRL / PR_SET_SPECULATION_CTRL —
@@ -66633,7 +66640,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 81: PR_SET_MEMORY_MERGE / PR_GET_MEMORY_MERGE
@@ -66802,7 +66809,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     assert_eq!(pcb::set_memory_merge(test_pid, 1), None);
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 82: PR_CAP_AMBIENT — ambient capability set
@@ -67037,7 +67044,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 83: PR_GET_SECUREBITS (27) / PR_SET_SECUREBITS (28)
@@ -67318,7 +67325,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 84: PR_CAPBSET_READ (23) / PR_CAPBSET_DROP (24)
@@ -67538,13 +67545,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     assert_eq!(pcb::LINUX_CAP_FULL_SET.count_ones(), 41);
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
         }
         Ok(())
     }
 
-    self_test_fcntl_owner_sig()?;
+    crate::selftest::step(self_test_fcntl_owner_sig())?;
 
     #[inline(never)]
     fn self_test_fcntl_owner_sig() -> crate::error::KernelResult<()> {
@@ -67724,7 +67731,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_fcntl_pipe_sz()?;
+    crate::selftest::step(self_test_fcntl_pipe_sz())?;
 
     #[inline(never)]
     fn self_test_fcntl_pipe_sz() -> crate::error::KernelResult<()> {
@@ -67893,7 +67900,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_prctl_get_auxv()?;
+    crate::selftest::step(self_test_prctl_get_auxv())?;
 
     #[inline(never)]
     fn self_test_prctl_get_auxv() -> crate::error::KernelResult<()> {
@@ -68074,7 +68081,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_fcntl_owner_ex()?;
+    crate::selftest::step(self_test_fcntl_owner_ex())?;
 
     #[inline(never)]
     fn self_test_fcntl_owner_ex() -> crate::error::KernelResult<()> {
@@ -68354,7 +68361,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_fcntl_lease()?;
+    crate::selftest::step(self_test_fcntl_lease())?;
 
     #[inline(never)]
     fn self_test_fcntl_lease() -> crate::error::KernelResult<()> {
@@ -68476,7 +68483,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_fcntl_seals()?;
+    crate::selftest::step(self_test_fcntl_seals())?;
 
     #[inline(never)]
     fn self_test_fcntl_seals() -> crate::error::KernelResult<()> {
@@ -68560,7 +68567,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_register_ipc_eventfd_memfd()?;
+    crate::selftest::step(self_test_register_ipc_eventfd_memfd())?;
 
     #[inline(never)]
     fn self_test_register_ipc_eventfd_memfd() -> crate::error::KernelResult<()> {
@@ -68687,7 +68694,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_register_ipc_pidfd_getfd()?;
+    crate::selftest::step(self_test_register_ipc_pidfd_getfd())?;
 
     #[inline(never)]
     fn self_test_register_ipc_pidfd_getfd() -> crate::error::KernelResult<()> {
@@ -68713,9 +68720,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // linux_fd_install, register the handle in the caller's
         // ipc_handles under the matching ResourceType (File / Pipe /
         // EventFd / MemFd).  Console and PidFd map to no kernel resource
-        // and are skipped, matching the dup-arm and release_handle_ref.
-        // Install-failure rollback now also deregisters before calling
-        // release_handle_ref.
+        // and are skipped. (Since 2026-10-02 the map is
+        // `HandleKind::resource_type`, the reference an `ipc::passed::Passed`,
+        // and the install `pcb::linux_fd_install_passed`, which registers only
+        // an object new to the caller.)
         //
         // Self-test surface:
         //   * Resource-type mapping table: assert each FdEntry kind maps to
@@ -68729,30 +68737,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         //     returns -EBADF without registering anything (the existing
         //     `caller_pid().is_none()` branch fires before the register).
         {
-            // (a) The kind→ResourceType map used by the new register call.
-            //     If a future HandleKind variant is added, this assertion
-            //     fails and forces the author to decide whether the new
-            //     kind needs a register_ipc_handle entry.
-            let kind_to_rt = |k: HandleKind| -> Option<crate::cap::ResourceType> {
-                match k {
-                    HandleKind::File => Some(crate::cap::ResourceType::File),
-                    HandleKind::Pipe => Some(crate::cap::ResourceType::Pipe),
-                    HandleKind::EventFd => Some(crate::cap::ResourceType::EventFd),
-                    HandleKind::MemFd => Some(crate::cap::ResourceType::MemFd),
-                    HandleKind::Epoll => Some(crate::cap::ResourceType::Epoll),
-                    HandleKind::SignalFd => Some(crate::cap::ResourceType::SignalFd),
-                    HandleKind::Timerfd => Some(crate::cap::ResourceType::Timerfd),
-                    HandleKind::Inotify => Some(crate::cap::ResourceType::Inotify),
-                    HandleKind::AlsaPcm => Some(crate::cap::ResourceType::AlsaPcm),
-                    HandleKind::DrmCard => Some(crate::cap::ResourceType::Drm),
-                    HandleKind::Evdev => Some(crate::cap::ResourceType::InputDevice),
-                    HandleKind::Socket => Some(crate::cap::ResourceType::NetSocket),
-                    HandleKind::Channel => Some(crate::cap::ResourceType::Channel),
-                    HandleKind::ServiceListener => Some(crate::cap::ResourceType::Service),
-                    HandleKind::UnixSocket => Some(crate::cap::ResourceType::UnixSocket),
-                    HandleKind::Console | HandleKind::PidFd | HandleKind::AlsaControl => None,
-                }
-            };
+            // (a) The kind→ResourceType map the install registers by
+            //     (`HandleKind::resource_type`), spot-checked.
+            let kind_to_rt = HandleKind::resource_type;
             assert_eq!(
                 kind_to_rt(HandleKind::File),
                 Some(crate::cap::ResourceType::File)
@@ -68839,7 +68826,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_fcntl_rw_hint()?;
+    crate::selftest::step(self_test_fcntl_rw_hint())?;
 
     #[inline(never)]
     fn self_test_fcntl_rw_hint() -> crate::error::KernelResult<()> {
@@ -68931,7 +68918,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_prctl_sched_core()?;
+    crate::selftest::step(self_test_prctl_sched_core())?;
 
     #[inline(never)]
     fn self_test_prctl_sched_core() -> crate::error::KernelResult<()> {
@@ -68986,7 +68973,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_fcntl_dupfd_query()?;
+    crate::selftest::step(self_test_fcntl_dupfd_query())?;
 
     #[inline(never)]
     fn self_test_fcntl_dupfd_query() -> crate::error::KernelResult<()> {
@@ -69051,7 +69038,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_ioctl_fioclex()?;
+    crate::selftest::step(self_test_ioctl_fioclex())?;
 
     #[inline(never)]
     fn self_test_ioctl_fioclex() -> crate::error::KernelResult<()> {
@@ -69207,7 +69194,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_ioctl_fionbio()?;
+    crate::selftest::step(self_test_ioctl_fionbio())?;
 
     #[inline(never)]
     fn self_test_ioctl_fionbio() -> crate::error::KernelResult<()> {
@@ -69338,7 +69325,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_prctl_set_vma()?;
+    crate::selftest::step(self_test_prctl_set_vma())?;
 
     #[inline(never)]
     fn self_test_prctl_set_vma() -> crate::error::KernelResult<()> {
@@ -69492,7 +69479,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_prctl_set_ptracer()?;
+    crate::selftest::step(self_test_prctl_set_ptracer())?;
 
     #[inline(never)]
     fn self_test_prctl_set_ptracer() -> crate::error::KernelResult<()> {
@@ -69614,7 +69601,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_personality_dispatch()?;
+    crate::selftest::step(self_test_personality_dispatch())?;
 
     #[inline(never)]
     fn self_test_personality_dispatch() -> crate::error::KernelResult<()> {
@@ -69653,7 +69640,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_getresuid_getresgid()?;
+    crate::selftest::step(self_test_getresuid_getresgid())?;
 
     #[inline(never)]
     fn self_test_getresuid_getresgid() -> crate::error::KernelResult<()> {
@@ -69699,7 +69686,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_getrusage_sysinfo_times()?;
+    crate::selftest::step(self_test_getrusage_sysinfo_times())?;
 
     #[inline(never)]
     fn self_test_getrusage_sysinfo_times() -> crate::error::KernelResult<()> {
@@ -69970,7 +69957,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_process_group_session()?;
+    crate::selftest::step(self_test_process_group_session())?;
 
     #[inline(never)]
     fn self_test_process_group_session() -> crate::error::KernelResult<()> {
@@ -70114,7 +70101,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_setpgid_existence_gate()?;
+    crate::selftest::step(self_test_setpgid_existence_gate())?;
 
     #[inline(never)]
     fn self_test_setpgid_existence_gate() -> crate::error::KernelResult<()> {
@@ -70300,7 +70287,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_priority_dispatch()?;
+    crate::selftest::step(self_test_priority_dispatch())?;
 
     #[inline(never)]
     fn self_test_priority_dispatch() -> crate::error::KernelResult<()> {
@@ -70726,7 +70713,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_credential_setters()?;
+    crate::selftest::step(self_test_credential_setters())?;
 
     #[inline(never)]
     fn self_test_credential_setters() -> crate::error::KernelResult<()> {
@@ -71235,7 +71222,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_capget_capset()?;
+    crate::selftest::step(self_test_capget_capset())?;
 
     #[inline(never)]
     fn self_test_capget_capset() -> crate::error::KernelResult<()> {
@@ -71273,7 +71260,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_sched_policy_dispatch()?;
+    crate::selftest::step(self_test_sched_policy_dispatch())?;
 
     #[inline(never)]
     fn self_test_sched_policy_dispatch() -> crate::error::KernelResult<()> {
@@ -72651,7 +72638,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_sched_affinity()?;
+    crate::selftest::step(self_test_sched_affinity())?;
 
     #[inline(never)]
     fn self_test_sched_affinity() -> crate::error::KernelResult<()> {
@@ -73053,7 +73040,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_fs_sync_family()?;
+    crate::selftest::step(self_test_fs_sync_family())?;
 
     #[inline(never)]
     fn self_test_fs_sync_family() -> crate::error::KernelResult<()> {
@@ -73133,7 +73120,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_sethostname_setdomainname()?;
+    crate::selftest::step(self_test_sethostname_setdomainname())?;
 
     #[inline(never)]
     fn self_test_sethostname_setdomainname() -> crate::error::KernelResult<()> {
@@ -73701,7 +73688,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_mlock_family()?;
+    crate::selftest::step(self_test_mlock_family())?;
 
     #[inline(never)]
     fn self_test_mlock_family() -> crate::error::KernelResult<()> {
@@ -73888,7 +73875,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_msync_flag_alignment()?;
+    crate::selftest::step(self_test_msync_flag_alignment())?;
 
     #[inline(never)]
     fn self_test_msync_flag_alignment() -> crate::error::KernelResult<()> {
@@ -74033,7 +74020,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_fadvise_readahead()?;
+    crate::selftest::step(self_test_fadvise_readahead())?;
 
     #[inline(never)]
     fn self_test_fadvise_readahead() -> crate::error::KernelResult<()> {
@@ -74173,7 +74160,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_close_range()?;
+    crate::selftest::step(self_test_close_range())?;
 
     #[inline(never)]
     fn self_test_close_range() -> crate::error::KernelResult<()> {
@@ -74235,7 +74222,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // getrlimit; the unconditional EFAULT-first order for setrlimit).
     // No probes here.
 
-    self_test_getcpu()?;
+    crate::selftest::step(self_test_getcpu())?;
 
     #[inline(never)]
     fn self_test_getcpu() -> crate::error::KernelResult<()> {
@@ -74301,7 +74288,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_statfs_fstatfs()?;
+    crate::selftest::step(self_test_statfs_fstatfs())?;
 
     #[inline(never)]
     fn self_test_statfs_fstatfs() -> crate::error::KernelResult<()> {
@@ -74344,7 +74331,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_clock_settime_adjtimex()?;
+    crate::selftest::step(self_test_clock_settime_adjtimex())?;
 
     #[inline(never)]
     fn self_test_clock_settime_adjtimex() -> crate::error::KernelResult<()> {
@@ -75471,7 +75458,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_clock_nanosleep()?;
+    crate::selftest::step(self_test_clock_nanosleep())?;
 
     #[inline(never)]
     fn self_test_clock_nanosleep() -> crate::error::KernelResult<()> {
@@ -75644,7 +75631,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_nanosleep()?;
+    crate::selftest::step(self_test_nanosleep())?;
 
     #[inline(never)]
     fn self_test_nanosleep() -> crate::error::KernelResult<()> {
@@ -75745,7 +75732,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_chroot_mknod()?;
+    crate::selftest::step(self_test_chroot_mknod())?;
 
     #[inline(never)]
     fn self_test_chroot_mknod() -> crate::error::KernelResult<()> {
@@ -76046,7 +76033,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_truncate()?;
+    crate::selftest::step(self_test_truncate())?;
 
     #[inline(never)]
     fn self_test_truncate() -> crate::error::KernelResult<()> {
@@ -76169,7 +76156,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_ftruncate()?;
+    crate::selftest::step(self_test_ftruncate())?;
 
     #[inline(never)]
     fn self_test_ftruncate() -> crate::error::KernelResult<()> {
@@ -76254,7 +76241,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_getitimer_setitimer()?;
+    crate::selftest::step(self_test_getitimer_setitimer())?;
 
     #[inline(never)]
     fn self_test_getitimer_setitimer() -> crate::error::KernelResult<()> {
@@ -76412,7 +76399,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_access_faccessat()?;
+    crate::selftest::step(self_test_access_faccessat())?;
 
     #[inline(never)]
     fn self_test_access_faccessat() -> crate::error::KernelResult<()> {
@@ -76582,7 +76569,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_stat_family()?;
+    crate::selftest::step(self_test_stat_family())?;
 
     #[inline(never)]
     fn self_test_stat_family() -> crate::error::KernelResult<()> {
@@ -76740,7 +76727,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_statx()?;
+    crate::selftest::step(self_test_statx())?;
 
     #[inline(never)]
     fn self_test_statx() -> crate::error::KernelResult<()> {
@@ -76964,7 +76951,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_mkdir_rename_family()?;
+    crate::selftest::step(self_test_mkdir_rename_family())?;
 
     #[inline(never)]
     fn self_test_mkdir_rename_family() -> crate::error::KernelResult<()> {
@@ -77453,7 +77440,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_renameat2_exchange()?;
+    crate::selftest::step(self_test_renameat2_exchange())?;
 
     #[inline(never)]
     fn self_test_renameat2_exchange() -> crate::error::KernelResult<()> {
@@ -77558,7 +77545,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_lseek_whence()?;
+    crate::selftest::step(self_test_lseek_whence())?;
 
     #[inline(never)]
     fn self_test_lseek_whence() -> crate::error::KernelResult<()> {
@@ -77684,7 +77671,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_readlink_chmod_chown_family()?;
+    crate::selftest::step(self_test_readlink_chmod_chown_family())?;
 
     #[inline(never)]
     fn self_test_readlink_chmod_chown_family() -> crate::error::KernelResult<()> {
@@ -79132,7 +79119,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_signalfd_timerfd_inotify()?;
+    crate::selftest::step(self_test_signalfd_timerfd_inotify())?;
 
     #[inline(never)]
     fn self_test_signalfd_timerfd_inotify() -> crate::error::KernelResult<()> {
@@ -80440,7 +80427,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_sendfile_splice_aio()?;
+    crate::selftest::step(self_test_sendfile_splice_aio())?;
 
     #[inline(never)]
     fn self_test_sendfile_splice_aio() -> crate::error::KernelResult<()> {
@@ -82159,7 +82146,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_bpf_perf_keyring()?;
+    crate::selftest::step(self_test_bpf_perf_keyring())?;
 
     #[inline(never)]
     fn self_test_bpf_perf_keyring() -> crate::error::KernelResult<()> {
@@ -82974,7 +82961,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -83075,7 +83062,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -83229,7 +83216,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -83267,7 +83254,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -83299,7 +83286,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -83329,7 +83316,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -83355,7 +83342,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -83381,7 +83368,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -83408,7 +83395,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             serial_println!("[syscall/linux]   fd-creator family int flags truncation: OK");
@@ -83431,7 +83418,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -83472,7 +83459,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -83498,7 +83485,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -83528,7 +83515,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -83553,7 +83540,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -83581,7 +83568,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -83607,7 +83594,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             serial_println!(
@@ -83906,7 +83893,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -83938,7 +83925,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -83965,7 +83952,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -83991,7 +83978,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -84020,7 +84007,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -84398,7 +84385,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     serial_println!("[syscall/linux]   process_mrelease pidfd discrimination: OK");
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -84458,7 +84445,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -84502,7 +84489,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_xattr_quota_mount()?;
+    crate::selftest::step(self_test_xattr_quota_mount())?;
 
     #[inline(never)]
     fn self_test_xattr_quota_mount() -> crate::error::KernelResult<()> {
@@ -85987,7 +85974,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_sysv_ipc_mqueue()?;
+    crate::selftest::step(self_test_sysv_ipc_mqueue())?;
 
     #[inline(never)]
     fn self_test_sysv_ipc_mqueue() -> crate::error::KernelResult<()> {
@@ -86298,7 +86285,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -86861,7 +86848,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -87282,7 +87269,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -87455,7 +87442,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     serial_println!("[syscall/linux]   mq_timedsend prio validation: OK");
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -87538,7 +87525,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -87980,13 +87967,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     serial_println!("[syscall/linux]   mq_getsetattr mq_flags & ~O_NONBLOCK: OK");
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
         }
         Ok(())
     }
 
-    self_test_poll_select_epoll()?;
+    crate::selftest::step(self_test_poll_select_epoll())?;
 
     #[inline(never)]
     fn self_test_poll_select_epoll() -> crate::error::KernelResult<()> {
@@ -89106,7 +89093,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_openat2_execveat_mount()?;
+    crate::selftest::step(self_test_openat2_execveat_mount())?;
 
     #[inline(never)]
     fn self_test_openat2_execveat_mount() -> crate::error::KernelResult<()> {
@@ -90623,7 +90610,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_numa_sched_landlock()?;
+    crate::selftest::step(self_test_numa_sched_landlock())?;
 
     #[inline(never)]
     fn self_test_numa_sched_landlock() -> crate::error::KernelResult<()> {
@@ -91592,7 +91579,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     pcb::destroy(srof);
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
             serial_println!(
                 "[syscall/linux]   sched_{{set,get}}attr SCHED_FLAG_RESET_ON_FORK round-trip (batch 527): OK"
@@ -91788,7 +91775,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     pcb::destroy(kp);
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
             serial_println!(
                 "[syscall/linux]   sched_setattr SCHED_FLAG_KEEP_POLICY/KEEP_PARAMS semantics (batch 528): OK"
@@ -92008,7 +91995,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     pcb::destroy(np);
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
             {
                 #[inline(never)]
@@ -92372,7 +92359,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_seccomp_ptrace_clone3()?;
+    crate::selftest::step(self_test_seccomp_ptrace_clone3())?;
 
     #[inline(never)]
     fn self_test_seccomp_ptrace_clone3() -> crate::error::KernelResult<()> {
@@ -92921,7 +92908,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
             // clone3 with CSIGNAL bits in flags -> EINVAL (must go in exit_signal).
             {
@@ -92945,7 +92932,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
             // clone3 with exit_signal > 0xFF -> EINVAL.
             {
@@ -92969,7 +92956,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
             // clone3 with stack_base set but stack_size=0 -> EINVAL.
             {
@@ -92991,7 +92978,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
             // clone3 with set_tid_size != 0 -> EINVAL (no manual TID assignment).
             {
@@ -93013,7 +93000,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
             // clone3 with CLONE_NEWPID -> EINVAL (no namespace subsystem).
             {
@@ -93035,7 +93022,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
             serial_println!(
                 "[syscall/linux]   clone3 size-E2BIG > size-EINVAL > NULL-EFAULT gate order: OK"
@@ -93695,7 +93682,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     serial_println!("[syscall/linux]   futex op int truncation: OK");
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // membarrier (batch 114): full cmd set.
@@ -94863,7 +94850,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_rtsig_posix_timer()?;
+    crate::selftest::step(self_test_rtsig_posix_timer())?;
 
     #[inline(never)]
     fn self_test_rtsig_posix_timer() -> crate::error::KernelResult<()> {
@@ -95627,7 +95614,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_bsd_socket_family()?;
+    crate::selftest::step(self_test_bsd_socket_family())?;
 
     #[inline(never)]
     fn self_test_bsd_socket_family() -> crate::error::KernelResult<()> {
@@ -96285,7 +96272,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_slate_channels()?;
+    crate::selftest::step(self_test_slate_channels())?;
 
     /// The SlateOS channel descriptors (1000-1004): the gates a kernel task
     /// meets (it has no descriptor table), then the descriptor machinery
@@ -96503,7 +96490,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_eventfd_futex_pkey()?;
+    crate::selftest::step(self_test_eventfd_futex_pkey())?;
 
     #[inline(never)]
     fn self_test_eventfd_futex_pkey() -> crate::error::KernelResult<()> {
@@ -98092,7 +98079,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_getsockname_getpeername()?;
+    crate::selftest::step(self_test_getsockname_getpeername())?;
 
     #[inline(never)]
     fn self_test_getsockname_getpeername() -> crate::error::KernelResult<()> {
@@ -98261,7 +98248,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_accept_accept4()?;
+    crate::selftest::step(self_test_accept_accept4())?;
 
     #[inline(never)]
     fn self_test_accept_accept4() -> crate::error::KernelResult<()> {
@@ -98462,7 +98449,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_validate_sockaddr_out()?;
+    crate::selftest::step(self_test_validate_sockaddr_out())?;
 
     #[inline(never)]
     fn self_test_validate_sockaddr_out() -> crate::error::KernelResult<()> {
@@ -98616,7 +98603,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_bind_connect()?;
+    crate::selftest::step(self_test_bind_connect())?;
 
     #[inline(never)]
     fn self_test_bind_connect() -> crate::error::KernelResult<()> {
@@ -98774,7 +98761,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_addr_len_bounds()?;
+    crate::selftest::step(self_test_addr_len_bounds())?;
 
     #[inline(never)]
     fn self_test_addr_len_bounds() -> crate::error::KernelResult<()> {
@@ -98964,7 +98951,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_sendto_recvfrom()?;
+    crate::selftest::step(self_test_sendto_recvfrom())?;
 
     #[inline(never)]
     fn self_test_sendto_recvfrom() -> crate::error::KernelResult<()> {
@@ -99177,7 +99164,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_sendmsg_recvmsg()?;
+    crate::selftest::step(self_test_sendmsg_recvmsg())?;
 
     #[inline(never)]
     fn self_test_sendmsg_recvmsg() -> crate::error::KernelResult<()> {
@@ -99272,7 +99259,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_sendmmsg_recvmmsg()?;
+    crate::selftest::step(self_test_sendmmsg_recvmmsg())?;
 
     #[inline(never)]
     fn self_test_sendmmsg_recvmmsg() -> crate::error::KernelResult<()> {
@@ -99435,7 +99422,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_legacy_x86_kexec_lsm()?;
+    crate::selftest::step(self_test_legacy_x86_kexec_lsm())?;
 
     #[inline(never)]
     fn self_test_legacy_x86_kexec_lsm() -> crate::error::KernelResult<()> {
@@ -101077,7 +101064,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_settimeofday_mincore_mremap()?;
+    crate::selftest::step(self_test_settimeofday_mincore_mremap())?;
 
     #[inline(never)]
     fn self_test_settimeofday_mincore_mremap() -> crate::error::KernelResult<()> {
@@ -102016,7 +102003,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_pread_pwrite_getcwd()?;
+    crate::selftest::step(self_test_pread_pwrite_getcwd())?;
 
     #[inline(never)]
     fn self_test_pread_pwrite_getcwd() -> crate::error::KernelResult<()> {
@@ -102319,7 +102306,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_flock_getdents_waitid()?;
+    crate::selftest::step(self_test_flock_getdents_waitid())?;
 
     #[inline(never)]
     fn self_test_flock_getdents_waitid() -> crate::error::KernelResult<()> {
@@ -102970,7 +102957,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_remap_ioprio_futex2()?;
+    crate::selftest::step(self_test_remap_ioprio_futex2())?;
 
     #[inline(never)]
     fn self_test_remap_ioprio_futex2() -> crate::error::KernelResult<()> {
@@ -103109,7 +103096,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -103197,7 +103184,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -103280,7 +103267,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -103630,7 +103617,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -104811,7 +104798,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // futex_requeue nonzero flags -> EINVAL.
@@ -104941,7 +104928,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_legacy_deprecated_syscalls()?;
+    crate::selftest::step(self_test_legacy_deprecated_syscalls())?;
 
     #[inline(never)]
     fn self_test_legacy_deprecated_syscalls() -> crate::error::KernelResult<()> {
@@ -105323,7 +105310,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- capget / capset NULL-data error matrix ----
@@ -105445,7 +105432,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     serial_println!("[syscall/linux]   capget/capset NULL-data error matrix: OK");
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- prctl(PR_SET_NAME) NULL-arg2 -> EFAULT ----
@@ -105517,7 +105504,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     serial_println!("[syscall/linux]   prctl(PR_SET_NAME) NULL-arg2 gating: OK");
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 350: prctl option int truncation.
@@ -105634,7 +105621,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     serial_println!("[syscall/linux]   prctl option int truncation: OK");
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- capset pid != current -> EPERM ----
@@ -105743,7 +105730,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     serial_println!("[syscall/linux]   capset pid != current EPERM gating: OK");
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- capget pid validation (Linux gate order) ----
@@ -105884,7 +105871,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- pread64/pwrite64 fd-before-count gate order ----
@@ -105967,7 +105954,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- mremap new_size PAGE_ALIGN overflow gating ----
@@ -106044,7 +106031,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- setsockopt/getsockopt no-syscall-entry-level gate ----
@@ -106146,7 +106133,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     serial_println!("[syscall/linux]   setsockopt/getsockopt no-level gate: OK");
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- listen/shutdown drop spurious entry-layer gates ----
@@ -106232,7 +106219,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     serial_println!("[syscall/linux]   listen/shutdown drop entry gates: OK");
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- socket/socketpair EAFNOSUPPORT + EOPNOTSUPP ----
@@ -106350,7 +106337,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     serial_println!("[syscall/linux]   socket/socketpair EAFNOSUPPORT gating: OK");
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- perf_event_open __reserved_2 in-struct check ----
@@ -106461,7 +106448,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     serial_println!("[syscall/linux]   perf_event_open __reserved_2 gating: OK");
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- mremap MREMAP_FIXED new_addr+new_size overflow / TASK_SIZE ----
@@ -106539,7 +106526,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     serial_println!("[syscall/linux]   mremap MREMAP_FIXED new_addr bounds: OK");
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- socket per-(family, type) protocol whitelist ----
@@ -106686,7 +106673,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     serial_println!("[syscall/linux]   socket EPROTONOSUPPORT gating: OK");
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- socket (family, SOCK_RDM) ESOCKTNOSUPPORT ----
@@ -106822,7 +106809,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     serial_println!("[syscall/linux]   socket ESOCKTNOSUPPORT gating: OK");
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- socket type-range gate widening (batch 466) ----
@@ -106994,7 +106981,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- socket AF_INET/AF_INET6 IPPROTO_MAX gate (batch 468) ----
@@ -107177,7 +107164,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- Batch 470: socket AF_NETLINK protocol MAX_LINKS=32 ----
@@ -107345,7 +107332,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- Batch 471: socket AF_UNIX accepts protocol = PF_UNIX ----
@@ -107365,8 +107352,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //   A. socket(AF_UNIX=1, STREAM=1, 1=PF_UNIX)   -> EBADF
             //      (was: EPROTONOSUPPORT; post: accepted)
             //   B. socket(AF_UNIX, DGRAM=2, 1)              -> EBADF
-            //   C. socket(AF_UNIX, SEQPACKET=5, 1)          -> ENOSYS
-            //      (accepted; no SOCK_SEQPACKET yet)
+            //   C. socket(AF_UNIX, SEQPACKET=5, 1)          -> EBADF
             //   D. Regression: socket(AF_UNIX, STREAM, 0)   -> EBADF
             //      (already accepted; gate 5 skipped for proto=0)
             //   E. Regression: socket(AF_UNIX, STREAM, 2)   -> EPROTONOSUPPORT
@@ -107419,9 +107405,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+                    if dispatch_linux(nr::SOCKET, &a).value
+                        != i64::from(errno::EBADF).wrapping_neg()
+                    {
                         serial_println!(
-                            "[syscall/linux]   FAIL: socket(AF_UNIX,SEQPACKET,PF_UNIX) not ENOSYS"
+                            "[syscall/linux]   FAIL: socket(AF_UNIX,SEQPACKET,PF_UNIX) not EBADF"
                         );
                         return Err(KernelError::InternalError);
                     }
@@ -107479,7 +107467,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- Batch 472: socket AF_INET/AF_INET6 SOCK_DGRAM ----
@@ -107642,7 +107630,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- socket AF_UNIX protocol-check-before-type-check ----
@@ -107797,7 +107785,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- socket AF_INET/AF_INET6 SOCK_RAW + protocol=0 ----
@@ -107913,7 +107901,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     // F: Cross-family — AF_UNIX / SOCK_RAW / 0.  AF_UNIX
                     // doesn't use inetsw; SOCK_RAW is aliased to DGRAM in
-                    // unix_create.
+                    // unix_create, so a datagram socket is made -- and, in
+                    // kernel context, closed again: EBADF.
                     let a = SyscallArgs {
                         arg0: 1,
                         arg1: 3,
@@ -107922,9 +107911,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+                    if dispatch_linux(nr::SOCKET, &a).value
+                        != i64::from(errno::EBADF).wrapping_neg()
+                    {
                         serial_println!(
-                            "[syscall/linux]   FAIL: socket(AF_UNIX,RAW,0) cross-family regression not ENOSYS"
+                            "[syscall/linux]   FAIL: socket(AF_UNIX,RAW,0) cross-family regression not EBADF"
                         );
                         return Err(KernelError::InternalError);
                     }
@@ -107933,7 +107924,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- socketpair per-(family,type,protocol) gating ----
@@ -108056,7 +108047,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     serial_println!("[syscall/linux]   socketpair ESOCKT/EPROTO gating: OK");
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- socketpair type-range gate widening (batch 467) ----
@@ -108243,7 +108234,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- Batch 469: socketpair AF_INET/AF_INET6 protocol ----
@@ -108426,7 +108417,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- Batch 470: socketpair AF_NETLINK protocol MAX_LINKS=32 ----
@@ -108603,23 +108594,24 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- Batch 471: socketpair AF_UNIX accepts PF_UNIX ----
             // Direct mirror of sys_socket batch 471.  unix_create's
             // `if (protocol && protocol != PF_UNIX) return
             // -EPROTONOSUPPORT;` is the same gate reached via
-            // sock_create from __sys_socketpair.  For AF_UNIX with
-            // valid (type, sv) the path falls through to the
-            // terminal ENOSYS.
+            // sock_create from __sys_socketpair.  For AF_UNIX with a
+            // valid (type, sv) a stream or datagram pair is made -- and, in
+            // kernel context, which has no descriptor table to install it in,
+            // closed again: EBADF (ENOSYS until AF_UNIX pairs existed).
             //
             // Sub-probes:
-            //   A. socketpair(AF_UNIX, STREAM, PF_UNIX=1, sv)    -> ENOSYS
+            //   A. socketpair(AF_UNIX, STREAM, PF_UNIX=1, sv)    -> EBADF
             //      (was: EPROTONOSUPPORT; post: accepted)
-            //   B. socketpair(AF_UNIX, DGRAM, PF_UNIX, sv)       -> ENOSYS
-            //   C. socketpair(AF_UNIX, SEQPACKET, PF_UNIX, sv)   -> ENOSYS
-            //   D. Regression: socketpair(AF_UNIX, STREAM, 0, sv) -> ENOSYS
+            //   B. socketpair(AF_UNIX, DGRAM, PF_UNIX, sv)       -> EBADF
+            //   C. socketpair(AF_UNIX, SEQPACKET, PF_UNIX, sv)   -> EBADF
+            //   D. Regression: socketpair(AF_UNIX, STREAM, 0, sv) -> EBADF
             //   E. Regression: socketpair(AF_UNIX, STREAM, 2, sv) -> EPROTONOSUPPORT
             //   F. Regression: socketpair(AF_UNIX, STREAM, -1, sv) -> EPROTONOSUPPORT
             {
@@ -108638,9 +108630,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ENOSYS) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != i64::from(errno::EBADF).wrapping_neg()
+                    {
                         serial_println!(
-                            "[syscall/linux]   FAIL: socketpair(AF_UNIX,STREAM,PF_UNIX) not ENOSYS"
+                            "[syscall/linux]   FAIL: socketpair(AF_UNIX,STREAM,PF_UNIX) not EBADF"
                         );
                         return Err(KernelError::InternalError);
                     }
@@ -108653,9 +108647,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ENOSYS) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != i64::from(errno::EBADF).wrapping_neg()
+                    {
                         serial_println!(
-                            "[syscall/linux]   FAIL: socketpair(AF_UNIX,DGRAM,PF_UNIX) not ENOSYS"
+                            "[syscall/linux]   FAIL: socketpair(AF_UNIX,DGRAM,PF_UNIX) not EBADF"
                         );
                         return Err(KernelError::InternalError);
                     }
@@ -108668,9 +108664,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ENOSYS) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != i64::from(errno::EBADF).wrapping_neg()
+                    {
                         serial_println!(
-                            "[syscall/linux]   FAIL: socketpair(AF_UNIX,SEQPACKET,PF_UNIX) not ENOSYS"
+                            "[syscall/linux]   FAIL: socketpair(AF_UNIX,SEQPACKET,PF_UNIX) not EBADF"
                         );
                         return Err(KernelError::InternalError);
                     }
@@ -108683,9 +108681,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ENOSYS) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != i64::from(errno::EBADF).wrapping_neg()
+                    {
                         serial_println!(
-                            "[syscall/linux]   FAIL: socketpair(AF_UNIX,STREAM,0) regression not ENOSYS"
+                            "[syscall/linux]   FAIL: socketpair(AF_UNIX,STREAM,0) regression not EBADF"
                         );
                         return Err(KernelError::InternalError);
                     }
@@ -108728,7 +108728,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- Batch 472: socketpair AF_INET/AF_INET6 SOCK_DGRAM ----
@@ -108886,7 +108886,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- socketpair AF_UNIX protocol-check-before-type ----
@@ -109057,7 +109057,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- socketpair AF_INET/AF_INET6 SOCK_RAW + protocol=0 ----
@@ -109181,7 +109181,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     // F: Cross-family — AF_UNIX / SOCK_RAW / 0 / sv.  AF_UNIX
                     // doesn't use inetsw; SOCK_RAW aliased to DGRAM in
-                    // unix_create.  Reaches terminal ENOSYS.
+                    // unix_create: a datagram pair is made, and in kernel
+                    // context closed again (EBADF).
                     let a = SyscallArgs {
                         arg0: 1,
                         arg1: 3,
@@ -109190,9 +109191,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ENOSYS) {
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value
+                        != i64::from(errno::EBADF).wrapping_neg()
+                    {
                         serial_println!(
-                            "[syscall/linux]   FAIL: socketpair(AF_UNIX,RAW,0,sv) cross-family regression not ENOSYS"
+                            "[syscall/linux]   FAIL: socketpair(AF_UNIX,RAW,0,sv) cross-family regression not EBADF"
                         );
                         return Err(KernelError::InternalError);
                     }
@@ -109201,7 +109204,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- AF_NETLINK / AF_PACKET socket-type allowlist ----
@@ -109388,7 +109391,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     serial_println!("[syscall/linux]   AF_NETLINK/AF_PACKET ESOCKT gating: OK");
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // futimesat NULL path -> EFAULT.
@@ -109456,7 +109459,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
             // futimesat discriminator B: tv_usec[1] = i64::MAX with
             // filename=NULL -> EINVAL via the same gate on entry 1.
@@ -109482,7 +109485,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
             // futimesat discriminator C: well-formed timeval array with
             // filename=NULL -> EFAULT (acceptance: usec gate passes,
@@ -109509,14 +109512,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
             serial_println!("[syscall/linux]   futimesat tv_usec value gating: OK");
         }
         Ok(())
     }
 
-    self_test_drm_kms_enumeration()?;
+    crate::selftest::step(self_test_drm_kms_enumeration())?;
 
     #[inline(never)]
     fn self_test_drm_kms_enumeration() -> crate::error::KernelResult<()> {
@@ -109597,7 +109600,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_drm_dumb_buffer()?;
+    crate::selftest::step(self_test_drm_dumb_buffer())?;
 
     #[inline(never)]
     fn self_test_drm_dumb_buffer() -> crate::error::KernelResult<()> {

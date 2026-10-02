@@ -5452,7 +5452,7 @@ mod tests {
             if self.unreadable.iter().any(|u| u == path) {
                 return Err(io::Error::from_raw_os_error(13));
             }
-            let mut prefix = path.to_vec();
+            let mut prefix = path.clone();
             if prefix.last() != Some(&b'/') {
                 prefix.push(b'/');
             }

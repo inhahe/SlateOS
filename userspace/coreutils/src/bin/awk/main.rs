@@ -210,7 +210,7 @@ fn run_main() -> ExitCode {
         let (name, value) = match p {
             Preassign::Var(name, value) => {
                 if let Some(refusal) = interp::cli_refusal(name, value) {
-                    die(&refusal);
+                    die(refusal.as_bytes());
                 }
                 (name.as_str(), ere::awk::string(value, true, &mut warnings))
             }
@@ -242,7 +242,10 @@ fn run_main() -> ExitCode {
         // gawk can report several `error:`s before it stops; each is a line.
         Err(e) => {
             for message in &e.messages {
-                diag!("awk: {message}");
+                let mut line = b"awk: ".to_vec();
+                line.extend_from_slice(message);
+                line.push(b'\n');
+                stdfd::diag_bytes(&line);
             }
             stdfd::exit_now(if e.fatal { 2 } else { 1 }, 2)
         }
@@ -298,7 +301,7 @@ fn run_main() -> ExitCode {
         Err(interp::Fatal::Said(message)) => {
             let mut line = b"awk: ".to_vec();
             line.extend_from_slice(&it.diagnostic_prefix());
-            line.extend_from_slice(message.as_bytes());
+            line.extend_from_slice(&message);
             line.push(b'\n');
             stdfd::diag_bytes(&line);
             stdfd::exit_now(2, 2)
@@ -311,17 +314,19 @@ fn run_main() -> ExitCode {
     }
 }
 
-/// Why the command line could not be used.
+/// Why the command line could not be used. Bytes, because two of the
+/// refusals quote a `-v` argument back, as gawk does with `%s`, and an
+/// argument need not be text.
 enum ArgError {
     /// Malformed: said with the usage, exit 1.
-    Usage(String),
+    Usage(Str),
     /// A `-v` gawk refuses as it reads it: fatal, exit 2.
-    Fatal(String),
+    Fatal(Str),
 }
 
 impl From<String> for ArgError {
     fn from(e: String) -> ArgError {
-        ArgError::Usage(e)
+        ArgError::Usage(e.into_bytes())
     }
 }
 
@@ -365,7 +370,7 @@ fn parse_args(raw: &[Str]) -> Result<Option<Args>, ArgError> {
                 b'F' | b'v' | b'f' => {
                     let value = if rest.is_empty() {
                         let Some(next) = raw.get(i) else {
-                            return Err(ArgError::Usage(format!(
+                            return Err(ArgError::from(format!(
                                 "option -{} requires an argument",
                                 flag as char
                             )));
@@ -385,16 +390,18 @@ fn parse_args(raw: &[Str]) -> Result<Option<Args>, ArgError> {
                             // no `=` is a usage error, a name that is not one
                             // is fatal.
                             let Some(eq) = value.iter().position(|b| *b == b'=') else {
-                                return Err(ArgError::Usage(format!(
-                                    "`{}' argument to `-v' not in `var=value' form",
-                                    String::from_utf8_lossy(&value)
-                                )));
+                                let mut said = b"`".to_vec();
+                                said.extend_from_slice(&value);
+                                said.extend_from_slice(
+                                    b"' argument to `-v' not in `var=value' form",
+                                );
+                                return Err(ArgError::Usage(said));
                             };
                             let Some((name, v)) = interp::command_assignment(&value) else {
-                                return Err(ArgError::Fatal(format!(
-                                    "fatal: `{}' is not a legal variable name",
-                                    String::from_utf8_lossy(value.get(..eq).unwrap_or_default())
-                                )));
+                                let mut said = b"fatal: `".to_vec();
+                                said.extend_from_slice(value.get(..eq).unwrap_or_default());
+                                said.extend_from_slice(b"' is not a legal variable name");
+                                return Err(ArgError::Fatal(said));
                             };
                             args.preassigns.push(Preassign::Var(name, v));
                         }
@@ -410,7 +417,7 @@ fn parse_args(raw: &[Str]) -> Result<Option<Args>, ArgError> {
                 // so names the whole character -- see `lex.rs`.)
                 other => {
                     let shown = coreutils::quote::escape_unprintable(&[other]);
-                    return Err(ArgError::Usage(format!("unknown option -{shown}")));
+                    return Err(ArgError::from(format!("unknown option -{shown}")));
                 }
             }
         }
@@ -418,7 +425,7 @@ fn parse_args(raw: &[Str]) -> Result<Option<Args>, ArgError> {
 
     if args.progfiles.is_empty() {
         let Some(text) = raw.get(i) else {
-            return Err(ArgError::Usage("no program text".to_string()));
+            return Err(ArgError::Usage(b"no program text".to_vec()));
         };
         i = i.saturating_add(1);
         args.program = Some(text.clone());
@@ -428,7 +435,7 @@ fn parse_args(raw: &[Str]) -> Result<Option<Args>, ArgError> {
 }
 
 /// The program text: the `-f` files joined by newlines, or the operand.
-fn program_source(args: &Args) -> Result<(Str, source::SourceMap), String> {
+fn program_source(args: &Args) -> Result<(Str, source::SourceMap), Str> {
     if let Some(text) = &args.program {
         return Ok((text.clone(), source::SourceMap::operand(text)));
     }
@@ -449,15 +456,18 @@ fn program_source(args: &Args) -> Result<(Str, source::SourceMap), String> {
                     "fatal: cannot open source file `-' for reading: {}",
                     coreutils::errmsg::strerror(&e)
                 )
+                .into_bytes()
             })?;
             buf
         } else {
             std::fs::read(io::os_path(name)).map_err(|e| {
-                format!(
-                    "fatal: cannot open source file `{}' for reading: {}",
-                    String::from_utf8_lossy(name),
-                    coreutils::errmsg::strerror(&e)
-                )
+                // The name as given, which need not be text.
+                let mut said = b"fatal: cannot open source file `".to_vec();
+                said.extend_from_slice(name);
+                said.extend_from_slice(
+                    format!("' for reading: {}", coreutils::errmsg::strerror(&e)).as_bytes(),
+                );
+                said
             })?
         };
         out.extend_from_slice(&text);
@@ -490,9 +500,17 @@ fn arg_bytes(a: &OsString) -> Str {
 
 /// A failure once the program is running, or before it because a file it named
 /// could not be opened.
-fn die(msg: &str) -> ! {
-    diag!("awk: {msg}");
+fn die(msg: &[u8]) -> ! {
+    say(msg);
     stdfd::exit_now(2, 2)
+}
+
+/// `awk: MESSAGE` on standard error, as bytes.
+fn say(msg: &[u8]) {
+    let mut line = b"awk: ".to_vec();
+    line.extend_from_slice(msg);
+    line.push(b'\n');
+    stdfd::diag_bytes(&line);
 }
 
 /// A program that will not compile.
@@ -502,8 +520,8 @@ fn die_program(msg: &str) -> ! {
 }
 
 /// A command line that does not make sense.
-fn die_usage(msg: &str) -> ! {
-    diag!("awk: {msg}");
+fn die_usage(msg: &[u8]) -> ! {
+    say(msg);
     diag!("{USAGE}");
     stdfd::exit_now(1, 2)
 }
@@ -521,7 +539,9 @@ mod tests {
     fn err(argv: &[&[u8]]) -> String {
         let raw: Vec<Str> = argv.iter().map(|a| a.to_vec()).collect();
         match parse_args(&raw) {
-            Err(ArgError::Usage(message) | ArgError::Fatal(message)) => message,
+            Err(ArgError::Usage(message) | ArgError::Fatal(message)) => {
+                String::from_utf8(message).unwrap()
+            }
             Ok(_) => panic!("expected these arguments to be refused: {argv:?}"),
         }
     }

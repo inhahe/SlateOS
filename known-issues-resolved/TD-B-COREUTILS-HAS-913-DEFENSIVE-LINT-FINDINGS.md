@@ -1,4 +1,19 @@
-## TD-B-COREUTILS-HAS-913-DEFENSIVE-LINT-FINDINGS — 2026-09-15 — OPEN
+## TD-B-COREUTILS-HAS-913-DEFENSIVE-LINT-FINDINGS — 2026-09-15 — FIXED 2026-10-02
+
+**Fixed:** `cargo clippy -p coreutils --all-targets` reports nothing, on
+clippy 1.98 for Linux and 1.95 for the Windows host -- production code and
+test code, every bin and the library. The last of it went in six commits:
+the library (`43a13392a`), `cal` (`db3c91e5c`), `diff` (`9fab86076`, and the
+port that replaced it since), `dd` (`daa2341a5`), the other 31 programs that
+still had findings (`bc66f224d`), and the test code, which a run without
+`--tests` never compiles (`8bdf5d2a9`: 120 findings, 89 of them the
+restriction lints test modules are meant to allow). The arithmetic went by
+`checked_*` and `saturating_*` rewrites and, where the indexing and the
+arithmetic are the algorithm's own, by function-level allows that give their
+reason (`diff`'s `analyze.rs`, for one). The warning below about defaulted
+values still stands for whoever touches these sites next.
+
+What follows is the entry as it was filed.
 
 **In short:** the 83 commands in `userspace/coreutils` are now checked by the
 warnings that point at code which can crash on bad input. They report 913

@@ -122,7 +122,7 @@ two disagree.
 | `indexer` | Background File Indexer |  |  |  |
 | `inetd` | Internet Super-Server Daemon (inetd) |  |  |  |
 | `inotifywait` | Filesystem event monitoring utility. |  | `inotify` | `inotifywatch` *(not installed)* |
-| `install` | Copy files and set attributes |  |  |  |
+| `install` | Copy files and set their attributes. |  | `coreutils` |  |
 | `iostat` | I/O Statistics Utility |  |  |  |
 | `ip` | Network Configuration Utility |  |  |  |
 | `ipcalc` | IP Subnet Calculator (`ipcalc`) |  |  |  |
@@ -269,7 +269,7 @@ two disagree.
 | `telnet` | `Slate OS` Telnet Client |  |  |  |
 | `test` | Evaluate a conditional expression. | yes | `coreutils` |  |
 | `time_cmd` | Run a command and report its resource usage. | yes | `coreutils` |  |
-| `timeout` | Run a command with a time limit, for Slate OS |  |  |  |
+| `timeout` | Run a command, and stop it if it is still running after a time limit. |  | `coreutils` |  |
 | `top` | Interactive Process Monitor |  |  |  |
 | `touch` | Create files, and set their access and modification times. | yes | `coreutils` |  |
 | `tput` | Terminal capability tools |  |  | `clear` *(not installed)*, `reset` *(not installed)*, `tset` *(not installed)* |

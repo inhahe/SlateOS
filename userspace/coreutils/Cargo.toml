@@ -9,6 +9,10 @@ description = "Coreutils for SlateOS: one binary per program, most of them ports
 # libc rebuild relinks these binaries instead of silently leaving them
 # stale. See userspace/sysroot-dep.
 sysroot-dep = { path = "../sysroot-dep" }
+# The `asInvoker` manifest every binary gets on a Windows host, so that
+# `install.exe` and `patch.exe` -- and their test harnesses -- are not taken
+# for installers and refused without elevation. See build.rs.
+embed-manifest = "1.5.0"
 
 [dependencies]
 # `/proc` parsing lives in `procinfo`, shared with `userspace/htop`,
@@ -111,8 +115,10 @@ randrange = { path = "../../randrange" }
 # being a no-op. See `userspace/pwdb`.
 pwdb = { path = "../pwdb" }
 # The `OWNER[:GROUP]` operand grammar, re-exported as `coreutils::userspec`.
-# Extracted from this crate on 2026-09-12 so `userspace/install` can share it
-# rather than keep the third copy of a rule with this many corners.
+# Extracted from this crate on 2026-09-12 so `userspace/install` could share it
+# rather than keep the third copy of a rule with this many corners. `install`
+# has been a coreutils bin since 2026-10-02 and resolves `-o`/`-g` by its own
+# upstream rule (`install.c`'s `get_ids`), so coreutils is this crate's one user.
 userspec = { path = "../userspec" }
 # One TZ resolution and one `strftime`, shared with `date`, `touch` and the
 # shell's prompt expansion. `ls -l` renders a timestamp in the machine's zone;

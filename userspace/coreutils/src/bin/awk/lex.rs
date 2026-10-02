@@ -491,8 +491,11 @@ impl<'a> Lexer<'a> {
         while matches!(self.peek(), Some(c) if c == b'_' || c.is_ascii_alphanumeric()) {
             self.i = self.i.saturating_add(1);
         }
-        let name =
-            String::from_utf8_lossy(self.src.get(start..self.i).unwrap_or_default()).into_owned();
+        // ASCII letters, digits and `_` only, by the loop above, so the decode
+        // cannot fail.
+        let name = std::str::from_utf8(self.src.get(start..self.i).unwrap_or_default())
+            .unwrap_or_default()
+            .to_string();
         if let Some(k) = keyword(&name) {
             return Tok::Keyword(k);
         }

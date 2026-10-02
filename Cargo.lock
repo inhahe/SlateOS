@@ -648,6 +648,7 @@ dependencies = [
  "blake2 0.1.0",
  "charwidth",
  "cprintf",
+ "embed-manifest",
  "ere",
  "errmsg",
  "fnmatch",
@@ -1696,18 +1697,6 @@ dependencies = [
  "keylayout",
  "settingsfile",
  "yamldoc",
-]
-
-[[package]]
-name = "install"
-version = "0.1.0"
-dependencies = [
- "embed-manifest",
- "modechange",
- "optionalfile",
- "pwdb",
- "quoting",
- "userspec",
 ]
 
 [[package]]
@@ -4091,13 +4080,6 @@ dependencies = [
  "gamechrome",
  "guitk",
  "oswindow",
-]
-
-[[package]]
-name = "timeout"
-version = "0.1.0"
-dependencies = [
- "quoting",
 ]
 
 [[package]]

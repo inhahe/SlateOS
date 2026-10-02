@@ -326,16 +326,21 @@ impl Colors {
         v
     }
 
-    /// Apply one `GREP_COLORS` specification: `key=value` pairs and bare
-    /// boolean keys, separated by `:`.
+    /// Apply one `GREP_COLORS` specification -- `key=value` pairs and bare
+    /// boolean keys, separated by `:` -- as upstream's `parse_grep_colors`
+    /// reads it, and say which match colours it set.
     ///
-    /// A key that is not one of the ten, and a value that is not SGR
-    /// parameters, are both ignored **in silence** — measured, and it is the
-    /// only tolerable behaviour for a variable that is set once in a shell
-    /// profile and then inherited by every grep in every script.
-    fn apply(&mut self, spec: &[u8]) {
+    /// A key that is not one of the ten is ignored in silence, for forward
+    /// compatibility. A malformed item is not: upstream's rule is "be
+    /// well-formed or you're gone", so a value holding anything but digits and
+    /// `;` -- or, our addition (§1008), a colour name -- ends the reading
+    /// there, and so does an `=` with no name before it or a second `=` in one
+    /// item. What came before stands, and nothing after it is read.
+    fn apply(&mut self, spec: &[u8]) -> MatchColorsSet {
+        let mut assigned = MatchColorsSet::default();
         for item in spec.split(|&b| b == b':') {
             let (key, value, valued) = match item.iter().position(|&b| b == b'=') {
+                Some(0) => return assigned,
                 Some(i) => (
                     item.get(..i).unwrap_or_default(),
                     item.get(i.saturating_add(1)..).unwrap_or_default(),
@@ -359,21 +364,33 @@ impl Colors {
             } else if named {
                 Some(value)
             } else {
-                color_name(value)
+                match color_name(value) {
+                    Some(params) => Some(params),
+                    None => return assigned,
+                }
             };
             let set = |field: &mut Vec<u8>| {
                 if let Some(p) = params {
                     *field = p.to_vec();
                 }
             };
+            let given = params.is_some();
             match key {
-                b"ms" => set(&mut self.selected_match),
-                b"mc" => set(&mut self.context_match),
+                b"ms" => {
+                    set(&mut self.selected_match);
+                    assigned.selected |= given;
+                }
+                b"mc" => {
+                    set(&mut self.context_match);
+                    assigned.context |= given;
+                }
                 // `mt` is both at once, and order decides: the last assignment
                 // to a field wins, so `ms=…:mt=…` and `mt=…:ms=…` differ.
                 b"mt" => {
                     set(&mut self.selected_match);
                     set(&mut self.context_match);
+                    assigned.selected |= given;
+                    assigned.context |= given;
                 }
                 b"sl" => set(&mut self.selected_line),
                 b"cx" => set(&mut self.context_line),
@@ -390,7 +407,16 @@ impl Colors {
                 _ => {}
             }
         }
+        assigned
     }
+}
+
+/// Which of the two match colours a `GREP_COLORS` assigned, for the question
+/// upstream asks of `GREP_COLOR` afterwards: is it still in effect?
+#[derive(Clone, Copy, Default)]
+struct MatchColorsSet {
+    selected: bool,
+    context: bool,
 }
 
 /// `-d ACTION` / `--directories=ACTION`: what to do with a directory.
@@ -945,9 +971,12 @@ struct GrepArgs {
     opts: Options,
     /// Patterns given directly, by `-e` or as the first operand.
     patterns: Vec<Vec<u8>>,
-    /// Files named by `-f`, whose lines are patterns. Read by `main`, so that
-    /// argument parsing stays a pure function of argv.
-    pattern_files: Vec<OsString>,
+    /// Files named by `-f`, whose lines are patterns, each with how many of
+    /// [`GrepArgs::patterns`] came before it on the command line. Upstream
+    /// reads `-e` and `-f` in the order given, and that is the order its
+    /// diagnostics name them in. Read by `main`, so that argument parsing
+    /// stays a pure function of argv.
+    pattern_files: Vec<(usize, OsString)>,
     files: Vec<OsString>,
     /// Whether the sole operand is a `.` this parser supplied rather than one
     /// the caller wrote, in which case the walk's names print without their
@@ -1414,7 +1443,7 @@ fn perl_unsupported() -> getopt::Error {
 fn parse_args(argv: &[OsString]) -> Result<Request, getopt::Error> {
     let mut opts = Options::default();
     let mut patterns: Vec<Vec<u8>> = Vec::new();
-    let mut pattern_files: Vec<OsString> = Vec::new();
+    let mut pattern_files: Vec<(usize, OsString)> = Vec::new();
     let mut operands: Vec<OsString> = Vec::new();
     let mut matcher: Option<Matcher> = None;
     let mut show_help = false;
@@ -1539,7 +1568,7 @@ fn parse_args(argv: &[OsString]) -> Result<Request, getopt::Error> {
             Flag::Short(b'e') => {
                 patterns.extend(split_arg_patterns(&quote::os_bytes(&required(value))));
             }
-            Flag::Short(b'f') => pattern_files.push(required(value)),
+            Flag::Short(b'f') => pattern_files.push((patterns.len(), required(value))),
             Flag::Short(b'm') => {
                 opts.max_count = max_count_arg(&quote::os_bytes(&required(value)))?;
             }
@@ -1934,7 +1963,19 @@ fn quote_ere(literal: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Compile every pattern, or name the first one that will not compile.
+/// A pattern that will not compile: which one, by its place in the list, and
+/// glibc's sentence for why -- which is all upstream prints of it, after the
+/// `FILE:LINE:` of a pattern that came from a `-f` file.
+#[cfg_attr(test, derive(Debug))]
+struct Refused {
+    index: usize,
+    message: &'static str,
+}
+
+/// Compile every pattern, or say which of them will not compile -- all of
+/// them, in order, as upstream does: each is `regex_compile`d in turn, and
+/// the run stops only after the last (`compilation_failed`). A pattern given
+/// twice is compiled, and refused, once.
 ///
 /// The second half of the answer is the diagnostics to print before searching:
 /// egrep syntax accepts shapes POSIX-extended refuses, and GNU says so rather
@@ -1947,16 +1988,17 @@ fn quote_ere(literal: &[u8]) -> Vec<u8> {
 fn compile_patterns(
     patterns: &[Vec<u8>],
     opts: &Options,
-) -> Result<(Vec<Pat>, Vec<String>), String> {
+) -> Result<(Vec<Pat>, Vec<String>), Vec<Refused>> {
     let mut out = Vec::with_capacity(patterns.len());
     let mut warnings = Vec::new();
+    let mut refused = Vec::new();
     // GNU collapses duplicate patterns, which is invisible in the output of a
     // search -- two copies of a pattern select the same lines as one -- and
     // visible here: `grep -E -e '*a' -e '*a'` warns once, `-e '*a' -e '*b'`
     // twice. Measured. Doing it for real rather than only for the diagnostic
     // also saves the duplicate its search.
     let mut seen: BTreeSet<&[u8]> = BTreeSet::new();
-    for p in patterns {
+    for (index, p) in patterns.iter().enumerate() {
         if !seen.insert(p.as_slice()) {
             continue;
         }
@@ -2003,22 +2045,20 @@ fn compile_patterns(
                 }));
                 out.push(Pat::Re(re));
             }
-            Err(e) => {
-                // Escaped, not lossy: a pattern is an argv token, so it is a
-                // byte string and need not decode. `from_utf8_lossy` would
-                // substitute U+FFFD and hand the user a message naming a
-                // *different* pattern from the one they typed, which is the one
-                // thing this diagnostic exists to get right. See
-                // design-decisions.md §369.
-                return Err(format!(
-                    "{}: {}",
-                    quote::escape_unprintable(p),
-                    quote::escape_unprintable(&e.detail)
-                ));
-            }
+            // glibc's sentence and not the pattern: upstream's
+            // `error (0, 0, "%s", err)`, where `err` is what
+            // `re_compile_pattern` returned -- `grep: Unmatched ( or \(`.
+            Err(e) => refused.push(Refused {
+                index,
+                message: e.message(),
+            }),
         }
     }
-    Ok((out, warnings))
+    if refused.is_empty() {
+        Ok((out, warnings))
+    } else {
+        Err(refused)
+    }
 }
 
 /// Whether a byte can be part of a word, for `-w`.
@@ -2509,21 +2549,35 @@ fn resolve_colors(opts: &mut Options) {
     if !opts.color {
         return;
     }
-    if let Some(v) = env::var_os("GREP_COLOR") {
-        let raw = quote::os_bytes(&v).into_owned();
-        if !raw.is_empty() {
-            // The text is GNU's, quoted the way GNU quotes it — a script that
-            // greps its own stderr for this warning greps for that wording.
-            let shown = String::from_utf8_lossy(&raw).into_owned();
-            diag!(
-                "grep: warning: GREP_COLOR='{shown}' is deprecated; use GREP_COLORS='mt={shown}'"
-            );
-            opts.colors.selected_match.clone_from(&raw);
-            opts.colors.context_match = raw;
-        }
+    // The legacy `GREP_COLOR`, taken as upstream takes it: only a value of
+    // digits and `;`, both match colours at once. Anything else is ignored
+    // without a word -- not used, not warned about. Measured:
+    // `GREP_COLOR=$'01;3\xff'` leaves the default highlight and says nothing.
+    let legacy = env::var_os("GREP_COLOR")
+        .map(|v| quote::os_bytes(&v).into_owned())
+        .filter(|v| !v.is_empty() && v.iter().all(|&b| b == b';' || b.is_ascii_digit()));
+    if let Some(value) = &legacy {
+        opts.colors.selected_match.clone_from(value);
+        opts.colors.context_match.clone_from(value);
     }
-    if let Some(v) = env::var_os("GREP_COLORS") {
-        opts.colors.apply(&quote::os_bytes(&v));
+    // `GREP_COLORS` has priority.
+    let assigned = env::var_os("GREP_COLORS")
+        .map(|v| opts.colors.apply(&quote::os_bytes(&v)))
+        .unwrap_or_default();
+    // The warning is for a value still in effect, decided after `GREP_COLORS`
+    // has had its say: `mt=` silences it, `ms=` alone does not. Upstream asks
+    // whether either match colour is still the `GREP_COLOR` string itself.
+    // The text is GNU's, quoted as GNU quotes it, since a script that greps
+    // its own stderr for this warning greps for that wording.
+    if let Some(value) = legacy
+        && !(assigned.selected && assigned.context)
+    {
+        let mut line = b"grep: warning: GREP_COLOR='".to_vec();
+        line.extend_from_slice(&value);
+        line.extend_from_slice(b"' is deprecated; use GREP_COLORS='mt=");
+        line.extend_from_slice(&value);
+        line.extend_from_slice(b"'\n");
+        coreutils::stdfd::diag_bytes(&line);
     }
 }
 
@@ -2569,8 +2623,20 @@ fn run_main() -> ExitCode {
     };
     resolve_colors(&mut parsed.opts);
 
-    let mut patterns = parsed.patterns;
-    for pf in &parsed.pattern_files {
+    // Every pattern in command-line order, with where it came from: a line of
+    // a `-f` file is named in a diagnostic as upstream's `pattern_file_name`
+    // names it, `FILE:LINE:` (`-:2:` for standard input), and a pattern given
+    // directly is not named at all.
+    let mut patterns: Vec<Vec<u8>> = Vec::new();
+    let mut origins: Vec<Option<(&OsString, usize)>> = Vec::new();
+    let mut given = parsed.patterns.into_iter();
+    let mut taken = 0;
+    for (before, pf) in &parsed.pattern_files {
+        for p in given.by_ref().take(before.saturating_sub(taken)) {
+            patterns.push(p);
+            origins.push(None);
+        }
+        taken = taken.max(*before);
         let raw = if pf == "-" {
             let mut buf = Vec::new();
             io::stdin().read_to_end(&mut buf).map(|_| buf)
@@ -2578,12 +2644,21 @@ fn run_main() -> ExitCode {
             fs::read(pf)
         };
         match raw {
-            Ok(raw) => patterns.extend(split_patterns(&raw)),
+            Ok(raw) => {
+                for (line, p) in split_patterns(&raw).into_iter().enumerate() {
+                    patterns.push(p);
+                    origins.push(Some((pf, line.saturating_add(1))));
+                }
+            }
             Err(e) => {
                 diag!("grep: {}: {}", quotef_os(pf), strerror(&e));
                 return ExitCode::from(2);
             }
         }
+    }
+    for p in given {
+        patterns.push(p);
+        origins.push(None);
     }
 
     let pats = match compile_patterns(&patterns, &parsed.opts) {
@@ -2598,8 +2673,19 @@ fn run_main() -> ExitCode {
             }
             p
         }
-        Err(e) => {
-            diag!("grep: {e}");
+        Err(refused) => {
+            for r in refused {
+                // The file's name as given, which need not be text: upstream
+                // prints it with `%s`.
+                let mut line = b"grep: ".to_vec();
+                if let Some(Some((file, number))) = origins.get(r.index) {
+                    line.extend_from_slice(&quote::os_bytes(file));
+                    line.extend_from_slice(format!(":{number}: ").as_bytes());
+                }
+                line.extend_from_slice(r.message.as_bytes());
+                line.push(b'\n');
+                coreutils::stdfd::diag_bytes(&line);
+            }
             return ExitCode::from(2);
         }
     };
@@ -4615,14 +4701,49 @@ mod tests {
             syntax: Syntax::Extended,
             ..Options::default()
         };
+        // glibc's sentence and nothing else, as upstream prints it. Which
+        // sentence turns on what follows the `[`: nothing at all is glibc's
+        // REG_BADPAT, an unclosed list REG_EBRACK. Both measured, GNU grep
+        // 3.11.
         let err = compile_patterns(&[b"a[".to_vec()], &o).err().unwrap();
-        assert!(err.contains("a["), "{err}");
+        assert_eq!(
+            err.first().map(|r| (r.index, r.message)),
+            Some((0, "Invalid regular expression"))
+        );
+        let err = compile_patterns(&[b"a[b".to_vec()], &o).err().unwrap();
+        assert_eq!(
+            err.first().map(|r| r.message),
+            Some("Unmatched [, [^, [:, [., or [=")
+        );
         // A reference to a group the pattern does not have is a compile error,
         // not a literal digit.
         let err = compile_patterns(&[b"\\(a\\)\\2".to_vec()], &Options::default())
             .err()
             .unwrap();
-        assert!(err.contains("backreference"), "{err}");
+        assert_eq!(
+            err.first().map(|r| r.message),
+            Some("Invalid back reference")
+        );
+    }
+
+    #[test]
+    fn every_pattern_that_will_not_compile_is_refused_once_in_order() {
+        let pats = [
+            b"ok".to_vec(),
+            b"a[b".to_vec(),
+            b"fine".to_vec(),
+            b"\\(".to_vec(),
+            b"a[b".to_vec(),
+        ];
+        let err = compile_patterns(&pats, &Options::default()).err().unwrap();
+        let got: Vec<(usize, &str)> = err.iter().map(|r| (r.index, r.message)).collect();
+        assert_eq!(
+            got,
+            [
+                (1, "Unmatched [, [^, [:, [., or [="),
+                (3, "Unmatched ( or \\(")
+            ]
+        );
     }
 
     #[test]
@@ -4963,6 +5084,29 @@ mod tests {
         let mut c = Colors::default();
         c.apply(b"fn=chartreuse");
         assert_eq!(c.filename, b"35"); // GNU's default, untouched
+    }
+
+    /// Upstream's "be well-formed or you're gone": a malformed item ends the
+    /// reading and keeps what came before it. And the match colours a reading
+    /// set are reported, for the question the `GREP_COLOR` warning asks.
+    #[test]
+    fn a_malformed_item_ends_the_reading_of_grep_colors() {
+        let defaults = Colors::default();
+        let mut c = Colors::default();
+        let set = c.apply(b"fn=45:ms=zz:ln=33");
+        assert_eq!(c.filename, b"45");
+        assert_eq!(c.line_number, defaults.line_number);
+        assert!(!set.selected && !set.context);
+        for spec in [&b"ms=1=2:fn=45"[..], b"=01:fn=45", b"ms=01;3x:fn=45"] {
+            let mut c = Colors::default();
+            c.apply(spec);
+            assert_eq!(c.filename, defaults.filename, "{spec:?}");
+        }
+        let mut c = Colors::default();
+        let set = c.apply(b"mt=01;36");
+        assert!(set.selected && set.context);
+        let set = c.apply(b"mc=01;36");
+        assert!(!set.selected && set.context);
     }
 
     /// `default` is SGR 39 -- the terminal's own foreground -- and **not** the

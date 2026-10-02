@@ -47,11 +47,11 @@
 # `division by zero`, `non-integer argument`) and a script that greps expr's
 # stderr should not have to know which expr it got.
 #
-# `run_case` is for the two that come out of the regex engine — `Unmatched ( or
-# \(`, `Invalid content of \{\}` — which are glibc's `regcomp` strings rendered
-# by glibc's `regerror`. Matching those exactly would be fitting our engine to
-# glibc's internal error taxonomy rather than to expr, so we agree only about
-# *whether* the pattern was rejected.
+# The regex engine's refusals are compared word for word too. They are glibc's
+# `regcomp` sentences -- `Unmatched ( or \(`, `Invalid content of \{\}` -- which
+# upstream prints and nothing else, and `ere` carries glibc's code for every
+# failure (`EreError::message`) for exactly that. This used to compare only
+# *whether* a pattern was refused, from before the engine had the taxonomy.
 #
 # `xfail_case` / `xmsg_case` take a reason first, for a divergence we chose. The
 # script fails if a plain case differs, and also if an xfail stops differing,
@@ -286,13 +286,26 @@ run_case v1.24.3 : 'v\([0-9]*\)'
 run_case v1.24.3 : 'v\([0-9]*\)\.\([0-9]*\)'
 run_case abc : '\(x\)*a'
 
-# Patterns the engine rejects. Presence only: the text is glibc's `regcomp`
-# error taxonomy rendered by `regerror`, and matching it would be fitting our
-# engine to glibc's internals rather than to expr.
-run_case abc : 'a\('
-run_case abc : 'a\{3,1\}'
-run_case abc : '[a-'
-run_case abc : 'a\{1'
+# Patterns the engine rejects, each with glibc's sentence for it.
+msg_case abc : 'a\('
+msg_case abc : 'a\{3,1\}'
+msg_case abc : '[a-'
+msg_case abc : 'a\{1'
+msg_case abc : '['
+msg_case abc : '[^'
+msg_case abc : 'a\)'
+msg_case abc : '\)'
+msg_case abc : 'a\{x\}'
+msg_case abc : 'a\{1,x\}'
+msg_case abc : 'a\{1,2'
+msg_case abc : 'a\{,\}'
+msg_case abc : '[[:foo:]]'
+msg_case abc : '[[:alpha:]'
+msg_case abc : '\1'
+msg_case abc : '\(a\)\2'
+msg_case abc : 'a\'
+msg_case abc : 'a\{32768\}'
+msg_case abc : 'a\{1\}\{2\}'
 
 # --- match, substr, index, length -------------------------------------------
 run_case match abc a

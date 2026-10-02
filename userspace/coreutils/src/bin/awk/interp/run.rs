@@ -82,7 +82,7 @@ impl Ctx {
 /// An instruction stream that broke its own invariants: the compiler emitted
 /// something the loop cannot run. It is a bug here, never the program's.
 fn internal(what: &str) -> Fatal {
-    Fatal::Said(format!("fatal: internal error: {what}"))
+    Fatal::said(format!("fatal: internal error: {what}"))
 }
 
 impl Interp {
@@ -322,7 +322,7 @@ impl Interp {
                     };
                     let fmt = self.to_str(fmt);
                     let convfmt = self.string_of(crate::ast::V_CONVFMT);
-                    let text = crate::fmt::sprintf(&fmt, rest, &convfmt).map_err(Fatal::Said)?;
+                    let text = crate::fmt::sprintf(&fmt, rest, &convfmt).map_err(Fatal::said)?;
                     self.push(Value::str(text));
                 }
 
@@ -385,7 +385,7 @@ impl Interp {
                 }
                 Op::Next => {
                     if ctx != Ctx::Rule {
-                        return Err(Fatal::Said(format!(
+                        return Err(Fatal::said(format!(
                             "fatal: `next' cannot be called from a `{}' rule",
                             ctx.name()
                         )));
@@ -394,7 +394,7 @@ impl Interp {
                 }
                 Op::NextFile => {
                     if ctx != Ctx::Rule {
-                        return Err(Fatal::Said(format!(
+                        return Err(Fatal::said(format!(
                             "fatal: `nextfile' cannot be called from a `{}' rule",
                             ctx.name()
                         )));
@@ -562,14 +562,14 @@ impl Interp {
     fn field_number(&self, v: &Value) -> R<usize> {
         let n = c_long(v.to_num());
         if n < 0 {
-            return Err(Fatal::Said(format!("fatal: attempt to access field {n}")));
+            return Err(Fatal::said(format!("fatal: attempt to access field {n}")));
         }
         let i = usize::try_from(n).unwrap_or(usize::MAX);
         // A field number this large is a typo, not a record; without the bound
         // `$1000000000 = "x"` allocates until the machine gives up. gawk has
         // no such bound, and would try.
         if i > 16_000_000 {
-            return Err(Fatal::Said(format!(
+            return Err(Fatal::said(format!(
                 "fatal: field {i} is beyond any plausible record"
             )));
         }
@@ -823,10 +823,10 @@ impl Interp {
                     // command exited with.
                     Some(Ok(())) => Value::Num(0.0),
                     Some(Err(e)) => {
-                        return Err(Fatal::Said(format!(
-                            "fatal: flush to \"{}\" failed: {}",
-                            String::from_utf8_lossy(&name),
-                            coreutils::errmsg::strerror(&e)
+                        return Err(Fatal::Said(super::named(
+                            "fatal: flush to \"",
+                            &name,
+                            &format!("\" failed: {}", coreutils::errmsg::strerror(&e)),
                         )));
                     }
                     None => Value::Num(-1.0),
@@ -857,12 +857,14 @@ impl Interp {
 
     /// `fflush(name)`, as gawk's `do_fflush` answers it.
     fn fflush_one(&mut self, name: &[u8]) -> R<Value> {
-        let shown = String::from_utf8_lossy(name).into_owned();
         if let Some(pipe) = self.inputs.open_as(name) {
             let what = if pipe { "pipe" } else { "file" };
-            let message =
-                format!("fflush: cannot flush: {what} `{shown}' opened for reading, not writing");
-            self.warning(message.as_bytes());
+            let message = super::named(
+                &format!("fflush: cannot flush: {what} `"),
+                name,
+                "' opened for reading, not writing",
+            );
+            self.warning(&message);
             return Ok(Value::Num(-1.0));
         }
         match self.out.flush_one(name) {
@@ -871,9 +873,10 @@ impl Interp {
                 return Err(Fatal::ReaderGone);
             }
             Some(Err(e)) => {
-                return Err(Fatal::Said(format!(
-                    "fatal: fflush: cannot flush file `{shown}': {}",
-                    coreutils::errmsg::strerror(&e)
+                return Err(Fatal::Said(super::named(
+                    "fatal: fflush: cannot flush file `",
+                    name,
+                    &format!("': {}", coreutils::errmsg::strerror(&e)),
                 )));
             }
             None => {}
@@ -884,7 +887,7 @@ impl Interp {
             return match self.out.flush_stdout() {
                 Ok(()) => Ok(Value::Num(0.0)),
                 Err(e) if coreutils::stdfd::reader_gone(&e) => Err(Fatal::ReaderGone),
-                Err(e) => Err(Fatal::Said(format!(
+                Err(e) => Err(Fatal::said(format!(
                     "fatal: fflush: cannot flush standard output: {}",
                     coreutils::errmsg::strerror(&e)
                 ))),
@@ -894,8 +897,12 @@ impl Interp {
             // Standard error is not buffered here; there is nothing to flush.
             return Ok(Value::Num(0.0));
         }
-        let message = format!("fflush: `{shown}' is not an open file, pipe or co-process");
-        self.warning(message.as_bytes());
+        let message = super::named(
+            "fflush: `",
+            name,
+            "' is not an open file, pipe or co-process",
+        );
+        self.warning(&message);
         Ok(Value::Num(-1.0))
     }
 
@@ -1057,13 +1064,13 @@ fn arith(op: BinOp, l: f64, r: f64) -> R<f64> {
         // hard error rather than a value.
         BinOp::Div => {
             if r == 0.0 {
-                return Err(Fatal::Said("fatal: division by zero attempted".to_string()));
+                return Err(Fatal::said("fatal: division by zero attempted".to_string()));
             }
             l / r
         }
         BinOp::Mod => {
             if r == 0.0 {
-                return Err(Fatal::Said(
+                return Err(Fatal::said(
                     "fatal: division by zero attempted in `%'".to_string(),
                 ));
             }
@@ -1078,10 +1085,10 @@ fn arith(op: BinOp, l: f64, r: f64) -> R<f64> {
 /// `l op= r`: gawk names the assignment operator in its refusal.
 fn arith_assign(op: BinOp, l: f64, r: f64) -> R<f64> {
     match op {
-        BinOp::Div if r == 0.0 => Err(Fatal::Said(
+        BinOp::Div if r == 0.0 => Err(Fatal::said(
             "fatal: division by zero attempted in `/='".to_string(),
         )),
-        BinOp::Mod if r == 0.0 => Err(Fatal::Said(
+        BinOp::Mod if r == 0.0 => Err(Fatal::said(
             "fatal: division by zero attempted in `%='".to_string(),
         )),
         _ => arith(op, l, r),
@@ -1124,7 +1131,7 @@ mod tests {
     #[test]
     fn a_zero_divisor_names_its_operator() {
         let said = |r: R<f64>| match r {
-            Err(Fatal::Said(m)) => m,
+            Err(Fatal::Said(m)) => String::from_utf8(m).unwrap(),
             _ => panic!("expected a refusal"),
         };
         assert_eq!(

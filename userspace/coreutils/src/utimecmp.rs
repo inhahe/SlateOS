@@ -841,6 +841,13 @@ mod unix {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
     use crate::fsattr::{self, Link, On, Times};
@@ -892,10 +899,7 @@ mod tests {
     fn an_older_source_makes_the_destination_newer() {
         let dir = ScratchDir::new("utimecmp_older");
         let (src, dst) = pair(&dir, Duration::ZERO);
-        stamp(
-            &src,
-            SystemTime::UNIX_EPOCH + Duration::from_secs(999_999_000),
-        );
+        stamp(&src, SystemTime::UNIX_EPOCH + Duration::new(999_999_000, 0));
         assert_eq!(utimecmp(&dst, &meta(&dst), &meta(&src), false), Age::Newer);
         assert_eq!(utimecmp(&dst, &meta(&dst), &meta(&src), true), Age::Newer);
     }
@@ -926,7 +930,7 @@ mod tests {
         // the question on a pair inside two seconds — the only pairs that can
         // reach the probe — and check the destination is unchanged.
         let dir = ScratchDir::new("utimecmp_restores");
-        let (src, dst) = pair(&dir, Duration::from_nanos(500_000_000));
+        let (src, dst) = pair(&dir, Duration::from_millis(500));
         let before = fsattr::times_of(&meta(&dst)).expect("times before");
         let _ = utimecmp(&dst, &meta(&dst), &meta(&src), true);
         let after = fsattr::times_of(&meta(&dst)).expect("times after");

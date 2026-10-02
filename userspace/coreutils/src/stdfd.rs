@@ -391,6 +391,16 @@ pub fn was_closed_at_startup(fd: i32) -> bool {
     stdfdguard::was_closed_at_startup(fd)
 }
 
+/// Whether `SIGPIPE` was ignored when the process started, before the runtime
+/// ignored it regardless -- what `split --filter` needs to hand its commands
+/// the disposition upstream would. See `stdfdguard`'s crate docs.
+///
+/// Always `false` without [`crate::guard_std_fds!`], and off Linux.
+#[must_use]
+pub fn sigpipe_ignored_at_startup() -> bool {
+    stdfdguard::sigpipe_ignored_at_startup()
+}
+
 /// gnulib's `fd_safer`: keep a file a utility opened for its own purposes off
 /// descriptors 0, 1 and 2.
 ///
@@ -552,6 +562,23 @@ pub fn diag_line(line: &str) {
 /// reach the terminal as the bytes it was given.
 pub fn diag_bytes(bytes: &[u8]) {
     diag_to(2, bytes);
+}
+
+/// [`diag_bytes`] for a signal handler: the same write, and the same record of
+/// one that failed, without flushing standard output first.
+///
+/// That flush takes the lock around this crate's stdout buffer, and a handler
+/// that interrupted code holding it would wait for itself forever. What is
+/// left is one `write(2)` loop and an atomic store, both safe in a handler.
+///
+/// For `timeout -v`, which announces the signal it is sending from inside the
+/// handler that sends it, as upstream does. Nothing has been written to its
+/// standard output by then, so there is nothing the skipped flush would have
+/// put first.
+pub fn diag_bytes_in_handler(bytes: &[u8]) {
+    if write_all(2, bytes).is_err() {
+        DIAGNOSTIC_LOST.store(true, Ordering::Relaxed);
+    }
 }
 
 /// [`diag_bytes`] with the descriptor spelled out, so that the failure path can

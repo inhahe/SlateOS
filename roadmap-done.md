@@ -1291,6 +1291,493 @@ prerequisite that is no longer in `roadmap.md` is done: look for it here, or
   - [x] Configurable colors (6 built-in schemes: default/solarized-dark/monokai/dracula/gruvbox/light, custom FG/BG via hex RGB, runtime palette swap, SGR uses scheme defaults, `color` kshell command)
   - [x] tmux-like session detach/reattach (termsession module: 10 sessions, per-session screen/scrollback/history/CWD/env, Ctrl+B quick-switch, tsession command)
   - [x] Find in backscroll (Ctrl+F interactive search with Ctrl+N/P navigation, 1000-line scrollback ring buffer, `scrollback` command with search/list/screen dump, per-cell screen text buffer for capture)
+- [x] Port coreutils (85 binaries: echo, cat, ls, head, wc, mkdir, rm, cp, mv, touch, tail, sort, grep, ln, pwd, env, sleep, true, false, uname, basename, dirname, tee, rmdir, seq, yes, which, date, uniq, cut, tr, chmod, chown, id, whoami, hostname, readlink, realpath, stat, printf, test, kill, dd, df, du, xargs, find, ps, nohup, nice, mkfifo, expr, nl, paste, comm, expand, fold, md5sum, sha256sum, tty, diff, cmp, od, strings, uptime, free, unexpand, cal, time, sed, awk, ed, more, sh, tar, bc, patch, split, join, csplit, logger, logname, who, tsort, renice)
+- [x] `[B]` Batch 44 — Modern Rust CLI tools (ripgrep, delta, hyperfine, tokei, dust, procs, bottom, bandwhich): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `ripgrep`, `delta`, `hyperfine`, `tokei`, `dust`, `procs`, `bottom`, `bandwhich`.
+- [x] `[B]` Batch 45 — Shell enhancement and network diagnostic tools (zoxide, starship, nushell, xh, dog, gping, trippy, choose): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `zoxide`, `starship`, `nushell`, `xh`, `dog`, `gping`, `trippy`, `choose`.
+- [x] `[B]` Batch 46 — Developer productivity tools (sd, jless, ouch, xsv, just, watchexec, pastel, grex): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `sd`, `jless`, `ouch`, `xsv`, `just`, `watchexec`, `pastel`, `grex`.
+- [x] `[B]` Batch 47 — Shell history and file navigation tools (mcfly, atuin, broot, nnn, lf, yazi, fzf, skim): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `mcfly`, `atuin`, `broot`, `nnn`, `lf`, `yazi`, `fzf`, `skim`.
+- [x] `[B]` Batch 48 — Documentation, process management, and code analysis (tealdeer, miniserve, mprocs, pueue, viddy, difftastic, ast-grep, amber): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `tealdeer`, `miniserve`, `mprocs`, `pueue`, `viddy`, `difftastic`, `ast-grep`, `amber`.
+- [x] `[B]` Batch 49 — System upgrade and Rust development tools (topgrade, onefetch, silicon, cargo-nextest, cargo-watch, cargo-edit, cargo-audit, cargo-bloat): -- 7 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `topgrade`, `onefetch`, `silicon`, `cargo-nextest`, `cargo-watch`, `cargo-edit`, `cargo-audit`.
+  - [x] cargo-bloat: Binary size analyzer (crates/time/filter/JSON, ~130 lines)
+- [x] `[B]` Batch 50 — Git workflow and documentation tools (gitui, tig, git-cliff, git-absorb, git-branchless, git-interactive-rebase-tool, mdbook, mdcat): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `gitui`, `tig`, `git-cliff`, `git-absorb`, `git-branchless`, `git-interactive-rebase-tool`, `mdbook`, `mdcat`.
+- [x] `[B]` Batch 51 — Knowledge, shell quality, secrets, and networking (navi, cheat-sh, so, howdoi, shellcheck, shfmt, sops, bore): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `navi`, `cheat-sh`, `so`, `howdoi`, `shellcheck`, `shfmt`, `sops`, `bore`.
+- [x] `[B]` Batch 52 — image/font/graphics utilities (8 tools, ~1540 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `oxipng`, `svgcleaner`, `gifski`, `lottie-player`, `fonttools`, `woff2`, `imagemagick-cli`, `graphviz`.
+- [x] `[B]` Batch 53 — audio/video/media utilities (10 tools, ~2046 lines): -- 10 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `ffmpeg-cli`, `mediainfo`, `ytdlp`, `mpv-cli`, `spotify-tui`, `obs-cli`, `audacity-cli`, `opus-tools`, `flac-tools`, `vorbis-tools`.
+- [x] `[B]` Batch 54 — database/data tools (8 tools, ~1214 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `pgcli`, `litecli`, `redis-cli`, `usql`, `sqlx-cli`, `diesel-cli`, `sea-orm-cli`, `dbmate`.
+- [x] `[B]` Batch 55 — cloud/infrastructure/DevOps tools (8 tools, ~1615 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `terraform-cli`, `kubectl-cli`, `helm-cli`, `ansible-cli`, `vault-cli`, `consul-cli`, `packer-cli`, `nomad-cli`.
+- [x] `[B]` Batch 56 — monitoring/observability tools (8 tools, ~1264 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `prometheus-cli`, `grafana-cli`, `loki-cli`, `jaeger-cli`, `opentelemetry-cli`, `vector-cli`, `datadog-cli`, `sentry-cli`.
+- [x] `[B]` Batch 57 — container/CI-CD tools (8 tools, ~1364 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `docker-cli`, `podman-cli`, `buildah-cli`, `skopeo-cli`, `crane-cli`, `act-cli`, `gh-actions-cli`, `circleci-cli`.
+- [x] `[B]` Batch 58 — Security/crypto/networking tools (8 utilities, 1056 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `openssl-cli`, `wireguard-cli`, `nmap-cli`, `wireshark-cli`, `certbot-cli`, `mkcert`, `cosign-cli`, `trivy-cli`.
+- [x] `[B]` Batch 59 — Cloud platform CLIs (8 utilities, 1739 lines): -- 7 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `aws-cli`, `gcloud-cli`, `az-cli`, `doctl`, `flyctl`, `vercel-cli`, `heroku-cli`.
+  - [x] netlify-cli: Netlify CLI (deploy/dev/build/sites/env/functions, ~181 lines)
+- [x] `[B]` Batch 60 — Messaging/communication tools (8 utilities, 1416 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `slack-cli`, `discord-cli`, `matrix-cli`, `mattermost-cli`, `telegram-cli`, `twilio-cli`, `sendgrid-cli`, `mailgun-cli`.
+- [x] `[B]` Batch 61 — Payment/fintech/blockchain tools (8 utilities, 1180 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `stripe-cli`, `paypal-cli`, `square-cli`, `braintree-cli`, `plaid-cli`, `coinbase-cli`, `ethers-cli`, `solana-cli`.
+- [x] `[B]` Batch 62 — Project management tools (8 utilities, 1072 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `jira-cli`, `linear-cli`, `notion-cli`, `asana-cli`, `trello-cli`, `clickup-cli`, `monday-cli`, `shortcut-cli`.
+- [x] `[B]` Batch 63 — Testing/quality/API tools (8 utilities, 923 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `playwright-cli`, `cypress-cli`, `selenium-cli`, `k6-cli`, `artillery-cli`, `lighthouse-cli`, `swagger-cli`, `postman-cli`.
+- [x] `[B]` Batch 64 — Data science / ML / AI tools (8 utilities, ~1416 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `jupyter-cli`, `mlflow-cli`, `dvc-cli`, `wandb-cli`, `huggingface-cli`, `ollama-cli`, `tensorboard-cli`, `dbt-cli`.
+- [x] `[B]` Batch 65 — Incident/alerting/distributed-systems/storage tools (8 utilities, ~1529 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `pagerduty-cli`, `opsgenie-cli`, `statsd-cli`, `etcd-cli`, `zookeeper-cli`, `minio-cli`, `rclone-cli`, `restic-cli`.
+- [x] `[B]` Batch 66 — Backup/encryption/secrets tools (8 utilities, ~1510 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `borgbackup-cli`, `duplicity-cli`, `kopia-cli`, `age-cli`, `sops-cli`, `gpg-cli`, `pass-cli`, `gopass-cli`.
+- [x] `[B]` Batch 67 — Database management & migration tools (8 utilities, ~1288 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `liquibase-cli`, `flyway-cli`, `prisma-cli`, `mycli`, `redis-cli-tool`, `mongosh-cli`, `cassandra-cli`, `clickhouse-cli`.
+- [x] `[B]` Batch 68 — Message queue/streaming/event-driven tools (8 utilities, ~1398 lines): -- 7 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `rabbitmq-cli`, `nats-cli`, `pulsar-cli`, `celery-cli`, `temporal-cli`, `dapr-cli`, `mosquitto-cli`.
+  - [x] kafka-cli: Kafka CLI (multi: kafka-topics/console-producer/console-consumer/consumer-groups, ~130 lines)
+- [x] `[B]` Batch 69 — System/network utilities (8 utilities, ~943 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `htop-cli`, `iotop-cli`, `ncdu-cli`, `tmux-cli`, `screen-cli`, `socat-cli`, `tcpdump-cli`, `mtr-cli`.
+- [x] `[B]` Batch 70 — Code quality/linting/formatting tools (8 utilities, ~927 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `prettier-cli`, `eslint-cli`, `black-cli`, `ruff-cli`, `mypy-cli`, `pylint-cli`, `rubocop-cli`, `shellcheck-cli`.
+- [x] `[B]` Batch 71 — Build systems & package managers (8 utilities, ~1159 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `cmake-cli`, `meson-cli`, `bazel-cli`, `conan-cli`, `vcpkg-cli`, `cargo-make-cli`, `just-cli`, `task-cli`.
+- [x] `[B]` Batch 72 — Media & audio tools (8 utilities, ~1293 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `sox-cli`, `yt-dlp-cli`, `handbrake-cli`, `mediainfo-cli`, `exiftool-cli`, `lame-cli`, `opus-cli`, `flac-cli`.
+- [x] `[B]` Batch 73 — Cloud provider CLIs (8 utilities, ~1319 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `azure-cli`, `doctl-cli`, `linode-cli`, `vultr-cli`, `hetzner-cli`, `flyctl-cli`, `railway-cli`, `render-cli`.
+- [x] `[B]` Batch 74 — Document processing tools (8 utilities, ~1160 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `pandoc-cli`, `asciidoctor-cli`, `latex-cli`, `bibtex-cli`, `groff-cli`, `enscript-cli`, `ghostscript-cli`, `djvu-cli`.
+- [x] `[B]` Batch 75 — Networking & security tools (8 utilities, ~1086 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `openvpn-cli`, `iperf-cli`, `netcat-cli`, `masscan-cli`, `nikto-cli`, `sqlmap-cli`, `hydra-cli`, `john-cli`.
+- [x] `[B]` Batch 76 — System administration tools (8 utilities, ~1177 lines): -- 5 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `systemctl-cli`, `journalctl-cli`, `logrotate-cli`, `passwd-cli`, `nsenter-cli`.
+  - [x] crontab-cli: crontab management (~68 lines)
+  - [x] useradd-cli: useradd/userdel/usermod/groupadd/groupdel (~115 lines)
+  - [x] chroot-cli: chroot/unshare/pivot_root (~105 lines)
+- [x] `[B]` Batch 77 — Disk & filesystem tools (8 utilities, ~1204 lines): -- 5 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `fdisk-cli`, `parted-cli`, `lvm-cli`, `mdadm-cli`, `fstrim-cli`.
+  - [x] mkfs-cli: mkfs.ext4/xfs/btrfs/fat/mkswap (~130 lines)
+  - [x] fsck-cli: fsck/e2fsck/xfs_repair (~82 lines)
+  - [x] mount-cli: mount/umount/findmnt (~128 lines)
+- [x] `[B]` Batch 78 — Database & data tools (8 utilities, ~1115 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `sqlite-cli`, `pgloader-cli`, `pg-dump-cli`, `mysqldump-cli`, `influxdb-cli`, `neo4j-cli`, `memcached-cli`, `valkey-cli`.
+- [x] `[B]` Batch 79 — Math/science/data tools (8 utilities, ~938 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `gnuplot-cli`, `octave-cli`, `r-cli`, `maxima-cli`, `bc-cli`, `units-cli`, `qalc-cli`, `datamash-cli`.
+- [x] `[B]` Batch 80 — Email/messaging/chat tools (8 utilities, ~1277 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `mutt-cli`, `sendmail-cli`, `postfix-cli`, `dovecot-cli`, `fetchmail-cli`, `notmuch-cli`, `irssi-cli`, `weechat-cli`.
+- [x] `[B]` Batch 81 — Printing/scanning/publishing tools (8 utilities, ~1239 lines): -- 7 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `lp-cli`, `a2ps-cli`, `scribus-cli`, `inkscape-cli`, `potrace-cli`, `tesseract-cli`, `ocrmypdf-cli`.
+  - [x] cups-cli: CUPS server control (cupsctl, cupsenable, cupsdisable, cupsaccept, cupsreject)
+- [x] `[B]` Batch 82 — Backup/sync/archival tools (8 utilities, ~1249 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `borg-cli`, `syncthing-cli`, `unison-cli`, `rdiff-backup-cli`, `timeshift-cli`, `bacula-cli`, `amanda-cli`, `duply-cli`.
+- [x] `[B]` Batch 83 — Virtualization/emulation tools (8 utilities, ~1383 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `qemu-cli`, `virt-cli`, `vagrant-cli`, `libvirt-cli`, `lxc-cli`, `firecracker-cli`, `cloud-init-cli`, `dosbox-cli`.
+- [x] `[B]` Batch 84 — Accessibility/input tools (8 utilities, ~1053 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `espeak-cli`, `festival-cli`, `brltty-cli`, `orca-cli`, `at-spi-cli`, `xdotool-cli`, `xclip-cli`, `xsel-cli`.
+- [x] `[B]` Batch 85 — Font/locale/i18n tools (8 utilities, ~1142 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `fontforge-cli`, `locale-cli`, `iconv-cli`, `gettext-cli`, `hunspell-cli`, `enchant-cli`, `aspell-cli`, `ibus-cli`.
+- [x] `[B]` Batch 86 — Desktop configuration/notification tools (8 utilities, ~1099 lines): -- 6 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `notify-send-cli`, `zenity-cli`, `wmctrl-cli`, `xprop-cli`, `xrandr-cli`, `xset-cli`.
+  - [x] dconf-cli: dconf low-level configuration system
+  - [x] gsettings-cli: GSettings desktop configuration
+- [x] `[B]` Batch 87 — 3D/CAD/gaming/graphics tools (8 utilities, ~1095 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `blender-cli`, `openscad-cli`, `freecad-cli`, `mesa-cli`, `vulkan-cli`, `glxinfo-cli`, `wine-cli`, `proton-cli`.
+- [x] `[B]` Batch 88 — System debugging/profiling tools (8 utilities, ~1453 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `ldconfig-cli`, `ldd-cli`, `strace-cli`, `ltrace-cli`, `valgrind-cli`, `perf-cli`, `gprof-cli`, `gcov-cli`.
+- [x] `[B]` Batch 89 — Hardware information/monitoring tools (8 utilities, ~1444 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `dmidecode-cli`, `lspci-cli`, `lsusb-cli`, `lsblk-cli`, `hwinfo-cli`, `sensors-cli`, `acpi-cli`, `smartctl-cli`.
+- [x] `[B]` Batch 90 — Kernel/system administration tools (8 utilities, ~1602 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `sysctl-cli`, `modprobe-cli`, `dmesg-cli`, `udevadm-cli`, `systemd-cli`, `cron-cli`, `kexec-cli`, `ntp-cli`.
+- [x] `[B]` Batch 91 — Security/authentication tools (8 utilities, ~1507 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `selinux-cli`, `apparmor-cli`, `pam-cli`, `audit-cli`, `seccomp-cli`, `tpm-cli`, `fido2-cli`, `oath-cli`.
+- [x] `[B]` Batch 92 — Embedded/debugging/binary tools (8 utilities, ~1365 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `minicom-cli`, `picocom-cli`, `avrdude-cli`, `openocd-cli`, `gdb-cli`, `objdump-cli`, `readelf-cli`, `nm-cli`.
+- [x] `[B]` Batch 93 — Power management/boot tools (8 utilities, ~1172 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `powertop-cli`, `tlp-cli`, `cpupower-cli`, `thermald-cli`, `grub-cli`, `efibootmgr-cli`, `dracut-cli`, `mkinitcpio-cli`.
+- [x] `[B]` Batch 94 — Bluetooth/wireless/connectivity tools (8 utilities, ~1285 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `bluez-cli`, `rfkill-cli`, `iw-cli`, `wpa-cli`, `hostapd-cli`, `networkd-cli`, `modem-cli`, `bridge-cli`.
+- [x] `[B]` Batch 95 — VPN/tunneling/proxy tools (8 utilities, ~1316 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `ipsec-cli`, `stunnel-cli`, `proxychains-cli`, `tor-cli`, `haproxy-cli`, `squid-cli`, `tailscale-cli`, `nebula-cli`.
+- [x] `[B]` Batch 96 — DNS/network service/directory tools (8 utilities, ~1381 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `bind-cli`, `unbound-cli`, `avahi-cli`, `snmp-cli`, `nfs-cli`, `samba-cli`, `ldap-cli`, `kerberos-cli`.
+- [x] `[B]` Batch 97 — Container runtime/service proxy tools (8 utilities, ~1353 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `containerd-cli`, `crio-cli`, `runc-cli`, `cni-cli`, `envoy-cli`, `traefik-cli`, `caddy-cli`, `alertmanager-cli`.
+- [x] `[B]` Batch 98 — Storage/distributed systems/data tools (8 utilities, ~1410 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `ceph-cli`, `gluster-cli`, `btrfs-cli`, `multipath-cli`, `iscsi-cli`, `elasticsearch-cli`, `grpc-cli`, `protobuf-cli`.
+- [x] `[B]` Batch 99 — CI/CD and configuration management tools (8 utilities, ~1287 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `jenkins-cli`, `gitlab-cli`, `argocd-cli`, `flux-cli`, `puppet-cli`, `chef-cli`, `saltstack-cli`, `pulumi-cli`.
+- [x] `[B]` Batch 100 — Gaming/emulation/performance tools (8 utilities, ~1076 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `retroarch-cli`, `mangohud-cli`, `gamemode-cli`, `gamescope-cli`, `scummvm-cli`, `dolphin-cli`, `pcsx2-cli`, `rpcs3-cli`.
+- [x] `[B]` Batch 101 — Scientific computing & ML tools (8 utilities, ~1163 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `numpy-cli`, `scipy-cli`, `pandas-cli`, `matplotlib-cli`, `torch-cli`, `tensorflow-cli`, `paraview-cli`, `root-cli`.
+- [x] `[B]` Batch 102 — Math, CAS & ML library tools (8 utilities, ~870 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `julia-cli`, `sage-cli`, `gams-cli`, `cadabra-cli`, `axiom-cli`, `sympy-cli`, `sklearn-cli`, `keras-cli`.
+- [x] `[B]` Batch 103 — Bioinformatics tools (8 utilities, ~1180 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `samtools-cli`, `bcftools-cli`, `blast-cli`, `bowtie-cli`, `bedtools-cli`, `picard-cli`, `gatk-cli`, `bwa-cli`.
+- [x] `[B]` Batch 104 — EDA, SPICE & HDL simulation tools (8 utilities, ~990 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `kicad-cli`, `ltspice-cli`, `ngspice-cli`, `ghdl-cli`, `verilator-cli`, `yosys-cli`, `iverilog-cli`, `gtkwave-cli`.
+- [x] `[B]` Batch 105 — GIS & geospatial tools (8 utilities, ~1088 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `qgis-cli`, `gdal-cli`, `proj-cli`, `mapnik-cli`, `osmium-cli`, `postgis-cli`, `grass-cli`, `spatialite-cli`.
+- [x] `[B]` Batch 106 — 3D printing, CNC & point cloud tools (8 utilities, ~1039 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `cura-cli`, `prusaslicer-cli`, `octoprint-cli`, `grbl-cli`, `linuxcnc-cli`, `meshlab-cli`, `cloudcompare-cli`, `pcl-cli`.
+- [x] `[B]` Batch 107 — Robotics, IoT & home automation tools (8 utilities, ~1193 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `ros-cli`, `gazebo-cli`, `mqtt-cli`, `zigbee-cli`, `zwave-cli`, `platformio-cli`, `esphome-cli`, `homeassistant-cli`.
+- [x] `[B]` Batch 108 — Music production & audio tools (8 utilities, ~921 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `ardour-cli`, `lmms-cli`, `musescore-cli`, `lilypond-cli`, `csound-cli`, `supercollider-cli`, `jack-cli`, `ladspa-cli`.
+- [x] `[B]` Batch 109 — Document & publishing tools (8 utilities, ~863 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `calibre-cli`, `sphinx-cli`, `mkdocs-cli`, `hugo-cli`, `jekyll-cli`, `pelican-cli`, `asciidoctor-cli`, `typst-cli`.
+- [x] `[B]` Batch 110 — Serialization, data format & doc generator tools (8 utilities, ~1167 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `flatbuffers-cli`, `capnproto-cli`, `thrift-cli`, `avro-cli`, `msgpack-cli`, `arrow-cli`, `doxygen-cli`, `javadoc-cli`.
+- [x] `[B]` Batch 111 — Documentation generators & TeX management tools (8 utilities, ~1249 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `godoc-cli`, `rustdoc-cli`, `pydoc-cli`, `rdoc-cli`, `yard-cli`, `pdoc-cli`, `texlive-cli`, `makeindex-cli`.
+- [x] `[B]` Batch 112 — TeX engines & JVM build systems (8 utilities, ~1113 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `pdflatex-cli`, `xelatex-cli`, `lualatex-cli`, `dvips-cli`, `gradle-cli`, `mvn-cli`, `ant-cli`, `scons-cli`.
+- [x] `[B]` Batch 113 — Build systems & functional package managers (8 utilities, ~1274 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `premake-cli`, `waf-cli`, `buck-cli`, `pants-cli`, `boundary-cli`, `waypoint-cli`, `nix-cli`, `guix-cli`.
+- [x] `[B]` Batch 114 — Linux/Unix package managers (8 utilities, ~1265 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `portage-cli`, `apk-cli`, `zypper-cli`, `xbps-cli`, `pkg-cli`, `swupd-cli`, `snap-cli`, `appimage-cli`.
+- [x] `[B]` Batch 115 — Functional & niche programming language tools (8 utilities, ~1154 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `erlang-cli`, `elixir-cli`, `ocaml-cli`, `fsharp-cli`, `racket-cli`, `scheme-cli`, `prolog-cli`, `forth-cli`.
+- [x] `[B]` Batch 116 — Systems & compiled language tools (8 utilities, ~1178 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `nim-cli`, `zig-tools`, `crystal-cli`, `d-cli`, `v-cli`, `pascal-cli`, `ada-cli`, `modula-cli`.
+- [x] `[B]` Batch 117 — Scripting & PHP ecosystem tools (8 utilities, ~1066 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `tcl-cli`, `tk-cli`, `lua-cli`, `luarocks-cli`, `phpunit-cli`, `composer-cli`, `phpstan-cli`, `psalm-cli`.
+- [x] `[B]` Batch 118 — Python packaging & environment tools (8 utilities, ~1304 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `conda-cli`, `pipx-cli`, `virtualenv-cli`, `poetry-cli`, `pdm-cli`, `hatch-cli`, `tox-cli`, `nox-cli`.
+- [x] `[B]` Batch 119 — Ruby & JS ecosystem tools (8 utilities, ~1311 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `bundler-cli`, `rspec-cli`, `minitest-cli`, `rake-cli`, `pnpm-cli`, `bun-cli`, `deno-cli`, `yarn-cli`.
+- [x] `[B]` Batch 120 — Database client tools (8 utilities, ~1107 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `psql-cli`, `mysql-cli`, `cqlsh-cli`, `influx-cli`, `pgcli-cli`, `mycli-cli`, `litecli-cli`, `cockroach-cli`.
+- [x] `[B]` Batch 121 — Cloud platform & BaaS CLIs (8 utilities, ~1058 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `scaleway-cli`, `civo-cli`, `upcloud-cli`, `exoscale-cli`, `wrangler-cli`, `supabase-cli`, `firebase-cli`, `deta-cli`.
+- [x] `[B]` Batch 122 — Monitoring & observability tools (8 utilities, ~920 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `promtool-cli`, `victoria-cli`, `tempo-cli`, `mimir-cli`, `thanos-cli`, `cortex-cli`, `otel-cli`, `newrelic-cli`.
+- [x] `[B]` Batch 123 — Message queue & data streaming tools (8 utilities, ~927 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `zeromq-cli`, `rq-cli`, `nsq-cli`, `redpanda-cli`, `benthos-cli`, `kafkacat-cli`, `amqp-cli`, `surrealdb-cli`.
+- [x] `[B]` Batch 124 — Web framework CLI tools (8 utilities, ~1007 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `django-cli`, `flask-cli`, `fastapi-cli`, `rails-cli`, `nextjs-cli`, `nuxt-cli`, `svelte-cli`, `remix-cli`.
+- [x] `[B]` Batch 125 — API development & testing tools (8 utilities, ~912 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `httpie-cli`, `grpcurl-cli`, `newman-cli`, `openapi-cli`, `graphql-cli`, `hurl-cli`, `bruno-cli`, `insomnia-cli`.
+- [x] `[B]` Batch 126 — Load testing & benchmarking tools (8 utilities, ~972 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `locust-cli`, `vegeta-cli`, `wrk-cli`, `ab-cli`, `hey-cli`, `siege-cli`, `jmeter-cli`, `bombardier-cli`.
+- [x] `[B]` Batch 127 — Security scanning & analysis tools (8 utilities, ~1063 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `grype-cli`, `syft-cli`, `snyk-cli`, `semgrep-cli`, `sonarqube-cli`, `checkov-cli`, `nuclei-cli`, `gitleaks-cli`.
+- [x] `[B]` Batch 128 — Config management & IaC tools (8 utilities, ~1090 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `salt-cli`, `crossplane-cli`, `cdktf-cli`, `cdk8s-cli`, `terragrunt-cli`, `spacelift-cli`, `kustomize-cli`, `jsonnet-cli`.
+- [x] `[B]` Batch 129 — Documentation & writing tools (8 utilities, ~910 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `docusaurus-cli`, `vuepress-cli`, `mdbook-cli`, `vale-cli`, `redoc-cli`, `spectral-cli`, `markdownlint-cli`, `gitbook-cli`.
+- [x] `[B]` Batch 130 — CI/CD & deployment tools (8 utilities, ~1017 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `drone-cli`, `buildkite-cli`, `concourse-cli`, `tekton-cli`, `woodpecker-cli`, `harness-cli`, `dagger-cli`, `earthly-cli`.
+- [x] `[B]` Batch 131 — Data processing & ETL tools (8 utilities, ~985 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `airbyte-cli`, `meltano-cli`, `singer-cli`, `fivetran-cli`, `prefect-cli`, `dagster-cli`, `airflow-cli`, `luigi-cli`.
+- [x] `[B]` Batch 132 — ML/AI CLI tools (8 utilities, ~966 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `kubeflow-cli`, `bentoml-cli`, `seldon-cli`, `mlrun-cli`, `clearml-cli`, `vllm-cli`, `cml-cli`, `ray-cli`.
+- [x] `[B]` Batch 133 — Game engine tools (8 utilities, ~935 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `godot-cli`, `unity-cli`, `unreal-cli`, `bevy-cli`, `love2d-cli`, `sdl-cli`, `sfml-cli`, `raylib-cli`.
+- [x] `[B]` Batch 134 — Desktop environment tools (8 utilities, ~963 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `rofi-cli`, `dmenu-cli`, `dunst-cli`, `polybar-cli`, `i3-cli`, `sway-cli`, `hyprland-cli`, `waybar-cli`.
+- [x] `[B]` Batch 135 — Terminal emulators and multiplexers (8 utilities, ~942 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `kitty-cli`, `alacritty-cli`, `wezterm-cli`, `foot-cli`, `zellij-cli`, `abduco-cli`, `rio-cli`, `ghostty-cli`.
+- [x] `[B]` Batch 136 — File managers and navigators (8 utilities, ~869 lines): -- 7 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `ranger-cli`, `nnn-cli`, `vifm-cli`, `mc-cli`, `broot-cli`, `xplr-cli`, `yazi-cli`.
+  - [x] lf-cli: lf file manager (lf)
+- [x] `[B]` Batch 137 — Shell tools and prompt engines (8 utilities, ~1073 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `starship-cli`, `oh-my-posh-cli`, `atuin-cli`, `mcfly-cli`, `direnv-cli`, `asdf-cli`, `mise-cli`, `navi-cli`.
+- [x] `[B]` Batch 138 — System monitoring and diagnostics (8 utilities, ~761 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `btop-cli`, `glances-cli`, `nmon-cli`, `dstat-cli`, `zenith-cli`, `iftop-cli`, `nethogs-cli`, `bandwhich-cli`.
+- [x] `[B]` Batch 139 — Text editors (8 utilities, ~804 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `helix-cli`, `kakoune-cli`, `micro-cli`, `amp-cli`, `lapce-cli`, `zed-cli`, `lite-xl-cli`, `ox-cli`.
+- [x] `[B]` Batch 140 — Media players and audio tools (8 utilities, ~864 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `cmus-cli`, `ncmpcpp-cli`, `moc-cli`, `mpd-cli`, `pulsemixer-cli`, `ffplay-cli`, `musikcube-cli`, `spotify-tui-cli`.
+- [x] `[B]` Batch 141 — Image and graphics tools (8 utilities, ~797 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `gimp-cli`, `chafa-cli`, `viu-cli`, `timg-cli`, `pastel-cli`, `oxipng-cli`, `svgo-cli`, `optipng-cli`.
+- [x] `[B]` Batch 142 — PDF tools (8 utilities, ~968 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `poppler-cli`, `mupdf-cli`, `qpdf-cli`, `pdftotext-cli`, `pdftk-cli`, `zathura-cli`, `pdfcpu-cli`, `cpdf-cli`.
+- [x] `[B]` Batch 143 — Disk and storage tools (8 utilities, ~815 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `duf-cli`, `dust-cli`, `gdu-cli`, `diskonaut-cli`, `fio-cli`, `hdparm-cli`, `zfs-cli`, `badblocks-cli`.
+- [x] `[B]` Batch 144 — Cryptocurrency/blockchain dev tools (8 utilities, ~938 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `cast-cli`, `anvil-cli`, `forge-cli`, `hardhat-cli`, `truffle-cli`, `brownie-cli`, `ape-cli`, `sui-cli`.
+- [x] `[B]` Batch 145 — Kubernetes orchestration tools (8 utilities, ~1028 lines): -- 7 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `skaffold-cli`, `istioctl-cli`, `velero-cli`, `kops-cli`, `minikube-cli`, `k3s-cli`, `k9s-cli`.
+  - [x] kubectx-cli: kubectx/kubens context switcher (kubectx, kubens)
+- [x] `[B]` Batch 146 — Database management and migration tools (8 utilities, ~968 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `usql-cli`, `dbmate-cli`, `sqlfluff-cli`, `atlas-cli`, `schemacrawler-cli`, `sqitch-cli`, `dbcli-cli`, `dbeaver-cli`.
+- [x] `[B]` Batch 147 — HTTP clients and load testing tools (8 utilities, ~883 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `xh-cli`, `curlie-cli`, `restclient-cli`, `gatling-cli`, `drill-cli`, `oha-cli`, `paw-cli`, `thunder-cli`.
+- [x] `[B]` Batch 148 — Message queue and event streaming tools (8 utilities, ~1041 lines): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `kafkactl-cli`, `rabbitmqctl-cli`, `zmq-cli`, `kcat-cli`, `emqx-cli`, `rsmq-cli`, `memphis-cli`, `wsk-cli`.
+- [x] `[B]` Batch 149 — Observability and metrics tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `cortextool-cli`, `victoriametrics-cli`, `zipkin-cli`, `pint-cli`, `pyrra-cli`, `sloth-cli`, `amtool-cli`, `promql-cli`.
+- [x] `[B]` Batch 150 — Security scanning and policy tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `osv-scanner-cli`, `tfsec-cli`, `kube-bench-cli`, `kubescape-cli`, `polaris-cli`, `kyverno-cli`, `falco-cli`, `gatekeeper-cli`.
+- [x] `[B]` Batch 151 — Static site generators and web frameworks (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `astro-cli`, `vitepress-cli`, `zola-cli`, `eleventy-cli`, `hexo-cli`, `gridsome-cli`, `gatsby-cli`, `sveltekit-cli`.
+- [x] `[B]` Batch 152 — Secret management tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `vals-cli`, `chamber-cli`, `dotenvx-cli`, `teller-cli`, `infisical-cli`, `doppler-cli`, `sealed-secrets-cli`, `berglas-cli`.
+- [x] `[B]` Batch 153 — Proxy and traffic management tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `mitmproxy-cli`, `charles-cli`, `fiddler-cli`, `mproxy-cli`, `wireproxy-cli`, `goproxy-cli`, `toxiproxy-cli`, `linkerd-cli`.
+- [x] `[B]` Batch 154 — Game dev and multimedia framework tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `love-cli`, `wgpu-cli`, `sokol-cli`, `macroquad-cli`, `ggez-cli`, `nannou-cli`, `minifb-cli`, `pixels-cli`.
+- [x] `[B]` Batch 155 — Audio/music production and live coding tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `sonic-pi-cli`, `chuck-cli`, `tidal-cli`, `foxdot-cli`, `renoise-cli`, `bitwig-cli`, `reaper-cli`, `vcvrack-cli`.
+- [x] `[B]` Batch 156 — 3D rendering, ray tracing, and scene description tools (8 utilities): -- 7 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `povray-cli`, `pbrt-cli`, `embree-cli`, `assimp-cli`, `openvdb-cli`, `materialx-cli`, `usd-cli`.
+  - [x] f3d-cli: F3D 3D model viewer (f3d)
+- [x] `[B]` Batch 157 — Font/typography and text rendering tools (8 utilities): -- 7 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `harfbuzz-cli`, `freetype-cli`, `fonttools-cli`, `otfcc-cli`, `woff2-cli`, `ttfdump-cli`, `glyphslib-cli`.
+  - [x] pango-cli: Pango text layout (pango-view)
+- [x] `[B]` Batch 158 — GIS/geospatial and map tile tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `tippecanoe-cli`, `ogr2ogr-cli`, `geojson-cli`, `mapbox-cli`, `tilemaker-cli`, `mbutil-cli`, `pmtiles-cli`, `supercluster-cli`.
+- [x] `[B]` Batch 159 — Electronics/EDA/PCB/FPGA tools (8 utilities): -- 5 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `gerbv-cli`, `nextpnr-cli`, `openroad-cli`, `kibot-cli`, `cocotb-cli`.
+  - [x] xschem-cli: Xschem schematic editor (xschem)
+  - [x] klayout-cli: KLayout IC layout viewer (klayout)
+  - [x] pcbdraw-cli: PcbDraw PCB renderer (pcbdraw)
+- [x] `[B]` Batch 160 — Scientific computing and numerical tools (8 utilities): -- 7 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `fftw-cli`, `lapack-cli`, `openblas-cli`, `eigen-cli`, `petsc-cli`, `sundials-cli`, `gmsh-cli`.
+  - [x] scilab-cli: Scilab numerical computing (scilab)
+- [x] `[B]` Batch 161 — Robotics and physics simulation tools (8 utilities): -- 7 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `ros2-cli`, `drake-cli`, `mujoco-cli`, `bullet-cli`, `ode-cli`, `pybullet-cli`, `ignition-cli`.
+  - [x] webots-cli: Webots robot simulator (webots)
+- [x] `[B]` Batch 162 — Bioinformatics and genomics tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `fastqc-cli`, `minimap2-cli`, `seqkit-cli`, `htslib-cli`, `bowtie2-cli`, `star-cli`, `salmon-cli`, `cellranger-cli`.
+- [x] `[B]` Batch 163 — Cryptocurrency wallets and blockchain tools (8 utilities): -- 5 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `bitcoin-cli`, `monero-cli`, `metamask-cli`, `ledger-cli`, `trezor-cli`.
+  - [x] electrum-cli: Electrum Bitcoin wallet (electrum)
+  - [x] sparrow-cli: Sparrow Bitcoin wallet (sparrow)
+  - [x] wasabi-cli: Wasabi privacy wallet (wasabi)
+- [x] `[B]` Batch 164 — Speech synthesis, accessibility, and game design tools (8 utilities): -- 7 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `flite-cli`, `piper-tts-cli`, `rhvoice-cli`, `dogtail-cli`, `ldtk-cli`, `mimic-cli`, `coqui-cli`.
+  - [x] accerciser-cli: AT-SPI accessibility explorer (accerciser)
+- [x] `[B]` Batch 165 — Color management and image science tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `opencolorio-cli`, `argyll-cli`, `dcraw-cli`, `icc-cli`, `colord-cli`, `displaycal-cli`, `littlecms-cli`, `rawtherapee-cli`.
+- [x] `[B]` Batch 166 — Data serialization and schema tools (8 utilities): -- 6 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `capnp-cli`, `bson-cli`, `bincode-cli`, `postcard-cli`, `flexbuffers-cli`, `ion-cli`.
+  - [x] cbor-cli: CBOR diagnostic tool (cbor-diag)
+  - [x] rmp-cli: MessagePack inspector (msgpack-inspect)
+- [x] `[B]` Batch 167 — Log analysis and monitoring tools (8 utilities): -- 7 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `lnav-cli`, `goaccess-cli`, `syslog-ng-cli`, `filebeat-cli`, `fluentbit-cli`, `angle-grinder-cli`, `sumologic-cli`.
+  - [x] logfmt-cli: logfmt parser/formatter (logfmt)
+- [x] `[B]` Batch 168 — Network diagnostic and protocol tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `iperf3-cli`, `ncat-cli`, `hping-cli`, `arping-cli`, `zmap-cli`, `httping-cli`, `pktgen-cli`, `netperf-cli`.
+- [x] `[B]` Batch 169 — Virtualization and container runtime tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `crun-cli`, `kata-cli`, `cloud-hypervisor-cli`, `crosvm-cli`, `stratovirt-cli`, `gvisor-cli`, `youki-cli`, `kvmtool-cli`.
+- [x] `[B]` Batch 170 — Configuration management and infrastructure tools (8 utilities): -- 5 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `cfengine-cli`, `nixops-cli`, `fleet-cli`, `diun-cli`, `confd-cli`.
+  - [x] mgmt-cli: mgmt reactive config management (mgmt)
+  - [x] pyinfra-cli: pyinfra infrastructure automation (pyinfra)
+  - [x] itamae-cli: Itamae config management (itamae)
+- [x] `[B]` Batch 171 — Email and messaging tools (8 utilities): -- 5 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `msmtp-cli`, `himalaya-cli`, `neomutt-cli`, `getmail-cli`, `isync-cli`.
+  - [x] fdm-cli: fdm mail fetcher (fdm)
+  - [x] aerc-cli: aerc terminal email client (aerc)
+  - [x] offlineimap-cli: OfflineIMAP sync (offlineimap)
+- [x] `[B]` Batch 172 — PDF and document processing tools (8 utilities): -- 5 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `pdfgrep-cli`, `pdfarranger-cli`, `sejda-cli`, `pdfimages-cli`, `xpdf-cli`.
+  - [x] stapler-cli: PDF page manipulation (stapler)
+  - [x] pdfunite-cli: PDF merger (pdfunite)
+  - [x] pdfseparate-cli: PDF page splitter (pdfseparate)
+- [x] `[B]` Batch 173 — Wayland compositor and desktop tools (8 utilities): -- 7 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `river-cli`, `wayfire-cli`, `labwc-cli`, `wlr-randr-cli`, `wlsunset-cli`, `kanshi-cli`, `swaylock-cli`.
+  - [x] cage-cli: Cage kiosk compositor (cage)
+- [x] `[B]` Batch 174 — Terminal emulators (8 utilities): -- 3 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `termite-cli`, `wayst-cli`, `zutty-cli`.
+  - [x] contour-cli: Contour GPU-accelerated terminal (contour)
+  - [x] st-cli: Suckless simple terminal (st)
+  - [x] sakura-cli: Sakura terminal emulator (sakura)
+  - [x] tym-cli: Tym Lua-configurable terminal (tym)
+  - [x] havoc-cli: Havoc minimal terminal (havoc)
+- [x] `[B]` Batch 175 — Notification daemons & panel/bar tools (8 utilities): -- 3 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `mako-cli`, `yambar-cli`, `wob-cli`.
+  - [x] eww-cli: Eww ElKowars Widgets (eww)
+  - [x] fnott-cli: Fnott keyboard-driven notifications (fnott)
+  - [x] swaync-cli: Sway Notification Center (swaync, swaync-client)
+  - [x] sfwbar-cli: SFWBar flow taskbar (sfwbar)
+  - [x] nwg-panel-cli: nwg-panel GTK panel (nwg-panel)
+- [x] `[B]` Batch 176 — Screenshot, recording & clipboard tools (8 utilities): -- 3 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `grim-cli`, `slurp-cli`, `wf-recorder-cli`.
+  - [x] swappy-cli: Swappy screenshot editor (swappy)
+  - [x] flameshot-cli: Flameshot screenshot tool (flameshot)
+  - [x] shotman-cli: Shotman screenshot manager (shotman)
+  - [x] satty-cli: Satty screenshot annotation (satty)
+  - [x] wl-clipboard-cli: Wayland clipboard (wl-copy, wl-paste)
+- [x] `[B]` Batch 177 — Input method & keyboard tools (8 utilities): -- 4 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `fcitx5-cli`, `ydotool-cli`, `wev-cli`, `wshowkeys-cli`.
+  - [x] wtype-cli: Wayland keyboard/mouse input simulator (wtype)
+  - [x] dotool-cli: Stdin-driven input automation (dotool, dotoold)
+  - [x] squeekboard-cli: On-screen keyboard (squeekboard)
+  - [x] wvkbd-cli: Virtual keyboard for Wayland (wvkbd)
+- [x] `[B]` Batch 178 — Wayland session/idle/power tools (8 utilities): -- 5 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `wlogout-cli`, `wlrctl-cli`, `wdisplays-cli`, `nwg-launchers-cli`, `wl-gammactl-cli`.
+  - [x] swayidle-cli: Idle management daemon (swayidle)
+  - [x] wlopm-cli: Output power management (wlopm)
+  - [x] wayland-logout-cli: Session terminator (wayland-logout)
+- [x] `[B]` Batch 179 — Accessibility tools (8 utilities): -- 6 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `espeak-ng-cli`, `speech-dispatcher-cli`, `magnus-cli`, `kmag-cli`, `wl-mirror-cli`, `at-spi2-cli`.
+  - [x] xmagnify-cli: Simple screen magnifier (xmagnify)
+  - [x] wl-kbptr-cli: Keyboard-driven pointer control (wl-kbptr)
+- [x] `[B]` Batch 180 — Wallpaper tools (8 utilities): -- 3 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `swaybg-cli`, `swww-cli`, `azote-cli`.
+  - [x] wpaperd-cli: Wallpaper daemon with slideshow (wpaperd, wpaperctl)
+  - [x] hyprpaper-cli: Hyprland wallpaper utility (hyprpaper, hyprctl-paper)
+  - [x] mpvpaper-cli: Video wallpaper (mpvpaper)
+  - [x] oguri-cli: Animated wallpaper daemon (oguri, ogurictl)
+  - [x] wbg-cli: Minimal wallpaper setter (wbg)
+- [x] `[B]` Batch 181 — Application launchers (8 utilities): -- 5 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `bemenu-cli`, `rofi-wayland-cli`, `kickoff-cli`, `nwg-dock-cli`, `anyrun-cli`.
+  - [x] wofi-cli: Application launcher (wofi)
+  - [x] fuzzel-cli: Fuzzy application launcher (fuzzel)
+  - [x] tofi-cli: Tiny dynamic menu (tofi, tofi-run, tofi-drun)
+- [x] `[B]` Batch 182 — Theme/appearance managers (8 utilities): -- 2 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `nwg-look-cli`, `flavours-cli`.
+  - [x] lxappearance-cli: GTK+ theme switcher (lxappearance)
+  - [x] qt5ct-cli: Qt5 configuration tool (qt5ct)
+  - [x] qt6ct-cli: Qt6 configuration tool (qt6ct)
+  - [x] kvantum-cli: Qt SVG theme engine (kvantummanager, kvantumpreview)
+  - [x] gradience-cli: Libadwaita/GTK4 color customization (gradience)
+  - [x] stylix-cli: System-wide color scheme manager (stylix)
+- [x] `[B]` Batch 183 — Wayland protocol & streaming tools (8 utilities): -- 4 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `wayland-utils-cli`, `wl-screenrec-cli`, `wayvnc-cli`, `wl-screencast-cli`.
+  - [x] wayland-info-cli: Compositor information (wayland-info)
+  - [x] wl-protocols-cli: Protocol information (wl-protocols)
+  - [x] waypipe-cli: Remote Wayland display proxy (waypipe)
+  - [x] obs-wlrobs-cli: OBS screen capture for wlroots (wlrobs)
+- [x] `[B]` Batch 184 — XDG desktop integration (8 utilities): -- 1 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `shared-mime-info-cli`.
+  - [x] xdg-desktop-portal-cli: Desktop integration portal (xdg-desktop-portal)
+  - [x] xdg-desktop-portal-wlr-cli: wlroots portal backend (xdg-desktop-portal-wlr)
+  - [x] xdg-utils-cli: Desktop utilities (xdg-open, xdg-mime, xdg-settings, xdg-email)
+  - [x] desktop-file-utils-cli: Desktop file tools (desktop-file-validate, desktop-file-install, update-desktop-database)
+  - [x] xdg-user-dirs-cli: User directory management (xdg-user-dirs-update, xdg-user-dir)
+  - [x] xdg-dbus-proxy-cli: D-Bus filtering proxy (xdg-dbus-proxy)
+  - [x] libnotify-cli: Desktop notifications (notify-send)
+- [x] `[B]` Batch 185 — PolicyKit agents (8 utilities): -- 1 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `polkit-dumb-agent-cli`.
+  - [x] polkit-cli: PolicyKit framework (polkitd, pkaction, pkcheck, pkexec, pkttyagent)
+  - [x] polkit-gnome-cli: GNOME PolicyKit agent (polkit-gnome-authentication-agent-1)
+  - [x] polkit-kde-cli: KDE PolicyKit agent (polkit-kde-authentication-agent-1)
+  - [x] lxpolkit-cli: LXDE PolicyKit agent (lxpolkit)
+  - [x] lxqt-policykit-cli: LXQt PolicyKit agent (lxqt-policykit-agent)
+  - [x] mate-polkit-cli: MATE PolicyKit agent (mate-polkit)
+  - [x] xfce-polkit-cli: Xfce PolicyKit agent (xfce-polkit)
+- [x] `[B]` Batch 186 — Bluetooth tools (8 utilities): -- 1 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `obexctl-cli`.
+  - [x] blueman-cli: Blueman Bluetooth manager (blueman-manager, blueman-applet, blueman-sendto, blueman-adapters)
+  - [x] bluetuith-cli: TUI Bluetooth manager (bluetuith)
+  - [x] blueberry-cli: Blueberry Bluetooth config (blueberry)
+  - [x] overskride-cli: Overskride Bluetooth client (overskride)
+  - [x] bluez-tools-cli: BlueZ command-line tools (bt-adapter, bt-agent, bt-device, bt-network, bt-obex)
+  - [x] bluetooth-sendto-cli: Bluetooth file sender (bluetooth-sendto)
+  - [x] btmgmt-cli: BlueZ management tool (btmgmt)
+- [x] `[B]` Batch 187 — Power management tools (8 utilities): -- 5 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `auto-cpufreq-cli`, `power-supply-cli`, `acpid-cli`, `upower-cli`, `battery-cli`.
+  - [x] power-profiles-daemon-cli: Power profile manager (power-profiles-daemon, powerprofilesctl)
+  - [x] laptop-mode-tools-cli: Laptop power saver (laptop_mode)
+  - [x] tuned-cli: System tuning daemon (tuned, tuned-adm)
+- [x] `[B]` Batch 188 — Thermal & hardware monitoring tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `lm-sensors-cli`, `fancontrol-cli`, `psensor-cli`, `xsensors-cli`, `hddtemp-cli`, `i2c-tools-cli`, `mbmon-cli`, `liquidctl-cli`.
+- [x] `[B]` Batch 189 — Printing & scanning tools (8 utilities): -- 6 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `system-config-printer-cli`, `hplip-cli`, `sane-cli`, `xsane-cli`, `simple-scan-cli`, `ipp-usb-cli`.
+  - [x] skanlite-cli: KDE scanner application (skanlite)
+  - [x] gscan2pdf-cli: Scan-to-PDF tool (gscan2pdf)
+- [x] `[B]` Batch 190 — Backup & snapshot tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `deja-dup-cli`, `snapper-cli`, `backintime-cli`, `duplicati-cli`, `rclone-backup-cli`, `rustic-cli`, `vorta-cli`, `bup-cli`.
+- [x] `[B]` Batch 191 — Download managers & torrent clients (8 utilities): -- 7 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `aria2-cli`, `wget2-cli`, `axel-cli`, `transmission-cli`, `deluge-cli`, `qbittorrent-cli`, `rtorrent-cli`.
+  - [x] fragments-cli: GNOME BitTorrent client (fragments)
+- [x] `[B]` Batch 192 — Email clients & calendar (8 utilities): -- 4 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `thunderbird-cli`, `evolution-cli`, `kmail-cli`, `betterbird-cli`.
+  - [x] geary-cli: Lightweight GNOME email (geary)
+  - [x] claws-mail-cli: Lightweight GTK email (claws-mail)
+  - [x] gnome-calendar-cli: GNOME Calendar (gnome-calendar)
+  - [x] mailspring-cli: Modern email client (mailspring)
+- [x] `[B]` Batch 194 — Video conferencing & VoIP (8 utilities): -- 5 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `jitsi-cli`, `linphone-cli`, `mumble-cli`, `ekiga-cli`, `obs-studio-cli`.
+  - [x] jami-cli: Jami P2P communicator (jami, jami-daemon)
+  - [x] teams-cli: Microsoft Teams wrapper (teams)
+  - [x] zoom-cli: Zoom video conferencing (zoom)
+- [x] `[B]` Batch 195 — Office & productivity (8 utilities): -- 2 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `gnumeric-cli`, `drawio-cli`.
+  - [x] libreoffice-cli: LibreOffice suite (libreoffice, lowriter, localc, loimpress, lodraw, lobase)
+  - [x] onlyoffice-cli: ONLYOFFICE editors (onlyoffice-desktopeditors)
+  - [x] calligra-cli: Calligra KDE office (calligrawords, calligrasheets, calligrastage, karbon)
+  - [x] abiword-cli: AbiWord word processor (abiword)
+  - [x] lyx-cli: LyX document processor (lyx, lyxclient)
+  - [x] xournalpp-cli: Xournal++ handwriting notes (xournalpp)
+- [x] `[B]` Batch 196 — Note-taking & knowledge management (8 utilities): -- 7 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `obsidian-cli`, `logseq-cli`, `zettlr-cli`, `joplin-cli`, `gnote-cli`, `tomboy-ng-cli`, `cherrytree-cli`.
+  - [x] simplenote-cli: Simplenote minimal notes (simplenote)
+- [x] `[B]` Batch 197 — Password managers & security (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `keepassxc-cli`, `bitwarden-cli`, `seahorse-cli`, `gnome-keyring-cli`, `kwallet-cli`, `secret-tool-cli`, `keychain-cli`, `rbw-cli`.
+- [x] `[B]` Batch 198 — PDF viewers & document tools (8 utilities): -- 5 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `evince-cli`, `okular-cli`, `foliate-cli`, `sioyek-cli`, `pdfpc-cli`.
+  - [x] qpdfview-cli: Tabbed PDF viewer (qpdfview)
+  - [x] xreader-cli: Linux Mint document reader (xreader)
+  - [x] atril-cli: MATE document viewer (atril)
+- [x] `[B]` Batch 199 — Game launchers & gaming tools (8 utilities): -- 5 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `lutris-cli`, `bottles-cli`, `steam-cli`, `vkbasalt-cli`, `steamtinkerlaunch-cli`.
+  - [x] heroic-cli: Epic/GOG/Amazon game launcher (heroic)
+  - [x] protonup-cli: Proton/Wine-GE installer (protonup-qt, protonup)
+  - [x] goverlay-cli: Graphics overlay manager (goverlay)
+- [x] `[B]` Batch 200 — Wine & compatibility tools (8 utilities): -- 7 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `winetricks-cli`, `protontricks-cli`, `dxvk-cli`, `wine-staging-cli`, `proton-ge-cli`, `wine-mono-cli`, `wine-gecko-cli`.
+  - [x] winecfg-cli: Wine configuration dialog (winecfg)
+- [x] `[B]` Batch 201 — Emulators & retro gaming (8 utilities): -- 6 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `dolphin-emu-cli`, `ppsspp-cli`, `citra-cli`, `duckstation-cli`, `mame-cli`, `mednafen-cli`.
+  - [x] yuzu-cli: Nintendo Switch emulator (yuzu, yuzu-cmd)
+  - [x] cemu-cli: Wii U emulator (cemu)
+- [x] `[B]` Batch 202 — 3D modeling & CAD tools (8 utilities): -- 5 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `librecad-cli`, `solvespace-cli`, `sweethome3d-cli`, `goxel-cli`, `step3d-cli`.
+  - [x] brlcad-cli: BRL-CAD solid modeling (mged, archer, rt, nirt)
+  - [x] wings3d-cli: Subdivision surface modeler (wings3d)
+  - [x] dusty3d-cli: Auto-rigging 3D modeler (dust3d)
+- [x] `[B]` Batch 203 — Science & math tools (8 utilities): -- 4 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `geogebra-cli`, `sagemath-cli`, `wxmaxima-cli`, `qtiplot-cli`.
+  - [x] labplot-cli: Scientific data analysis (labplot)
+  - [x] kalgebra-cli: Math expression calculator (kalgebra)
+  - [x] cantor-cli: KDE math worksheet (cantor)
+  - [x] veusz-cli: Scientific plotting (veusz)
+- [x] `[B]` Batch 204 — Electronics & EDA tools (8 utilities): -- 5 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `fritzing-cli`, `geda-cli`, `eeschema-cli`, `logisim-cli`, `simulide-cli`.
+  - [x] qucs-cli: Circuit simulator (qucs, qucsator)
+  - [x] eagle-cli: PCB design editor (eagle)
+  - [x] pcb-rnd-cli: Modular PCB layout editor (pcb-rnd)
+- [x] `[B]` Batch 205 — Accessibility tools (8 utilities): -- 5 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `onboard-cli`, `mousetweaks-cli`, `florence-cli`, `xkbcomp-cli`, `speechd-cli`.
+  - [x] magnifier-cli: Screen magnification (magnifier)
+  - [x] dasher-cli: Predictive text input (dasher)
+  - [x] caribou-cli: GNOME on-screen keyboard (caribou, caribou-preferences)
+- [x] `[B]` Batch 206 — Font management tools (8 utilities): -- 6 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `fontconfig-cli`, `font-manager-cli`, `gucharmap-cli`, `kcharselect-cli`, `fontmatrix-cli`, `font-viewer-cli`.
+  - [x] birdfont-cli: Font editor (birdfont)
+  - [x] ttfautohint-cli: Automatic font hinting (ttfautohint)
+- [x] `[B]` Batch 207 — Localization & input method tools (8 utilities): -- 3 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `m17n-cli`, `libhangul-cli`, `libchewing-cli`.
+  - [x] scim-cli: Smart Common Input Method (scim, scim-setup)
+  - [x] uim-cli: Universal Input Method (uim-xim, uim-toolbar, uim-pref)
+  - [x] anthy-cli: Japanese kana-kanji conversion (anthy, anthy-dic-tool)
+  - [x] mozc-cli: Japanese input method (mozc_server, mozc_tool)
+  - [x] libpinyin-cli: Chinese Pinyin input (pinyin)
+- [x] `[B]` Batch 208 — Education & learning tools (8 utilities): -- 3 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `moodle-cli`, `stellarium-cli`, `celestia-cli`.
+  - [x] anki-cli: Spaced-repetition flashcards (anki)
+  - [x] kstars-cli: Desktop astronomy (kstars)
+  - [x] marble-cli: KDE virtual globe (marble)
+  - [x] kgeography-cli: Geography learning (kgeography)
+  - [x] minuet-cli: Music education (minuet)
+- [x] `[B]` Batch 209 — Screenshot & photo tools (8 utilities): -- 2 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `ksnip-cli`, `maim-cli`.
+  - [x] spectacle-cli: KDE screenshot utility (spectacle)
+  - [x] gnome-screenshot-cli: GNOME screenshot (gnome-screenshot)
+  - [x] shutter-cli: Feature-rich screenshot tool (shutter)
+  - [x] shotwell-cli: Photo manager (shotwell)
+  - [x] deepin-screenshot-cli: Deepin screenshot (deepin-screenshot)
+  - [x] screengrab-cli: Qt screenshot tool (screengrab)
+- [x] `[B]` Batch 210 — Remote desktop & VNC tools (9 utilities): -- 5 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `tigervnc-cli`, `x11vnc-cli`, `rustdesk-cli`, `freerdp-cli`, `krdc-cli`.
+  - [x] remmina-cli: Remote desktop client (remmina)
+  - [x] vinagre-cli: GNOME remote viewer (vinagre)
+  - [x] x2go-cli: X2Go remote session (x2goclient, x2goserver)
+- [x] `[B]` Batch 211 — System logging & journal tools (8 utilities): -- 5 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `rsyslog-cli`, `glogg-cli`, `sysstat-cli`, `logtool-cli`, `logwatch-cli`.
+  - [x] ccze-cli: Log colorizer (ccze)
+  - [x] multitail-cli: Multi-log viewer (multitail)
+  - [x] system-log-viewer-cli: GNOME system log viewer (gnome-system-log)
+- [x] `[B]` Batch 212 — System monitoring & diagnostics (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `nagios-cli`, `icinga-cli`, `zabbix-cli`, `munin-cli`, `cacti-cli`, `collectd-cli`, `monit-cli`, `netdata-cli`.
+- [x] `[B]` Batch 213 — Configuration management & automation (8 utilities): -- 7 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `etckeeper-cli`, `augeas-cli`, `cdist-cli`, `rex-cli`, `bcfg2-cli`, `rudder-cli`, `foreman-cli`.
+  - [x] fabric-cli: Remote execution tool (fab, fabric)
+- [x] `[B]` Batch 214 — Backup & recovery tools (8 utilities): -- 7 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `bareos-cli`, `dar-cli`, `dirvish-cli`, `backuppc-cli`, `burp-cli`, `obnam-cli`, `urbackup-cli`.
+  - [x] luckybackup-cli: Rsync backup GUI (luckybackup)
+- [x] `[B]` Batch 215 — Database client & admin tools (8 utilities): -- 6 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `postgresql-cli`, `mongodb-cli`, `mariadb-cli`, `pgadmin-cli`, `adminer-cli`, `sqlitebrowser-cli`.
+  - [x] beekeeper-cli: Database manager (beekeeper-studio)
+  - [x] valentina-cli: Database IDE (valentina-studio)
+- [x] `[B]` Batch 216 — Disk & partition management (8 utilities): -- 7 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `gparted-cli`, `gdisk-cli`, `cryptsetup-cli`, `testdisk-cli`, `partclone-cli`, `gnome-disks-cli`, `kde-partition-cli`.
+  - [x] clonezilla-cli: Disk cloning (clonezilla, ocs-sr, ocs-onthefly)
+- [x] `[B]` Batch 217 — Virtualization & VM management (8 utilities): -- 5 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `virtualbox-cli`, `virsh-cli`, `cockpit-machines-cli`, `virtinst-cli`, `uvtool-cli`.
+  - [x] virt-manager-cli: Virtual Machine Manager (virt-manager)
+  - [x] gnome-boxes-cli: GNOME Boxes (gnome-boxes)
+  - [x] virt-viewer-cli: VM display client (virt-viewer, remote-viewer)
+- [x] `[B]` Batch 218 — System power & hardware management (8 utilities): -- 4 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `smartmontools-cli`, `fwupd-cli`, `sdparm-cli`, `turbostat-cli`.
+  - [x] laptop-mode-cli: Laptop power saving (laptop-mode)
+  - [x] irqbalance-cli: IRQ balancing (irqbalance)
+  - [x] x86-energy-perf-cli: CPU energy policy (x86_energy_perf_policy)
+  - [x] power-profiles-cli: Power profiles (powerprofilesctl, power-profiles-daemon)
+- [x] `[B]` Batch 219 — Wireless & Bluetooth tools (8 utilities): -- 5 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `wavemon-cli`, `wpa-supplicant-cli`, `horst-cli`, `kismet-cli`, `crda-cli`.
+  - [x] aircrack-cli: Wireless security (aircrack-ng, airodump-ng, aireplay-ng, airmon-ng)
+  - [x] iwgtk-cli: iwd GTK frontend (iwgtk)
+  - [x] gnome-bluetooth-cli: GNOME Bluetooth (gnome-bluetooth, bluetooth-sendto)
+- [x] `[B]` Batch 220 — Notification & dialog tools (8 utilities): -- 2 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `xfce4-notifyd-cli`, `mate-notification-cli`.
+  - [x] yad-cli: Yet Another Dialog (yad)
+  - [x] herbe-cli: Minimal notification (herbe)
+  - [x] deadd-cli: Notification center (deadd-notification-center, deadd-notification-center-ctl)
+  - [x] tiramisu-cli: Stdout notification daemon (tiramisu)
+  - [x] avizo-cli: OSD notification (avizo-service, volumectl, lightctl)
+  - [x] linux-notification-center-cli: Notification center (notification-center)
+- [x] `[B]` Batch 221 — System information & benchmarking (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `neofetch-cli`, `fastfetch-cli`, `screenfetch-cli`, `inxi-cli`, `hardinfo-cli`, `phoronix-cli`, `sysbench-cli`, `stress-cli`.
+- [x] `[B]` Batch 222 — Document conversion & format tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `wkhtmltopdf-cli`, `htmldoc-cli`, `ps2pdf-cli`, `latex2html-cli`, `unoconv-cli`, `wvware-cli`, `xlsxio-cli`, `odt2txt-cli`.
+- [x] `[B]` Batch 223 — Advanced math & algebra systems (8 utilities): -- 6 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `pari-cli`, `singular-cli`, `macaulay2-cli`, `reduce-cli`, `mathomatic-cli`, `genius-cli`.
+  - [x] freemat-cli: Numerical computing (freemat)
+  - [x] yacas-cli: Computer algebra (yacas)
+- [x] `[B]` Batch 224 — Accessibility & speech tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `kmousetool-cli`, `xvkbd-cli`, `xzoom-cli`, `cellwriter-cli`, `mbrola-cli`, `svox-cli`, `picotts-cli`, `gespeaker-cli`.
+- [x] `[B]` Batch 225 — Retro game emulators & map editor (8 utilities): -- 6 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `zsnes-cli`, `mupen64plus-cli`, `nestopia-cli`, `desmume-cli`, `mgba-cli`, `sameboy-cli`.
+  - [x] tiled-cli: Tile map editor (tiled)
+  - [x] higan-cli: Multi-system emulator (higan)
+- [x] `[B]` Batch 226 — Scientific engineering & FEM tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `salome-cli`, `calculix-cli`, `elmer-cli`, `netgen-cli`, `openfoam-cli`, `fenics-cli`, `admesh-cli`, `meshio-cli`.
+- [x] `[B]` Batch 227 — SDR & radio tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `gnuradio-cli`, `gqrx-cli`, `cubicsdr-cli`, `sdr-cli`, `inspectrum-cli`, `urh-cli`, `multimon-cli`, `rtl-sdr-cli`.
+- [x] `[B]` Batch 228 — Astronomy & astrophotography tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `xephem-cli`, `cartes-du-ciel-cli`, `siril-cli`, `astropy-cli`, `astrometry-cli`, `pyephem-cli`, `sextractor-cli`, `swarp-cli`.
+- [x] `[B]` Batch 229 — Genealogy & graph visualization tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `gramps-cli`, `webtrees-cli`, `ancestris-cli`, `geneanet-cli`, `graphviz-cli`, `gephi-cli`, `d3-cli`, `vega-cli`.
+- [x] `[B]` Batch 230 — Genomics & metagenomics tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `vcftools-cli`, `trimmomatic-cli`, `cutadapt-cli`, `hisat2-cli`, `spades-cli`, `megahit-cli`, `kraken2-cli`, `bracken-cli`.
+- [x] `[B]` Batch 231 — EDA & VLSI design tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `magic-cli`, `irsim-cli`, `opensta-cli`, `xcircuit-cli`, `electric-cli`, `alliance-cli`, `coriolis-cli`, `graywolf-cli`.
+- [x] `[B]` Batch 232 — Geospatial & GIS tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `osm2pgsql-cli`, `mapserver-cli`, `geoserver-cli`, `mapshaper-cli`, `lastools-cli`, `whitebox-cli`, `geotiff-cli`, `terrset-cli`.
+- [x] `[B]` Batch 233 — Music production & MIDI tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `timidity-cli`, `fluidsynth-cli`, `zynaddsubfx-cli`, `yoshimi-cli`, `hydrogen-cli`, `rosegarden-cli`, `qtractor-cli`, `setBfree-cli`.
+- [x] `[B]` Batch 234 — Reverse engineering & binary analysis tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `radare2-cli`, `ghidra-cli`, `rizin-cli`, `cutter-cli`, `binwalk-cli`, `capstone-cli`, `retdec-cli`, `angr-cli`.
+- [x] `[B]` Batch 235 — Penetration testing & security tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `metasploit-cli`, `hashcat-cli`, `gobuster-cli`, `wfuzz-cli`, `subfinder-cli`, `amass-cli`, `responder-cli`, `impacket-cli`.
+- [x] `[B]` Batch 236 — Data science & ML tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `pytorch-cli`, `scikit-learn-cli`, `xgboost-cli`, `lightgbm-cli`, `catboost-cli`, `optuna-cli`, `feast-cli`, `evidently-cli`.
+- [x] `[B]` Batch 237 — Container infrastructure & networking tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `cri-o-cli`, `slirp4netns-cli`, `conmon-cli`, `fuse-overlayfs-cli`, `flannel-cli`, `calico-cli`, `cilium-cli`, `weave-cli`.
+- [x] `[B]` Batch 238 — Filesystem & storage tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `bcachefs-cli`, `stratis-cli`, `xfs-cli`, `lvm2-cli`, `dm-cli`, `mergerfs-cli`, `snapraid-cli`, `mhddfs-cli`.
+- [x] `[B]` Batch 239 — Document processing & typesetting tools (8 utilities): -- 7 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `sile-cli`, `context-cli`, `lout-cli`, `troff-cli`, `tectonic-cli`, `hevea-cli`, `halibut-cli`.
+  - [x] patoline-cli: Typesetting system (patoline)
+- [x] `[B]` Batch 240 — Monitoring & observability tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `telegraf-cli`, `sensu-cli`, `checkmk-cli`, `prtg-cli`, `observium-cli`, `librenms-cli`, `graylog-cli`, `osquery-cli`.
+- [x] `[B]` Batch 241 — DNS servers & infrastructure-as-code tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `opentofu-cli`, `pihole-cli`, `knot-cli`, `powerdns-cli`, `coredns-cli`, `dnsmasq-cli`, `nsd-cli`, `pdns-recursor-cli`.
+- [x] `[B]` Batch 242 — Document & knowledge management tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `zotero-cli`, `paperless-cli`, `bookstack-cli`, `docspell-cli`, `tiddlywiki-cli`, `trilium-cli`, `wikijs-cli`, `outline-cli`.
+- [x] `[B]` Batch 243 — Email & groupware tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `roundcube-cli`, `exim-cli`, `maddy-cli`, `stalwart-cli`, `zimbra-cli`, `kopano-cli`, `sogo-cli`, `mailcow-cli`.
+- [x] `[B]` Batch 244 — VPN & tunneling tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `strongswan-cli`, `softether-cli`, `zerotier-cli`, `headscale-cli`, `innernet-cli`, `netmaker-cli`, `tinc-cli`, `ocserv-cli`.
+- [x] `[B]` Batch 245 — Message brokers & data stores (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `vernemq-cli`, `hivemq-cli`, `activemq-cli`, `watermill-cli`, `nanomq-cli`, `tigerbeetle-cli`, `garnet-cli`, `keydb-cli`.
+- [x] `[B]` Batch 246 — Identity & authentication tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `keycloak-cli`, `authelia-cli`, `authentik-cli`, `dex-cli`, `openldap-cli`, `freeipa-cli`, `kanidm-cli`, `zitadel-cli`.
+- [x] `[B]` Batch 247 — Time-series databases & analytics (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `timescaledb-cli`, `questdb-cli`, `druid-cli`, `pinot-cli`, `duckdb-cli`, `tdengine-cli`, `iotdb-cli`, `griddb-cli`.
+- [x] `[B]` Batch 248 — Service mesh & API gateway tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `istio-cli`, `kong-cli`, `apisix-cli`, `kuma-cli`, `tyk-cli`, `emissary-cli`, `gloo-cli`, `skipper-cli`.
+- [x] `[B]` Batch 249 — Secrets management & PKI tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `cfssl-cli`, `smallstep-cli`, `mkcert-cli`, `boulder-cli`, `ejbca-cli`, `lemur-cli`, `conjur-cli`, `openbao-cli`.
+- [x] `[B]` Batch 250 — Web servers & proxies (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `nginx-cli`, `apache-cli`, `varnish-cli`, `lighttpd-cli`, `pound-cli`, `tengine-cli`, `openresty-cli`, `h2o-cli`.
+- [x] `[B]` Batch 251 — Search engines & indexing (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `meilisearch-cli`, `typesense-cli`, `solr-cli`, `manticore-cli`, `sonic-cli`, `tantivy-cli`, `zincsearch-cli`, `opensearch-cli`.
+- [x] `[B]` Batch 252 — CI/CD tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `gitlab-runner-cli`, `argo-workflows-cli`, `gocd-cli`, `spinnaker-cli`, `screwdriver-cli`, `zuul-ci-cli`, `laminar-cli`, `abstruse-cli`.
+- [x] `[B]` Batch 253 — Log shipping & collection (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `fluentd-cli`, `logstash-cli`, `alloy-cli`, `cribl-cli`, `stanza-cli`, `journalbeat-cli`, `metalog-cli`, `nxlog-cli`.
+- [x] `[B]` Batch 254 — Config management & automation (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `baton-cli`, `otter-cli`, `rundeck-cli`, `env0-cli`, `attune-cli`, `stackstorm-cli`, `semaphoreui-cli`, `morpheus-cli`.
+- [x] `[B]` Batch 255 — Network monitoring (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `ntopng-cli`, `pandorafms-cli`, `xymon-cli`, `thruk-cli`, `naemon-cli`, `centreon-cli`, `adagios-cli`, `op5monitor-cli`.
+- [x] `[B]` Batch 256 — Database admin tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `phpmyadmin-cli`, `dbgate-cli`, `cloudbeaver-cli`, `sqlpad-cli`, `heidisql-cli`, `datagrip-cli`, `dbvisualizer-cli`, `azuredatastudio-cli`.
+- [x] `[B]` Batch 257 — Data pipeline & ETL (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `mage-cli`, `nifi-cli`, `kestra-cli`, `windmill-cli`, `n8n-cli`, `hevo-cli`, `stitch-cli`, `matillion-cli`.
+- [x] `[B]` Batch 258 — Status page & uptime (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `statuspage-cli`, `cachet-cli`, `gatus-cli`, `upptime-cli`, `statping-cli`, `uptime-kuma-cli`, `instatus-cli`, `betteruptime-cli`.
+- [x] `[B]` Batch 259 — Cloud storage & distributed FS (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `nextcloud-cli`, `owncloud-cli`, `seafile-cli`, `glusterfs-cli`, `garage-cli`, `seaweedfs-cli`, `juicefs-cli`, `lakefs-cli`.
+- [x] `[B]` Batch 260 — Game engines (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `pygame-cli`, `phaser-cli`, `construct-cli`, `defold-cli`, `stride-cli`, `flax-cli`, `ogre-cli`, `panda3d-cli`.
+- [x] `[B]` Batch 261 — 3D modeling & rendering tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `maya-cli`, `max3ds-cli`, `houdini-cli`, `cinema4d-cli`, `zbrush-cli`, `modo-cli`, `lightwave-cli`, `sketchup-cli`.
+- [x] `[B]` Batch 262 — VFX compositing & video editing tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `nuke-cli`, `fusion-cli`, `aftereffects-cli`, `davinci-cli`, `premiere-cli`, `flame-cli`, `mocha-cli`, `silhouette-cli`.
+- [x] `[B]` Batch 263 — 2D illustration & photography tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `photoshop-cli`, `illustrator-cli`, `indesign-cli`, `lightroom-cli`, `affinity-cli`, `krita-cli`, `procreate-cli`, `rebelle-cli`.
+- [x] `[B]` Batch 264 — Digital audio workstations (DAWs) (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `protools-cli`, `logic-cli`, `ableton-cli`, `fl-cli`, `cubase-cli`, `studioone-cli`, `waveform-cli`, `mixbus-cli`.
+- [x] `[B]` Batch 265 — Synthesizers & sampler plug-ins (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `kontakt-cli`, `reason-cli`, `serum-cli`, `massive-cli`, `omnisphere-cli`, `kompletekontrol-cli`, `sylenth-cli`, `vital-cli`.
+- [x] `[B]` Batch 266 — Mastering, mixing & audio repair (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `ozone-cli`, `neutron-cli`, `rx-cli`, `autotune-cli`, `fabfilter-cli`, `waves-cli`, `soundtoys-cli`, `melodyne-cli`.
+- [x] `[B]` Batch 267 — Live streaming & video production (8 utilities): -- 7 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `twitchstudio-cli`, `streamlabs-cli`, `xsplit-cli`, `vmix-cli`, `wirecast-cli`, `ecamm-cli`, `restream-cli`.
+  - [x] switchboardlive-cli: Switchboard Live (switchboardlive)
+- [x] `[B]` Batch 268 — Podcasting & remote recording (8 utilities): -- 6 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `hindenburg-cli`, `descript-cli`, `riverside-cli`, `zencastr-cli`, `squadcast-cli`, `adobepodcast-cli`.
+  - [x] auphonic-cli: Auphonic (auphonic)
+  - [x] alitu-cli: Alitu (alitu)
+- [x] `[B]` Batch 269 — Video NLE editors (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `shotcut-cli`, `kdenlive-cli`, `openshot-cli`, `olive-cli`, `vegas-cli`, `avid-cli`, `edius-cli`, `lightworks-cli`.
+- [x] `[B]` Batch 270 — Color grading & DI finishing tools (8 utilities): -- 7 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `baselight-cli`, `mistika-cli`, `filmconvert-cli`, `dehancer-cli`, `colourlab-cli`, `scratch-cli`, `redcine-cli`.
+  - [x] pomfort-cli: Pomfort Silverstack/LiveGrade Pro (pomfort)
+- [x] `[B]` Batch 271 — CAD & engineering tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `autocad-cli`, `solidworks-cli`, `inventor-cli`, `fusion360-cli`, `onshape-cli`, `catia-cli`, `creo-cli`, `nx-cli`.
+- [x] `[B]` Batch 272 — BIM & architecture CAD (8 utilities): -- 6 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `revit-cli`, `archicad-cli`, `vectorworks-cli`, `allplan-cli`, `draftsight-cli`, `rhino-cli`.
+  - [x] microstation-cli: Bentley MicroStation CONNECT (microstation)
+  - [x] bricscad-cli: Bricsys BricsCAD V25 (bricscad)
+- [x] `[B]` Batch 273 — CAE simulation & technical computing (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `ansys-cli`, `abaqus-cli`, `comsol-cli`, `matlab-cli`, `mathematica-cli`, `simulink-cli`, `labview-cli`, `altium-cli`.
+- [x] `[B]` Batch 274 — EDA PCB & FPGA design tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `orcad-cli`, `allegro-cli`, `pads-cli`, `proteus-cli`, `diptrace-cli`, `easyeda-cli`, `quartus-cli`, `vivado-cli`.
+- [x] `[B]` Batch 275 — Embedded IDEs & MCU toolchains (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `mplab-cli`, `stm32cubeide-cli`, `iar-cli`, `keil-cli`, `microchipstudio-cli`, `segger-cli`, `arduinoide-cli`, `energia-cli`.
+- [x] `[B]` Batch 276 — Databases & data platforms (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `oracle-cli`, `sqlserver-cli`, `db2-cli`, `couchbase-cli`, `snowflake-cli`, `databricks-cli`, `toad-cli`, `mongocompass-cli`.
+- [x] `[B]` Batch 277 — BI & analytics platforms (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `tableau-cli`, `powerbi-cli`, `qlik-cli`, `looker-cli`, `sas-cli`, `spss-cli`, `alteryx-cli`, `knime-cli`.
+- [x] `[B]` Batch 278 — Enterprise ERP/CRM/SaaS platforms (8 utilities): -- 7 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `sap-cli`, `salesforce-cli`, `netsuite-cli`, `dynamics365-cli`, `servicenow-cli`, `quickbooks-cli`, `mailchimp-cli`.
+  - [x] workday-cli: Workday 2024R2 (workday)
+- [x] `[B]` Batch 279 — DevOps platforms & endpoint security (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `github-cli`, `teamcity-cli`, `rancher-cli`, `openshift-cli`, `nessus-cli`, `crowdstrike-cli`, `sentinelone-cli`, `malwarebytes-cli`.
+- [x] `[B]` Batch 280 — Consumer/business antivirus suites (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `norton-cli`, `mcafee-cli`, `kaspersky-cli`, `bitdefender-cli`, `avast-cli`, `eset-cli`, `trendmicro-cli`, `sophos-cli`.
+- [x] `[B]` Batch 281 — Productivity suites & note-taking platforms (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `microsoft365-cli`, `googleworkspace-cli`, `wps-cli`, `zoho-cli`, `airtable-cli`, `evernote-cli`, `roam-cli`, `coda-cli`.
+- [x] `[B]` Batch 282 — Communication & messaging platforms (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `webex-cli`, `skype-cli`, `whatsapp-cli`, `signal-cli`, `element-cli`, `rocketchat-cli`, `wechat-cli`, `line-cli`.
+- [x] `[B]` Batch 283 — Web browsers (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `chrome-cli`, `firefox-cli`, `edge-cli`, `safari-cli`, `opera-cli`, `brave-cli`, `vivaldi-cli`, `arc-cli`.
+- [x] `[B]` Batch 284 — Password managers & consumer backup (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `onepassword-cli`, `lastpass-cli`, `dashlane-cli`, `keepass-cli`, `acronis-cli`, `veeam-cli`, `macrium-cli`, `backblaze-cli`.
+- [x] `[B]` Batch 285 — Virtualization & hypervisor platforms (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `vmware-cli`, `parallels-cli`, `hyperv-cli`, `proxmox-cli`, `xen-cli`, `citrix-cli`, `nutanix-cli`, `utm-cli`.
+- [x] `[B]` Batch 286 — Graphics & image editing platforms (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `xd-cli`, `figma-cli`, `sketch-cli`, `affinityphoto-cli`, `darktable-cli`, `captureone-cli`, `pixelmator-cli`, `canva-cli`.
+- [x] `[B]` Batch 287 — Pro audio/video editing platforms (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `finalcut-cli`, `logicpro-cli`, `flstudio-cli`, `garageband-cli`, `filmora-cli`, `camtasia-cli`, `motion-cli`, `virtualdj-cli`.
+- [x] `[B]` Batch 288 — Production rendering & ArchViz engines (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `vray-cli`, `coronarender-cli`, `octanerender-cli`, `redshift-cli`, `arnold-cli`, `keyshot-cli`, `lumion-cli`, `twinmotion-cli`.
+- [x] `[B]` Batch 289 — Gaming launchers & storefronts (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `epicgames-cli`, `battlenet-cli`, `gog-cli`, `ea-cli`, `ubisoft-cli`, `rockstar-cli`, `xbox-cli`, `itch-cli`.
+- [x] `[B]` Batch 290 — Game development engines & tools (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `unrealengine-cli`, `gamemaker-cli`, `renpy-cli`, `rpgmaker-cli`, `monogame-cli`, `cocos-cli`, `roblox-cli`, `buildbox-cli`.
+- [x] `[B]` Batch 291 — IDEs & code editors (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `vscode-cli`, `intellij-cli`, `xcode-cli`, `androidstudio-cli`, `sublime-cli`, `neovim-cli`, `cursor-cli`, `notepadpp-cli`.
+- [x] `[B]` Batch 292 — Code hosting & CI/CD platforms (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `bitbucket-cli`, `azuredevops-cli`, `gitea-cli`, `sourcegraph-cli`, `travisci-cli`, `bamboo-cli`, `forgejo-cli`, `semaphore-cli`.
+- [x] `[B]` Batch 293 — APM, observability & error tracking (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `splunk-cli`, `dynatrace-cli`, `appdynamics-cli`, `kibana-cli`, `honeycomb-cli`, `lightstep-cli`, `rollbar-cli`, `bugsnag-cli`.
+- [x] `[B]` Batch 294 — HR & payroll platforms (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `adp-cli`, `paychex-cli`, `gusto-cli`, `bamboohr-cli`, `rippling-cli`, `deel-cli`, `paycom-cli`, `ukg-cli`.
+- [x] `[B]` Batch 295 — Accounting & spend management (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `xero-cli`, `freshbooks-cli`, `wave-cli`, `concur-cli`, `expensify-cli`, `ramp-cli`, `brex-cli`, `bill-cli`.
+- [x] `[B]` Batch 296 — Identity/SSO/IAM platforms (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `okta-cli`, `auth0-cli`, `onelogin-cli`, `pingidentity-cli`, `jumpcloud-cli`, `duo-cli`, `entraid-cli`, `workos-cli`.
+- [x] `[B]` Batch 297 — CRM platforms (smaller-mid-market) (9 utilities): -- 9 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `hubspot-cli`, `pipedrive-cli`, `copper-cli`, `insightly-cli`, `sugarcrm-cli`, `zendesksell-cli`, `close-cli`, `nutshell-cli`, `freshsales-cli`.
+- [x] `[B]` Batch 298 — Customer support / helpdesk platforms (9 utilities): -- 9 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `zendesk-cli`, `intercom-cli`, `freshdesk-cli`, `helpscout-cli`, `kustomer-cli`, `gorgias-cli`, `frontapp-cli`, `gladly-cli`, `livechat-cli`.
+- [x] `[B]` Batch 299 — Product analytics + DXI platforms (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `amplitude-cli`, `mixpanel-cli`, `heap-cli`, `pendo-cli`, `fullstory-cli`, `hotjar-cli`, `posthog-cli`, `plausible-cli`.
+- [x] `[B]` Personality binaries batch 300 — marketing automation platforms (8 utilities) — milestone batch: -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `marketo-cli`, `iterable-cli`, `customerio-cli`, `braze-cli`, `klaviyo-cli`, `activecampaign-cli`, `convertkit-cli`, `brevo-cli`.
+- [x] `[B]` Personality binaries batch 301 — e-commerce platforms (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `shopify-cli`, `bigcommerce-cli`, `magento-cli`, `woocommerce-cli`, `squarespace-cli`, `wix-cli`, `prestashop-cli`, `ecwid-cli`.
+- [x] `[B]` Personality binaries batch 302 — project management + collaboration platforms (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `wrike-cli`, `smartsheet-cli`, `basecamp-cli`, `teamwork-cli`, `confluence-cli`, `hive-cli`, `lark-cli`, `quip-cli`.
+- [x] `[B]` Personality binaries batch 303 — data warehouse + activation + streaming platforms (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `hightouch-cli`, `census-cli`, `rivery-cli`, `starburst-cli`, `dremio-cli`, `trino-cli`, `confluent-cli`, `atlan-cli`.
+- [x] `[B]` Personality binaries batch 304 — data observability + catalog + governance platforms (10 utilities): -- 10 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `montecarlo-cli`, `anomalo-cli`, `soda-cli`, `bigeye-cli`, `acceldata-cli`, `alation-cli`, `collibra-cli`, `datafold-cli`, `metaplane-cli`, `lightup-cli`.
+- [x] `[B]` Personality binaries batch 305 — CDP + customer data platform vendors (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `segment-cli`, `mparticle-cli`, `tealium-cli`, `rudderstack-cli`, `bloomreach-cli`, `lytics-cli`, `treasuredata-cli`, `adobe-cli`.
+- [x] `[B]` Personality binaries batch 306 — security software vendors (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `sonatype-cli`, `wiz-cli`, `lacework-cli`, `aquasec-cli`, `sysdig-cli`, `tenable-cli`, `rapid7-cli`, `qualys-cli`.
+- [x] `[B]` Personality binaries batch 307 — iPaaS + API integration platforms (9 utilities): -- 9 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `mulesoft-cli`, `workato-cli`, `boomi-cli`, `zapier-cli`, `tray-cli`, `celigo-cli`, `jitterbit-cli`, `informatica-cli`, `make-cli`.
+- [x] `[B]` Personality binaries batch 308 — observability + log management + APM vendors (9 utilities): -- 9 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `logzio-cli`, `instana-cli`, `elastic-cli`, `humio-cli`, `observe-cli`, `chronosphere-cli`, `mezmo-cli`, `betterstack-cli`, `signoz-cli`.
+- [x] `[B]` Personality binaries batch 309 — edge + PaaS + cloud hosting vendors (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `fly-cli`, `digitalocean-cli`, `cloudflare-cli`, `fastly-cli`, `akamai-cli`, `ovh-cli`, `ibmcloud-cli`, `alibabacloud-cli`.
+- [x] `[B]` Personality binaries batch 310 — data warehouse + analytics DB vendors (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `bigquery-cli`, `teradata-cli`, `vertica-cli`, `motherduck-cli`, `singlestore-cli`, `firebolt-cli`, `materialize-cli`, `imply-cli`.
+- [x] `[B]` Personality binaries batch 311 — vector database vendors (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `pinecone-cli`, `weaviate-cli`, `qdrant-cli`, `chroma-cli`, `milvus-cli`, `lancedb-cli`, `vespa-cli`, `marqo-cli`.
+- [x] `[B]` Personality binaries batch 312 — cloud + enterprise messaging vendors (9 utilities): -- 9 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `kinesis-cli`, `sqs-cli`, `sns-cli`, `pubsub-cli`, `eventbridge-cli`, `solace-cli`, `tibco-cli`, `ibmmq-cli`, `servicebus-cli`.
+- [x] `[B]` Personality binaries batch 313 — IAM + IGA + PAM + MFA + modern dev-first auth vendors (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `ping-cli`, `cyberark-cli`, `sailpoint-cli`, `forgerock-cli`, `duosecurity-cli`, `beyondidentity-cli`, `clerk-cli`, `stytch-cli`.
+- [x] `[B]` Personality binaries batch 314 — API gateway and management platform vendors (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `apigee-cli`, `gravitee-cli`, `wso2-cli`, `zuplo-cli`, `krakend-cli`, `ambassador-cli`, `threescale-cli`, `axway-cli`.
+- [x] `[B]` Personality binaries batch 315 — email delivery vendors (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `postmark-cli`, `resend-cli`, `loops-cli`, `mailerlite-cli`, `mailjet-cli`, `mailersend-cli`, `ses-cli`, `sparkpost-cli`.
+- [x] `[B]` Personality binaries batch 316 — payment processors and subscription billing (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `adyen-cli`, `checkout-cli`, `mollie-cli`, `razorpay-cli`, `paddle-cli`, `lemonsqueezy-cli`, `chargebee-cli`, `recurly-cli`.
+- [x] `[B]` Personality binaries batch 317 — CDN and edge platform vendors (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `bunny-cli`, `keycdn-cli`, `stackpath-cli`, `cdn77-cli`, `edgio-cli`, `azion-cli`, `gcore-cli`, `jsdelivr-cli`.
+- [x] `[B]` Personality binaries batch 318 — headless CMS vendors (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `contentful-cli`, `sanity-cli`, `strapi-cli`, `ghost-cli`, `payload-cli`, `directus-cli`, `storyblok-cli`, `prismic-cli`.
+- [x] `[B]` Personality binaries batch 319 — DNS providers and domain registrars (10 utilities): -- 10 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `route53-cli`, `ns1-cli`, `dnsimple-cli`, `namecheap-cli`, `godaddy-cli`, `hover-cli`, `porkbun-cli`, `dnsmadeeasy-cli`, `dynadot-cli`, `easydns-cli`.
+- [x] `[B]` Personality binaries batch 320 — CPaaS / SMS and voice API vendors (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `vonage-cli`, `plivo-cli`, `telnyx-cli`, `messagebird-cli`, `sinch-cli`, `bandwidth-cli`, `infobip-cli`, `telesign-cli`.
+- [x] `[B]` Personality binaries batch 321 — feature flag + experimentation platforms (9 utilities): -- 9 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `launchdarkly-cli`, `optimizely-cli`, `growthbook-cli`, `statsig-cli`, `split-cli`, `unleash-cli`, `configcat-cli`, `flagsmith-cli`, `devcycle-cli`.
+- [x] `[B]` Personality binaries batch 322 — serverless / distributed databases (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `planetscale-cli`, `neon-cli`, `fauna-cli`, `cockroachdb-cli`, `yugabyte-cli`, `turso-cli`, `xata-cli`, `tigris-cli`.
+- [x] `[B]` Personality binaries batch 323 — auth platforms / customer identity providers (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `supertokens-cli`, `kinde-cli`, `frontegg-cli`, `descope-cli`, `propelauth-cli`, `fusionauth-cli`, `ory-cli`, `hanko-cli`.
+- [x] `[B]` Personality binaries batch 324 — AI/ML model + inference platforms (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `openai-cli`, `anthropic-cli`, `mistral-cli`, `cohere-cli`, `replicate-cli`, `modal-cli`, `groq-cli`, `fireworks-cli`.
+- [x] `[B]` Personality binaries batch 325 — email marketing platforms (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `getresponse-cli`, `drip-cli`, `kit-cli`, `aweber-cli`, `omnisend-cli`, `constantcontact-cli`, `moosend-cli`, `campaignmonitor-cli`.
+- [x] `[B]` Personality binaries batch 326 — payments and fintech platforms (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `wise-cli`, `revolut-cli`, `mercury-cli`, `rapyd-cli`, `airwallex-cli`, `payoneer-cli`, `klarna-cli`, `affirm-cli`.
+- [x] `[B]` Personality binaries batch 327 — HR / payroll / EOR / PEO platforms (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `justworks-cli`, `oysterhr-cli`, `remote-cli`, `papaya-cli`, `zenefits-cli`, `trinet-cli`, `paylocity-cli`, `ceridian-cli`.
+- [x] `[B]` Personality binaries batch 328 — customer-support / help-desk SaaS (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `front-cli`, `liveperson-cli`, `kayako-cli`, `groove-cli`, `helpcrunch-cli`, `hiver-cli`, `reamaze-cli`, `liveagent-cli`.
+- [x] `[B]` Personality binaries batch 329 — low-code / no-code app builders (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `retool-cli`, `bubble-cli`, `appsmith-cli`, `budibase-cli`, `tooljet-cli`, `softr-cli`, `glide-cli`, `noloco-cli`.
+- [x] `[B]` Personality binaries batch 330 — design + whiteboarding + visual collaboration (8 utilities): -- 8 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `miro-cli`, `framer-cli`, `penpot-cli`, `invision-cli`, `marvel-cli`, `zeplin-cli`, `whimsical-cli`, `excalidraw-cli`.
 
 # OS Development Roadmap — SIX-AGENT EDITION
 ## Phase 2: Basic Userspace
@@ -1820,6 +2307,21 @@ prerequisite that is no longer in `roadmap.md` is done: look for it here, or
   - [x] Blocking wait and non-blocking poll for multiplexed events
   - [x] Manual notification (wake waiter from another thread)
   - [x] Timer integration (one-shot and periodic kernel timers)
+- [x] `[B]` Client library (libservicebus) for easy integration
+  - [x] Connection: connect to named service, send/recv messages, call+wait-for-reply
+  - [x] ServiceHost: register a service, accept incoming connections
+  - [x] Message: structured wire format (type/member/payload/serial) with serialization
+  - [x] BusError: typed errors matching kernel error codes
+  - [x] Blocking, non-blocking, and timeout variants for all operations
+  - [x] Unit tests for message round-trip, error mapping, duration helpers
+  - [x] **Made true 2026-10-01 (B).** Until then three of the ticks above were
+        not: no reply serial on the wire, so `call` never returned; errors
+        numbered like errnos (-1..-8), not the kernel's codes; and the tests
+        never made a round trip. Now: wire format v2, codes through `kerror`,
+        peer credentials from `SYS_CHANNEL_PEER_CRED`, `call_fields`, and
+        tests that drive a scripted channel and read the kernel's own
+        constants. Lane F's
+        `requests/f-b-logind-refuses-every-caller-because-libservicebus-never-asks-who-it-is.md`.
 
 # OS Development Roadmap — SIX-AGENT EDITION
 ## Phase 5: Advanced Features and Ecosystem

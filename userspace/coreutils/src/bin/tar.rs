@@ -3426,7 +3426,8 @@ fn restore_metadata(at: &Located, name: &[u8], mode: u32, mtime: i64, status: &m
         diag!(
             "tar: {}: Cannot change mode to {}: {}",
             escape(name),
-            String::from_utf8_lossy(bits.get(1..).unwrap_or(&[])),
+            // `mode_string` writes ASCII letters only.
+            std::str::from_utf8(bits.get(1..).unwrap_or(&[])).unwrap_or_default(),
             strerror(&e)
         );
         *status = EXIT_FATAL;
@@ -6568,10 +6569,12 @@ mod tests {
         // both exiting 64. It is also the measurement
         // `scripts/getopt-ambiguity-check.py` reads GNU's table with.
         let err = run_args(&s(&["--=x"])).unwrap_err();
-        let expected: String = LONG_OPTIONS
-            .iter()
-            .map(|(name, _)| format!(" '--{name}'"))
-            .collect();
+        let expected = LONG_OPTIONS.iter().fold(String::new(), |mut s, (name, _)| {
+            use std::fmt::Write as _;
+            // Writing to a String cannot fail.
+            let _ = write!(s, " '--{name}'");
+            s
+        });
         // The word as typed, `=x` and all — glibc names the argv word in an
         // ambiguity, and only resolves to a table name once one entry has won.
         assert_eq!(

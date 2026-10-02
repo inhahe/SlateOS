@@ -504,7 +504,7 @@ mod tests {
     fn sent(args: &[&str]) -> (i32, Vec<OsString>) {
         match parse_args(&s(args)).unwrap() {
             KillAction::Send { signal, pids } => (signal, pids),
-            other => panic!("expected a Send, got {other:?}"),
+            other @ KillAction::List { .. } => panic!("expected a Send, got {other:?}"),
         }
     }
 
@@ -744,7 +744,7 @@ mod tests {
                 assert!(operands.is_empty());
                 assert!(!table);
             }
-            other => panic!("expected a List, got {other:?}"),
+            other @ KillAction::Send { .. } => panic!("expected a List, got {other:?}"),
         }
     }
 
@@ -752,7 +752,7 @@ mod tests {
     fn dash_capital_l_asks_for_the_table() {
         match parse_args(&s(&["-L"])).unwrap() {
             KillAction::List { table, .. } => assert!(table),
-            other => panic!("expected a List, got {other:?}"),
+            other @ KillAction::Send { .. } => panic!("expected a List, got {other:?}"),
         }
     }
 
@@ -762,7 +762,7 @@ mod tests {
         // so `kill -l 9` printed all twelve names instead of `KILL`.
         match parse_args(&s(&["-l", "9", "TERM"])).unwrap() {
             KillAction::List { operands, .. } => assert_eq!(operands, s(&["9", "TERM"])),
-            other => panic!("expected a List, got {other:?}"),
+            other @ KillAction::Send { .. } => panic!("expected a List, got {other:?}"),
         }
     }
 

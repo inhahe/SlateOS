@@ -467,12 +467,18 @@
 //! - [`sum`] — the BSD and System V checksums, for `sum` and for `cksum -a
 //!   bsd` and `-a sysv`.
 //! - [`grouplist`] — the group list `id -G`, `id` and `groups` print.
+//! - [`interval`] — a time interval, `strtod` and an `s`/`m`/`h`/`d` suffix:
+//!   `sleep`'s operands and `timeout`'s durations, which upstream copies
+//!   between the two files.
 //! - [`locale`] — the locale `setlocale (LC_ALL, "")` would select, and
 //!   gnulib's `hard_locale`, for `ls`, `cmp` and `pinky`. Two private copies
 //!   had disagreed about whether `LC_ALL=` is set.
 //! - [`ls`] — `ls`, `dir` and `vdir`: `ls.c` built three times.
 //! - [`mbswidth`] — gnulib's `mbswidth`, the columns a string occupies, for
 //!   `df`'s column widths and `pr`'s centred page header.
+//! - [`mkdirp`] — gnulib's `mkdir-p.c`, `mkancesdirs.c` and `dirchownmod.c`:
+//!   a directory and its missing ancestors, then its owner and mode, for
+//!   `install -d` and `install -D`.
 //! - [`parse_datetime`] — gnulib's `parse-datetime`, the date language of
 //!   `date -d`, `touch -d` and `find -newermt`: upstream's Bison tables and
 //!   actions, not a reimplementation of the forms they accept.
@@ -484,6 +490,11 @@
 //! - [`remove`] — what `rm` and `mv` must agree on about deleting a tree.
 //! - [`setfields`] — the `cut`-style LIST of fields, for `cut` and `numfmt
 //!   --field` (`set-fields.c`).
+//! - [`sig2str`] — gnulib's `sig2str.c`, signal names and numbers in GNU's
+//!   spelling (`POLL` for 29, `RTMIN+2`), for `split --filter`'s report of the
+//!   signal that ended its command, and coreutils' `operand2sig.c`, for
+//!   `timeout -s` -- with a name that needs no allocation, for `timeout -v`'s
+//!   report from inside a signal handler.
 //! - [`utsname`] — the `uname(2)` answers `uname` and `arch` both print.
 //!
 //! The regex engine, which is the other thing they must not disagree about,
@@ -515,9 +526,11 @@ pub mod getopt;
 pub mod grouplist;
 pub mod hardlink;
 pub mod human;
+pub mod interval;
 pub mod locale;
 pub mod ls;
 pub mod mbswidth;
+pub mod mkdirp;
 pub mod overwrite;
 pub mod parse_datetime;
 pub mod pathname;
@@ -534,6 +547,7 @@ pub use quoting as quote;
 pub mod remove;
 pub mod rename;
 pub mod setfields;
+pub mod sig2str;
 // Handing a command line to `sh -c`. This was `src/shell.rs` until 2026-09-27;
 // it became the `shellcmd` crate so that GNU AutoGen's libopts (`autoopts`,
 // whose `--more-help` runs `$PAGER`) runs its pager the same way.
@@ -553,7 +567,9 @@ pub mod umask;
 // it with a private parser that tried the NUMBER FIRST. POSIX requires the
 // name first (GNU's manual, "Disambiguating names and IDs"), which is why the
 // `+` escape exists at all — so `install -o 1000` disagreed with `chown 1000`
-// on any system with an account named `1000`.
+// on any system with an account named `1000`. (Since 2026-10-02 `install` is a
+// coreutils bin again and follows `install.c`'s own `get_ids` -- the name, then
+// a number in any base -- so this crate's one user is coreutils' `chown` side.)
 pub use userspec;
 pub mod utimecmp;
 pub mod utsname;

@@ -178,6 +178,13 @@ IGNORE: dict[str, str] = {
         "converting the *test input*, which is the one edit that makes that "
         "test pass while detecting nothing."
     ),
+    "userspace/coreutils/build.rs:host-error-text": (
+        "A build script, not a utility: its one `{e}` is a `cargo:warning=` "
+        "line saying why the Windows asInvoker manifest could not be embedded. "
+        "It runs on the build host and is read by the developer at that "
+        "host's console, so the host's own error text is the right text -- "
+        "there is no SlateOS process and no POSIX wording involved."
+    ),
 }
 
 assert ":" not in RULE, "the rule name must not contain ':' -- it is the key separator"

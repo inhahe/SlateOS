@@ -1,4 +1,24 @@
-## TD-B-INSTALL-REIMPLEMENTS-A-BACKUP-POLICY-COREUTILS-ALREADY-HAS (lane B, 2026-09-11)
+## TD-B-INSTALL-REIMPLEMENTS-A-BACKUP-POLICY-COREUTILS-ALREADY-HAS (lane B, 2026-09-11) — **FIXED** 2026-10-02
+
+**Fixed** by the route this entry pointed at: `install` is a coreutils bin
+again, `userspace/coreutils/src/bin/install.rs`, a port of GNU coreutils
+9.4's `install.c` on the copy engine `cp` and `mv` share (with GNU's
+`set_mode`, which only `install` sets, added to it) and on a new
+`coreutils::mkdirp` (gnulib's `mkdir-p.c`, `mkancesdirs.c` and
+`dirchownmod.c`). Backups are `backup.rs`'s, so numbered backups,
+`--backup=CONTROL`, `$VERSION_CONTROL` and `$SIMPLE_BACKUP_SUFFIX` all work,
+and argv is bytes. `userspace/install` is deleted (§1005).
+
+Measured, not assumed: `scripts/install-diff.sh` (new; the files left behind
+are compared, not just the output) found the standalone agreeing with GNU on
+22 of 173 cases, and finds the port agreeing on all 189 it has now --
+modes and umask, `-d`, `-D`, `-t`, `-T`, every backup word and both
+variables, `-C`, `-p`, `-o`/`-g`, `-s` with a strip program that records its
+arguments, `-v`, the SELinux options on a kernel without it, one file under
+two names, and names with a newline or a non-UTF-8 byte. `cp-diff.sh`
+(584/0/30) and `mv-diff.sh` (363/0/10) did not move across the engine change.
+
+What follows is the entry as it was filed.
 
 **In short:** `userspace/install` has its own backup handling, and
 `userspace/coreutils/src/backup.rs` has a complete, correct one that `cp`, `mv`

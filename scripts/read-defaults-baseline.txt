@@ -53,7 +53,6 @@ dmesg: extract_json_string(line, "level").unwrap_or_default()  # examined 2026-0
 dmesg: extract_json_string(line, "service").unwrap_or_default()  # examined 2026-09-11: an optional field; absent means the line came from the kernel rather than a service
 fuser: fs::read_to_string("/etc/passwd").unwrap_or_default()  # examined 2026-09-11: uid_to_name falls back to the numeric uid, which is what real fuser prints
 hwinfo: fs::read_to_string(path) .unwrap_or_default()
-install: std::env::var("TARGET").unwrap_or_default()  # examined 2026-09-11: build.rs, where cargo always sets TARGET, so the default is unreachable
 losetup: std::env::var("TARGET").unwrap_or_default()  # examined 2026-09-11: build.rs, where cargo always sets TARGET, so the default is unreachable
 lspci: read_file(&format!("{dev_path}/driver/name")).unwrap_or_default()  # examined 2026-09-11: a device with no driver bound has no driver/name link at all, so empty IS unbound
 lsusb: read_attr(&format!("{dev_path}/bMaxPower")).unwrap_or_default()  # examined 2026-09-11: sysfs omits the file when the device exposes no such descriptor, so empty IS absent; the display omits the line, as real lsusb does

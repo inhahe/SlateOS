@@ -818,6 +818,9 @@ run_stdin abc.txt 'y/a/b/;p'
 # command — which is unterminated. `{b}` branches to the end, not to a label
 # called `}`.
 run_stdin abc.txt 'b x y'
+# A label nothing defines is named as it was written, bytes and all.
+run_stdin abc.txt 'b nolabel'
+run_stdin abc.txt "$(printf 'b no\377label')"
 run_stdin abc.txt ':x y'
 run_stdin abc.txt 'b x s'
 # A missing delimiter is not a fault of its own: `s` and `y` read it with the

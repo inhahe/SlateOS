@@ -1987,8 +1987,8 @@ impl Opts {
         OPT_LETTERS.iter().position(|&l| l == letter)
     }
 
-    fn name_index(name: &str) -> Option<usize> {
-        OPT_NAMES.iter().position(|&n| n == name)
+    fn name_index(name: &[u8]) -> Option<usize> {
+        OPT_NAMES.iter().position(|n| n.as_bytes() == name)
     }
 
     fn get(self, letter: u8) -> bool {
@@ -2006,7 +2006,7 @@ impl Opts {
         true
     }
 
-    fn set_named(&mut self, name: &str, on: bool) -> bool {
+    fn set_named(&mut self, name: &[u8], on: bool) -> bool {
         let Some(i) = Self::name_index(name) else {
             return false;
         };
@@ -2206,6 +2206,16 @@ fn diag_out(bytes: &[u8]) {
     // that reaches the exit status.
     let _ = write_fd(&io, 2, bytes);
     flush_stdout();
+}
+
+/// A diagnostic assembled from byte pieces, with its newline: for a message
+/// that quotes what the script wrote. That is bytes, and it is printed as
+/// it was written -- a decode would put U+FFFD where the script had a
+/// byte, and the message would then quote something the script never said.
+fn diag_parts(parts: &[&[u8]]) {
+    let mut bytes = parts.concat();
+    bytes.push(b'\n');
+    diag_out(&bytes);
 }
 
 /// Push this shell's buffered standard output out.
@@ -2809,11 +2819,12 @@ impl Shell {
                     } else {
                         msg
                     };
-                    diag!(
-                        "sh: {}: {}",
-                        coreutils::quote::quotef(name),
-                        String::from_utf8_lossy(&msg)
-                    );
+                    diag_parts(&[
+                        b"sh: ",
+                        coreutils::quote::quotef(name).as_bytes(),
+                        b": ",
+                        &msg,
+                    ]);
                     return Err(Flow::Exit(2));
                 }
                 cur.unwrap_or_default()
@@ -3272,10 +3283,13 @@ impl Shell {
                 // the message usable: the expression the script *wrote* was
                 // `$((x/y))`, and only the substituted form says what the
                 // values were.
-                diag!(
-                    "sh: arithmetic expression: {e}: \"{}\"",
-                    String::from_utf8_lossy(&text)
-                );
+                diag_parts(&[
+                    b"sh: arithmetic expression: ",
+                    e.as_bytes(),
+                    b": \"",
+                    &text,
+                    b"\"",
+                ]);
                 Err(Flow::Exit(2))
             }
         }
@@ -4917,7 +4931,7 @@ impl Shell {
                 // is what every shell does with a wider number.
                 Some(v) => status_byte(i32::try_from(v).unwrap_or(0)),
                 None => {
-                    diag!("sh: illegal number: {}", String::from_utf8_lossy(a));
+                    diag_parts(&[b"sh: illegal number: ", a]);
                     2
                 }
             },
@@ -5032,7 +5046,7 @@ impl Shell {
             Some(a) => match parse_int(a).and_then(|v| u32::try_from(v).ok()) {
                 Some(v) if v > 0 => v,
                 _ => {
-                    diag!("sh: {word}: illegal number: {}", String::from_utf8_lossy(a));
+                    diag_parts(&[b"sh: ", word.as_bytes(), b": illegal number: ", a]);
                     self.status = 2;
                     return Ok(());
                 }
@@ -5058,7 +5072,7 @@ impl Shell {
             Some(a) => match parse_int(a).and_then(|v| usize::try_from(v).ok()) {
                 Some(v) => v,
                 None => {
-                    diag!("sh: shift: illegal number: {}", String::from_utf8_lossy(a));
+                    diag_parts(&[b"sh: shift: illegal number: ", a]);
                     return self.special_error(2);
                 }
             },
@@ -5190,9 +5204,8 @@ impl Shell {
                     match args.get(i.saturating_add(1)) {
                         Some(nm) => {
                             i = i.saturating_add(1);
-                            let text = String::from_utf8_lossy(nm).into_owned();
-                            if !self.opts.set_named(&text, on) {
-                                diag!("sh: set: illegal option name: {text}");
+                            if !self.opts.set_named(nm, on) {
+                                diag_parts(&[b"sh: set: illegal option name: ", nm]);
                                 return self.special_error(2);
                             }
                         }
@@ -5470,7 +5483,7 @@ impl Shell {
         let mut status = 0u8;
         for a in args {
             let Some(pid) = parse_int(a).and_then(|v| u32::try_from(v).ok()) else {
-                diag!("sh: wait: {}: bad process id", String::from_utf8_lossy(a));
+                diag_parts(&[b"sh: wait: ", a, b": bad process id"]);
                 self.bg = children;
                 self.status = 2;
                 return Ok(());
@@ -5657,9 +5670,8 @@ fn run_main() -> ExitCode {
                     i = i.saturating_add(1);
                     match argv.get(i) {
                         Some(nm) => {
-                            let text = String::from_utf8_lossy(nm).into_owned();
-                            if !sh.opts.set_named(&text, on) {
-                                diag!("sh: illegal option name: {text}");
+                            if !sh.opts.set_named(nm, on) {
+                                diag_parts(&[b"sh: illegal option name: ", nm]);
                                 return ExitCode::from(2);
                             }
                         }
@@ -5754,6 +5766,43 @@ mod tests {
     /// What a script exited with.
     fn code(script: &[u8]) -> u8 {
         run(script).0
+    }
+
+    /// A diagnostic quotes what the script wrote as it was written: a byte
+    /// that is not UTF-8 comes out as that byte, not as U+FFFD -- which would
+    /// quote the script saying something it never said.
+    #[test]
+    fn diagnostics_quote_the_scripts_bytes() {
+        let cases: [(&[u8], &[u8]); 7] = [
+            (
+                b"set -o a\xffb 2>&1",
+                b"sh: set: illegal option name: a\xffb\n",
+            ),
+            (b"exit 1\xff 2>&1", b"sh: illegal number: 1\xff\n"),
+            (b"shift x\xff 2>&1", b"sh: shift: illegal number: x\xff\n"),
+            (
+                b"for i in 1; do break x\xff 2>&1; done",
+                b"sh: break: illegal number: x\xff\n",
+            ),
+            (b"wait 1\xff 2>&1", b"sh: wait: 1\xff: bad process id\n"),
+            (b"{ : ${x?a\xffb}; } 2>&1", b"sh: x: a\xffb\n"),
+            // The error names the byte in shell quoting; the expression after
+            // it is the script's text as written.
+            (
+                b"{ : $((1/\xff)); } 2>&1",
+                b"sh: arithmetic expression: unexpected ''$'\\377': \"1/\xff\"\n",
+            ),
+        ];
+        for (script, want) in cases {
+            let got = run(script).1;
+            assert_eq!(
+                got,
+                want,
+                "{} printed {}",
+                String::from_utf8_lossy(script),
+                String::from_utf8_lossy(&got)
+            );
+        }
     }
 
     fn first_word(src: &[u8]) -> Word {

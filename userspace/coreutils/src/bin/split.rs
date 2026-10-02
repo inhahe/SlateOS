@@ -143,22 +143,44 @@
 //! one set of bugs. See §336 for the tradeoff and for what would trigger
 //! revisiting it.
 //!
+//! # `--filter`
+//!
+//! Each piece is handed to a shell command on its standard input, with `$FILE`
+//! naming the file the piece would have been. The shell is the user's
+//! `$SHELL` -- `/bin/sh` only when that is unset -- named in `argv[0]` by its
+//! last component and run as `execl` runs a program, never through a `PATH`
+//! search. A command that stops reading early is not a failure (upstream
+//! ignores `SIGPIPE` while it filters and lets `EPIPE` pass), and nor is one
+//! that dies *of* `SIGPIPE`; its own reader went first.
+//!
+//! # An output that is the input
+//!
+//! Before an existing file is truncated it is compared with the input, and a
+//! match stops the run: `'in.txt' would overwrite input; aborting`. Reading
+//! the whole input first, as this does, would otherwise save the bytes and
+//! still replace the file that held them with its own first piece.
+//!
 //! # Exit status
 //!
 //! 0 on success, 1 on any failure — except under `--filter`, where a command
-//! that fails hands its own status back, so `--filter='exit 3'` exits 3.
+//! that fails hands its own status back, so `--filter='exit 3'` exits 3, and
+//! one killed by a signal exits 128 plus its number, as a shell reports it.
 
-use coreutils::diag;
 use coreutils::errmsg::strerror;
+use coreutils::fileid;
 use coreutils::getopt::{self, Program, Takes};
-use coreutils::quote::{os_bytes, quote, quoteaf, quoteaf_os, quotef_os};
-use coreutils::shell::shell;
-use coreutils::stdfd;
+use coreutils::pathname::last_component;
+use coreutils::quote::{os_bytes, os_from_bytes, quote, quoteaf, quoteaf_os, quotef, quotef_os};
+use coreutils::shell::shell_as;
+use coreutils::stdfd::{self, Stream};
 use coreutils::xnum::{self, Status};
 use std::ffi::{OsStr, OsString};
-use std::fs::File;
+use std::fs::{File, Metadata, OpenOptions};
 use std::io::{self, Read, Write};
-use std::process::{ExitCode, Stdio};
+use std::path::Path;
+use std::process::{ChildStdin, Command, ExitCode, ExitStatus, Stdio};
+
+coreutils::guard_std_fds!();
 
 /// `split --zzz` exits 1, like almost everything that is not `ls`/`sort`/`grep`.
 const SPLIT: Program = Program::new("split", 1);
@@ -182,28 +204,43 @@ const SIZE_SUFFIXES: &[u8] = b"bEGKkMmPQRTYZ0";
 /// A refusal: the message to print after `split: `, and the status to exit
 /// with.
 ///
+/// The message is bytes because two of them quote the `--filter` command, and
+/// upstream prints that as it was given -- `with FILE=xaa, exit 3 from
+/// command: CMD` -- where a command is argv data and need not be text.
+///
 /// The status is carried rather than assumed because `--filter` breaks the
 /// otherwise-universal rule that a failure exits 1 — it exits with whatever
-/// the command exited with.
+/// the command exited with, or 128 plus the signal that ended it.
 #[derive(Debug)]
 struct Fail {
-    message: String,
+    message: Vec<u8>,
     status: u8,
 }
 
 impl Fail {
     fn new(message: String) -> Self {
-        Fail { message, status: 1 }
+        Fail {
+            message: message.into_bytes(),
+            status: 1,
+        }
     }
 }
 
 impl From<getopt::Error> for Fail {
     fn from(e: getopt::Error) -> Self {
         Fail {
-            message: e.message(),
+            message: e.message().into_bytes(),
             status: u8::try_from(e.status).unwrap_or(1),
         }
     }
+}
+
+/// `split: MESSAGE` on standard error, as bytes -- see [`Fail`].
+fn say(message: &[u8]) {
+    let mut line = b"split: ".to_vec();
+    line.extend_from_slice(message);
+    line.push(b'\n');
+    stdfd::diag_bytes(&line);
 }
 
 /// Which rule decides where a piece ends.
@@ -315,27 +352,8 @@ const LONG_OPTIONS: &[(&str, Takes)] = &[
     ("version", Takes::Nothing),
 ];
 
-#[cfg(unix)]
 fn arg_bytes(a: &OsStr) -> Vec<u8> {
     os_bytes(a).into_owned()
-}
-
-#[cfg(not(unix))]
-fn arg_bytes(a: &OsStr) -> Vec<u8> {
-    os_bytes(a).into_owned()
-}
-
-/// An `OsString` from bytes; the mirror of [`coreutils::quote::os_bytes`], and
-/// lossy on a Windows host for the same reason.
-#[cfg(unix)]
-fn os_from_bytes(b: &[u8]) -> OsString {
-    use std::os::unix::ffi::OsStringExt;
-    OsString::from_vec(b.to_vec())
-}
-
-#[cfg(not(unix))]
-fn os_from_bytes(b: &[u8]) -> OsString {
-    OsString::from(String::from_utf8_lossy(b).into_owned())
 }
 
 /// The funnel. A diagnostic that could not be written turns the earned
@@ -347,31 +365,42 @@ fn main() -> ExitCode {
 }
 
 fn run_main() -> ExitCode {
+    stdfd::restore();
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     let request = match parse_args(&args, getopt::posixly_correct()) {
         Ok(r) => r,
         Err(e) => {
-            diag!("split: {}", e.message);
+            say(&e.message);
             return ExitCode::from(e.status);
         }
     };
-    match request {
+    // Standard output as stdio has it -- by block unless it is a terminal --
+    // because that is observable here. A `--filter` command writes to the same
+    // descriptor directly, so upstream's `executing with FILE=` lines reach a
+    // file or a pipe *after* everything the commands wrote, at the final flush.
+    // Every write to it is deliberately unread: a failed write is `Stream`'s
+    // to remember and `close_stdout`'s to report, once, as upstream's
+    // `atexit (close_stdout)` does -- `split --help >/dev/full` says
+    // `split: write error: No space left on device` and exits 1.
+    let mut out = Stream::stdout();
+    let earned = match request {
         Request::Help => {
-            print!("{}", help_text());
+            let _ = out.write_all(help_text().as_bytes());
             ExitCode::SUCCESS
         }
         Request::Version => {
-            println!("split (SlateOS coreutils) 0.1.0");
+            let _ = out.write_all(b"split (SlateOS coreutils) 0.1.0\n");
             ExitCode::SUCCESS
         }
-        Request::Run(options, file, prefix) => match run(&options, &file, &prefix) {
+        Request::Run(options, file, prefix) => match run(&options, &file, &prefix, &mut out) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                diag!("split: {}", e.message);
+                say(&e.message);
                 ExitCode::from(e.status)
             }
         },
-    }
+    };
+    stdfd::close_stdout("split", out, earned)
 }
 
 /// GNU's `--help`, byte for byte, minus the trailing block of URLs that names
@@ -1064,18 +1093,19 @@ enum Sink {
 struct Emitter<'a> {
     options: &'a Options,
     sink: Sink,
+    /// The input operand, `-` for standard input, and what `fstat` said of it:
+    /// upstream's `infile` and `in_stat_buf`, which [`Emitter::create`]
+    /// compares every output file against.
+    input_name: &'a OsStr,
+    input_meta: &'a Metadata,
+    /// Standard output, for `--verbose` and for the round-robin `-n r/K/N`.
+    out: &'a mut Stream,
 }
 
 impl Emitter<'_> {
     fn emit(&mut self, data: &[u8]) -> Result<(), Fail> {
         let namer = match &mut self.sink {
-            Sink::Stdout => {
-                let mut out = io::stdout().lock();
-                return out
-                    .write_all(data)
-                    .and_then(|()| out.flush())
-                    .map_err(|e| Fail::new(format!("write error: {}", strerror(&e))));
-            }
+            Sink::Stdout => return self.write_stdout(data),
             Sink::Files(namer) => namer,
         };
         // `-e` suppresses the name as well as the file, so the pieces that do
@@ -1086,14 +1116,36 @@ impl Emitter<'_> {
         let name = namer
             .next()
             .ok_or_else(|| Fail::new("output file suffixes exhausted".to_string()))?;
-        match &self.options.filter {
+        // The options outlive this borrow of `self`, so the command can be
+        // lent to a method that needs `self` mutably.
+        let options = self.options;
+        match &options.filter {
             Some(command) => self.run_filter(command, &name, data),
             None => self.write_file(&name, data),
         }
     }
 
-    fn write_file(&self, name: &[u8], data: &[u8]) -> Result<(), Fail> {
-        let path = os_from_bytes(name);
+    /// `-n K/N`: the one piece, on standard output, written the way each of
+    /// upstream's modes writes it -- which decides how a failure reads. The
+    /// byte mode writes straight to descriptor 1 and names it `-`, so a full
+    /// disk is `split: -: No space left on device`; the line and round-robin
+    /// modes say `write error`, which is what [`Stream`] says at the close.
+    fn write_stdout(&mut self, data: &[u8]) -> Result<(), Fail> {
+        if self.options.kind == Kind::ChunkBytes {
+            return match stdfd::write_all(1, data) {
+                Ok(()) => Ok(()),
+                // Nobody is left to read it: see `stdfd::reader_gone`.
+                Err(e) if stdfd::reader_gone(&e) => Ok(()),
+                Err(e) => Err(Fail::new(format!("{}: {}", quotef(b"-"), strerror(&e)))),
+            };
+        }
+        // Unread: see `run_main`.
+        let _ = self.out.write_all(data);
+        Ok(())
+    }
+
+    /// One output file: upstream's `create`, the write, and `closeout`.
+    fn write_file(&mut self, name: &[u8], data: &[u8]) -> Result<(), Fail> {
         if self.options.verbose {
             // `quoteaf`, not `quote`: GNU spells this
             // `fprintf (stdout, _("creating file %s\n"), quoteaf (name))`, and
@@ -1101,50 +1153,254 @@ impl Emitter<'_> {
             // straight in every locale. Measured against GNU split 9.4 under
             // `LC_ALL=C.UTF-8`, which prints `creating file 'xaa'`. This read
             // `quote` — curly since §351 — until the harness moved off its `C`
-            // reference, where the two styles are indistinguishable.
-            println!("creating file {}", quoteaf(name));
+            // reference, where the two styles are indistinguishable. Printed
+            // before the open, so a name that is then refused was announced.
+            // Unread: see `run_main`.
+            let _ = writeln!(self.out, "creating file {}", quoteaf(name));
         }
         // GNU names the output file bare and lets the errno finish the
-        // sentence — `split: nosuchdir/aa: No such file or directory`.
-        let mut file = File::create(&path)
-            .map_err(|e| Fail::new(format!("{}: {}", quotef_os(&path), strerror(&e))))?;
-        file.write_all(data)
-            .and_then(|()| file.flush())
-            .map_err(|e| Fail::new(format!("{}: {}", quotef_os(&path), strerror(&e))))
+        // sentence — `split: nosuchdir/aa: No such file or directory` — for the
+        // open, the write and the close alike.
+        let failed = |e: io::Error| Fail::new(format!("{}: {}", quotef(name), strerror(&e)));
+        let mut file = self.create(name)?;
+        file.write_all(data).map_err(failed)?;
+        stdfd::close(file).map_err(failed)
     }
 
-    fn run_filter(&self, command: &OsStr, name: &[u8], data: &[u8]) -> Result<(), Fail> {
-        let shown = String::from_utf8_lossy(name).into_owned();
-        if self.options.verbose {
-            println!("executing with FILE={shown}");
+    /// Open a piece's file the way upstream's `create` does.
+    ///
+    /// First with `O_EXCL`, which settles the common case -- a name nobody has
+    /// used -- in one call. A name that already exists is opened again without
+    /// it, and examined before a byte is written: if it is the *input* the run
+    /// stops, rather than truncate the file it is splitting. (`split -l 1 -a 1
+    /// --additional-suffix=.txt in.txt i` reaches `in.txt` at its fourteenth
+    /// piece.) Only then is it emptied, by `ftruncate` rather than `O_TRUNC`,
+    /// and only when there is something to empty: a FIFO or a device may be an
+    /// output, and truncating one can fail without that being an error.
+    fn create(&self, name: &[u8]) -> Result<File, Fail> {
+        let path = os_from_bytes(name);
+        let failed = |e: io::Error| Fail::new(format!("{}: {}", quotef(name), strerror(&e)));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => return Ok(file),
+            Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(failed(e)),
+            Err(_) => {}
         }
-        let mut child = shell(command)
-            .env("FILE", os_from_bytes(name))
-            .stdin(Stdio::piped())
-            .spawn()
-            .map_err(|e| Fail::new(format!("with FILE={shown}: {}", strerror(&e))))?;
+        // No `O_TRUNC`: what is there is looked at first, below.
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(failed)?;
+        let meta = file.metadata().map_err(|e| {
+            Fail::new(format!(
+                "failed to stat {}: {}",
+                quoteaf(name),
+                strerror(&e)
+            ))
+        })?;
+        if fileid::same_inode(
+            (Path::new(self.input_name), self.input_meta),
+            (Path::new(&path), &meta),
+        ) {
+            return Err(Fail::new(format!(
+                "{} would overwrite input; aborting",
+                quoteaf(name)
+            )));
+        }
+        let regular = meta.is_file();
+        if !(regular && meta.len() == 0)
+            && let Err(e) = file.set_len(0)
+            && regular
+        {
+            return Err(Fail::new(format!(
+                "{}: error truncating: {}",
+                quotef(name),
+                strerror(&e)
+            )));
+        }
+        Ok(file)
+    }
+
+    /// `--filter`: run COMMAND with `$FILE` naming this piece, and hand it the
+    /// piece on its standard input -- upstream's `create` and `closeout`.
+    ///
+    /// The shell is the user's: `$SHELL`, or `/bin/sh` only when that is
+    /// *unset* (an empty `SHELL` is used, and fails). It is named in `argv[0]`
+    /// by its last component, as `execl (shell_prog, last_component
+    /// (shell_prog), "-c", filter_command, (char *) nullptr)` names it, so a
+    /// command that fails under `SHELL=/bin/bash` says `bash: line 1: ...`.
+    fn run_filter(&mut self, command: &OsStr, name: &[u8], data: &[u8]) -> Result<(), Fail> {
+        if self.options.verbose {
+            // `quotef`, where `creating file` has `quoteaf`: measured, and
+            // upstream's own `fprintf (stdout, _("executing with FILE=%s\n"),
+            // quotef (name))`. Unread: see `run_main`.
+            let _ = writeln!(self.out, "executing with FILE={}", quotef(name));
+        }
+        let shell = std::env::var_os("SHELL").unwrap_or_else(|| OsString::from("/bin/sh"));
+        let shell_bytes = os_bytes(&shell).into_owned();
+        let arg0 = os_from_bytes(last_component(&shell_bytes));
+        let mut run = shell_as(exec_path(&shell_bytes), &arg0, command);
+        run.env("FILE", os_from_bytes(name)).stdin(Stdio::piped());
+        if stdfd::sigpipe_ignored_at_startup() {
+            keep_sigpipe_ignored(&mut run);
+        }
+        let spawned = run.spawn();
+        let mut child = match spawned {
+            Ok(child) => child,
+            Err(e) => {
+                // Upstream forks first and execs in the child, so a shell that
+                // cannot be run is reported *by the child*, which then exits 1
+                // -- and the parent reports that as it would any command's
+                // status. Both lines, in that order:
+                //
+                //   split: failed to run command: "/nope -c cat": No such file or directory
+                //   split: with FILE=xaa, exit 1 from command: cat
+                //
+                // Every way `spawn` can fail is taken for an exec failure. The
+                // others -- no pipe, no process -- have their own sentences
+                // upstream, but reaching one here takes an exhausted system.
+                let mut line = b"failed to run command: \"".to_vec();
+                line.extend_from_slice(&shell_bytes);
+                line.extend_from_slice(b" -c ");
+                line.extend_from_slice(&os_bytes(command));
+                line.extend_from_slice(format!("\": {}", strerror(&e)).as_bytes());
+                say(&line);
+                return Err(command_failed(name, command, "exit 1", 1));
+            }
+        };
         if let Some(mut pipe) = child.stdin.take() {
-            // A filter that exits without reading everything closes the pipe;
-            // that is the command's business, not an error of ours, and the
-            // non-zero status below is what reports it.
-            let _ = pipe.write_all(data);
-            drop(pipe);
+            match pipe.write_all(data) {
+                Ok(()) => {}
+                // Upstream ignores SIGPIPE while it filters and lets EPIPE pass
+                // (`ignorable`): a command that stops reading early -- `head
+                // -1` -- has taken what it wanted, and its exit status is what
+                // says whether that was a failure.
+                Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {}
+                Err(e) => {
+                    return Err(Fail::new(format!("{}: {}", quotef(name), strerror(&e))));
+                }
+            }
+            close_pipe(pipe)
+                .map_err(|e| Fail::new(format!("{}: {}", quotef(name), strerror(&e))))?;
         }
         let status = child
             .wait()
-            .map_err(|e| Fail::new(format!("with FILE={shown}: {}", strerror(&e))))?;
-        if status.success() {
+            .map_err(|e| Fail::new(format!("waiting for child process: {}", strerror(&e))))?;
+        command_verdict(name, command, status)
+    }
+}
+
+/// What a finished `--filter` command's status means: nothing, if it exited 0
+/// or died of `SIGPIPE`. Otherwise the run stops, saying which, and exits with
+/// the command's own status -- or, for a signal, 128 plus its number --
+/// exactly as `closeout` does.
+fn command_verdict(name: &[u8], command: &OsStr, status: ExitStatus) -> Result<(), Fail> {
+    if let Some(code) = status.code() {
+        if code == 0 {
             return Ok(());
         }
-        let code = status.code().unwrap_or(1);
-        Err(Fail {
-            message: format!(
-                "with FILE={shown}, exit {code} from command: {}",
-                command.to_string_lossy()
-            ),
-            status: u8::try_from(code).unwrap_or(1),
-        })
+        let exit = u8::try_from(code).unwrap_or(1);
+        return Err(command_failed(name, command, &format!("exit {code}"), exit));
     }
+    signal_verdict(name, command, status)
+}
+
+#[cfg(unix)]
+fn signal_verdict(name: &[u8], command: &OsStr, status: ExitStatus) -> Result<(), Fail> {
+    use coreutils::sig2str::sig2str;
+    use std::os::unix::process::ExitStatusExt;
+    let Some(signal) = status.signal() else {
+        // Neither exited nor signalled: upstream's "shouldn't happen".
+        return Err(Fail::new(format!(
+            "unknown status from command (0x{:X})",
+            status.into_raw()
+        )));
+    };
+    // The command's own reader left first; what it wrote was somebody else's
+    // to want, and its death is not this run's failure.
+    if signal == libcall::SIGPIPE {
+        return Ok(());
+    }
+    // gnulib's `sig2str`, so `TERM` and `RTMIN+3`; a number it cannot name is
+    // printed as the number.
+    let named = sig2str(signal).unwrap_or_else(|| signal.to_string());
+    let exit = u8::try_from(signal.saturating_add(128)).unwrap_or(u8::MAX);
+    Err(command_failed(
+        name,
+        command,
+        &format!("signal {named}"),
+        exit,
+    ))
+}
+
+/// Off Unix a status with no code has nothing more to say.
+#[cfg(not(unix))]
+fn signal_verdict(_name: &[u8], _command: &OsStr, _status: ExitStatus) -> Result<(), Fail> {
+    Err(Fail::new("unknown status from command".to_string()))
+}
+
+/// `with FILE=NAME, WHAT from command: COMMAND` -- the name quoted for a
+/// shell if it needs it, the command exactly as it was given.
+fn command_failed(name: &[u8], command: &OsStr, what: &str, status: u8) -> Fail {
+    let mut message = format!("with FILE={}, {what} from command: ", quotef(name)).into_bytes();
+    message.extend_from_slice(&os_bytes(command));
+    Fail { message, status }
+}
+
+/// The name to run `shell` by, so that it is found the way `execl` finds it:
+/// as a path, never by searching `PATH`.
+///
+/// `Command` searches `PATH` for a name with no slash in it, which `execl` does
+/// not do -- so `SHELL=bash` would quietly run `/bin/bash` where upstream runs
+/// `./bash`, which normally is not there, and says so. A `./` in front makes
+/// the two agree. An empty name is left alone: `execl ("")` fails `ENOENT`, and
+/// so does running the empty name, where `./` would name a directory.
+fn exec_path(shell: &[u8]) -> OsString {
+    if shell.is_empty() || shell.contains(&b'/') {
+        return os_from_bytes(shell);
+    }
+    let mut path = b"./".to_vec();
+    path.extend_from_slice(shell);
+    os_from_bytes(&path)
+}
+
+/// Hand a `--filter` command `SIGPIPE` ignored, as `split` was started.
+///
+/// Upstream restores the default in its child only when the default is what
+/// it found at startup (`default_SIGPIPE`), so a `split` run with the signal
+/// ignored passes that on -- and a `yes | head -1` inside the command then
+/// sees `EPIPE` and says so, instead of dying of the signal in silence. Rust's
+/// `Command` restores the default in every child, so the hook puts back what
+/// `split` was given, recorded before the runtime replaced it.
+#[cfg(unix)]
+fn keep_sigpipe_ignored(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: the hook runs in the child between `fork` and `exec`, where only
+    // async-signal-safe calls are allowed. It makes one, `signal`, allocates
+    // nothing and takes no lock.
+    unsafe {
+        command.pre_exec(|| {
+            // Unchecked, as upstream's own `signal (SIGPIPE, SIG_DFL)` is: it
+            // can fail only for a number that is no signal, and 13 is one.
+            let _ = libcall::ignore_signal(libcall::SIGPIPE);
+            Ok(())
+        });
+    }
+}
+
+/// Off Unix there is no `SIGPIPE` to hand on.
+#[cfg(not(unix))]
+fn keep_sigpipe_ignored(_command: &mut Command) {}
+
+/// Close a `--filter` command's input, saying if that failed -- `closeout`'s
+/// `close (fd)`. Dropping it would close it too, and discard the verdict.
+fn close_pipe(pipe: ChildStdin) -> io::Result<()> {
+    #[cfg(unix)]
+    let file = File::from(std::os::fd::OwnedFd::from(pipe));
+    #[cfg(windows)]
+    let file = File::from(std::os::windows::io::OwnedHandle::from(pipe));
+    stdfd::close(file)
 }
 
 // ------------------------------------------------------------------ splitting
@@ -1342,41 +1598,84 @@ fn round_robin_pieces(data: &[u8], separator: u8, count: u64) -> Vec<Vec<u8>> {
 
 // ----------------------------------------------------------------- the run
 
-fn read_input(file: &OsString) -> Result<Vec<u8>, Fail> {
-    let mut data = Vec::new();
-    if file == OsStr::new("-") {
-        io::stdin()
-            .lock()
-            .read_to_end(&mut data)
-            .map_err(|e| Fail::new(format!("read error: {}", strerror(&e))))?;
-        return Ok(data);
-    }
-    // `quoteaf_os`, not `quote_os`: upstream is
-    // `error (EXIT_FAILURE, errno, _("cannot open %s for reading"), quoteaf (infile))`,
-    // and `quoteaf` is shell-escape-always, whose marks stay straight in every
-    // locale. Measured, GNU split 9.4, `LC_ALL=C.UTF-8`:
-    // `split: cannot open 'nosuch' for reading: No such file or directory`.
-    let mut handle = File::open(file).map_err(|e| {
-        Fail::new(format!(
-            "cannot open {} for reading: {}",
-            quoteaf_os(file),
-            strerror(&e)
-        ))
-    })?;
-    handle
-        .read_to_end(&mut data)
-        .map_err(|e| Fail::new(format!("{}: read error: {}", quotef_os(file), strerror(&e))))?;
-    Ok(data)
+/// The whole input, and what `fstat` said of it -- upstream's `in_stat_buf`,
+/// which every output file is compared against before it is truncated.
+struct Input {
+    data: Vec<u8>,
+    meta: Metadata,
 }
 
-fn run(options: &Options, file: &OsString, prefix: &OsString) -> Result<(), Fail> {
+/// Read the input operand, `-` meaning standard input.
+///
+/// Every failure after the open names the input the way upstream does, bare
+/// and with the errno finishing the sentence: `split: d: Is a directory`. The
+/// two chunk modes word a failed read differently, because upstream reads
+/// there to learn the size before it splits anything --
+/// `split: d: cannot determine file size: Is a directory`.
+fn read_input(file: &OsStr, kind: Kind) -> Result<Input, Fail> {
+    let named = |e: &io::Error| format!("{}: {}", quotef_os(file), strerror(e));
+    let (mut reader, meta): (Box<dyn Read>, Metadata) = if file == OsStr::new("-") {
+        let meta = stdin_metadata().map_err(|e| Fail::new(named(&e)))?;
+        (Box::new(io::stdin().lock()), meta)
+    } else {
+        // `quoteaf_os`, not `quote_os`: upstream is
+        // `error (EXIT_FAILURE, errno, _("cannot open %s for reading"), quoteaf (infile))`,
+        // and `quoteaf` is shell-escape-always, whose marks stay straight in
+        // every locale. Measured, GNU split 9.4, `LC_ALL=C.UTF-8`:
+        // `split: cannot open 'nosuch' for reading: No such file or directory`.
+        let handle = File::open(file).map_err(|e| {
+            Fail::new(format!(
+                "cannot open {} for reading: {}",
+                quoteaf_os(file),
+                strerror(&e)
+            ))
+        })?;
+        let meta = handle.metadata().map_err(|e| Fail::new(named(&e)))?;
+        (Box::new(handle), meta)
+    };
+    let mut data = Vec::new();
+    reader.read_to_end(&mut data).map_err(|e| {
+        Fail::new(if matches!(kind, Kind::ChunkBytes | Kind::ChunkLines) {
+            format!(
+                "{}: cannot determine file size: {}",
+                quotef_os(file),
+                strerror(&e)
+            )
+        } else {
+            named(&e)
+        })
+    })?;
+    Ok(Input { data, meta })
+}
+
+/// `fstat (STDIN_FILENO)`: what standard input is, through a duplicate of the
+/// descriptor so that nothing here owns -- or closes -- descriptor 0.
+#[cfg(unix)]
+fn stdin_metadata() -> io::Result<Metadata> {
+    use std::os::fd::AsFd;
+    File::from(io::stdin().as_fd().try_clone_to_owned()?).metadata()
+}
+
+#[cfg(windows)]
+fn stdin_metadata() -> io::Result<Metadata> {
+    use std::os::windows::io::AsHandle;
+    File::from(io::stdin().as_handle().try_clone_to_owned()?).metadata()
+}
+
+fn run(
+    options: &Options,
+    file: &OsString,
+    prefix: &OsString,
+    out: &mut Stream,
+) -> Result<(), Fail> {
     if options.piece.is_some() && options.filter.is_some() {
         return Err(SPLIT
             .usage_referring("--filter does not process a chunk extracted to stdout".to_string())
             .into());
     }
     let (width, start, widen) = suffix_plan(options)?;
-    let data = read_input(file)?;
+    let input = read_input(file, options.kind)?;
+    let data: &[u8] = &input.data;
 
     let sink = if options.piece.is_some() {
         Sink::Stdout
@@ -1390,19 +1689,25 @@ fn run(options: &Options, file: &OsString, prefix: &OsString) -> Result<(), Fail
             widen,
         ))
     };
-    let mut emitter = Emitter { options, sink };
+    let mut emitter = Emitter {
+        options,
+        sink,
+        input_name: file,
+        input_meta: &input.meta,
+        out,
+    };
 
     if options.kind == Kind::RoundRobin {
-        let pieces = round_robin_pieces(&data, options.separator, options.units);
+        let pieces = round_robin_pieces(data, options.separator, options.units);
         return emit_selected(&mut emitter, options, pieces.iter().map(Vec::as_slice));
     }
 
     let ranges = match options.kind {
-        Kind::Lines => line_pieces(&data, options.separator, options.units),
-        Kind::Bytes => byte_pieces(&data, options.units),
-        Kind::LineBytes => line_byte_pieces(&data, options.separator, options.units),
-        Kind::ChunkBytes => chunk_byte_pieces(&data, options.units),
-        Kind::ChunkLines => chunk_line_pieces(&data, options.separator, options.units),
+        Kind::Lines => line_pieces(data, options.separator, options.units),
+        Kind::Bytes => byte_pieces(data, options.units),
+        Kind::LineBytes => line_byte_pieces(data, options.separator, options.units),
+        Kind::ChunkBytes => chunk_byte_pieces(data, options.units),
+        Kind::ChunkLines => chunk_line_pieces(data, options.separator, options.units),
         Kind::RoundRobin => Vec::new(),
     };
     let pieces = ranges
@@ -1434,6 +1739,14 @@ fn emit_selected<'a, I: Iterator<Item = &'a [u8]>>(
 #[allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    impl Fail {
+        /// The message as text, to compare with a literal. Every message these
+        /// tests provoke is text.
+        fn text(&self) -> String {
+            String::from_utf8(self.message.clone()).unwrap()
+        }
+    }
 
     /// `parse_args` with `POSIXLY_CORRECT` pinned off, so that a test putting an
     /// option after an operand does not depend on the environment `cargo test`
@@ -1587,19 +1900,19 @@ mod tests {
     #[test]
     fn two_modes_are_refused() {
         let e = parse(&["-l", "5", "-b", "5"]).unwrap_err();
-        assert!(e.message.starts_with("cannot split in more than one way"));
+        assert!(e.text().starts_with("cannot split in more than one way"));
     }
 
     #[test]
     fn the_same_mode_twice_is_also_refused() {
         let e = parse(&["-l", "5", "-l", "6"]).unwrap_err();
-        assert!(e.message.starts_with("cannot split in more than one way"));
+        assert!(e.text().starts_with("cannot split in more than one way"));
     }
 
     #[test]
     fn zero_bytes_is_refused_without_an_errno_tail() {
         let e = parse(&["-b", "0"]).unwrap_err();
-        assert_eq!(e.message, "invalid number of bytes: ‘0’");
+        assert_eq!(e.text(), "invalid number of bytes: ‘0’");
     }
 
     #[test]
@@ -1611,7 +1924,7 @@ mod tests {
     #[test]
     fn lines_take_no_multiplier_suffix() {
         let e = parse(&["-l", "1k"]).unwrap_err();
-        assert_eq!(e.message, "invalid number of lines: ‘1k’");
+        assert_eq!(e.text(), "invalid number of lines: ‘1k’");
     }
 
     #[test]
@@ -1623,17 +1936,17 @@ mod tests {
     #[test]
     fn line_bytes_borrows_the_lines_diagnostic() {
         let e = parse(&["-C", "0"]).unwrap_err();
-        assert_eq!(e.message, "invalid number of lines: ‘0’");
+        assert_eq!(e.text(), "invalid number of lines: ‘0’");
     }
 
     #[test]
     fn chunks_report_the_whole_argument_when_nothing_converted() {
         assert_eq!(
-            parse(&["-n", "x/3"]).unwrap_err().message,
+            parse(&["-n", "x/3"]).unwrap_err().text(),
             "invalid number of chunks: ‘x/3’"
         );
         assert_eq!(
-            parse(&["-n", "/3"]).unwrap_err().message,
+            parse(&["-n", "/3"]).unwrap_err().text(),
             "invalid number of chunks: ‘/3’"
         );
     }
@@ -1641,11 +1954,11 @@ mod tests {
     #[test]
     fn chunks_report_only_the_count_when_the_k_converted() {
         assert_eq!(
-            parse(&["-n", "2/x"]).unwrap_err().message,
+            parse(&["-n", "2/x"]).unwrap_err().text(),
             "invalid number of chunks: ‘x’"
         );
         assert_eq!(
-            parse(&["-n", "3/"]).unwrap_err().message,
+            parse(&["-n", "3/"]).unwrap_err().text(),
             "invalid number of chunks: ‘’"
         );
     }
@@ -1653,7 +1966,7 @@ mod tests {
     #[test]
     fn only_one_slash_pair_is_recognised() {
         assert_eq!(
-            parse(&["-n", "2/3/4"]).unwrap_err().message,
+            parse(&["-n", "2/3/4"]).unwrap_err().text(),
             "invalid number of chunks: ‘3/4’"
         );
     }
@@ -1661,15 +1974,15 @@ mod tests {
     #[test]
     fn a_chunk_number_outside_the_count_is_its_own_message() {
         assert_eq!(
-            parse(&["-n", "0/3"]).unwrap_err().message,
+            parse(&["-n", "0/3"]).unwrap_err().text(),
             "invalid chunk number: ‘0’"
         );
         assert_eq!(
-            parse(&["-n", "4/3"]).unwrap_err().message,
+            parse(&["-n", "4/3"]).unwrap_err().text(),
             "invalid chunk number: ‘4’"
         );
         assert_eq!(
-            parse(&["-n", "l/0/3"]).unwrap_err().message,
+            parse(&["-n", "l/0/3"]).unwrap_err().text(),
             "invalid chunk number: ‘0’"
         );
     }
@@ -1677,7 +1990,7 @@ mod tests {
     #[test]
     fn chunks_take_no_multiplier_suffix() {
         assert_eq!(
-            parse(&["-n", "2k"]).unwrap_err().message,
+            parse(&["-n", "2k"]).unwrap_err().text(),
             "invalid number of chunks: ‘2k’"
         );
     }
@@ -1691,11 +2004,11 @@ mod tests {
     #[test]
     fn a_negative_suffix_length_is_out_of_range_not_unparsable() {
         assert_eq!(
-            parse(&["-a", "-1"]).unwrap_err().message,
+            parse(&["-a", "-1"]).unwrap_err().text(),
             "invalid suffix length: ‘-1’: Numerical result out of range"
         );
         assert_eq!(
-            parse(&["-a", "x"]).unwrap_err().message,
+            parse(&["-a", "x"]).unwrap_err().text(),
             "invalid suffix length: ‘x’"
         );
     }
@@ -1705,7 +2018,7 @@ mod tests {
         let options = parse(&["-a", "1", "--numeric-suffixes=95"]).unwrap();
         let e = suffix_plan(&options).unwrap_err();
         assert!(
-            e.message
+            e.text()
                 .starts_with("numerical suffix start value is too large for the suffix length")
         );
     }
@@ -1714,21 +2027,21 @@ mod tests {
     fn a_suffix_too_narrow_for_the_chunk_count_names_the_width() {
         let options = parse(&["-n", "700", "-a", "2"]).unwrap();
         let e = suffix_plan(&options).unwrap_err();
-        assert_eq!(e.message, "the suffix length needs to be at least 3");
+        assert_eq!(e.text(), "the suffix length needs to be at least 3");
     }
 
     #[test]
     fn a_separator_must_be_one_character() {
         assert_eq!(
-            parse(&["-t", "xy"]).unwrap_err().message,
+            parse(&["-t", "xy"]).unwrap_err().text(),
             "multi-character separator ‘xy’"
         );
         assert_eq!(
-            parse(&["-t", ""]).unwrap_err().message,
+            parse(&["-t", ""]).unwrap_err().text(),
             "empty record separator"
         );
         assert_eq!(
-            parse(&["-t", "a", "-t", "b"]).unwrap_err().message,
+            parse(&["-t", "a", "-t", "b"]).unwrap_err().text(),
             "multiple separator characters specified"
         );
     }
@@ -1747,7 +2060,7 @@ mod tests {
     fn an_additional_suffix_may_not_contain_a_slash() {
         let e = parse(&["--additional-suffix=/x"]).unwrap_err();
         assert!(
-            e.message
+            e.text()
                 .starts_with("invalid suffix ‘/x’, contains directory separator")
         );
     }
@@ -1756,7 +2069,7 @@ mod tests {
     fn a_bad_start_value_is_reported_with_the_value_first() {
         let e = parse(&["--numeric-suffixes=abc"]).unwrap_err();
         assert!(
-            e.message
+            e.text()
                 .starts_with("‘abc’: invalid start value for numerical suffix")
         );
     }
@@ -1770,7 +2083,7 @@ mod tests {
     #[test]
     fn an_extra_operand_is_refused() {
         let e = parse(&["f", "y", "extra"]).unwrap_err();
-        assert!(e.message.starts_with("extra operand ‘extra’"));
+        assert!(e.text().starts_with("extra operand ‘extra’"));
     }
 
     #[test]
@@ -1783,18 +2096,18 @@ mod tests {
     #[test]
     fn an_unknown_short_option_is_getopts_message() {
         let e = parse(&["-z"]).unwrap_err();
-        assert!(e.message.starts_with("invalid option -- 'z'"));
+        assert!(e.text().starts_with("invalid option -- 'z'"));
     }
 
     #[test]
     fn an_ambiguous_long_option_lists_the_candidates() {
         let e = parse(&["--num=3"]).unwrap_err();
         assert!(
-            e.message.starts_with(
+            e.text().starts_with(
                 "option '--num=3' is ambiguous; possibilities: '--number' '--numeric-suffixes'"
             ),
             "{}",
-            e.message
+            e.text()
         );
     }
 

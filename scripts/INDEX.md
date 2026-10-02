@@ -244,6 +244,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/hostload.py` | How much CPU this host will give a process right now -- measured, not assumed. |
 | `scripts/hostname-diff.sh` | Differential test: our `hostname` against net-tools `hostname`. |
 | `scripts/id-diff.sh` | id-diff.sh — compare our `id` and `groups` against GNU's, inside WSL. |
+| `scripts/install-diff.sh` | Differential test: our `install` against GNU coreutils 9.4's. |
 | `scripts/install-hooks.sh` | Install this repo's git hooks into the shared .git dir, as trampolines. |
 | `scripts/interleave-diff.sh` | interleave-diff.sh — one question, asked of every utility that answers it: |
 | `scripts/join-diff.sh` | Differential test: our join against GNU join. |
@@ -477,6 +478,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/test-straddle-check.py` | Regression tests for `scripts/straddle-check.py`. |
 | `scripts/test-worktree.sh` | Self-test for `slate_ensure_src` in scripts/lib/worktree.sh. |
 | `scripts/time-diff.sh` | Differential test: our `time` against GNU Time 1.9's `/usr/bin/time`. |
+| `scripts/timeout-diff.sh` | Differential test: our `timeout` against GNU coreutils 9.4's. |
 | `scripts/touch-diff.sh` | Differential test: our `touch` against GNU coreutils'. |
 | `scripts/tr-diff.sh` | Differential test: our tr against GNU tr. |
 | `scripts/truncate-diff.sh` | truncate-diff.sh — compare our `truncate` against the real GNU one, in WSL. |
@@ -508,4 +510,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_498 scripts._
+_500 scripts._

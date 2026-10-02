@@ -141,6 +141,9 @@ printf 'END { print "P2:" NR }\n'                           > p2.awk
 printf '#!/usr/bin/awk -f\nBEGIN { print "shebang" }\n'      > p3.awk
 # A runtime fatal on line 2, so a diagnostic has a file and a line to name.
 printf 'BEGIN { x = 1 }\nBEGIN { print 1/z }\n'              > div.awk
+# A program file whose name is not text, holding a regex that will not
+# compile: the name is printed in gawk's location prefix as it is.
+printf 'BEGIN { x = 1 }\n/a(/\n'                                 > "$(printf 'bad\377re.awk')"
 # A backslash-newline inside a string on line 2: fatal under --posix.
 printf 'BEGIN { x = 1 }\nBEGIN { print "a\\\nb" }\n'          > bsnl.awk
 
@@ -716,6 +719,15 @@ BEGIN { y = f(1)
   print 1/z }'
 fmsg_case -f div.awk
 fmsg_case -f p1.awk -f div.awk
+# Every name gawk prints with `%s` -- a program file, an input file, a `-v`
+# argument, a redirection -- is printed as given, bytes and all.
+fmsg_case -f "$(printf 'bad\377re.awk')"
+fmsg_case -f "$(printf 'no\377such.awk')"
+fmsg_case '{ print }' "$(printf 'no\377such.txt')"
+# (A usage error is compared by presence: gawk's usage is its own long help.)
+file_case -v "$(printf 'x\377')" 'BEGIN { print "x" }'
+fmsg_case -v "$(printf '\377=1')" 'BEGIN { print "x" }'
+fmsg_case "$(printf 'BEGIN { print "x" > "/nonexistent/\377" }')"
 fmsg_case '
 NR == 2 && 1/z { print }' abc.txt
 fmsg_case '{ x = 1 }

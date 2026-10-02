@@ -48,14 +48,15 @@
 # stdout and the exit status, byte for byte, always.
 #
 # stderr text is compared **by default**, which is the change from the old
-# harness — it compared presence only, for every case. The reason it gave is
-# real but narrow: the wording of a *pattern* error comes from glibc's regcomp
-# on GNU's side and from `ere` on ours, and matching glibc's phrasing would fit
-# us to its parser's internals rather than to grep. That argument covers about
-# fifteen cases. It does not cover `grep: /nonexistent: No such file or
-# directory`, or `grep: invalid max count`, or an unknown-option diagnostic,
-# which are plain reports a script may reasonably grep for and which nothing
-# here had ever checked.
+# harness — it compared presence only, for every case. The reason it gave was
+# real but narrow: the wording of a *pattern* error came from glibc's regcomp
+# on GNU's side and from `ere` on ours. That covered about fifteen cases, and no
+# longer holds even for them: `ere` carries glibc's code for every refusal
+# (`EreError::message`), grep prints that sentence as upstream does, and those
+# cases are compared word for word like the rest. It never covered `grep:
+# /nonexistent: No such file or directory`, or `grep: invalid max count`, or an
+# unknown-option diagnostic, which are plain reports a script may reasonably
+# grep for and which nothing here had ever checked.
 #
 # So the rule is inverted: text is pinned unless a case opts out with `~`.
 #
@@ -166,6 +167,8 @@ printf 'a\nb'                                   > nonl
 printf 'bin\0ary\nplain\n'                      > binfile
 printf 'foo\0bar\0foo bar\0'                    > zsep
 printf 'foo\n\nqux\n'                           > pats
+# Two lines that will not compile, one of them twice.
+printf 'ok\n[\nfine\n\\(\n[\n'                  > badpats
 printf 'caf\303\251\nCAF\303\211\ncafe\n'       > accent
 # What a backslash can be taken to mean: a dot or a backslash, a `t` or a tab,
 # `]` or `\]`, `ax` or `\x`, `w\-` and `ab_`, and the letters `n` and `0`.
@@ -440,11 +443,26 @@ grep '\(a\)\1' braces
 grep '\(a\)b' braces
 grep '\.' braces
 grep '\\' braces
-~glibc regcomp's wording, not grep's|grep 'a[' braces
-~glibc regcomp's wording, not grep's|grep 'a\{2' braces
-~glibc regcomp's wording, not grep's|grep 'a\{2,1\}' braces
-~glibc regcomp's wording, not grep's|grep '\(a' braces
-~glibc regcomp's wording, not grep's|grep 'a\)' braces
+grep 'a[' braces
+grep 'a\{2' braces
+grep 'a\{2,1\}' braces
+grep '\(a' braces
+grep 'a\)' braces
+grep '[' braces
+grep '[[:foo:]]' braces
+grep '[[:alpha:]' braces
+grep '\1' braces
+grep 'a\' braces
+grep 'a\{x\}' braces
+# Every pattern that will not compile is refused, each once, in the order the
+# command line gave them -- `-e` and `-f` interleaved -- a `-f` line named
+# `FILE:LINE:`, and nothing searched.
+grep -e '[' -e '\(' -e '[' braces
+grep -f badpats braces
+grep -f badpats -e '\(a' braces
+grep -e '\(a' -f badpats braces
+grep -E -f badpats braces
+printf 'a\n\\(\n' | grep -f - braces
 grep '*a' braces
 grep '\w' mixed
 grep '\W' words
@@ -583,13 +601,16 @@ grep -E 'a{' braces
 grep -E '{b}' braces
 grep -E 'a{,}' braces
 # A well-formed-looking but wrong interval stays an error in both dialects.
-~glibc regcomp's wording, not grep's|grep -E 'a{}' braces
-~glibc regcomp's wording, not grep's|grep -E 'a{1,2,3}' braces
-~glibc regcomp's wording, not grep's|grep -E 'a{2,1}' braces
-~glibc regcomp's wording, not grep's|grep -E 'a{99999999}' braces
-~glibc regcomp's wording, not grep's|grep -E 'a(' braces
-~glibc regcomp's wording, not grep's|grep -E 'a)' braces
-~glibc regcomp's wording, not grep's|grep -E 'a[' braces
+grep -E 'a{}' braces
+grep -E 'a{1,2,3}' braces
+grep -E 'a{2,1}' braces
+grep -E 'a{99999999}' braces
+grep -E 'a(' braces
+grep -E 'a)' braces
+grep -E 'a[' braces
+grep -E '[' braces
+grep -E '(' braces
+grep -E 'a\' braces
 # GNU is two engines here — at the start of an expression glibc regcomp skips
 # the offending token while dfa.c makes it a literal — so these exit 1 with no
 # diagnostic. They were written as expected-to-differ and turned out to agree:
@@ -1213,6 +1234,11 @@ GREP_COLORS='rv:sl=33:cx=34' grep --color=always -v foo words
 GREP_COLORS='rv:sl=33:cx=34' grep --color=always foo words
 GREP_COLORS='zz=1' grep --color=always foo words
 GREP_COLORS='ms=zz' grep --color=always foo words
+# ...and a malformed item ends the reading there: nothing after it is applied.
+GREP_COLORS='ms=01;3x:fn=35' grep --color=always -H foo words
+GREP_COLORS='ms=1=2:fn=35' grep --color=always -H foo words
+GREP_COLORS='=01:fn=35' grep --color=always -H foo words
+GREP_COLORS='fn=35:ms=zz:ln=33' grep --color=always -Hn foo words
 GREP_COLORS='' grep --color=always foo words
 # A value capability with no `=` is *ignored*, not read as "set it to empty":
 # `ms` leaves the default highlight alone where `ms=` removes it. The two
@@ -1257,9 +1283,19 @@ GREP_COLORS='sl=33' grep --color=always -TnbHZ HIT w99
 GREP_COLOR='01;35' grep --color=always foo words
 # An empty one is not a setting: no warning, and the default highlight stands.
 GREP_COLOR='' grep --color=always foo words
+# Only digits and `;` are a GREP_COLOR at all; anything else is ignored in
+# silence -- the default highlight, and no warning.
+GREP_COLOR=$'01;3\xff' grep --color=always foo words
+GREP_COLOR='0x1' grep --color=always foo words
+GREP_COLOR='red' grep --color=always foo words
 # GREP_COLOR loses to a GREP_COLORS that names the same capability, and neither
 # is read at all when colour is off — the deprecation warning included.
 GREP_COLOR='01;35' GREP_COLORS='ms=01;36' grep --color=always foo words
+# The warning is for a GREP_COLOR still in effect once GREP_COLORS is read:
+# `mt=` replaces both match colours and silences it, `mc=` alone does not.
+GREP_COLOR='01;35' GREP_COLORS='mt=01;36' grep --color=always foo words
+GREP_COLOR='01;35' GREP_COLORS='mc=01;36' grep --color=always -C 1 HIT ctx
+GREP_COLOR='01;35' GREP_COLORS='ms=:mc=' grep --color=always foo words
 GREP_COLOR='01;35' grep foo words
 GREP_COLOR='01;35' grep --color=never foo words
 # `--color=` with a word that is none of the three is not an error: GNU sets

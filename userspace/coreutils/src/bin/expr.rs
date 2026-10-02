@@ -63,9 +63,8 @@
 //! | Case | Ours | GNU |
 //! |---|---|---|
 //! | `:` against a byte that is not valid UTF-8 | the byte is data; `.` matches it | the byte stops the match dead |
-//! | the text of a bad-pattern diagnostic | `ere`'s wording | `regcomp`'s wording |
 //!
-//! The first is a place where **GNU disagrees with itself** and we do not.
+//! It is a place where **GNU disagrees with itself** and we do not.
 //! Measured on GNU expr 9.4 under `C.UTF-8`, with `$raw` holding the three
 //! bytes `a`, `0xff`, `b`: `expr length "$raw"` answers `3` and `expr index
 //! "$raw" b` answers `3`, so its string half calls the undecodable byte a
@@ -77,15 +76,15 @@
 //! is the only reading under which `expr "$path" : '.*/\(.*\)'` still works on
 //! a path this filesystem allows — every byte but `/` and NUL.
 //!
-//! The second stays: `regcomp`'s messages are glibc's internal error taxonomy,
-//! and reproducing them would fit our engine to glibc rather than to expr.
-//!
-//! Two rows that used to be here are gone because they stopped being true.
+//! Three rows that used to be here are gone because they stopped being true.
+//! A pattern that will not compile is reported in glibc's words now --
+//! `expr: Unmatched ( or \(` -- because `ere` carries glibc's code for every
+//! refusal (`EreError::message`), which is what upstream prints.
 //! Backreferences (`\(a\)\1`) were the Pike VM's one real limitation and are
 //! now supported — see `known-issues.md`, fixed 2026-08-18 — and a stacked
-//! quantifier (`a**`) is now folded exactly as GNU folds it. Both were caught
-//! by `expr-diff.sh` reporting them as XPASS once it was measuring against real
-//! GNU expr rather than MSYS2's.
+//! quantifier (`a**`) is now folded exactly as GNU folds it. Those two were
+//! caught by `expr-diff.sh` reporting them as XPASS once it was measuring
+//! against real GNU expr rather than MSYS2's.
 
 use coreutils::diag;
 use coreutils::stdfd;
@@ -286,7 +285,10 @@ fn to_int(v: &[u8]) -> Result<BigInt, Fail> {
     if !looks_like_integer(v) {
         return Err(Fail("non-integer argument".to_string()));
     }
-    Ok(BigInt::from_str(&String::from_utf8_lossy(v)))
+    // `looks_like_integer` has just checked it is ASCII digits, so this decode
+    // cannot fail; if it ever did, the honest answer is the same refusal.
+    let text = std::str::from_utf8(v).map_err(|_| Fail("non-integer argument".to_string()))?;
+    Ok(BigInt::from_str(text))
 }
 
 /// A value as a machine integer for `substr`'s position and length, saturating
@@ -589,8 +591,11 @@ fn colon(subject: &[u8], pattern: &[u8]) -> Result<Str, Fail> {
     }
     // coreutils' basic syntax: no `RE_CONTEXT_INVALID_DUP` and no
     // `RE_NO_EMPTY_RANGES`, so `a**` and `[z-a]` both compile (measured).
+    // A pattern that will not compile is `die (EXPR_INVALID, 0, "%s",
+    // errmsg)` upstream, where `errmsg` is what `re_compile_pattern` returned:
+    // glibc's sentence, and nothing else -- `expr: Unmatched ( or \(`.
     let re = ere::bre::compile_syntax(pattern, false, ere::bre::BreSyntax::COREUTILS)
-        .map_err(|e| Fail(String::from_utf8_lossy(&e.detail).into_owned()))?;
+        .map_err(|e| Fail(e.message().to_string()))?;
     // A search that gave up is neither a match nor a non-match. `expr` is used
     // for control flow — `expr "$f" : 'lib' >/dev/null || exit` — so reporting
     // it as "no match" would take the failure branch on a question we never
@@ -881,8 +886,12 @@ mod tests {
         // start still applies.
         assert_eq!(eval(&["abcabcx", ":", "\\(abc\\)\\1"]), "abc");
         // A reference to a group that does not exist is still a diagnostic,
-        // not a literal digit — `\2` must not quietly match a `2`.
-        assert!(eval_err(&["a2", ":", "\\(a\\)\\2"]).contains("backreference"));
+        // not a literal digit — `\2` must not quietly match a `2` — and it is
+        // glibc's sentence, as upstream prints it.
+        assert_eq!(
+            eval_err(&["a2", ":", "\\(a\\)\\2"]),
+            "Invalid back reference"
+        );
     }
 
     #[test]

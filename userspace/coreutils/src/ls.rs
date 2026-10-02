@@ -88,7 +88,7 @@ use crate::errmsg::strerror;
 use crate::fnmatch::{Flags, fnmatch};
 use crate::getopt::{self, Opt, Program, Takes};
 use crate::human::{Opts, default_block_size, human_readable};
-use crate::pathname::{base_len, last_component, last_component_offset};
+use crate::pathname::{file_name_concat, last_component};
 use crate::quote::{Mb, Style, next_mb, os_bytes, quote, quoteaf, quotef};
 #[cfg(unix)]
 use crate::stdfd::{self, Stream};
@@ -2061,39 +2061,6 @@ fn full_name_for(dirname: &[u8], name: &[u8]) -> Vec<u8> {
     }
 }
 
-/// gnulib's `file_name_concat`, which is *not* [`attach`].
-///
-/// `ls` joins a directory to an entry two different ways on purpose, and the
-/// difference is visible: `attach` builds the path handed to `stat`, and drops
-/// a `dirname` of `.` so an error reads `cannot access 'x'`; this one builds
-/// the name a recursive listing will *print*, and keeps it, so `ls -R .`
-/// heads the subdirectory `./dirA`. Measured, GNU ls 9.4.
-///
-/// The dir is truncated to the end of its last component, so a trailing run of
-/// slashes collapses: `ls -R 'dirA//'` heads `dirA//` — the operand, printed
-/// verbatim — but its children `dirA/sub1`. The `.` separator is gnulib's
-/// answer to joining the root to an absolute base: `/` + `/foo` is `/./foo`,
-/// because `//foo` names a different file on some POSIX systems.
-fn file_name_concat(dir: &[u8], base: &[u8]) -> Vec<u8> {
-    let dirbase_at = last_component_offset(dir);
-    let dirbaselen = base_len(dir.get(dirbase_at..).unwrap_or_default());
-    let dirlen = dirbase_at.saturating_add(dirbaselen);
-    let sep = if dirbaselen == 0 {
-        // The dir is a filesystem root.
-        (base.first() == Some(&b'/')).then_some(b'.')
-    } else {
-        let ends_in_slash = dirlen
-            .checked_sub(1)
-            .and_then(|last| dir.get(last))
-            .is_some_and(|&c| c == b'/');
-        (!ends_in_slash && base.first() != Some(&b'/')).then_some(b'/')
-    };
-    let mut out = dir.get(..dirlen).unwrap_or_default().to_vec();
-    out.extend(sep);
-    out.extend_from_slice(base);
-    out
-}
-
 /// GNU's `basename_is_dot_or_dotdot`, the guard that stops `-R` recursing
 /// through `./././.` forever.
 fn basename_is_dot_or_dotdot(name: &[u8]) -> bool {
@@ -2218,6 +2185,14 @@ fn extract_dirs_from_files(
             continue;
         }
         let name = match dirname {
+            // gnulib's `file_name_concat`, which is *not* `attach`: `ls` joins
+            // a directory to an entry two ways on purpose, and the difference
+            // is visible. `attach` builds the path handed to `stat` and drops
+            // a `dirname` of `.`, so an error reads `cannot access 'x'`; this
+            // builds the name a recursive listing *prints* and keeps it, so
+            // `ls -R .` heads the subdirectory `./dirA`, and a trailing run of
+            // slashes collapses: `ls -R 'dirA//'` heads `dirA//` but its
+            // children `dirA/sub1`. Measured, GNU ls 9.4.
             Some(dir) if f.name.first() != Some(&b'/') => file_name_concat(dir, &f.name),
             _ => f.name.clone(),
         };
@@ -3081,7 +3056,7 @@ enum Funky {
 /// * **Octal and hex wrap in a byte.** Upstream accumulates into a `char`, so
 ///   `\501` is `(('5' << 3) + 0) << 3 + 1` truncated — the arithmetic is done
 ///   on the byte, not on a wide integer that is later checked.
-fn get_funky_string(src: &[u8], equals_end: bool) -> Option<(Vec<u8>, usize)> {
+pub fn get_funky_string(src: &[u8], equals_end: bool) -> Option<(Vec<u8>, usize)> {
     let mut out = Vec::new();
     let mut p = 0usize;
     let mut num: u8 = 0;

@@ -27,7 +27,9 @@ WHY IT IS A RATCHET AND NOT A GATE
 ----------------------------------
 Thirteen modules are Linux-only as this is written and all thirteen are
 deliberate -- `ipc::epoll` has no native syscall number on purpose, because this
-system uses channels. Failing outright would block all three lanes over state
+system uses channels. (Ten, since 2026-10-02: three of the thirteen were this
+check misreading `use crate::x::{self, ...}`, and native code reached them all
+along -- see the end of `BASELINE`.) Failing outright would block all three lanes over state
 none of them created, and a gate that does that is a gate that gets bypassed.
 
 It was fourteen until 2026-09-10, when the fourteenth -- `fs::nameservice`, pinned
@@ -135,20 +137,14 @@ BASELINE: dict[str, str] = {
     # Zero native syscall numbers each, on purpose: readiness and notification
     # here are channels, not descriptors you poll.
     "ipc::epoll": "no native epoll by design -- channels, not a readiness fd",
-    "ipc::eventfd": "no native eventfd by design -- channels carry wakeups",
     "ipc::inotify": "no native inotify by design -- fs watches are a service",
     "ipc::signalfd": "no native signalfd by design -- signals are not fds here",
     "ipc::memfd": "no native memfd by design -- anonymous memory is shm + caps",
-    "ipc::pipe": "native pipes exist; only fcntl's F_GETPIPE_SZ/F_SETPIPE_SZ "
-    "and pidfd_getfd reach this module and nothing native does",
     # --- a compatibility shim over a stack native code reaches elsewhere ----
     # 46 native net handlers exist; they reach other modules. linux.rs carries
     # its own BSD-sockets layer, which is the point of a compatibility table.
     "net::socket": "linux.rs's own BSD-sockets shim; native net uses SYS_NET_*",
     "net::netstack_client": "same shim; native net reaches the stack elsewhere",
-    # --- plumbing, not a capability -----------------------------------------
-    "mm::page_table": "vmsplice/getrusage read page tables; not a capability a "
-    "native program would ask for by number",
     # --- Linux-specific thread machinery ------------------------------------
     "proc::thread_clone": "rseq, robust futex lists and prctl are Linux TLS/futex "
     "machinery with no native equivalent intended",
@@ -163,6 +159,18 @@ BASELINE: dict[str, str] = {
     # what said so, on the same change that fixed it. That is the half of a
     # ratchet nobody remembers to build: an exemption list that cannot notice
     # when its exemptions stop being true stops describing the tree.
+    #
+    # --- REMOVED 2026-10-02: three entries that were never true -------------
+    # `ipc::eventfd` ("no native eventfd by design"), `ipc::pipe` ("nothing
+    # native reaches this module") and `mm::page_table` ("not a capability a
+    # native program would ask for") were pinned on this check's own blind
+    # spot: `use_aliases` skipped the `self` in
+    # `use crate::ipc::eventfd::{self, EventFdHandle};`, so every bare
+    # `eventfd::...` call in a native handler went unresolved. Eight native
+    # SYS_EVENTFD_* syscalls, twelve SYS_PIPE_*, and SYS_MMAP and
+    # SYS_IO_RING_SETUP reach those modules. The same blind spot reported
+    # `ipc::service` as Linux-only when the slate channel calls (Linux 1000-1005)
+    # first reached it, with six native SYS_SERVICE_* syscalls wired.
 }
 
 
@@ -199,7 +207,15 @@ def use_aliases(src: str) -> dict[str, str]:
     for base, names in USE_GROUP.findall(src):
         for n in names.split(","):
             n = n.strip().split(" as ")[0].strip()
-            if n and n != "self":
+            if n == "self":
+                # `use crate::ipc::service::{self, ServiceListenerHandle};`
+                # names the module itself, as `service`. Skipping it hid every
+                # `service::register(...)` in a native handler, so `ipc::service`
+                # read as Linux-only the day the Linux table first reached it
+                # (2026-10-02, the slate channel calls) -- while six native
+                # service syscalls were wired.
+                out[base.split("::")[-1]] = base
+            elif n:
                 out[n] = base + "::" + n
     return out
 
@@ -280,6 +296,29 @@ def self_test(repo: pathlib.Path) -> int:
     """
     failures = 0
     _native, only = analyse(repo)
+
+    # The import forms a handler's module calls are resolved through. The
+    # `self` in a group is the one that was missed: it hid every native
+    # eventfd, pipe and service syscall from this check until 2026-10-02.
+    aliases = use_aliases(
+        "use crate::ipc::futex;\n"
+        "use crate::ipc::service::{self, ServiceListenerHandle};\n"
+        "use crate::ipc::channel::{Message, ChannelHandle as Ch};\n"
+    )
+    for name, want in (
+        ("futex", "ipc::futex"),
+        ("service", "ipc::service"),
+        ("ServiceListenerHandle", "ipc::service::ServiceListenerHandle"),
+        ("Message", "ipc::channel::Message"),
+        ("ChannelHandle", "ipc::channel::ChannelHandle"),
+    ):
+        if aliases.get(name) != want:
+            print(
+                f"selftest FAIL: use_aliases resolves {name!r} to "
+                f"{aliases.get(name)!r}, not {want!r}",
+                file=sys.stderr,
+            )
+            failures += 1
 
     bad = calibration_failures(only)
     if bad:

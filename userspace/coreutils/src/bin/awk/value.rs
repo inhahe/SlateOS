@@ -185,40 +185,45 @@ pub fn c_long(d: f64) -> i64 {
     l
 }
 
-/// Render a number as awk renders it: as an integer when it is one, and through
-/// `fmt` (CONVFMT or OFMT) when it is not.
+/// Render a number as gawk's `format_val` does, for `CONVFMT` (a string
+/// conversion) or `OFMT` (`print`).
 ///
-/// The integer case is not an optimisation — `print 1/1` must say `1`, not
-/// `1.000000` and not `1e+00`. The magnitude bound is where an `f64` stops
-/// being able to name consecutive integers; past it, `%d` would be printing
-/// digits it does not actually have.
+/// * An infinity or a NaN is `+inf`, `-inf`, `+nan` or `-nan`: gawk's own
+///   spelling, sign always shown, not C's.
+/// * An integral value within a C `long` is `%d` of it -- `print 1/1` says
+///   `1`, not `1.000000` -- and one past that range is `%.0f`, every digit:
+///   `print 2^63` is `9223372036854775808` and `print 1e30` is
+///   `1000000000000000019884624838656`, where `%.6g` would have rounded them
+///   away.
+/// * Anything else goes through `fmt`.
 #[must_use]
 pub fn num_to_str(n: f64, fmt: &[u8]) -> Str {
-    if n.is_nan() {
-        return if n.is_sign_negative() {
-            b"-nan".to_vec()
-        } else {
-            b"nan".to_vec()
+    if !n.is_finite() {
+        let word: &[u8] = match (n.is_nan(), n.is_sign_negative()) {
+            (true, true) => b"-nan",
+            (true, false) => b"+nan",
+            (false, true) => b"-inf",
+            (false, false) => b"+inf",
         };
+        return word.to_vec();
     }
-    if n.is_infinite() {
-        return if n < 0.0 {
-            b"-inf".to_vec()
-        } else {
-            b"inf".to_vec()
-        };
-    }
+    let t = n.trunc();
+    // `double_to_int(n) != n || val <= LONG_MIN || val >= LONG_MAX`, where
+    // LONG_MAX as a double is 2^63 exactly.
+    const LONG_LIMIT: f64 = 9_223_372_036_854_775_808.0;
     // Exact on purpose: whether `n` has a fractional part at all.
     #[allow(clippy::float_cmp)]
-    let integral = n == n.trunc();
-    if integral && n.abs() < 1e18 {
-        // The cast is exact: the guard above put `n` inside i64's range and
-        // established that it has no fractional part.
-        #[allow(clippy::cast_possible_truncation)]
-        let i = n as i64;
-        return format!("{i}").into_bytes();
+    let integral = t == n;
+    if !integral || t <= -LONG_LIMIT || t >= LONG_LIMIT {
+        if integral {
+            return format!("{n:.0}").into_bytes();
+        }
+        return crate::fmt::sprintf_one_number(fmt, n);
     }
-    crate::fmt::sprintf_one_number(fmt, n)
+    // In range by the test above, so the cast is exact; `-0.0` is `0`.
+    #[allow(clippy::cast_possible_truncation)]
+    let i = t as i64;
+    i.to_string().into_bytes()
 }
 
 /// Whether the whole string is a number, and if so which — the strnum test.
@@ -409,6 +414,27 @@ mod tests {
         assert_eq!(num_to_str(1e17, b"%.6g"), b"100000000000000000");
         assert_eq!(num_to_str(0.5, b"%.6g"), b"0.5");
         assert_eq!(num_to_str(1.0 / 3.0, b"%.6g"), b"0.333333");
+        // Past a `long`, every digit, as gawk's `%.0f` writes them.
+        assert_eq!(num_to_str(1e18, b"%.6g"), b"1000000000000000000");
+        assert_eq!(
+            num_to_str(9_223_372_036_854_775_808.0, b"%.6g"),
+            b"9223372036854775808"
+        );
+        assert_eq!(
+            num_to_str(-9_223_372_036_854_775_808.0, b"%.6g"),
+            b"-9223372036854775808"
+        );
+        assert_eq!(
+            num_to_str(1e30, b"%.6g"),
+            b"1000000000000000019884624838656"
+        );
+        // gawk's own spelling of the values that are not numbers.
+        assert_eq!(num_to_str(f64::INFINITY, b"%.6g"), b"+inf");
+        assert_eq!(num_to_str(f64::NEG_INFINITY, b"%.6g"), b"-inf");
+        assert_eq!(num_to_str(f64::NAN, b"%.6g"), b"+nan");
+        assert_eq!(num_to_str(-f64::NAN, b"%.6g"), b"-nan");
+        // A subnormal, through CONVFMT, digit for digit.
+        assert_eq!(num_to_str(1e-320, b"%.6g"), b"9.99989e-321");
     }
 
     #[test]

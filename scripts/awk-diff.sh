@@ -1018,6 +1018,72 @@ fmsg_case 'BEGIN { x = 1
 xfail_case 'a multi-character RS is a regex here; gawk --posix uses its first character' \
   abc 'BEGIN { RS = "ab" } { print NR ": " $0 }'
 
+# --- printf, as gawk's format_tree --------------------------------------------
+# Until 2026-10-01 `printf` was a hand-rolled C printf that refused what it did
+# not know, laid floats out from `log10` (so `%.17g` lost its last digit and a
+# subnormal printed as `infe-320`), had no `%a`, and saturated `%d` at a
+# `long`. It is gawk's format_tree now, over Rust's exact float digits.
+#
+# What gawk cannot convert it copies as written; C's length modifiers are fatal
+# under --posix.
+for c in k y q b - . '*' '#' "'" ' ' + 0; do
+  fmsg_case "BEGIN { printf \"[%$c]\\n\", 65 }"
+done
+for c in h l L j t z; do
+  fmsg_case "BEGIN { x = 1
+ printf \"[%${c}d]\\n\", 65 }"
+done
+fmsg_case 'BEGIN { printf "[%5" }'
+fmsg_case 'BEGIN { printf "[%-5" }'
+fmsg_case 'BEGIN { printf "abc%" }'
+fmsg_case 'BEGIN { printf "[%5k]\n", 65 }'
+fmsg_case 'BEGIN { printf "%k %d\n", 7 }'
+fmsg_case 'BEGIN { x = sprintf("[%z]", 65); print x }'
+fmsg_case 'BEGIN { printf "%1$d\n", 5 }'
+# The flags are a state machine: read while the width is open.
+fmsg_case 'BEGIN { printf "[%5-d] [%+ d] [% +d] [%*05d] [%-05d] [%.-3d] [%5.-3d] [%P5d]\n", 42, 42, 42, 8, 3, 4, 7, 8, 7 }'
+fmsg_case 'BEGIN { printf "[%5%] [%-5%] [%%]\n" }'
+# Integers: every digit of %d, two's complement for the unsigned ones, and %g
+# for what does not fit.
+fmsg_case 'BEGIN { printf "%d %d %d\n", 2^53, 2^64, -2^63 }'
+fmsg_case 'BEGIN { x = 2^1024; printf "%d %d %i %x|\n", x, -x, log(-1), x }'
+fmsg_case 'BEGIN { printf "%x %u %o %X\n", -1, -1, -1, 255 }'
+fmsg_case 'BEGIN { printf "%x %.3x %#x\n", 2^70, 2^70, 2^64 - 2048 }'
+fmsg_case 'BEGIN { printf "[%#o] [%#.0o] [%#x] [%.0x] [%#.0x] [%5.0d] [%.0d]\n", 0, 0, 0, 0, 0, 0, 0 }'
+fmsg_case 'BEGIN { printf "[%#08x] [%#8x] [%-#8x] [%08.3d] [%.5d] [%+.5d] [%08d]\n", 255, 255, 255, 7, -42, 42, -42 }'
+fmsg_case 'BEGIN { printf "%d %d %d %d\n", -0.5, 0.5, -1.5, 1e18 }'
+# Floats, digit for digit with glibc.
+fmsg_case 'BEGIN { printf "%.17g %.17g %.17g\n", 7^-21, 1.1^50, 0.1 }'
+fmsg_case 'BEGIN { printf "%g %e %.3g %.3e %f\n", 1e-320, 1e-320, 5e-324, 5e-324, 1e-320 }'
+fmsg_case 'BEGIN { printf "%.0f %.0f %.0f %.0f %.1f %.2f\n", 0.5, 1.5, 2.5, 3.5, 0.25, 0.125 }'
+fmsg_case 'BEGIN { printf "[%#g] [%#.0f] [%#.0e] [%08.2f] [%-8.2f] [%+.3e] [% .3e]\n", 1, 1, 1, -1.5, 1.5, 12345, 12345 }'
+fmsg_case 'BEGIN { x = 2^1024; printf "[%f] [%F] [%e] [%E] [%g] [%G] [%05f] [%-6f] [%+f]\n", x, -x, log(-1), -log(-1), x, -x, x, x, x }'
+fmsg_case 'BEGIN { printf "%g %g %g %g %g %g\n", 100000, 1000000, 0.0001, 0.00001, 123456789, 1e100 }'
+fmsg_case 'BEGIN { printf "%.10g %.20g %.0g %#.3g %G\n", 1/3, 2/3, 123, 1, 1e-10 }'
+# %a, as glibc writes hexadecimal floating point.
+fmsg_case 'BEGIN { printf "[%a] [%A] [%a] [%a] [%a] [%.1a] [%#a] [%a]\n", 65, 65, 1, 0, -0.5, 1 + 3/32, 1, 2^-1074 }'
+fmsg_case 'BEGIN { printf "[%.0a] [%.0a] [%.2a] [%10a] [%-10a] [%010a] [%+a]\n", 1.5, 1.9, 1/3, 1, 1, 1, 1 }'
+# %c: a string's first character -- the empty string's NUL, as gawk copies it
+# -- and a number as glibc's wcrtomb writes it.
+run_case abc 'BEGIN { printf "[%c] [%5c] [%-3c]\n", "", "", "abc" }'
+run_case abc 'BEGIN { printf "[%c][%c][%c][%c]\n", -1, 55296, 57343, 1114111 }'
+run_case abc 'BEGIN { printf "[%c][%c][%c][%c]\n", 1114112, 2147483647, 2147483648, 4294967361 }'
+
+# --- numbers as strings, as gawk's format_val -----------------------------------
+# An integral value prints whole within a `long` and through %.0f past it; the
+# values that are not numbers are gawk's +inf, -inf, +nan, -nan.
+fmsg_case 'BEGIN { print int(1e30), int(-1e30), 1e30, 2^63, 2^63 - 1024, 1e18 }'
+fmsg_case 'BEGIN { x = 2^1024; print x, -x, log(-1), -log(-1) }'
+fmsg_case 'BEGIN { x = 2^1024; y = x ""; print y; CONVFMT = "%d"; z = 0.5 ""; print z }'
+fmsg_case 'BEGIN { x = 2^-1074; y = 1e-320; print y; printf "%g %e %.3g\n", y, y, y }'
+fmsg_case 'BEGIN { OFMT = "%.2f"; print 3.14159, 17; x = 3.14159; print x "" }'
+fmsg_case 'BEGIN { x = -0; print x, x "", -0 "" ; y = 0 * -1; print y }'
+fmsg_case 'BEGIN { print exp(1000); print exp(-710); print exp(709) }'
+fmsg_case '{ NR = 1e30; print NR; exit }' abc.txt
+# `^` is gawk's, by repeated squaring.
+fmsg_case 'BEGIN { x = 2; print x^1024, x^-1075, x^-1074, 0^0, (-0)^-1 }'
+fmsg_case 'BEGIN { printf "%.17g %.17g\n", 3^33, 1.1^50 }'
+
 # --- errors -----------------------------------------------------------------
 # Parse errors: only *whether* there was a diagnostic is compared.
 run_case abc '{print'

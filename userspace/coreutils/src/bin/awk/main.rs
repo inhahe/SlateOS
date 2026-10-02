@@ -43,7 +43,7 @@
 //! | [`parse`] | recursive descent, POSIX precedence |
 //! | [`types`] | which names are arrays — decided before the run, because arrays pass by reference |
 //! | [`value`] | the strnum rule: a field that looks like a number compares as one, a program literal never does |
-//! | [`fmt`] | C's `printf` over bytes |
+//! | [`fmt`] | `printf`: gawk's `format_tree` over bytes, on Rust's exact float digits |
 //! | [`io`] | records (three `RS` modes) and redirections |
 //! | [`compile`] | the parsed program to instructions, in gawk's order and with gawk's lines |
 //! | [`interp`] | the running program's state, and the loop that runs the instructions |

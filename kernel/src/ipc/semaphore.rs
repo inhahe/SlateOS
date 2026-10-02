@@ -272,7 +272,10 @@ pub fn wait(handle: SemHandle) -> KernelResult<()> {
         sem.waiters.push_back(sched::current_task_id());
     }
 
-    sched::block_current();
+    sched::block_current_on(crate::wchan::Wait::new(
+        crate::wchan::WaitChannel::Semaphore,
+        handle.raw(),
+    ));
 
     // We were woken.  Two possibilities:
     // 1. signal() removed us from the waiter queue and woke us — a
@@ -406,7 +409,10 @@ pub fn wait_timeout(handle: SemHandle, timeout_ns: u64) -> KernelResult<()> {
             }
         }
 
-        sched::block_current();
+        sched::block_current_on(crate::wchan::Wait::new(
+            crate::wchan::WaitChannel::Semaphore,
+            handle.raw(),
+        ));
 
         // Woken by either signal() or timer.
         // If signal() woke us, it already removed us from the queue

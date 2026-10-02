@@ -565,7 +565,10 @@ pub fn futex_wait_bitset(addr: u64, expected: u32, bitset: u32) -> KernelResult<
     if pid == 0 {
         // Kernel task (boot self-test, etc.): no signal context — park
         // uninterruptibly.  Woken only by futex_wake.
-        sched::block_current();
+        sched::block_current_on(crate::wchan::Wait::new(
+            crate::wchan::WaitChannel::Futex,
+            addr,
+        ));
         note_contention(addr, crate::hpet::elapsed_ns().saturating_sub(blocked_at));
         return Ok(true);
     }
@@ -586,7 +589,10 @@ pub fn futex_wait_bitset(addr: u64, expected: u32, bitset: u32) -> KernelResult<
         return Ok(true);
     }
 
-    sched::block_current();
+    sched::block_current_on(crate::wchan::Wait::new(
+        crate::wchan::WaitChannel::Futex,
+        addr,
+    ));
     crate::proc::signal::deregister_signalfd_waiter(pid, current_task);
     // Every exit below this point has been parked, so the elapsed time is a
     // real blocked interval whether the wake was a futex_wake, a signal or
@@ -722,7 +728,10 @@ pub fn futex_wait_bitset_timeout(
     }
 
     // Block until woken (by futex_wake, the timer, or a signal).
-    sched::block_current();
+    sched::block_current_on(crate::wchan::Wait::new(
+        crate::wchan::WaitChannel::Futex,
+        addr,
+    ));
 
     if pid != 0 {
         crate::proc::signal::deregister_signalfd_waiter(pid, current_task);
@@ -903,7 +912,10 @@ pub fn futex_wait_multiple(keys: &[WaitvKey], timeout_ns: Option<u64>) -> WaitvO
         }
 
         // ---- park ----
-        sched::block_current();
+        sched::block_current_on(crate::wchan::Wait::new(
+            crate::wchan::WaitChannel::Futex,
+            keys.first().map_or(0, |k| k.uaddr),
+        ));
 
         if pid != 0 {
             crate::proc::signal::deregister_signalfd_waiter(pid, current_task);
@@ -1560,6 +1572,17 @@ fn find_pi_owner(wait: sched::task::PiWaitKey) -> Option<TaskId> {
         .map(|o| o.owner_id)
 }
 
+/// The thread that owns the priority-inheritance futex `waiter` is blocked
+/// on, or `None` if it is blocked on no PI futex (a plain futex has no owner
+/// the kernel can see) or the futex has no recorded owner.
+///
+/// For `/proc/<pid>/wchan`'s holder ([`crate::wchan::holder`]). Takes `SCHED`,
+/// then `PI_FUTEX_TABLE`, one after the other: call with neither held.
+#[must_use]
+pub fn pi_owner_of_waiter(waiter: TaskId) -> Option<TaskId> {
+    find_pi_owner(sched::get_blocked_on_pi(waiter)?)
+}
+
 /// Register a task as the PI futex owner of `key`; `uaddr` is the owner's
 /// own virtual address of the word (see [`PiOwner::uaddr`]).
 fn register_pi_owner(key: FutexKey, uaddr: u64, owner_id: TaskId) {
@@ -1891,7 +1914,10 @@ fn lock_pi_inner(addr: u64, timeout_ns: Option<u64>) -> KernelResult<()> {
     // release to respect the PI_FUTEX_TABLE → SCHED lock ordering.
     let mut deboost: Option<(TaskId, Option<u8>)> = None;
     let outcome: KernelResult<()> = loop {
-        sched::block_current();
+        sched::block_current_on(crate::wchan::Wait::new(
+            crate::wchan::WaitChannel::Futex,
+            addr,
+        ));
 
         let mut table = PI_FUTEX_TABLE.lock();
         let idx = key.bucket();
@@ -2642,7 +2668,10 @@ pub fn futex_wait_requeue_pi(
     // SCHED order).
     let mut deboost: Option<(TaskId, Option<u8>)> = None;
     let outcome: KernelResult<()> = loop {
-        sched::block_current();
+        sched::block_current_on(crate::wchan::Wait::new(
+            crate::wchan::WaitChannel::Futex,
+            pi_addr,
+        ));
 
         let mut table = PI_FUTEX_TABLE.lock();
         let pidx = pi_key.bucket();

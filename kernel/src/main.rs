@@ -3984,6 +3984,17 @@ extern "C" fn kernel_main() -> ! {
                 proc::spawn::self_test_pkgconf_on_slateos_libc(),
             );
 
+            // eSpeak NG 1.52, the speech synthesizer, linked against OUR libc.a:
+            // made to speak into a WAV file, and the file judged for format,
+            // length and sound, twice for determinism, and once without its data
+            // (it must refuse). No-op without /bin/espeak-ng and its English data
+            // on the image. See requests/e-a-espeak-ng-needs-a-ring-3-rung.md.
+            selftest::dispatch_debug(
+                "eSpeak NG on SlateOS libc",
+                selftest::Severity::Diagnostic,
+                proc::spawn::self_test_espeak_on_slateos_libc(),
+            );
+
             // Path Z: the full shell-orchestration proof — dash forks + exec's an
             // EXTERNAL real-glibc binary (/bin/emit) with output redirection. Proves
             // dash parses `cmd > file`, fork()s, the child redirects fd 1 + execve()s
@@ -8388,6 +8399,15 @@ extern "C" fn kernel_main() -> ! {
         "Cpu Hotplug",
         selftest::Severity::Diagnostic,
         cpu_hotplug::self_test(),
+    );
+
+    // CPU affinity moves a task off a CPU it may no longer use -- a running
+    // one included -- and refuses a mask with no online CPU. After hotplug
+    // init, so the online mask it checks against is the real one.
+    selftest::dispatch(
+        "Scheduler CPU affinity",
+        selftest::Severity::Integrity,
+        sched::affinity_self_test(),
     );
 
     // NUMA topology detection — parse SRAT or default to UMA.

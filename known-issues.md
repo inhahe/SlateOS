@@ -181235,6 +181235,80 @@ a negative value can be one. Every producer already went through
 `restart_result`, so nothing else changed. The restart self-test now checks
 that 512-516 of either sign and the three native codes are not sentinels.
 
+### A-PROC-PID-FILES-CHECK-NO-READER -- 2026-10-01 -- FIXED the same day (lane A)
+
+**In short:** any program can read what `/proc/<pid>/` says about any other
+program, whoever runs either of them. That includes `environ` (the other
+program's environment variables, where passwords and access tokens are often
+passed), `auxv` and `maps` (where its code and data sit in memory, which
+undoes address randomisation), `io`, the `cwd`/`root`/`exe` links, and since
+2026-10-01 `wchan`. Linux lets only a reader allowed to trace the program
+(the same user, with the program not marked undumpable, or an administrator)
+read those. Nothing is exposed in practice yet -- every process still runs as
+uid 0, the "administrator" who may read them anyway -- but the first login
+service that starts a second user's programs makes this a real leak between
+users.
+
+**Where:** `kernel/src/fs/procfs.rs` -- `generate_pid`, `generate_task` and
+`ProcFs::readlink` serve every file to every reader; `ProcFs::stat` reports
+no owner or mode, so the VFS has nothing to check either.
+
+**Fixed** (design-decisions 1516): one predicate, `pcb::may_inspect`, as
+Linux's `ptrace_may_access(PTRACE_MODE_READ_FSCREDS)`. The reader may inspect
+if it is the kernel, the process itself, or uid 0; or has the target's uid
+and gid while the target is dumpable; or holds a `Process` capability for it
+with `READ`.
+- Refused to anyone else (`EACCES`): `environ`, `auxv`, `maps`, `io`, the
+  `cwd`/`root`/`exe`/`fd/<n>` links, `fd/` and `fdinfo/`.
+- Blanked instead: `wchan` reads `0` and `stat` field 35 is 0, as on Linux.
+- Writing `oom_score_adj` needs the same rule with `WRITE`, and lowering it
+  needs uid 0.
+
+**Still open:** `stat` of these files reports no owner or mode, so
+`ls -l /proc/<pid>` does not show Linux's `0400`. The VFS's directory entry
+has no field for them; the check when a file is generated is the
+enforcement either way.
+
+### A-CPU-AFFINITY-DID-NOT-MOVE-A-RUNNING-THREAD -- 2026-10-01 -- FIXED the same day (lane A)
+
+**In short:** limiting a thread to certain CPUs ("affinity") did not reliably
+take effect, in four ways:
+- A thread that was running when its affinity changed kept running where it
+  was for as long as it stayed busy. The most common case is a thread pinning
+  itself, so the most common use did nothing until the thread next slept.
+- A mask naming only CPUs that are not online could put a task on a CPU's
+  queue that no CPU serves, where it waited forever.
+- New threads, forked children and spawned programs ignored their creator's
+  affinity and could run on any CPU.
+- The Linux calls applied nothing. `sched_setaffinity` reported success and
+  `sched_getaffinity` always answered "every CPU", so no Linux program could
+  pin itself at all.
+
+**Where:** `kernel/src/sched/mod.rs` -- `classify_pick`, which resumed the
+current task in place whatever its mask said; `choose_cpu_for_task`, whose
+fallback took the lowest CPU in the mask whether it was online or not;
+`set_cpu_affinity`, which moved only queued tasks. Also
+`kernel/src/proc/thread.rs`, where every process thread was created with every
+CPU, and `kernel/src/syscall/linux.rs`, `sys_sched_{set,get}affinity`.
+
+**Fixed:**
+- `sched::set_affinity` stores the mask and refuses one with no online CPU.
+  A queued task changes queue at once. A running task moves at its next
+  switch, which is asked for: a caller that moved itself switches before
+  returning, and a task running on another CPU has that CPU asked to
+  reschedule (`request_preempt_on`).
+- The pick moves a current task whose mask forbids its CPU, instead of
+  resuming it there. It does not do so in the idle fallback, where the task's
+  context is still live and another CPU could only hand it back.
+- The fallback CPU choice looks only at online CPUs.
+- A thread takes its creator's mask.
+- The Linux calls read and set the real mask, under the native call's
+  permission rule (design-decisions 1515).
+
+`sched::affinity_self_test` checks both moves on a two-CPU boot: a thread
+pinning itself elsewhere returns there, and a spinning thread on another CPU,
+pinned here, comes here.
+
 ## Lane B: new entries
 
 Lane B (userland) appends new entries at the end of this section, above the

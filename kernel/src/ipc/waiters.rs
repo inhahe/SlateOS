@@ -158,9 +158,14 @@ pub fn deliverable_signal_pending(pid: u64) -> bool {
 /// object's lock and re-evaluate **both** the object state and
 /// [`deliverable_signal_pending`] — a signal wake is reported by the latter,
 /// not by this function's return.
-pub fn park_interruptible(pid: u64, task: TaskId) {
+///
+/// `wait` says what the task waits on, for `/proc/<pid>/wchan`
+/// ([`crate::wchan`]). `#[track_caller]`, so the scheduler's record of where
+/// the task parked names the blocking object's code, not this function.
+#[track_caller]
+pub fn park_interruptible(pid: u64, task: TaskId, wait: crate::wchan::Wait) {
     if pid == 0 {
-        sched::block_current();
+        sched::block_current_on(wait);
         return;
     }
     let deliverable = !crate::proc::signal::blocked(pid);
@@ -171,6 +176,6 @@ pub fn park_interruptible(pid: u64, task: TaskId) {
         crate::proc::signal::deregister_signalfd_waiter(pid, task);
         return;
     }
-    sched::block_current();
+    sched::block_current_on(wait);
     crate::proc::signal::deregister_signalfd_waiter(pid, task);
 }

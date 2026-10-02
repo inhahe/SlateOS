@@ -91683,3 +91683,172 @@ image is the root".
 **Revisit** when the boot test's fixtures and self-tests use the standard
 paths: then the pivot can move to the start of the boot (B), with `/mnt` kept
 as a second name for the image for whatever still uses it.
+
+## 1514. What a task waits on lives on the task, beside its state; `/proc/<pid>/wchan` prints it with its holder
+
+**Date:** 2026-10-01 · **Decided by:** Claude (autonomous) · **Lane:** A
+
+**In short:** `ps`, `top` and the process explorer can show what a stuck
+program is waiting for -- a lock, a pipe, a child, another program -- in a
+column called WCHAN. The kernel had a table meant for this, but nothing ever
+wrote to it, so every program read as "not waiting" and there was no
+`/proc/<pid>/wchan` at all. Now every place in the kernel that puts a thread
+to sleep says what for, the scheduler keeps that next to the thread's
+"blocked" state, and `/proc/<pid>/wchan` prints it in one line -- with *who
+holds* the thing waited on wherever the kernel knows, which is what lane E's
+explorer needs to find deadlocks
+(`requests/e-adf-what-the-process-explorer-still-cannot-ask.md`, part 1).
+
+**What changed:**
+- **Blocking says what for.** `sched::block_current_on(wait)` beside
+  `block_current()`; `ipc::waiters::park_interruptible` takes a `Wait`. The 31
+  direct blocking sites and the 22 that park through `park_interruptible`
+  describe their wait: a futex by its address, a channel, pipe, eventfd or
+  socket by its handle, a child by its pid, a join by the thread. Waits built
+  from timed slices (socket reads) say "socket", not "timer"
+  (`sleep_ms_interruptible_as`).
+- **The record lives on the task.** `Task::wait`, written in the scheduler
+  critical section that sets `Blocked`; `sched::wait_of` reads it and answers
+  "not waiting" for a task in any other state, `stopped` for a suspended one,
+  and `wait` for a blocked one whose blocking code said nothing.
+- **What is published:** `/proc/<pid>/wchan` and
+  `/proc/<pid>/task/<tid>/wchan` (format below); `/proc/<pid>/stat` field 35
+  is 1 while the task waits; the kernel shell's `wchan` lists the same lines;
+  the scheduler's hang dumps print each task's last wait.
+
+The line, with no trailing newline, as Linux's:
+
+```text
+0                                       not waiting
+poll                                    a kind with no argument
+futex 0x7f001000                        a kind and its argument
+channel 12 holder 34                    ... and the process holding the other end
+join 57 holder 34 thread 57             ... and the holding thread, when known
+```
+
+**Alternatives:**
+
+| | What changes | For | Against |
+|---|---|---|---|
+| **A. On the task, under the scheduler lock (chosen)** | the wait is a field of the task, written with `Blocked` | exact: one record per task, and it can never disagree with the state; costs one 16-byte store inside a critical section the park already takes | a reader takes the scheduler lock -- as procfs already does to read the state |
+| B. Fill the existing lock-free table at every park | readers take no lock | | two tasks whose ids differ by 1024 share a slot, so one reads as "unknown"; the record and the state are written apart, so a woken task could read as waiting; two more atomic stores on every park and wake |
+
+**Smaller decisions:**
+
+| decision | alternative | why this one |
+|---|---|---|
+| The holder goes on the same line: `holder <pid>`, then `thread <tid>` | a second line, as the request suggested | Linux's `wchan` is one line with no newline and `ps -o wchan` prints the file as it is -- a newline would break its column. The first token is still the single word Linux tools expect |
+| An argument of 0 is left out | print it | for most kinds 0 means "no argument"; for `child`, plain `child` is "any child" |
+| Holders only where the kernel knows: a channel's recorded peer, a named child, a joined thread, a priority-inheritance futex's owner | guess (the last process to touch a pipe, a plain futex's last locker) | a deadlock analyzer that draws a wrong edge finds a cycle that is not there; a missing edge only hides one |
+| Kernel locks and wait queues report `mutex` with no argument | their address | a kernel address in a file any process reads would defeat address randomisation |
+| A reader who may not inspect the process reads `0` (§1516, added the same day) | refuse, or show everyone | Linux's behaviour: `ps -o wchan` must not fail on other users' processes, and a wait can name a handle or an address in the process |
+
+**Revisit** if the explorer needs holders for pipes and sockets: that means
+recording which processes hold each end, which the kernel does not track
+today.
+
+## 1515. Native CPU affinity: a process or a thread, the signalling rule, and the mask kept as given
+
+**Date:** 2026-10-01 · **Decided by:** Claude (autonomous) · **Lane:** A
+
+**In short:** a program can now ask the kernel to keep a process -- or one of
+its threads -- on particular CPUs, and ask which CPUs another process may use.
+Before this, only the kernel's own debugging shell could pin anything. The
+Linux calls a program would use (`sched_setaffinity`) reported success and
+changed nothing, and `sched_getaffinity` always answered "every CPU". Lane E's
+process explorer asked for the native pair
+(`requests/e-adf-what-the-process-explorer-still-cannot-ask.md`, part 2).
+Lane D routes libc's calls to it. Writing the pair turned up three scheduler
+gaps, all fixed here (`A-CPU-AFFINITY-DID-NOT-MOVE-A-RUNNING-THREAD`).
+
+**What changed:**
+- `SYS_SCHED_SET_AFFINITY` (1100) / `SYS_SCHED_GET_AFFINITY` (1101):
+  `arg0` a process id, or with `SCHED_AFFINITY_THREAD` a thread id, and 0 for
+  the caller; `arg1` the mask, or a pointer for the get; `arg2` the flag.
+- The Linux `sched_setaffinity` / `sched_getaffinity` now apply and report
+  the real mask, to the thread `pid` names.
+- `sched::set_affinity` moves the task at once. A queued task changes queue.
+  A task running elsewhere has its CPU asked to reschedule. A caller that
+  moved itself switches before returning.
+
+**Alternatives:**
+
+| | What changes | For | Against |
+|---|---|---|---|
+| **A. Who may set: the signalling rule -- the process itself, its parent, or a `Process` capability holder (chosen)** | the same people who may stop or kill a process may pin it | the request asked for it; it is how this kernel already decides who may act on another process, with no ambient authority; one rule for both ABIs | a Linux program running as the same user as its target, but neither its parent nor holding a capability, gets `EPERM` where Linux would let it |
+| B. Linux's rule: same user id, or `CAP_SYS_NICE` | a user can pin any of their processes | what Linux programs expect | ambient authority, which the design rules out; every process here is uid 0 today, so it would let anything pin anything |
+
+**Smaller decisions:**
+
+| decision | alternative | why this one |
+|---|---|---|
+| The native call takes a process (every thread) or, with a flag, a thread | a thread only, as Linux's `pid` is | the explorer pins processes; a process's threads would otherwise need pinning one by one, racing the threads it starts |
+| Reading is open to every process | the setting rule | Linux checks nothing here, and `/proc/<pid>/status`'s `Cpus_allowed` already publishes it |
+| The mask is kept as given; it must name a CPU online now; reads report it less the offline CPUs | keep only its online part | as Linux: a CPU that comes online later is used by a mask that named it |
+| New threads, forked children and spawned processes take their creator's mask | every CPU | as Linux's `clone`, `fork` and `posix_spawn` |
+| The flags are checked first, then the target (`NoSuchProcess`), then permission, then the mask | the mask first | Linux's order (`ESRCH`, `EPERM`, `EINVAL`); a refused mask leaves a process unchanged, never half moved |
+| No process may move a kernel task | allow it to whoever may signal the kernel | kernel tasks belong to no process, so the rule has nobody to ask; Linux refuses its per-CPU threads too |
+
+**Revisit** when user identities exist: whether a same-user rule should
+join A's three (as `A-PROC-PID-FILES-CHECK-NO-READER` will decide for
+`/proc`).
+
+## 1516. Who may read what `/proc` says of a process: Linux's tracing rule, plus a capability
+
+**Date:** 2026-10-01 · **Decided by:** Claude (autonomous) · **Lane:** A
+
+**In short:** `/proc/<pid>/` lets one program look inside another: its
+environment variables, which often carry passwords and access tokens; where
+its code and data sit in memory, which defeats address randomisation; what it
+has open; what it is waiting on. Until now any program could read all of it
+for any other. Now the private parts need the same permission Linux asks: the
+reader is the program itself, runs as the same user (while the program
+allows it), or is the administrator. This kernel adds one more way in -- a
+capability for the process. Nothing changes for anyone today, because every
+program still runs as uid 0, the administrator. It matters from the first
+login that starts a second user's programs.
+
+**What changed:**
+- `pcb::may_inspect(reader, target)` decides it (and `pcb::may_access` for
+  a change, asking `WRITE` of the capability instead of `READ`).
+- **Refused** (`EACCES`) to a reader who may not inspect:
+  - reading `environ`, `auxv`, `maps` and `io`;
+  - the `cwd`, `root`, `exe` and `fd/<n>` links;
+  - listing `fd/` and `fdinfo/`, and reading `fdinfo/<n>`.
+- **Blanked** instead: `wchan` reads `0` and `stat` field 35 is 0, as on
+  Linux.
+- **Open to all**, as on Linux: `status`, `cmdline`, `stat` (all but field
+  35), `statm`, `limits`, `mounts`, `cgroup` and the rest.
+- **Writing `oom_score_adj`** needs `may_access(..., WRITE)`, and lowering it
+  needs uid 0 -- Linux's `CAP_SYS_RESOURCE` for making a process the last one
+  the out-of-memory killer picks.
+
+**The rule**, in order. The reader may inspect if any of these holds:
+- it is the kernel;
+- it is the target;
+- it runs as uid 0, Linux's `CAP_SYS_PTRACE`;
+- it has the target's uid and gid, and the target is dumpable
+  (`PR_SET_DUMPABLE` 1);
+- it holds a `Process` capability for the target with `READ`.
+
+A kernel task belongs to no process: only uid 0 and the kernel may inspect
+one.
+
+**Alternatives:**
+
+| | What changes | For | Against |
+|---|---|---|---|
+| **A. Linux's rule, plus a `Process` capability (chosen)** | the files Linux guards, guarded as Linux guards them; a capability opens a process to a holder of another identity | Linux programs and users meet the behaviour they expect; the capability gives a non-root process explorer a way in without ambient authority | two ways in, identity and capability, where the design leans to capabilities alone |
+| B. Capabilities only (the signalling rule) | a process sees only itself, its children, and what it holds a capability for | no ambient authority | `ps e`, `top`, `lsof`, debuggers and the explorer cannot see a user's own processes without a capability for each; nothing grants those today |
+| C. Leave procfs open | nothing | no work | a second user reads the first one's tokens from `environ` |
+
+**Smaller decisions:**
+
+| decision | alternative | why this one |
+|---|---|---|
+| Checked when the file is generated, so `stat` of a guarded file reports 0 bytes | report its real size | the size of another process's environment is itself a leak, if a small one |
+| `wchan` and field 35 blank rather than refuse | refuse | Linux prints `0`, and `ps -o wchan` must not fail on other users' processes |
+| No per-file owner or mode in `stat` yet | report Linux's owner and mode | the VFS has no field for them here; the check at generation is the enforcement either way. `ls -l /proc/<pid>` shows no `0400` until it does |
+
+**Revisit** when users other than uid 0 exist, and whether a parent should
+inspect its children without a capability (Linux does not).

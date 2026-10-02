@@ -414,7 +414,11 @@ pub fn write(handle: PipeHandle, data: &[u8]) -> KernelResult<usize> {
         // Block (interruptibly for user processes).  The reader wakes us when it
         // drains data; a signal wakes us via the registered signal-waiter.
         super::stats::pipe_write_block();
-        park_interruptible(pid, task);
+        park_interruptible(
+            pid,
+            task,
+            crate::wchan::Wait::new(crate::wchan::WaitChannel::Pipe, handle.raw()),
+        );
 
         // Re-check on wake (loop back to top).
     }
@@ -536,7 +540,11 @@ pub fn read(handle: PipeHandle, buf: &mut [u8]) -> KernelResult<usize> {
         // Block (interruptibly for user processes).  The writer wakes us when it
         // writes data; a signal wakes us via the registered signal-waiter.
         super::stats::pipe_read_block();
-        park_interruptible(pid, task);
+        park_interruptible(
+            pid,
+            task,
+            crate::wchan::Wait::new(crate::wchan::WaitChannel::Pipe, handle.raw()),
+        );
     }
 }
 
@@ -656,7 +664,11 @@ pub fn wait_readable(handle: PipeHandle) -> KernelResult<bool> {
             pipe.reader_waiters.insert(task);
         }
         super::stats::pipe_read_block();
-        park_interruptible(pid, task);
+        park_interruptible(
+            pid,
+            task,
+            crate::wchan::Wait::new(crate::wchan::WaitChannel::Pipe, handle.raw()),
+        );
     }
 }
 
@@ -769,7 +781,11 @@ pub fn read_timeout(handle: PipeHandle, buf: &mut [u8], timeout_ns: u64) -> Kern
         }
 
         super::stats::pipe_read_block();
-        park_interruptible(pid, task);
+        park_interruptible(
+            pid,
+            task,
+            crate::wchan::Wait::new(crate::wchan::WaitChannel::Pipe, handle.raw()),
+        );
     }
 }
 
@@ -880,7 +896,11 @@ pub fn write_timeout(handle: PipeHandle, data: &[u8], timeout_ns: u64) -> Kernel
         }
 
         super::stats::pipe_write_block();
-        park_interruptible(pid, task);
+        park_interruptible(
+            pid,
+            task,
+            crate::wchan::Wait::new(crate::wchan::WaitChannel::Pipe, handle.raw()),
+        );
     }
 }
 

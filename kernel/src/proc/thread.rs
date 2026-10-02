@@ -262,7 +262,14 @@ pub fn spawn_suspended_with_tls(
     // process's id is its main thread's task id, as on Linux
     // (`pcb::claim_leader_id`); every later thread takes a fresh one.
     let requested_id = pcb::claim_leader_id(pid).then_some(pid);
-    let task_id = sched::spawn_suspended_with_id(name, priority, entry, arg, pml4, requested_id)?;
+    // The creating thread's CPU affinity, as Linux's clone, fork and
+    // posix_spawn all keep it: a process pinned to some CPUs stays there
+    // through the threads and children it starts. A kernel task creating a
+    // process (the boot's init, the kernel's services) has every CPU.
+    let affinity = sched::get_cpu_affinity(sched::current_task_id())
+        .unwrap_or(crate::sched::task::CPU_AFFINITY_ALL);
+    let task_id =
+        sched::spawn_suspended_with_id(name, priority, entry, arg, pml4, requested_id, affinity)?;
 
     // Register the thread with the process.
     if let Err(e) = pcb::add_thread(pid, task_id) {
@@ -675,7 +682,10 @@ fn join_until(target_task: TaskId, deadline: Option<u64>) -> KernelResult<i64> {
         )
     });
     loop {
-        sched::block_current();
+        sched::block_current_on(crate::wchan::Wait::new(
+            crate::wchan::WaitChannel::Join,
+            target_task,
+        ));
         let released = {
             let waiters = THREAD_JOIN_WAITERS.lock();
             waiters.get(&target_task) != Some(&caller_task)

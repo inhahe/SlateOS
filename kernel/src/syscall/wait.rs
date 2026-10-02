@@ -346,7 +346,10 @@ pub fn wait_for_child_event(
                 signal::deregister_signalfd_waiter(parent_pid, task_id);
                 continue;
             }
-            sched::block_current();
+            sched::block_current_on(crate::wchan::Wait::new(
+                crate::wchan::WaitChannel::Child,
+                child_pid,
+            ));
             signal::deregister_signalfd_waiter(parent_pid, task_id);
         }
     } else {
@@ -410,7 +413,7 @@ pub fn wait_for_child_event(
                 signal::deregister_signalfd_waiter(parent_pid, task_id);
                 continue;
             }
-            sched::block_current();
+            sched::block_current_on(crate::wchan::Wait::on(crate::wchan::WaitChannel::Child));
             signal::deregister_signalfd_waiter(parent_pid, task_id);
         }
     }

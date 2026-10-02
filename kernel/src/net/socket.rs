@@ -592,7 +592,7 @@ pub fn send(handle: SocketHandle, buf: &[u8], nonblock: bool) -> KernelResult<i3
     let mut sent: usize = 0;
     loop {
         let rest = buf.get(sent..).unwrap_or(&[]);
-        let got = wait_until(nonblock, || {
+        let got = wait_until(handle, nonblock, || {
             let mut guard = inner.lock();
             if guard.state != SockState::Connected {
                 return Err(KernelError::NotConnected);
@@ -654,7 +654,7 @@ fn timeout_reported(inner: &KMutex<SocketInner>) {
 /// - protocol faults propagated from [`NetstackConn::recv`].
 pub fn recv(handle: SocketHandle, buf: &mut [u8], nonblock: bool, peek: bool) -> KernelResult<i32> {
     let inner = inner_of(handle)?;
-    let got = wait_until(nonblock, || {
+    let got = wait_until(handle, nonblock, || {
         let mut guard = inner.lock();
         if guard.state != SockState::Connected {
             return Err(KernelError::NotConnected);
@@ -1397,7 +1397,7 @@ pub fn dgram_recv_from(
     nonblock: bool,
 ) -> KernelResult<(i32, u16, [u8; 16], u16)> {
     let inner = inner_of(handle)?;
-    wait_until(nonblock, || {
+    wait_until(handle, nonblock, || {
         let mut guard = inner.lock();
         if guard.kind != SockKind::Dgram {
             return Err(KernelError::InvalidArgument);
@@ -1447,7 +1447,7 @@ pub fn dgram_recv_from(
 /// attempt goes on, as in Linux). The resolution itself is [`poll_ready`]'s,
 /// which moves the socket to `Connected` or `Failed`.
 fn wait_connected(handle: SocketHandle) -> KernelResult<ConnectOutcome> {
-    let outcome = wait_until(false, || {
+    let outcome = wait_until(handle, false, || {
         let (_, writable, error) = poll_ready(handle)?;
         if error {
             Err(KernelError::ConnectionRefused)
@@ -1467,7 +1467,15 @@ fn wait_connected(handle: SocketHandle) -> KernelResult<ConnectOutcome> {
     outcome
 }
 
-fn wait_until<T>(nonblock: bool, mut ask: impl FnMut() -> KernelResult<T>) -> KernelResult<T> {
+/// Ask until the answer is not would-block, sleeping between asks -- 1 ms,
+/// doubling to a 10 ms ceiling -- unless `nonblock`, or until a deliverable
+/// signal interrupts the wait. The sleeps are reported to `/proc/<pid>/wchan`
+/// as a wait on `socket`, which is what the caller is doing.
+fn wait_until<T>(
+    socket: SocketHandle,
+    nonblock: bool,
+    mut ask: impl FnMut() -> KernelResult<T>,
+) -> KernelResult<T> {
     let pid = crate::ipc::waiters::current_user_pid();
     let mut backoff_ms: u64 = 1;
     loop {
@@ -1478,7 +1486,10 @@ fn wait_until<T>(nonblock: bool, mut ask: impl FnMut() -> KernelResult<T>) -> Ke
         if crate::ipc::waiters::deliverable_signal_pending(pid) {
             return Err(KernelError::Interrupted);
         }
-        crate::sched::sleep_ms_interruptible(backoff_ms);
+        crate::sched::sleep_ms_interruptible_as(
+            backoff_ms,
+            crate::wchan::Wait::new(crate::wchan::WaitChannel::Socket, socket.raw()),
+        );
         backoff_ms = backoff_ms.saturating_mul(2).min(10);
     }
 }
@@ -1495,9 +1506,12 @@ pub fn self_test_wait_until() -> KernelResult<()> {
         crate::serial_println!("[netsock]   FAIL: wait_until {}", what);
         Err(KernelError::InternalError)
     }
+    // No socket is asked: the answers are synthetic. Only the waits'
+    // description names it.
+    let sock = SocketHandle::from_raw(0);
 
     let mut asks = 0u32;
-    let got = wait_until(false, || {
+    let got = wait_until(sock, false, || {
         asks = asks.saturating_add(1);
         if asks < 4 {
             Err(KernelError::WouldBlock)
@@ -1510,7 +1524,7 @@ pub fn self_test_wait_until() -> KernelResult<()> {
     }
 
     asks = 0;
-    let got = wait_until(true, || {
+    let got = wait_until(sock, true, || {
         asks = asks.saturating_add(1);
         Err::<i32, _>(KernelError::WouldBlock)
     });
@@ -1519,7 +1533,7 @@ pub fn self_test_wait_until() -> KernelResult<()> {
     }
 
     asks = 0;
-    let got = wait_until(false, || {
+    let got = wait_until(sock, false, || {
         asks = asks.saturating_add(1);
         Ok(0)
     });
@@ -1528,7 +1542,7 @@ pub fn self_test_wait_until() -> KernelResult<()> {
     }
 
     asks = 0;
-    let got = wait_until(false, || {
+    let got = wait_until(sock, false, || {
         asks = asks.saturating_add(1);
         Err::<i32, _>(KernelError::TimedOut)
     });
@@ -1540,7 +1554,7 @@ pub fn self_test_wait_until() -> KernelResult<()> {
     // Unbounded doubling would be about 4 s.
     asks = 0;
     let start = crate::hrtimer::now_ns();
-    let got = wait_until(false, || {
+    let got = wait_until(sock, false, || {
         asks = asks.saturating_add(1);
         if asks <= 12 {
             Err(KernelError::WouldBlock)

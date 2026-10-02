@@ -3989,6 +3989,48 @@ pub fn get_dumpable(pid: ProcessId) -> Option<u32> {
     PROCESS_TABLE.lock().get(&pid).map(|p| p.linux_dumpable)
 }
 
+/// Whether `reader` may inspect `target`: read what `/proc/<pid>/` says
+/// of its environment, memory layout, I/O and waits. Linux's
+/// `ptrace_may_access(PTRACE_MODE_READ_FSCREDS)`, in this kernel's terms
+/// (design-decisions §1516).
+///
+/// `None` as the reader is the kernel, which may inspect anything; `None` as
+/// the target is a kernel task, which belongs to no process and only uid 0
+/// may inspect. Otherwise, any of:
+/// - the reader is the target;
+/// - the reader runs as uid 0, as Linux's `CAP_SYS_PTRACE`;
+/// - the reader has the target's uid and gid, and the target is dumpable
+///   (`PR_SET_DUMPABLE` left at 1, `SUID_DUMP_USER`);
+/// - the reader holds a `Process` capability for the target with `READ`.
+#[must_use]
+pub fn may_inspect(reader: Option<ProcessId>, target: Option<ProcessId>) -> bool {
+    may_access(reader, target, Rights::READ)
+}
+
+/// [`may_inspect`], with the capability path asking for `rights` instead of
+/// `READ` -- `WRITE` for a change to the target through `/proc` (its
+/// `oom_score_adj`). The identity paths are the same: the kernel, the target
+/// itself, uid 0, and the target's own user while it is dumpable.
+#[must_use]
+pub fn may_access(reader: Option<ProcessId>, target: Option<ProcessId>, rights: Rights) -> bool {
+    let Some(reader) = reader else {
+        return true;
+    };
+    let reader_ids = process_uid_gid(reader);
+    let is_root = reader_ids.is_some_and(|(uid, _)| uid == 0);
+    let Some(target) = target else {
+        return is_root;
+    };
+    if reader == target || is_root {
+        return true;
+    }
+    let same_user = reader_ids.is_some() && process_uid_gid(target) == reader_ids;
+    if same_user && get_dumpable(target) == Some(1) {
+        return true;
+    }
+    has_capability_for(reader, ResourceType::Process, target, rights)
+}
+
 /// Install a new dumpable flag for `pid`, returning the prior
 /// value.  Caller is responsible for validating the value is one
 /// of 0 (`SUID_DUMP_DISABLE`), 1 (`SUID_DUMP_USER`), or 2
@@ -7910,6 +7952,7 @@ pub fn self_test() -> KernelResult<()> {
     test_reap_any()?;
     test_exit_notice()?;
     test_inherit_job()?;
+    test_may_inspect()?;
     test_deferred_address_space()?;
     test_cpu_time_accounting()?;
     test_io_accounting()?;
@@ -8998,9 +9041,15 @@ fn test_controlling_terminal() -> KernelResult<()> {
     ctty_set_fg_pgrp(shell, job)?;
 
     // (6) A zombie group member does not keep the group eligible. Kill the
-    //     job's group off and confirm the terminal cannot be handed to it.
-    //     (The shell keeps the terminal it already holds — releasing it is
-    //     the shell's job, not the kernel's.)
+    //     job's group off and confirm the terminal cannot be handed to it:
+    //     a group whose members are all zombies has no live member, so it is
+    //     ESRCH, as (4)'s empty group is -- the rule `judge_fg_group` has kept
+    //     since lane D's request of 2026-10-01; this step still expected the
+    //     EPERM it used to give until the first boot that ran it (rq26).
+    //     (Linux would hand it over: a zombie stays on its group's list until
+    //     reaped. Refusing is deliberate -- a dead group could never hand the
+    //     terminal back.) The shell keeps the terminal it already holds --
+    //     releasing it is the shell's job, not the kernel's.
     add_thread(job, 91_010)?;
     let (became_zombie, _wake, _any) = remove_thread(job, 91_010, ThreadExitAccounting::default())?;
     if !became_zombie || state(job) != Some(ProcessState::Zombie) {
@@ -9009,9 +9058,9 @@ fn test_controlling_terminal() -> KernelResult<()> {
             &[shell, job, stranger],
         );
     }
-    if ctty_set_fg_pgrp(shell, job) != Err(KernelError::PermissionDenied) {
+    if ctty_set_fg_pgrp(shell, job) != Err(KernelError::NoSuchProcess) {
         return fail(
-            "tcsetpgrp to an all-zombie group should be EPERM",
+            "tcsetpgrp to an all-zombie group should be ESRCH",
             &[shell, job, stranger],
         );
     }
@@ -9718,6 +9767,93 @@ fn test_exit_notice() -> KernelResult<()> {
 
 /// Test: [`inherit_job`] puts a child in its parent's group and session, and
 /// fails cleanly for a missing parent.
+/// [`may_inspect`] and [`may_access`], the rule `/proc` applies to who may
+/// read what of a process (design-decisions §1516): the kernel, the process
+/// itself, uid 0, its own user's processes while it is dumpable, and a holder
+/// of a `Process` capability for it -- nobody else, and no process but uid 0
+/// a kernel task.
+fn test_may_inspect() -> KernelResult<()> {
+    let root = create("inspect-root", 0);
+    let alice = create("inspect-alice", 0);
+    let alice2 = create("inspect-alice2", 0);
+    let bob = create("inspect-bob", 0);
+    let result = (|| -> Result<(), &'static str> {
+        for (pid, uid) in [(alice, 1000), (alice2, 1000), (bob, 1001)] {
+            set_credentials(pid, ProcessCredentials::new(uid, uid))
+                .map_err(|_| "set_credentials")?;
+        }
+        let checks = [
+            (may_inspect(None, Some(bob)), true, "the kernel"),
+            (
+                may_inspect(Some(alice), Some(alice)),
+                true,
+                "the process itself",
+            ),
+            (
+                may_inspect(Some(alice), Some(alice2)),
+                true,
+                "its own user's process",
+            ),
+            (
+                may_inspect(Some(alice), Some(bob)),
+                false,
+                "another user's process",
+            ),
+            (may_inspect(Some(root), Some(bob)), true, "uid 0"),
+            (
+                may_inspect(Some(alice), None),
+                false,
+                "a kernel task, to a user",
+            ),
+            (
+                may_inspect(Some(root), None),
+                true,
+                "a kernel task, to uid 0",
+            ),
+        ];
+        for (got, want, who) in checks {
+            if got != want {
+                serial_println!("[proc]   FAIL: may_inspect: {} gave {}", who, got);
+                return Err("a may_inspect answer");
+            }
+        }
+        // An undumpable process is closed to its own user, not to uid 0.
+        set_dumpable(alice2, 0);
+        let closed =
+            !may_inspect(Some(alice), Some(alice2)) && may_inspect(Some(root), Some(alice2));
+        set_dumpable(alice2, 1);
+        if !closed {
+            return Err("PR_SET_DUMPABLE 0 did not close the process to its own user");
+        }
+        // A capability opens another user's process -- READ to read; a READ
+        // capability does not let its holder write.
+        grant_capability(alice, ResourceType::Process, bob, Rights::READ)
+            .map_err(|_| "grant_capability")?;
+        if !may_inspect(Some(alice), Some(bob)) {
+            return Err("a READ capability did not open the process");
+        }
+        if may_access(Some(alice), Some(bob), Rights::WRITE) {
+            return Err("a READ capability let its holder write");
+        }
+        Ok(())
+    })();
+    for pid in [bob, alice2, alice, root] {
+        destroy(pid);
+    }
+    match result {
+        Ok(()) => {
+            serial_println!(
+                "[proc]   may_inspect: kernel, self, user, uid 0, dumpable, capability: OK"
+            );
+            Ok(())
+        }
+        Err(what) => {
+            serial_println!("[proc]   FAIL: may_inspect: {}", what);
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
 fn test_inherit_job() -> KernelResult<()> {
     let leader = create("job-leader", 0);
     let member = create("job-member", leader);

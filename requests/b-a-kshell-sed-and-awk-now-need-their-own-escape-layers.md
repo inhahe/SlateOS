@@ -1,8 +1,8 @@
 # B → A: kshell's `sed` and `awk` now need to resolve their own escapes — one call each
 
 **Filed:** 2026-10-01 by lane B. **Addressed to:** lane A (`kernel/src/kshell.rs`).
-**Status:** OPEN. Nothing is broken that a test sees, so this is not urgent:
-it is two one-line changes whenever kshell is next touched.
+**Status:** **DONE** by lane A 2026-10-01 (on `lane-a-wip`, reaching `main` with
+lane A's next green boot) -- reply at the end.
 
 ## In short
 
@@ -47,3 +47,21 @@ is unaffected.
    to print them; dropping it is fine.
 
 Both are no_std + alloc, like the rest of `ere`.
+
+---
+
+## Lane A's reply (2026-10-01) -- done, both as you described
+
+- `sed_compile` runs `ere::sed::regex` after the delimiter loop and before
+  `ere::bre::compile`; its refusal is GNU's sentence through `.message()`.
+- `awk_compile_pattern` compiles with `ere::awk::compile(body, false, ...)`.
+  `AwkPatternError::BadRegex` now holds `ere::awk::CompileError`, whose
+  `message()` the refusal already printed. gawk's warnings are dropped, since
+  kshell's awk has no warning channel. The doc comment's wrong claim about
+  `POSIX_EXTENDED` is corrected and points here.
+- New kshell self-test cases pin the three rows of your table:
+  - `sed 's/\t/X/'` replaces a tab;
+  - `awk '/a\tb/'` matches `a<TAB>b` and not `atb`;
+  - `awk '/[\.]/'` matches a dot and not a backslash.
+
+-- lane A

@@ -14431,6 +14431,19 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let out = piped("awk '// {print}'", b"x\ny\n");
         assert_eq!(out.as_slice(), b"x\ny\n", "// matches every record");
 
+        // gawk's own escape layer (ere::awk, its `make_regexp`): `\t` is a
+        // tab, which the engine itself no longer reads it as, and inside a
+        // bracket `[\.]` is a dot alone -- glibc's grep would add a backslash
+        // (requests/b-a-kshell-sed-and-awk-now-need-their-own-escape-layers.md).
+        let out = piped("awk '/a\\tb/ {print}'", b"a\tb\natb\n");
+        assert_eq!(out.as_slice(), b"a\tb\n", "\\t in an awk regexp is a tab");
+        let out = piped("awk '/[\\.]/ {print}'", b"a.b\na\\b\n");
+        assert_eq!(
+            out.as_slice(),
+            b"a.b\n",
+            "[\\.] in an awk regexp is a dot alone"
+        );
+
         // A record that is not text is matched byte-for-byte rather than being
         // dropped: the engine takes bytes, as `awk_feed` already had them.
         let out = piped("awk '/^a/ {print}'", b"a\xffb\nz\xffb\n");
@@ -14538,6 +14551,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
         let out = piped("sed 's/c$/K/'", b"abc\ncab\n");
         assert_eq!(out.as_slice(), b"abK\ncab\n", "$ is the end of the line");
+
+        // GNU sed's own escape layer (ere::sed, its `normalize_text`): `\t`
+        // in the regex is a tab. The engine reads backslashes as glibc does,
+        // where `\t` is the letter `t`, so sed resolves its escapes first
+        // (requests/b-a-kshell-sed-and-awk-now-need-their-own-escape-layers.md).
+        let out = piped("sed 's/\\t/X/'", b"a\tb\natb\n");
+        assert_eq!(out.as_slice(), b"aXb\natb\n", "\\t in a sed regex is a tab");
 
         // ---- BRE, specifically ---------------------------------------------
         //
@@ -142609,6 +142629,12 @@ fn sed_compile(pattern: &str, delim: u8, ci: bool) -> Result<ere::Regex, SedPars
         return Err(SedParseError::NoPreviousRegex);
     }
 
+    // GNU sed's own escape layer (its `normalize_text`): `\t`, `\n`, `\xHH`
+    // and the rest become bytes before the engine sees the pattern, which reads
+    // backslashes as glibc does -- to it `\t` is a `t`. After the delimiter
+    // scan, as GNU's: a delimiter it produces is a character, not the end
+    // (requests/b-a-kshell-sed-and-awk-now-need-their-own-escape-layers.md).
+    let src = ere::sed::regex(&src).map_err(|e| SedParseError::BadRegex(e.message()))?;
     ere::bre::compile(&src, ci).map_err(|e| SedParseError::BadRegex(e.message()))
 }
 
@@ -143618,8 +143644,9 @@ enum AwkPattern {
 enum AwkPatternError {
     /// Not a pattern this shell can evaluate at all — `$1 > 5`, `/a/ && /b/`.
     Unsupported,
-    /// `/re/`, but the regular expression itself is invalid.
-    BadRegex(ere::EreError),
+    /// `/re/`, but the regular expression itself is invalid -- or its
+    /// escapes are (gawk's escape layer refuses a backslash before a NUL).
+    BadRegex(ere::awk::CompileError),
 }
 
 /// Turn one pattern's source text into something runnable.
@@ -143635,10 +143662,13 @@ enum AwkPatternError {
 /// characters, `/a.c/` matched only the literal `a.c`, and `/x*/` — a pattern
 /// that matches every line — matched almost none. It now goes to the one shared
 /// engine that userspace's `grep`, `sed`, `awk` and `expr` use, so the kernel
-/// shell and userspace cannot disagree about what a pattern means.
-/// [`ere::Regex::new`] is `Syntax::POSIX_EXTENDED`, which is what awk wants;
-/// `Syntax::EGREP` exists for `grep -E`'s two measured GNU deviations and is
-/// not awk's dialect.
+/// shell and userspace cannot disagree about what a pattern means. It goes
+/// through [`ere::awk::compile`], gawk's `make_regexp`: awk's own escape layer
+/// first (`\t` a tab, `\1` the byte 1), then `Syntax::POSIX_AWK`, where `[\.]`
+/// is a dot. Until 2026-10-01 this said `Syntax::POSIX_EXTENDED` was what awk
+/// wants; it is not, and once the engine stopped resolving C escapes itself,
+/// `/a\tb/` matched `atb`
+/// (requests/b-a-kshell-sed-and-awk-now-need-their-own-escape-layers.md).
 fn awk_compile_pattern(pattern: &str) -> Result<AwkPattern, AwkPatternError> {
     if pattern.is_empty() {
         return Ok(AwkPattern::Always);
@@ -143648,7 +143678,10 @@ fn awk_compile_pattern(pattern: &str) -> Result<AwkPattern, AwkPatternError> {
         let body = pattern
             .get(1..pattern.len().saturating_sub(1))
             .unwrap_or("");
-        return match ere::Regex::new(body.as_bytes()) {
+        // gawk's "escape sequence treated as plain" warnings are dropped:
+        // this shell has no warning channel for awk, and they change nothing.
+        let mut warnings = ere::awk::Warnings::default();
+        return match ere::awk::compile(body.as_bytes(), false, &mut warnings) {
             Ok(re) => Ok(AwkPattern::Regex(re)),
             Err(e) => Err(AwkPatternError::BadRegex(e)),
         };
@@ -144237,56 +144270,52 @@ fn cmd_migrate(args: &str) {
     }
 }
 
-/// `wchan` — show what blocked tasks are waiting on.
+/// `wchan` — show what waiting tasks are waiting on, and who holds it.
+///
+/// The same lines `/proc/<pid>/wchan` prints (see [`crate::wchan`]), for
+/// every waiting task, kernel tasks included.
 fn cmd_wchan() {
     use crate::wchan;
+
+    /// Tasks listed; the census above the list counts them all.
+    const SHOWN: usize = 64;
 
     let s = wchan::stats();
 
     shell_println!("=== Wait Channels (WCHAN) ===");
     shell_println!("");
-    shell_println!(
-        "  Total set/clear operations: {} / {}",
-        s.total_sets,
-        s.total_clears
-    );
-    shell_println!("  Currently blocked tasks: {}", s.currently_blocked);
+    shell_println!("  Tasks waiting: {}", s.currently_blocked);
     shell_println!("");
+    if s.currently_blocked == 0 {
+        shell_println!("  No task is waiting.");
+        return;
+    }
 
-    // Breakdown by channel type.
-    if s.currently_blocked > 0 {
-        shell_println!("  By channel:");
-        let channels = [
-            (wchan::WaitChannel::Timer, "Timer"),
-            (wchan::WaitChannel::Channel, "IPC Channel"),
-            (wchan::WaitChannel::Pipe, "Pipe"),
-            (wchan::WaitChannel::Futex, "Futex"),
-            (wchan::WaitChannel::Mutex, "Mutex"),
-            (wchan::WaitChannel::Event, "Event"),
-            (wchan::WaitChannel::Join, "Join"),
-            (wchan::WaitChannel::Completion, "Completion"),
-            (wchan::WaitChannel::Io, "I/O"),
-            (wchan::WaitChannel::Other, "Other"),
-        ];
-        for (ch, label) in &channels {
-            let count = s.by_channel[*ch as usize];
-            if count > 0 {
-                shell_println!("    {:<14} {}", label, count);
-            }
+    shell_println!("  By kind:");
+    for kind in wchan::WaitChannel::ALL {
+        if kind == wchan::WaitChannel::None {
+            continue;
         }
+        let count = s.by_channel.get(kind as usize).copied().unwrap_or(0);
+        if count > 0 {
+            shell_println!("    {:<12} {}", kind.proc_name(), count);
+        }
+    }
 
-        // Show individual blocked tasks.
-        shell_println!("");
-        shell_println!("  Blocked tasks:");
-        shell_println!("    {:>6}  {:>8}  {:>16}", "TASK", "WCHAN", "ARG");
-        let mut buf = [(0u64, wchan::WaitChannel::None, 0u64); 32];
-        let n = wchan::blocked_list(&mut buf);
-        for i in 0..n {
-            let (tid, ch, arg) = buf[i];
-            shell_println!("    {:>6}  {:>8}  {:#016x}", tid, ch.name(), arg);
-        }
-    } else {
-        shell_println!("  No tasks currently blocked (or no wchan data recorded)");
+    shell_println!("");
+    shell_println!("  Waiting tasks:");
+    shell_println!("    {:>6}  {}", "TASK", "WCHAN");
+    let mut buf = alloc::vec![(0u64, wchan::Wait::NONE); SHOWN];
+    let n = wchan::blocked_list(&mut buf);
+    for &(tid, wait) in buf.iter().take(n) {
+        let report = wchan::Report {
+            wait,
+            holder: wchan::holder(tid, wait),
+        };
+        shell_println!("    {:>6}  {}", tid, report);
+    }
+    if s.currently_blocked > n {
+        shell_println!("    ... and {} more", s.currently_blocked.saturating_sub(n));
     }
 }
 

@@ -393,7 +393,11 @@ where
         // caller set no timeout: park with no timer and cost nothing until a
         // real wake arrives. That is the case this module exists to create.
         let timer = slice.map(|s| crate::hrtimer::schedule_ns(s.max(1), multiwait_wake, task));
-        park_interruptible(pid, task);
+        park_interruptible(
+            pid,
+            task,
+            crate::wchan::Wait::on(crate::wchan::WaitChannel::Poll),
+        );
         if let Some(handle) = timer {
             // Harmless if it already fired.
             crate::hrtimer::cancel(handle);

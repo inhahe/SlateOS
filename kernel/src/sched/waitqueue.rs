@@ -119,7 +119,7 @@ impl WaitQueue {
         }
 
         // Block the current task.  We will be woken by wake_one/wake_all.
-        super::block_current();
+        super::block_current_on(crate::wchan::Wait::on(crate::wchan::WaitChannel::Mutex));
     }
 
     /// Block until a condition is true.
@@ -196,7 +196,7 @@ impl WaitQueue {
             // Condition not met — block.  If wake_one() fired between
             // registration and here, pending_wake is set and
             // block_current() returns immediately.
-            super::block_current();
+            super::block_current_on(crate::wchan::Wait::on(crate::wchan::WaitChannel::Mutex));
             woken = true;
 
             // Woken up — remove from waiter list (wake_one may have

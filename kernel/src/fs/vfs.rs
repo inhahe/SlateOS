@@ -7263,7 +7263,11 @@ impl Vfs {
                 remove_flock_waiter(task);
                 return Err(KernelError::Interrupted);
             }
-            waiters::park_interruptible(pid, task);
+            waiters::park_interruptible(
+                pid,
+                task,
+                crate::wchan::Wait::on(crate::wchan::WaitChannel::FileLock),
+            );
             remove_flock_waiter(task);
         }
     }

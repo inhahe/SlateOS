@@ -4148,14 +4148,20 @@ fn dispatch_socket_write(
 /// flight, then fall to 1 ms interruptible sleeps. `poll`/`select` use 10 ms
 /// slices for the same job; 1 ms here because a read that has already decided to
 /// wait is more latency-sensitive than a poller holding a whole fd set.
-fn socket_read_backoff(spins: &mut u32) {
+///
+/// The sleeps are reported to `/proc/<pid>/wchan` as a wait on `socket` (the
+/// raw socket handle), which is what the reader is doing.
+fn socket_read_backoff(spins: &mut u32, socket: u64) {
     /// Yields before falling back to sleeping.
     const SPIN_YIELDS: u32 = 16;
     if *spins < SPIN_YIELDS {
         *spins = spins.saturating_add(1);
         crate::sched::yield_now();
     } else {
-        crate::sched::sleep_ms_interruptible(1);
+        crate::sched::sleep_ms_interruptible_as(
+            1,
+            crate::wchan::Wait::new(crate::wchan::WaitChannel::Socket, socket),
+        );
     }
 }
 
@@ -4210,7 +4216,7 @@ fn dispatch_socket_read(
                 if nonblock {
                     return linux_err(linux_errno_for(KernelError::WouldBlock));
                 }
-                socket_read_backoff(&mut spins);
+                socket_read_backoff(&mut spins, h.raw());
             }
             Err(e) => return linux_err(linux_errno_for(e)),
         }
@@ -4262,7 +4268,7 @@ fn socket_recv_waitall(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
         let n = loop {
             match crate::net::socket::recv(h, &mut kbuf[..chunk], true, false) {
                 Ok(v) => break v,
-                Err(KernelError::WouldBlock) => socket_read_backoff(&mut spins),
+                Err(KernelError::WouldBlock) => socket_read_backoff(&mut spins, h.raw()),
                 Err(e) => {
                     if done > 0 {
                         return SyscallResult::ok(done as i64);
@@ -4614,7 +4620,7 @@ fn dispatch_signalfd_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
             crate::proc::signal::deregister_signalfd_waiter(caller, task);
             continue;
         }
-        crate::sched::block_current();
+        crate::sched::block_current_on(crate::wchan::Wait::on(crate::wchan::WaitChannel::Signal));
         // Woken (watched/other signal arrived, or spurious) — deregister (a
         // no-op if the waker already removed us) and loop to re-evaluate.
         crate::proc::signal::deregister_signalfd_waiter(caller, task);
@@ -8264,7 +8270,10 @@ fn interruptible_sleep_until(
             let _ = crate::hrtimer::cancel(handle); // discard: nothing to wake
             return false;
         }
-        crate::sched::block_current();
+        crate::sched::block_current_on(crate::wchan::Wait::new(
+            crate::wchan::WaitChannel::Timer,
+            deadline_ns,
+        ));
         crate::proc::signal::deregister_signalfd_waiter(pid, task);
         // Cancel the timer if it has not fired; harmless (false) if it already
         // did.  The next loop iteration decides completed-vs-interrupted.
@@ -17186,15 +17195,17 @@ fn sys_sched_rr_get_interval(args: &SyscallArgs) -> SyscallResult {
 /// that many bytes and returns the number of bytes actually written
 /// (so callers can detect a too-small buffer and retry).
 ///
-/// We report every online CPU as eligible (the default affinity for a
-/// freshly-created task on Linux).  The mask is filled in bit-by-bit
-/// from 0..N where N = smp::cpu_count().
+/// `pid` names a thread, as on Linux: 0 is the calling thread, and a
+/// process's id is its main thread's. The answer is the thread's affinity
+/// less the CPUs that are not online (`sched::affinity_of`), so what
+/// `sched_setaffinity` set reads back. Until 2026-10-01 it was every online
+/// CPU, whatever had been set.
 ///
 /// Errors:
 ///   - `-EINVAL` if `cpusetsize` is less than the number of bytes
 ///     needed to represent every online CPU (Linux's contract).
 ///   - `-EFAULT` on bad `mask` pointer.
-///   - `-ESRCH` if `pid` is not the caller and not a real pid.
+///   - `-ESRCH` if no thread has the id `pid`.
 ///
 /// Returns the number of bytes written (Linux convention).
 fn sys_sched_getaffinity(args: &SyscallArgs) -> SyscallResult {
@@ -17255,18 +17266,16 @@ fn sys_sched_getaffinity(args: &SyscallArgs) -> SyscallResult {
     if cpusetsize & 7 != 0 {
         return linux_err(errno::EINVAL);
     }
-    // pid lookup using the truncated pid_t value.  pid==0 is the
-    // "current" semantics; pid>0 is explicit; pid<0 mirrors Linux's
-    // find_task_by_vpid returning NULL → ESRCH.
-    if pid > 0 {
-        #[allow(clippy::cast_sign_loss)]
-        let pid_u = pid as u64;
-        if crate::proc::pcb::state(pid_u).is_none() {
-            return linux_err(errno::ESRCH);
-        }
-    } else if pid < 0 {
+    // pid lookup using the truncated pid_t value: 0 is the calling thread,
+    // a positive value names a thread (a process's id is its main thread's),
+    // and a negative one mirrors Linux's find_task_by_vpid returning NULL ->
+    // ESRCH.
+    let Some(tid) = affinity_thread(pid) else {
         return linux_err(errno::ESRCH);
-    }
+    };
+    let Some(affinity) = crate::sched::affinity_of(tid) else {
+        return linux_err(errno::ESRCH);
+    };
     if mask_ptr == 0 {
         return linux_err(errno::EFAULT);
     }
@@ -17324,16 +17333,11 @@ fn sys_sched_getaffinity(args: &SyscallArgs) -> SyscallResult {
     // input.
     let cpumask_size = n_cpus.div_ceil(64) * 8;
     let write_bytes = cpusetsize.min(cpumask_size);
-    // Set bits 0..n_cpus.
-    for cpu in 0..n_cpus {
-        let byte_off = cpu / 8;
-        let bit = cpu % 8;
-        if byte_off < write_bytes {
-            #[allow(clippy::indexing_slicing)]
-            {
-                buf[byte_off] |= 1u8 << bit;
-            }
-        }
+    // The thread's CPUs, little-endian as glibc's cpu_set_t words are: CPU N
+    // is bit N % 8 of byte N / 8. The mask covers CPUs 0..63, which is every
+    // CPU there can be (`smp::MAX_CPUS` <= 64); bytes past the eighth stay 0.
+    for (slot, byte) in buf.iter_mut().zip(affinity.to_le_bytes()) {
+        *slot = byte;
     }
     // SAFETY: validate_user_write above confirmed `cpusetsize` writable
     // bytes; we copy min(cpusetsize, cpumask_size) ≤ cpusetsize bytes.
@@ -17350,15 +17354,24 @@ fn sys_sched_getaffinity(args: &SyscallArgs) -> SyscallResult {
 /// `sched_setaffinity(pid, cpusetsize, mask)` — set the CPU affinity
 /// mask of `pid`.
 ///
-/// We accept any mask as silent success — affinity is advisory and
-/// our scheduler doesn't honour it yet.  The caller's view via
-/// sched_getaffinity will continue to report "all online CPUs" even
-/// after a successful setaffinity, which is technically incorrect but
-/// matches the "we don't enforce" model.
+/// `pid` names a thread, as on Linux: 0 is the calling thread, and a
+/// process's id is its main thread's. The mask is the first
+/// `min(cpusetsize, 8)` bytes (CPUs 0..63, every CPU there can be); the
+/// thread is moved by `sched::set_affinity`, at once if it runs on a CPU it
+/// may no longer use. Until 2026-10-01 every mask was accepted and none
+/// applied.
 ///
-/// Errors:
+/// Who may: the native call's rule (`handlers::affinity_targets`), the
+/// rule for signalling -- the thread's own process, its parent, or a holder
+/// of a `Process` capability for it -- where Linux checks the user id or
+/// `CAP_SYS_NICE`. No process may move a kernel task.
+///
+/// Errors, in Linux's order:
 ///   - `-EFAULT` on bad mask pointer.
-///   - `-ESRCH` on bad pid.
+///   - `-ESRCH` if no thread has the id `pid`.
+///   - `-EPERM` if the caller may not move it.
+///   - `-EINVAL` if the mask names no online CPU -- including the empty mask
+///     a `cpusetsize` of 0 gives, as on Linux.
 fn sys_sched_setaffinity(args: &SyscallArgs) -> SyscallResult {
     // Linux gate order (kernel/sched/syscalls.c::SYSCALL_DEFINE3):
     //
@@ -17386,6 +17399,10 @@ fn sys_sched_setaffinity(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation)]
     let cpusetsize = (args.arg1 as u32) as usize;
     let mask_ptr = args.arg2;
+    // get_user_cpu_mask: the first min(len, cpumask_size) bytes, the rest
+    // zero. Our cpumask is one 64-bit word.
+    let mut bytes = [0u8; 8];
+    let take = cpusetsize.min(bytes.len());
     if cpusetsize > 0 {
         if mask_ptr == 0 {
             return linux_err(errno::EFAULT);
@@ -17393,17 +17410,43 @@ fn sys_sched_setaffinity(args: &SyscallArgs) -> SyscallResult {
         if let Err(e) = crate::mm::user::validate_user_read(mask_ptr, cpusetsize) {
             return linux_err(linux_errno_for(e));
         }
-    }
-    if pid > 0 {
-        #[allow(clippy::cast_sign_loss)]
-        let pid_u = pid as u64;
-        if crate::proc::pcb::state(pid_u).is_none() {
-            return linux_err(errno::ESRCH);
+        // SAFETY: `bytes` has room for `take` <= 8 bytes, and the source was
+        // validated readable for `cpusetsize` >= `take` bytes above.
+        let r = unsafe { crate::mm::user::copy_from_user(mask_ptr, bytes.as_mut_ptr(), take) };
+        if let Err(e) = r {
+            return linux_err(linux_errno_for(e));
         }
-    } else if pid < 0 {
-        return linux_err(errno::ESRCH);
     }
-    SyscallResult::ok(0)
+    let mask = u64::from_le_bytes(bytes);
+    let Some(tid) = affinity_thread(pid) else {
+        return linux_err(errno::ESRCH);
+    };
+    match super::handlers::affinity_targets(tid, super::number::SCHED_AFFINITY_THREAD, true) {
+        Ok(_) => {}
+        Err(KernelError::NoSuchProcess) => return linux_err(errno::ESRCH),
+        Err(KernelError::PermissionDenied) => return linux_err(errno::EPERM),
+        Err(e) => return linux_err(linux_errno_for(e)),
+    }
+    match crate::sched::set_affinity(tid, mask) {
+        Ok(_) => SyscallResult::ok(0),
+        Err(KernelError::NotFound) => linux_err(errno::ESRCH),
+        Err(KernelError::InvalidArgument) => linux_err(errno::EINVAL),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
+/// The thread a `sched_{get,set}affinity` `pid` names: 0 is the calling
+/// thread, a positive id names a thread directly (a process's id is its main
+/// thread's), and a negative one names none -- Linux's `find_task_by_vpid`
+/// finds nothing for it.
+fn affinity_thread(pid: i32) -> Option<crate::sched::task::TaskId> {
+    match pid {
+        0 => Some(crate::sched::current_task_id()),
+        // Positive: the cast is exact.
+        #[allow(clippy::cast_sign_loss)]
+        p if p > 0 => Some(p as u64),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -19973,7 +20016,7 @@ fn sys_pause(_args: &SyscallArgs) -> SyscallResult {
             crate::proc::signal::deregister_signalfd_waiter(caller, task);
             continue;
         }
-        crate::sched::block_current();
+        crate::sched::block_current_on(crate::wchan::Wait::on(crate::wchan::WaitChannel::Signal));
         crate::proc::signal::deregister_signalfd_waiter(caller, task);
     }
 }
@@ -23937,7 +23980,10 @@ fn dispatch_inotify_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
                     }
                     continue;
                 }
-                crate::sched::block_current();
+                crate::sched::block_current_on(crate::wchan::Wait::new(
+                    crate::wchan::WaitChannel::Event,
+                    entry.raw_handle,
+                ));
                 crate::fs::notify::deregister_notify_waiter(token, task);
                 if let Some(p) = caller {
                     crate::proc::signal::deregister_signalfd_waiter(p, task);
@@ -33660,9 +33706,9 @@ fn sys_move_mount(_args: &SyscallArgs) -> SyscallResult {
 //
 // Landlock is the Linux unprivileged-sandbox API; without a real
 // implementation we must NOT pretend success or callers would assume
-// they are sandboxed when they are not.  The version-query path
-// (LANDLOCK_CREATE_RULESET_VERSION) is handled honestly by reporting
-// ABI version 0 (= "no landlock"), which Linux uses to signal absence.
+// they are sandboxed when they are not.  All three calls answer ENOSYS,
+// as a Linux kernel built without Landlock does, before any argument is
+// read -- the version probe included (sys_landlock_create_ruleset).
 //
 // kcmp compares two processes' resources for ptrace-style debugging.
 // We don't implement it; ENOSYS is what every caller expects on
@@ -35190,304 +35236,33 @@ fn sys_sched_getattr(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
-/// `landlock_create_ruleset(attr*, size, flags)`.
+/// Landlock (Linux's unprivileged sandbox): this kernel has none, so its three
+/// calls answer as a Linux kernel built without `CONFIG_SECURITY_LANDLOCK`
+/// does -- `ENOSYS` (`kernel/sys_ni.c`'s `COND_SYSCALL`), before any argument
+/// is looked at.
 ///
-/// Linux's `security/landlock/syscalls.c::SYSCALL_DEFINE3` treats
-/// `flags` as a small dispatch token, not a bitmask:
-///   * `flags == 0` enters the real-ruleset construction path.
-///   * `flags == LANDLOCK_CREATE_RULESET_VERSION (0x1)` with
-///     `attr == NULL && size == 0` returns the Landlock ABI version
-///     (a *positive* integer: `LANDLOCK_ABI_VERSION` = 1 in Linux 5.13,
-///     and = 3 in Linux 6.6 — the version this layer targets).
-///   * Any other `flags` value returns `EINVAL`.  v6.6 defines ONLY
-///     the VERSION flag (`security/landlock/syscalls.c`:
-///     `if (flags) { if (flags == VERSION && !attr && !size) return
-///     ABI; return -EINVAL; }`).  `LANDLOCK_CREATE_RULESET_ERRATA
-///     (0x2)` is a Linux 6.10 addition and therefore an *unknown*
-///     flag here — `flags == 0x2` falls into the generic EINVAL arm,
-///     NOT a dedicated errata-query path.
+/// A program probes with `landlock_create_ruleset(NULL, 0,
+/// LANDLOCK_CREATE_RULESET_VERSION)` and reads a negative answer as "no
+/// Landlock" -- Chromium's sandbox, BubbleWrap, systemd, libcap-ng.
 ///
-/// Batch 384: pre-batch we returned `0` from the VERSION and ERRATA
-/// query paths, claiming "ABI version 0" / "no errata to surface".
-/// But Linux NEVER returns `0` from these queries — the function-body
-/// answers are exclusively: positive `LANDLOCK_ABI_VERSION`,
-/// errata bitmap, or `-EOPNOTSUPP` (when `landlock_initialized` is
-/// false) / `-EINVAL` (bad flag combinations).  Returning `0` claims
-/// a fictional ABI version that has no documented semantics:
-///
-///   abi = syscall(SYS_landlock_create_ruleset, NULL, 0,
-///                 LANDLOCK_CREATE_RULESET_VERSION);
-///   if (abi < 0)     /* no Landlock */
-///   else if (abi >= 1) /* Landlock at version abi */
-///   /* abi == 0 — undefined; some libs treat as success+v0, others
-///      as "no Landlock", inconsistent. */
-///
-/// Real-world probe paths (Chromium sandbox, BubbleWrap, systemd's
-/// landlock support, libcap-ng) take the `>= 1` branch on `0`, then
-/// fail trying to use a "version-0 ruleset" that doesn't exist.
-///
-/// Linux's `security/landlock/syscalls.c` literal gate order:
-///
-///   SYSCALL_DEFINE3(landlock_create_ruleset, ...) {
-///       if (!landlock_initialized)
-///           return -EOPNOTSUPP;
-///       if (flags) {
-///           if (attr || size || flags != LANDLOCK_CREATE_RULESET_VERSION)
-///               return -EINVAL;
-///           return LANDLOCK_ABI_VERSION;
-///       }
-///       ...
-///   }
-///
-/// We model `landlock_initialized = false` — there is no Landlock LSM
-/// in this kernel.  The Linux-faithful answer on the
-/// `!landlock_initialized` branch is `-EOPNOTSUPP` for every code
-/// path through this syscall, including the version and errata
-/// queries and the real ruleset construction.  Migrate the terminal
-/// `0` / `ENOSYS` answers to `EOPNOTSUPP`, leaving the
-/// pre-`!landlock_initialized` flag-validity gates intact so callers
-/// who poke at flag-level discriminators (the VERSION query form, the
-/// size/attr query-form constraints) still see the Linux-shaped
-/// `EINVAL`s before the terminal answer.  This makes
-/// the function body internally consistent — every "valid call shape,
-/// no Landlock to back it" path now answers EOPNOTSUPP, the same
-/// errno Linux returns when its `landlock_initialized` gate fires.
-fn sys_landlock_create_ruleset(args: &SyscallArgs) -> SyscallResult {
-    const LANDLOCK_CREATE_RULESET_VERSION: u32 = 0x1;
-    #[allow(clippy::cast_possible_truncation)]
-    let flags = args.arg2 as u32;
-    if flags != 0 {
-        if flags == LANDLOCK_CREATE_RULESET_VERSION && args.arg0 == 0 && args.arg1 == 0 {
-            // Linux: returns positive LANDLOCK_ABI_VERSION when
-            // initialized.  We model !initialized -> EOPNOTSUPP, the
-            // canonical "this kernel has Landlock LSM hooks registered
-            // but no working backend" signal.  Pre-batch we returned
-            // `0`, which Linux never does from this query path.
-            return linux_err(errno::EOPNOTSUPP);
-        }
-        // Batch 523: v6.6's only valid create_ruleset flag is VERSION.
-        // ERRATA (0x2) is a Linux 6.10 addition, so under v6.6 it is an
-        // unknown flag and hits the generic EINVAL arm — exactly as
-        // every other non-VERSION flag value does.  v6.6 source:
-        //   if (flags) {
-        //       if (flags == VERSION && !attr && !size) return ABI;
-        //       return -EINVAL;
-        //   }
-        return linux_err(errno::EINVAL);
-    }
-    // Real-ruleset path: Linux security/landlock/syscalls.c
-    // SYSCALL_DEFINE3(landlock_create_ruleset) forwards the user
-    // buffer to `copy_min_struct_from_user` which gates in this
-    // literal statement order:
-    //   1. `if (!src) return -EFAULT;`
-    //   2. `if (usize < ksize_min) return -EINVAL;` (ksize_min = 8 =
-    //      offsetofend(handled_access_fs)).
-    //   3. `if (usize > PAGE_SIZE) return -E2BIG;` (PAGE_SIZE = 4096
-    //      on x86_64 — userspace expects this fixed cap, not our
-    //      16 KiB internal frame size).
-    // Prior to batch 224 we collapsed both size bounds into a single
-    // EINVAL gate and used an oversized 1 MiB upper bound, so:
-    //   * (attr=valid, size=8192) returned ENOSYS instead of E2BIG.
-    //   * (attr=valid, size=4097) returned ENOSYS instead of E2BIG.
-    //   * (attr=valid, size=2097152) returned EINVAL instead of
-    //     E2BIG.
-    // Splitting the gate and tightening the cap restores Linux's
-    // discriminators.
-    if args.arg0 == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if args.arg1 < 8 {
-        return linux_err(errno::EINVAL);
-    }
-    const LINUX_PAGE_SIZE: u64 = 4096;
-    if args.arg1 > LINUX_PAGE_SIZE {
-        return linux_err(errno::E2BIG);
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, args.arg1 as usize) {
-        return linux_err(linux_errno_for(e));
-    }
-    // Forward-compat trailing-zero check (Linux lib/usercopy.c
-    // `copy_struct_from_user`).  If `usize > ksize` (=8 here, the
-    // offsetofend(handled_access_fs)), any non-zero byte in the
-    // unknown tail must return -E2BIG so probes can detect what
-    // the kernel knows.  Without this, a userspace probe passing
-    // size=16 with non-zero garbage at byte 8 would silently
-    // succeed where Linux returns -E2BIG.
-    const LANDLOCK_RULESET_ATTR_KSIZE: u64 = 8;
-    if args.arg1 > LANDLOCK_RULESET_ATTR_KSIZE {
-        let excess_addr = args.arg0.wrapping_add(LANDLOCK_RULESET_ATTR_KSIZE);
-        let excess_len = (args.arg1 - LANDLOCK_RULESET_ATTR_KSIZE) as usize;
-        let mut chunk = [0u8; 64];
-        let mut off: usize = 0;
-        while off < excess_len {
-            let take = core::cmp::min(64, excess_len - off);
-            // SAFETY: validate_user_read covered the full [attr, attr+size)
-            // range above; the excess sub-range is contained within it.
-            if let Err(e) = unsafe {
-                crate::mm::user::copy_from_user(
-                    excess_addr.wrapping_add(off as u64),
-                    chunk.as_mut_ptr(),
-                    take,
-                )
-            } {
-                return linux_err(linux_errno_for(e));
-            }
-            if chunk[..take].iter().any(|&b| b != 0) {
-                return linux_err(errno::E2BIG);
-            }
-            off += take;
-        }
-    }
-    // Batch 384: was ENOSYS.  Linux's `!landlock_initialized` arm
-    // returns EOPNOTSUPP for every code path in this syscall, so the
-    // real-ruleset construction path also terminates here — matching
-    // the VERSION/ERRATA query EOPNOTSUPP above.
-    linux_err(errno::EOPNOTSUPP)
+/// Until 2026-10-01 these answered `EOPNOTSUPP` -- Linux's "built in, not
+/// enabled at boot", which tells a program a boot option would switch it on --
+/// and only after checking their arguments, which no Linux kernel does in
+/// either state. The C library's native path (`posix/src/sys_syscall.rs`)
+/// answered `ENOSYS`, so a program run both ways saw two kernels
+/// (`requests/d-a-landlock-answers-as-no-linux-kernel-does.md`).
+fn sys_landlock_create_ruleset(_args: &SyscallArgs) -> SyscallResult {
+    linux_err(errno::ENOSYS)
 }
 
-/// `landlock_add_rule(ruleset_fd, rule_type, rule_attr*, flags)`.
-///
-/// Mirrors Linux's `security/landlock/syscalls.c::SYSCALL_DEFINE4` gates
-/// ahead of the privilege/fd-kind check:
-///   * `flags == 0` (currently no defined bits).
-///   * `rule_type == 1` (`LANDLOCK_RULE_PATH_BENEATH`).  v6.6 defines
-///     no other rule type — `LANDLOCK_RULE_NET_PORT (2)` arrived in
-///     Linux 6.7, so v6.6's switch hits `default: return -EINVAL`.
-///   * `rule_attr` is a non-NULL, 16-byte readable buffer.
-///   * The `allowed_access` (first u64) must be non-zero — Linux's
-///     `add_rule_path_beneath` returns `ENOMSG` for an empty access mask.
-///   * `allowed_access` must be a subset of the FS mask
-///     `LANDLOCK_ACCESS_FS_MASK = 0x7fff` (EXECUTE(1<<0)..TRUNCATE(1<<14)
-///     inclusive).  `IOCTL_DEV (1<<15)` was added in Linux 6.10 and is
-///     NOT part of v6.6's mask.
-///
-/// Batch 522 — drop the Linux 6.7 `NET_PORT` rule type and the Linux
-/// 6.10 `IOCTL_DEV` access bit: both were accepted with a comment
-/// attributing them to >6.6, contradicting our v6.6 fidelity target
-/// (same class as batches 519/521 for the pidfd family).  Verified
-/// against v6.6 include/uapi/linux/landlock.h: `enum landlock_rule_type`
-/// has only `LANDLOCK_RULE_PATH_BENEATH = 1`, and the FS access flags
-/// run only EXECUTE..TRUNCATE (no NET_* defines, no IOCTL_DEV).
-fn sys_landlock_add_rule(args: &SyscallArgs) -> SyscallResult {
-    // EXECUTE(1<<0)..TRUNCATE(1<<14) = 0x7fff.  IOCTL_DEV (1<<15) is a
-    // Linux 6.10 addition, absent from v6.6.
-    const LANDLOCK_ACCESS_FS_MASK: u64 = 0x7fff;
-    // Linux signature: `SYSCALL_DEFINE4(landlock_add_rule, const int,
-    // ruleset_fd, const enum landlock_rule_type, rule_type,
-    // const void __user *, rule_attr, const __u32, flags)`.  `flags`
-    // is C `__u32` (unsigned int), delivered in r10.  The AMD64
-    // syscall ABI does not zero-extend `unsigned int` across the
-    // syscall instruction, so Linux observes only the low 32 bits.
-    // Pre-batch we tested args.arg3 as raw u64, so any high-half
-    // garbage (e.g. 0x1_0000_0000) was rejected with EINVAL where
-    // Linux's truncated flags=0 advances to the rule_type / attr gates.
-    #[allow(clippy::cast_possible_truncation)]
-    let flags = args.arg3 as u32;
-    if flags != 0 {
-        return linux_err(errno::EINVAL);
-    }
-    // rule_type 1 = LANDLOCK_RULE_PATH_BENEATH — the only rule type in
-    // v6.6 (NET_PORT=2 is a Linux 6.7 addition; v6.6's switch returns
-    // -EINVAL for it via the `default` arm).
-    // Linux signature: `const enum landlock_rule_type, rule_type` — the
-    // C enum is int-sized, delivered in rsi.  The AMD64 syscall ABI does
-    // not zero-extend C int across the syscall instruction, so Linux
-    // sees only the low 32 bits.  Pre-batch we matched args.arg1 against
-    // a u64 literal, so a probe like rule_type=0x1_0000_0001 failed the
-    // match and saw EINVAL where Linux's truncated rule_type = 1 matches
-    // PATH_BENEATH and advances to the attr gate.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let rule_type = args.arg1 as i32;
-    if rule_type != 1 {
-        return linux_err(errno::EINVAL);
-    }
-    if args.arg2 == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    // Min rule_attr size: PATH_BENEATH = 16 (u64 allowed_access + u32 fd
-    // padded to 16), NET_PORT = 16 (u64 allowed_access + u16 port padded).
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 16) {
-        return linux_err(linux_errno_for(e));
-    }
-    let mut buf = [0u8; 16];
-    // SAFETY: validate_user_read above confirmed 16 bytes readable.
-    if let Err(e) = unsafe { crate::mm::user::copy_from_user(args.arg2, buf.as_mut_ptr(), 16) } {
-        return linux_err(linux_errno_for(e));
-    }
-    let allowed_access = u64::from_ne_bytes(match <[u8; 8]>::try_from(&buf[0..8]) {
-        Ok(b) => b,
-        Err(_) => return linux_err(errno::EINVAL),
-    });
-    if allowed_access == 0 {
-        // Linux returns ENOMSG for a zero access mask — "no rule body."
-        return linux_err(errno::ENOMSG);
-    }
-    // PATH_BENEATH (the only v6.6 rule type): allowed_access must be a
-    // subset of the FS mask.  (rule_type is guaranteed == 1 by the gate
-    // above; bytes 8..16 of the attr — the NET_PORT `port` field — are
-    // not part of struct landlock_path_beneath_attr and are ignored.)
-    if allowed_access & !LANDLOCK_ACCESS_FS_MASK != 0 {
-        return linux_err(errno::EINVAL);
-    }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let fd = args.arg0 as i32;
-    if let Err(r) = validate_linux_fd(fd) {
-        return r;
-    }
-    // Batch 396: terminal was EBADF, predating the batch-384 unification
-    // of Landlock terminal answers on EOPNOTSUPP.  Linux's literal gate 1
-    // in security/landlock/syscalls.c::SYSCALL_DEFINE4(landlock_add_rule)
-    // is `if (!landlock_initialized) return -EOPNOTSUPP;` — strictly,
-    // every call on our kernel (which models landlock_initialized=false)
-    // should return EOPNOTSUPP, but we keep the diagnostic EINVAL/EFAULT/
-    // ENOMSG gates intact so future Landlock implementation work doesn't
-    // need to re-derive them (same rationale as the kept gates in
-    // sys_landlock_create_ruleset).  The terminal — the answer Linux
-    // gives for a *valid* call shape — must be EOPNOTSUPP to match
-    // gate 1, not EBADF (which is what Linux gates 2-N would return
-    // *if* landlock_initialized were true and the fd were bogus).
-    linux_err(errno::EOPNOTSUPP)
+/// `landlock_add_rule`: [`sys_landlock_create_ruleset`]'s answer.
+fn sys_landlock_add_rule(_args: &SyscallArgs) -> SyscallResult {
+    linux_err(errno::ENOSYS)
 }
 
-/// `landlock_restrict_self(ruleset_fd, flags)`.
-///
-/// Batch 524: v6.6 accepts NO flags — `security/landlock/syscalls.c`
-/// gates with a literal `/* No flag for now. */ if (flags) return
-/// -EINVAL;`.  The `LANDLOCK_RESTRICT_SELF_LOG_*` logging-control bits
-/// are later additions and must NOT be accepted here:
-///   * `LOG_SAME_EXEC_OFF` = `1 << 0` — Linux 6.10
-///   * `LOG_NEW_EXEC_ON`   = `1 << 1` — Linux 6.10
-///   * `LOG_SUBDOMAINS_OFF`= `1 << 2` — Linux 6.12
-///
-/// A prior batch wrongly accepted these three bits (its own comment
-/// attributed them to 6.10/6.12), the same version-attribution bug
-/// class fixed in batches 519/521/522/523.  In v6.6 the only valid
-/// `flags` value is 0; any non-zero value returns `EINVAL` before the
-/// (modelled-EOPNOTSUPP) terminal.
-fn sys_landlock_restrict_self(args: &SyscallArgs) -> SyscallResult {
-    // Linux ABI: `int landlock_restrict_self(int ruleset_fd,
-    // __u32 flags)`.  SYSCALL_DEFINE2(landlock_restrict_self, ...,
-    // __u32, flags) narrows the second parameter to (__u32) on entry;
-    // the AMD64 syscall ABI does not zero-extend int args before
-    // issuing the syscall, so we mask to 32 bits before the `!= 0`
-    // test — high-half register garbage must be ignored (13th instance
-    // of the int/unsigned-int truncation pattern, batches 308-320).
-    #[allow(clippy::cast_possible_truncation)]
-    let flags = args.arg1 as u32;
-    if flags != 0 {
-        return linux_err(errno::EINVAL);
-    }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let fd = args.arg0 as i32;
-    if let Err(r) = validate_linux_fd(fd) {
-        return r;
-    }
-    // Batch 396: terminal was EBADF, predating batch 384's unification of
-    // Landlock terminals on EOPNOTSUPP.  Linux's gate 1 in
-    // security/landlock/syscalls.c::SYSCALL_DEFINE2(landlock_restrict_self)
-    // is `if (!landlock_initialized) return -EOPNOTSUPP;`.  See the
-    // matching comment in sys_landlock_add_rule above.
-    linux_err(errno::EOPNOTSUPP)
+/// `landlock_restrict_self`: [`sys_landlock_create_ruleset`]'s answer.
+fn sys_landlock_restrict_self(_args: &SyscallArgs) -> SyscallResult {
+    linux_err(errno::ENOSYS)
 }
 
 /// `kcmp(pid1, pid2, type, idx1, idx2)` — compare two processes'
@@ -37178,7 +36953,7 @@ fn sys_rt_sigsuspend(args: &SyscallArgs) -> SyscallResult {
             crate::proc::signal::deregister_signalfd_waiter(caller, task);
             continue;
         }
-        crate::sched::block_current();
+        crate::sched::block_current_on(crate::wchan::Wait::on(crate::wchan::WaitChannel::Signal));
         crate::proc::signal::deregister_signalfd_waiter(caller, task);
     }
 }
@@ -37421,7 +37196,7 @@ fn sys_rt_sigtimedwait(args: &SyscallArgs) -> SyscallResult {
             }
             None => None,
         };
-        crate::sched::block_current();
+        crate::sched::block_current_on(crate::wchan::Wait::on(crate::wchan::WaitChannel::Signal));
         if let Some(th) = timer {
             crate::hrtimer::cancel(th);
         }
@@ -40282,7 +40057,7 @@ fn socket_recvmsg(entry: FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
                     if nonblock {
                         return linux_err(linux_errno_for(KernelError::WouldBlock));
                     }
-                    socket_read_backoff(&mut spins);
+                    socket_read_backoff(&mut spins, h.raw());
                 }
                 Err(e) => return linux_err(linux_errno_for(e)),
             }
@@ -70671,8 +70446,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 );
                 return Err(KernelError::InternalError);
             }
-            // Case B: setaffinity(pid=0, len=0, mask=NULL) -> 0 (Linux
-            // accepts copy_from_user(NULL, 0) as a no-op); was EFAULT.
+            // Case B: setaffinity(pid=0, len=0, mask=NULL) -> EINVAL.  The
+            // copy of zero bytes from NULL does not fault (it was EFAULT
+            // pre-batch-235), but it leaves Linux's mask empty
+            // (get_user_cpu_mask clears it when len < cpumask_size), and an
+            // empty mask names no CPU: __set_cpus_allowed_ptr's EINVAL.  It
+            // read 0 until 2026-10-01, when no mask was ever applied.
             let a = SyscallArgs {
                 arg0: 0,
                 arg1: 0,
@@ -70681,9 +70460,53 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 arg4: 0,
                 arg5: 0,
             };
-            if dispatch_linux(nr::SCHED_SETAFFINITY, &a).value != 0 {
-                serial_println!("[syscall/linux]   FAIL: sched_setaffinity(0, len=0, NULL) not 0");
+            if dispatch_linux(nr::SCHED_SETAFFINITY, &a).value
+                != i64::from(errno::EINVAL).wrapping_neg()
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: sched_setaffinity(0, len=0, NULL) not EINVAL"
+                );
                 return Err(KernelError::InternalError);
+            }
+            // Case B2: a mask set reads back.  CPU 0 alone -- always
+            // online, and where this boot task runs -- then put back.
+            {
+                let me = crate::sched::current_task_id();
+                let before = crate::sched::get_cpu_affinity(me);
+                let cpu0 = 1u64.to_le_bytes();
+                let mut got = [0u8; 8];
+                let set = SyscallArgs {
+                    arg0: 0,
+                    arg1: 8,
+                    arg2: cpu0.as_ptr() as u64,
+                    arg3: 0,
+                    arg4: 0,
+                    arg5: 0,
+                };
+                let get = SyscallArgs {
+                    arg0: 0,
+                    arg1: 8,
+                    arg2: got.as_mut_ptr() as u64,
+                    arg3: 0,
+                    arg4: 0,
+                    arg5: 0,
+                };
+                let set_ok = dispatch_linux(nr::SCHED_SETAFFINITY, &set).value == 0;
+                let get_ok = dispatch_linux(nr::SCHED_GETAFFINITY, &get).value == 8;
+                if let Some(mask) = before {
+                    // Back to what it was; it held a CPU before, so it
+                    // still does.
+                    let _ = crate::sched::set_affinity(me, mask);
+                }
+                if !set_ok || !get_ok || got != cpu0 {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: sched_setaffinity(0, CPU 0) read back as {:?} (set {}, get {})",
+                        got,
+                        set_ok,
+                        get_ok
+                    );
+                    return Err(KernelError::InternalError);
+                }
             }
             serial_println!(
                 "[syscall/linux]   sched_setaffinity len>0->mask-EFAULT > pid-ESRCH gate order: OK"
@@ -89925,836 +89748,76 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             }
             {
                 #[inline(never)]
-                fn landlock_create_ruleset() -> crate::error::KernelResult<()> {
+                fn landlock_and_kcmp() -> crate::error::KernelResult<()> {
                     serial_println!(
                         "[syscall/linux]   sched_setattr/getattr nice round-trip (batch 529): OK"
                     );
 
-                    // Batch 384: landlock_create_ruleset VERSION-query.  Pre-batch
-                    // we returned `0`, claiming a fictional "ABI version 0" that
-                    // Linux never produces.  Linux's `!landlock_initialized` arm
-                    // returns -EOPNOTSUPP for every code path in this syscall;
-                    // mirror that so probes detect "no Landlock" via the same errno
-                    // sandbox libraries (Chromium, BubbleWrap, systemd, libcap-ng)
-                    // see on a Linux kernel built without the Landlock LSM
-                    // initialized.
-                    let a = SyscallArgs {
-                        arg0: 0,
-                        arg1: 0,
-                        arg2: 1,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value
-                        != -i64::from(errno::EOPNOTSUPP)
-                    {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: landlock version-query not EOPNOTSUPP"
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                    // Batch 523: landlock_create_ruleset flags=0x2 — formerly a
-                    // dedicated ERRATA-query path returning EOPNOTSUPP.  ERRATA is
-                    // a Linux 6.10 addition and does NOT exist in v6.6, so 0x2 is
-                    // an unknown flag and must hit the generic EINVAL arm (v6.6:
-                    // `if (flags) { if (VERSION ...) return ABI; return -EINVAL; }`).
-                    let a = SyscallArgs {
-                        arg0: 0,
-                        arg1: 0,
-                        arg2: 2,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value
-                        != -i64::from(errno::EINVAL)
-                    {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: landlock flags=0x2 (6.10 ERRATA) not EINVAL"
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                    serial_println!(
-                        "[syscall/linux]   landlock_create_ruleset VERSION query -> EOPNOTSUPP, ERRATA(0x2, 6.10) -> EINVAL: OK"
-                    );
-                    // landlock_create_ruleset flags=0x3 -> EINVAL.  v6.6 accepts
-                    // ONLY flags == VERSION (0x1) exactly; any other value
-                    // (including 0x1 OR'd with the 6.10 ERRATA bit) is unknown and
-                    // returns EINVAL.
-                    let a = SyscallArgs {
-                        arg0: 0,
-                        arg1: 0,
-                        arg2: 3,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value
-                        != -i64::from(errno::EINVAL)
-                    {
-                        serial_println!("[syscall/linux]   FAIL: landlock flags=0x3 not EINVAL");
-                        return Err(KernelError::InternalError);
-                    }
-                    // landlock_create_ruleset VERSION with non-NULL attr -> EINVAL
-                    // (Linux requires attr=NULL,size=0 for query paths).
-                    let a = SyscallArgs {
-                        arg0: 8,
-                        arg1: 0,
-                        arg2: 1,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value
-                        != -i64::from(errno::EINVAL)
-                    {
-                        serial_println!("[syscall/linux]   FAIL: landlock VERSION+attr not EINVAL");
-                        return Err(KernelError::InternalError);
-                    }
-                    // landlock_create_ruleset flags=0x2 with non-zero size -> EINVAL
-                    // (unknown flag; the size is irrelevant once the flag fails the
-                    // VERSION match).
-                    let a = SyscallArgs {
-                        arg0: 0,
-                        arg1: 8,
-                        arg2: 2,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value
-                        != -i64::from(errno::EINVAL)
-                    {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: landlock flags=0x2+size not EINVAL"
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                    // landlock_create_ruleset bad flags -> EINVAL.
-                    let a = SyscallArgs {
-                        arg0: 0,
-                        arg1: 0,
-                        arg2: 0xff,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value
-                        != -i64::from(errno::EINVAL)
-                    {
-                        serial_println!("[syscall/linux]   FAIL: landlock bad flags not EINVAL");
-                        return Err(KernelError::InternalError);
-                    }
-                    serial_println!("[syscall/linux]   landlock_create_ruleset flag dispatch: OK");
-                    // landlock_create_ruleset real path with NULL attr -> EFAULT.
-                    let a = SyscallArgs {
-                        arg0: 0,
-                        arg1: 8,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value
-                        != -i64::from(errno::EFAULT)
-                    {
-                        serial_println!("[syscall/linux]   FAIL: landlock NULL attr not EFAULT");
-                        return Err(KernelError::InternalError);
-                    }
-                    Ok(())
-                }
-                landlock_create_ruleset()?;
-            }
-            {
-                #[inline(never)]
-                fn landlock_size_bounds() -> crate::error::KernelResult<()> {
-                    // Batch 384: landlock_create_ruleset real-ruleset path also
-                    // moves to EOPNOTSUPP (was ENOSYS).  Linux's
-                    // `!landlock_initialized` arm terminates here as well; ENOSYS
-                    // would falsely signal "syscall-table miss" where the syscall
-                    // is in fact registered.  Keep the readable 8-byte attr buffer
-                    // so the pre-EOPNOTSUPP attr/size/forward-compat gates still
-                    // get exercised by the discriminators below.
-                    let landlock_attr = [0u8; 8];
-                    let size_ptr = landlock_attr.as_ptr() as u64;
-                    let a = SyscallArgs {
-                        arg0: size_ptr,
-                        arg1: 8,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value
-                        != -i64::from(errno::EOPNOTSUPP)
-                    {
-                        serial_println!("[syscall/linux]   FAIL: landlock valid not EOPNOTSUPP");
-                        return Err(KernelError::InternalError);
-                    }
-                    // Batch 224 discriminator: (attr=valid, size=4) — usize <
-                    // ksize_min (8) so copy_min_struct_from_user returns -EINVAL.
-                    // Confirms the lower-bound EINVAL still fires when the size
-                    // is in the rejected range.
-                    let a = SyscallArgs {
-                        arg0: size_ptr,
-                        arg1: 4,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value
-                        != -i64::from(errno::EINVAL)
-                    {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: landlock (attr, size=4) not EINVAL"
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                    // Batch 224 discriminator: (attr=valid, size=4097) — usize >
-                    // PAGE_SIZE so copy_min_struct_from_user returns -E2BIG.
-                    // Pre-batch the upper bound was 1 MiB (with the same EINVAL
-                    // errno collapsed in), so 4097 fell through to ENOSYS.
-                    let a = SyscallArgs {
-                        arg0: size_ptr,
-                        arg1: 4097,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value
-                        != -i64::from(errno::E2BIG)
-                    {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: landlock (attr, size=4097) not E2BIG"
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                    // Batch 224 discriminator: (attr=valid, size=2 MiB) — also
-                    // > PAGE_SIZE, must surface as E2BIG.  Pre-batch this hit our
-                    // 1 MiB upper bound which returned EINVAL with the wrong
-                    // errno.
-                    let a = SyscallArgs {
-                        arg0: size_ptr,
-                        arg1: 1 << 21,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value
-                        != -i64::from(errno::E2BIG)
-                    {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: landlock (attr, size=2MiB) not E2BIG"
-                        );
-                        return Err(KernelError::InternalError);
+                    // Landlock, as a kernel built without it answers
+                    // (requests/d-a-landlock-answers-as-no-linux-kernel-does.md):
+                    // ENOSYS from all three calls, before any argument is
+                    // looked at -- the version probe, a ruleset, a rule, a
+                    // restriction, with good arguments and bad alike. Until
+                    // 2026-10-01 these said EOPNOTSUPP ("built in, switched
+                    // off") after checking their arguments, which no Linux
+                    // kernel does, while the C library's native path said
+                    // ENOSYS.
+                    let attr = [0u64; 2];
+                    let attr_ptr = attr.as_ptr() as u64;
+                    for (nr_, name, args) in [
+                        (
+                            nr::LANDLOCK_CREATE_RULESET,
+                            "create_ruleset(version probe)",
+                            [0, 0, 1],
+                        ),
+                        (
+                            nr::LANDLOCK_CREATE_RULESET,
+                            "create_ruleset(ruleset)",
+                            [attr_ptr, 8, 0],
+                        ),
+                        (
+                            nr::LANDLOCK_CREATE_RULESET,
+                            "create_ruleset(bad flags)",
+                            [0, 0, 0x2],
+                        ),
+                        (
+                            nr::LANDLOCK_CREATE_RULESET,
+                            "create_ruleset(NULL attr)",
+                            [0, 8, 0],
+                        ),
+                        (
+                            nr::LANDLOCK_ADD_RULE,
+                            "add_rule(path rule)",
+                            [3, 1, attr_ptr],
+                        ),
+                        (nr::LANDLOCK_ADD_RULE, "add_rule(bad type)", [3, 9, 0]),
+                        (nr::LANDLOCK_RESTRICT_SELF, "restrict_self(fd)", [3, 0, 0]),
+                        (
+                            nr::LANDLOCK_RESTRICT_SELF,
+                            "restrict_self(bad flags)",
+                            [3, 8, 0],
+                        ),
+                    ] {
+                        let a = SyscallArgs {
+                            arg0: args[0],
+                            arg1: args[1],
+                            arg2: args[2],
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        let v = dispatch_linux(nr_, &a).value;
+                        if v != i64::from(errno::ENOSYS).wrapping_neg() {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: landlock_{} -> {} (expected -ENOSYS)",
+                                name,
+                                v
+                            );
+                            return Err(KernelError::InternalError);
+                        }
                     }
                     serial_println!(
-                        "[syscall/linux]   landlock_create_ruleset NULL-EFAULT > size-EINVAL > size-E2BIG gate order: OK"
-                    );
-                    Ok(())
-                }
-                landlock_size_bounds()?;
-            }
-            {
-                #[inline(never)]
-                fn landlock_add_rule() -> crate::error::KernelResult<()> {
-                    // Batch 230 forward-compat trailing-zero E2BIG check.  Linux's
-                    // copy_struct_from_user (lib/usercopy.c) requires that any
-                    // bytes past the kernel-known size (ksize=8) are zero; the
-                    // first non-zero byte returns -E2BIG so probes can detect
-                    // what the kernel knows.
-                    //
-                    // Case A: size=16 with zero tail -> EOPNOTSUPP (passes
-                    // zero-check; landlock not initialized so terminal answer is
-                    // EOPNOTSUPP after batch 384, not ENOSYS).
-                    let landlock_pad_zero = [0u8; 16];
-                    let a = SyscallArgs {
-                        arg0: landlock_pad_zero.as_ptr() as u64,
-                        arg1: 16,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value
-                        != -i64::from(errno::EOPNOTSUPP)
-                    {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: landlock (attr, size=16, zero-pad) not EOPNOTSUPP"
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                    // Case B: size=16 with non-zero byte at offset 8 -> E2BIG.
-                    let mut landlock_pad_nonzero = [0u8; 16];
-                    landlock_pad_nonzero[8] = 1;
-                    let a = SyscallArgs {
-                        arg0: landlock_pad_nonzero.as_ptr() as u64,
-                        arg1: 16,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value
-                        != -i64::from(errno::E2BIG)
-                    {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: landlock (attr, size=16, nonzero-pad) not E2BIG"
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                    serial_println!(
-                        "[syscall/linux]   landlock_create_ruleset forward-compat trailing-zero E2BIG: OK"
-                    );
-                    // landlock_add_rule bad rule_type -> EINVAL.
-                    let a = SyscallArgs {
-                        arg0: 0,
-                        arg1: 99,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL)
-                    {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: landlock_add_rule bad type not EINVAL"
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                    // landlock_add_rule NULL attr -> EFAULT.
-                    let a = SyscallArgs {
-                        arg0: 0,
-                        arg1: 1,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EFAULT)
-                    {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: landlock_add_rule NULL not EFAULT"
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                    // landlock_add_rule valid PATH_BENEATH (allowed_access=EXECUTE=0x1,
-                    // parent_fd=0) -> EOPNOTSUPP (batch 396: terminal switched from
-                    // EBADF to EOPNOTSUPP to match Linux gate 1
-                    // !landlock_initialized).
-                    let lpb_attr: [u8; 16] = {
-                        let mut b = [0u8; 16];
-                        b[0..8].copy_from_slice(&0x1u64.to_ne_bytes());
-                        b
-                    };
-                    let lpb_attr_ptr = lpb_attr.as_ptr() as u64;
-                    let a = SyscallArgs {
-                        arg0: 0,
-                        arg1: 1,
-                        arg2: lpb_attr_ptr,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value
-                        != -i64::from(errno::EOPNOTSUPP)
-                    {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: landlock_add_rule valid PATH_BENEATH not EOPNOTSUPP"
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                    // landlock_add_rule PATH_BENEATH with allowed_access=0 -> ENOMSG
-                    // (Linux's "empty rule body" path).
-                    let lpb_empty: [u8; 16] = [0u8; 16];
-                    let lpb_empty_ptr = lpb_empty.as_ptr() as u64;
-                    let a = SyscallArgs {
-                        arg0: 0,
-                        arg1: 1,
-                        arg2: lpb_empty_ptr,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::ENOMSG)
-                    {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: landlock_add_rule empty PATH_BENEATH not ENOMSG"
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                    // landlock_add_rule PATH_BENEATH with allowed_access bit
-                    // outside LANDLOCK_ACCESS_FS_MASK -> EINVAL.  Bit 0x8000 is
-                    // IOCTL_DEV, a Linux 6.10 addition that is NOT in v6.6's mask
-                    // (0x7fff = EXECUTE..TRUNCATE), so it must be rejected.  This
-                    // pins the v6.6 mask boundary (batch 522).
-                    let lpb_bad_access: [u8; 16] = {
-                        let mut b = [0u8; 16];
-                        b[0..8].copy_from_slice(&0x8000u64.to_ne_bytes());
-                        b
-                    };
-                    let lpb_bad_access_ptr = lpb_bad_access.as_ptr() as u64;
-                    let a = SyscallArgs {
-                        arg0: 0,
-                        arg1: 1,
-                        arg2: lpb_bad_access_ptr,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL)
-                    {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: landlock_add_rule PATH_BENEATH IOCTL_DEV(6.10) bit not EINVAL"
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                    // landlock_add_rule rule_type=2 (LANDLOCK_RULE_NET_PORT) -> EINVAL.
-                    // NET_PORT is a Linux 6.7 rule type; v6.6's switch has no case for
-                    // it and returns -EINVAL via `default`.  The rule_type gate fires
-                    // before the attr pointer/access/port checks, so a fully valid-
-                    // looking NET_PORT attr still gets EINVAL (batch 522 — was
-                    // EOPNOTSUPP when NET_PORT was wrongly accepted).
-                    let lnp_attr: [u8; 16] = {
-                        let mut b = [0u8; 16];
-                        b[0..8].copy_from_slice(&0x1u64.to_ne_bytes());
-                        b[8..16].copy_from_slice(&8080u64.to_ne_bytes());
-                        b
-                    };
-                    let lnp_attr_ptr = lnp_attr.as_ptr() as u64;
-                    let a = SyscallArgs {
-                        arg0: 0,
-                        arg1: 2,
-                        arg2: lnp_attr_ptr,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL)
-                    {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: landlock_add_rule NET_PORT(6.7) rule_type not EINVAL"
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                    serial_println!("[syscall/linux]   landlock_add_rule attr validation: OK");
-
-                    // landlock_add_rule flags is C `__u32`; the high 32 bits of
-                    // arg3 must be masked before the `flags != 0` rejection gate.
-                    // Pre-batch the gate compared at u64 width, so any high-half
-                    // garbage returned EINVAL where Linux's truncated flags=0 falls
-                    // through to the rule_type / attr gates.
-                    //
-                    // (a) flags=0x1_0000_0000 (high-only), rule_type=1 (PATH_BENEATH),
-                    //     attr=NULL: truncates to 0, flag gate passes, downstream
-                    //     attr=NULL gate returns EFAULT.  Pre-fix returned EINVAL.
-                    let a = SyscallArgs {
-                        arg0: 0,
-                        arg1: 1,
-                        arg2: 0,
-                        arg3: 0x1_0000_0000,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EFAULT)
-                    {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: landlock_add_rule(high-only,NULL) not EFAULT"
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                    // (b) flags=0x1_0000_0001 (high|bad-low 1): truncates to 1, gate
-                    //     still rejects.  Verifies the mask continues to reject any
-                    //     nonzero low half after the high-bit strip.
-                    let a = SyscallArgs {
-                        arg0: 0,
-                        arg1: 1,
-                        arg2: 0,
-                        arg3: 0x1_0000_0001,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL)
-                    {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: landlock_add_rule(high|bad-low) not EINVAL"
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                    // (c) flags=0x1_0000_0000 with bad rule_type=99: truncates to 0,
-                    //     flag gate passes, downstream rule_type gate fires EINVAL.
-                    //     Verifies subsequent gates still work after flag truncation.
-                    let a = SyscallArgs {
-                        arg0: 0,
-                        arg1: 99,
-                        arg2: 0,
-                        arg3: 0x1_0000_0000,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL)
-                    {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: landlock_add_rule(high-only,type=99) not EINVAL"
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                    // (d) flags=0x1_0000_0000 with valid PATH_BENEATH attr
-                    //     (allowed_access=EXECUTE=0x1): truncates to 0, flag gate
-                    //     passes, full pre-validate flow runs to the terminal
-                    //     EOPNOTSUPP (batch 396).  Pre-fix returned EINVAL on the
-                    //     flag gate.
-                    let a = SyscallArgs {
-                        arg0: 0,
-                        arg1: 1,
-                        arg2: lpb_attr_ptr,
-                        arg3: 0x1_0000_0000,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value
-                        != -i64::from(errno::EOPNOTSUPP)
-                    {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: landlock_add_rule(high-only,valid) not EOPNOTSUPP"
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                    serial_println!(
-                        "[syscall/linux]   landlock_add_rule unsigned-int truncation (high-half ignored): OK"
-                    );
-
-                    // landlock_add_rule rule_type is C enum (int-sized); the high 32
-                    // bits of arg1 must be masked before the matches!(1 | 2) gate.
-                    // Pre-batch the gate compared at u64 width, so any high-half
-                    // garbage (even with low half = 1 or 2) failed the match and
-                    // returned EINVAL where Linux's truncated rule_type matches and
-                    // advances to the attr gate.
-                    //
-                    // (a) rule_type=0x1_0000_0001 (high|PATH_BENEATH), attr=NULL:
-                    //     truncates to 1, matches PATH_BENEATH, downstream attr=NULL
-                    //     gate returns EFAULT.  Pre-fix returned EINVAL because the
-                    //     u64 match failed.
-                    let a = SyscallArgs {
-                        arg0: 0,
-                        arg1: 0x1_0000_0001,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EFAULT)
-                    {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: landlock_add_rule(rule_type high|1) not EFAULT"
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                    // (b) rule_type=0x1_0000_0002 (high|NET_PORT), attr=NULL:
-                    //     truncates to 2.  NET_PORT (2) is a Linux 6.7 rule type
-                    //     absent from v6.6, so the rule_type gate returns EINVAL
-                    //     (before the attr=NULL gate could return EFAULT).  This
-                    //     still exercises the high-half truncation: the EINVAL comes
-                    //     from the truncated low value 2, not from the raw u64.
-                    //     (Batch 522 — was EFAULT when NET_PORT was wrongly accepted.)
-                    let a = SyscallArgs {
-                        arg0: 0,
-                        arg1: 0x1_0000_0002,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL)
-                    {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: landlock_add_rule(rule_type high|2) not EINVAL"
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                    // (c) rule_type=0x1_0000_0000 (high|0=invalid), attr=NULL:
-                    //     truncates to 0, NOT in {1,2}, rule_type gate fires EINVAL.
-                    //     Verifies the mask continues to reject unknown rule_type
-                    //     after the high-bit strip.
-                    let a = SyscallArgs {
-                        arg0: 0,
-                        arg1: 0x1_0000_0000,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL)
-                    {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: landlock_add_rule(rule_type high|0) not EINVAL"
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                    // (d) rule_type=0x1_0000_0001 with valid PATH_BENEATH attr
-                    //     (allowed_access=EXECUTE=0x1): truncates to 1, full pre-
-                    //     validate flow runs to the terminal EOPNOTSUPP (batch
-                    //     396).  Pre-fix returned EINVAL.
-                    let a = SyscallArgs {
-                        arg0: 0,
-                        arg1: 0x1_0000_0001,
-                        arg2: lpb_attr_ptr,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value
-                        != -i64::from(errno::EOPNOTSUPP)
-                    {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: landlock_add_rule(rule_type high|1,valid) not EOPNOTSUPP"
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                    serial_println!(
-                        "[syscall/linux]   landlock_add_rule rule_type int truncation (high-half ignored): OK"
-                    );
-
-                    // landlock_restrict_self undefined flag bit (0x8) -> EINVAL.
-                    let a = SyscallArgs {
-                        arg0: 0,
-                        arg1: 8,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value
-                        != -i64::from(errno::EINVAL)
-                    {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: landlock_restrict_self undef flag not EINVAL"
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                    Ok(())
-                }
-                landlock_add_rule()?;
-            }
-            {
-                #[inline(never)]
-                fn landlock_restrict_self() -> crate::error::KernelResult<()> {
-                    // Batch 396: terminals switched from EBADF to EOPNOTSUPP.
-                    // Linux gate 1 in restrict_self is !landlock_initialized →
-                    // EOPNOTSUPP before any flag/fd touch; we model
-                    // landlock_initialized=false so every valid call shape
-                    // terminates EOPNOTSUPP.
-                    // landlock_restrict_self valid (flags=0) -> EOPNOTSUPP.
-                    let a = SyscallArgs {
-                        arg0: 0,
-                        arg1: 0,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value
-                        != -i64::from(errno::EOPNOTSUPP)
-                    {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: landlock_restrict_self valid not EOPNOTSUPP"
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                    // Batch 524: the LANDLOCK_RESTRICT_SELF_LOG_* bits do NOT exist
-                    // in v6.6 (LOG_SAME_EXEC_OFF/LOG_NEW_EXEC_ON = 6.10,
-                    // LOG_SUBDOMAINS_OFF = 6.12).  v6.6 gates `if (flags) return
-                    // -EINVAL;`, so each of these must now return EINVAL.
-                    // flags=0x1 (6.10 LOG_SAME_EXEC_OFF) -> EINVAL.
-                    let a = SyscallArgs {
-                        arg0: 0,
-                        arg1: 1,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value
-                        != -i64::from(errno::EINVAL)
-                    {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: landlock_restrict_self flags=0x1 (6.10) not EINVAL"
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                    // flags=0x2 (6.10 LOG_NEW_EXEC_ON) -> EINVAL.
-                    let a = SyscallArgs {
-                        arg0: 0,
-                        arg1: 2,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value
-                        != -i64::from(errno::EINVAL)
-                    {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: landlock_restrict_self flags=0x2 (6.10) not EINVAL"
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                    // flags=0x4 (6.12 LOG_SUBDOMAINS_OFF) -> EINVAL.
-                    let a = SyscallArgs {
-                        arg0: 0,
-                        arg1: 4,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value
-                        != -i64::from(errno::EINVAL)
-                    {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: landlock_restrict_self flags=0x4 (6.12) not EINVAL"
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                    // flags=0x7 (all three post-6.6 log bits) -> EINVAL.
-                    let a = SyscallArgs {
-                        arg0: 0,
-                        arg1: 7,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value
-                        != -i64::from(errno::EINVAL)
-                    {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: landlock_restrict_self flags=0x7 not EINVAL"
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                    // flags=0x101 (undefined high bit) -> EINVAL.
-                    let a = SyscallArgs {
-                        arg0: 0,
-                        arg1: 0x101,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value
-                        != -i64::from(errno::EINVAL)
-                    {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: landlock_restrict_self high bit not EINVAL"
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                    serial_println!(
-                        "[syscall/linux]   landlock_restrict_self flags!=0 -> EINVAL (v6.6: no flags): OK"
-                    );
-
-                    // Batch 320: landlock_restrict_self unsigned-int truncation —
-                    // high-half register garbage must be stripped before the
-                    // LANDLOCK_RESTRICT_SELF_FLAGS mask check.
-                    //
-                    // Linux signature: `int landlock_restrict_self(int ruleset_fd,
-                    // __u32 flags)`.  flags is C __u32 → low 32 bits only.  The
-                    // AMD64 syscall ABI does not zero-extend int args, so high-half
-                    // garbage must be stripped before the `flags != 0` test.  The
-                    // key truncation probe is (c): a value whose LOW half is zero
-                    // must reach the EOPNOTSUPP terminal — proving the high half is
-                    // ignored.  (a)/(b)/(d) carry non-zero low halves and therefore
-                    // hit the v6.6 `if (flags) return -EINVAL;` gate (batch 524).
-                    //
-                    // (a) landlock_restrict_self(0, 0x1_0000_0001) → EINVAL
-                    //     (truncates to 1; non-zero -> EINVAL).
-                    let a = SyscallArgs {
-                        arg0: 0,
-                        arg1: 0x1_0000_0001,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    let v = dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value;
-                    if v != -i64::from(errno::EINVAL) {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: landlock_restrict_self(high|0x1) -> {} (expected -EINVAL)",
-                            v
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-
-                    // (b) landlock_restrict_self(0, 0x1_0000_0007) → EINVAL
-                    //     (truncates to 7; non-zero -> EINVAL).
-                    let a = SyscallArgs {
-                        arg0: 0,
-                        arg1: 0x1_0000_0007,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    let v = dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value;
-                    if v != -i64::from(errno::EINVAL) {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: landlock_restrict_self(high|0x7) -> {} (expected -EINVAL)",
-                            v
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-
-                    // (c) landlock_restrict_self(0, 0x1_0000_0000) → EOPNOTSUPP
-                    //     (high-half only, low half zero; truncates to 0, flag gate
-                    //     passes, modelled terminal EOPNOTSUPP).  This is the probe
-                    //     that proves the high half is stripped — if it weren't,
-                    //     0x1_0000_0000 != 0 would yield EINVAL.
-                    let a = SyscallArgs {
-                        arg0: 0,
-                        arg1: 0x1_0000_0000,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    let v = dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value;
-                    if v != -i64::from(errno::EOPNOTSUPP) {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: landlock_restrict_self(high-half-zero) -> {} (expected -EOPNOTSUPP)",
-                            v
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-
-                    // (d) landlock_restrict_self(0, 0x1_0000_0008) → EINVAL
-                    //     (truncates to 0x8; non-zero -> EINVAL).
-                    let a = SyscallArgs {
-                        arg0: 0,
-                        arg1: 0x1_0000_0008,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    let v = dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value;
-                    if v != -i64::from(errno::EINVAL) {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: landlock_restrict_self(high|bad-low) -> {} (expected -EINVAL)",
-                            v
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-
-                    serial_println!(
-                        "[syscall/linux]   landlock_restrict_self unsigned-int truncation (high-half ignored): OK"
-                    );
-                    serial_println!(
-                        "[syscall/linux]   landlock_add_rule + landlock_restrict_self terminal EOPNOTSUPP (Linux gate 1 !landlock_initialized): OK"
+                        "[syscall/linux]   landlock: ENOSYS from all three, before any argument (built without Landlock): OK"
                     );
 
                     // kcmp bad type, valid pids -> EINVAL.  Type validation lives
@@ -90822,7 +89885,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                landlock_restrict_self()?;
+                landlock_and_kcmp()?;
             }
             {
                 #[inline(never)]

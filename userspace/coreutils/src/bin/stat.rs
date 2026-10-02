@@ -1192,8 +1192,11 @@ Valid format sequences for file systems:
 --terse --file-system is equivalent to the following FORMAT:
     {}
 ",
-        String::from_utf8_lossy(TERSE_FILE).trim_end(),
-        String::from_utf8_lossy(TERSE_FS).trim_end(),
+        // Both formats are ASCII literals, so neither decode can fail.
+        std::str::from_utf8(TERSE_FILE)
+            .unwrap_or_default()
+            .trim_end(),
+        std::str::from_utf8(TERSE_FS).unwrap_or_default().trim_end(),
     )
 }
 

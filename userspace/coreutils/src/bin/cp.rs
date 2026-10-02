@@ -1066,7 +1066,7 @@ fn decode_preserve(list: &OsString, on: bool, flags: &mut CpFlags) -> Result<(),
         // The spelling the user actually wrote, for the refusals below. It is a
         // prefix of one of the table's words, so it is ASCII whenever
         // `argmatch` resolved it at all.
-        let spelling = String::from_utf8_lossy(word);
+        let spelling = std::str::from_utf8(word).unwrap_or_default();
         match attribute {
             Attribute::Mode => {
                 flags.preserve.mode = on;
@@ -1090,7 +1090,7 @@ fn decode_preserve(list: &OsString, on: bool, flags: &mut CpFlags) -> Result<(),
             // silently carried nothing would report success for a copy that
             // dropped the thing it was asked to keep.
             Attribute::Context if on => {
-                return Err(unimplemented_attribute(&spelling, ""));
+                return Err(unimplemented_attribute(spelling, ""));
             }
             // `all` is the other six words at once (`cp.c`'s `PRESERVE_ALL`).
             // It is *not* `context` as well on this system, and that is GNU's

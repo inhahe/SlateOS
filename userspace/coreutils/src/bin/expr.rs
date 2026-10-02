@@ -63,9 +63,8 @@
 //! | Case | Ours | GNU |
 //! |---|---|---|
 //! | `:` against a byte that is not valid UTF-8 | the byte is data; `.` matches it | the byte stops the match dead |
-//! | the text of a bad-pattern diagnostic | `ere`'s wording | `regcomp`'s wording |
 //!
-//! The first is a place where **GNU disagrees with itself** and we do not.
+//! It is a place where **GNU disagrees with itself** and we do not.
 //! Measured on GNU expr 9.4 under `C.UTF-8`, with `$raw` holding the three
 //! bytes `a`, `0xff`, `b`: `expr length "$raw"` answers `3` and `expr index
 //! "$raw" b` answers `3`, so its string half calls the undecodable byte a
@@ -77,15 +76,15 @@
 //! is the only reading under which `expr "$path" : '.*/\(.*\)'` still works on
 //! a path this filesystem allows — every byte but `/` and NUL.
 //!
-//! The second stays: `regcomp`'s messages are glibc's internal error taxonomy,
-//! and reproducing them would fit our engine to glibc rather than to expr.
-//!
-//! Two rows that used to be here are gone because they stopped being true.
+//! Three rows that used to be here are gone because they stopped being true.
+//! A pattern that will not compile is reported in glibc's words now --
+//! `expr: Unmatched ( or \(` -- because `ere` carries glibc's code for every
+//! refusal (`EreError::message`), which is what upstream prints.
 //! Backreferences (`\(a\)\1`) were the Pike VM's one real limitation and are
 //! now supported — see `known-issues.md`, fixed 2026-08-18 — and a stacked
-//! quantifier (`a**`) is now folded exactly as GNU folds it. Both were caught
-//! by `expr-diff.sh` reporting them as XPASS once it was measuring against real
-//! GNU expr rather than MSYS2's.
+//! quantifier (`a**`) is now folded exactly as GNU folds it. Those two were
+//! caught by `expr-diff.sh` reporting them as XPASS once it was measuring
+//! against real GNU expr rather than MSYS2's.
 
 use coreutils::diag;
 use coreutils::stdfd;
@@ -286,7 +285,10 @@ fn to_int(v: &[u8]) -> Result<BigInt, Fail> {
     if !looks_like_integer(v) {
         return Err(Fail("non-integer argument".to_string()));
     }
-    Ok(BigInt::from_str(&String::from_utf8_lossy(v)))
+    // `looks_like_integer` has just checked it is ASCII digits, so this decode
+    // cannot fail; if it ever did, the honest answer is the same refusal.
+    let text = std::str::from_utf8(v).map_err(|_| Fail("non-integer argument".to_string()))?;
+    Ok(BigInt::from_str(text))
 }
 
 /// A value as a machine integer for `substr`'s position and length, saturating

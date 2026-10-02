@@ -3426,7 +3426,8 @@ fn restore_metadata(at: &Located, name: &[u8], mode: u32, mtime: i64, status: &m
         diag!(
             "tar: {}: Cannot change mode to {}: {}",
             escape(name),
-            String::from_utf8_lossy(bits.get(1..).unwrap_or(&[])),
+            // `mode_string` writes ASCII letters only.
+            std::str::from_utf8(bits.get(1..).unwrap_or(&[])).unwrap_or_default(),
             strerror(&e)
         );
         *status = EXIT_FATAL;

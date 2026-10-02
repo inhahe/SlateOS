@@ -510,7 +510,8 @@ impl Ctx {
                 let right = self.at(op.saturating_add(1)).to_vec();
                 self.pos = self.pos.saturating_add(3);
                 if l_is_l || r_is_l {
-                    let name = String::from_utf8_lossy(&opname).into_owned();
+                    // One of the three spellings matched just above.
+                    let name = std::str::from_utf8(&opname).unwrap_or_default();
                     return Err(Fail(format!("{name} does not accept -l")));
                 }
                 return Ok(match opname.as_slice() {

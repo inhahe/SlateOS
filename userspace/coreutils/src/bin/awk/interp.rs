@@ -1393,7 +1393,8 @@ pub fn command_assignment(arg: &[u8]) -> Option<(String, Str)> {
         return None;
     }
     let value = arg.get(eq.saturating_add(1)..)?.to_vec();
-    Some((String::from_utf8_lossy(name).into_owned(), value))
+    // Checked above to be an ASCII identifier, so the decode cannot fail.
+    Some((std::str::from_utf8(name).ok()?.to_string(), value))
 }
 
 fn seconds_since_epoch() -> f64 {

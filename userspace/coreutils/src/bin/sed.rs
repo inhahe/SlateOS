@@ -1240,7 +1240,8 @@ fn parse_replacement(raw: &[u8]) -> Result<Vec<Rep>, String> {
 #[cfg_attr(test, derive(Debug))]
 struct ScriptError {
     pos: Pos,
-    msg: String,
+    /// Bytes, for [`ScriptFail::Label`]'s sake.
+    msg: Vec<u8>,
     code: i32,
 }
 
@@ -1276,7 +1277,8 @@ enum ScriptFail {
     Syntax(String),
     /// A syntax error somewhere other than where the parser stopped.
     SyntaxAt(Pos, String),
-    Label(String),
+    /// Bytes, because it quotes the label, and a label need not be text.
+    Label(Vec<u8>),
 }
 
 /// `strverscmp(3)`, which is how `v` decides whether the version a script asks
@@ -1418,10 +1420,14 @@ fn compile_script(
         }
         Err(ScriptFail::Syntax(msg)) => Err(ScriptError {
             pos: Pos::At(p.i),
-            msg,
+            msg: msg.into_bytes(),
             code: 1,
         }),
-        Err(ScriptFail::SyntaxAt(pos, msg)) => Err(ScriptError { pos, msg, code: 1 }),
+        Err(ScriptFail::SyntaxAt(pos, msg)) => Err(ScriptError {
+            pos,
+            msg: msg.into_bytes(),
+            code: 1,
+        }),
         // GNU reports an unresolvable label after parsing has finished, and
         // gives it its own status. Matching that keeps a script that checks
         // `$?` behaving the same under either sed.
@@ -1744,10 +1750,9 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
                 .find(|(l, _)| *l == name)
                 .map(|(_, i)| i)
                 .ok_or_else(|| {
-                    ScriptFail::Label(format!(
-                        "can't find label for jump to `{}'",
-                        String::from_utf8_lossy(&name)
-                    ))
+                    ScriptFail::Label(
+                        [b"can't find label for jump to `".as_slice(), &name, b"'"].concat(),
+                    )
                 })?
         };
         if let Some(cmd) = cmds.get_mut(at) {
@@ -3653,7 +3658,7 @@ fn main() {
                 line.extend_from_slice(&where_);
                 line.extend_from_slice(b": ");
             }
-            line.extend_from_slice(e.msg.as_bytes());
+            line.extend_from_slice(&e.msg);
             line.push(b'\n');
             let _ = io::stdout().flush();
             stdfd::diag_bytes(&line);
@@ -3966,8 +3971,13 @@ mod tests {
     /// [`compile`] with `--debug`, so the [`Command::dump`] of each command is
     /// filled in and can be checked.
     fn compile_debug(script: &[u8]) -> Script {
-        compile_script(script, &[], false, DEFAULT_LINE_LEN, false, true)
-            .unwrap_or_else(|e| panic!("compiling {}: {}", String::from_utf8_lossy(script), e.msg))
+        compile_script(script, &[], false, DEFAULT_LINE_LEN, false, true).unwrap_or_else(|e| {
+            panic!(
+                "compiling {}: {}",
+                String::from_utf8_lossy(script),
+                String::from_utf8_lossy(&e.msg)
+            )
+        })
     }
 
     /// The `SED PROGRAM:` dump of `script`, as text.
@@ -4015,7 +4025,7 @@ mod tests {
     fn compile_err(script: &[u8]) -> String {
         match compile(script, false) {
             Ok(_) => panic!("{} compiled", String::from_utf8_lossy(script)),
-            Err(e) => e.msg,
+            Err(e) => String::from_utf8(e.msg).unwrap(),
         }
     }
 
@@ -4034,8 +4044,13 @@ mod tests {
     /// Separate because every caller but the `-z` tests wants text, and a
     /// separator of NUL makes the input and the output both unprintable.
     fn run_sep(script: &[u8], input: &[u8], suppress: bool, ere: bool, sep: u8) -> Vec<u8> {
-        let compiled = compile(script, ere)
-            .unwrap_or_else(|e| panic!("compiling {}: {}", String::from_utf8_lossy(script), e.msg));
+        let compiled = compile(script, ere).unwrap_or_else(|e| {
+            panic!(
+                "compiling {}: {}",
+                String::from_utf8_lossy(script),
+                String::from_utf8_lossy(&e.msg)
+            )
+        });
         let mut sink: Vec<u8> = Vec::new();
         let mut inp = over(input.to_vec(), sep);
         let mut job = Job {
@@ -4059,7 +4074,7 @@ mod tests {
     /// being checked.
     fn run_stopping(script: &str, input: &str) -> Result<Vec<u8>, Vec<u8>> {
         let compiled = compile(script.as_bytes(), false)
-            .unwrap_or_else(|e| panic!("compiling {script}: {}", e.msg));
+            .unwrap_or_else(|e| panic!("compiling {script}: {}", String::from_utf8_lossy(&e.msg)));
         let mut inp = over(input.as_bytes().to_vec(), b'\n');
         let mut wfiles = open_wfiles(&compiled.wfiles);
         let mut rfiles = open_rfiles(&compiled.rfiles);

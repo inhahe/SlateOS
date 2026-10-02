@@ -287,6 +287,10 @@ run_case -L --files0-from=list0
 run_case --files0-from=nosuchlist
 run_case --total=always --files0-from=empty0
 run_case --files0-from=dir0
+# The list is named in the empty-name complaint as upstream's `quotef` names it:
+# bare unless it needs quoting, which a space does.
+printf 'plain.txt\0\0w1.txt\0' > 'list0 spaced'
+run_case '--files0-from=list0 spaced'
 # A list on a pipe cannot be read in advance, so the width drops to 1 — the one
 # case where `--files0-from=-` and `--files0-from=FILE` differ in output.
 run_stdin 'plain.txt\x00w1.txt\x00' --files0-from=-

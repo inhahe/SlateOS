@@ -562,7 +562,7 @@ fn line_control(bytes: &[u8], last_line: &mut u64) -> Result<Control, Fail> {
         // Measured: this one is *not* quoted, where "invalid pattern" is.
         return Err(Fail::fatal(format!(
             "{}: line number must be greater than zero",
-            String::from_utf8_lossy(bytes)
+            text.unwrap_or_default()
         )));
     }
     if value < *last_line {

@@ -29,7 +29,7 @@ use coreutils::getopt::{self, Program, Takes};
 use coreutils::stdfd::{self, Stream};
 // No `quote` here: every diagnostic `wc` prints names its file with one of the
 // shell-escape styles, so none of them carry §351's curly marks.
-use coreutils::quote::{quoteaf, quoteaf_os, quotef_os};
+use coreutils::quote::{quoteaf, quoteaf_os, quotef, quotef_os};
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -744,9 +744,10 @@ fn run(options: &Options, source: &Source, out: &mut Stream) -> ExitCode {
         // per-name complaint, not a fatal one — the names around it are still
         // counted, and only the exit status remembers.
         if name.as_deref() == Some(b"".as_slice()) {
+            // `quotef (files_from)`: bare unless the name needs quoting.
             diag!(
                 "wc: {}:{}: invalid zero-length file name",
-                String::from_utf8_lossy(inputs.label.as_deref().unwrap_or(b"-")),
+                quotef(inputs.label.as_deref().unwrap_or(b"-")),
                 n.saturating_add(1)
             );
             failed = true;

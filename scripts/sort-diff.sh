@@ -284,6 +284,11 @@ run_stdin 'b\x00a\x00' -z
 # --- -c and -C --------------------------------------------------------------
 run_case -c sorted.txt
 run_case -c unsorted.txt
+# The disorder line names the file as given -- bare, and as bytes.
+cp unsorted.txt 'un sorted'
+cp unsorted.txt "$(printf 'un\377sorted')"
+run_case -c 'un sorted'
+run_case -c "$(printf 'un\377sorted')"
 run_case -C sorted.txt
 run_case -C unsorted.txt
 run_case -cu dupes.txt
@@ -649,6 +654,10 @@ run_case --files0-from=names0
 run_msg --files0-from=names0-empty
 run_msg --files0-from=names0-none
 run_msg --files0-from=names0 sorted.txt
+# The list is named in the empty-name refusal as upstream's `quotef` names it:
+# bare unless it needs quoting, which a space does.
+printf 'sorted.txt\0\0' > 'names0 spaced'
+run_msg '--files0-from=names0 spaced'
 # A value may be written either way round.
 run_stdin 'b 1\na 2\n' --key 2
 run_stdin 'b 1\na 2\n' --key=2

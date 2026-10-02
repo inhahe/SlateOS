@@ -28322,6 +28322,408 @@ pub fn self_test_pkgconf_on_slateos_libc() -> KernelResult<()> {
     Ok(())
 }
 
+/// eSpeak NG's data directory on the image, which the battery sees at `/mnt`
+/// (the image becomes `/` only after it, design-decisions §1513).
+const ESPEAK_DATA_DIR: &str = "/mnt/usr/share/espeak-ng-data";
+
+/// `--path` for [`ESPEAK_DATA_DIR`]: eSpeak takes the directory that *holds*
+/// `espeak-ng-data`. Its compiled-in default, `/usr/share/espeak-ng-data`, is
+/// where the data is once the image is the root; during the battery it is
+/// not.
+const ESPEAK_PATH_ARG: &[u8] = b"--path=/mnt/usr/share";
+
+/// Run the staged eSpeak NG once with `args` (argv\[0\] is supplied), and
+/// return its exit code once it has exited.
+///
+/// stdout goes to a scratch file that is thrown away (with `-w` eSpeak writes
+/// nothing there), stderr to the console so a refusal is in the log. eSpeak
+/// opens and `stat`s its data files and writes its WAV: `(File, READ | WRITE |
+/// METADATA)`, the grant pkgconf's rung learnt the `METADATA` half of the hard
+/// way ([`pkgconf_invoke`]). It needs no environment: its data path is
+/// compiled in, or given by `--path`.
+///
+/// Waits on the clock, not on a yield count: synthesis is floating-point work
+/// whose cost under QEMU's emulation is the one thing here with no measured
+/// bound.
+fn espeak_invoke(label: &str, exe_elf: &[u8], args: &[&[u8]]) -> KernelResult<Option<i32>> {
+    use crate::fs::handle;
+
+    /// Scratch file for eSpeak's stdout.
+    const OUT_PATH: &str = "/espeak-out.txt";
+    /// How long one run may take, emulated.
+    const PATIENCE_NS: u64 = 300_000_000_000;
+
+    // Absent on a first run, which is the case to want; any other failure
+    // shows up as the open below failing.
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+    let out_handle = handle::open(
+        OUT_PATH,
+        handle::OpenFlags::WRITE
+            .union(handle::OpenFlags::CREATE)
+            .union(handle::OpenFlags::TRUNCATE),
+    )?;
+    let mut argv: alloc::vec::Vec<&[u8]> =
+        alloc::vec::Vec::with_capacity(args.len().saturating_add(1));
+    argv.push(b"/bin/espeak-ng".as_slice());
+    argv.extend_from_slice(args);
+    let fd_map = [
+        (0_i32, fd_handle_type::CONSOLE, 0_u64),
+        (1_i32, fd_handle_type::FILE, out_handle),
+        (2_i32, fd_handle_type::CONSOLE, 2_u64),
+    ];
+    let caps = [(
+        ResourceType::File,
+        1u64,
+        Rights::READ | Rights::WRITE | Rights::METADATA,
+    )];
+    let options = SpawnOptions {
+        name: "spawn-test-espeak",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &fd_map,
+        argv: &argv,
+        envp: &[],
+        exe_path: Some(b"/bin/espeak-ng"),
+        cwd: None,
+        uid_gid: None,
+    };
+    let spawned = spawn_process(exe_elf, &options);
+    // The child has its own dup of the capture file; ours goes before the `?`.
+    if let Err(e) = handle::close(out_handle) {
+        serial_println!(
+            "[spawn]   espeak {}: WARNING: closing the parent's capture handle failed: {:?}",
+            label,
+            e
+        );
+    }
+    let result = spawned?;
+
+    let start = crate::hrtimer::now_ns();
+    let mut exited = false;
+    while crate::hrtimer::now_ns().saturating_sub(start) < PATIENCE_NS {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            exited = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+    let exit_code = pcb::exit_code(result.pid);
+    let state = pcb::state(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+    // Scratch; nothing reads it, and the next run truncates it anyway.
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+    if !exited {
+        serial_println!(
+            "[spawn]   FAIL: espeak {} did not exit within {} s (state={:?})",
+            label,
+            PATIENCE_NS / 1_000_000_000,
+            state
+        );
+        return Err(KernelError::TimedOut);
+    }
+    Ok(exit_code)
+}
+
+/// What [`self_test_espeak_on_slateos_libc`] reads out of a WAV file.
+struct WavFacts<'a> {
+    /// `fmt ` chunk: format tag (1 = PCM).
+    format: u16,
+    /// `fmt ` chunk: channels.
+    channels: u16,
+    /// `fmt ` chunk: samples per second.
+    rate: u32,
+    /// `fmt ` chunk: bits per sample.
+    bits: u16,
+    /// The `data` chunk's samples.
+    data: &'a [u8],
+}
+
+/// Read a RIFF/WAVE file's format and samples, walking its chunks -- and
+/// require the two sizes its writer patches in on close to be the file's
+/// own: `RIFF`'s (the file less 8) and `data`'s (to the end of the file).
+/// eSpeak writes placeholders and `fseek`s back to fix both, so a wrong one
+/// is our libc's `fseek`/`ftell`, not eSpeak.
+fn wav_facts(bytes: &[u8]) -> Result<WavFacts<'_>, &'static str> {
+    let u16_at = |at: usize| -> Option<u16> {
+        Some(u16::from_le_bytes(
+            bytes.get(at..at.checked_add(2)?)?.try_into().ok()?,
+        ))
+    };
+    let u32_at = |at: usize| -> Option<u32> {
+        Some(u32::from_le_bytes(
+            bytes.get(at..at.checked_add(4)?)?.try_into().ok()?,
+        ))
+    };
+    if bytes.get(0..4) != Some(b"RIFF".as_slice()) || bytes.get(8..12) != Some(b"WAVE".as_slice()) {
+        return Err("not a RIFF/WAVE file");
+    }
+    let riff_size = u32_at(4).ok_or("no RIFF size")?;
+    if usize::try_from(riff_size).ok() != bytes.len().checked_sub(8) {
+        return Err("the RIFF size is not the file's (the close-time fseek/write went wrong)");
+    }
+    let mut format = None;
+    let mut at = 12usize;
+    while let (Some(id), Some(size)) = (
+        bytes.get(at..at.saturating_add(4)),
+        u32_at(at.saturating_add(4)),
+    ) {
+        let body = at.saturating_add(8);
+        let size = usize::try_from(size).map_err(|_| "a chunk size does not fit")?;
+        let end = body.checked_add(size).ok_or("a chunk size overflows")?;
+        if id == b"fmt " {
+            format = Some((
+                u16_at(body).ok_or("short fmt chunk")?,
+                u16_at(body.saturating_add(2)).ok_or("short fmt chunk")?,
+                u32_at(body.saturating_add(4)).ok_or("short fmt chunk")?,
+                u16_at(body.saturating_add(14)).ok_or("short fmt chunk")?,
+            ));
+        } else if id == b"data" {
+            if end != bytes.len() {
+                return Err(
+                    "the data size is not the rest of the file (the close-time fseek/write went wrong)",
+                );
+            }
+            let (format, channels, rate, bits) = format.ok_or("data before fmt")?;
+            let data = bytes.get(body..end).ok_or("data runs past the file")?;
+            return Ok(WavFacts {
+                format,
+                channels,
+                rate,
+                bits,
+                data,
+            });
+        }
+        // Chunks are padded to an even length.
+        at = end.checked_add(size & 1).ok_or("a chunk size overflows")?;
+    }
+    Err("no data chunk")
+}
+
+/// Path Z: **eSpeak NG 1.52**, the speech synthesizer Linux screen readers
+/// use, linked against OUR `libc.a` -- made to speak into a WAV file, and the
+/// file judged (`requests/e-a-espeak-ng-needs-a-ring-3-rung.md`).
+///
+/// A link with no missing symbols proves nothing is *missing*; this proves the
+/// program runs. It needs no sound device: the samples go to a file, and a
+/// file can be read back. Lane E measured every expectation on Linux, with
+/// the same source and data:
+///
+/// | # | run | expect |
+/// |---|---|---|
+/// | 1 | `espeak-ng -w fox.wav "The quick brown fox jumps over the lazy dog."` | exit 0; a PCM WAV, 1 channel, 22050 Hz, 16 bits, whose two patched-in sizes are the file's own |
+/// | 2 | its `data` | 2.0-4.0 s of samples (Linux: 2.8 s, 122,804 bytes) |
+/// | 3 | its samples | **not silence**: peak above 10,000 (Linux: 26,536), more than half non-zero (Linux: 78%) -- the row that proves synthesis ran; 1 and 2 pass for a correct header over zeros |
+/// | 4 | run 1 again | **byte-identical** -- eSpeak is deterministic, so a difference is uninitialised memory or a clock leaking into the synthesis |
+/// | 5 | `--path=/nonexistent ... "hi"` | **non-zero exit** -- without a case that must fail, the rung passes for a program that writes a plausible file whatever it is given |
+///
+/// Runs 1-4 pass `--path` ([`ESPEAK_PATH_ARG`]): the battery sees the image
+/// at `/mnt`, not where the compiled-in path points. Also prints, without
+/// asserting, whether the file's SHA-256 matches Linux's (`84388329afc664fb…`):
+/// synthesis is floating-point, so a match says our `libm` agrees with
+/// musl's to the last bit on this input, and a one-ulp difference is not the
+/// program failing.
+///
+/// No-op (returns `Ok(())`), loudly, when the image has no `/bin/espeak-ng` or
+/// its English data.
+///
+/// # Errors
+///
+/// [`KernelError::InternalError`] if any row above does not hold;
+/// [`KernelError::TimedOut`] if eSpeak never exits; staging and spawn
+/// failures.
+pub fn self_test_espeak_on_slateos_libc() -> KernelResult<()> {
+    const SRC: &str = "/mnt/bin/espeak-ng";
+    const DST: &str = "/bin/espeak-ng";
+    const WAV: &str = "/espeak-fox.wav";
+    const WAV_AGAIN: &str = "/espeak-fox2.wav";
+    const WAV_NONE: &str = "/espeak-none.wav";
+    const TEXT: &[u8] = b"The quick brown fox jumps over the lazy dog.";
+    const RUNG: &str = "eSpeak NG 1.52 linked against OUR libc.a (ring 3)";
+    /// The first 8 bytes of Linux's file's SHA-256, as lane E measured it.
+    const LINUX_SHA256_PREFIX: [u8; 8] = [0x84, 0x38, 0x83, 0x29, 0xaf, 0xc6, 0x64, 0xfb];
+
+    let required = [
+        SRC,
+        "/mnt/usr/share/espeak-ng-data/phondata",
+        "/mnt/usr/share/espeak-ng-data/phonindex",
+        "/mnt/usr/share/espeak-ng-data/phontab",
+        "/mnt/usr/share/espeak-ng-data/intonations",
+        "/mnt/usr/share/espeak-ng-data/en_dict",
+    ];
+    if pathz_missing(RUNG, &required) {
+        return Ok(());
+    }
+    serial_println!("[spawn] Running {} test...", RUNG);
+    serial_println!("[spawn]   espeak: data from {}", ESPEAK_DATA_DIR);
+
+    let _ = crate::fs::Vfs::mkdir_all("/bin");
+    let exe_elf = match crate::fs::Vfs::read_file(SRC) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: espeak: reading {} failed: {:?}", SRC, e);
+            return Err(KernelError::InternalError);
+        }
+    };
+    if let Err(e) = crate::fs::Vfs::write_file(DST, &exe_elf) {
+        serial_println!("[spawn]   FAIL: espeak: staging {} failed: {:?}", DST, e);
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   espeak: staged {} bytes -> {}",
+        exe_elf.len(),
+        DST
+    );
+
+    let fail = |what: &str| {
+        serial_println!("[spawn]   FAIL: espeak: {}", what);
+        Err(KernelError::InternalError)
+    };
+    let speak = |label: &str, wav: &str| -> KernelResult<Option<i32>> {
+        // A stale file from an earlier boot must not pass for this run's;
+        // absent is the usual answer.
+        let _ = crate::fs::Vfs::remove(wav);
+        espeak_invoke(
+            label,
+            &exe_elf,
+            &[ESPEAK_PATH_ARG, b"-w", wav.as_bytes(), TEXT],
+        )
+    };
+
+    // 1-3: speak, and judge the file.
+    let code = speak("the fox", WAV)?;
+    if code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: espeak: run 1 exited {:?}, expected 0",
+            code
+        );
+        return Err(KernelError::InternalError);
+    }
+    let Ok(wav) = crate::fs::Vfs::read_file(WAV) else {
+        return fail("run 1 exited 0 and wrote no WAV file");
+    };
+    let facts = match wav_facts(&wav) {
+        Ok(f) => f,
+        Err(why) => {
+            serial_println!(
+                "[spawn]   FAIL: espeak: the WAV ({} bytes): {}",
+                wav.len(),
+                why
+            );
+            return Err(KernelError::InternalError);
+        }
+    };
+    if (facts.format, facts.channels, facts.rate, facts.bits) != (1, 1, 22050, 16) {
+        serial_println!(
+            "[spawn]   FAIL: espeak: format {} channels {} rate {} bits {}, expected PCM 1 x 22050 Hz x 16",
+            facts.format,
+            facts.channels,
+            facts.rate,
+            facts.bits
+        );
+        return Err(KernelError::InternalError);
+    }
+    // 22050 samples of 2 bytes a second: 2.0-4.0 s.
+    const BYTES_PER_S: usize = 22_050 * 2;
+    let len = facts.data.len();
+    if !(BYTES_PER_S * 2..=BYTES_PER_S * 4).contains(&len) {
+        serial_println!(
+            "[spawn]   FAIL: espeak: {} bytes of samples is {} ms, expected 2000-4000 (Linux: 122804 bytes, 2785 ms)",
+            len,
+            len.saturating_mul(1000) / BYTES_PER_S
+        );
+        return Err(KernelError::InternalError);
+    }
+    let (mut peak, mut nonzero, mut samples) = (0u32, 0usize, 0usize);
+    for pair in facts.data.chunks_exact(2) {
+        let s = i16::from_le_bytes([
+            pair.first().copied().unwrap_or(0),
+            pair.get(1).copied().unwrap_or(0),
+        ]);
+        peak = peak.max(u32::from(s.unsigned_abs()));
+        nonzero = nonzero.saturating_add(usize::from(s != 0));
+        samples = samples.saturating_add(1);
+    }
+    if peak <= 10_000 || nonzero.saturating_mul(2) <= samples {
+        serial_println!(
+            "[spawn]   FAIL: espeak: peak {} and {} of {} samples non-zero -- silence, or nearly (Linux: peak 26536, 78% non-zero)",
+            peak,
+            nonzero,
+            samples
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   espeak: PCM 22050 Hz mono 16-bit, {} ms, peak {}, {}% non-zero: OK",
+        len.saturating_mul(1000) / BYTES_PER_S,
+        peak,
+        nonzero
+            .saturating_mul(100)
+            .checked_div(samples)
+            .unwrap_or(0)
+    );
+
+    // 4: the same words, the same bytes.
+    let code = speak("the fox again", WAV_AGAIN)?;
+    let again = crate::fs::Vfs::read_file(WAV_AGAIN).unwrap_or_default();
+    if code != Some(0) || again != wav {
+        serial_println!(
+            "[spawn]   FAIL: espeak: run 2 exited {:?} with {} bytes; run 1 wrote {} -- not byte-identical",
+            code,
+            again.len(),
+            wav.len()
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // 5: no data, no speech.
+    // As in `speak`: no stale file may stand in for this run's.
+    let _ = crate::fs::Vfs::remove(WAV_NONE);
+    let code = espeak_invoke(
+        "with no data",
+        &exe_elf,
+        &[b"--path=/nonexistent", b"-w", WAV_NONE.as_bytes(), b"hi"],
+    )?;
+    if code == Some(0) || code.is_none() {
+        serial_println!(
+            "[spawn]   FAIL: espeak: with no data directory it exited {:?}, expected non-zero",
+            code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Informational: does our libm agree with musl's to the last bit here?
+    let digest = crate::crypto::sha256(&wav);
+    let prefix = digest.get(..8).unwrap_or(&[]);
+    let hex = prefix
+        .iter()
+        .fold(alloc::string::String::with_capacity(16), |mut s, b| {
+            // Writing to a String cannot fail.
+            let _ = core::fmt::Write::write_fmt(&mut s, format_args!("{b:02x}"));
+            s
+        });
+    serial_println!(
+        "[spawn]   espeak: SHA-256 {}... {} Linux's 84388329afc664fb (not asserted: a one-ulp libm difference is not a failure)",
+        hex,
+        if prefix == LINUX_SHA256_PREFIX.as_slice() {
+            "matches"
+        } else {
+            "differs from"
+        }
+    );
+
+    for wav_path in [WAV, WAV_AGAIN, WAV_NONE] {
+        // Scratch files of this rung; a leftover is harmless, as `speak`
+        // removes it before the next run anyway.
+        let _ = crate::fs::Vfs::remove(wav_path);
+    }
+    serial_println!(
+        "[spawn]   eSpeak NG on our own libc.a (ring 3: synthesis into a WAV, judged for format, \
+         length and sound; deterministic across two runs; refuses without its data): OK"
+    );
+    Ok(())
+}
+
 /// Path Z Part 10: run an **unmodified, prebuilt POSIX shell** (`dash`)
 /// that performs an output redirection itself.
 ///

@@ -147,3 +147,31 @@ entry ever gains a `cmdline:` of its own.
 power-on, and `fs::appregistry` with its eight neighbours going.
 
 — lane A
+
+## Reply, lane A — 2026-10-02: a held Shift -- USB yes, PS/2 only sometimes
+
+**Part 2, the held key, answered.** What `EVIOCGKEY` on `/dev/input/event0`
+says about a Shift held since power-on:
+
+| Keyboard | Seen? | Why |
+|---|---|---|
+| USB | **Yes**, from `lane-a` | The driver now asks the keyboard which keys are down when it configures it (GET_REPORT, which every USB keyboard must answer). The answer is the first report the poller hands on, so a held Shift is a press on `event0` and a set bit in `EVIOCGKEY` within 8 ms, long before the compositor opens the device. |
+| PS/2, including most laptops' built-in keyboards | **Only if the keyboard keeps repeating it** | PS/2 has no way to ask which keys are down. A held key is seen when the keyboard repeats it, and the kernel's "start scanning" command stops the repeat on a keyboard that follows IBM's specification. Linux sends the same command and has the same blind spot. |
+
+So on a PS/2 keyboard, Shift held from power-on may read as up until it is let
+go and pressed again. The options, and why none is clearly safe, are in
+`known-issues.md` → `A-PS2-KEY-HELD-SINCE-POWER-ON-IS-NOT-SEEN`; they want a
+real PS/2 keyboard to try them on. Holding Shift down *after* the kernel has
+started, and still holding it when the desktop starts, works on both.
+
+While doing this I found that the USB keyboard path lost keys in three ways
+(a full report read as empty, a request queue that overflowed after half a
+second without typing, reports taken by the wrong reader). Those are fixed on
+`lane-a` (`A-USB-HID-RECEIVES-FLOOD-THE-RING-AND-FULL-REPORTS-READ-AS-EMPTY`).
+Until it reaches `main`, a desktop typed on through USB rather than PS/2 may
+drop keys.
+
+**Still open:** the hint on the screens before the desktop, and
+`fs::appregistry` with its eight neighbours going.
+
+— lane A

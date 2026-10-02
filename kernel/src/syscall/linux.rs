@@ -61826,14 +61826,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // longer representable and there is nothing for a recorder to record.
 
     // (1) errno mapping round-trips for every variant in the table.
-    self_test_errno_mapping()?;
+    crate::selftest::step(self_test_errno_mapping())?;
 
     // (2)-(3) native↔Linux result translation round-trips.
-    self_test_native_translation()?;
+    crate::selftest::step(self_test_native_translation())?;
 
     // (4)-(7b2) basic dispatch sanity (unknown nr, sched_yield, bad-fd
     // write/writev, fd-table-less EBADF surface, dup3/pipe/pipe2 gates).
-    self_test_dispatch_basics()?;
+    crate::selftest::step(self_test_dispatch_basics())?;
 
     // ---- pipe2 flag-mask precedes fildes pointer access ----
     // Batch 476 — Linux's do_pipe2 calls __do_pipe_flags BEFORE
@@ -61858,7 +61858,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     //      surfaces as before).
     //   E. Regression: pipe2(NULL, 0) -> EFAULT  (already
     //      tested by 7b1 but include for gate-order coverage).
-    self_test_pipe2_flag_gate()?;
+    crate::selftest::step(self_test_pipe2_flag_gate())?;
 
     // (7c) openat dirfd resolution (batch 40).
     //
@@ -61867,19 +61867,19 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // than panicking or falling into ENOSYS.  Absolute paths and the
     // explicit error checks (NULL path, empty path) must short-circuit
     // before the fd lookup.
-    self_test_openat_dirfd()?;
+    crate::selftest::step(self_test_openat_dirfd())?;
 
     // (7d) translate_open_flags exhaustive cases.
-    self_test_translate_open_flags()?;
+    crate::selftest::step(self_test_translate_open_flags())?;
 
     // (8)-(8b) clock_gettime clockid validation.
-    self_test_clock_gettime_clockids()?;
+    crate::selftest::step(self_test_clock_gettime_clockids())?;
 
     // (9)-(9a) arch_prctl unknown-code reject + ARCH_SET_FS bounds matrix.
-    self_test_arch_prctl_set_fs()?;
+    crate::selftest::step(self_test_arch_prctl_set_fs())?;
 
     // (9b) arch_prctl ARCH_SET_GS / ARCH_GET_GS validation matrix.
-    self_test_arch_prctl_set_gs()?;
+    crate::selftest::step(self_test_arch_prctl_set_gs())?;
 
     // (9c) Batch 99: arch_prctl(ARCH_GET_CPUID = 0x1011) and
     // ARCH_SET_CPUID (0x1012).  glibc, gdb, lldb, rr, V8, and
@@ -61890,7 +61890,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // supported CPU would: GET always returns 1, SET accepts 1
     // (idempotent), rejects 0 with -ENODEV, and other values with
     // -EINVAL.  No MSR or PCB state needs to change.
-    self_test_arch_prctl_cpuid()?;
+    crate::selftest::step(self_test_arch_prctl_cpuid())?;
 
     // (9d) Batch 100: arch_prctl(ARCH_GET_XCOMP_SUPP = 0x1021),
     // ARCH_GET_XCOMP_PERM (0x1022), ARCH_REQ_XCOMP_PERM (0x1023).
@@ -61902,24 +61902,24 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // advertised xcr0_supported mask (CPUID leaf 0xD subleaf 0)
     // and reject bit-index requests for components the CPU does
     // not advertise.  Extracted to self_test_arch_prctl_xcomp (TD4).
-    self_test_arch_prctl_xcomp()?;
+    crate::selftest::step(self_test_arch_prctl_xcomp())?;
 
     // (9e) Batch 101: get_mempolicy returns a single-node UMA answer
     // instead of -ENOSYS.  libnuma, jemalloc, tcmalloc, and glibc's
     // NUMA tunable parser probe this at startup.  Extracted to
     // self_test_get_mempolicy (TD4).
-    self_test_get_mempolicy()?;
+    crate::selftest::step(self_test_get_mempolicy())?;
 
     // (9f) Batch 102: set_mempolicy upgraded from -ENOSYS stub to a
     // real UMA-aware accept/reject decision.  Mirrors what libnuma's
     // numa_set_preferred / numa_set_bind_policy emit at startup.
     // Extracted to self_test_set_mempolicy (TD4).
-    self_test_set_mempolicy()?;
+    crate::selftest::step(self_test_set_mempolicy())?;
 
     // (9g) Batch 103: mbind upgraded from -ENOSYS stub to UMA-aware
     // accept/reject decision.  Per-VMA equivalent of batch 102.
     // Extracted to self_test_mbind (TD4).
-    self_test_mbind()?;
+    crate::selftest::step(self_test_mbind())?;
 
     // (9g-545) Batch 545: sanitize_mpol_flags fidelity.  Linux v6.6
     // mm/mempolicy.c::sanitize_mpol_flags treats MPOL_MODE_FLAGS as
@@ -61928,42 +61928,42 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // enforces three rules in order: residual mode < MPOL_MAX, STATIC and
     // RELATIVE are mutually exclusive, and NUMA_BALANCING is only legal
     // with MPOL_BIND.  Extracted to self_test_sanitize_mpol_flags (TD4).
-    self_test_sanitize_mpol_flags()?;
+    crate::selftest::step(self_test_sanitize_mpol_flags())?;
 
     // (9g-546) Batch 546: get_nodes + mpol_new fidelity for mbind /
     // set_mempolicy.  Three verbatim corrections vs Linux v6.6
     // mm/mempolicy.c: NULL-mask=empty (not -EFAULT), 32768-bit nodemask
     // cap, and the PREFERRED_MANY/PREFERRED/LOCAL emptiness rules under
     // STATIC/RELATIVE flags.  Extracted to self_test_get_nodes_mpol_new (TD4).
-    self_test_get_nodes_mpol_new()?;
+    crate::selftest::step(self_test_get_nodes_mpol_new())?;
 
     // (9h) Batch 104: migrate_pages upgraded from -ENOSYS stub to
     // UMA-aware no-op.  Every page is already on node 0 so the
     // migration is trivially a success that moves zero pages.
     // Extracted to self_test_migrate_pages (TD4).
-    self_test_migrate_pages()?;
+    crate::selftest::step(self_test_migrate_pages())?;
 
     // (9i) Batch 105: move_pages upgraded from -ENOSYS stub to a
     // UMA-aware no-op + per-page status writer.  Verifies status[i]
     // writes for query/move modes plus the Linux gate order
     // (MOVE_ALL EPERM -> pid ESRCH -> pages EFAULT).  Extracted to
     // self_test_move_pages (TD4).
-    self_test_move_pages()?;
+    crate::selftest::step(self_test_move_pages())?;
 
     // (10)-(12b) LinuxTimespec round-trip + malformed rejection,
     // kernel_error_from_code round-trips, and execve user-marshalling
     // NULL handling (read_user_cstr / read_user_ptr_array).  Extracted
     // to self_test_timespec_and_marshalling (TD4).
-    self_test_timespec_and_marshalling()?;
+    crate::selftest::step(self_test_timespec_and_marshalling())?;
 
     // (13) dispatch_linux_with_frame routing (READ/EXECVE/FORK/CLONE
     // gate ladder, incl. CLONE_SETTLS canonical-address EPERM gate).
     // Extracted to self_test_dispatch_with_frame_routing (TD4).
-    self_test_dispatch_with_frame_routing()?;
+    crate::selftest::step(self_test_dispatch_with_frame_routing())?;
 
     // CLONE_VFORK accept / CLONE_PARENT,NEWNS,PTRACE reject. Extracted
     // to self_test_clone_vfork_parent (TD4).
-    self_test_clone_vfork_parent()?;
+    crate::selftest::step(self_test_clone_vfork_parent())?;
 
     // kill(target, sig) gate-order validation (Linux ESRCH-before-EINVAL):
     //   Linux's kill_something_info → kill_proc_info → find_vpid
@@ -61999,7 +61999,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     //     existence probe path with the same nonexistent pid).
     //   - sig = 0x1_0000_0009 (truncates to 9 = SIGKILL): not
     //     EINVAL — post-batch ESRCH via the pid gate.
-    self_test_kill_gate_order()?;
+    crate::selftest::step(self_test_kill_gate_order())?;
 
     // Batch 359: kill() pid-truncation propagation.
     //
@@ -62016,7 +62016,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // approved.  Mirrors Linux's behavior where pid is truncated
     // once via the SYSCALL_DEFINE2 ABI shim and every downstream
     // user sees the same post-ABI pid.
-    self_test_kill_pid_truncation()?;
+    crate::selftest::step(self_test_kill_pid_truncation())?;
 
     // rt_sigreturn:
     //   - misaligned user_rsp causes both candidate addresses to fail
@@ -62028,18 +62028,18 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     //   - frame.user_rip must be left untouched on the failure path
     //     so a userspace program can debug the EFAULT without losing
     //     control.
-    self_test_rt_sigreturn()?;
+    crate::selftest::step(self_test_rt_sigreturn())?;
 
     // Linux-sigaction table — round-trip + edge cases.
     //   Operates directly on the table (not via dispatch_linux),
     //   because dispatch_linux's rt_sigaction needs a live caller pid
     //   to record state, which the boot self-test doesn't have.
-    self_test_sigaction_table()?;
-    self_test_sigtimedwait_interrupters()?;
+    crate::selftest::step(self_test_sigaction_table())?;
+    crate::selftest::step(self_test_sigtimedwait_interrupters())?;
 
     // SA_RESTART core mechanism — pure restart-decision table + sentinel
     // helpers (independent of any userspace handler delivery).
-    self_test_restart_action()?;
+    crate::selftest::step(self_test_restart_action())?;
 
     // rt_sigaction validation via dispatch_linux:
     //   - sig == 0 -> EINVAL
@@ -62048,7 +62048,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     //   - unknown sa_flags bits -> EINVAL (needs an act pointer; we
     //     can't safely deref one from boot context so we only test
     //     the cheap rejects above).
-    self_test_rt_sigaction_validation()?;
+    crate::selftest::step(self_test_rt_sigaction_validation())?;
 
     // Batch 354: rt_sigprocmask gate ordering & how arithmetic.
     //
@@ -62065,7 +62065,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // distinguish.  Linux returns 0 on success regardless of the
     // signal-mask update result here, so we look for the errno
     // discriminators that pre-batch returned wrongly.
-    self_test_rt_sigprocmask()?;
+    crate::selftest::step(self_test_rt_sigprocmask())?;
 
     // mprotect argument validation — Linux gate order
     // (mm/mprotect.c::do_mprotect_pkey):
@@ -62077,7 +62077,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // We can't exercise the success path from boot context (no owning
     // Linux process), but we *can* prove the validation layer rejects
     // bad input before reaching the page-table walk.
-    self_test_mprotect_validation()?;
+    crate::selftest::step(self_test_mprotect_validation())?;
 
     // mprotect_flush_range routing: tiny range (<= MPROTECT_FULL_FLUSH_
     // PAGES) takes the per-page invlpg path; large range promotes to
@@ -62087,41 +62087,41 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // promptly on every code path including the degenerate end<=start
     // and zero-length cases.  We use a kernel-space address since the
     // function only flushes — it doesn't touch the page tables.
-    self_test_mprotect_flush_range()?;
+    crate::selftest::step(self_test_mprotect_flush_range())?;
 
-    self_test_madvise_validation()?;
+    crate::selftest::step(self_test_madvise_validation())?;
 
-    self_test_wstatus_encoding()?;
+    crate::selftest::step(self_test_wstatus_encoding())?;
 
-    self_test_wait4_dispatch()?;
+    crate::selftest::step(self_test_wait4_dispatch())?;
 
-    self_test_clock_truncation()?;
+    crate::selftest::step(self_test_clock_truncation())?;
 
-    self_test_seccomp_quotactl_truncation()?;
+    crate::selftest::step(self_test_seccomp_quotactl_truncation())?;
 
-    self_test_io_swap_membarrier_truncation()?;
+    crate::selftest::step(self_test_io_swap_membarrier_truncation())?;
 
-    self_test_membarrier_registration()?;
+    crate::selftest::step(self_test_membarrier_registration())?;
 
-    self_test_module_archprctl_truncation()?;
+    crate::selftest::step(self_test_module_archprctl_truncation())?;
 
-    self_test_itimer_getrusage_validation()?;
+    crate::selftest::step(self_test_itimer_getrusage_validation())?;
 
-    self_test_getrusage_maxrss_times()?;
+    crate::selftest::step(self_test_getrusage_maxrss_times())?;
 
-    self_test_setgroups_validation()?;
+    crate::selftest::step(self_test_setgroups_validation())?;
 
-    self_test_dup3_validation()?;
+    crate::selftest::step(self_test_dup3_validation())?;
 
-    self_test_mlockall_truncation()?;
+    crate::selftest::step(self_test_mlockall_truncation())?;
 
-    self_test_msync_truncation()?;
+    crate::selftest::step(self_test_msync_truncation())?;
 
-    self_test_default_rlimits()?;
+    crate::selftest::step(self_test_default_rlimits())?;
 
-    self_test_brk_logic()?;
+    crate::selftest::step(self_test_brk_logic())?;
 
-    self_test_prlimit64_dispatch()?;
+    crate::selftest::step(self_test_prlimit64_dispatch())?;
 
     #[inline(never)]
     fn self_test_prlimit64_dispatch() -> crate::error::KernelResult<()> {
@@ -63129,7 +63129,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_rt_sigpending_dispatch()?;
+    crate::selftest::step(self_test_rt_sigpending_dispatch())?;
 
     #[inline(never)]
     fn self_test_rt_sigpending_dispatch() -> crate::error::KernelResult<()> {
@@ -63287,7 +63287,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_tkill_tgkill_dispatch()?;
+    crate::selftest::step(self_test_tkill_tgkill_dispatch())?;
 
     #[inline(never)]
     fn self_test_tkill_tgkill_dispatch() -> crate::error::KernelResult<()> {
@@ -63442,7 +63442,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_umask_dispatch()?;
+    crate::selftest::step(self_test_umask_dispatch())?;
 
     #[inline(never)]
     fn self_test_umask_dispatch() -> crate::error::KernelResult<()> {
@@ -63572,7 +63572,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_sigaltstack_dispatch()?;
+    crate::selftest::step(self_test_sigaltstack_dispatch())?;
 
     #[inline(never)]
     fn self_test_sigaltstack_dispatch() -> crate::error::KernelResult<()> {
@@ -63805,7 +63805,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_ioctl_dispatch()?;
+    crate::selftest::step(self_test_ioctl_dispatch())?;
 
     #[inline(never)]
     fn self_test_ioctl_dispatch() -> crate::error::KernelResult<()> {
@@ -63870,7 +63870,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_prctl_dispatch()?;
+    crate::selftest::step(self_test_prctl_dispatch())?;
 
     #[inline(never)]
     fn self_test_prctl_dispatch() -> crate::error::KernelResult<()> {
@@ -64057,7 +64057,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 61: PR_SET_PDEATHSIG / PR_GET_PDEATHSIG.
@@ -64214,7 +64214,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     assert_eq!(pcb::set_pdeathsig(test_pid, 1), None);
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 66: PR_SET_DUMPABLE / PR_GET_DUMPABLE round-trip.
@@ -64334,7 +64334,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     assert_eq!(pcb::set_dumpable(test_pid, 1), None);
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 67: PR_SET_KEEPCAPS / PR_GET_KEEPCAPS round-trip.
@@ -64478,7 +64478,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     ));
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 428 — PR_SET_DUMPABLE + PR_SET_KEEPCAPS arg2 narrowing
@@ -64665,7 +64665,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
             serial_println!(
                 "[syscall/linux]   setrlimit/getrlimit unconditional copy_to/from_user EFAULT gate (Linux: legacy wrappers always touch rlim, NULL → EFAULT regardless of resource validity): OK"
@@ -64808,7 +64808,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
             serial_println!(
                 "[syscall/linux]   gettimeofday tz argument writes sys_tz=0 (Linux: deprecated struct timezone always zero on modern kernels, NULL-skip per-arg): OK"
@@ -64983,7 +64983,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     assert_eq!(pcb::set_no_new_privs(test_pid, 1), None);
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 69: PR_SET_CHILD_SUBREAPER / PR_GET_CHILD_SUBREAPER
@@ -65162,7 +65162,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     assert_eq!(pcb::set_child_subreaper(test_pid, 1), None);
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 70: PR_SET_THP_DISABLE / PR_GET_THP_DISABLE round-trip
@@ -65317,7 +65317,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     assert_eq!(pcb::set_thp_disable(test_pid, 1), None);
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 71: PR_SET_TIMERSLACK / PR_GET_TIMERSLACK round-trip
@@ -65458,7 +65458,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     assert_eq!(pcb::set_timer_slack_ns(test_pid, 1), None);
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 72: PR_SET_TSC / PR_GET_TSC round-trip with strict
@@ -65635,7 +65635,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     assert_eq!(pcb::set_tsc_mode(test_pid, 1), None);
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 73: PR_GET_TID_ADDRESS round-trip with strict
@@ -65718,7 +65718,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 74: PR_MCE_KILL / PR_MCE_KILL_GET round-trip with
@@ -65913,7 +65913,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     assert_eq!(pcb::set_mce_kill_policy(test_pid, 1), None);
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 75: PR_TASK_PERF_EVENTS_DISABLE (31) /
@@ -65946,7 +65946,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 76: PR_SET_MDWE / PR_GET_MDWE round-trip with strict
@@ -66127,7 +66127,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     assert_eq!(pcb::set_mdwe_bits(test_pid, 1), None);
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 77: PR_GET_TIMING / PR_SET_TIMING — Linux supports
@@ -66225,7 +66225,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 78: PR_GET_SECCOMP — Linux returns the current
@@ -66294,7 +66294,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 79: PR_GET_IO_FLUSHER / PR_SET_IO_FLUSHER round-trip
@@ -66462,7 +66462,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     assert_eq!(pcb::set_io_flusher(test_pid, 1), None);
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 80: PR_GET_SPECULATION_CTRL / PR_SET_SPECULATION_CTRL —
@@ -66631,7 +66631,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 81: PR_SET_MEMORY_MERGE / PR_GET_MEMORY_MERGE
@@ -66800,7 +66800,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     assert_eq!(pcb::set_memory_merge(test_pid, 1), None);
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 82: PR_CAP_AMBIENT — ambient capability set
@@ -67035,7 +67035,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 83: PR_GET_SECUREBITS (27) / PR_SET_SECUREBITS (28)
@@ -67316,7 +67316,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 84: PR_CAPBSET_READ (23) / PR_CAPBSET_DROP (24)
@@ -67536,13 +67536,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     assert_eq!(pcb::LINUX_CAP_FULL_SET.count_ones(), 41);
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
         }
         Ok(())
     }
 
-    self_test_fcntl_owner_sig()?;
+    crate::selftest::step(self_test_fcntl_owner_sig())?;
 
     #[inline(never)]
     fn self_test_fcntl_owner_sig() -> crate::error::KernelResult<()> {
@@ -67722,7 +67722,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_fcntl_pipe_sz()?;
+    crate::selftest::step(self_test_fcntl_pipe_sz())?;
 
     #[inline(never)]
     fn self_test_fcntl_pipe_sz() -> crate::error::KernelResult<()> {
@@ -67891,7 +67891,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_prctl_get_auxv()?;
+    crate::selftest::step(self_test_prctl_get_auxv())?;
 
     #[inline(never)]
     fn self_test_prctl_get_auxv() -> crate::error::KernelResult<()> {
@@ -68072,7 +68072,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_fcntl_owner_ex()?;
+    crate::selftest::step(self_test_fcntl_owner_ex())?;
 
     #[inline(never)]
     fn self_test_fcntl_owner_ex() -> crate::error::KernelResult<()> {
@@ -68352,7 +68352,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_fcntl_lease()?;
+    crate::selftest::step(self_test_fcntl_lease())?;
 
     #[inline(never)]
     fn self_test_fcntl_lease() -> crate::error::KernelResult<()> {
@@ -68474,7 +68474,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_fcntl_seals()?;
+    crate::selftest::step(self_test_fcntl_seals())?;
 
     #[inline(never)]
     fn self_test_fcntl_seals() -> crate::error::KernelResult<()> {
@@ -68558,7 +68558,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_register_ipc_eventfd_memfd()?;
+    crate::selftest::step(self_test_register_ipc_eventfd_memfd())?;
 
     #[inline(never)]
     fn self_test_register_ipc_eventfd_memfd() -> crate::error::KernelResult<()> {
@@ -68685,7 +68685,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_register_ipc_pidfd_getfd()?;
+    crate::selftest::step(self_test_register_ipc_pidfd_getfd())?;
 
     #[inline(never)]
     fn self_test_register_ipc_pidfd_getfd() -> crate::error::KernelResult<()> {
@@ -68817,7 +68817,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_fcntl_rw_hint()?;
+    crate::selftest::step(self_test_fcntl_rw_hint())?;
 
     #[inline(never)]
     fn self_test_fcntl_rw_hint() -> crate::error::KernelResult<()> {
@@ -68909,7 +68909,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_prctl_sched_core()?;
+    crate::selftest::step(self_test_prctl_sched_core())?;
 
     #[inline(never)]
     fn self_test_prctl_sched_core() -> crate::error::KernelResult<()> {
@@ -68964,7 +68964,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_fcntl_dupfd_query()?;
+    crate::selftest::step(self_test_fcntl_dupfd_query())?;
 
     #[inline(never)]
     fn self_test_fcntl_dupfd_query() -> crate::error::KernelResult<()> {
@@ -69029,7 +69029,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_ioctl_fioclex()?;
+    crate::selftest::step(self_test_ioctl_fioclex())?;
 
     #[inline(never)]
     fn self_test_ioctl_fioclex() -> crate::error::KernelResult<()> {
@@ -69185,7 +69185,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_ioctl_fionbio()?;
+    crate::selftest::step(self_test_ioctl_fionbio())?;
 
     #[inline(never)]
     fn self_test_ioctl_fionbio() -> crate::error::KernelResult<()> {
@@ -69316,7 +69316,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_prctl_set_vma()?;
+    crate::selftest::step(self_test_prctl_set_vma())?;
 
     #[inline(never)]
     fn self_test_prctl_set_vma() -> crate::error::KernelResult<()> {
@@ -69470,7 +69470,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_prctl_set_ptracer()?;
+    crate::selftest::step(self_test_prctl_set_ptracer())?;
 
     #[inline(never)]
     fn self_test_prctl_set_ptracer() -> crate::error::KernelResult<()> {
@@ -69592,7 +69592,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_personality_dispatch()?;
+    crate::selftest::step(self_test_personality_dispatch())?;
 
     #[inline(never)]
     fn self_test_personality_dispatch() -> crate::error::KernelResult<()> {
@@ -69631,7 +69631,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_getresuid_getresgid()?;
+    crate::selftest::step(self_test_getresuid_getresgid())?;
 
     #[inline(never)]
     fn self_test_getresuid_getresgid() -> crate::error::KernelResult<()> {
@@ -69677,7 +69677,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_getrusage_sysinfo_times()?;
+    crate::selftest::step(self_test_getrusage_sysinfo_times())?;
 
     #[inline(never)]
     fn self_test_getrusage_sysinfo_times() -> crate::error::KernelResult<()> {
@@ -69948,7 +69948,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_process_group_session()?;
+    crate::selftest::step(self_test_process_group_session())?;
 
     #[inline(never)]
     fn self_test_process_group_session() -> crate::error::KernelResult<()> {
@@ -70092,7 +70092,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_setpgid_existence_gate()?;
+    crate::selftest::step(self_test_setpgid_existence_gate())?;
 
     #[inline(never)]
     fn self_test_setpgid_existence_gate() -> crate::error::KernelResult<()> {
@@ -70278,7 +70278,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_priority_dispatch()?;
+    crate::selftest::step(self_test_priority_dispatch())?;
 
     #[inline(never)]
     fn self_test_priority_dispatch() -> crate::error::KernelResult<()> {
@@ -70704,7 +70704,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_credential_setters()?;
+    crate::selftest::step(self_test_credential_setters())?;
 
     #[inline(never)]
     fn self_test_credential_setters() -> crate::error::KernelResult<()> {
@@ -71213,7 +71213,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_capget_capset()?;
+    crate::selftest::step(self_test_capget_capset())?;
 
     #[inline(never)]
     fn self_test_capget_capset() -> crate::error::KernelResult<()> {
@@ -71251,7 +71251,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_sched_policy_dispatch()?;
+    crate::selftest::step(self_test_sched_policy_dispatch())?;
 
     #[inline(never)]
     fn self_test_sched_policy_dispatch() -> crate::error::KernelResult<()> {
@@ -72629,7 +72629,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_sched_affinity()?;
+    crate::selftest::step(self_test_sched_affinity())?;
 
     #[inline(never)]
     fn self_test_sched_affinity() -> crate::error::KernelResult<()> {
@@ -73031,7 +73031,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_fs_sync_family()?;
+    crate::selftest::step(self_test_fs_sync_family())?;
 
     #[inline(never)]
     fn self_test_fs_sync_family() -> crate::error::KernelResult<()> {
@@ -73111,7 +73111,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_sethostname_setdomainname()?;
+    crate::selftest::step(self_test_sethostname_setdomainname())?;
 
     #[inline(never)]
     fn self_test_sethostname_setdomainname() -> crate::error::KernelResult<()> {
@@ -73679,7 +73679,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_mlock_family()?;
+    crate::selftest::step(self_test_mlock_family())?;
 
     #[inline(never)]
     fn self_test_mlock_family() -> crate::error::KernelResult<()> {
@@ -73866,7 +73866,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_msync_flag_alignment()?;
+    crate::selftest::step(self_test_msync_flag_alignment())?;
 
     #[inline(never)]
     fn self_test_msync_flag_alignment() -> crate::error::KernelResult<()> {
@@ -74011,7 +74011,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_fadvise_readahead()?;
+    crate::selftest::step(self_test_fadvise_readahead())?;
 
     #[inline(never)]
     fn self_test_fadvise_readahead() -> crate::error::KernelResult<()> {
@@ -74151,7 +74151,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_close_range()?;
+    crate::selftest::step(self_test_close_range())?;
 
     #[inline(never)]
     fn self_test_close_range() -> crate::error::KernelResult<()> {
@@ -74213,7 +74213,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // getrlimit; the unconditional EFAULT-first order for setrlimit).
     // No probes here.
 
-    self_test_getcpu()?;
+    crate::selftest::step(self_test_getcpu())?;
 
     #[inline(never)]
     fn self_test_getcpu() -> crate::error::KernelResult<()> {
@@ -74279,7 +74279,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_statfs_fstatfs()?;
+    crate::selftest::step(self_test_statfs_fstatfs())?;
 
     #[inline(never)]
     fn self_test_statfs_fstatfs() -> crate::error::KernelResult<()> {
@@ -74322,7 +74322,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_clock_settime_adjtimex()?;
+    crate::selftest::step(self_test_clock_settime_adjtimex())?;
 
     #[inline(never)]
     fn self_test_clock_settime_adjtimex() -> crate::error::KernelResult<()> {
@@ -75449,7 +75449,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_clock_nanosleep()?;
+    crate::selftest::step(self_test_clock_nanosleep())?;
 
     #[inline(never)]
     fn self_test_clock_nanosleep() -> crate::error::KernelResult<()> {
@@ -75622,7 +75622,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_nanosleep()?;
+    crate::selftest::step(self_test_nanosleep())?;
 
     #[inline(never)]
     fn self_test_nanosleep() -> crate::error::KernelResult<()> {
@@ -75723,7 +75723,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_chroot_mknod()?;
+    crate::selftest::step(self_test_chroot_mknod())?;
 
     #[inline(never)]
     fn self_test_chroot_mknod() -> crate::error::KernelResult<()> {
@@ -76024,7 +76024,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_truncate()?;
+    crate::selftest::step(self_test_truncate())?;
 
     #[inline(never)]
     fn self_test_truncate() -> crate::error::KernelResult<()> {
@@ -76147,7 +76147,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_ftruncate()?;
+    crate::selftest::step(self_test_ftruncate())?;
 
     #[inline(never)]
     fn self_test_ftruncate() -> crate::error::KernelResult<()> {
@@ -76232,7 +76232,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_getitimer_setitimer()?;
+    crate::selftest::step(self_test_getitimer_setitimer())?;
 
     #[inline(never)]
     fn self_test_getitimer_setitimer() -> crate::error::KernelResult<()> {
@@ -76390,7 +76390,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_access_faccessat()?;
+    crate::selftest::step(self_test_access_faccessat())?;
 
     #[inline(never)]
     fn self_test_access_faccessat() -> crate::error::KernelResult<()> {
@@ -76560,7 +76560,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_stat_family()?;
+    crate::selftest::step(self_test_stat_family())?;
 
     #[inline(never)]
     fn self_test_stat_family() -> crate::error::KernelResult<()> {
@@ -76718,7 +76718,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_statx()?;
+    crate::selftest::step(self_test_statx())?;
 
     #[inline(never)]
     fn self_test_statx() -> crate::error::KernelResult<()> {
@@ -76942,7 +76942,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_mkdir_rename_family()?;
+    crate::selftest::step(self_test_mkdir_rename_family())?;
 
     #[inline(never)]
     fn self_test_mkdir_rename_family() -> crate::error::KernelResult<()> {
@@ -77431,7 +77431,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_renameat2_exchange()?;
+    crate::selftest::step(self_test_renameat2_exchange())?;
 
     #[inline(never)]
     fn self_test_renameat2_exchange() -> crate::error::KernelResult<()> {
@@ -77536,7 +77536,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_lseek_whence()?;
+    crate::selftest::step(self_test_lseek_whence())?;
 
     #[inline(never)]
     fn self_test_lseek_whence() -> crate::error::KernelResult<()> {
@@ -77662,7 +77662,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_readlink_chmod_chown_family()?;
+    crate::selftest::step(self_test_readlink_chmod_chown_family())?;
 
     #[inline(never)]
     fn self_test_readlink_chmod_chown_family() -> crate::error::KernelResult<()> {
@@ -79110,7 +79110,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_signalfd_timerfd_inotify()?;
+    crate::selftest::step(self_test_signalfd_timerfd_inotify())?;
 
     #[inline(never)]
     fn self_test_signalfd_timerfd_inotify() -> crate::error::KernelResult<()> {
@@ -80418,7 +80418,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_sendfile_splice_aio()?;
+    crate::selftest::step(self_test_sendfile_splice_aio())?;
 
     #[inline(never)]
     fn self_test_sendfile_splice_aio() -> crate::error::KernelResult<()> {
@@ -82137,7 +82137,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_bpf_perf_keyring()?;
+    crate::selftest::step(self_test_bpf_perf_keyring())?;
 
     #[inline(never)]
     fn self_test_bpf_perf_keyring() -> crate::error::KernelResult<()> {
@@ -82952,7 +82952,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -83053,7 +83053,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -83207,7 +83207,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -83245,7 +83245,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -83277,7 +83277,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -83307,7 +83307,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -83333,7 +83333,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -83359,7 +83359,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -83386,7 +83386,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             serial_println!("[syscall/linux]   fd-creator family int flags truncation: OK");
@@ -83409,7 +83409,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -83450,7 +83450,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -83476,7 +83476,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -83506,7 +83506,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -83531,7 +83531,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -83559,7 +83559,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -83585,7 +83585,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             serial_println!(
@@ -83884,7 +83884,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -83916,7 +83916,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -83943,7 +83943,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -83969,7 +83969,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -83998,7 +83998,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -84376,7 +84376,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     serial_println!("[syscall/linux]   process_mrelease pidfd discrimination: OK");
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -84436,7 +84436,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -84480,7 +84480,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_xattr_quota_mount()?;
+    crate::selftest::step(self_test_xattr_quota_mount())?;
 
     #[inline(never)]
     fn self_test_xattr_quota_mount() -> crate::error::KernelResult<()> {
@@ -85965,7 +85965,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_sysv_ipc_mqueue()?;
+    crate::selftest::step(self_test_sysv_ipc_mqueue())?;
 
     #[inline(never)]
     fn self_test_sysv_ipc_mqueue() -> crate::error::KernelResult<()> {
@@ -86276,7 +86276,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -86839,7 +86839,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -87260,7 +87260,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -87433,7 +87433,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     serial_println!("[syscall/linux]   mq_timedsend prio validation: OK");
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -87516,7 +87516,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -87958,13 +87958,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     serial_println!("[syscall/linux]   mq_getsetattr mq_flags & ~O_NONBLOCK: OK");
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
         }
         Ok(())
     }
 
-    self_test_poll_select_epoll()?;
+    crate::selftest::step(self_test_poll_select_epoll())?;
 
     #[inline(never)]
     fn self_test_poll_select_epoll() -> crate::error::KernelResult<()> {
@@ -89084,7 +89084,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_openat2_execveat_mount()?;
+    crate::selftest::step(self_test_openat2_execveat_mount())?;
 
     #[inline(never)]
     fn self_test_openat2_execveat_mount() -> crate::error::KernelResult<()> {
@@ -90601,7 +90601,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_numa_sched_landlock()?;
+    crate::selftest::step(self_test_numa_sched_landlock())?;
 
     #[inline(never)]
     fn self_test_numa_sched_landlock() -> crate::error::KernelResult<()> {
@@ -91570,7 +91570,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     pcb::destroy(srof);
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
             serial_println!(
                 "[syscall/linux]   sched_{{set,get}}attr SCHED_FLAG_RESET_ON_FORK round-trip (batch 527): OK"
@@ -91766,7 +91766,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     pcb::destroy(kp);
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
             serial_println!(
                 "[syscall/linux]   sched_setattr SCHED_FLAG_KEEP_POLICY/KEEP_PARAMS semantics (batch 528): OK"
@@ -91986,7 +91986,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     pcb::destroy(np);
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
             {
                 #[inline(never)]
@@ -92350,7 +92350,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_seccomp_ptrace_clone3()?;
+    crate::selftest::step(self_test_seccomp_ptrace_clone3())?;
 
     #[inline(never)]
     fn self_test_seccomp_ptrace_clone3() -> crate::error::KernelResult<()> {
@@ -92899,7 +92899,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
             // clone3 with CSIGNAL bits in flags -> EINVAL (must go in exit_signal).
             {
@@ -92923,7 +92923,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
             // clone3 with exit_signal > 0xFF -> EINVAL.
             {
@@ -92947,7 +92947,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
             // clone3 with stack_base set but stack_size=0 -> EINVAL.
             {
@@ -92969,7 +92969,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
             // clone3 with set_tid_size != 0 -> EINVAL (no manual TID assignment).
             {
@@ -92991,7 +92991,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
             // clone3 with CLONE_NEWPID -> EINVAL (no namespace subsystem).
             {
@@ -93013,7 +93013,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
             serial_println!(
                 "[syscall/linux]   clone3 size-E2BIG > size-EINVAL > NULL-EFAULT gate order: OK"
@@ -93673,7 +93673,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     serial_println!("[syscall/linux]   futex op int truncation: OK");
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // membarrier (batch 114): full cmd set.
@@ -94841,7 +94841,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_rtsig_posix_timer()?;
+    crate::selftest::step(self_test_rtsig_posix_timer())?;
 
     #[inline(never)]
     fn self_test_rtsig_posix_timer() -> crate::error::KernelResult<()> {
@@ -95605,7 +95605,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_bsd_socket_family()?;
+    crate::selftest::step(self_test_bsd_socket_family())?;
 
     #[inline(never)]
     fn self_test_bsd_socket_family() -> crate::error::KernelResult<()> {
@@ -96263,7 +96263,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_slate_channels()?;
+    crate::selftest::step(self_test_slate_channels())?;
 
     /// The SlateOS channel descriptors (1000-1004): the gates a kernel task
     /// meets (it has no descriptor table), then the descriptor machinery
@@ -96481,7 +96481,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_eventfd_futex_pkey()?;
+    crate::selftest::step(self_test_eventfd_futex_pkey())?;
 
     #[inline(never)]
     fn self_test_eventfd_futex_pkey() -> crate::error::KernelResult<()> {
@@ -98070,7 +98070,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_getsockname_getpeername()?;
+    crate::selftest::step(self_test_getsockname_getpeername())?;
 
     #[inline(never)]
     fn self_test_getsockname_getpeername() -> crate::error::KernelResult<()> {
@@ -98239,7 +98239,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_accept_accept4()?;
+    crate::selftest::step(self_test_accept_accept4())?;
 
     #[inline(never)]
     fn self_test_accept_accept4() -> crate::error::KernelResult<()> {
@@ -98440,7 +98440,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_validate_sockaddr_out()?;
+    crate::selftest::step(self_test_validate_sockaddr_out())?;
 
     #[inline(never)]
     fn self_test_validate_sockaddr_out() -> crate::error::KernelResult<()> {
@@ -98594,7 +98594,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_bind_connect()?;
+    crate::selftest::step(self_test_bind_connect())?;
 
     #[inline(never)]
     fn self_test_bind_connect() -> crate::error::KernelResult<()> {
@@ -98752,7 +98752,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_addr_len_bounds()?;
+    crate::selftest::step(self_test_addr_len_bounds())?;
 
     #[inline(never)]
     fn self_test_addr_len_bounds() -> crate::error::KernelResult<()> {
@@ -98942,7 +98942,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_sendto_recvfrom()?;
+    crate::selftest::step(self_test_sendto_recvfrom())?;
 
     #[inline(never)]
     fn self_test_sendto_recvfrom() -> crate::error::KernelResult<()> {
@@ -99155,7 +99155,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_sendmsg_recvmsg()?;
+    crate::selftest::step(self_test_sendmsg_recvmsg())?;
 
     #[inline(never)]
     fn self_test_sendmsg_recvmsg() -> crate::error::KernelResult<()> {
@@ -99250,7 +99250,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_sendmmsg_recvmmsg()?;
+    crate::selftest::step(self_test_sendmmsg_recvmmsg())?;
 
     #[inline(never)]
     fn self_test_sendmmsg_recvmmsg() -> crate::error::KernelResult<()> {
@@ -99413,7 +99413,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_legacy_x86_kexec_lsm()?;
+    crate::selftest::step(self_test_legacy_x86_kexec_lsm())?;
 
     #[inline(never)]
     fn self_test_legacy_x86_kexec_lsm() -> crate::error::KernelResult<()> {
@@ -101055,7 +101055,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_settimeofday_mincore_mremap()?;
+    crate::selftest::step(self_test_settimeofday_mincore_mremap())?;
 
     #[inline(never)]
     fn self_test_settimeofday_mincore_mremap() -> crate::error::KernelResult<()> {
@@ -101994,7 +101994,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_pread_pwrite_getcwd()?;
+    crate::selftest::step(self_test_pread_pwrite_getcwd())?;
 
     #[inline(never)]
     fn self_test_pread_pwrite_getcwd() -> crate::error::KernelResult<()> {
@@ -102297,7 +102297,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_flock_getdents_waitid()?;
+    crate::selftest::step(self_test_flock_getdents_waitid())?;
 
     #[inline(never)]
     fn self_test_flock_getdents_waitid() -> crate::error::KernelResult<()> {
@@ -102948,7 +102948,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_remap_ioprio_futex2()?;
+    crate::selftest::step(self_test_remap_ioprio_futex2())?;
 
     #[inline(never)]
     fn self_test_remap_ioprio_futex2() -> crate::error::KernelResult<()> {
@@ -103087,7 +103087,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -103175,7 +103175,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -103258,7 +103258,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -103608,7 +103608,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             {
@@ -104789,7 +104789,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // futex_requeue nonzero flags -> EINVAL.
@@ -104919,7 +104919,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_legacy_deprecated_syscalls()?;
+    crate::selftest::step(self_test_legacy_deprecated_syscalls())?;
 
     #[inline(never)]
     fn self_test_legacy_deprecated_syscalls() -> crate::error::KernelResult<()> {
@@ -105301,7 +105301,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- capget / capset NULL-data error matrix ----
@@ -105423,7 +105423,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     serial_println!("[syscall/linux]   capget/capset NULL-data error matrix: OK");
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- prctl(PR_SET_NAME) NULL-arg2 -> EFAULT ----
@@ -105495,7 +105495,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     serial_println!("[syscall/linux]   prctl(PR_SET_NAME) NULL-arg2 gating: OK");
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // Batch 350: prctl option int truncation.
@@ -105612,7 +105612,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     serial_println!("[syscall/linux]   prctl option int truncation: OK");
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- capset pid != current -> EPERM ----
@@ -105721,7 +105721,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     serial_println!("[syscall/linux]   capset pid != current EPERM gating: OK");
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- capget pid validation (Linux gate order) ----
@@ -105862,7 +105862,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- pread64/pwrite64 fd-before-count gate order ----
@@ -105945,7 +105945,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- mremap new_size PAGE_ALIGN overflow gating ----
@@ -106022,7 +106022,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- setsockopt/getsockopt no-syscall-entry-level gate ----
@@ -106124,7 +106124,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     serial_println!("[syscall/linux]   setsockopt/getsockopt no-level gate: OK");
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- listen/shutdown drop spurious entry-layer gates ----
@@ -106210,7 +106210,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     serial_println!("[syscall/linux]   listen/shutdown drop entry gates: OK");
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- socket/socketpair EAFNOSUPPORT + EOPNOTSUPP ----
@@ -106328,7 +106328,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     serial_println!("[syscall/linux]   socket/socketpair EAFNOSUPPORT gating: OK");
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- perf_event_open __reserved_2 in-struct check ----
@@ -106439,7 +106439,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     serial_println!("[syscall/linux]   perf_event_open __reserved_2 gating: OK");
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- mremap MREMAP_FIXED new_addr+new_size overflow / TASK_SIZE ----
@@ -106517,7 +106517,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     serial_println!("[syscall/linux]   mremap MREMAP_FIXED new_addr bounds: OK");
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- socket per-(family, type) protocol whitelist ----
@@ -106664,7 +106664,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     serial_println!("[syscall/linux]   socket EPROTONOSUPPORT gating: OK");
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- socket (family, SOCK_RDM) ESOCKTNOSUPPORT ----
@@ -106800,7 +106800,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     serial_println!("[syscall/linux]   socket ESOCKTNOSUPPORT gating: OK");
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- socket type-range gate widening (batch 466) ----
@@ -106972,7 +106972,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- socket AF_INET/AF_INET6 IPPROTO_MAX gate (batch 468) ----
@@ -107155,7 +107155,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- Batch 470: socket AF_NETLINK protocol MAX_LINKS=32 ----
@@ -107323,7 +107323,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- Batch 471: socket AF_UNIX accepts protocol = PF_UNIX ----
@@ -107457,7 +107457,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- Batch 472: socket AF_INET/AF_INET6 SOCK_DGRAM ----
@@ -107620,7 +107620,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- socket AF_UNIX protocol-check-before-type-check ----
@@ -107775,7 +107775,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- socket AF_INET/AF_INET6 SOCK_RAW + protocol=0 ----
@@ -107911,7 +107911,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- socketpair per-(family,type,protocol) gating ----
@@ -108034,7 +108034,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     serial_println!("[syscall/linux]   socketpair ESOCKT/EPROTO gating: OK");
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- socketpair type-range gate widening (batch 467) ----
@@ -108221,7 +108221,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- Batch 469: socketpair AF_INET/AF_INET6 protocol ----
@@ -108404,7 +108404,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- Batch 470: socketpair AF_NETLINK protocol MAX_LINKS=32 ----
@@ -108581,7 +108581,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- Batch 471: socketpair AF_UNIX accepts PF_UNIX ----
@@ -108714,7 +108714,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- Batch 472: socketpair AF_INET/AF_INET6 SOCK_DGRAM ----
@@ -108872,7 +108872,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- socketpair AF_UNIX protocol-check-before-type ----
@@ -109043,7 +109043,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- socketpair AF_INET/AF_INET6 SOCK_RAW + protocol=0 ----
@@ -109187,7 +109187,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // ---- AF_NETLINK / AF_PACKET socket-type allowlist ----
@@ -109374,7 +109374,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     serial_println!("[syscall/linux]   AF_NETLINK/AF_PACKET ESOCKT gating: OK");
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
 
             // futimesat NULL path -> EFAULT.
@@ -109442,7 +109442,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
             // futimesat discriminator B: tv_usec[1] = i64::MAX with
             // filename=NULL -> EINVAL via the same gate on entry 1.
@@ -109468,7 +109468,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
             // futimesat discriminator C: well-formed timeval array with
             // filename=NULL -> EFAULT (acceptance: usec gate passes,
@@ -109495,14 +109495,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                     Ok(())
                 }
-                case()?;
+                crate::selftest::step(case())?;
             }
             serial_println!("[syscall/linux]   futimesat tv_usec value gating: OK");
         }
         Ok(())
     }
 
-    self_test_drm_kms_enumeration()?;
+    crate::selftest::step(self_test_drm_kms_enumeration())?;
 
     #[inline(never)]
     fn self_test_drm_kms_enumeration() -> crate::error::KernelResult<()> {
@@ -109583,7 +109583,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_drm_dumb_buffer()?;
+    crate::selftest::step(self_test_drm_dumb_buffer())?;
 
     #[inline(never)]
     fn self_test_drm_dumb_buffer() -> crate::error::KernelResult<()> {

@@ -8896,6 +8896,10 @@ fi
 # (parsed by fs::kernparam) — e.g. to arm the B-KNULLJUMP corruption hunt under
 # the soak harness:
 #     SLATE_CMDLINE="mm.corruption_hunt=1" ./scripts/boot-test.sh
+# or to have one failing boot list every failing self-test rather than stop at
+# the first (selftest::keep_going; a boot that passes with it is an ordinary
+# pass, since nothing changes until something fails):
+#     SLATE_CMDLINE="selftest.keep_going=1" ./scripts/boot-test.sh
 KERNEL_CMDLINE="sched.boot_deadline_ms=$((TIMEOUT * 1000))"
 if [ -n "${SLATE_CMDLINE:-}" ]; then
     KERNEL_CMDLINE="$KERNEL_CMDLINE $SLATE_CMDLINE"

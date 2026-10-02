@@ -1784,10 +1784,23 @@ fn choose_cpu_for_task(task: &Task) -> usize {
     if task.can_run_on(task.last_cpu) {
         return task.last_cpu; // Preferred CPU is allowed.
     }
-    // last_cpu is not in the affinity mask — pick the lowest allowed CPU.
-    // This is the cold path; we could also pick the lightest-loaded
-    // allowed CPU, but that requires locking per-CPU queues.
-    let first = task.cpu_affinity.trailing_zeros();
+    // last_cpu is not in the affinity mask — pick the lowest allowed CPU
+    // that is online.  This is the cold path; we could also pick the
+    // lightest-loaded allowed CPU, but that requires locking per-CPU queues.
+    //
+    // Online, because a queue no CPU serves strands whatever is put on it: a
+    // mask naming only CPUs that are not online (set before a CPU went
+    // offline, or a kernel `spawn_with_affinity` naming CPU 1 on a
+    // uniprocessor boot) leaves the task where it was instead.  Before CPU
+    // hotplug has started the online mask is empty, and the mask alone
+    // decides, as it always did.
+    let online = crate::cpu_hotplug::online_mask();
+    let allowed = if online == 0 {
+        task.cpu_affinity
+    } else {
+        task.cpu_affinity & online
+    };
+    let first = allowed.trailing_zeros();
     if first < 64 {
         first as usize
     } else {
@@ -1928,7 +1941,15 @@ pub fn spawn_suspended(
     arg: u64,
     pml4_phys: u64,
 ) -> KernelResult<TaskId> {
-    spawn_suspended_with_id(name, priority, entry, arg, pml4_phys, None)
+    spawn_suspended_with_id(
+        name,
+        priority,
+        entry,
+        arg,
+        pml4_phys,
+        None,
+        task::CPU_AFFINITY_ALL,
+    )
 }
 
 /// [`spawn_suspended`], giving the task the id `requested_id` when it is
@@ -1937,6 +1958,10 @@ pub fn spawn_suspended(
 /// main thread's, as on Linux. A requested id already in use -- which only
 /// a second "first" thread could ask for -- falls back to a fresh one; the
 /// returned id is the one the task has.
+///
+/// `affinity_mask` is the task's CPU affinity: a process's threads take
+/// their creator's ([`crate::proc::thread`]), as on Linux, where a thread,
+/// a forked child and an exec'd image all keep the creating thread's mask.
 ///
 /// # Errors
 ///
@@ -1948,6 +1973,7 @@ pub fn spawn_suspended_with_id(
     arg: u64,
     pml4_phys: u64,
     requested_id: Option<TaskId>,
+    affinity_mask: u64,
 ) -> KernelResult<TaskId> {
     spawn_inner(
         name,
@@ -1955,7 +1981,7 @@ pub fn spawn_suspended_with_id(
         entry,
         arg,
         pml4_phys,
-        task::CPU_AFFINITY_ALL,
+        affinity_mask,
         false,
         requested_id,
     )
@@ -5250,59 +5276,115 @@ pub fn set_priority(task_id: TaskId, new_priority: u8) -> Option<u8> {
     Some(old_priority)
 }
 
-/// Set a task's CPU affinity mask.
+/// Set a task's CPU affinity mask: [`set_affinity`], with `None` for every
+/// failure (no such task, or no online CPU in `mask`). For the kernel shell's
+/// `taskset` and the scheduler's own tests.
+pub fn set_cpu_affinity(task_id: TaskId, mask: u64) -> Option<u64> {
+    set_affinity(task_id, mask).ok()
+}
+
+/// Restrict a task to the CPUs in `mask` (bit N = CPU N), as
+/// `sched_setaffinity(2)` does, and return its previous mask.
 ///
-/// Bit N set means the task is allowed to run on CPU N.  If the task
-/// is currently in the run queue on a CPU that's no longer allowed,
-/// it is moved to the first allowed CPU.
-///
-/// Returns the old affinity mask, or `None` if the task was not found.
+/// The mask is stored as given, so CPUs it names that come online later are
+/// used; it must name at least one CPU online now. The task moves at once if
+/// its CPU is no longer allowed: a queued task to an allowed CPU's queue; a
+/// running one at its next switch, which this asks for -- by switching now if
+/// it is the caller, or by a reschedule request to its CPU otherwise
+/// ([`request_preempt_on`]).
 ///
 /// # Errors
 ///
-/// Returns `None` if `mask` is zero (would make the task unrunnable).
-pub fn set_cpu_affinity(task_id: TaskId, mask: u64) -> Option<u64> {
-    if mask == 0 {
-        return None;
+/// - [`KernelError::InvalidArgument`] if `mask` names no online CPU (once CPU
+///   hotplug has started; before that, if it is zero).
+/// - [`KernelError::NotFound`] if there is no such task.
+pub fn set_affinity(task_id: TaskId, mask: u64) -> KernelResult<u64> {
+    let online = crate::cpu_hotplug::online_mask();
+    let usable = if online == 0 { mask } else { mask & online };
+    if usable == 0 {
+        return Err(KernelError::InvalidArgument);
     }
 
-    let mut state = SCHED.lock();
-    let task = state.tasks.get(&task_id)?;
-    let old_mask = task.cpu_affinity;
-    let task_state = task.state;
-    let prio = task.effective_priority();
-    let old_cpu = task.last_cpu;
-
-    if old_mask == mask {
-        return Some(old_mask);
-    }
-
-    // Check if the task's current CPU is still allowed.
-    let needs_migrate = task_state == TaskState::Ready && (mask >> old_cpu) & 1 == 0;
-
-    // Update the stored mask.
-    if let Some(task) = state.tasks.get_mut(&task_id) {
+    let mut wake_target = None;
+    let mut kick_cpu = None;
+    let old_mask = {
+        let mut state = SCHED.lock();
+        let task = state.tasks.get_mut(&task_id).ok_or(KernelError::NotFound)?;
+        let old_mask = task.cpu_affinity;
         task.cpu_affinity = mask;
+        let here = task.last_cpu;
+        if !task.can_run_on(here) {
+            match task.state {
+                TaskState::Ready => {
+                    // Queued on a CPU it may no longer use: move the entry.
+                    // A task requeued by a CPU still switching away from it is
+                    // safe to move too -- the pick on the new CPU hands it back
+                    // until the switch is done (`running_elsewhere`).
+                    let prio = task.effective_priority();
+                    let new_cpu = choose_cpu_for_task(task);
+                    if new_cpu != here {
+                        task.last_cpu = new_cpu;
+                        PER_CPU_SCHED.dequeue(task_id, prio, here);
+                        PER_CPU_SCHED.enqueue(task_id, prio, new_cpu);
+                        wake_target = Some(new_cpu);
+                    }
+                }
+                // Running on it: it moves at its next switch, when the pick
+                // re-homes it (`classify_pick`).
+                TaskState::Running => kick_cpu = Some(here),
+                // Blocked or suspended: its wake chooses an allowed CPU.
+                TaskState::Blocked | TaskState::Suspended | TaskState::Dead => {}
+            }
+        }
+        old_mask
+    };
 
-        if needs_migrate {
-            // Move from old CPU's queue to the first allowed CPU.
-            let new_cpu = choose_cpu_for_task(task);
-            task.last_cpu = new_cpu;
-            PER_CPU_SCHED.dequeue(task_id, prio, old_cpu);
-            PER_CPU_SCHED.enqueue(task_id, prio, new_cpu);
+    if let Some(cpu) = wake_target {
+        signal_cpu(cpu);
+    }
+    if let Some(cpu) = kick_cpu {
+        if task_id == load_current_task() {
+            // The caller moved itself: switch now, so it returns on an
+            // allowed CPU, as Linux's sched_setaffinity does.
+            yield_now();
+        } else {
+            request_preempt_on(cpu);
         }
     }
-
-    Some(old_mask)
+    Ok(old_mask)
 }
 
-/// Get a task's CPU affinity mask.
+/// Get a task's CPU affinity mask, as stored ([`task::CPU_AFFINITY_ALL`]
+/// for a task never restricted).
 ///
 /// Returns the affinity mask, or `None` if the task was not found.
 #[must_use]
 pub fn get_cpu_affinity(task_id: TaskId) -> Option<u64> {
     let state = SCHED.lock();
     state.tasks.get(&task_id).map(|t| t.cpu_affinity)
+}
+
+/// The CPUs a task may run on now: its mask, less the CPUs that are not
+/// online -- what `sched_getaffinity(2)` reports. `None` if there is no such
+/// task. Before CPU hotplug has started, the mask as stored.
+#[must_use]
+pub fn affinity_of(task_id: TaskId) -> Option<u64> {
+    let mask = get_cpu_affinity(task_id)?;
+    let online = crate::cpu_hotplug::online_mask();
+    Some(if online == 0 { mask } else { mask & online })
+}
+
+/// Ask `cpu` to reschedule at its next interrupt exit, and interrupt it now.
+///
+/// [`request_preempt`] for another CPU: sets its `NEED_RESCHED`, which its
+/// next outermost interrupt exit services ([`do_deferred_preempt`]), and sends
+/// it a reschedule interrupt ([`signal_cpu`]) so that exit comes now rather
+/// than at its next timer tick.
+pub fn request_preempt_on(cpu: usize) {
+    if let Some(f) = NEED_RESCHED.get(cpu) {
+        f.store(true, Ordering::Release);
+    }
+    signal_cpu(cpu);
 }
 
 /// Kill a task remotely (force-terminate without running task code).
@@ -7388,14 +7470,40 @@ enum PickVerdict {
 /// Decide what may be done with `id`, just taken off a run queue on `cpu`,
 /// whose current task is `current_id`.  The caller holds `SCHED`, so the
 /// state read here is the state the dispatch will act on.
-fn classify_pick(state: &SchedState, id: TaskId, current_id: TaskId, cpu: usize) -> PickVerdict {
+///
+/// `move_current` says whether the current task may be moved off this CPU
+/// when its affinity forbids it: only where this CPU is about to switch away
+/// from it. In the idle fallback the current task's context stays live here,
+/// so another CPU could only hand it back -- it resumes here instead, and moves
+/// at its next switch.
+fn classify_pick(
+    state: &SchedState,
+    id: TaskId,
+    current_id: TaskId,
+    cpu: usize,
+    move_current: bool,
+) -> PickVerdict {
     let Some(task) = state.tasks.get(&id) else {
         return PickVerdict::Stale(None);
     };
     if id == current_id {
         return match task.state {
             // Requeued by this very call, or woken in the window between
-            // marking itself parked and getting here.
+            // marking itself parked and getting here -- unless its affinity
+            // no longer allows this CPU (it pinned itself elsewhere, or was
+            // pinned while it ran), when it moves instead of resuming here.
+            // Resuming it in place regardless was how a running thread that
+            // changed its own affinity stayed where it was for as long as it
+            // stayed runnable. `schedule_inner` sees the move in `last_cpu`
+            // and does not resume it in place either.
+            TaskState::Ready if move_current && !task.can_run_on(cpu) => {
+                let target = choose_cpu_for_task(task);
+                if target != cpu && target < PER_CPU_SCHED.num_cpus() {
+                    PickVerdict::Rehome(target)
+                } else {
+                    PickVerdict::Run
+                }
+            }
             TaskState::Ready => PickVerdict::Run,
             // Still running, and holding an entry a running task never has.
             // Resuming it is what it was doing anyway, so that is the
@@ -7505,7 +7613,9 @@ fn next_queued_locked(state: &mut SchedState, cpu: usize, may_steal: bool) -> Op
 /// whose affinity forbids this CPU goes to one it allows.  Either way the CPU
 /// it lands on is added to `signals`, owed a reschedule once `SCHED` is
 /// released, and stealing stops for the rest of the call so the same entry
-/// cannot be stolen straight back.
+/// cannot be stolen straight back. `move_current` is [`classify_pick`]'s:
+/// whether the current task, requeued here, may be moved off a CPU its
+/// affinity forbids.
 ///
 /// [`PriorityRoundRobin::dequeue`]: priority_rr::PriorityRoundRobin::dequeue
 fn pick_runnable_locked(
@@ -7513,11 +7623,12 @@ fn pick_runnable_locked(
     cpu: usize,
     current_id: TaskId,
     signals: &mut u64,
+    move_current: bool,
 ) -> Option<TaskId> {
     let mut may_steal = true;
     for _ in 0..PICK_ATTEMPTS {
         let id = next_queued_locked(state, cpu, may_steal)?;
-        match classify_pick(state, id, current_id, cpu) {
+        match classify_pick(state, id, current_id, cpu, move_current) {
             PickVerdict::Run => return Some(id),
             PickVerdict::Stale(task_state) => {
                 report_stale_rq_entry(id, task_state, cpu, "pick");
@@ -7703,7 +7814,7 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
         // this CPU, which no longer takes an entry on trust.
         let _pick_t = crate::kprofile::begin(crate::kprofile::Slot::SchedPickNext);
         let mut pick_signals = 0u64;
-        let picked = pick_runnable_locked(&mut state, cpu, current_id, &mut pick_signals);
+        let picked = pick_runnable_locked(&mut state, cpu, current_id, &mut pick_signals, true);
         wake_signals.add(pick_signals);
         crate::kprofile::end(crate::kprofile::Slot::SchedPickNext, _pick_t);
 
@@ -7734,8 +7845,13 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
             // state — `Blocked`, `Dead`, `Suspended`, or `Ready` because it was
             // throttled — means the task must not execute, so we fall into the
             // idle fallback and HLT until something genuinely becomes runnable.
+            //
+            // A requeued task the pick moved to another CPU (its affinity
+            // forbids this one: `classify_pick`) is queued there now, which
+            // its `last_cpu` says; resuming it here as well would run it twice.
             let resume_in_place = state.tasks.get(&current_id).is_some_and(|t| {
-                t.state == TaskState::Running || (requeued_current && t.state == TaskState::Ready)
+                t.state == TaskState::Running
+                    || (requeued_current && t.state == TaskState::Ready && t.last_cpu == cpu)
             });
 
             if !resume_in_place {
@@ -7797,7 +7913,10 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                     // for a dead or parked task is dropped here too, rather
                     // than switched to.
                     let mut pick_signals = 0u64;
-                    let picked = pick_runnable_locked(&mut s, cpu, current_id, &mut pick_signals);
+                    // The current task's context stays live on this CPU
+                    // here, so it is not moved (`classify_pick`).
+                    let picked =
+                        pick_runnable_locked(&mut s, cpu, current_id, &mut pick_signals, false);
                     wake_signals.add(pick_signals);
                     let Some(ready_id) = picked else {
                         idle_spins = idle_spins.saturating_add(1);
@@ -8316,6 +8435,164 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
 // ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
+
+/// Where [`affinity_self_test`]'s self-pinning task found itself after its
+/// call returned (`u64::MAX`: not yet; `u64::MAX - 1`: the call failed).
+static AFF_LANDED: AtomicU64 = AtomicU64::new(u64::MAX);
+/// The CPU [`affinity_self_test`]'s spinning task last ran on.
+static AFF_SPIN_CPU: AtomicU64 = AtomicU64::new(u64::MAX);
+/// Tells [`affinity_self_test`]'s spinning task to stop.
+static AFF_SPIN_STOP: AtomicBool = AtomicBool::new(false);
+/// Set by [`affinity_self_test`]'s spinning task as it returns.
+static AFF_SPIN_DONE: AtomicBool = AtomicBool::new(false);
+
+/// [`affinity_self_test`]'s first task: pins itself to CPU `target` and
+/// records the CPU it is on once the call returns.
+extern "C" fn aff_self_pinner(target: u64) {
+    let mask = u32::try_from(target)
+        .ok()
+        .and_then(|t| 1u64.checked_shl(t))
+        .unwrap_or(0);
+    let landed = match set_affinity(load_current_task(), mask) {
+        Ok(_) => current_cpu_id() as u64,
+        Err(_) => u64::MAX - 1,
+    };
+    AFF_LANDED.store(landed, Ordering::Release);
+}
+
+/// [`affinity_self_test`]'s second task: runs without ever blocking,
+/// recording its CPU, until told to stop.
+extern "C" fn aff_spinner(_arg: u64) {
+    while !AFF_SPIN_STOP.load(Ordering::Acquire) {
+        AFF_SPIN_CPU.store(current_cpu_id() as u64, Ordering::Release);
+        core::hint::spin_loop();
+    }
+    AFF_SPIN_DONE.store(true, Ordering::Release);
+}
+
+/// Wait up to two seconds for `done`, sleeping a millisecond at a time.
+fn affinity_test_wait(done: impl Fn() -> bool) -> bool {
+    let start = crate::hrtimer::now_ns();
+    while !done() {
+        if crate::hrtimer::now_ns().saturating_sub(start) > 2_000_000_000 {
+            return false;
+        }
+        sleep_ms(1);
+    }
+    true
+}
+
+/// Self-test: a CPU affinity change moves a task off a CPU it may no longer
+/// use, and a mask naming no online CPU is refused.
+///
+/// - A running task that pins itself to another CPU returns from the call on
+///   that CPU. It used to be resumed where it was, for as long as it stayed
+///   runnable (`classify_pick`).
+/// - A task running on another CPU, pinned to this one, comes here: its CPU is
+///   asked to reschedule ([`request_preempt_on`]) and the pick there re-homes
+///   it.
+///
+/// The moves need two online CPUs; with one, it says so and checks the
+/// refusal alone. Run after CPU hotplug has started, so the online mask is
+/// the real one.
+pub fn affinity_self_test() -> KernelResult<()> {
+    serial_println!("[sched] Running CPU affinity self-test...");
+    let fail = |what: &str| {
+        serial_println!("[sched]   FAIL: affinity: {}", what);
+        Err(KernelError::InternalError)
+    };
+    let online = crate::cpu_hotplug::online_mask();
+    let me = load_current_task();
+    let before = get_cpu_affinity(me);
+
+    // A mask with no online CPU is refused, and changes nothing.
+    if set_affinity(me, !online) != Err(KernelError::InvalidArgument)
+        || set_affinity(me, 0) != Err(KernelError::InvalidArgument)
+        || get_cpu_affinity(me) != before
+    {
+        return fail("a mask with no online CPU was not refused, or changed the mask");
+    }
+    if affinity_of(me).is_none_or(|m| m == 0 || m & !online != 0) {
+        return fail("the reported mask is empty or names a CPU that is not online");
+    }
+
+    // The mask naming only `cpu`.
+    let only = |cpu: usize| {
+        u32::try_from(cpu)
+            .ok()
+            .and_then(|c| 1u64.checked_shl(c))
+            .unwrap_or(0)
+    };
+    let here = current_cpu_id();
+    let Some(other) = (0..crate::smp::MAX_CPUS).find(|&c| c != here && online & only(c) != 0)
+    else {
+        serial_println!("[sched]   CPU affinity: one CPU online, refusal only: OK");
+        return Ok(());
+    };
+
+    // 1. A running task pins itself elsewhere.
+    AFF_LANDED.store(u64::MAX, Ordering::Release);
+    let pinner = spawn_with_affinity(
+        b"aff-pinner",
+        task::DEFAULT_PRIORITY,
+        aff_self_pinner,
+        other as u64,
+        0,
+        only(here),
+    )?;
+    if !affinity_test_wait(|| AFF_LANDED.load(Ordering::Acquire) != u64::MAX) {
+        kill_task(pinner);
+        reap_dead_tasks();
+        return fail("the self-pinning task never returned from its call");
+    }
+    let landed = AFF_LANDED.load(Ordering::Acquire);
+    if landed != other as u64 {
+        serial_println!(
+            "[sched]   FAIL: affinity: pinned itself to CPU {} and returned on {} (from CPU {})",
+            other,
+            landed,
+            here
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // 2. A task running on another CPU is pinned to this one.
+    AFF_SPIN_CPU.store(u64::MAX, Ordering::Release);
+    AFF_SPIN_STOP.store(false, Ordering::Release);
+    AFF_SPIN_DONE.store(false, Ordering::Release);
+    let spinner = spawn_with_affinity(
+        b"aff-spinner",
+        task::DEFAULT_PRIORITY,
+        aff_spinner,
+        0,
+        0,
+        only(other),
+    )?;
+    let ran_there = affinity_test_wait(|| AFF_SPIN_CPU.load(Ordering::Acquire) == other as u64);
+    let moved = ran_there
+        && set_affinity(spinner, only(here)).is_ok()
+        && affinity_test_wait(|| AFF_SPIN_CPU.load(Ordering::Acquire) == here as u64);
+    AFF_SPIN_STOP.store(true, Ordering::Release);
+    let stopped = affinity_test_wait(|| AFF_SPIN_DONE.load(Ordering::Acquire));
+    if !stopped {
+        kill_task(spinner);
+        reap_dead_tasks();
+    }
+    if !ran_there {
+        return fail("a task pinned to another CPU never ran there");
+    }
+    if !moved {
+        return fail("a task running on another CPU, pinned to this one, never came here");
+    }
+    serial_println!(
+        "[sched]   CPU affinity: a self-pinning task moved {} -> {}, a running one {} -> {}: OK",
+        here,
+        other,
+        other,
+        here
+    );
+    Ok(())
+}
 
 /// SMP-specific scheduler validation.
 ///
@@ -9899,19 +10176,19 @@ fn test_stale_run_queue_entries() -> KernelResult<()> {
         // is the case that hung.
         let current = current_task_id();
         let verdicts_ok = matches!(
-            classify_pick(&state, dead, dead, cpu),
+            classify_pick(&state, dead, dead, cpu, true),
             PickVerdict::Stale(Some(TaskState::Dead))
         ) && matches!(
-            classify_pick(&state, parked, parked, cpu),
+            classify_pick(&state, parked, parked, cpu, true),
             PickVerdict::Stale(Some(TaskState::Blocked))
         ) && matches!(
-            classify_pick(&state, dead, current, cpu),
+            classify_pick(&state, dead, current, cpu, true),
             PickVerdict::Stale(Some(TaskState::Dead))
         ) && matches!(
-            classify_pick(&state, parked, current, cpu),
+            classify_pick(&state, parked, current, cpu, true),
             PickVerdict::Stale(Some(TaskState::Blocked))
         ) && matches!(
-            classify_pick(&state, TaskId::MAX, current, cpu),
+            classify_pick(&state, TaskId::MAX, current, cpu, true),
             PickVerdict::Stale(None)
         );
         Some((killed_ok, verdicts_ok))

@@ -2,7 +2,7 @@
 
 **Filed:** 2026-09-27 by lane E. **For:** lane A (`kernel/`), lane D
 (`posix/src/sched.rs`), lane F (`gui/compositor`, `gui/window`).
-**Status:** OPEN for lanes A and F -- part 3 (lane F) is blocked on a display transport that attests the client's pid; see "Lane F's answer" at the end. Lane D's interim half of part 2 (the setters refuse what they cannot apply) landed 2026-09-27 -- reply at the end.
+**Status:** parts 1 and 2 **DONE on lane A** 2026-10-01 (on `lane-a-wip`, reaching `main` with lane A's next green boot) -- "Lane A's answer" at the end; lane D's routing of `sched_{get,set}affinity` to the new calls is the remaining half of part 2. Part 3 (lane F) is blocked on a display transport that attests the client's pid; see "Lane F's answer". Lane D's interim half of part 2 (the setters refuse what they cannot apply) landed 2026-09-27 -- reply at the end.
 
 **In short:** the operator answered C-Q17 (design-decisions §1423): the
 process explorer's finished-but-unreachable tools are to be wired up, not
@@ -152,3 +152,119 @@ with that window's title and its owner's attested pid -- nothing of its
 contents. Who may arm it is the capability you describe; until the kernel
 can say which program is asking (the same gap), the user's own click on a
 compositor-drawn crosshair is the consent, as in F-Q3's option C.
+
+---
+
+## Lane A's answer (2026-10-01) -- parts 1 and 2 are done
+
+Both are on `lane-a-wip` and reach `main` with lane A's next green boot
+(design-decisions §1514, §1515).
+
+### Part 1: what a process is waiting on
+
+`/proc/<pid>/wchan` (the main thread) and `/proc/<pid>/task/<tid>/wchan`
+(each thread): one line with no trailing newline, as Linux's. Every token is
+separated by one space, and the first is always the kind:
+
+| Line | Meaning |
+|---|---|
+| `0` | not waiting: running, ready to run, or exiting |
+| `<kind>` | waiting, on something with no argument -- `poll`, `terminal`, `signal`, `stopped`, `wait` |
+| `<kind> <arg>` | `futex 0x7f001000`, `channel 12`, `pipe 3`, `child 77`, `timer 81234567890` |
+| `... holder <pid>` | the process that holds what is waited on |
+| `... holder <pid> thread <tid>` | ... and the thread, when the kernel knows which |
+
+An argument of 0 is left out. Futex and mutex arguments are hex with `0x`;
+every other argument is decimal. The kinds and what their arguments are:
+
+| Kind | Waiting for | Argument |
+|---|---|---|
+| `timer` | a sleep to end | its deadline, `CLOCK_MONOTONIC` nanoseconds |
+| `channel` | an IPC channel | the channel handle the program holds |
+| `pipe` | a pipe | the pipe handle |
+| `futex` | a futex word | its address in the waiter's own space |
+| `mutex` | a kernel lock or wait queue | none (never a kernel address) |
+| `event` | an eventfd, timerfd or inotify | its handle |
+| `join` | a thread to exit | that thread's id |
+| `io` | a device interrupt (a userspace driver) | the IRQ |
+| `socket` | a socket | its handle |
+| `terminal` | a terminal, pseudo-terminal or the keyboard | none |
+| `filelock` | an advisory or record lock | none |
+| `poll` | `poll`/`select`/`epoll` | none |
+| `child` | `wait`/`waitpid`/`waitid` | the pid; none for "any child" |
+| `signal` | `sigsuspend`, `pause`, `sigtimedwait`, a `signalfd` read | none |
+| `semaphore` | a semaphore | its handle |
+| `service` | a connection to accept | the listener's handle |
+| `stopped` | to be continued (job control) | none |
+| `wait` | a wait the kernel code did not describe | none |
+| `completion` | a completion port | none |
+
+**Holders, for the deadlock graph.** The kernel names one only where it
+knows; otherwise the line simply has no `holder`. A deadlock analyzer that
+draws a wrong edge finds a cycle that is not there; a missing edge only hides
+one. Known holders:
+
+- `channel`: the process bound to the other end, as recorded when a service
+  connection was made (the same answer `SYS_CHANNEL_PEER_CRED` gives). A
+  channel made by `channel_create` and handed to another process has no
+  recorded peer, so no holder.
+- `child <pid>`: that child.
+- `join <tid>`: that thread, and its process.
+- `futex`: for a priority-inheritance futex (`FUTEX_LOCK_PI`, which glibc uses
+  for `PTHREAD_PRIO_INHERIT` mutexes), the owning thread and its process. A
+  plain futex -- an ordinary `pthread_mutex` -- has no owner the kernel can
+  see. glibc records the owning thread in the mutex beside the word
+  (`__data.__owner`), so the explorer could read it from the process's
+  memory if it is allowed to.
+- Pipes and sockets: no holder. The kernel does not record which processes
+  hold each end; say if the explorer needs it.
+
+Also: `/proc/<pid>/stat` field 35 is 1 while the task waits and 0 otherwise,
+as Linux has printed since it stopped publishing the address. The kernel
+shell's `wchan` lists every waiting task the same way.
+
+Who may read it: anyone, today, like every other `/proc/<pid>` file here --
+`environ` included. That is a gap lane A is fixing next
+(`A-PROC-PID-FILES-CHECK-NO-READER`). When it closes, `wchan` will read `0` to
+a reader not allowed to inspect the process, as on Linux. Plan the panel for
+that answer.
+
+### Part 2: which CPUs a process may run on
+
+The native pair, in `kernel/src/syscall/number.rs`:
+
+| | `arg0` | `arg1` | `arg2` |
+|---|---|---|---|
+| `SYS_SCHED_SET_AFFINITY` = 1100 | target: a process id, or with the flag a thread id; 0 = the caller (its process, or with the flag the calling thread) | the mask, bit N = CPU N | flags: `SCHED_AFFINITY_THREAD` = 1 |
+| `SYS_SCHED_GET_AFFINITY` = 1101 | the same | a `u64` out-pointer | the same |
+
+- **Set** moves every thread of a process, or the one thread. A thread on a
+  CPU it may no longer use moves at once; a caller that moved itself returns
+  on an allowed CPU. Threads, forked children and spawned processes take
+  their creator's mask. The mask is kept as given, so a CPU it names that
+  comes online later is used, but it must name a CPU online now.
+- **Get** reports a process's main thread (its first thread once the main one
+  has exited), less the CPUs that are not online. Anyone may read, as on
+  Linux.
+- **Who may set:** the signalling rule you asked for -- the process itself,
+  its parent, or a holder of a `Process` capability for it with `DELETE`. No
+  process may move a kernel task.
+- **Errors**, in this order:
+  - `InvalidArgument`: an unknown flag, or a null get pointer.
+  - `NoSuchProcess`: no such process or thread, or a process with no threads.
+  - `PermissionDenied`: the caller may not set it.
+  - `InvalidArgument`: a mask with no online CPU.
+  - `InvalidAddress`: an unwritable get pointer.
+
+The Linux `sched_setaffinity` / `sched_getaffinity` now apply and report the
+real mask too. `pid` names a thread, as on Linux. Errors come in Linux's
+order: `EFAULT`, `ESRCH`, `EPERM`, `EINVAL`. `EINVAL` covers an empty mask,
+including the one a `cpusetsize` of 0 gives.
+
+**For lane D:** `affinity_change` in `posix/src/sched.rs` can now route a
+narrower mask to `SYS_SCHED_SET_AFFINITY` instead of answering `ENOSYS`, with
+`SCHED_AFFINITY_THREAD` for `pthread_setaffinity_np`'s thread form.
+`sched_getaffinity` should ask `SYS_SCHED_GET_AFFINITY` instead of answering
+"every online CPU". `MAX_SYSCALL_NR` is now 1200.
+
+— lane A

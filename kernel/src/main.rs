@@ -8390,6 +8390,15 @@ extern "C" fn kernel_main() -> ! {
         cpu_hotplug::self_test(),
     );
 
+    // CPU affinity moves a task off a CPU it may no longer use -- a running
+    // one included -- and refuses a mask with no online CPU. After hotplug
+    // init, so the online mask it checks against is the real one.
+    selftest::dispatch(
+        "Scheduler CPU affinity",
+        selftest::Severity::Integrity,
+        sched::affinity_self_test(),
+    );
+
     // NUMA topology detection — parse SRAT or default to UMA.
     // Requires ACPI tables and SMP to be initialized.
     numa::init();

@@ -82,16 +82,17 @@ use super::number::{
     SYS_PTY_MASTER_TRY_READ, SYS_PTY_MASTER_TRY_WRITE, SYS_PTY_MASTER_WRITE, SYS_PTY_POLL,
     SYS_PTY_READABLE_BYTES, SYS_PTY_SET_PGRP, SYS_PTY_SET_TERMIOS, SYS_PTY_SET_WINSIZE,
     SYS_PTY_SLAVE_ID, SYS_PTY_SLAVE_READ, SYS_PTY_SLAVE_TRY_READ, SYS_PTY_SLAVE_WRITE,
-    SYS_RLIMIT_GET, SYS_RLIMIT_SET, SYS_SCHED_GET_PROFILE, SYS_SCHED_GET_TIMESLICE,
-    SYS_SCHED_RECONFIGURE, SYS_SCHED_SET_PROFILE, SYS_SCHED_SET_TIMESLICE, SYS_SECUREBOOT_ENROLL,
-    SYS_SECUREBOOT_REMOVE, SYS_SECUREBOOT_VERIFY, SYS_SEM_CLOSE, SYS_SEM_CREATE, SYS_SEM_SIGNAL,
-    SYS_SEM_TRY_WAIT, SYS_SEM_WAIT, SYS_SEM_WAIT_TIMEOUT, SYS_SERVICE_ACCEPT,
-    SYS_SERVICE_ACCEPT_TIMEOUT, SYS_SERVICE_CONNECT, SYS_SERVICE_REGISTER, SYS_SERVICE_TRY_ACCEPT,
-    SYS_SERVICE_UNREGISTER, SYS_SET_EXCEPTION_HANDLER, SYS_SET_FS_BASE, SYS_SHM_CLOSE,
-    SYS_SHM_CREATE, SYS_SHM_MAP, SYS_SHM_MAP_AT, SYS_SHM_SIZE, SYS_SHM_UNMAP, SYS_SIGNAL_ALTSTACK,
-    SYS_SIGNAL_GET_IGNORED, SYS_SIGNAL_MASK, SYS_SIGNAL_PENDING, SYS_SIGNAL_QUEUE,
-    SYS_SIGNAL_REGISTER, SYS_SIGNAL_SEND, SYS_SIGNAL_SET_IGNORED, SYS_SIGNAL_STOP_SELF,
-    SYS_SIGNAL_TGKILL, SYS_SLEEP, SYS_SOCKETPAIR_CLOSE, SYS_SOCKETPAIR_CREATE, SYS_SOCKETPAIR_POLL,
+    SYS_RLIMIT_GET, SYS_RLIMIT_SET, SYS_SCHED_GET_AFFINITY, SYS_SCHED_GET_PROFILE,
+    SYS_SCHED_GET_TIMESLICE, SYS_SCHED_RECONFIGURE, SYS_SCHED_SET_AFFINITY, SYS_SCHED_SET_PROFILE,
+    SYS_SCHED_SET_TIMESLICE, SYS_SECUREBOOT_ENROLL, SYS_SECUREBOOT_REMOVE, SYS_SECUREBOOT_VERIFY,
+    SYS_SEM_CLOSE, SYS_SEM_CREATE, SYS_SEM_SIGNAL, SYS_SEM_TRY_WAIT, SYS_SEM_WAIT,
+    SYS_SEM_WAIT_TIMEOUT, SYS_SERVICE_ACCEPT, SYS_SERVICE_ACCEPT_TIMEOUT, SYS_SERVICE_CONNECT,
+    SYS_SERVICE_REGISTER, SYS_SERVICE_TRY_ACCEPT, SYS_SERVICE_UNREGISTER,
+    SYS_SET_EXCEPTION_HANDLER, SYS_SET_FS_BASE, SYS_SHM_CLOSE, SYS_SHM_CREATE, SYS_SHM_MAP,
+    SYS_SHM_MAP_AT, SYS_SHM_SIZE, SYS_SHM_UNMAP, SYS_SIGNAL_ALTSTACK, SYS_SIGNAL_GET_IGNORED,
+    SYS_SIGNAL_MASK, SYS_SIGNAL_PENDING, SYS_SIGNAL_QUEUE, SYS_SIGNAL_REGISTER, SYS_SIGNAL_SEND,
+    SYS_SIGNAL_SET_IGNORED, SYS_SIGNAL_STOP_SELF, SYS_SIGNAL_TGKILL, SYS_SLEEP,
+    SYS_SOCKETPAIR_CLOSE, SYS_SOCKETPAIR_CREATE, SYS_SOCKETPAIR_POLL,
     SYS_SOCKETPAIR_READABLE_BYTES, SYS_SOCKETPAIR_RECV, SYS_SOCKETPAIR_RECV_TIMEOUT,
     SYS_SOCKETPAIR_SEND, SYS_SOCKETPAIR_SEND_TIMEOUT, SYS_SOCKETPAIR_SHUTDOWN,
     SYS_SOCKETPAIR_TRY_RECV, SYS_SOCKETPAIR_TRY_SEND, SYS_SYSCTL_GET, SYS_SYSCTL_SET,
@@ -570,6 +571,8 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_SIGNAL_STOP_SELF as usize] = Some(handlers::sys_signal_stop_self);
     handlers[SYS_SIGNAL_SET_IGNORED as usize] = Some(handlers::sys_signal_set_ignored);
     handlers[SYS_SIGNAL_GET_IGNORED as usize] = Some(handlers::sys_signal_get_ignored);
+    handlers[SYS_SCHED_SET_AFFINITY as usize] = Some(handlers::sys_sched_set_affinity);
+    handlers[SYS_SCHED_GET_AFFINITY as usize] = Some(handlers::sys_sched_get_affinity);
 
     // Thread management (510–519).
     handlers[SYS_THREAD_CREATE as usize] = Some(handlers::sys_thread_create);
@@ -1030,6 +1033,7 @@ pub fn self_test() -> KernelResult<()> {
     test_thread_join_timeout_registered()?;
     test_dispatch_signal_siginfo_frame()?;
     test_dispatch_signal_ignored()?;
+    test_dispatch_sched_affinity()?;
     test_dispatch_priority_doors()?;
     test_dispatch_exec_close()?;
     test_dispatch_tioc_and_watch_records()?;
@@ -2685,6 +2689,163 @@ fn test_dispatch_signal_ignored() -> KernelResult<()> {
         }
         Err(what) => {
             serial_println!("[syscall]   FAIL: ignored set: {}", what);
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
+/// `SYS_SCHED_SET_AFFINITY` (1100) and `SYS_SCHED_GET_AFFINITY` (1101):
+///
+/// - an unknown flag, a null out-pointer and an empty mask are refused, and a
+///   thread or process that does not exist is `NoSuchProcess`;
+/// - the kernel sets a thread's mask, and reading it back gives that mask;
+///   the caller reads its own;
+/// - a process may not move a kernel task, but may read its mask (from a
+///   self-test, the read gets as far as the pointer, which a process-context
+///   self-test cannot write: `InvalidAddress`, not `PermissionDenied`);
+/// - who may move whom: a process itself, its parent, the kernel -- not its
+///   child, and no process a kernel task (`may_change_affinity`).
+///
+/// The CPUs-moved half needs two CPUs and hotplug's online mask, and runs
+/// later in the boot (`sched::affinity_self_test`).
+fn test_dispatch_sched_affinity() -> KernelResult<()> {
+    use super::handlers::may_change_affinity;
+    use super::number::SCHED_AFFINITY_THREAD;
+    use crate::proc::pcb;
+    use crate::proc::thread::self_test_as_process;
+
+    /// Ids no task or process has.
+    const NOBODY: u64 = 0x00F0_0000_0000_0000;
+    /// A kernel task's body that never runs: it is created suspended.
+    extern "C" fn never_runs(_arg: u64) {}
+
+    let args = |arg0: u64, arg1: u64, arg2: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let code = |e: KernelError| i64::from(e.code());
+    let mut out = 0u64;
+    let out_ptr = core::ptr::from_mut(&mut out) as u64;
+    let me = crate::sched::current_task_id();
+    let thread = SCHED_AFFINITY_THREAD;
+
+    // A kernel task that never runs, to be moved and read.
+    let parked = crate::sched::spawn_suspended(b"affinity-door", 16, never_runs, 0, 0)?;
+    let parent = pcb::create("affinity-parent", 0);
+    let child = pcb::create("affinity-child", parent);
+
+    let result = (|| -> Result<(), &'static str> {
+        for (nr, a, want, why) in [
+            (
+                SYS_SCHED_SET_AFFINITY,
+                args(0, 1, 2),
+                KernelError::InvalidArgument,
+                "SET: an unknown flag",
+            ),
+            (
+                SYS_SCHED_GET_AFFINITY,
+                args(0, out_ptr, 2),
+                KernelError::InvalidArgument,
+                "GET: an unknown flag",
+            ),
+            (
+                SYS_SCHED_GET_AFFINITY,
+                args(0, 0, thread),
+                KernelError::InvalidArgument,
+                "GET: a null pointer",
+            ),
+            (
+                SYS_SCHED_SET_AFFINITY,
+                args(parked, 0, thread),
+                KernelError::InvalidArgument,
+                "SET: an empty mask",
+            ),
+            (
+                SYS_SCHED_GET_AFFINITY,
+                args(NOBODY, out_ptr, thread),
+                KernelError::NoSuchProcess,
+                "GET: no such thread",
+            ),
+            (
+                SYS_SCHED_GET_AFFINITY,
+                args(NOBODY, out_ptr, 0),
+                KernelError::NoSuchProcess,
+                "GET: no such process",
+            ),
+            (
+                SYS_SCHED_SET_AFFINITY,
+                args(NOBODY, 1, thread),
+                KernelError::NoSuchProcess,
+                "SET: no such thread",
+            ),
+            (
+                SYS_SCHED_GET_AFFINITY,
+                args(parent, out_ptr, 0),
+                KernelError::NoSuchProcess,
+                "GET: a process with no threads",
+            ),
+        ] {
+            if dispatch(nr, &a).value != code(want) {
+                serial_println!("[syscall]   FAIL: affinity: {} was not {:?}", why, want);
+                return Err("a refusal");
+            }
+        }
+        // The caller reads its own.
+        if dispatch(SYS_SCHED_GET_AFFINITY, &args(0, out_ptr, thread)).value != 0
+            || Some(out) != crate::sched::affinity_of(me)
+            || out == 0
+        {
+            return Err("the caller's own mask did not read back");
+        }
+        // The kernel moves a thread, and reads the move back. CPU 0 is
+        // always online.
+        out = 0;
+        if dispatch(SYS_SCHED_SET_AFFINITY, &args(parked, 1, thread)).value != 0
+            || crate::sched::get_cpu_affinity(parked) != Some(1)
+            || dispatch(SYS_SCHED_GET_AFFINITY, &args(parked, out_ptr, thread)).value != 0
+            || out != 1
+        {
+            return Err("a mask the kernel set did not read back");
+        }
+        // A process may not move a kernel task, but may read its mask.
+        let as_parent =
+            |nr: u64, a: SyscallArgs| self_test_as_process(parent, || dispatch(nr, &a).value);
+        if as_parent(SYS_SCHED_SET_AFFINITY, args(parked, 1, thread))
+            != code(KernelError::PermissionDenied)
+        {
+            return Err("a process moved a kernel task");
+        }
+        if as_parent(SYS_SCHED_GET_AFFINITY, args(parked, out_ptr, thread))
+            != code(KernelError::InvalidAddress)
+        {
+            return Err("reading a kernel task's mask was refused before the pointer");
+        }
+        // Who may move whom.
+        if !may_change_affinity(Some(parent), Some(parent))
+            || !may_change_affinity(Some(parent), Some(child))
+            || may_change_affinity(Some(child), Some(parent))
+            || !may_change_affinity(None, Some(child))
+            || may_change_affinity(Some(parent), None)
+        {
+            return Err("the rule for who may move whom");
+        }
+        Ok(())
+    })();
+    crate::sched::kill_task(parked);
+    crate::sched::reap_dead_tasks();
+    pcb::destroy(child);
+    pcb::destroy(parent);
+    match result {
+        Ok(()) => {
+            serial_println!("[syscall]   SYS_SCHED_SET_AFFINITY / GET_AFFINITY (1100/1101): OK");
+            Ok(())
+        }
+        Err(what) => {
+            serial_println!("[syscall]   FAIL: affinity: {}", what);
             Err(KernelError::InternalError)
         }
     }

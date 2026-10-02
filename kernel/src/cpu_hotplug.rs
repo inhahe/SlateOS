@@ -299,6 +299,31 @@ pub fn online_count() -> usize {
     ONLINE_COUNT.load(Ordering::Acquire) as usize
 }
 
+/// The CPUs online now, as an affinity mask: bit N set when CPU N is
+/// [`is_online`]. What `sched_getaffinity` intersects a task's mask with, and
+/// what a new mask must overlap (`sched::set_affinity`).
+///
+/// `smp::MAX_CPUS` is at most 64 (asserted below), so one word holds every
+/// CPU.
+///
+/// Empty until [`init`] has run: callers treat an empty mask as "not known
+/// yet", never as "no CPU".
+#[must_use]
+pub fn online_mask() -> u64 {
+    const _: () = assert!(smp::MAX_CPUS <= 64, "an affinity mask is one u64");
+    let mut mask = 0u64;
+    for cpu in 0..smp::MAX_CPUS {
+        if is_online(cpu) {
+            // cpu < MAX_CPUS <= 64, so the shift is in range.
+            #[allow(clippy::arithmetic_side_effects)]
+            {
+                mask |= 1u64 << cpu;
+            }
+        }
+    }
+    mask
+}
+
 /// Offline a CPU — remove it from scheduling and park it.
 ///
 /// The CPU's tasks are migrated to other online CPUs before parking.

@@ -17195,15 +17195,17 @@ fn sys_sched_rr_get_interval(args: &SyscallArgs) -> SyscallResult {
 /// that many bytes and returns the number of bytes actually written
 /// (so callers can detect a too-small buffer and retry).
 ///
-/// We report every online CPU as eligible (the default affinity for a
-/// freshly-created task on Linux).  The mask is filled in bit-by-bit
-/// from 0..N where N = smp::cpu_count().
+/// `pid` names a thread, as on Linux: 0 is the calling thread, and a
+/// process's id is its main thread's. The answer is the thread's affinity
+/// less the CPUs that are not online (`sched::affinity_of`), so what
+/// `sched_setaffinity` set reads back. Until 2026-10-01 it was every online
+/// CPU, whatever had been set.
 ///
 /// Errors:
 ///   - `-EINVAL` if `cpusetsize` is less than the number of bytes
 ///     needed to represent every online CPU (Linux's contract).
 ///   - `-EFAULT` on bad `mask` pointer.
-///   - `-ESRCH` if `pid` is not the caller and not a real pid.
+///   - `-ESRCH` if no thread has the id `pid`.
 ///
 /// Returns the number of bytes written (Linux convention).
 fn sys_sched_getaffinity(args: &SyscallArgs) -> SyscallResult {
@@ -17264,18 +17266,16 @@ fn sys_sched_getaffinity(args: &SyscallArgs) -> SyscallResult {
     if cpusetsize & 7 != 0 {
         return linux_err(errno::EINVAL);
     }
-    // pid lookup using the truncated pid_t value.  pid==0 is the
-    // "current" semantics; pid>0 is explicit; pid<0 mirrors Linux's
-    // find_task_by_vpid returning NULL → ESRCH.
-    if pid > 0 {
-        #[allow(clippy::cast_sign_loss)]
-        let pid_u = pid as u64;
-        if crate::proc::pcb::state(pid_u).is_none() {
-            return linux_err(errno::ESRCH);
-        }
-    } else if pid < 0 {
+    // pid lookup using the truncated pid_t value: 0 is the calling thread,
+    // a positive value names a thread (a process's id is its main thread's),
+    // and a negative one mirrors Linux's find_task_by_vpid returning NULL ->
+    // ESRCH.
+    let Some(tid) = affinity_thread(pid) else {
         return linux_err(errno::ESRCH);
-    }
+    };
+    let Some(affinity) = crate::sched::affinity_of(tid) else {
+        return linux_err(errno::ESRCH);
+    };
     if mask_ptr == 0 {
         return linux_err(errno::EFAULT);
     }
@@ -17333,16 +17333,11 @@ fn sys_sched_getaffinity(args: &SyscallArgs) -> SyscallResult {
     // input.
     let cpumask_size = n_cpus.div_ceil(64) * 8;
     let write_bytes = cpusetsize.min(cpumask_size);
-    // Set bits 0..n_cpus.
-    for cpu in 0..n_cpus {
-        let byte_off = cpu / 8;
-        let bit = cpu % 8;
-        if byte_off < write_bytes {
-            #[allow(clippy::indexing_slicing)]
-            {
-                buf[byte_off] |= 1u8 << bit;
-            }
-        }
+    // The thread's CPUs, little-endian as glibc's cpu_set_t words are: CPU N
+    // is bit N % 8 of byte N / 8. The mask covers CPUs 0..63, which is every
+    // CPU there can be (`smp::MAX_CPUS` <= 64); bytes past the eighth stay 0.
+    for (slot, byte) in buf.iter_mut().zip(affinity.to_le_bytes()) {
+        *slot = byte;
     }
     // SAFETY: validate_user_write above confirmed `cpusetsize` writable
     // bytes; we copy min(cpusetsize, cpumask_size) ≤ cpusetsize bytes.
@@ -17359,15 +17354,24 @@ fn sys_sched_getaffinity(args: &SyscallArgs) -> SyscallResult {
 /// `sched_setaffinity(pid, cpusetsize, mask)` — set the CPU affinity
 /// mask of `pid`.
 ///
-/// We accept any mask as silent success — affinity is advisory and
-/// our scheduler doesn't honour it yet.  The caller's view via
-/// sched_getaffinity will continue to report "all online CPUs" even
-/// after a successful setaffinity, which is technically incorrect but
-/// matches the "we don't enforce" model.
+/// `pid` names a thread, as on Linux: 0 is the calling thread, and a
+/// process's id is its main thread's. The mask is the first
+/// `min(cpusetsize, 8)` bytes (CPUs 0..63, every CPU there can be); the
+/// thread is moved by `sched::set_affinity`, at once if it runs on a CPU it
+/// may no longer use. Until 2026-10-01 every mask was accepted and none
+/// applied.
 ///
-/// Errors:
+/// Who may: the native call's rule (`handlers::affinity_targets`), the
+/// rule for signalling -- the thread's own process, its parent, or a holder
+/// of a `Process` capability for it -- where Linux checks the user id or
+/// `CAP_SYS_NICE`. No process may move a kernel task.
+///
+/// Errors, in Linux's order:
 ///   - `-EFAULT` on bad mask pointer.
-///   - `-ESRCH` on bad pid.
+///   - `-ESRCH` if no thread has the id `pid`.
+///   - `-EPERM` if the caller may not move it.
+///   - `-EINVAL` if the mask names no online CPU -- including the empty mask
+///     a `cpusetsize` of 0 gives, as on Linux.
 fn sys_sched_setaffinity(args: &SyscallArgs) -> SyscallResult {
     // Linux gate order (kernel/sched/syscalls.c::SYSCALL_DEFINE3):
     //
@@ -17395,6 +17399,10 @@ fn sys_sched_setaffinity(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation)]
     let cpusetsize = (args.arg1 as u32) as usize;
     let mask_ptr = args.arg2;
+    // get_user_cpu_mask: the first min(len, cpumask_size) bytes, the rest
+    // zero. Our cpumask is one 64-bit word.
+    let mut bytes = [0u8; 8];
+    let take = cpusetsize.min(bytes.len());
     if cpusetsize > 0 {
         if mask_ptr == 0 {
             return linux_err(errno::EFAULT);
@@ -17402,17 +17410,43 @@ fn sys_sched_setaffinity(args: &SyscallArgs) -> SyscallResult {
         if let Err(e) = crate::mm::user::validate_user_read(mask_ptr, cpusetsize) {
             return linux_err(linux_errno_for(e));
         }
-    }
-    if pid > 0 {
-        #[allow(clippy::cast_sign_loss)]
-        let pid_u = pid as u64;
-        if crate::proc::pcb::state(pid_u).is_none() {
-            return linux_err(errno::ESRCH);
+        // SAFETY: `bytes` has room for `take` <= 8 bytes, and the source was
+        // validated readable for `cpusetsize` >= `take` bytes above.
+        let r = unsafe { crate::mm::user::copy_from_user(mask_ptr, bytes.as_mut_ptr(), take) };
+        if let Err(e) = r {
+            return linux_err(linux_errno_for(e));
         }
-    } else if pid < 0 {
-        return linux_err(errno::ESRCH);
     }
-    SyscallResult::ok(0)
+    let mask = u64::from_le_bytes(bytes);
+    let Some(tid) = affinity_thread(pid) else {
+        return linux_err(errno::ESRCH);
+    };
+    match super::handlers::affinity_targets(tid, super::number::SCHED_AFFINITY_THREAD, true) {
+        Ok(_) => {}
+        Err(KernelError::NoSuchProcess) => return linux_err(errno::ESRCH),
+        Err(KernelError::PermissionDenied) => return linux_err(errno::EPERM),
+        Err(e) => return linux_err(linux_errno_for(e)),
+    }
+    match crate::sched::set_affinity(tid, mask) {
+        Ok(_) => SyscallResult::ok(0),
+        Err(KernelError::NotFound) => linux_err(errno::ESRCH),
+        Err(KernelError::InvalidArgument) => linux_err(errno::EINVAL),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
+/// The thread a `sched_{get,set}affinity` `pid` names: 0 is the calling
+/// thread, a positive id names a thread directly (a process's id is its main
+/// thread's), and a negative one names none -- Linux's `find_task_by_vpid`
+/// finds nothing for it.
+fn affinity_thread(pid: i32) -> Option<crate::sched::task::TaskId> {
+    match pid {
+        0 => Some(crate::sched::current_task_id()),
+        // Positive: the cast is exact.
+        #[allow(clippy::cast_sign_loss)]
+        p if p > 0 => Some(p as u64),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -70683,8 +70717,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 );
                 return Err(KernelError::InternalError);
             }
-            // Case B: setaffinity(pid=0, len=0, mask=NULL) -> 0 (Linux
-            // accepts copy_from_user(NULL, 0) as a no-op); was EFAULT.
+            // Case B: setaffinity(pid=0, len=0, mask=NULL) -> EINVAL.  The
+            // copy of zero bytes from NULL does not fault (it was EFAULT
+            // pre-batch-235), but it leaves Linux's mask empty
+            // (get_user_cpu_mask clears it when len < cpumask_size), and an
+            // empty mask names no CPU: __set_cpus_allowed_ptr's EINVAL.  It
+            // read 0 until 2026-10-01, when no mask was ever applied.
             let a = SyscallArgs {
                 arg0: 0,
                 arg1: 0,
@@ -70693,9 +70731,53 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 arg4: 0,
                 arg5: 0,
             };
-            if dispatch_linux(nr::SCHED_SETAFFINITY, &a).value != 0 {
-                serial_println!("[syscall/linux]   FAIL: sched_setaffinity(0, len=0, NULL) not 0");
+            if dispatch_linux(nr::SCHED_SETAFFINITY, &a).value
+                != i64::from(errno::EINVAL).wrapping_neg()
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: sched_setaffinity(0, len=0, NULL) not EINVAL"
+                );
                 return Err(KernelError::InternalError);
+            }
+            // Case B2: a mask set reads back.  CPU 0 alone -- always
+            // online, and where this boot task runs -- then put back.
+            {
+                let me = crate::sched::current_task_id();
+                let before = crate::sched::get_cpu_affinity(me);
+                let cpu0 = 1u64.to_le_bytes();
+                let mut got = [0u8; 8];
+                let set = SyscallArgs {
+                    arg0: 0,
+                    arg1: 8,
+                    arg2: cpu0.as_ptr() as u64,
+                    arg3: 0,
+                    arg4: 0,
+                    arg5: 0,
+                };
+                let get = SyscallArgs {
+                    arg0: 0,
+                    arg1: 8,
+                    arg2: got.as_mut_ptr() as u64,
+                    arg3: 0,
+                    arg4: 0,
+                    arg5: 0,
+                };
+                let set_ok = dispatch_linux(nr::SCHED_SETAFFINITY, &set).value == 0;
+                let get_ok = dispatch_linux(nr::SCHED_GETAFFINITY, &get).value == 8;
+                if let Some(mask) = before {
+                    // Back to what it was; it held a CPU before, so it
+                    // still does.
+                    let _ = crate::sched::set_affinity(me, mask);
+                }
+                if !set_ok || !get_ok || got != cpu0 {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: sched_setaffinity(0, CPU 0) read back as {:?} (set {}, get {})",
+                        got,
+                        set_ok,
+                        get_ok
+                    );
+                    return Err(KernelError::InternalError);
+                }
             }
             serial_println!(
                 "[syscall/linux]   sched_setaffinity len>0->mask-EFAULT > pid-ESRCH gate order: OK"

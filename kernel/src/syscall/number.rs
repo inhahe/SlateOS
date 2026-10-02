@@ -6169,12 +6169,64 @@ pub const SIGNAL_IGNORED_NOCLDWAIT: u64 = 1;
 /// Chosen number 1099, the next free slot after 1098.
 pub const SYS_SIGNAL_GET_IGNORED: u64 = 1099;
 
+/// Restrict a process's threads, or one thread, to some CPUs -- the native
+/// `sched_setaffinity`.
+///
+/// - `arg0`: the target -- a process id, or with [`SCHED_AFFINITY_THREAD`] a
+///   thread id. 0 is the caller: its process, or with the flag the calling
+///   thread.
+/// - `arg1`: the mask, bit N for CPU N.
+/// - `arg2`: flags: [`SCHED_AFFINITY_THREAD`].
+///
+/// The mask is kept as given, so a CPU it names that comes online later is
+/// used, but it must name a CPU that is online now. A process target sets
+/// every thread the process has; threads it starts later, and processes it
+/// spawns or forks, take their creator's mask. A thread running on a CPU it
+/// may no longer use moves at once.
+///
+/// Who may: the same rule as for signalling the target's process -- the
+/// process itself, its parent, or a holder of a `Process` capability for it
+/// with `DELETE` rights. A kernel task is no process's to move.
+///
+/// Returns 0. Errors: `InvalidArgument` for a mask with no online CPU or an
+/// unknown flag; `NoSuchProcess` for no such process or thread;
+/// `PermissionDenied` as above. Checked in that order, as Linux checks
+/// `ESRCH`, `EPERM`, `EINVAL`, except that the flags come first.
+///
+/// Chosen number 1100, the next free slot after 1099.
+pub const SYS_SCHED_SET_AFFINITY: u64 = 1100;
+
+/// Read the CPUs a process or a thread may run on now -- the native
+/// `sched_getaffinity`.
+///
+/// - `arg0`: the target, as [`SYS_SCHED_SET_AFFINITY`]'s. A process reads as
+///   its main thread, as on Linux (its first thread, once the main one has
+///   exited).
+/// - `arg1`: a `u64` out-pointer for the mask: the target's, less the CPUs
+///   that are not online.
+/// - `arg2`: flags: [`SCHED_AFFINITY_THREAD`].
+///
+/// Any process may read any other's, as on Linux -- it is what
+/// `/proc/<pid>/status`'s `Cpus_allowed` publishes anyway.
+///
+/// Returns 0. Errors: `InvalidArgument` for a null pointer or an unknown
+/// flag, `NoSuchProcess`, `InvalidAddress` for an unwritable pointer.
+///
+/// Chosen number 1101, the next free slot after 1100.
+pub const SYS_SCHED_GET_AFFINITY: u64 = 1101;
+
+/// [`SYS_SCHED_SET_AFFINITY`] and [`SYS_SCHED_GET_AFFINITY`]'s flag: the
+/// target is a thread id, not a process id.
+pub const SCHED_AFFINITY_THREAD: u64 = 1;
+
 // ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------
 
-/// Maximum supported syscall number.
+/// One more than the highest syscall number the dispatch table can hold.
 ///
 /// The dispatch table is a flat array of this size for O(1) lookup.
-/// Sparse — most entries are `None`.
-pub const MAX_SYSCALL_NR: usize = 1100;
+/// Sparse — most entries are `None`. Raised in steps of 100 when the numbers
+/// reach it (1100 -> 1200 with [`SYS_SCHED_SET_AFFINITY`]), so a new call
+/// does not have to move it; `scfilter` derives its bitmap from it.
+pub const MAX_SYSCALL_NR: usize = 1200;

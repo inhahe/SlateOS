@@ -8596,6 +8596,147 @@ pub fn sys_signal_get_ignored(
     }
 }
 
+/// The threads an affinity call acts on, for its target and flags
+/// ([`SYS_SCHED_SET_AFFINITY`](super::number::SYS_SCHED_SET_AFFINITY)): one
+/// thread, or every thread of a process with its main thread first.
+/// `for_set` adds the permission check a change needs; reading needs none.
+///
+/// Shared with the Linux ABI's `sched_setaffinity`, whose thread form this
+/// is, so that the two ABIs answer to one rule.
+///
+/// # Errors
+///
+/// `InvalidArgument` for an unknown flag, `NoSuchProcess` for no such thread
+/// or process (or a process with no threads left), `PermissionDenied` for a
+/// change the caller may not make: see [`may_change_affinity`].
+pub(crate) fn affinity_targets(
+    target: u64,
+    flags: u64,
+    for_set: bool,
+) -> Result<alloc::vec::Vec<crate::sched::task::TaskId>, KernelError> {
+    use super::number::SCHED_AFFINITY_THREAD;
+    use crate::proc::pcb;
+
+    if flags & !SCHED_AFFINITY_THREAD != 0 {
+        return Err(KernelError::InvalidArgument);
+    }
+    let caller = caller_pid().filter(|&p| p != 0);
+    let (owner, tasks) = if flags & SCHED_AFFINITY_THREAD != 0 {
+        let tid = if target == 0 {
+            sched::current_task_id()
+        } else {
+            target
+        };
+        if sched::get_cpu_affinity(tid).is_none() {
+            return Err(KernelError::NoSuchProcess);
+        }
+        let owner = crate::proc::thread::owner_process(tid).filter(|&p| p != 0);
+        (owner, alloc::vec![tid])
+    } else {
+        let pid = if target == 0 {
+            caller.ok_or(KernelError::NoSuchProcess)?
+        } else {
+            target
+        };
+        let mut threads = pcb::get_threads(pid).ok_or(KernelError::NoSuchProcess)?;
+        if threads.is_empty() {
+            return Err(KernelError::NoSuchProcess);
+        }
+        // The main thread first: a process reads as it, as on Linux.
+        if let Some(main) = threads.iter().position(|&t| t == pid) {
+            threads.swap(0, main);
+        }
+        (Some(pid), threads)
+    };
+    if for_set && !may_change_affinity(caller, owner) {
+        return Err(KernelError::PermissionDenied);
+    }
+    Ok(tasks)
+}
+
+/// Whether `caller` (`None`: a kernel task) may change the affinity of a
+/// thread of `owner` (`None`: a kernel task, which belongs to no process).
+///
+/// The rule for signalling, which lane E's request asked for and which the
+/// kernel already applies there ([`check_signal_target`]): the process
+/// itself, its parent, or a holder of a `Process` capability for it with
+/// `DELETE` rights. The kernel may move anything; no process may move a
+/// kernel task.
+pub(crate) fn may_change_affinity(
+    caller: Option<crate::proc::pcb::ProcessId>,
+    owner: Option<crate::proc::pcb::ProcessId>,
+) -> bool {
+    use crate::proc::pcb;
+    match (caller, owner) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some(c), Some(o)) => {
+            c == o
+                || pcb::parent(o) == Some(c)
+                || pcb::has_capability_for(
+                    c,
+                    crate::cap::ResourceType::Process,
+                    o,
+                    crate::cap::Rights::DELETE,
+                )
+        }
+    }
+}
+
+/// `SYS_SCHED_SET_AFFINITY` (1100) — restrict a process's threads, or one
+/// thread, to some CPUs. See
+/// [`SYS_SCHED_SET_AFFINITY`](super::number::SYS_SCHED_SET_AFFINITY).
+pub fn sys_sched_set_affinity(
+    args: &super::dispatch::SyscallArgs,
+) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    let tasks = match affinity_targets(args.arg0, args.arg2, true) {
+        Ok(t) => t,
+        Err(e) => return SyscallResult::err(e),
+    };
+    // Checked once, before any thread changes, so a mask that fails leaves a
+    // process as it was rather than half moved.
+    let mask = args.arg1;
+    let online = crate::cpu_hotplug::online_mask();
+    if mask == 0 || (online != 0 && mask & online == 0) {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    for tid in tasks {
+        match sched::set_affinity(tid, mask) {
+            // A thread that exited since the list was taken has nothing left
+            // to move.
+            Ok(_) | Err(KernelError::NotFound) => {}
+            Err(e) => return SyscallResult::err(e),
+        }
+    }
+    SyscallResult::ok(0)
+}
+
+/// `SYS_SCHED_GET_AFFINITY` (1101) — read the CPUs a process or a thread may
+/// run on now. See
+/// [`SYS_SCHED_GET_AFFINITY`](super::number::SYS_SCHED_GET_AFFINITY).
+pub fn sys_sched_get_affinity(
+    args: &super::dispatch::SyscallArgs,
+) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    if args.arg1 == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let tasks = match affinity_targets(args.arg0, args.arg2, false) {
+        Ok(t) => t,
+        Err(e) => return SyscallResult::err(e),
+    };
+    // The main thread, or the only one asked about; one that exited since
+    // the list was taken reads as gone.
+    let Some(mask) = tasks.first().and_then(|&tid| sched::affinity_of(tid)) else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+    match crate::mm::user::write_user_value::<u64>(args.arg1, mask) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 /// `SYS_SIGNAL_PENDING` — query the calling process's pending set.
 ///
 /// `arg0`: out-pointer for the pending mask.

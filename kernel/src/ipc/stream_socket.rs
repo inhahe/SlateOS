@@ -185,6 +185,19 @@ impl Ring {
         to_write
     }
 
+    /// Copy bytes from the front of the ring without consuming them
+    /// (`MSG_PEEK`). Returns bytes copied (may be partial).
+    fn peek_bytes(&self, out: &mut [u8]) -> usize {
+        let to_read = out.len().min(self.len);
+        let cap = self.buf.len();
+        for (i, slot) in out.iter_mut().take(to_read).enumerate() {
+            // `head < cap` and `i < len <= cap`, so the sum is below 2 * cap.
+            let at = self.head.wrapping_add(i).checked_rem(cap).unwrap_or(0);
+            *slot = self.buf.get(at).copied().unwrap_or(0);
+        }
+        to_read
+    }
+
     /// Read bytes from the ring.  Returns bytes read (may be partial).
     #[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
     fn read_bytes(&mut self, out: &mut [u8]) -> usize {
@@ -959,6 +972,31 @@ pub fn deregister_waiter(handle: StreamSocketHandle, task: TaskId) {
     };
     pair.ep[e].reader_waiters.remove(task);
     pair.ep[e].writer_waiters.remove(task);
+}
+
+/// Copy up to `buf.len()` bytes this endpoint would receive next, without
+/// consuming them (`recv(MSG_PEEK)`), and without blocking.
+///
+/// # Returns
+///
+/// - `Ok(n)` where `n > 0` -- that many bytes are waiting, copied to `buf`.
+/// - `Ok(0)` -- nothing is waiting and nothing will come (EOF), or `buf` is
+///   empty.
+/// - `Err(WouldBlock)` -- nothing is waiting yet.
+/// - `Err(InvalidHandle)`.
+#[allow(clippy::indexing_slicing)]
+pub fn peek(handle: StreamSocketHandle, buf: &mut [u8]) -> KernelResult<usize> {
+    let e = handle.endpoint();
+    let peer = e ^ 1;
+    let table = PAIRS.lock();
+    let pair = table
+        .get(&handle.pair_id())
+        .ok_or(KernelError::InvalidHandle)?;
+    let n = pair.ring[peer].peek_bytes(buf);
+    if n > 0 || buf.is_empty() || pair.recv_eof(e) {
+        return Ok(n);
+    }
+    Err(KernelError::WouldBlock)
 }
 
 /// Return the number of bytes available to receive on this endpoint.

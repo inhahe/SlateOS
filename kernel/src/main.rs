@@ -1898,6 +1898,19 @@ extern "C" fn kernel_main() -> ! {
                 selftest::Severity::Diagnostic,
                 fs::vfs::file_identity_self_test(),
             );
+            // Unix-domain socket nodes on memfs and devfs (needs both mounted).
+            selftest::dispatch_debug(
+                "VFS socket nodes",
+                selftest::Severity::Diagnostic,
+                fs::vfs::socket_node_self_test(),
+            );
+            // Unix-domain sockets by name: datagrams and streams over abstract
+            // names and /tmp nodes (needs the socket nodes above).
+            selftest::dispatch_debug(
+                "Unix-domain sockets",
+                selftest::Severity::Integrity,
+                ipc::unix_socket::self_test(),
+            );
             // Read-only shared page-cache self-test (C-lite storage core — §23/§36).
             selftest::dispatch_debug(
                 "page-cache",

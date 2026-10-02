@@ -2713,6 +2713,12 @@ pub fn tar_tree<B: AsRef<Path> + ?Sized>(base: &B) -> KernelResult<Vec<u8>> {
                     // other half of that -- an archiver that followed it would
                     // be the walk that does.
                 }
+                EntryType::Socket => {
+                    // A socket's name means nothing without the process bound
+                    // to it, which an archive cannot carry; tar implementations
+                    // skip sockets for the same reason (GNU tar: "socket
+                    // ignored").
+                }
             }
         }
     }

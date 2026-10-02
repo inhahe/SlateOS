@@ -114,6 +114,9 @@ pub(crate) const TABLES: &[Table] = &[
     super::immutable::PER_FILE_STATE,
     super::sealing::PER_FILE_STATE,
     super::queryable::PER_FILE_STATE,
+    // Which socket a Unix-domain socket's node leads to: an entry outliving
+    // its node would lead the next client to whatever file reuses the inode.
+    crate::ipc::unix_socket::PER_FILE_STATE,
 ];
 
 /// What removing one name of an object ends.

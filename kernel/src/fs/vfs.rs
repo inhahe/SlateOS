@@ -92,6 +92,40 @@ pub enum EntryType {
     /// that such a check waves through — the failure mode being writing a disk
     /// image over somebody's file rather than over their USB stick.
     BlockDevice,
+
+    /// A Unix-domain socket's name (`S_IFSOCK`): the node `bind` creates at a
+    /// path such as `/dev/log`, and the one `connect` looks for there.
+    ///
+    /// The node holds nothing. What a `connect` reaches is the socket bound to
+    /// it, found by the node's identity ([`FileId`]) in
+    /// [`crate::ipc::unix_socket`]'s table -- so a renamed node still leads to
+    /// its socket, and an unlinked one leads nowhere, as on Linux. A node
+    /// whose socket has closed stays, and `connect` to it is refused.
+    /// Opening one is `ENXIO`: it has no contents to read.
+    Socket,
+}
+
+impl EntryType {
+    /// The entry-type byte the native ABI carries for this type, in every
+    /// directory record and stat result.
+    ///
+    /// These bytes are ABI, so a new type is appended and never inserted: a
+    /// program that does not know 6 still reads 0..=5 as it always did. They
+    /// were five copies of one `match` in `syscall/handlers.rs` until
+    /// 2026-10-02, when the sixth type would have meant five more edits that
+    /// had to agree.
+    #[must_use]
+    pub const fn type_byte(self) -> u8 {
+        match self {
+            Self::File => 0,
+            Self::Directory => 1,
+            Self::VolumeLabel => 2,
+            Self::Symlink => 3,
+            Self::CharDevice => 4,
+            Self::BlockDevice => 5,
+            Self::Socket => 6,
+        }
+    }
 }
 
 /// A single directory entry returned by readdir.
@@ -1027,6 +1061,21 @@ pub trait FileSystem: Send {
     /// Default: not supported.
     fn symlink(&mut self, path: &Path, target: &Path) -> KernelResult<()> {
         let _ = (path, target);
+        Err(KernelError::NotSupported)
+    }
+
+    /// Create a Unix-domain socket's node ([`EntryType::Socket`]) at `path`,
+    /// with permission bits `mode`, and return its inode number.
+    ///
+    /// `path` must not exist (`AlreadyExists`). The node has no contents; what
+    /// it names is kept by [`crate::ipc::unix_socket`], keyed by the node's
+    /// identity, which is why the inode number is returned and must be
+    /// non-zero and stable for as long as the node exists.
+    ///
+    /// Default: not supported -- a filesystem that cannot hold one makes
+    /// `bind` there fail as Linux's does on, say, FAT (`EPERM`).
+    fn mknod_socket(&mut self, path: &Path, mode: u16) -> KernelResult<u64> {
+        let _ = (path, mode);
         Err(KernelError::NotSupported)
     }
 
@@ -6385,6 +6434,60 @@ impl Vfs {
         op(&mut **guard, &relative)
     }
 
+    // --- Socket node ---
+
+    /// Create a Unix-domain socket's node at `path` (`bind`'s half that is
+    /// the filesystem's), with permission bits `mode` -- already
+    /// umask-masked by the caller, as for [`Vfs::mkdir_mode`] -- and return
+    /// the node's identity, which [`crate::ipc::unix_socket`] binds the
+    /// socket to.
+    ///
+    /// The final component is not followed: a symlink there is
+    /// `AlreadyExists`, as Linux's `bind` answers `EADDRINUSE` for any
+    /// existing name. Everything a creation goes through -- the namespace,
+    /// a read-only mount, write permission on the directory, the intercept
+    /// hooks, the inode quota -- is gone through here.
+    ///
+    /// # Errors
+    ///
+    /// `AlreadyExists` if the name exists; `NotSupported` if the filesystem
+    /// cannot hold a socket node, or reports no stable inode for it;
+    /// otherwise what path resolution and the checks above report.
+    pub fn mknod_socket(path: impl AsRef<Path>, mode: u16) -> KernelResult<FileId> {
+        let path = path.as_ref();
+        crate::ipc::namespace::check_writable(path)?;
+        let path = Self::resolve_no_follow(path)?;
+        check_writable(&path)?;
+        check_path_access(&path, PathAccess::Write)?;
+        // The intercept hooks know creation by writing; a socket node is a
+        // name created in its directory, as a file is.
+        super::intercept::pre_check(super::intercept::FsOp::Write, &path, None)?;
+        enforce_quota_create(&path)?;
+        let (fs_id, ino) = {
+            let (fs, fs_id, _opts, relative) = resolve_mount(&path)?;
+            let ino = fs.lock().mknod_socket(&relative, mode & 0o7777)?;
+            (fs_id, ino)
+        };
+        if ino == 0 {
+            // A node the table could not find again. The filesystem promised
+            // a stable identity by implementing this; take the node back out
+            // rather than leave a name nothing can ever be bound to.
+            let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+            // Best effort: the creation is being refused either way, and a
+            // failure to remove leaves only an inert node behind.
+            let _ = fs.lock().remove(&relative);
+            return Err(KernelError::NotSupported);
+        }
+        super::quota::charge_inode(0, 0);
+        VFS_DCACHE.lock().invalidate_negative_prefix(&path);
+        super::notify::emit_created(&path);
+        super::index::on_file_changed(&path);
+        super::journal::record(super::journal::JournalEventType::Created, &path);
+        // Audited as a write to the directory, as a file's creation is.
+        super::audit::log_ok(super::audit::AuditOp::Write, 0, &path);
+        Ok(FileId { fs_id, ino })
+    }
+
     // --- Symlink VFS methods ---
 
     /// Create a symbolic link.
@@ -11505,6 +11608,144 @@ pub fn file_identity_self_test() -> KernelResult<()> {
     result?;
 
     serial_println!("[vfs] File-identity self-test PASSED");
+    Ok(())
+}
+
+/// Unix-domain socket nodes ([`EntryType::Socket`]) on memfs and devfs:
+/// [`Vfs::mknod_socket`] makes one with a stable identity, `stat` and a
+/// listing say what it is, an existing name is refused, `open` and a whole
+/// read are `ENXIO`, a rename keeps the identity (which is how a renamed
+/// node still leads to its socket), `chmod` takes, and `remove` takes it away.
+///
+/// ext4 is not exercised here: no ext4 volume is writable this early in the
+/// boot. Its `mknod_socket` is the same shape as its `symlink`, and the
+/// socket rungs later in the boot bind on the root filesystem.
+///
+/// # Errors
+///
+/// `InternalError` naming the first check that failed.
+pub fn socket_node_self_test() -> KernelResult<()> {
+    use crate::serial_println;
+
+    serial_println!("[vfs] Running socket-node self-test...");
+
+    /// The checks, on the node `a` -- renamed to `b` -- in directory `dir`.
+    fn exercise(fs: &str, dir: &str, a: &str, b: &str) -> Result<(), &'static str> {
+        let id = Vfs::mknod_socket(a, 0o755).map_err(|_| "mknod_socket refused a free name")?;
+        if id.ino == 0 {
+            return Err("the node has no inode number");
+        }
+        let st = Vfs::stat(a).map_err(|_| "stat of the node failed")?;
+        let meta = Vfs::metadata(a).map_err(|_| "metadata of the node failed")?;
+        if st.entry_type != EntryType::Socket || meta.entry_type != EntryType::Socket {
+            return Err("stat does not call the node a socket");
+        }
+        if meta.ino != id.ino || meta.permissions != 0o755 {
+            return Err("the node's inode or mode is not what mknod_socket made");
+        }
+        if !matches!(Vfs::file_identity(a), Ok(Some(found)) if found == id) {
+            return Err("the node's identity is not the one mknod_socket returned");
+        }
+        let listed = Vfs::readdir(dir).map_err(|_| "the directory could not be listed")?;
+        let name = Path::new(a).file_name().unwrap_or(Path::new(""));
+        if !listed
+            .iter()
+            .any(|e| e.name.as_path() == name && e.entry_type == EntryType::Socket)
+        {
+            return Err("the listing does not show the node as a socket");
+        }
+        if Vfs::mknod_socket(a, 0o755) != Err(KernelError::AlreadyExists) {
+            return Err("an existing name was not refused");
+        }
+        match crate::fs::handle::open(a, crate::fs::handle::OpenFlags::READ) {
+            Err(KernelError::NoSuchDeviceOrAddress) => {}
+            Ok(h) => {
+                // Opened by mistake: closing it is all that is left to do.
+                let _ = crate::fs::handle::close(h);
+                return Err("open of the node succeeded");
+            }
+            Err(_) => return Err("open of the node failed, but not with ENXIO"),
+        }
+        if Vfs::read_file(a) != Err(KernelError::NoSuchDeviceOrAddress) {
+            return Err("a whole read of the node was not ENXIO");
+        }
+        Vfs::set_permissions(a, 0o666).map_err(|_| "chmod of the node failed")?;
+        if Vfs::metadata(a).map(|m| m.permissions) != Ok(0o666) {
+            return Err("chmod of the node did not take");
+        }
+        if fs == "memfs" {
+            // devfs has no rename: its names are the kernel's, bar these.
+            Vfs::rename(a, b).map_err(|_| "rename of the node failed")?;
+            if !matches!(Vfs::file_identity(b), Ok(Some(found)) if found == id) {
+                return Err("a renamed node lost its identity");
+            }
+            Vfs::remove(b).map_err(|_| "remove of the renamed node failed")?;
+            if Vfs::stat(b).is_ok() {
+                return Err("the removed node is still there");
+            }
+        } else {
+            Vfs::remove(a).map_err(|_| "remove of the node failed")?;
+            if Vfs::stat(a).is_ok() {
+                return Err("the removed node is still there");
+            }
+        }
+        Ok(())
+    }
+
+    let mp = "/_socknode_selftest";
+    if Vfs::mounts()
+        .iter()
+        .any(|(p, _)| p.as_path() == Path::new(mp))
+    {
+        // A previous boot's leftover; the test needs the name.
+        let _ = Vfs::unmount(mp);
+    }
+    crate::fs::memfs::mount(mp)?;
+    let on_memfs = exercise(
+        "memfs",
+        mp,
+        "/_socknode_selftest/a.sock",
+        "/_socknode_selftest/b.sock",
+    );
+    // Teardown whatever happened; each may already be gone.
+    let _ = Vfs::remove("/_socknode_selftest/a.sock");
+    let _ = Vfs::remove("/_socknode_selftest/b.sock");
+    let _ = Vfs::unmount(mp);
+    if let Err(why) = on_memfs {
+        serial_println!("[vfs]   FAIL: socket node on memfs: {}", why);
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[vfs]   socket node on memfs: made, seen, ENXIO to open, renamed, removed: OK"
+    );
+
+    let on_devfs = exercise(
+        "devfs",
+        "/dev",
+        "/dev/_selftest.sock",
+        "/dev/_selftest.sock",
+    );
+    // Gone already unless a check failed first.
+    let _ = Vfs::remove("/dev/_selftest.sock");
+    if let Err(why) = on_devfs {
+        serial_println!("[vfs]   FAIL: socket node on devfs: {}", why);
+        return Err(KernelError::InternalError);
+    }
+    if Vfs::mknod_socket("/dev/input/_selftest.sock", 0o755) != Err(KernelError::NotSupported) {
+        let _ = Vfs::remove("/dev/input/_selftest.sock");
+        serial_println!("[vfs]   FAIL: devfs made a socket node in a subdirectory");
+        return Err(KernelError::InternalError);
+    }
+    if Vfs::mknod_socket("/dev/null", 0o755) != Err(KernelError::AlreadyExists) {
+        serial_println!("[vfs]   FAIL: devfs made a socket node over /dev/null");
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[vfs]   socket node on devfs: made at the root, refused in a subdirectory and over a \
+         device: OK"
+    );
+
+    serial_println!("[vfs] Socket-node self-test PASSED");
     Ok(())
 }
 

@@ -246,6 +246,10 @@ kernel_errors! {
         NoSuchDevice = -601,
         /// The device is busy and cannot accept the operation right now.
         DeviceBusy = -602,
+        /// The name exists but there is nothing behind it to open: a
+        /// Unix-domain socket's node, which `connect` reaches and `open` does
+        /// not. Maps to `ENXIO`.
+        NoSuchDeviceOrAddress = -603,
 
         // --- Network (700 - 799) ---
         /// A connection attempt was actively refused by the peer or the netstack
@@ -331,6 +335,7 @@ impl KernelError {
             Self::IoError => "I/O error",
             Self::NoSuchDevice => "no such device",
             Self::DeviceBusy => "device busy",
+            Self::NoSuchDeviceOrAddress => "no such device or address",
             Self::ConnectionRefused => "connection refused",
             Self::NotConnected => "socket not connected",
             Self::InProgress => "operation now in progress",

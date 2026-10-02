@@ -554,6 +554,11 @@ pub fn join_timeout(target_task: TaskId, timeout_ns: u64) -> KernelResult<i64> {
 /// other hrtimer wakes: a direct wake, or a deferred one if the joiner has not
 /// parked yet.
 fn join_timeout_wake(task: u64) {
+    JOIN_TIMEOUT_WAKES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    JOIN_TIMEOUT_WAKE_LAST_NS.store(
+        crate::hrtimer::now_ns(),
+        core::sync::atomic::Ordering::Relaxed,
+    );
     if !sched::try_wake(task) {
         sched::defer_wake(task);
     }
@@ -2138,6 +2143,22 @@ static JT_ERRS: [core::sync::atomic::AtomicI32; 3] = [
     core::sync::atomic::AtomicI32::new(i32::MIN),
 ];
 static JT_VALUE: core::sync::atomic::AtomicI64 = core::sync::atomic::AtomicI64::new(i64::MIN);
+/// When each of the joiner's three calls returned (`hrtimer::now_ns`), and
+/// when the second began -- what tells a deadline timer that never woke the
+/// joiner from a joiner that was woken and not run (rq28 failed here with the
+/// 20 ms call waiting out the target's ten seconds).
+static JT_T: [core::sync::atomic::AtomicU64; 4] = [
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+];
+
+/// How many times [`join_timeout_wake`] has run, and when it last did -- the
+/// deadline timer's side of the same question.
+static JOIN_TIMEOUT_WAKES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static JOIN_TIMEOUT_WAKE_LAST_NS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
 
 /// Target: stays alive until released (or ten seconds, so a broken joiner
 /// cannot keep it for ever), then exits with 9.
@@ -2162,10 +2183,13 @@ extern "C" fn jt_joiner_entry(target: u64) {
     };
     let now = join_timeout(target, 0);
     JT_ERRS[0].store(code(&now), SeqCst);
+    JT_T[0].store(crate::hrtimer::now_ns(), SeqCst);
     let brief = join_timeout(target, 20_000_000);
+    JT_T[1].store(crate::hrtimer::now_ns(), SeqCst);
     JT_ERRS[1].store(code(&brief), SeqCst);
     JT_RELEASE.store(1, SeqCst);
     let last = join_timeout(target, 5_000_000_000);
+    JT_T[2].store(crate::hrtimer::now_ns(), SeqCst);
     JT_ERRS[2].store(code(&last), SeqCst);
     if let Ok(v) = last {
         JT_VALUE.store(v, SeqCst);
@@ -2200,8 +2224,16 @@ fn test_join_timeout() -> KernelResult<()> {
         jt_joiner_entry,
         target,
     )?;
-    let give_up = crate::hrtimer::now_ns().saturating_add(15_000_000_000);
+    let started = crate::hrtimer::now_ns();
+    let give_up = started.saturating_add(15_000_000_000);
+    let wakes_before = JOIN_TIMEOUT_WAKES.load(SeqCst);
+    // A look at both threads 100 ms in, after the 20 ms limit should have
+    // ended the second call: state and priority, as the scheduler has them.
+    let mut sampled: Option<(Option<sched::TaskInfo>, Option<sched::TaskInfo>)> = None;
     while JT_DONE.load(SeqCst) == 0 && crate::hrtimer::now_ns() < give_up {
+        if sampled.is_none() && crate::hrtimer::now_ns() >= started.saturating_add(100_000_000) {
+            sampled = Some((sched::task_info(joiner), sched::task_info(target)));
+        }
         sched::yield_now();
     }
     let errs = [
@@ -2224,6 +2256,36 @@ fn test_join_timeout() -> KernelResult<()> {
             errs,
             value
         );
+        let ms = |a: u64, b: u64| b.saturating_sub(a) / 1_000_000;
+        let t = [
+            JT_T[0].load(SeqCst),
+            JT_T[1].load(SeqCst),
+            JT_T[2].load(SeqCst),
+        ];
+        serial_println!(
+            "[thread]     the 20 ms call took {} ms; the deadline timer ran {} time(s), the last \
+             {} ms after the call began",
+            ms(t[0], t[1]),
+            JOIN_TIMEOUT_WAKES.load(SeqCst).saturating_sub(wakes_before),
+            ms(t[0], JOIN_TIMEOUT_WAKE_LAST_NS.load(SeqCst)),
+        );
+        let describe = |info: &Option<sched::TaskInfo>| match info {
+            Some(i) => alloc::format!(
+                "{:?} priority {} cpu {} waited {} ticks",
+                i.state,
+                i.priority,
+                i.last_cpu,
+                i.total_wait_ticks
+            ),
+            None => alloc::string::String::from("gone"),
+        };
+        if let Some((j, tg)) = &sampled {
+            serial_println!(
+                "[thread]     100 ms in: joiner {}; target {}",
+                describe(j),
+                describe(tg)
+            );
+        }
         return Err(KernelError::InternalError);
     }
     serial_println!(

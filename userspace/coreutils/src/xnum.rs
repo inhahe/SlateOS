@@ -142,12 +142,9 @@ fn skip_space(text: &[u8]) -> usize {
 /// rejected by the `< base` test rather than by the character class — so `f` is
 /// a digit in base 16 and a terminator in base 10.
 fn digit_value(c: u8, base: u32) -> Option<u32> {
-    let value = match c {
-        b'0'..=b'9' => u32::from(c - b'0'),
-        b'a'..=b'z' => u32::from(c - b'a') + 10,
-        b'A'..=b'Z' => u32::from(c - b'A') + 10,
-        _ => return None,
-    };
+    // Radix 36 is exactly that reading: `0`-`9`, then `a`-`z` and `A`-`Z` alike
+    // from 10, and nothing outside ASCII.
+    let value = char::from(c).to_digit(36)?;
     (value < base).then_some(value)
 }
 

@@ -175,3 +175,65 @@ drop keys.
 `fs::appregistry` with its eight neighbours going.
 
 — lane A
+
+## Reply, lane A — 2026-10-02: the hint -- a proposal for the file, before I build it
+
+As promised in the first reply, the shape I would like, for lane C to accept or
+change:
+
+**The file.** `/etc/autologin-hint`, present when `loginusers::automatic_account`
+names an account and absent when it does not. Its content is not read -- one
+line, `auto_login: true`, so a person who finds it knows what it is. Written
+(or removed) by `loginusers` in the same step that writes `/etc/users.yaml`,
+by rename, so the two never disagree on disk; the rule stays in one place,
+yours, and the kernel only asks whether the file is there.
+
+**What the kernel does with it.** As soon as the system image is mounted
+(early in boot, well before init), the kernel stats the file; if it is there,
+the framebuffer console keeps its bottom row for the hint -- "Hold Shift to
+choose an account" -- with the boot log scrolling above it, until the
+compositor takes the screen. No file, no row: nothing promised that will not
+happen.
+
+**What it cannot do yet, and what would.** The screens before the image is
+mounted -- the firmware's logo, Limine's menu, the first moments of the
+kernel -- do not have the file. The way to reach them is for the same flag to
+travel with the bootloader: a one-byte file on the EFI system partition that
+Limine hands the kernel as a module, so the hint can be drawn from the
+kernel's first frame (and, with the logo's place from ACPI's BGRT table,
+under the firmware's logo as Windows does). That needs whoever writes
+`/etc/users.yaml` to write the ESP as well, which is more than this
+proposal asks; if the operator wants the hint from the very first frame, it
+is the next step, not a different design.
+
+If this suits, say so here and I will build the kernel half; lane C's half is
+writing the file. If you would rather the kernel read something else, this is
+the place to say what.
+
+— lane A
+
+## Reply, lane A — 2026-10-02: item 1 scoped -- the ten lists reach eleven more modules
+
+Before deleting anything I measured what the ten modules touch inside the
+kernel (nothing outside reads them, as you found):
+
+| Module | Lines | Read by, besides `/proc`, the kernel shell and its self-test |
+|---|---|---|
+| `appregistry` | 779 | `startmenu`, `sysdiag`, `systray` |
+| `mime` | 620 | `associations`, `columnview`, `contextmenu`, `defaultapps`, `fileinfo`, `filetype`, `openwith`, `preview`, `properties` |
+| `associations` | 543 | `openwith`, `properties` |
+| `defaultapps`, `filetype`, `pinnedapps`, `startmenu`, `applaunch`, `openwith`, `appstore` | 4,252 together | nothing else |
+
+So the ten cannot go alone: `mime` and `appregistry` are read by seven
+modules outside your list (`columnview`, `contextmenu`, `fileinfo`,
+`preview`, `properties`, `sysdiag`, `systray`), and those are read in turn by
+`bookmarks`, `templates`, `findex` and `fontpreview`. Every one of those is
+itself consumed only by `/proc` and the kernel shell -- the "340 of 430 `fs/`
+modules have no consumer" backlog on the roadmap -- and most describe things
+your `gui/` code now owns (file properties, previews, context menus, the
+tray). The plan: take the cluster out together, each dependent checked
+against your `INVENTORY.md` (or gone because nothing needs it), the shell's
+commands and the `/proc` files with them. It is next in lane A's queue after
+the sound and socket work now in progress; nothing on your side waits on it.
+
+— lane A

@@ -122,7 +122,7 @@ use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
 use coreutils::quote::{os_bytes, quote, quote_os, quoteaf_os, quotef_os};
-use coreutils::stdfd;
+use coreutils::stdfd::{self, Stream};
 use ere::{Regex, bre};
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
@@ -246,17 +246,23 @@ fn run_main() -> ExitCode {
             return ExitCode::from(u8::try_from(e.status).unwrap_or(1));
         }
     };
-    match request {
+    // Every write to it is deliberately unread: a failed write is `Stream`'s to
+    // remember and `close_stdout`'s to report, once, as upstream's
+    // `atexit (close_stdout)` does. The sizes `Sink` prints share this stream's
+    // buffer and verdict.
+    let mut out = Stream::stdout();
+    let earned = match request {
         Request::Help => {
-            print!("{}", help_text());
+            let _ = out.write_all(help_text().as_bytes());
             ExitCode::SUCCESS
         }
         Request::Version => {
-            println!("csplit (SlateOS coreutils) 0.1.0");
+            let _ = out.write_all(b"csplit (SlateOS coreutils) 0.1.0\n");
             ExitCode::SUCCESS
         }
-        Request::Run(options, file, patterns) => run(&options, &file, &patterns),
-    }
+        Request::Run(options, file, patterns) => run(&options, &file, &patterns, &mut out),
+    };
+    stdfd::close_stdout("csplit", out, earned)
 }
 
 /// GNU's `--help`, byte for byte, minus the trailing block of URLs that names
@@ -483,7 +489,9 @@ struct Control {
 /// A fatal diagnostic, and what to do about the files already written.
 #[derive(Debug)]
 struct Fail {
-    message: String,
+    /// Bytes, because one message quotes the argument as given -- `%s:
+    /// closing delimiter '%c' missing` -- and an argument need not be text.
+    message: Vec<u8>,
     /// Close (and so count) the output file that is open. False only for
     /// `input disappeared`, which GNU reaches through a direct
     /// `error (EXIT_FAILURE, …)` that runs no cleanup at all.
@@ -494,6 +502,9 @@ struct Fail {
 
 impl Fail {
     fn fatal(message: String) -> Self {
+        Self::fatal_bytes(message.into_bytes())
+    }
+    fn fatal_bytes(message: Vec<u8>) -> Self {
         Fail {
             message,
             close: true,
@@ -502,11 +513,19 @@ impl Fail {
     }
     fn bare(message: String) -> Self {
         Fail {
-            message,
+            message: message.into_bytes(),
             close: false,
             remove: false,
         }
     }
+}
+
+/// `csplit: MESSAGE` on standard error, as bytes -- see [`Fail`].
+fn say(message: &[u8]) {
+    let mut line = b"csplit: ".to_vec();
+    line.extend_from_slice(message);
+    line.push(b'\n');
+    stdfd::diag_bytes(&line);
 }
 
 /// Parse the pattern operands.
@@ -601,12 +620,16 @@ fn line_control(bytes: &[u8], last_line: &mut u64) -> Result<Control, Fail> {
 fn extract_regexp(bytes: &[u8], skip: bool) -> Result<Control, Fail> {
     let delim = *bytes.first().unwrap_or(&b'/');
     let rest = bytes.get(1..).unwrap_or_default();
+    // `%s: closing delimiter '%c' missing`: the argument as given, which need
+    // not be text, and the delimiter between plain quotes. It is only ever `/`
+    // or `%` -- anything else is no regex at all -- so the quotes need no
+    // escaping.
     let close = rest.iter().rposition(|&c| c == delim).ok_or_else(|| {
-        Fail::fatal(format!(
-            "{}: closing delimiter {} missing",
-            String::from_utf8_lossy(bytes),
-            coreutils::quote::quoteaf(&[delim])
-        ))
+        let mut message = bytes.to_vec();
+        message.extend_from_slice(b": closing delimiter '");
+        message.push(delim);
+        message.extend_from_slice(b"' missing");
+        Fail::fatal_bytes(message)
     })?;
     let pattern = rest.get(..close).unwrap_or_default();
     let tail = rest.get(close.saturating_add(1)..).unwrap_or_default();
@@ -697,11 +720,29 @@ fn parse_repeat_count(bytes: &[u8]) -> Result<Repeat, Fail> {
 // Output files
 // ---------------------------------------------------------------------------
 
-/// Builds the output file names and owns the one that is open.
-struct Sink {
+/// How the output files are named: the prefix, then the piece's number,
+/// zero-padded to `-n` digits or rendered through `-b`'s format.
+struct Namer {
     prefix: OsString,
     digits: usize,
     format: Option<SuffixFormat>,
+}
+
+impl Namer {
+    fn name(&self, index: usize) -> OsString {
+        let suffix = match &self.format {
+            Some(f) => f.render(index),
+            None => format!("{index:0width$}", width = self.digits).into_bytes(),
+        };
+        let mut name = self.prefix.clone();
+        name.push(os_from_bytes(&suffix));
+        name
+    }
+}
+
+/// Owns the output file that is open, and says how big each one was.
+struct Sink<'a> {
+    names: Namer,
     quiet: bool,
     elide_empty: bool,
     /// The next number a file will be given. Not incremented for a file that
@@ -712,21 +753,18 @@ struct Sink {
     /// cleanup an error triggers.
     written: Vec<OsString>,
     open: Option<(OsString, File, u64)>,
+    /// Where each piece's size is printed: `run_main`'s standard output, lent
+    /// rather than a handle of its own. Upstream's `fprintf (stdout, ...)` is
+    /// buffered and fails at the final close, which still knows why -- `csplit:
+    /// write error: No space left on device`. A second handle here would flush
+    /// when it was dropped, earlier, and the close would then have only "a
+    /// write failed" to report, without the reason.
+    out: &'a mut Stream,
 }
 
-impl Sink {
-    fn name(&self, index: usize) -> OsString {
-        let suffix = match &self.format {
-            Some(f) => f.render(index),
-            None => format!("{index:0width$}", width = self.digits).into_bytes(),
-        };
-        let mut name = self.prefix.clone();
-        name.push(os_from_bytes(&suffix));
-        name
-    }
-
+impl Sink<'_> {
     fn create(&mut self) -> Result<(), Fail> {
-        let name = self.name(self.index);
+        let name = self.names.name(self.index);
         // GNU names the output file bare and lets the errno finish the
         // sentence — `csplit: ro/x00: Permission denied` — rather than using
         // the "cannot open ... for writing" phrasing it uses for the *input*.
@@ -758,21 +796,32 @@ impl Sink {
     /// Under `-z` an empty file is removed instead, and — the part that is
     /// observable rather than tidy — its number is *not* consumed, so the next
     /// piece gets it.
-    fn close(&mut self) {
+    fn close(&mut self) -> Result<(), Fail> {
         let Some((name, file, bytes)) = self.open.take() else {
-            return;
+            return Ok(());
         };
-        drop(file);
+        // Upstream's `fclose`, whose failure is `NAME: <errno>` and the end of
+        // the run, with the outputs removed.
+        stdfd::close(file)
+            .map_err(|e| Fail::fatal(format!("{}: {}", quotef_os(&name), strerror(&e))))?;
         if bytes == 0 && self.elide_empty {
-            let _ = std::fs::remove_file(&name);
+            // Upstream's `unlink`, whose failure is said and is not fatal --
+            // except that a file already gone is no failure at all.
+            if let Err(e) = std::fs::remove_file(&name)
+                && e.kind() != io::ErrorKind::NotFound
+            {
+                say(format!("{}: {}", quotef_os(&name), strerror(&e)).as_bytes());
+            }
             // The file never existed as far as numbering is concerned.
-            return;
+            return Ok(());
         }
         if !self.quiet {
-            println!("{bytes}");
+            // Unread: the stream remembers a failure for `close_stdout`.
+            let _ = writeln!(self.out, "{bytes}");
         }
         self.written.push(name);
         self.index = self.index.saturating_add(1);
+        Ok(())
     }
 
     fn remove_all(&mut self) {
@@ -990,12 +1039,12 @@ impl SuffixFormat {
 // Running
 // ---------------------------------------------------------------------------
 
-fn run(options: &Options, file: &OsString, patterns: &[OsString]) -> ExitCode {
+fn run(options: &Options, file: &OsString, patterns: &[OsString], out: &mut Stream) -> ExitCode {
     let format = match &options.suffix {
         Some(f) => match SuffixFormat::parse(f) {
             Ok(parsed) => Some(parsed),
             Err(e) => {
-                diag!("csplit: {}", e.message);
+                say(&e.message);
                 return ExitCode::FAILURE;
             }
         },
@@ -1005,7 +1054,7 @@ fn run(options: &Options, file: &OsString, patterns: &[OsString]) -> ExitCode {
     let controls = match parse_patterns(patterns) {
         Ok(c) => c,
         Err(e) => {
-            diag!("csplit: {}", e.message);
+            say(&e.message);
             return ExitCode::FAILURE;
         }
     };
@@ -1020,22 +1069,29 @@ fn run(options: &Options, file: &OsString, patterns: &[OsString]) -> ExitCode {
     let lines = split_lines(&data);
 
     let mut sink = Sink {
-        prefix: options.prefix.clone(),
-        digits: options.digits,
-        format,
+        names: Namer {
+            prefix: options.prefix.clone(),
+            digits: options.digits,
+            format,
+        },
         quiet: options.quiet,
         elide_empty: options.elide_empty,
         index: 0,
         written: Vec::new(),
         open: None,
+        out,
     };
 
     match split(options, &lines, &controls, &mut sink) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            diag!("csplit: {}", e.message);
+            say(&e.message);
             if e.close {
-                sink.close();
+                // The run is already failing; a close that fails as well is
+                // reported by the close itself and changes nothing here.
+                if let Err(also) = sink.close() {
+                    say(&also.message);
+                }
             }
             if e.remove && !options.keep_files {
                 sink.remove_all();
@@ -1108,7 +1164,7 @@ fn split(
     options: &Options,
     lines: &[&[u8]],
     controls: &[Control],
-    sink: &mut Sink,
+    sink: &mut Sink<'_>,
 ) -> Result<(), Fail> {
     // `emit` is the first line not yet written; `search` is the first line a
     // regex will look at. See the module doc: they are not the same cursor.
@@ -1149,7 +1205,7 @@ fn split(
     for line in rest {
         sink.write(line)?;
     }
-    sink.close();
+    sink.close()?;
     Ok(())
 }
 
@@ -1167,7 +1223,7 @@ fn apply(
     control: &Control,
     repetition: u64,
     lines: &[&[u8]],
-    sink: &mut Sink,
+    sink: &mut Sink<'_>,
     emit: &mut usize,
     search: &mut usize,
 ) -> Result<Step, Fail> {
@@ -1195,7 +1251,7 @@ fn apply(
             // closes — and so counts — the open file first.
             let boundary = target.saturating_sub(1).clamp(*emit, lines.len());
             write_range(sink, lines, *emit, boundary)?;
-            sink.close();
+            sink.close()?;
             *emit = advance(options, boundary, lines.len());
             *search = *emit;
             // GNU's own comment on this check: "Ensure that the line number
@@ -1218,7 +1274,7 @@ fn apply(
             let Some(m) = found else {
                 write_range(sink, lines, *emit, lines.len())?;
                 if forever {
-                    sink.close();
+                    sink.close()?;
                     return Ok(Step::Finished);
                 }
                 return Err(Fail::fatal(format!(
@@ -1242,7 +1298,7 @@ fn apply(
                 }
             };
             write_range(sink, lines, *emit, boundary)?;
-            sink.close();
+            sink.close()?;
             *emit = advance(options, boundary, lines.len());
             *search = m.saturating_add(1);
             Ok(Step::Applied)
@@ -1312,7 +1368,7 @@ fn find(re: &Regex, lines: &[&[u8]], from: usize, arg: &[u8]) -> Result<Option<u
     Ok(None)
 }
 
-fn write_range(sink: &mut Sink, lines: &[&[u8]], from: usize, to: usize) -> Result<(), Fail> {
+fn write_range(sink: &mut Sink<'_>, lines: &[&[u8]], from: usize, to: usize) -> Result<(), Fail> {
     let slice = lines.get(from..to.max(from)).unwrap_or_default();
     for line in slice {
         sink.write(line)?;
@@ -1338,6 +1394,14 @@ fn on_repetition(repetition: u64) -> String {
 )]
 mod tests {
     use super::*;
+
+    impl Fail {
+        /// The message as text, to compare with a literal. Every message these
+        /// tests provoke is text.
+        fn text(&self) -> String {
+            String::from_utf8(self.message.clone()).unwrap()
+        }
+    }
 
     /// `parse_args` with `POSIXLY_CORRECT` pinned off, so that a test putting an
     /// option after an operand does not depend on the environment `cargo test`
@@ -1365,16 +1429,11 @@ mod tests {
         items.iter().map(OsString::from).collect()
     }
 
-    fn sink(digits: usize, format: Option<&str>) -> Sink {
-        Sink {
+    fn namer(digits: usize, format: Option<&str>) -> Namer {
+        Namer {
             prefix: OsString::from("xx"),
             digits,
             format: format.map(|f| SuffixFormat::parse(f.as_bytes()).unwrap()),
-            quiet: true,
-            elide_empty: false,
-            index: 0,
-            written: Vec::new(),
-            open: None,
         }
     }
 
@@ -1382,7 +1441,7 @@ mod tests {
 
     #[test]
     fn default_names_are_two_digits() {
-        let s = sink(2, None);
+        let s = namer(2, None);
         assert_eq!(s.name(0), OsString::from("xx00"));
         assert_eq!(s.name(7), OsString::from("xx07"));
         assert_eq!(s.name(100), OsString::from("xx100"));
@@ -1391,7 +1450,7 @@ mod tests {
     #[test]
     fn zero_digits_does_not_pad() {
         // Measured: `csplit f -n 0 4` writes `xx0` and `xx1`.
-        let s = sink(0, None);
+        let s = namer(0, None);
         assert_eq!(s.name(0), OsString::from("xx0"));
         assert_eq!(s.name(11), OsString::from("xx11"));
     }
@@ -1399,36 +1458,36 @@ mod tests {
     #[test]
     fn suffix_format_keeps_the_prefix() {
         // Measured: `csplit f -b 'q%03dz' 4` writes `xxq000z`.
-        let s = sink(2, Some("q%03dz"));
+        let s = namer(2, Some("q%03dz"));
         assert_eq!(s.name(0), OsString::from("xxq000z"));
         assert_eq!(s.name(1), OsString::from("xxq001z"));
     }
 
     #[test]
     fn suffix_format_hex_and_bare() {
-        assert_eq!(sink(2, Some("%03x")).name(255), OsString::from("xx0ff"));
-        assert_eq!(sink(2, Some("%d")).name(3), OsString::from("xx3"));
-        assert_eq!(sink(2, Some("%5d")).name(3), OsString::from("xx    3"));
-        assert_eq!(sink(2, Some("%-5d")).name(3), OsString::from("xx3    "));
+        assert_eq!(namer(2, Some("%03x")).name(255), OsString::from("xx0ff"));
+        assert_eq!(namer(2, Some("%d")).name(3), OsString::from("xx3"));
+        assert_eq!(namer(2, Some("%5d")).name(3), OsString::from("xx    3"));
+        assert_eq!(namer(2, Some("%-5d")).name(3), OsString::from("xx3    "));
     }
 
     #[test]
     fn suffix_format_must_have_exactly_one_conversion() {
         assert_eq!(
-            SuffixFormat::parse(b"%s").err().unwrap().message,
+            SuffixFormat::parse(b"%s").err().unwrap().text(),
             "invalid conversion specifier in suffix: s"
         );
         assert_eq!(
-            SuffixFormat::parse(b"plain").err().unwrap().message,
+            SuffixFormat::parse(b"plain").err().unwrap().text(),
             "missing % conversion specification in suffix"
         );
         assert_eq!(
-            SuffixFormat::parse(b"%d%d").err().unwrap().message,
+            SuffixFormat::parse(b"%d%d").err().unwrap().text(),
             "too many % conversion specifications in suffix"
         );
         // `%%` is a literal percent and does not count as the conversion.
         assert_eq!(
-            SuffixFormat::parse(b"100%%").err().unwrap().message,
+            SuffixFormat::parse(b"100%%").err().unwrap().text(),
             "missing % conversion specification in suffix"
         );
         assert_eq!(
@@ -1451,24 +1510,24 @@ mod tests {
     #[test]
     fn the_suffix_flag_set_is_gnus_and_not_printfs() {
         assert_eq!(
-            SuffixFormat::parse(b"%+d").err().unwrap().message,
+            SuffixFormat::parse(b"%+d").err().unwrap().text(),
             "invalid conversion specifier in suffix: +"
         );
         assert_eq!(
-            SuffixFormat::parse(b"% d").err().unwrap().message,
+            SuffixFormat::parse(b"% d").err().unwrap().text(),
             "invalid conversion specifier in suffix:  "
         );
         assert_eq!(
-            SuffixFormat::parse(b"% 5d").err().unwrap().message,
+            SuffixFormat::parse(b"% 5d").err().unwrap().text(),
             "invalid conversion specifier in suffix:  "
         );
         // The four GNU does take still work, which is the half a parser with
         // no flags at all would fail. `'` is accepted and ignored, as the
         // thousands separator is empty in this locale.
-        assert_eq!(sink(2, Some("%-5d")).name(3), OsString::from("xx3    "));
-        assert_eq!(sink(2, Some("%05d")).name(3), OsString::from("xx00003"));
-        assert_eq!(sink(2, Some("%#o")).name(8), OsString::from("xx010"));
-        assert_eq!(sink(2, Some("%'d")).name(3), OsString::from("xx3"));
+        assert_eq!(namer(2, Some("%-5d")).name(3), OsString::from("xx3    "));
+        assert_eq!(namer(2, Some("%05d")).name(3), OsString::from("xx00003"));
+        assert_eq!(namer(2, Some("%#o")).name(8), OsString::from("xx010"));
+        assert_eq!(namer(2, Some("%'d")).name(3), OsString::from("xx3"));
     }
 
     // ---------------- pattern parsing ----------------
@@ -1477,7 +1536,7 @@ mod tests {
     fn line_numbers_must_ascend() {
         let e = parse_patterns(&os(&["4", "2"])).err().unwrap();
         assert_eq!(
-            e.message,
+            e.text(),
             // Curly: this is `quote()`, measured against GNU 9.4 under
             // `LC_ALL=C.UTF-8`. Contrast `zero_is_refused_unquoted` below,
             // where GNU quotes the number not at all.
@@ -1489,7 +1548,7 @@ mod tests {
     fn zero_is_refused_unquoted() {
         // Measured: this diagnostic alone does not quote its argument.
         let e = parse_patterns(&os(&["0"])).err().unwrap();
-        assert_eq!(e.message, "0: line number must be greater than zero");
+        assert_eq!(e.text(), "0: line number must be greater than zero");
     }
 
     #[test]
@@ -1497,7 +1556,7 @@ mod tests {
         // Not "no preceding pattern": GNU looks ahead for `{`, so a leading one
         // reaches the integer branch.
         let e = parse_patterns(&os(&["{3}"])).err().unwrap();
-        assert_eq!(e.message, "‘{3}’: invalid pattern");
+        assert_eq!(e.text(), "‘{3}’: invalid pattern");
     }
 
     #[test]
@@ -1507,21 +1566,21 @@ mod tests {
         // curly. The braces on the right are csplit's own, spelled straight
         // into the format string, and the `}` immediately after `‘{x’` is the
         // one GNU prints separately because it NUL-terminated there.
-        assert_eq!(e.message, "‘{x’}: integer required between '{' and '}'");
+        assert_eq!(e.text(), "‘{x’}: integer required between '{' and '}'");
         let e = parse_patterns(&os(&["4", "{1"])).err().unwrap();
-        assert_eq!(e.message, "‘{1’: '}' is required in repeat count");
+        assert_eq!(e.text(), "‘{1’: '}' is required in repeat count");
     }
 
     #[test]
     fn missing_closing_delimiter() {
         let e = parse_patterns(&os(&["/5"])).err().unwrap();
-        assert_eq!(e.message, "/5: closing delimiter '/' missing");
+        assert_eq!(e.text(), "/5: closing delimiter '/' missing");
     }
 
     #[test]
     fn offset_must_be_an_integer() {
         let e = parse_patterns(&os(&["/5/xyz"])).err().unwrap();
-        assert_eq!(e.message, "‘/5/xyz’: integer expected after delimiter");
+        assert_eq!(e.text(), "‘/5/xyz’: integer expected after delimiter");
     }
 
     #[test]

@@ -43,7 +43,7 @@ signposts (nothing to carry across).
 from __future__ import annotations
 
 import argparse
-import os
+import json
 import subprocess
 import sys
 import tempfile
@@ -239,6 +239,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--stray", action="store_true")
+    ap.add_argument("--lane", default="", help="names the grandfather file (default: this worktree's lane)")
     args = ap.parse_args(argv)
     root = D.repo_root()
     gitdir = D.git_dir(root)
@@ -283,15 +284,94 @@ def main(argv: list[str] | None = None) -> int:
         if any(base_texts.get(n) != our_texts.get(n) for n in names):
             carry_group(root, names, base_texts, our_texts, plan)
     carry_roadmap(root, base, ours, theirs, plan)
-    # README files are the trunk's own new text; a lane edit to an old header is
-    # reported rather than merged into them.
-    for f in [f for f in list(plan.write) if f.endswith("/README.md")]:
-        plan.notes.append(f"{f}: this lane edited the old document's header; that edit is not carried "
-                          "(compare it with the README by hand)")
-        del plan.write[f]
+    # A README generated from an old header (the decisions' band table, the
+    # queue's rules) is merged like any entry above: a lane that opened a new band
+    # on its branch (lane A opened §1500 on 2026-10-01) must not lose it, or every
+    # decision it numbered there reads as outside any band.
+    lane = (args.lane or running_lane(root) or "unknown").lower()
+    grandfather(root, plan, base, ours, lane)
     if not args.dry_run:
         apply(root, plan, their_signposts)
+        resolve_leftovers(root, plan)
     return report(plan, args.dry_run)
+
+
+# Scripts the cutover deleted. A lane that changed one meanwhile gets a
+# modify/delete conflict; the replacement is check-docs.py, so the conflict is
+# resolved as deleted and the lane is told its change needs porting.
+RETIRED = (
+    "scripts/check-known-issues-index.py", "scripts/check-open-questions.py",
+    "scripts/check-design-decisions-bands.py", "scripts/test-check-design-decisions-bands.py",
+    "scripts/design-decisions-baseline.json", "scripts/ki_dupes.py", "scripts/test-ki-dupes.py",
+    "scripts/ki_archive.py", "scripts/backfill-lane-fields.py", "scripts/test-backfill-lane-fields.py",
+)
+
+
+def running_lane(root: Path) -> str | None:
+    try:
+        import srcload
+        wl = srcload.load(str(Path(__file__).resolve().parent / "which-lane.py"), "which_lane")
+        letter, _how = wl.lane_of_worktree(root)
+        return letter if letter and letter != "!" else None
+    except Exception:  # noqa: BLE001 - only names the grandfather file
+        return None
+
+
+def grandfather(root: Path, plan: Plan, base: str, ours: str, lane: str) -> None:
+    """Record what this lane wrote *before* the cutover as inherited, the way the
+    cutover's own baseline records the trunk's: an entry carried across was written
+    under the old rules (status in the heading, no Trigger line), and it is not new
+    work for check-docs.py to refuse. Kept in a per-lane file,
+    `scripts/docs-baseline-carried-<lane>.json`, so lanes never edit one file."""
+    import srcload
+    cd = srcload.load(str(Path(__file__).resolve().parent / "check-docs.py"), "check_docs")
+    add: dict[str, set] = {k: set() for k in ("issue_without_status", "lowercase_marker", "decision_files",
+                                              "deferred_without_trigger", "todo_done_paragraphs")}
+    for path, text in plan.write.items():
+        top = path.split("/", 1)[0]
+        if path.endswith("README.md") or "/" not in path:
+            continue
+        lines = text.splitlines(keepends=True)
+        if top in ISSUE_DIRS and lines:
+            title = lines[0].lstrip("#").strip()
+            if not any(ln.lstrip().startswith("**Status") for ln in lines[1:8]):
+                add["issue_without_status"].add(cd._entry_key(path))  # noqa: SLF001
+            if any(t != t.upper() for t in cd.status_marker_tokens(title, lines)):
+                add["lowercase_marker"].add(cd._entry_key(path))  # noqa: SLF001
+        elif top == D.DECISIONS_DIR:
+            add["decision_files"].add(path)
+        elif top == D.DEFERRED_DIR and not cd._TRIGGER.search(text):  # noqa: SLF001
+            add["deferred_without_trigger"].add(path)
+    b_todo, o_todo = show(root, base, "todo.txt"), show(root, ours, "todo.txt")
+    if b_todo is not None and o_todo is not None and b_todo != o_todo:
+        before = {cd._hash(t) for _l, _o, t in cd.todo_done_paragraphs(b_todo)}  # noqa: SLF001
+        add["todo_done_paragraphs"] = {cd._hash(t) for _l, _o, t in cd.todo_done_paragraphs(o_todo)} - before  # noqa: SLF001
+    if not any(add.values()):
+        return
+    rel = f"scripts/docs-baseline-carried-{lane}.json"
+    existing = {}
+    if (root / rel).is_file():
+        existing = json.loads((root / rel).read_text(encoding="utf-8"))
+    merged = {k: sorted(set(existing.get(k, [])) | v) for k, v in add.items()}
+    plan.write[rel] = json.dumps(merged, indent=1, ensure_ascii=False) + "\n"
+    plan.notes.append(f"{rel}: {sum(len(v) for v in add.values())} entr(ies) this lane wrote before the cutover "
+                      "are grandfathered, as the trunk's were")
+
+
+def resolve_leftovers(root: Path, plan: Plan) -> None:
+    """Conflicts the cutover causes outside the documents: retired scripts this lane
+    changed (resolved as deleted, with a note), and the generated script index."""
+    unmerged = git(root, "diff", "--name-only", "--diff-filter=U", check=False).stdout.split()
+    for path in unmerged:
+        if path in RETIRED:
+            git(root, "rm", "-q", "--", path, check=False)
+            plan.notes.append(f"{path}: this lane changed it, and the cutover retired it (check-docs.py replaces "
+                              "it). Resolved as deleted -- port the change to check-docs.py if it still matters.")
+    if "scripts/INDEX.md" in unmerged and (root / "scripts/gen-script-index.py").is_file():
+        r = subprocess.run([sys.executable, "scripts/gen-script-index.py"], cwd=root, capture_output=True, text=True)
+        if r.returncode == 0:
+            git(root, "add", "--", "scripts/INDEX.md")
+            plan.notes.append("scripts/INDEX.md: regenerated (it is generated; both sides' versions were stale)")
 
 
 if __name__ == "__main__":

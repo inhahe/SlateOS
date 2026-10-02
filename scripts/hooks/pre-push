@@ -79,8 +79,8 @@
 #      failure came from. Narrowed to the crates a push touches, because the
 #      verdict is empirical and costs 105 s over the whole tree.
 #
-#  36. Refuse a `known-issues.md` whose headings cannot be counted: two
-#      entries sharing a slug, or a lowercase status marker. Every triage
+#  36. Refuse known issues whose headings cannot be counted: two
+#      issue files under one name, or a lowercase status marker. Every triage
 #      number in this project comes out of a grep on those headings, and both
 #      shapes have already produced a wrong one.
 #
@@ -3563,7 +3563,7 @@ if [ "$skip_docs" != "1" ]; then
             # Per-sha gate name, for gate 9's reason: a shared name lets a later
             # clean sha delete the kept log of an earlier failing one.
             if ! run_checker "docs-$sha" "$py" "$docs" \
-                             --head "$sha" --quiet --exclude-rules Q; then
+                             --head "$sha" --quiet --exclude-rules Q,I2,S3; then
                 docs_failed=1
             fi
         done
@@ -5136,23 +5136,25 @@ fi
 # ---------------------------------------------------------------------------
 # Gate 36: the tech-debt index must stay countable.
 #
-# `known-issues.md` is read by grep, not by people -- 223 entries, and every
-# triage figure anyone quotes comes from `grep "^## TD-"` plus a filter on the
-# heading line. That makes the heading a machine interface with two failure
-# modes, both of which have already happened and neither of which is visible
-# by reading the file:
+# Every triage figure anyone quotes about the known issues comes from a grep on
+# their headings, so the headings are a machine interface with two failure modes
+# that have both already produced a wrong number, invisibly:
 #
-#   - a lowercase `-- fixed` marker, which a case-sensitive triage grep counts
-#     as open. Four entries; the reported figure was 39 against a true 34.
-#   - two headings sharing a slug, which happens when a closed entry quotes
-#     its own original text and the quoted copy keeps its `##`. Three entries;
-#     each was counted twice, once closed and once open.
+#   - a lowercase `-- fixed` marker, which a case-sensitive triage grep counts as
+#     open. Four entries; the reported figure was 39 against a true 34.
+#   - two entries under one name, so every count sees one entry twice.
 #
-# Narrowed to pushes that touch the file or the checker, for gate 35's reason:
-# you broke it, you fix it. A lane pushing kernel code should not be blocked
-# by a heading another lane merged.
+# Until 2026-10-02 this ran check-known-issues-index.py on one `known-issues.md`.
+# Since the one-file-per-entry cutover the issues are files, and this gate runs
+# the two matching rules of scripts/check-docs.py -- upper-case status markers
+# (I2) and no two issue files whose names differ only in case (S3) -- on each
+# pushed commit. Gate 13 runs the other rules of the same checker.
+#
+# Narrowed to pushes that touch the issues or the checker, for gate 35's reason:
+# you broke it, you fix it. A lane pushing kernel code should not be blocked by a
+# heading another lane merged.
 # ---------------------------------------------------------------------------
-kiindex="${repo_root:-.}/scripts/check-known-issues-index.py"
+kiindex="${repo_root:-.}/scripts/check-docs.py"
 skip_kiindex=0
 # Bypass: ALLOW_KNOWN_ISSUES_INDEX=1 git push origin <branch>
 if [ "${ALLOW_KNOWN_ISSUES_INDEX:-0}" = "1" ]; then
@@ -5161,36 +5163,35 @@ if [ "${ALLOW_KNOWN_ISSUES_INDEX:-0}" = "1" ]; then
 fi
 [ -n "$py" ] || skip_kiindex=1
 [ -f "$kiindex" ] || skip_kiindex=1
-touches known-issues.md scripts/check-known-issues-index.py || skip_kiindex=1
-# No `[ -n "${pushed_shas# }" ]` guard: this gate runs once rather than
-# looping over `$pushed_shas`, so an empty push is already skipped by
-# `touches`, and adding one would break `test-pre-push-gates.py`'s
-# guards-match-loops count -- which is the count that catches a real omission.
+touches known-issues known-issues-resolved known-issues.md scripts/check-docs.py \
+        scripts/doc_entries.py scripts/docs-baseline.json || skip_kiindex=1
+[ -n "${pushed_shas# }" ] || skip_kiindex=1
 note_gate known-issues-index "$skip_kiindex"
 
 kiindex_failed=0
 if [ "$skip_kiindex" != "1" ]; then
-    # Self-test first. This checker's silent failure mode is specific and was
-    # hit during its own development: an anchored pattern without
-    # `re.MULTILINE` matched zero headings in a file with 223 of them. It was
-    # caught only because an empty scan is a refusal here rather than a pass.
-    if ! run_checker known-issues-index-selftest "$py" "$kiindex" --self-test; then
-        echo "pre-push: check-known-issues-index.py FAILED ITS OWN SELF-TEST - its verdict is not trustworthy." >&2
+    # Self-test first: an anchored pattern without `re.MULTILINE` once matched
+    # zero headings in a file with 223 of them, and was caught only because an
+    # empty scan is a refusal here rather than a pass.
+    if ! run_checker known-issues-index-selftest "$py" "$kiindex" --selftest; then
+        echo "pre-push: check-docs.py FAILED ITS OWN SELF-TEST - its verdict is not trustworthy." >&2
         kiindex_failed=1
     else
-        if ! run_checker known-issues-index "$py" "$kiindex"; then
-            kiindex_failed=1
-        fi
+        for sha in $pushed_shas; do
+            if ! run_checker "known-issues-index-$sha" "$py" "$kiindex" \
+                             --head "$sha" --quiet --only-rules I2,S3; then
+                kiindex_failed=1
+            fi
+        done
     fi
 fi
 if [ "$kiindex_failed" != "0" ]; then
     cat >&2 <<EOF
-pre-push: REFUSING to push - known-issues.md cannot be counted (details above).
+pre-push: REFUSING to push - the known issues cannot be counted (details above).
 
 Two rules, both of which have already produced a wrong triage number:
-  * no two '## TD-' headings share a slug. If a closed entry quotes its
-    own original text, make the quoted copy bold, not a heading.
   * a status marker is uppercase: '-- FIXED', not '-- fixed'.
+  * no two issue files whose names differ only in case.
 
 To push anyway:
     ALLOW_KNOWN_ISSUES_INDEX=1 git push $remote_name ...

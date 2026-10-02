@@ -118,9 +118,17 @@ def _entry_key(name: str) -> str:
 
 
 def load_baseline(path: Path = BASELINE) -> dict:
+    """The baseline at `path`, unioned with every `docs-baseline-carried-<lane>.json`
+    beside it: what each lane wrote before the cutover and carried across in its
+    merge (docs-carry-forward.py), grandfathered exactly as the trunk's was."""
     if not path.is_file():
         return {}
-    return json.loads(path.read_text(encoding="utf-8"))
+    out = json.loads(path.read_text(encoding="utf-8"))
+    for extra in sorted(path.parent.glob("docs-baseline-carried-*.json")):
+        for k, v in json.loads(extra.read_text(encoding="utf-8")).items():
+            if isinstance(v, list):
+                out[k] = sorted(set(out.get(k, [])) | set(v), key=str)
+    return out
 
 
 def status_marker_tokens(title: str, lines: list[str]) -> list[str]:
@@ -490,10 +498,14 @@ def materialise(root: Path, rev: str, into: Path) -> None:
         raise NoVerdict(f"--head {rev}: git archive failed: {out.stderr.decode(errors='replace')[:300]}")
     with tarfile.open(fileobj=io.BytesIO(out.stdout)) as tf:
         tf.extractall(into, filter="data")
-    blob = subprocess.run(["git", "-C", str(root), "show", f"{rev}:{BASELINE_REL}"], capture_output=True)
-    if blob.returncode == 0:
-        (into / "scripts").mkdir(parents=True, exist_ok=True)
-        (into / BASELINE_REL).write_bytes(blob.stdout)
+    names = subprocess.run(["git", "-C", str(root), "ls-tree", "--name-only", rev, "--", "scripts/"],
+                           capture_output=True, text=True).stdout.split()
+    for rel in [n for n in names if n == BASELINE_REL or
+                (n.startswith("scripts/docs-baseline-carried-") and n.endswith(".json"))]:
+        blob = subprocess.run(["git", "-C", str(root), "show", f"{rev}:{rel}"], capture_output=True)
+        if blob.returncode == 0:
+            (into / "scripts").mkdir(parents=True, exist_ok=True)
+            (into / rel).write_bytes(blob.stdout)
 
 
 # --- self-test ---------------------------------------------------------------------------------

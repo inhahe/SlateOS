@@ -180138,7 +180138,27 @@ them 300 seeded random texts formatted with random options. A scratch run of
   `closing standard input: Bad file descriptor`, which needed
   `stdfd::close_stdin` (and `stdfd::close`, for an input whose close fails).
 
-## TD-B-DIFF-CHOOSES-ITS-OWN-EDIT-SCRIPT (lane B, 2026-10-02)
+## TD-B-DIFF-CHOOSES-ITS-OWN-EDIT-SCRIPT (lane B, 2026-10-02) — **FIXED** 2026-10-02
+
+**Fixed:** `userspace/coreutils/src/bin/diff.rs` is replaced by
+`userspace/coreutils/src/bin/diff/`, a port of GNU diffutils 3.10's `diff`:
+`io.c` (reading, the identical prefix and suffix, hashing lines into
+equivalence classes), `analyze.c` with gnulib's `diffseq.h` (the comparison
+itself, `discard_confusing_lines`, `shift_boundaries`), `context.c`,
+`normal.c`, `ed.c`, `ifdef.c` (`-D` and the group and line formats, which the
+old one refused), `side.c`, `dir.c` (`-r`, `-x`, `-X`, `-S`, `-N`, `-P`),
+`util.c` (`-l` through `pr`, `--color`, `--palette`) and `diff.c`'s option
+handling -- whose parser now returns its refusals, so they are unit-tested.
+`scripts/diff-diff.sh`: 574 cases agree, 3 differ on purpose (our `--help`
+and `--version`, and stdin's header stamped with the time of the run). Its 300
+seeded random pairs are the repro below made a case; scratch runs of 4000 more
+agreed byte for byte, as did pairs of 120,000 short lines -- enough to outgrow
+the line table's first size -- under twelve options, with and without final
+newlines. On a pair of 200,000-line files it runs in GNU's time, give or take
+noise, in each of the seven modes measured (default, `-d`, `-u`, `-i -w`,
+`-y`, `--minimal`, `-H`).
+
+What follows is the entry as it was filed.
 
 **In short:** our `diff` finds *a* shortest set of changes between two files,
 but not the one GNU `diff` prints. On random pairs of small files it prints

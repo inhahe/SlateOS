@@ -487,6 +487,9 @@
 //! - [`remove`] — what `rm` and `mv` must agree on about deleting a tree.
 //! - [`setfields`] — the `cut`-style LIST of fields, for `cut` and `numfmt
 //!   --field` (`set-fields.c`).
+//! - [`sig2str`] — gnulib's `sig2str.c`, signal names and numbers in GNU's
+//!   spelling (`POLL` for 29, `RTMIN+2`), for `split --filter`'s report of the
+//!   signal that ended its command.
 //! - [`utsname`] — the `uname(2)` answers `uname` and `arch` both print.
 //!
 //! The regex engine, which is the other thing they must not disagree about,
@@ -538,6 +541,7 @@ pub use quoting as quote;
 pub mod remove;
 pub mod rename;
 pub mod setfields;
+pub mod sig2str;
 // Handing a command line to `sh -c`. This was `src/shell.rs` until 2026-09-27;
 // it became the `shellcmd` crate so that GNU AutoGen's libopts (`autoopts`,
 // whose `--more-help` runs `$PAGER`) runs its pager the same way.

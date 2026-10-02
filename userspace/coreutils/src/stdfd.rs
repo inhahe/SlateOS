@@ -391,6 +391,16 @@ pub fn was_closed_at_startup(fd: i32) -> bool {
     stdfdguard::was_closed_at_startup(fd)
 }
 
+/// Whether `SIGPIPE` was ignored when the process started, before the runtime
+/// ignored it regardless -- what `split --filter` needs to hand its commands
+/// the disposition upstream would. See `stdfdguard`'s crate docs.
+///
+/// Always `false` without [`crate::guard_std_fds!`], and off Linux.
+#[must_use]
+pub fn sigpipe_ignored_at_startup() -> bool {
+    stdfdguard::sigpipe_ignored_at_startup()
+}
+
 /// gnulib's `fd_safer`: keep a file a utility opened for its own purposes off
 /// descriptors 0, 1 and 2.
 ///

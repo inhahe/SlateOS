@@ -110,6 +110,9 @@ pub const SIGKILL: i32 = 9;
 pub const SIGSTOP: i32 = 19;
 /// Resume a stopped process. A process manager's Resume.
 pub const SIGCONT: i32 = 18;
+/// A write on a pipe nobody reads. A `split --filter` command that dies of it
+/// has not failed: its own reader left before it did.
+pub const SIGPIPE: i32 = 13;
 
 /// The longest hostname the kernel will store, not counting the NUL.
 /// A buffer of `HOST_NAME_MAX + 1` always suffices for [`hostname_into`].
@@ -154,6 +157,7 @@ mod sys {
         pub fn getdomainname(name: *mut u8, len: usize) -> i32;
         pub fn klogctl(cmd: i32, buf: *mut u8, len: i32) -> i32;
         pub fn kill(pid: i32, sig: i32) -> i32;
+        pub fn signal(sig: i32, handler: usize) -> usize;
         pub fn __errno_location() -> *mut i32;
     }
 }
@@ -183,6 +187,26 @@ mod sys {
 mod slateos_sys {
     unsafe extern "C" {
         pub fn setkeylayout(name: *const u8, len: usize) -> i32;
+    }
+}
+
+/// The Linux C libraries' real-time signal bounds, which SlateOS's library
+/// exports under the same names (`posix/src/signal.rs`).
+///
+/// # Why `target_os = "linux"` and not `unix`
+///
+/// The reason [`slateos_sys`] gives for its own gate, the other way round.
+/// These two are a convention of the Linux C libraries -- `SIGRTMIN` is a
+/// macro calling the first, because glibc's and musl's thread libraries keep
+/// the lowest few real-time signals for themselves -- and a BSD libc has no
+/// such symbols, so a `unix` gate would fail to link there. Every
+/// Linux-shaped target this tree builds for has them, SlateOS's included,
+/// since its JSON declares `"os": "linux"`.
+#[cfg(target_os = "linux")]
+mod linux_sys {
+    unsafe extern "C" {
+        pub fn __libc_current_sigrtmin() -> i32;
+        pub fn __libc_current_sigrtmax() -> i32;
     }
 }
 
@@ -594,6 +618,89 @@ fn kill_one(_pid: i32, _sig: i32) -> Result<(), i32> {
     Err(ENOSYS)
 }
 
+/// Leave signal `sig` ignored: `signal (sig, SIG_IGN)`.
+///
+/// Async-signal-safe, so it may run between `fork` and `exec` -- which is what
+/// it is for. `split --filter` hands its commands `SIGPIPE` ignored when
+/// `split` itself was started that way, as upstream does, and Rust's `Command`
+/// has by then restored the default in the child; a `pre_exec` hook puts the
+/// disposition back with this.
+///
+/// # Errors
+///
+/// The `errno` set by `signal`: `EINVAL` for a number that is no signal, or
+/// for `SIGKILL` and `SIGSTOP`, which cannot be ignored. Off Unix, [`ENOSYS`].
+#[cfg(unix)]
+pub fn ignore_signal(sig: i32) -> Result<(), i32> {
+    /// `SIG_IGN`, `(void (*)(int)) 1`.
+    const SIG_IGN: usize = 1;
+    /// `SIG_ERR`, `(void (*)(int)) -1`.
+    const SIG_ERR: usize = usize::MAX;
+    // SAFETY: `SIG_IGN` installs no code of ours, and `signal` reads and writes
+    // no memory we own: it returns the replaced handler, or `SIG_ERR`.
+    let old = unsafe { sys::signal(sig, SIG_IGN) };
+    if old == SIG_ERR {
+        Err(last_errno())
+    } else {
+        Ok(())
+    }
+}
+
+/// Leave signal `sig` ignored -- which there is no such thing as here.
+///
+/// # Errors
+///
+/// Always [`ENOSYS`]: the host has no signals of this kind.
+#[cfg(not(unix))]
+pub fn ignore_signal(_sig: i32) -> Result<(), i32> {
+    Err(ENOSYS)
+}
+
+/// The lowest real-time signal number the linked C library hands out --
+/// `SIGRTMIN`, which glibc and musl define as a call to this, since each keeps
+/// a few for its own threads: 34 under glibc, 35 under musl, 32 under
+/// SlateOS's library, which keeps none.
+///
+/// A question for the library, not a constant, for exactly that reason: the
+/// same program names the same signal differently on two systems, and gnulib's
+/// `sig2str` -- which `coreutils::sig2str` is -- asks at run time too.
+///
+/// Off Linux there are no real-time signals, and the answer is 0 with
+/// [`sigrtmax`] answering -1: an empty range, which is gnulib's own fallback
+/// for a system that does not define `SIGRTMIN`.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn sigrtmin() -> i32 {
+    // SAFETY: takes no arguments and touches no memory of ours; it reads the
+    // library's own state and returns an integer.
+    unsafe { linux_sys::__libc_current_sigrtmin() }
+}
+
+/// The lowest real-time signal number: none here. See the Linux arm.
+#[cfg(not(target_os = "linux"))]
+#[must_use]
+pub fn sigrtmin() -> i32 {
+    0
+}
+
+/// The highest real-time signal number the linked C library hands out --
+/// `SIGRTMAX`, 64 under glibc, musl and SlateOS's library alike. See
+/// [`sigrtmin`].
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn sigrtmax() -> i32 {
+    // SAFETY: as for `sigrtmin` -- no arguments, no memory of ours.
+    unsafe { linux_sys::__libc_current_sigrtmax() }
+}
+
+/// The highest real-time signal number: below the lowest, so the range is
+/// empty. See the Linux arm of [`sigrtmin`].
+#[cfg(not(target_os = "linux"))]
+#[must_use]
+pub fn sigrtmax() -> i32 {
+    -1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -629,10 +736,26 @@ mod tests {
         assert_eq!(SIGKILL, posix::signal::SIGKILL);
         assert_eq!(SIGSTOP, posix::signal::SIGSTOP);
         assert_eq!(SIGCONT, posix::signal::SIGCONT);
+        assert_eq!(SIGPIPE, posix::signal::SIGPIPE);
         assert_eq!(
             SYSLOG_ACTION_SIZE_BUFFER,
             posix::unistd::SYSLOG_ACTION_SIZE_BUFFER
         );
+    }
+
+    /// The real-time range is a range -- a real one wherever the library is a
+    /// Linux one, and gnulib's empty one everywhere else.
+    #[test]
+    fn the_real_time_range_is_the_library_s() {
+        let (lowest, highest) = (sigrtmin(), sigrtmax());
+        if cfg!(target_os = "linux") {
+            assert!(
+                0 < lowest && lowest <= highest && highest <= 64,
+                "{lowest}..={highest}"
+            );
+        } else {
+            assert_eq!((lowest, highest), (0, -1));
+        }
     }
 
     /// A broadcast pid is refused before it can reach the libc.

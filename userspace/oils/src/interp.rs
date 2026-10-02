@@ -90849,8 +90849,10 @@ st=1
         // `^a` against `a\xffb`, the case named in TD-OILS-ERE-TEXT-ONLY.
         assert_eq!(run("f=$'a\\xffb'; [[ $f =~ ^a ]]").1, 0);
         assert_eq!(run("f=$'a\\xffb'; [[ $f =~ ^b ]]").1, 1);
-        // `.` matches the byte as one character, so this is `a`, one, `b`.
-        assert_eq!(run("f=$'a\\xffb'; [[ $f =~ ^a.b$ ]]").1, 0);
+        // The byte is one character, and -- as bash's `=~` under C.UTF-8,
+        // which is glibc's -- `.` does not match it: measured, both of these
+        // exit 1 there (and the first exits 0 under C).
+        assert_eq!(run("f=$'a\\xffb'; [[ $f =~ ^a.b$ ]]").1, 1);
         assert_eq!(run("f=$'a\\xffb'; [[ $f =~ ^a..b$ ]]").1, 1);
         // The byte is writable in the pattern too, and still exits 0/1 rather
         // than 2 — it is a literal, not a malformed regex.
@@ -90858,8 +90860,14 @@ st=1
         assert_eq!(run("f=$'a\\xffb'; [[ $f =~ $'\\xfe' ]]").1, 1);
         // And the capture that reaches BASH_REMATCH is the bytes themselves —
         // read through `run_raw`, since `run`'s lossy decode would hide it.
-        let (o, s) = run_raw("f=$'a\\xffb'; [[ $f =~ ^a(.)b$ ]]; printf %s \"${BASH_REMATCH[1]}\"");
+        let (o, s) = run_raw(
+            "f=$'a\\xffb'; [[ $f =~ ^a($'\\xff')b$ ]]; printf %s \"${BASH_REMATCH[1]}\"",
+        );
         assert_eq!(o, b"\xff");
+        assert_eq!(s, 0);
+        // A `.` that cannot take it leaves no match and an empty capture.
+        let (o, s) = run_raw("f=$'a\\xffb'; [[ $f =~ ^a(.)b$ ]]; printf %s \"${BASH_REMATCH[1]}\"");
+        assert_eq!(o, b"");
         assert_eq!(s, 0);
     }
 

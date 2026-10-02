@@ -949,10 +949,19 @@ mod tests {
     }
 
     /// A path may hold any byte but `/` and NUL, and `expr` is how a portable
-    /// script takes it apart.
+    /// script takes it apart. The byte counts as one character, and -- as in
+    /// glibc's UTF-8 locales -- `.` does not match it: measured under
+    /// `C.UTF-8`, GNU `expr $'a\xffb' : '.*'` is 1 and `length` is 3.
     #[test]
     fn an_undecodable_byte_is_one_character_and_survives() {
         let args = vec![b"a\xffb".to_vec(), b":".to_vec(), b".*".to_vec()];
+        let mut p = Parser {
+            args: &args,
+            pos: 0,
+        };
+        assert_eq!(p.or().ok().as_deref(), Some(&b"1"[..]));
+        // Written into the pattern, it matches itself.
+        let args = vec![b"a\xffb".to_vec(), b":".to_vec(), b"a\xffb".to_vec()];
         let mut p = Parser {
             args: &args,
             pos: 0,

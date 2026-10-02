@@ -54,12 +54,19 @@
 //! A shell value is bytes, and a SlateOS path may hold any byte but `/` and
 //! NUL, so both the subject and the pattern can contain a byte that begins no
 //! valid UTF-8 sequence. The engine therefore scans [`Ch`] — a decoded scalar
-//! *or* one undecodable byte — exactly as the glob engine does. That is the
-//! only reading that makes `.` match such a byte as **one** character rather
-//! than as a third of an `é`, and it is what lets `[[ $f =~ ^a ]]` answer for a
-//! filename the locale cannot decode. ERE *syntax* is entirely ASCII, so every
-//! metacharacter test goes through [`Ch::as_ascii`] and no encoding question
-//! arises in the parser.
+//! *or* one undecodable byte — exactly as the glob engine does. That keeps a
+//! match from ever splitting an `é`, and it is what lets `[[ $f =~ ^a ]]`
+//! answer for a filename the locale cannot decode. ERE *syntax* is entirely
+//! ASCII, so every metacharacter test goes through [`Ch::as_ascii`] and no
+//! encoding question arises in the parser.
+//!
+//! An undecodable byte is a character for spans and for a literal byte in the
+//! pattern, but **`.` and bracket expressions do not match it** -- as in
+//! glibc's UTF-8 locales, where GNU `grep 'a.b'`, `sed` and bash's `=~` all
+//! fail to match `a\xffb` and all match it in the C locale. The C locale's
+//! reading is [`Regex::with_byte_chars`]. See `takes`. (Until 2026-10-02 `.`
+//! did match it, a deliberate choice that matched none of the programs it
+//! stood in for; `tac -r -s '.'` on such a file was where it showed.)
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -1675,6 +1682,11 @@ fn nothing_to_repeat() -> EreError {
 enum Inst {
     Char(Ch),
     Any,
+    /// The unanchored search's step over one character -- any character,
+    /// including a byte that decodes to nothing, which `.` ([`Inst::Any`])
+    /// does not take in a UTF-8 reading. The search prefix's only consuming
+    /// instruction, and nothing else's.
+    Skip,
     Class(ClassInst),
     Match,
     Jmp(usize),
@@ -1911,11 +1923,25 @@ fn char_fold_eq(a: Ch, b: Ch) -> bool {
 /// the Pike VM, the backtracker and the [`Prefilter`] alike: if they ever
 /// disagreed, a position the prefilter stepped over could be one the VM would
 /// have matched at.
-fn takes(inst: &Inst, c: Option<Ch>, ci: bool) -> bool {
+///
+/// `bytes` is [`Regex::with_byte_chars`]: the subject read as the C locale
+/// reads it. Read as characters -- a UTF-8 locale -- **a byte that decodes to
+/// nothing is taken only by itself**: `.` does not take it, and neither does
+/// any bracket expression, negated or not. That is glibc's rule, and so the
+/// rule of every program this engine stands in for -- measured under
+/// `C.UTF-8` with `a\xffb` as the subject, GNU `grep 'a.b'` and `grep
+/// 'a[^x]b'`, `sed -n '/a.b/p'` and bash's `[[ $s =~ ^a.b$ ]]` all fail to
+/// match, and all match under `C`. glibc's `.` in a UTF-8 locale takes only
+/// a valid sequence, and its bracket expressions keep only the bytes that are
+/// characters on their own (`bitset_mask (sbcset, dfa->sb_char)`); a literal
+/// byte in the pattern is a `CHARACTER` and compares as a byte.
+fn takes(inst: &Inst, c: Option<Ch>, ci: bool, bytes: bool) -> bool {
+    let undecodable = matches!(c, Some(Ch::B(_))) && !bytes;
     match inst {
         Inst::Char(lit) => char_eq(c, *lit, ci),
-        Inst::Any => c.is_some(),
-        Inst::Class(k) => c.is_some_and(|ch| k.matches(ch, ci)),
+        Inst::Any => c.is_some() && !undecodable,
+        Inst::Skip => c.is_some(),
+        Inst::Class(k) => !undecodable && c.is_some_and(|ch| k.matches(ch, ci)),
         _ => false,
     }
 }
@@ -2005,7 +2031,7 @@ impl Prefilter {
             *seen = true;
             let next = pc.saturating_add(1);
             match prog.get(pc)? {
-                Inst::Char(_) | Inst::Any | Inst::Class(_) => {
+                Inst::Char(_) | Inst::Any | Inst::Skip | Inst::Class(_) => {
                     // At most twice, anchored and not; deduplicated below.
                     firsts.push(pc);
                     line_start &= anchored;
@@ -2030,7 +2056,7 @@ impl Prefilter {
         let set = byte_set(|c| {
             firsts
                 .iter()
-                .any(|&pc| prog.get(pc).is_some_and(|inst| takes(inst, Some(c), ci)))
+                .any(|&pc| prog.get(pc).is_some_and(|inst| takes(inst, Some(c), ci, true)))
         });
         if !line_start && set == [u64::MAX; 4] {
             return None;
@@ -2049,7 +2075,7 @@ impl Prefilter {
             None => self
                 .firsts
                 .iter()
-                .any(|&pc| prog.get(pc).is_some_and(|inst| takes(inst, Some(c), ci))),
+                .any(|&pc| prog.get(pc).is_some_and(|inst| takes(inst, Some(c), ci, true))),
         }
     }
 }
@@ -2229,8 +2255,39 @@ impl Regex {
         ci: bool,
         syntax: Syntax,
     ) -> Result<(Regex, Vec<Warning>), EreError> {
+        Self::compile_pattern(pattern, ci, syntax, false)
+    }
+
+    /// [`Regex::new_syntax`] with the pattern read a byte at a time, as well as
+    /// the subject ([`Regex::with_byte_chars`]): how glibc reads both in the C
+    /// locale, where every byte above 0x7f is a character of its own. So `[é]`
+    /// is a bracket of two bytes and `é*` repeats the second of them.
+    ///
+    /// # Errors
+    /// As [`Regex::new_syntax`].
+    pub fn new_syntax_bytes(
+        pattern: BStr<'_>,
+        ci: bool,
+        syntax: Syntax,
+    ) -> Result<Regex, EreError> {
+        Self::compile_pattern(pattern, ci, syntax, true).map(|(re, _)| re.with_byte_chars(true))
+    }
+
+    /// The compiler behind every constructor; `pattern_bytes` reads the
+    /// pattern a byte at a time rather than as UTF-8.
+    fn compile_pattern(
+        pattern: BStr<'_>,
+        ci: bool,
+        syntax: Syntax,
+        pattern_bytes: bool,
+    ) -> Result<(Regex, Vec<Warning>), EreError> {
+        let chars: Vec<Ch> = if pattern_bytes {
+            bytes::byte_positions(pattern).map(|(_, c)| c).collect()
+        } else {
+            bytes::chars(pattern).collect()
+        };
         let mut parser = EParser {
-            chars: bytes::chars(pattern).collect(),
+            chars,
             pos: 0,
             ngroups: 0,
             depth: 0,
@@ -2253,11 +2310,11 @@ impl Regex {
         // Unanchored search prefix: prefer entering the match at the current
         // position (leftmost) over skipping one char and retrying.
         //   0: Split(real, skip)
-        //   1: Any            (skip)
+        //   1: Skip           (any character, a byte that decodes to nothing too)
         //   2: Jmp 0
         //   real: Save(0) … Save(1) Match
         let split = c.emit(Inst::Split(0, 0));
-        let skip = c.emit(Inst::Any);
+        let skip = c.emit(Inst::Skip);
         c.emit(Inst::Jmp(split));
         let real = c.prog.len();
         c.patch(split, Inst::Split(real, skip));
@@ -2818,8 +2875,8 @@ impl Regex {
                 // and `sp` is an index into `input`.
                 let next_pc = f.pc.saturating_add(1);
                 match inst {
-                    Inst::Char(_) | Inst::Any | Inst::Class(_)
-                        if takes(inst, input.at(f.sp), self.ci) =>
+                    Inst::Char(_) | Inst::Any | Inst::Skip | Inst::Class(_)
+                        if takes(inst, input.at(f.sp), self.ci, self.bytes) =>
                     {
                         f.pc = next_pc;
                         f.sp = f.sp.saturating_add(1);
@@ -3035,7 +3092,9 @@ impl Regex {
                 // (`Match` is), and `sp` is an index into `input`.
                 let next = (pc.saturating_add(1), sp.saturating_add(1));
                 match inst {
-                    Inst::Char(_) | Inst::Any | Inst::Class(_) if takes(inst, c, self.ci) => {
+                    Inst::Char(_) | Inst::Any | Inst::Skip | Inst::Class(_)
+                        if takes(inst, c, self.ci, self.bytes) =>
+                    {
                         // The search prefix is the instructions before the
                         // pattern's entry; its one consuming instruction is
                         // the `Any` whose successor seeds the pattern again.
@@ -3278,6 +3337,49 @@ impl Search<'_> {
                 .map(|end| (0, end)))
         })?;
         Ok(span.map(|(_, end)| end))
+    }
+
+    /// glibc's *backward* search: the match that begins latest in the bytes
+    /// `0..hi`, taken as the whole subject -- each starting character tried
+    /// from the last one down to the first -- and, at the first start that
+    /// matches, the longest match there. `(start, end)` as byte offsets, or
+    /// `None` if nothing in the window matches.
+    ///
+    /// `re_search (re, s, hi, hi - 1, -(hi - 1), regs)`: how `tac -r` finds the
+    /// separator nearest the end of what it has not printed yet. The anchors
+    /// are the window's, because the window is the string glibc is handed:
+    /// `^` and `` \` `` hold at byte 0 (and `^` after a newline, under the
+    /// newline anchor), `$` and `\'` at `hi` -- wherever those fall in the
+    /// file the window came from.
+    ///
+    /// Only the first byte of a character is tried as a start, as glibc tries
+    /// in a multibyte locale; a byte that decodes to nothing is a character of
+    /// its own. The prefilter, where the pattern has one, skips a start no
+    /// match can begin at, as glibc's fastmap does.
+    ///
+    /// # Errors
+    /// [`MatchLimit`] if a backreference search exceeded its budget, which is
+    /// shared by every start tried.
+    pub fn rsearch(&self, hi: usize) -> Result<Option<(usize, usize)>, MatchLimit> {
+        self.in_window(0, hi, |re, input| {
+            let mut budget = Regex::backtrack_budget(input.len());
+            for start in (0..input.len()).rev() {
+                if let Some(pf) = re.prefilter.as_ref()
+                    && !re.can_start(pf, input, start, StartOfLine::Yes)
+                {
+                    continue;
+                }
+                let slots = if re.has_backref {
+                    re.backtrack_at(input, start, &mut budget, StartOfLine::Yes)?
+                } else {
+                    re.scan(input, start, re.entry, true, StartOfLine::Yes, MATCH_SLOTS)
+                };
+                if let Some(end) = slots.and_then(|s| s.get(1).copied().flatten()) {
+                    return Ok(Some((start, end)));
+                }
+            }
+            Ok(None)
+        })
     }
 
     /// Run `search` over the characters of the window `lo..hi` and turn the
@@ -3656,14 +3758,60 @@ mod tests {
         assert_eq!(backref.search(b"baab").longest_at(1, 4).unwrap(), Some(3));
     }
 
+    /// `re_search` backward: the latest start that matches, and the longest
+    /// match there; the window's ends are the anchors.
+    #[test]
+    fn a_backward_search_finds_the_latest_start() {
+        let re = |p: &str| emacs_nl(p);
+        // The latest start wins, not the longest match overall.
+        assert_eq!(re("a+").search(b"baaa").rsearch(4).unwrap(), Some((3, 4)));
+        assert_eq!(re("ba+").search(b"baaab").rsearch(5).unwrap(), Some((0, 4)));
+        // Newlines, as tac's default separator would find them.
+        assert_eq!(re("\n").search(b"a\nb\nc").rsearch(5).unwrap(), Some((3, 4)));
+        assert_eq!(re("\n").search(b"a\nb\nc").rsearch(3).unwrap(), Some((1, 2)));
+        assert_eq!(re("\n").search(b"abc").rsearch(3).unwrap(), None);
+        assert_eq!(re("\n").search(b"abc").rsearch(0).unwrap(), None);
+        // `^` holds at the window's start and after a newline; `$` at its end.
+        assert_eq!(re("^b").search(b"ab\nb").rsearch(4).unwrap(), Some((3, 4)));
+        assert_eq!(re("^a").search(b"xa").rsearch(2).unwrap(), None);
+        assert_eq!(re("b$").search(b"ab\ncd").rsearch(2).unwrap(), Some((1, 2)));
+        assert_eq!(re("\\`x").search(b"xx").rsearch(2).unwrap(), Some((0, 1)));
+        // Only a character's first byte starts a match: `.` at the start of
+        // "é" takes both its bytes.
+        let e = "a\u{e9}".as_bytes();
+        assert_eq!(re(".").search(e).rsearch(3).unwrap(), Some((1, 3)));
+        // A window that ends inside a character sees its first byte alone,
+        // which decodes to nothing, so `.` skips it for the `a` before.
+        assert_eq!(re(".").search(e).rsearch(2).unwrap(), Some((0, 1)));
+        // The backtracker answers the same way.
+        let backref = emacs_nl("\\(a\\)\\1");
+        let br = backref.search(b"aaxaa");
+        assert_eq!(br.rsearch(5).unwrap(), Some((3, 5)));
+        assert_eq!(br.rsearch(4).unwrap(), Some((0, 2)));
+    }
+
+    fn emacs_nl(p: &str) -> Regex {
+        crate::emacs::compile(p.as_bytes(), false)
+            .unwrap()
+            .with_newline_anchor(true)
+    }
+
     /// A window that starts inside a character is decoded from its own bytes:
-    /// the tail of the character is bytes that decode to nothing.
+    /// the tail of the character is bytes that decode to nothing -- which, read
+    /// as characters, only a literal byte takes, and read as bytes, anything
+    /// that takes a byte does.
     #[test]
     fn a_window_inside_a_character_sees_bytes() {
-        let re = Regex::new(br"[^a]b").unwrap();
         // "é" is C3 A9; from byte 2 the window is A9, then "b".
         let text = "aéb".as_bytes();
+        let re = Regex::new(br"[^a]b").unwrap();
         let search = re.search(text);
+        assert_eq!(search.find_window(2, 4).unwrap(), None);
+        assert_eq!(search.longest_at(2, 4).unwrap(), None);
+        let b = Regex::new(br"b").unwrap();
+        assert_eq!(b.search(text).find_window(2, 4).unwrap(), Some((3, 4)));
+        let bytes = Regex::new(br"[^a]b").unwrap().with_byte_chars(true);
+        let search = bytes.search(text);
         assert_eq!(search.find_window(2, 4).unwrap(), Some((2, 4)));
         assert_eq!(search.longest_at(2, 4).unwrap(), Some(4));
     }
@@ -4575,9 +4723,17 @@ mod tests {
     /// a pattern was reported as an uncompilable right-hand side.
     #[test]
     fn matches_a_subject_and_a_pattern_that_are_not_text() {
-        // `.` matches one *character*, and an undecodable byte is one — not a
-        // third of an `é`, and not nothing.
-        assert!(Regex::new(b"^a.b$").unwrap().is_match(b"a\xffb").unwrap());
+        // `.` matches one *character* -- not a third of an `é` -- but, as in a
+        // glibc UTF-8 locale, not a byte that decodes to nothing; read as the
+        // C locale reads it, it does.
+        assert!(!Regex::new(b"^a.b$").unwrap().is_match(b"a\xffb").unwrap());
+        assert!(
+            Regex::new(b"^a.b$")
+                .unwrap()
+                .with_byte_chars(true)
+                .is_match(b"a\xffb")
+                .unwrap()
+        );
         assert!(
             Regex::new(b"^a.b$")
                 .unwrap()
@@ -4604,16 +4760,27 @@ mod tests {
                 .is_match(b"a\xffb")
                 .unwrap()
         );
-        // …and inside a bracket expression.
+        // …but not inside a bracket expression, which in a UTF-8 reading keeps
+        // only the bytes that are characters on their own -- measured, bash's
+        // `[[ $'a\xffb' =~ ^a[$'\xff']b$ ]]` fails under C.UTF-8 and holds
+        // under C. Read as bytes, it is a member like any other.
+        assert!(
+            !Regex::new(b"^a[\xff\xfe]b$")
+                .unwrap()
+                .is_match(b"a\xffb")
+                .unwrap()
+        );
         assert!(
             Regex::new(b"^a[\xff\xfe]b$")
                 .unwrap()
+                .with_byte_chars(true)
                 .is_match(b"a\xffb")
                 .unwrap()
         );
         assert!(
             !Regex::new(b"^a[\xfe]b$")
                 .unwrap()
+                .with_byte_chars(true)
                 .is_match(b"a\xffb")
                 .unwrap()
         );
@@ -4633,8 +4800,17 @@ mod tests {
                 .is_match(b"\xff")
                 .unwrap()
         );
-        // …so a negated class does match it, as bash in the C locale does.
-        assert!(Regex::new(b"^[^a-z]$").unwrap().is_match(b"\xff").unwrap());
+        // …and a negated class does not match it either, as bash's does not
+        // under C.UTF-8 -- while under C, where the byte is a character, it
+        // does.
+        assert!(!Regex::new(b"^[^a-z]$").unwrap().is_match(b"\xff").unwrap());
+        assert!(
+            Regex::new(b"^[^a-z]$")
+                .unwrap()
+                .with_byte_chars(true)
+                .is_match(b"\xff")
+                .unwrap()
+        );
 
         // A quantifier counts it as one character.
         assert!(
@@ -4666,8 +4842,16 @@ mod tests {
         );
 
         // A capture hands back the bytes, not an approximation of them — this
-        // is what reaches `BASH_REMATCH`.
+        // is what reaches `BASH_REMATCH`. (`.` takes the bytes only read as
+        // the C locale reads them; a literal byte takes itself either way.)
         let caps = Regex::new(b"^a(.+)b$")
+            .unwrap()
+            .with_byte_chars(true)
+            .captures(b"a\xff\xfeb")
+            .unwrap()
+            .unwrap();
+        assert_eq!(caps[1].as_deref(), Some(&b"\xff\xfe"[..]));
+        let caps = Regex::new(b"^a(\xff\xfe)b$")
             .unwrap()
             .captures(b"a\xff\xfeb")
             .unwrap()
@@ -4940,7 +5124,22 @@ mod tests {
         // a span must not split it or skip it.
         let hay: &[u8] = &[b'a', 0xFF, b'b'];
         assert_eq!(re("b").find(hay).unwrap(), Some((2, 3)));
-        assert_eq!(re("a.b").find(hay).unwrap(), Some((0, 3)));
+        // Only itself takes it: not `.`, and no bracket expression.
+        assert_eq!(re("a.b").find(hay).unwrap(), None);
+        assert_eq!(re("a[^x]b").find(hay).unwrap(), None);
+        assert_eq!(re("a[^[:alpha:]]b").find(hay).unwrap(), None);
+        assert_eq!(re("a\\Wb").find(hay).unwrap(), None);
+        assert_eq!(
+            Regex::new(b"a\xffb").unwrap().find(hay).unwrap(),
+            Some((0, 3))
+        );
+        // `.` still takes a whole valid character, and the byte between.
+        assert_eq!(re("a.b").find("a\u{e9}b".as_bytes()).unwrap(), Some((0, 4)));
+        assert_eq!(re("x.").find(b"x\xffx\xc3\xa9").unwrap(), Some((2, 5)));
+        // Read as bytes -- the C locale -- `.` and a negated bracket take it.
+        let bytes = |p: &str| Regex::new(p.as_bytes()).unwrap().with_byte_chars(true);
+        assert_eq!(bytes("a.b").find(hay).unwrap(), Some((0, 3)));
+        assert_eq!(bytes("a[^x]b").find(hay).unwrap(), Some((0, 3)));
     }
 
     // ---- backreferences --------------------------------------------------

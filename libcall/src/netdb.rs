@@ -93,7 +93,12 @@ mod sys {
     use super::{Addrinfo, Hostent, Ifaddrs, Sockaddr, c_char, c_int, c_void};
 
     unsafe extern "C" {
-        pub fn inet_ntop(af: c_int, src: *const c_void, dst: *mut c_char, size: u32) -> *const c_char;
+        pub fn inet_ntop(
+            af: c_int,
+            src: *const c_void,
+            dst: *mut c_char,
+            size: u32,
+        ) -> *const c_char;
         pub fn getaddrinfo(
             node: *const c_char,
             service: *const c_char,
@@ -619,7 +624,10 @@ mod tests {
     fn inet_ntop_refuses_an_unknown_family_and_a_short_address() {
         let mut buf = [0u8; INET6_ADDRSTRLEN];
         assert_eq!(inet_ntop(99, &[0; 16], &mut buf), Err(EAFNOSUPPORT));
-        assert_eq!(inet_ntop(AF_INET, &[127, 0, 1], &mut buf), Err(crate::EINVAL));
+        assert_eq!(
+            inet_ntop(AF_INET, &[127, 0, 1], &mut buf),
+            Err(crate::EINVAL)
+        );
         assert_eq!(inet_ntop(AF_INET6, &[0; 15], &mut buf), Err(crate::EINVAL));
     }
 
@@ -637,7 +645,11 @@ mod tests {
         };
         check(AF_INET, &[127, 0, 0, 1], b"127.0.0.1");
         check(AF_INET, &[255, 255, 255, 255], b"255.255.255.255");
-        check(AF_INET6, &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], b"::1");
+        check(
+            AF_INET6,
+            &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            b"::1",
+        );
         let doc = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
         check(AF_INET6, &doc, b"2001:db8::1");
         let mapped = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 1, 2, 3, 4];
@@ -656,7 +668,10 @@ mod tests {
     #[test]
     fn inet_ntop_has_no_library_on_the_host() {
         let mut buf = [0u8; INET6_ADDRSTRLEN];
-        assert_eq!(inet_ntop(AF_INET, &[127, 0, 0, 1], &mut buf), Err(crate::ENOSYS));
+        assert_eq!(
+            inet_ntop(AF_INET, &[127, 0, 0, 1], &mut buf),
+            Err(crate::ENOSYS)
+        );
     }
 
     #[test]

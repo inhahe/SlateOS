@@ -349,7 +349,9 @@ fn esc_ctl(s: &mut [u8]) {
         let lead = s.get(i).copied().unwrap_or(0);
         let n = utf8_len(lead);
         let whole = n.filter(|&n| i.saturating_add(n) <= len);
-        let c1 = lead == 0xc2 && s.get(i.saturating_add(1)).is_some_and(|b| (0x80..=0x9f).contains(b));
+        let c1 = lead == 0xc2
+            && s.get(i.saturating_add(1))
+                .is_some_and(|b| (0x80..=0x9f).contains(b));
         let good = whole.filter(|&n| {
             !c1 && (1..n).all(|x| {
                 s.get(i.saturating_add(x))
@@ -583,7 +585,10 @@ mod tests {
 
     #[test]
     fn scanf_reads_what_strtod_would_and_stops_where_it_stops() {
-        assert_eq!(scan_doubles(b"16000.00 100000.00\n", 2), [16000.0, 100_000.0]);
+        assert_eq!(
+            scan_doubles(b"16000.00 100000.00\n", 2),
+            [16000.0, 100_000.0]
+        );
         assert_eq!(scan_doubles(b"  \t1.5\n\n2.5", 2), [1.5, 2.5]);
         assert_eq!(scan_doubles(b"-3 +4", 2), [-3.0, 4.0]);
         assert_eq!(scan_doubles(b"1e3 2E-1", 2), [1000.0, 0.2]);
@@ -641,7 +646,10 @@ mod tests {
 
     #[test]
     fn load_averages_keep_what_parsed_and_zero_the_rest() {
-        assert_eq!(load_averages(b"0.07 1.05 12.34 2/297 51893\n"), (0.07, 1.05, 12.34));
+        assert_eq!(
+            load_averages(b"0.07 1.05 12.34 2/297 51893\n"),
+            (0.07, 1.05, 12.34)
+        );
         assert_eq!(load_averages(b"1.50 x"), (1.5, 0.0, 0.0));
         assert_eq!(load_averages(b"a line of prose"), (0.0, 0.0, 0.0));
         assert_eq!(load_averages(b""), (0.0, 0.0, 0.0));
@@ -774,8 +782,14 @@ mod tests {
 
     #[test]
     fn escape_command_brackets_and_marks_a_zombie() {
-        assert_eq!(escape_command(b"kworker/0:1", b'S', MAX_BUFSZ, true), b"[kworker/0:1]");
-        assert_eq!(escape_command(b"sh", b'Z', MAX_BUFSZ, true), b"[sh] <defunct>");
+        assert_eq!(
+            escape_command(b"kworker/0:1", b'S', MAX_BUFSZ, true),
+            b"[kworker/0:1]"
+        );
+        assert_eq!(
+            escape_command(b"sh", b'Z', MAX_BUFSZ, true),
+            b"[sh] <defunct>"
+        );
         assert_eq!(escape_command(b"", b'R', MAX_BUFSZ, true), b"[]");
         // No room for a byte of the name: nothing at all.
         assert_eq!(escape_command(b"sh", b'S', 3, true), b"");
@@ -799,7 +813,10 @@ mod tests {
 
     #[test]
     fn the_cmdline_item_falls_back_to_the_name_and_then_to_a_question_mark() {
-        assert_eq!(cmdline_cvt(b"sleep\x00600\x00", b"sleep", b'S', true), b"sleep 600");
+        assert_eq!(
+            cmdline_cvt(b"sleep\x00600\x00", b"sleep", b'S', true),
+            b"sleep 600"
+        );
         assert_eq!(cmdline_cvt(b"", b"kthreadd", b'S', true), b"[kthreadd]");
         assert_eq!(cmdline_cvt(b"", b"sh", b'Z', true), b"[sh] <defunct>");
         assert_eq!(cmdline_cvt(b"\x00", b"sh", b'S', true), b"?");

@@ -334,7 +334,9 @@ fn layout(
         .saturating_add(21)
         .saturating_add(from_width)
         .saturating_add(times_width);
-    maxcmd = maxcmd.saturating_sub(taken).clamp(MIN_CMD_WIDTH, MAX_CMD_WIDTH);
+    maxcmd = maxcmd
+        .saturating_sub(taken)
+        .clamp(MIN_CMD_WIDTH, MAX_CMD_WIDTH);
     let lay = Layout {
         userlen: usize::try_from(userlen).unwrap_or(8),
         fromlen: usize::try_from(fromlen).unwrap_or(16),
@@ -346,9 +348,17 @@ fn layout(
 /// The two heading lines, under the status line (`status`, empty when
 /// `/proc/uptime` could not be read -- upstream then prints a blank line).
 fn header(opts: &Options, lay: &Layout, status: &str) -> Vec<u8> {
-    let mut h = format!("{status}\n{:<width$} TTY      ", "USER", width = lay.userlen);
+    let mut h = format!(
+        "{status}\n{:<width$} TTY      ",
+        "USER",
+        width = lay.userlen
+    );
     if opts.from {
-        h.push_str(&format!("{:<width$}", "FROM", width = lay.fromlen.saturating_sub(1)));
+        h.push_str(&format!(
+            "{:<width$}",
+            "FROM",
+            width = lay.fromlen.saturating_sub(1)
+        ));
     }
     h.push_str(if opts.longform {
         "  LOGIN@   IDLE   JCPU   PCPU WHAT\n"
@@ -537,12 +547,7 @@ fn display_or_interface(host: &[u8], restlen: i64) -> Vec<u8> {
 /// it fits whole -- then whatever display or interface the host names. With no
 /// address, or without `-i`, the host. `ntop` is `inet_ntop` into a buffer of
 /// the size given.
-fn from_field(
-    rec: &Record,
-    ip_addresses: bool,
-    fromlen: usize,
-    ntop: &Ntop,
-) -> Vec<u8> {
+fn from_field(rec: &Record, ip_addresses: bool, fromlen: usize, ntop: &Ntop) -> Vec<u8> {
     if !ip_addresses {
         return print_host(&rec.host, fromlen);
     }
@@ -764,12 +769,22 @@ fn showinfo(
     }
 
     let mut row = Vec::new();
-    let name = rec.user.get(..lay.userlen.min(rec.user.len())).unwrap_or_default();
+    let name = rec
+        .user
+        .get(..lay.userlen.min(rec.user.len()))
+        .unwrap_or_default();
     row.extend_from_slice(name);
-    row.resize(row.len().saturating_add(lay.userlen.saturating_add(1).saturating_sub(name.len())), b' ');
+    row.resize(
+        row.len()
+            .saturating_add(lay.userlen.saturating_add(1).saturating_sub(name.len())),
+        b' ',
+    );
     let shown = line_name.get(..8.min(line_name.len())).unwrap_or_default();
     row.extend_from_slice(shown);
-    row.resize(row.len().saturating_add(9usize.saturating_sub(shown.len())), b' ');
+    row.resize(
+        row.len().saturating_add(9usize.saturating_sub(shown.len())),
+        b' ',
+    );
     if opts.from {
         row.extend_from_slice(&from_field(rec, opts.ip_addresses, lay.fromlen, world.ntop));
     }
@@ -805,7 +820,11 @@ fn showinfo(
     }
     row.push(b' ');
     let width = usize::try_from(maxcmd).unwrap_or(0);
-    row.extend_from_slice(best.cmdline.get(..width.min(best.cmdline.len())).unwrap_or_default());
+    row.extend_from_slice(
+        best.cmdline
+            .get(..width.min(best.cmdline.len()))
+            .unwrap_or_default(),
+    );
     row.push(b'\n');
     Ok(Some(row))
 }
@@ -814,7 +833,11 @@ fn showinfo(
 /// either those whose name is `user` -- compared as `strncmp` over the
 /// 32-byte field -- or, with no user given, every one with a name.
 fn sessions<'r>(records: &'r [Record], user: Option<&[u8]>) -> impl Iterator<Item = &'r Record> {
-    let user = user.map(|u| u.get(..UT_NAMESIZE.min(u.len())).unwrap_or_default().to_vec());
+    let user = user.map(|u| {
+        u.get(..UT_NAMESIZE.min(u.len()))
+            .unwrap_or_default()
+            .to_vec()
+    });
     records.iter().filter(move |r| {
         r.record_type == USER_PROCESS
             && match &user {
@@ -830,12 +853,12 @@ mod imp {
         HELP, Layout, Node, Options, Request, TaskTable, UT_NAMESIZE, World, header, layout,
         parse_args, sessions, showinfo,
     };
+    use coreutils::diag;
     use coreutils::errmsg::strerror;
     use coreutils::procps;
     use coreutils::quote::{os_bytes, os_from_bytes, quotef};
     use coreutils::stdfd::{self, Stream};
     use coreutils::utmp::{self, UTMP_FILE};
-    use coreutils::diag;
     use std::ffi::OsString;
     use std::io::Write;
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
@@ -1068,13 +1091,24 @@ mod tests {
         let d = Options::default();
         // 512 less 21 + 8 + 16 + 20.
         let (lay, w) = layout(&d, None, None, None, None);
-        assert_eq!(lay, Layout { userlen: 8, fromlen: 16, maxcmd: 447 });
+        assert_eq!(
+            lay,
+            Layout {
+                userlen: 8,
+                fromlen: 16,
+                maxcmd: 447
+            }
+        );
         assert!(w.is_empty());
         // The terminal first, then COLUMNS; zero columns is no answer.
         assert_eq!(layout(&d, None, None, Some(80), Some(b"200")).0.maxcmd, 15);
         assert_eq!(layout(&d, None, None, Some(0), Some(b"200")).0.maxcmd, 135);
         assert_eq!(layout(&d, None, None, None, Some(b"")).0.maxcmd, 7);
-        let short = Options { longform: false, from: false, ..Options::default() };
+        let short = Options {
+            longform: false,
+            from: false,
+            ..Options::default()
+        };
         assert_eq!(layout(&short, None, None, Some(80), None).0.maxcmd, 51);
         // The variables, and their refusals.
         let (lay, w) = layout(&d, Some(b"20"), Some(b"30"), Some(200), None);
@@ -1099,7 +1133,11 @@ mod tests {
             String::from_utf8(header(&d, &lay, " 10:00:00 up 1 min")).unwrap(),
             " 10:00:00 up 1 min\nUSER     TTY      FROM             LOGIN@   IDLE   JCPU   PCPU WHAT\n"
         );
-        let s = Options { longform: false, from: false, ..Options::default() };
+        let s = Options {
+            longform: false,
+            from: false,
+            ..Options::default()
+        };
         assert_eq!(
             String::from_utf8(header(&s, &lay, "")).unwrap(),
             "\nUSER     TTY         IDLE WHAT\n"
@@ -1152,7 +1190,10 @@ mod tests {
         let early = 1_699_920_000 + 5 * 3600;
         assert_eq!(logintime(early, 1_699_920_000 - 3600, &utc), " 23:00  ");
         // Yesterday and more than twelve hours ago: weekday and hour.
-        assert_eq!(logintime(early, 1_699_920_000 - 20 * 3600, &utc), " Mon04  ");
+        assert_eq!(
+            logintime(early, 1_699_920_000 - 20 * 3600, &utc),
+            " Mon04  "
+        );
         // Within six days: weekday and hour.
         assert_eq!(at(now - 2 * 86400), " Sun22  ");
         // Before that: day, month, year.
@@ -1225,7 +1266,12 @@ mod tests {
         r.addr_v6 = [u32::from_le_bytes([192, 168, 100, 200]), 0, 0, 0];
         assert_eq!(show(&r, true, 8), "example.");
         // IPv4-mapped IPv6 is IPv4.
-        r.addr_v6 = [0, 0, u32::from_le_bytes([0, 0, 0xff, 0xff]), u32::from_le_bytes([10, 0, 0, 3])];
+        r.addr_v6 = [
+            0,
+            0,
+            u32::from_le_bytes([0, 0, 0xff, 0xff]),
+            u32::from_le_bytes([10, 0, 0, 3]),
+        ];
         assert_eq!(show(&r, true, 16), "10.0.0.3:0      ");
         // IPv6 is cut to the column.
         r.addr_v6 = [1, 0, 0, 1];
@@ -1244,13 +1290,27 @@ mod tests {
     #[test]
     fn the_terminal_device() {
         let stat = |p: &[u8]| -> Option<Node> {
-            let char_dev = |rdev| Some(Node { atime: 0, rdev, is_char: true });
+            let char_dev = |rdev| {
+                Some(Node {
+                    atime: 0,
+                    rdev,
+                    is_char: true,
+                })
+            };
             match p {
                 b"/dev/pts/3" => char_dev(34819),
                 b"/dev/tty1" => char_dev(1025),
-                b"/dev/" => Some(Node { atime: 0, rdev: 0, is_char: false }),
+                b"/dev/" => Some(Node {
+                    atime: 0,
+                    rdev: 0,
+                    is_char: false,
+                }),
                 b"/dev/tty" => char_dev(1280),
-                b"/elsewhere" => Some(Node { atime: 0, rdev: 77, is_char: false }),
+                b"/elsewhere" => Some(Node {
+                    atime: 0,
+                    rdev: 77,
+                    is_char: false,
+                }),
                 _ => None,
             }
         };
@@ -1307,7 +1367,10 @@ mod tests {
         assert_eq!(find_best_proc(&theirs, 10, 7, None).cmdline, b"vim notes");
         // The real ID is enough.
         theirs[2].ruid = 1000;
-        assert_eq!(find_best_proc(&theirs, 10, 7, Some(1000)).cmdline, b"vim notes");
+        assert_eq!(
+            find_best_proc(&theirs, 10, 7, Some(1000)).cmdline,
+            b"vim notes"
+        );
     }
 
     #[test]
@@ -1332,7 +1395,10 @@ mod tests {
         assert_eq!(best.cmdline, b"login");
         assert_eq!(best.jcpu, 20 + 21);
         // Seen before the login process, the terminal's newest is replaced by it.
-        let tasks = [task(5, 50, 7, 5, 99, b"early"), task(10, 100, 5, 10, 99, b"login")];
+        let tasks = [
+            task(5, 50, 7, 5, 99, b"early"),
+            task(10, 100, 5, 10, 99, b"login"),
+        ];
         assert_eq!(find_best_proc(&tasks, 10, 7, Some(1000)).cmdline, b"login");
         // A login process whose command line is `-` leaves the dash in place,
         // and the newest process on the terminal takes it.
@@ -1345,7 +1411,10 @@ mod tests {
         assert_eq!((best.cmdline.as_slice(), best.pid), (&b"make"[..], 20));
         // A login process that began at tick zero seeds WHAT but not the
         // time, so any foreground process of the user beats it.
-        let tasks = [task(10, 0, 5, 10, 99, b"init"), task(20, 1, 7, 20, 20, b"sh")];
+        let tasks = [
+            task(10, 0, 5, 10, 99, b"init"),
+            task(20, 1, 7, 20, 20, b"sh"),
+        ];
         assert_eq!(find_best_proc(&tasks, 10, 7, Some(1000)).cmdline, b"sh");
     }
 
@@ -1370,7 +1439,8 @@ mod tests {
             rec(b"bob", b"pts/4", b"", 5),
             rec(b"alice", b"pts/5", b"", 6),
         ];
-        let pids = |user: Option<&[u8]>| sessions(&records, user).map(|r| r.pid).collect::<Vec<_>>();
+        let pids =
+            |user: Option<&[u8]>| sessions(&records, user).map(|r| r.pid).collect::<Vec<_>>();
         assert_eq!(pids(None), [1, 5, 6]);
         assert_eq!(pids(Some(b"alice")), [1, 6]);
         // An empty USER matches the nameless entry, as `strncmp` does.
@@ -1392,7 +1462,11 @@ mod tests {
     fn a_row() {
         let now = 1_700_000_000;
         let stat = |p: &[u8]| -> Option<Node> {
-            (p == b"/dev/pts/3").then_some(Node { atime: now - 3700, rdev: 34819, is_char: true })
+            (p == b"/dev/pts/3").then_some(Node {
+                atime: now - 3700,
+                rdev: 34819,
+                is_char: true,
+            })
         };
         let uid_of = |n: &[u8]| (n == b"alice").then_some(1000);
         let world = World {
@@ -1409,11 +1483,16 @@ mod tests {
                 task(30, 300, 34819, 30, 30, b"vim notes"),
             ])
         };
-        let mut table = TaskTable { read: None, load: &load };
+        let mut table = TaskTable {
+            read: None,
+            load: &load,
+        };
         let d = Options::default();
         let (lay, _) = layout(&d, None, None, Some(80), None);
         let row = |r: &Record, o: &Options, t: &mut TaskTable<'_>| {
-            showinfo(r, o, &lay, &world, t).unwrap().map(|b| String::from_utf8(b).unwrap())
+            showinfo(r, o, &lay, &world, t)
+                .unwrap()
+                .map(|b| String::from_utf8(b).unwrap())
         };
         let alice = rec(b"alice", b"pts/3", b"10.0.0.2", 10);
         assert_eq!(
@@ -1421,15 +1500,23 @@ mod tests {
             Some("alice    pts/3    10.0.0.2         22:12    1:01m  0.40s  0.30s vim notes\n")
         );
         // -p takes its share of WHAT; 80 columns leave 15, the IDs 6.
-        let p = Options { pids: true, ..Options::default() };
+        let p = Options {
+            pids: true,
+            ..Options::default()
+        };
         assert_eq!(
             row(&alice, &p, &mut table).as_deref(),
-            Some("alice    pts/3    10.0.0.2         22:12    1:01m  0.40s  0.30s 10/30 vim notes\n")
+            Some(
+                "alice    pts/3    10.0.0.2         22:12    1:01m  0.40s  0.30s 10/30 vim notes\n"
+            )
         );
         // An unknown user has no row, unless -u.
         let mallory = rec(b"mallory", b"pts/3", b"", 10);
         assert_eq!(row(&mallory, &d, &mut table), None);
-        let u = Options { ignoreuser: true, ..Options::default() };
+        let u = Options {
+            ignoreuser: true,
+            ..Options::default()
+        };
         assert!(row(&mallory, &u, &mut table).is_some());
         // A session whose login process has gone has none either.
         let stale = rec(b"alice", b"pts/3", b"", 99);
@@ -1443,7 +1530,10 @@ mod tests {
     #[test]
     fn a_table_that_cannot_be_read_is_an_error_only_when_a_row_needs_it() {
         let failed = || Err(io::Error::from(io::ErrorKind::PermissionDenied));
-        let mut table = TaskTable { read: None, load: &failed };
+        let mut table = TaskTable {
+            read: None,
+            load: &failed,
+        };
         let stat = |_: &[u8]| None;
         let nobody = |_: &[u8]| None;
         let world = World {
@@ -1457,8 +1547,14 @@ mod tests {
         let d = Options::default();
         let (lay, _) = layout(&d, None, None, None, None);
         // An unknown user is decided before the table is read.
-        assert_eq!(showinfo(&rec(b"x", b"pts/1", b"", 1), &d, &lay, &world, &mut table).unwrap(), None);
-        let u = Options { ignoreuser: true, ..Options::default() };
+        assert_eq!(
+            showinfo(&rec(b"x", b"pts/1", b"", 1), &d, &lay, &world, &mut table).unwrap(),
+            None
+        );
+        let u = Options {
+            ignoreuser: true,
+            ..Options::default()
+        };
         assert!(showinfo(&rec(b"x", b"pts/1", b"", 1), &u, &lay, &world, &mut table).is_err());
     }
 }

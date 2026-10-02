@@ -1843,12 +1843,18 @@ fn mget(
     1
 }
 
-/// The bytes after `ms_value` in C's `struct magic_set`, which a string
-/// comparison can read one past the value: the six `uint16_t` limits.
-fn value_with_tail(ms: &Ms) -> Vec<u8> {
-    let mut v = ms.ms_value.0.to_vec();
-    for x in [ms.indir_max, ms.name_max, ms.elf_shnum_max, ms.elf_phnum_max, ms.elf_notes_max, ms.regex_max] {
-        v.extend_from_slice(&x.to_le_bytes());
+/// `ms_value`, and after it the bytes that follow it in C's `struct
+/// magic_set`, which a string comparison can read past the value: the six
+/// `uint16_t` limits.
+///
+/// On the stack: every string rule tried makes one, thousands a file.
+fn value_with_tail(ms: &Ms) -> [u8; MAXSTRING + 12] {
+    let mut v = [0u8; MAXSTRING + 12];
+    let (value, tail) = v.split_at_mut(MAXSTRING);
+    value.copy_from_slice(&ms.ms_value.0);
+    let limits = [ms.indir_max, ms.name_max, ms.elf_shnum_max, ms.elf_phnum_max, ms.elf_notes_max, ms.regex_max];
+    for (dst, x) in tail.as_chunks_mut::<2>().0.iter_mut().zip(limits) {
+        *dst = x.to_le_bytes();
     }
     v
 }
@@ -2043,7 +2049,7 @@ fn magiccheck(ms: &mut Ms, m: &Magic, rx: Option<&Rx>, s: &[u8]) -> i32 {
                     idx = ms.search.s_len;
                 }
                 let hay = region.get(..idx).unwrap_or(region);
-                let found = hay.windows(slen).position(|w| w == pat);
+                let found = crate::cstd::memmem(hay, pat);
                 if ms.flags & MAGIC_DEBUG != 0 {
                     debug(if found.is_some() { b"] found\n" } else { b"] not found\n" });
                 }

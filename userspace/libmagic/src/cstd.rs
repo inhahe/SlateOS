@@ -172,10 +172,68 @@ pub fn cstr(s: &[u8]) -> &[u8] {
     s.get(..cstrlen(s)).unwrap_or(s)
 }
 
+/// `memmem`: where `needle` first occurs in `hay`, or `None`. An empty needle
+/// occurs at 0.
+///
+/// By its first byte, then the rest: a search rule looks through as much as
+/// a file's first megabyte, and comparing a whole window at every position
+/// costs a call to compare at every position.
+#[must_use]
+pub fn memmem(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    let Some((&first, rest)) = needle.split_first() else {
+        return Some(0);
+    };
+    let last = hay.len().checked_sub(needle.len())?;
+    let mut from = 0;
+    while from <= last {
+        let at = from + hay.get(from..=last)?.iter().position(|&b| b == first)?;
+        if hay.get(at + 1..at + needle.len()) == Some(rest) {
+            return Some(at);
+        }
+        from = at + 1;
+    }
+    None
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memmem_finds_the_first_occurrence() {
+        let naive = |h: &[u8], n: &[u8]| {
+            if n.is_empty() {
+                Some(0)
+            } else {
+                h.windows(n.len()).position(|w| w == n)
+            }
+        };
+        let cases: &[(&[u8], &[u8])] = &[
+            (b"hello", b"he"),
+            (b"hello", b"lo"),
+            (b"hello", b"l"),
+            (b"hello", b"hello!"),
+            (b"hello", b""),
+            (b"", b"a"),
+            (b"aaab", b"ab"),
+            (b"abababc", b"ababc"),
+            (b"xyz", b"xz"),
+            (b"a\0b\0c", b"\0c"),
+        ];
+        for &(h, n) in cases {
+            assert_eq!(memmem(h, n), naive(h, n), "{h:?} {n:?}");
+        }
+        // Every needle cut from a subject, against every subject.
+        let subject = b"the cat sat on the mat; the end";
+        for i in 0..subject.len() {
+            for j in i..=subject.len().min(i + 6) {
+                let n = &subject[i..j];
+                assert_eq!(memmem(subject, n), naive(subject, n));
+                assert_eq!(memmem(&subject[..i], n), naive(&subject[..i], n));
+            }
+        }
+    }
 
     #[test]
     fn strtol_reads_c_prefixes_and_saturates() {

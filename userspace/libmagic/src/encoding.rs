@@ -78,7 +78,7 @@ pub fn file_encoding(buf: &[u8], encoding_max: usize) -> Encoding {
         typ: "text",
         ubuf: Vec::new(),
     };
-    if looks_ascii(buf, &mut ubuf) {
+    if looks_ascii(buf.iter().copied(), &mut ubuf) {
         if looks_utf7(buf, &mut ubuf) > 0 {
             enc.code = "Unicode text, UTF-7";
             enc.code_mime = "utf-7";
@@ -112,18 +112,21 @@ pub fn file_encoding(buf: &[u8], encoding_max: usize) -> Encoding {
                     enc.code = "Unicode text, UTF-16, big-endian";
                     enc.code_mime = "utf-16be";
                 }
-            } else if looks_latin1(buf, &mut ubuf) {
+            } else if looks_latin1(buf.iter().copied(), &mut ubuf) {
                 enc.code = "ISO-8859";
                 enc.code_mime = "iso-8859-1";
-            } else if looks_extended(buf, &mut ubuf) {
+            } else if looks_extended(buf.iter().copied(), &mut ubuf) {
                 enc.code = "Non-ISO extended-ASCII";
                 enc.code_mime = "unknown-8bit";
             } else {
-                let nbuf = from_ebcdic(buf);
-                if looks_ascii(&nbuf, &mut ubuf) {
+                // `from_ebcdic` into a second buffer, then the tests -- which
+                // stop at the first byte that fails, so the bytes are
+                // translated as they are read rather than all of them first.
+                let nbuf = || buf.iter().map(|&b| from_ebcdic(b));
+                if looks_ascii(nbuf(), &mut ubuf) {
                     enc.code = "EBCDIC";
                     enc.code_mime = "ebcdic";
-                } else if looks_latin1(&nbuf, &mut ubuf) {
+                } else if looks_latin1(nbuf(), &mut ubuf) {
                     enc.code = "International EBCDIC";
                     enc.code_mime = "ebcdic";
                 } else {
@@ -139,9 +142,9 @@ pub fn file_encoding(buf: &[u8], encoding_max: usize) -> Encoding {
 
 /// The `LOOKS` macro: every byte of the buffer is in an allowed class. The
 /// decoded characters are what was read before a failure, as in C.
-fn looks(buf: &[u8], ubuf: &mut Vec<Unichar>, ok: impl Fn(u8) -> bool) -> bool {
+fn looks(bytes: impl IntoIterator<Item = u8>, ubuf: &mut Vec<Unichar>, ok: impl Fn(u8) -> bool) -> bool {
     ubuf.clear();
-    for &b in buf {
+    for b in bytes {
         if !ok(text_char(b)) {
             return false;
         }
@@ -150,16 +153,16 @@ fn looks(buf: &[u8], ubuf: &mut Vec<Unichar>, ok: impl Fn(u8) -> bool) -> bool {
     true
 }
 
-fn looks_ascii(buf: &[u8], ubuf: &mut Vec<Unichar>) -> bool {
-    looks(buf, ubuf, |t| t == T)
+fn looks_ascii(bytes: impl IntoIterator<Item = u8>, ubuf: &mut Vec<Unichar>) -> bool {
+    looks(bytes, ubuf, |t| t == T)
 }
 
-fn looks_latin1(buf: &[u8], ubuf: &mut Vec<Unichar>) -> bool {
-    looks(buf, ubuf, |t| t == T || t == I)
+fn looks_latin1(bytes: impl IntoIterator<Item = u8>, ubuf: &mut Vec<Unichar>) -> bool {
+    looks(bytes, ubuf, |t| t == T || t == I)
 }
 
-fn looks_extended(buf: &[u8], ubuf: &mut Vec<Unichar>) -> bool {
-    looks(buf, ubuf, |t| t == T || t == I || t == X)
+fn looks_extended(bytes: impl IntoIterator<Item = u8>, ubuf: &mut Vec<Unichar>) -> bool {
+    looks(bytes, ubuf, |t| t == T || t == I || t == X)
 }
 
 /// `XX`: an invalid first byte (size 1).
@@ -427,9 +430,9 @@ b'\\', 159, b'S', b'T', b'U', b'V', b'W', b'X', b'Y', b'Z', 244, 245, 246, 247, 
 b'0', b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'8', b'9', 250, 251, 252, 253, 254, 255,
 ];
 
-/// `from_ebcdic`.
-fn from_ebcdic(buf: &[u8]) -> Vec<u8> {
-    buf.iter().map(|&b| EBCDIC_TO_ASCII[usize::from(b)]).collect()
+/// `from_ebcdic`, a byte at a time.
+fn from_ebcdic(b: u8) -> u8 {
+    EBCDIC_TO_ASCII[usize::from(b)]
 }
 
 #[cfg(test)]

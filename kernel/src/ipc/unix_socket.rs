@@ -487,6 +487,56 @@ pub fn bind_node(h: UnixHandle, id: FileId, path: &Path, addr: Address) -> Kerne
     Ok(())
 }
 
+/// Bind `h` to a new socket node at the resolved path `path`, with
+/// permission bits `mode` (already umask-masked), reporting `reported` -- the
+/// path as the binder gave it -- as its address. Both ABIs' `bind` to a path.
+///
+/// # Errors
+///
+/// `InvalidHandle`; `InvalidArgument` if `h` is bound already (checked before
+/// a node is made, so a refused `bind` leaves none behind); `AddrInUse` if the
+/// name exists; what [`crate::fs::Vfs::mknod_socket`] reports otherwise.
+pub fn bind_path(h: UnixHandle, path: &Path, reported: Vec<u8>, mode: u16) -> KernelResult<()> {
+    if is_bound(h)? {
+        return Err(KernelError::InvalidArgument);
+    }
+    // No lock held here: the VFS is never entered with TABLE held.
+    let id = crate::fs::Vfs::mknod_socket(path, mode).map_err(|e| match e {
+        KernelError::AlreadyExists => KernelError::AddrInUse,
+        e => e,
+    })?;
+    bind_node(h, id, path, Address::Path(reported)).inspect_err(|_| {
+        // Bound meanwhile by another thread: the node this call made leads
+        // nowhere, so it goes again. A failure to remove it leaves only an
+        // inert node.
+        let _ = crate::fs::Vfs::remove(path);
+    })
+}
+
+/// The socket a resolved filesystem path leads to, for `connect` and
+/// `sendto`: Linux's checks, in its order.
+///
+/// # Errors
+///
+/// `NotFound` if nothing is there; `ConnectionRefused` if it is not a
+/// socket's node (or has no identity to find one by); `PermissionDenied` if
+/// the caller may not write the node -- Linux asks for write permission, and
+/// a read-only mount does not stop a connect (its `sb_permission` spares
+/// sockets), so that refusal alone is passed over.
+pub fn name_at(path: &Path) -> KernelResult<Name> {
+    let st = crate::fs::Vfs::stat(path)?;
+    if st.entry_type != crate::fs::vfs::EntryType::Socket {
+        return Err(KernelError::ConnectionRefused);
+    }
+    match crate::fs::Vfs::access(path, crate::fs::vfs::W_OK) {
+        Ok(()) | Err(KernelError::ReadOnlyFilesystem) => {}
+        Err(e) => return Err(e),
+    }
+    crate::fs::Vfs::file_identity(path)?
+        .map(Name::Node)
+        .ok_or(KernelError::ConnectionRefused)
+}
+
 /// Bind `h` to the abstract name `name` (without its leading NUL).
 ///
 /// # Errors
@@ -621,12 +671,11 @@ pub fn listen(h: UnixHandle, backlog: usize) -> KernelResult<()> {
 /// # Errors
 ///
 /// `InvalidHandle`; `ConnectionRefused` if nothing live is bound there, or
-/// it is not listening; `ProtocolType`-shaped mismatches (a stream to a
-/// datagram socket, or the reverse) are `ConnectionRefused` too, which Linux
-/// reports as `EPROTOTYPE` -- see the syscall layer; `AlreadyExists`-shaped
-/// `ConnectAlready` if `h` is connected (`EISCONN`); `InvalidArgument` if it
-/// is listening; `WouldBlock` for a full backlog when `nonblocking`;
-/// `Interrupted`.
+/// a stream socket bound there is not listening; `WrongSocketType`
+/// (`EPROTOTYPE`) if the socket there is of the other kind;
+/// `ConnectAlready` if `h` is a connected stream (`EISCONN`);
+/// `InvalidArgument` if it is listening; `WouldBlock` for a full backlog
+/// when `nonblocking`; `Interrupted`.
 pub fn connect(h: UnixHandle, target: &Name, nonblocking: bool) -> KernelResult<()> {
     let kind = kind(h).ok_or(KernelError::InvalidHandle)?;
     match kind {
@@ -634,7 +683,7 @@ pub fn connect(h: UnixHandle, target: &Name, nonblocking: bool) -> KernelResult<
             let mut t = TABLE.lock();
             let peer = t.lookup(target).ok_or(KernelError::ConnectionRefused)?;
             if t.sockets.get(&peer).map(|s| s.kind) != Some(Kind::Dgram) {
-                return Err(KernelError::ConnectionRefused);
+                return Err(KernelError::WrongSocketType);
             }
             t.socket_mut(h)?.default_peer = Some(peer);
             Ok(())
@@ -668,7 +717,7 @@ fn connect_stream(h: UnixHandle, target: &Name, nonblocking: bool) -> KernelResu
                 .ok_or(KernelError::ConnectionRefused)?;
             s.room.remove(task);
             if s.kind != Kind::Stream {
-                return Err(KernelError::ConnectionRefused);
+                return Err(KernelError::WrongSocketType);
             }
             let server_cred = s.listen_cred;
             let server_addr = s.local();
@@ -810,10 +859,11 @@ pub fn send(h: UnixHandle, data: &[u8], nonblocking: bool) -> KernelResult<usize
 ///
 /// # Errors
 ///
-/// As [`send`]; `ConnectionRefused` if nothing live is bound at `target` or
-/// it is not a datagram socket. On a stream socket, `ConnectAlready`
-/// (`EISCONN`) if connected and `NotSupported` (`EOPNOTSUPP`) if not, as
-/// Linux answers a stream `sendto` that names an address.
+/// As [`send`]; `ConnectionRefused` if nothing live is bound at `target`,
+/// `WrongSocketType` (`EPROTOTYPE`) if a stream socket is. On a stream
+/// socket, `ConnectAlready` (`EISCONN`) if connected and `NotSupported`
+/// (`EOPNOTSUPP`) if not, as Linux answers a stream `sendto` that names an
+/// address.
 pub fn send_to(
     h: UnixHandle,
     data: &[u8],
@@ -857,7 +907,7 @@ fn send_dgram(h: UnixHandle, peer: u64, data: &[u8], nonblocking: bool) -> Kerne
             };
             dest.room.remove(task);
             if dest.kind != Kind::Dgram {
-                return Err(KernelError::ConnectionRefused);
+                return Err(KernelError::WrongSocketType);
             }
             if dest.rd_shut {
                 // Linux discards datagrams to a socket whose reading half is
@@ -1222,24 +1272,6 @@ fn reports_node(name: &Path) -> bool {
         .any(|b| b.reported.as_path() == name)
 }
 
-/// Every bound name and its socket's kind, for a listing of bound sockets:
-/// `(reported name, kind, listening)`.
-#[must_use]
-pub fn bound_names() -> Vec<(PathBuf, Kind, bool)> {
-    let t = TABLE.lock();
-    t.names
-        .values()
-        .filter_map(|b| {
-            let s = t.sockets.get(&b.socket)?;
-            Some((
-                b.reported.clone(),
-                s.kind,
-                matches!(s.state, State::Listening { .. }),
-            ))
-        })
-        .collect()
-}
-
 // ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
@@ -1437,8 +1469,8 @@ fn run_self_test(opened: &mut Vec<UnixHandle>) -> Result<(), &'static str> {
     if connect(c3, &stream_name, true) != Err(KernelError::ConnectionRefused) {
         return Err("a closed listener's name still took connections");
     }
-    if connect(c3, &name, true) != Err(KernelError::ConnectionRefused) {
-        return Err("a stream connected to a datagram socket");
+    if connect(c3, &name, true) != Err(KernelError::WrongSocketType) {
+        return Err("a stream connecting to a datagram socket was not WrongSocketType");
     }
 
     // --- socketpair ---

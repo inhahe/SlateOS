@@ -3569,6 +3569,15 @@ extern "C" fn kernel_main() -> ! {
         proc::spawn::self_test_linux_slate_channels(),
     );
 
+    // Ring-3 end-to-end test of AF_UNIX sockets by name: datagrams by
+    // abstract name and by a /tmp path, a stream through listen/connect/
+    // accept, SO_PEERCRED, end of file, EADDRINUSE and unlink.
+    selftest::dispatch_debug(
+        "Linux Unix-domain sockets (ring 3)",
+        selftest::Severity::Diagnostic,
+        proc::spawn::self_test_linux_unix_sockets(),
+    );
+
     // Where each process's program headers are: found in a loaded segment,
     // or copied into a read-only page when none holds them -- recorded for
     // SYS_PROCESS_GET_PHDR and given to Linux programs as AT_PHDR.

@@ -280,6 +280,10 @@ kernel_errors! {
         /// does not exist (NXDOMAIN). Maps to `ENODATA`; `getaddrinfo` answers
         /// `EAI_NODATA`.
         NoAddress = -707,
+        /// The socket at the other end is of the wrong kind for the
+        /// operation: a stream connecting to a datagram socket's name, or a
+        /// datagram sent to a stream socket's. Maps to `EPROTOTYPE`.
+        WrongSocketType = -708,
     }
 }
 
@@ -344,6 +348,7 @@ impl KernelError {
             Self::AddrInUse => "address already in use",
             Self::MsgSize => "message too long for datagram",
             Self::NoAddress => "name has no address of the kind asked",
+            Self::WrongSocketType => "socket at that name is of the wrong type",
         }
     }
 

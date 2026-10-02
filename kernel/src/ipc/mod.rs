@@ -91,6 +91,11 @@ pub fn cleanup_handles(handles: &[(ResourceType, u64)]) {
             ResourceType::StreamSocket => {
                 stream_socket::close(stream_socket::StreamSocketHandle::from_raw(handle_raw));
             }
+            ResourceType::UnixSocket => {
+                // One holder fewer; the socket ends with its last, leaving its
+                // name leading nowhere.
+                unix_socket::close(unix_socket::UnixHandle::from_raw(handle_raw));
+            }
             ResourceType::MemFd => {
                 memfd::close(memfd::MemFdHandle::from_raw(handle_raw));
             }

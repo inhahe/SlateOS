@@ -3768,6 +3768,9 @@ fn fd_link_target(entry: &crate::proc::linux_fd::FdEntry) -> PathBuf {
         HandleKind::ServiceListener => {
             PathBuf::from(format!("socket:[listener {}]", entry.raw_handle))
         }
+        // As Linux names every socket: `socket:[<inode>]`, the handle standing
+        // in for the inode.
+        HandleKind::UnixSocket => PathBuf::from(format!("socket:[{}]", entry.raw_handle)),
     }
 }
 

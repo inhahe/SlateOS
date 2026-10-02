@@ -398,6 +398,17 @@ pub enum ResourceType {
     /// closed when its process dies. Not inherited across fork, like a
     /// channel: there is no refcounted duplicate.
     Semaphore = 32,
+
+    /// A Unix-domain socket (`ipc::unix_socket`), as a handle a process holds
+    /// through a Linux descriptor.
+    ///
+    /// Recorded in the holder's `ipc_handles` so that it is closed when the
+    /// process dies and duplicated -- one more holder -- when it forks, as
+    /// every descriptor-backed IPC object is. Not a capability anything is
+    /// gated on: as on Linux, any process may make a Unix-domain socket, and
+    /// what a name allows is the filesystem's to say (write permission on the
+    /// directory to bind, on the node to connect).
+    UnixSocket = 33,
 }
 
 impl ResourceType {
@@ -407,7 +418,7 @@ impl ResourceType {
     /// variant count. Consumers that need "every type" iterate `1..=LAST`
     /// rather than keeping their own list — see
     /// [`groups::test_admin_grants_every_resource_type`](crate::cap::groups).
-    pub const LAST: u16 = Self::Semaphore as u16;
+    pub const LAST: u16 = Self::UnixSocket as u16;
 
     /// This type's wire discriminant, as sent to userspace.
     ///
@@ -490,7 +501,8 @@ impl ResourceType {
             | Self::ResourceLimit
             | Self::InputDevice
             | Self::BlockDevice
-            | Self::Semaphore => self as u16,
+            | Self::Semaphore
+            | Self::UnixSocket => self as u16,
         }
     }
 
@@ -559,6 +571,7 @@ impl ResourceType {
             30 => Self::InputDevice,
             31 => Self::BlockDevice,
             32 => Self::Semaphore,
+            33 => Self::UnixSocket,
             _ => return None,
         };
         Some(ty)
@@ -837,13 +850,16 @@ fn test_cap_entry_info_abi() -> KernelResult<()> {
     //    32 since 2026-10-01: `Semaphore` (febc4c8d3), a held object like a
     //    descriptor rather than a privilege, so it implies no Linux capability
     //    -- told to lane D in requests/a-d-resource-type-32-is-semaphore.md.
-    if ResourceType::LAST != 32 {
+    //    33 since 2026-10-02: `UnixSocket`, likewise a held object, and Linux
+    //    gates no Unix-domain socket on a capability -- told to lane D in
+    //    requests/a-d-resource-type-33-is-unixsocket.md.
+    if ResourceType::LAST != 33 {
         serial_println!(
-            "[cap]   FAIL: ResourceType::LAST is {}, pinned at 32 — a new resource type \
+            "[cap]   FAIL: ResourceType::LAST is {}, pinned at 33 — a new resource type \
              was appended. That is fine, but the wire ABI just grew: bump the pin here, \
              and ask lane D whether the new type implies a Linux capability. If it does, \
              posix/src/sys_capability.rs needs a rule; if it does not — which is the usual \
-             answer, that file names seven of our thirty-two types — it needs nothing, and \
+             answer, that file names seven of our thirty-three types — it needs nothing, and \
              adding it anyway would make capget() report a CAP_* the kernel will refuse. \
              Ask either way: no compiler here can see that tree.",
             ResourceType::LAST

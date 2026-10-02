@@ -22681,6 +22681,92 @@ pub fn self_test_linux_slate_channels() -> KernelResult<()> {
     Ok(())
 }
 
+/// Unix-domain sockets by name from a real Linux-ABI process
+/// ([`elf::build_linux_unix_socket_test_elf`]): datagrams by abstract name
+/// and by path, a stream through listen/connect/accept with the kernel's
+/// record of the peer, end of file on close, a node a second `bind` finds in
+/// use and `unlink` removes.
+///
+/// # Errors
+///
+/// `InternalError` if the program does not exit `0x5D`; the exit code names
+/// the step that failed.
+pub fn self_test_linux_unix_sockets() -> KernelResult<()> {
+    /// The program's success exit.
+    const OK_EXIT: i32 = 0x5D;
+    /// The program never blocks for long -- every wait it makes has its
+    /// answer already queued -- so this only bounds a broken run.
+    const MAX_YIELDS: usize = 1024;
+    /// The path the program binds and then unlinks.
+    const NODE: &str = "/tmp/slt.sock";
+
+    serial_println!("[spawn] Running Linux Unix-domain sockets (ring 3) integration test...");
+
+    // A node left by an interrupted earlier run would make the first bind
+    // EADDRINUSE.
+    let _ = crate::fs::Vfs::remove(NODE);
+    let exe_elf = elf::build_linux_unix_socket_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-unix-sockets"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-unix-sockets",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: Unix-domain sockets spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    for _ in 0..MAX_YIELDS {
+        crate::sched::yield_now();
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break;
+        }
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+    // Gone already unless a step after the bind failed.
+    let _ = crate::fs::Vfs::remove(NODE);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: Unix-domain sockets (ring 3) -- not a zombie after {} yields, got {:?}",
+            MAX_YIELDS,
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(OK_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: Unix-domain sockets (ring 3) -- exit {:?}, expected {} \
+             (0xD1-0xD6 datagrams by abstract name: socket, bind, socket, sendto, recvfrom, \
+             the bytes; 0xD7-0xE1 the stream: socket, bind, listen, socket, connect, accept, \
+             write, read, SO_PEERCRED, its pid, end of file; 0xE2-0xE8 by path: bind, a second \
+             bind not EADDRINUSE, sendto, recvfrom, the sender's address, unlink, sendto after \
+             unlink not ENOENT)",
+            exit_code,
+            OK_EXIT
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux Unix-domain sockets (ring 3: datagrams by abstract name and by path, \
+         listen/connect/accept, SO_PEERCRED, end of file, EADDRINUSE, unlink): OK"
+    );
+    Ok(())
+}
+
 /// Where a process's program headers are (`place_phdr_table`,
 /// `pcb::main_phdr`, `AT_PHDR`): found in a loaded segment, and copied into a
 /// page of their own when no segment holds them.

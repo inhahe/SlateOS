@@ -234,6 +234,14 @@ pub enum HandleKind {
     /// listener's holder count (`ipc::service::dup_listener`); the name is
     /// unregistered when the last holder closes it.
     ServiceListener,
+    /// A Unix-domain socket (`AF_UNIX`, `SOCK_STREAM` or `SOCK_DGRAM`):
+    /// unbound, bound to a path or an abstract name, listening, or connected.
+    /// `raw_handle` holds the `ipc::unix_socket::UnixHandle` raw u64. On a
+    /// connected stream `read`/`write` move bytes; on a datagram socket each
+    /// moves one datagram. Shared across `dup`/`fork` by the socket's holder
+    /// count (`ipc::unix_socket::dup`), so `needs_kernel_close()` is `true`:
+    /// close drops one, and the socket ends with the last.
+    UnixSocket,
 }
 
 impl HandleKind {
@@ -256,7 +264,8 @@ impl HandleKind {
             | Self::Evdev
             | Self::Socket
             | Self::Channel
-            | Self::ServiceListener => true,
+            | Self::ServiceListener
+            | Self::UnixSocket => true,
         }
     }
 }
@@ -517,6 +526,22 @@ impl FdEntry {
     pub const fn socket(handle: u64, fd_flags: u32, status_flags: u32) -> Self {
         Self {
             kind: HandleKind::Socket,
+            raw_handle: handle,
+            fd_flags,
+            status_flags,
+            f_owner: 0,
+            f_owner_sig: 0,
+        }
+    }
+
+    /// Construct an entry for a Unix-domain socket. `handle` is the
+    /// `ipc::unix_socket::UnixHandle` raw u64; `fd_flags` carries
+    /// `FD_CLOEXEC` for `SOCK_CLOEXEC`, `status_flags` `O_NONBLOCK` for
+    /// `SOCK_NONBLOCK`.
+    #[must_use]
+    pub const fn unix_socket(handle: u64, fd_flags: u32, status_flags: u32) -> Self {
+        Self {
+            kind: HandleKind::UnixSocket,
             raw_handle: handle,
             fd_flags,
             status_flags,

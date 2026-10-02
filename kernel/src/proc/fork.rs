@@ -374,6 +374,13 @@ fn dup_one(rtype: ResourceType, id: u64) -> KernelResult<Option<(ResourceType, u
             )?;
             Ok(Some((rtype, id)))
         }
+        ResourceType::UnixSocket => {
+            // One more holder of the same socket -- an inherited descriptor
+            // is the same open socket, as on Linux; it ends with its last
+            // holder.
+            crate::ipc::unix_socket::dup(crate::ipc::unix_socket::UnixHandle::from_raw(id))?;
+            Ok(Some((rtype, id)))
+        }
         // No refcounted same-id dup yet — not inherited.  Documented
         // limitation in todo.txt; revisit when these gain dup support.
         ResourceType::SharedMemory

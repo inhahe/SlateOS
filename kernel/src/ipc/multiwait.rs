@@ -129,6 +129,10 @@ pub enum WaitTarget {
     /// connection is queued or the listener goes
     /// ([`super::service::register_waiter`]).
     Listener(u64),
+    /// [`super::unix_socket::UnixHandle`] raw value: woken by a datagram, a
+    /// connection to accept, room to send, or -- for a connected stream --
+    /// anything its pair does ([`super::unix_socket::register_waiter`]).
+    UnixSocket(u64),
     /// [`super::epoll::EpollHandle`] raw value — the instance's
     /// **interest-set-change** notification, *not* its readiness.
     ///
@@ -183,6 +187,12 @@ impl WaitTarget {
                     task,
                 );
             }
+            Self::UnixSocket(raw) => {
+                super::unix_socket::register_waiter(
+                    super::unix_socket::UnixHandle::from_raw(raw),
+                    task,
+                );
+            }
             Self::EpollCtl(raw) => {
                 super::epoll::register_waiter(super::epoll::EpollHandle::from_raw(raw), task);
             }
@@ -228,6 +238,12 @@ impl WaitTarget {
             Self::Listener(raw) => {
                 super::service::deregister_waiter(
                     super::service::ServiceListenerHandle::from_raw(raw),
+                    task,
+                );
+            }
+            Self::UnixSocket(raw) => {
+                super::unix_socket::deregister_waiter(
+                    super::unix_socket::UnixHandle::from_raw(raw),
                     task,
                 );
             }

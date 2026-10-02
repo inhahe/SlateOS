@@ -246,6 +246,9 @@ pub fn init() {
         // semaphores it creates whatever its groups, so this grants admin
         // nothing over anyone else's.
         ResourceType::Semaphore,
+        // The same for Unix-domain sockets: a process holds the ones it
+        // makes, and nothing is gated on the type.
+        ResourceType::UnixSocket,
     ]
     .map(|resource_type| CapGrant {
         resource_type,

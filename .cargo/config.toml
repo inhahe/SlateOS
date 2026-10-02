@@ -53,6 +53,16 @@ rustflags = [
     "-C", "code-model=kernel",
     "-C", "relocation-model=static",
     "-C", "force-frame-pointers=yes",
+    # The vendored RustCrypto ciphers the kernel links through `seal`
+    # (`fs::diskencrypt`, design-decisions 1523) compile SIMD backends on
+    # x86_64 by default and pick one at run time. On this soft-float target
+    # the run-time pick would always be the portable one, but the SIMD code is
+    # still compiled -- and LLVM cannot lower vector operations without the
+    # vector registers ("Do not know how to split the result of this
+    # operator!", rq35, 2026-10-02). These select the portable backends at
+    # compile time, so no vector code exists to lower.
+    "--cfg", 'poly1305_backend="soft"',
+    "--cfg", 'chacha20_backend="soft"',
 ]
 
 # Shared userspace linker flags. Each zone config still has to set

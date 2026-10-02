@@ -64,7 +64,7 @@ printf 'one\ntwo\nthree\n\n\nfour five\n   \nsix\n' > blanks
 printf 'a b c' > noeol
 printf '  ' > spaces
 printf '' > empty
-printf '\tindented with a tab\n\tand another line\n\n        eight spaces here\n        and here\n' > tabs
+printf '\tindented with a tab\n\tand another line\n\n        eight spaces here\n        and here\n' > tabbed
 printf 'word\tthen a tab\tand   three spaces\n' > midtabs
 printf 'first line\n   second line\n   third line\n\n  alpha\n    beta\n    gamma\n' > indents
 printf 'one\r\ntwo\r\nthree\r\n' > crlf
@@ -331,16 +331,16 @@ printf '  ab' | fmt -p 'ab' | od -c
 printf '  ' | fmt -p 'ab' | od -c
 
 # --- white space and tabs ---
-fmt tabs | od -c
+fmt tabbed | od -c
 fmt midtabs | od -c
-fmt -w 20 tabs | od -c
+fmt -w 20 tabbed | od -c
 fmt -u midtabs | od -c
-fmt -c tabs | od -c
+fmt -c tabbed | od -c
 printf 'a\tb\n' | fmt | od -c
 printf '\t\ta b\n\t\tc d\n' | fmt -w 30 | od -c
 printf '   \ta b\n' | fmt | od -c
 printf 'x  y\n\tz\n' | fmt | od -c
-fmt tabs fox | od -c
+fmt tabbed fox | od -c
 
 # --- the limits: 1000 words, 5000 bytes ---
 fmt manywords | md5sum

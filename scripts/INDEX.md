@@ -187,7 +187,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/expand-diff.sh` | Differential test: our expand against GNU expand. |
 | `scripts/expr-diff.sh` | Differential test: our expr against GNU expr, both run inside WSL. |
 | `scripts/extfloat-cases.py` | Generate cases for `scripts/extfloat-diff.sh`. |
-| `scripts/extfloat-diff.sh` | Differential test: our `coreutils::extfloat` against glibc's `strtold` and |
+| `scripts/extfloat-diff.sh` | Differential test: our `cprintf::extfloat` against glibc's `strtold` and |
 | `scripts/extract-tcc-strace.sh` | Extract tcc + crt + libtcc1.a from rootfs.ext4 and strace a hosted compile. |
 | `scripts/factor-diff.sh` | factor-diff.sh — compare our `factor` against GNU's, inside WSL. |
 | `scripts/fastpy-slateos-bundle.py` | Build the tree that puts the fastpy compiler on a SlateOS image. |

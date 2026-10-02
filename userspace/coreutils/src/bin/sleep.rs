@@ -23,18 +23,14 @@
 //! # The number is read the way `strtod` reads one
 //!
 //! Upstream is `xstrtod (argv[i], &p, &s, cl_strtod)`, and `cl_strtod` is the
-//! C-locale `strtod`. [`coreutils::extfloat::strtold`] is that grammar, already
-//! certified against glibc for `printf` and `seq`, and it reports how much of
-//! the input it claimed -- which is the `p` upstream then inspects for a
-//! suffix. [`ExtF80::to_f64`](coreutils::extfloat::ExtF80::to_f64) narrows it.
+//! C-locale `strtod`. [`coreutils::extfloat::strtod`] is that function, measured
+//! against glibc's by `scripts/extfloat-diff.sh`, and it reports how much of the
+//! input it claimed -- which is the `p` upstream then inspects for a suffix.
 //!
-//! That narrowing rounds a second time where glibc's `strtod` rounds once, so a
-//! numeral sitting exactly on a `double`'s rounding boundary can land one ulp
-//! from where glibc puts it. The difference is at most one part in 2^52 of a
-//! duration -- for `sleep 1` a quarter of an attosecond -- against a `nanosleep`
-//! whose own granularity is nine orders of magnitude coarser. Reading it twice,
-//! once at 64 bits for the value and once at 53 for the grammar, would be two
-//! parsers to keep in agreement in exchange for nothing observable.
+//! It rounds once, at 53 bits, as glibc does. Until 2026-10-01 this read the
+//! 80-bit `strtold` and narrowed the result, which rounds twice and can land a
+//! numeral on a `double`'s rounding boundary one ulp from where glibc puts it;
+//! that was the price of there being no 53-bit reader, and there now is.
 //!
 //! # Two shapes that look like bugs and are measured
 //!
@@ -127,11 +123,11 @@ fn suffix_multiplier(c: u8) -> Option<f64> {
 /// `! (xstrtod (…) || errno == ERANGE)`, so `sleep 1e400` pauses forever and
 /// `sleep 1e-400` pauses for no time at all, both successfully.
 fn operand_seconds(arg: &[u8]) -> Option<f64> {
-    let scanned = extfloat::strtold(arg);
+    let scanned = extfloat::strtod(arg);
     if scanned.consumed == 0 {
         return None;
     }
-    let value = scanned.value.to_f64();
+    let value = scanned.value;
     // `0 <= s` upstream, which admits `-0.0` and refuses NaN. Written as two
     // tests rather than `!(value >= 0.0)` because the negation of a partial
     // order is the shape that reads as a typo.

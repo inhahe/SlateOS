@@ -1,4 +1,4 @@
-//! [`coreutils::extfloat::ExtF80`] division against glibc's x87 `long double`,
+//! [`cprintf::extfloat::ExtF80`] division against glibc's x87 `long double`,
 //! case for case.
 //!
 //! The expectations were not computed by this crate or written by hand: they
@@ -15,7 +15,7 @@
 //! run, and its x87 control word is set to 53 bits, so the hardware beside the
 //! test would not give the answer the target gives.
 
-use coreutils::extfloat::ExtF80;
+use cprintf::extfloat::ExtF80;
 
 fn bytes(hex: &str) -> [u8; 10] {
     let mut out = [0u8; 10];

@@ -941,12 +941,77 @@ fn assemble(neg: bool, m: u64, exp2: i32) -> ExtF80 {
 /// x87 *arithmetic* does none of this — `fadd` and `fmul` round once, correctly,
 /// in hardware. So `+` and `*` keep using
 /// [`round_detail`], and only the parsing paths come through here.
+///
+/// The work is [`round_strtod_in`]'s, which takes the format as a parameter:
+/// glibc's `strtod` and `strtof` are this same function compiled for 53 and 24
+/// bits, dropped round bit and all, and [`strtod`] and [`strtof`] call it so.
 fn round_strtod(neg: bool, sig: u128, exp2: i32, sticky: bool) -> Rounded {
-    let zero = |tiny| Rounded {
-        value: ExtF80 {
-            neg,
-            ..ExtF80::ZERO
-        },
+    let r = round_strtod_in(sig, exp2, sticky, X87);
+    Rounded {
+        value: assemble(neg, r.m, r.e),
+        tiny: r.tiny,
+        inexact: r.inexact,
+    }
+}
+
+/// The two numbers by which glibc's three readers of a numeral differ.
+///
+/// `stdlib/strtod_l.c` is compiled three times -- as `strtof`, `strtod` and
+/// `strtold` -- and in `round_and_return`, which is all of the rounding, the
+/// format enters only as `MANT_DIG` and `MIN_EXP`. These are those two, the
+/// second restated as where the format's subnormals sit.
+#[derive(Clone, Copy)]
+struct Format {
+    /// Significand bits, the integer bit included: `MANT_DIG`.
+    mant_dig: u32,
+    /// The `e` of `m * 2^e` for every subnormal, which is also the least
+    /// significant bit of the smallest normal.
+    subnormal_exp: i32,
+}
+
+/// The x87 80-bit format: `long double`.
+const X87: Format = Format {
+    mant_dig: 64,
+    subnormal_exp: SUBNORMAL_EXP,
+};
+
+/// IEEE binary64: `double`. The smallest normal is 2^-1022, whose last bit
+/// is 2^-1074.
+const BINARY64: Format = Format {
+    mant_dig: 53,
+    subnormal_exp: -1074,
+};
+
+/// IEEE binary32: `float`. The smallest normal is 2^-126, whose last bit is
+/// 2^-149.
+const BINARY32: Format = Format {
+    mant_dig: 24,
+    subnormal_exp: -149,
+};
+
+/// A significand rounded to a format, and the exponent of its last bit -- the
+/// value before it is packed into that format's bits.
+#[derive(Clone, Copy)]
+struct RoundedBits {
+    /// At most `mant_dig` bits. Below the integer bit only for a subnormal
+    /// (or zero), whose exponent is then the format's `subnormal_exp`; a
+    /// subnormal that rounded up into the integer bit is the smallest normal.
+    m: u64,
+    /// The exponent of `m`'s least significant bit. An exponent too large for
+    /// the format is the packer's to turn into an infinity.
+    e: i32,
+    /// As [`Rounded::tiny`].
+    tiny: bool,
+    /// As [`Rounded::inexact`].
+    inexact: bool,
+}
+
+/// [`round_strtod`] for any of the three formats: glibc's `round_and_return`,
+/// with `MANT_DIG` and the subnormal floor taken from `fmt`.
+fn round_strtod_in(sig: u128, exp2: i32, sticky: bool, fmt: Format) -> RoundedBits {
+    let zero = |tiny| RoundedBits {
+        m: 0,
+        e: fmt.subnormal_exp,
         tiny,
         inexact: tiny,
     };
@@ -955,14 +1020,16 @@ fn round_strtod(neg: bool, sig: u128, exp2: i32, sticky: bool) -> Rounded {
         // value gets. An exact zero is neither.
         return zero(sticky);
     }
+    let n = fmt.mant_dig as i32;
 
-    // Truncate to the 64-bit mantissa glibc holds, keeping the bit just below
-    // it (`half`) and a flag for everything under that (`more`) separately —
-    // the subnormal path treats the two differently, which is the whole point.
+    // Truncate to the `MANT_DIG`-bit mantissa glibc holds, keeping the bit
+    // just below it (`half`) and a flag for everything under that (`more`)
+    // separately -- the subnormal path treats the two differently, which is
+    // the whole point.
     let bits = 128 - sig.leading_zeros() as i32;
-    let up = bits - 64;
+    let up = bits - n;
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-    let (m64, e1, half, more) = if up > 0 {
+    let (mn, e1, half, more) = if up > 0 {
         let s = up as u32;
         let half = (sig >> (s - 1)) & 1 == 1;
         let below = s - 1;
@@ -972,23 +1039,25 @@ fn round_strtod(neg: bool, sig: u128, exp2: i32, sticky: bool) -> Rounded {
         ((sig << (-up) as u32) as u64, exp2 + up, false, sticky)
     };
 
-    if e1 >= SUBNORMAL_EXP {
+    if e1 >= fmt.subnormal_exp {
         // In range: one rounding, half to even, against the bit below the
         // mantissa. This much is ordinary and correct.
-        let mut m = u128::from(m64);
+        let mut m = u128::from(mn);
         let mut e = e1;
         if half && (more || m & 1 == 1) {
             m += 1;
-            if m >> 64 != 0 {
-                // The carry landed in a 65th bit; the bit it drops is zero,
-                // since a significand that carried is a power of two.
+            if m >> fmt.mant_dig != 0 {
+                // The carry landed in a bit past the mantissa; the bit it
+                // drops is zero, since a significand that carried is a power
+                // of two.
                 m >>= 1;
                 e += 1;
             }
         }
         #[allow(clippy::cast_possible_truncation)]
-        return Rounded {
-            value: assemble(neg, m as u64, e),
+        return RoundedBits {
+            m: m as u64,
+            e,
             tiny: false,
             inexact: half || more,
         };
@@ -996,38 +1065,85 @@ fn round_strtod(neg: bool, sig: u128, exp2: i32, sticky: bool) -> Rounded {
 
     // Below the smallest normal. Shift onto the subnormal grid, and note what
     // does *not* happen: `half` is not folded into `more`. It is dropped.
-    let shift = SUBNORMAL_EXP - e1;
-    if shift > 64 {
+    let shift = fmt.subnormal_exp - e1;
+    if shift > n {
         // glibc's `underflow_value`: not even the round bit reaches the grid,
         // and it returns a signed zero without rounding at all.
         return zero(true);
     }
     #[allow(clippy::cast_sign_loss)]
     let s = shift as u32;
-    let m = u128::from(m64);
+    let m = u128::from(mn);
     let guard = (m >> (s - 1)) & 1 == 1;
     let lost = s > 1 && m & ((1u128 << (s - 1)) - 1) != 0;
     let sticky = more || lost;
 
     // `TININESS_AFTER_ROUNDING`. A one-bit shift is the only case where a
     // rounding at normal precision could carry the value back up to the
-    // smallest normal, and a value that would do so is not tiny — it is a
+    // smallest normal, and a value that would do so is not tiny -- it is a
     // normal number that happened to be written from below.
-    let tiny = !(shift == 1 && half && (more || m64 & 1 == 1) && m64 == u64::MAX);
+    let all_ones = (1u128 << fmt.mant_dig) - 1;
+    let tiny = !(shift == 1 && half && (more || mn & 1 == 1) && m == all_ones);
 
     let mut q = m >> s;
     if guard && (sticky || q & 1 == 1) {
         q += 1;
     }
     #[allow(clippy::cast_possible_truncation)]
-    Rounded {
+    RoundedBits {
         // A subnormal that rounds up into the integer bit becomes the smallest
-        // normal, which `assemble` reads off the significand rather than being
+        // normal, which the packers read off the significand rather than being
         // told, so the carry needs no special case here.
-        value: assemble(neg, q as u64, SUBNORMAL_EXP),
+        m: q as u64,
+        e: fmt.subnormal_exp,
         tiny,
         inexact: guard || sticky,
     }
+}
+
+/// Pack a binary64 rounding into a `double`; an exponent past the top of the
+/// range is an infinity.
+fn pack_f64(neg: bool, r: RoundedBits) -> f64 {
+    let sign = u64::from(neg) << 63;
+    if r.m == 0 {
+        return f64::from_bits(sign);
+    }
+    let bits = if r.m >> 52 == 0 {
+        // Under the integer bit: a subnormal, its exponent pinned at the floor.
+        r.m
+    } else {
+        // `m * 2^e` with `m` in [2^52, 2^53) is `1.f * 2^(e + 52)`.
+        let biased = r.e + 52 + 1023;
+        if biased > 2046 {
+            return f64::from_bits(sign | 0x7ff0_0000_0000_0000);
+        }
+        #[allow(clippy::cast_sign_loss)]
+        let biased = biased as u64;
+        (biased << 52) | (r.m & ((1 << 52) - 1))
+    };
+    f64::from_bits(sign | bits)
+}
+
+/// Pack a binary32 rounding into a `float`, as [`pack_f64`] does a `double`.
+fn pack_f32(neg: bool, r: RoundedBits) -> f32 {
+    let sign = u32::from(neg) << 31;
+    if r.m == 0 {
+        return f32::from_bits(sign);
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let m = r.m as u32;
+    let bits = if m >> 23 == 0 {
+        m
+    } else {
+        let biased = r.e + 23 + 127;
+        if biased > 254 {
+            return f32::from_bits(sign | 0x7f80_0000);
+        }
+        #[allow(clippy::cast_sign_loss)]
+        let biased = biased as u32;
+        (biased << 23) | (m & ((1 << 23) - 1))
+    };
+    f32::from_bits(sign | bits)
 }
 
 // ---------------------------------------------------------------------------
@@ -1062,6 +1178,184 @@ const EXPONENT_GUARD: i64 = 6000;
 /// or `infinity`, or `nan` with an optional parenthesised payload — each of the
 /// words in any case.
 pub fn strtold(s: &[u8]) -> Scanned {
+    let n = read_numeral(s);
+    let neg = n.neg;
+    let (value, range_error) = match n.reading {
+        Reading::Zero => (
+            ExtF80 {
+                neg,
+                ..ExtF80::ZERO
+            },
+            false,
+        ),
+        Reading::Infinity => (
+            ExtF80 {
+                neg,
+                ..ExtF80::INFINITY
+            },
+            false,
+        ),
+        // The payload is not kept: nothing here prints or compares one, and
+        // `%La` writes every NaN as `nan`.
+        Reading::Nan(_) => (ExtF80 { neg, ..ExtF80::NAN }, false),
+        Reading::Overflow => (
+            ExtF80 {
+                neg,
+                ..ExtF80::INFINITY
+            },
+            true,
+        ),
+        Reading::Underflow => (
+            ExtF80 {
+                neg,
+                ..ExtF80::ZERO
+            },
+            true,
+        ),
+        Reading::Bits { sig, exp2, sticky } => {
+            let got = round_strtod(neg, sig, exp2, sticky);
+            (got.value, got.range_error())
+        }
+    };
+    Scanned {
+        value,
+        consumed: n.consumed,
+        range_error,
+    }
+}
+
+/// What one `strtod` call did: the value, how much of the input it claimed,
+/// and whether it would have set `ERANGE`.
+#[derive(Clone, Copy, Debug)]
+pub struct ScannedDouble {
+    pub value: f64,
+    /// Bytes consumed; zero is "no conversion could be performed".
+    pub consumed: usize,
+    /// glibc's `ERANGE`: overflow to infinity, or tininess and inexactness
+    /// together, as for [`Scanned::range_error`].
+    pub range_error: bool,
+}
+
+/// What one `strtof` call did, as [`ScannedDouble`] for a `float`.
+#[derive(Clone, Copy, Debug)]
+pub struct ScannedFloat {
+    pub value: f32,
+    pub consumed: usize,
+    pub range_error: bool,
+}
+
+/// C's `strtod` in the C locale, as glibc implements it: [`strtold`]'s grammar
+/// and its exact reading, rounded once to 53 bits the way glibc's
+/// `round_and_return` rounds -- correctly for a normal, and with glibc's
+/// dropped round bit for a subnormal (see [`round_strtod`]).
+///
+/// Rounding the 80-bit [`strtold`] result down to a `double` would not be the
+/// same: that is two roundings, and a numeral just past a 53-bit tie that the
+/// first rounding pulls onto the tie is then broken the wrong way.
+#[must_use]
+pub fn strtod(s: &[u8]) -> ScannedDouble {
+    let n = read_numeral(s);
+    let neg = n.neg;
+    let sign = u64::from(neg) << 63;
+    let inf = f64::from_bits(sign | 0x7ff0_0000_0000_0000);
+    let (value, range_error) = match n.reading {
+        Reading::Zero => (f64::from_bits(sign), false),
+        Reading::Infinity => (inf, false),
+        // glibc's `SET_NAN_PAYLOAD`: the payload's low 51 bits under the
+        // quiet bit.
+        Reading::Nan(payload) => (
+            f64::from_bits(
+                sign | 0x7ff8_0000_0000_0000 | (payload.unwrap_or(0) & 0x0007_ffff_ffff_ffff),
+            ),
+            false,
+        ),
+        Reading::Overflow => (inf, true),
+        Reading::Underflow => (f64::from_bits(sign), true),
+        Reading::Bits { sig, exp2, sticky } => {
+            let r = round_strtod_in(sig, exp2, sticky, BINARY64);
+            let v = pack_f64(neg, r);
+            (v, v.is_infinite() || (r.tiny && r.inexact))
+        }
+    };
+    ScannedDouble {
+        value,
+        consumed: n.consumed,
+        range_error,
+    }
+}
+
+/// C's `strtof` in the C locale, as glibc implements it: [`strtod`] at 24 bits.
+#[must_use]
+pub fn strtof(s: &[u8]) -> ScannedFloat {
+    let n = read_numeral(s);
+    let neg = n.neg;
+    let sign = u32::from(neg) << 31;
+    let inf = f32::from_bits(sign | 0x7f80_0000);
+    let (value, range_error) = match n.reading {
+        Reading::Zero => (f32::from_bits(sign), false),
+        Reading::Infinity => (inf, false),
+        #[allow(clippy::cast_possible_truncation)]
+        Reading::Nan(payload) => (
+            f32::from_bits(sign | 0x7fc0_0000 | (payload.unwrap_or(0) as u32 & 0x003f_ffff)),
+            false,
+        ),
+        Reading::Overflow => (inf, true),
+        Reading::Underflow => (f32::from_bits(sign), true),
+        Reading::Bits { sig, exp2, sticky } => {
+            let r = round_strtod_in(sig, exp2, sticky, BINARY32);
+            let v = pack_f32(neg, r);
+            (v, v.is_infinite() || (r.tiny && r.inexact))
+        }
+    };
+    ScannedFloat {
+        value,
+        consumed: n.consumed,
+        range_error,
+    }
+}
+
+/// What a numeral says, exactly, before it is rounded to any format.
+enum Reading {
+    /// Zero: a numeral whose digits are all zeros, whatever its exponent --
+    /// or no numeral at all, which reads as `+0`.
+    Zero,
+    /// `inf` or `infinity`.
+    Infinity,
+    /// `nan`, with the payload glibc's `__strtod_nan` takes from a
+    /// parenthesised `n-char-sequence` that reads whole as a C integer.
+    Nan(Option<u64>),
+    /// Past the top of every format: an exponent beyond [`EXPONENT_GUARD`].
+    Overflow,
+    /// Below the bottom of every format, likewise.
+    Underflow,
+    /// `sig * 2^exp2`, plus a positive infinitesimal when `sticky`. `sig`
+    /// holds at least 65 significant bits whenever the value has that many,
+    /// one more than the widest format keeps, so any of them can round it.
+    Bits { sig: u128, exp2: i32, sticky: bool },
+}
+
+/// One numeral, as glibc's `strtod` family scans it.
+struct Numeral {
+    neg: bool,
+    reading: Reading,
+    /// Bytes consumed. Zero is "no conversion could be performed", which is
+    /// `endptr == nptr`, and then the value is `+0` whatever sign was written.
+    consumed: usize,
+}
+
+impl Numeral {
+    fn none() -> Numeral {
+        Numeral {
+            neg: false,
+            reading: Reading::Zero,
+            consumed: 0,
+        }
+    }
+}
+
+/// The scan [`strtold`], [`strtod`] and [`strtof`] share: leading white
+/// space, a sign, then a word, a `0x` numeral or a decimal one.
+fn read_numeral(s: &[u8]) -> Numeral {
     let mut i = 0;
     while matches!(s.get(i), Some(c) if c.is_ascii_whitespace() || *c == 0x0b) {
         i += 1;
@@ -1078,8 +1372,8 @@ pub fn strtold(s: &[u8]) -> Scanned {
         _ => false,
     };
 
-    if let Some(scanned) = scan_word(s, i, neg) {
-        return scanned;
+    if let Some(word) = scan_word(s, i, neg) {
+        return word;
     }
     if matches!(s.get(i), Some(b'0'))
         && matches!(s.get(i + 1), Some(b'x' | b'X'))
@@ -1098,33 +1392,28 @@ pub fn strtold(s: &[u8]) -> Scanned {
 }
 
 /// `inf`, `infinity` and `nan`, which are words rather than numerals.
-fn scan_word(s: &[u8], at: usize, neg: bool) -> Option<Scanned> {
+fn scan_word(s: &[u8], at: usize, neg: bool) -> Option<Numeral> {
     let starts = |word: &[u8]| {
         s.get(at..at + word.len())
             .is_some_and(|got| got.eq_ignore_ascii_case(word))
     };
     if starts(b"infinity") {
-        return Some(Scanned {
-            value: ExtF80 {
-                neg,
-                ..ExtF80::INFINITY
-            },
+        return Some(Numeral {
+            neg,
+            reading: Reading::Infinity,
             consumed: at + 8,
-            range_error: false,
         });
     }
     if starts(b"inf") {
-        return Some(Scanned {
-            value: ExtF80 {
-                neg,
-                ..ExtF80::INFINITY
-            },
+        return Some(Numeral {
+            neg,
+            reading: Reading::Infinity,
             consumed: at + 3,
-            range_error: false,
         });
     }
     if starts(b"nan") {
         let mut end = at + 3;
+        let mut payload = None;
         // An `n-char-sequence` in parentheses is part of the token, but only if
         // it is closed; an unclosed one leaves the token at `nan`.
         if matches!(s.get(end), Some(b'(')) {
@@ -1133,16 +1422,43 @@ fn scan_word(s: &[u8], at: usize, neg: bool) -> Option<Scanned> {
                 j += 1;
             }
             if matches!(s.get(j), Some(b')')) {
+                payload = nan_payload(s.get(end + 1..j).unwrap_or_default());
                 end = j + 1;
             }
         }
-        return Some(Scanned {
-            value: ExtF80 { neg, ..ExtF80::NAN },
+        return Some(Numeral {
+            neg,
+            reading: Reading::Nan(payload),
             consumed: end,
-            range_error: false,
         });
     }
     None
+}
+
+/// glibc's `__strtod_nan`: the sequence is a payload only if `strtoull` at base
+/// 0 reads all of it -- `0x99`, `017`, `1234`, or nothing at all, which reads
+/// as zero. Too large a number is `ULLONG_MAX`, as `strtoull` saturates.
+fn nan_payload(seq: &[u8]) -> Option<u64> {
+    let (digits, radix) = match seq {
+        [b'0', b'x' | b'X', rest @ ..] if rest.first().is_some_and(u8::is_ascii_hexdigit) => {
+            (rest, 16)
+        }
+        [b'0', ..] => (seq, 8),
+        _ => (seq, 10),
+    };
+    let mut value: u64 = 0;
+    let mut overflow = false;
+    for &c in digits {
+        let d = char::from(c).to_digit(radix)?;
+        match value
+            .checked_mul(u64::from(radix))
+            .and_then(|v| v.checked_add(u64::from(d)))
+        {
+            Some(v) => value = v,
+            None => overflow = true,
+        }
+    }
+    Some(if overflow { u64::MAX } else { value })
 }
 
 /// Read the digits of an exponent, saturating rather than wrapping: a numeral
@@ -1183,7 +1499,7 @@ fn scan_exponent(s: &[u8], at: usize, marks: &[u8]) -> Option<(i64, usize)> {
 }
 
 /// The decimal numeral path.
-fn scan_decimal(s: &[u8], at: usize, neg: bool) -> Scanned {
+fn scan_decimal(s: &[u8], at: usize, neg: bool) -> Numeral {
     let mut digits: Vec<u8> = Vec::new();
     let mut i = at;
     let mut seen = false;
@@ -1214,45 +1530,32 @@ fn scan_decimal(s: &[u8], at: usize, neg: bool) -> Scanned {
         }
     }
     if !seen {
-        return Scanned {
-            value: ExtF80::ZERO,
-            consumed: 0,
-            range_error: false,
-        };
+        return Numeral::none();
     }
     let mut exp10: i64 = -frac_len;
     if let Some((written, end)) = scan_exponent(s, i, b"eE") {
         exp10 = exp10.saturating_add(written);
         i = end;
     }
-
-    let (value, range_error) = decimal_value(neg, &digits, exp10);
-    Scanned {
-        value,
+    Numeral {
+        neg,
+        reading: decimal_value(&digits, exp10),
         consumed: i,
-        range_error,
     }
 }
 
-/// Turn the collected digits and a power of ten into the nearest value, and say
-/// whether glibc would call it a range error.
+/// The collected digits times a power of ten, exactly.
 ///
 /// A subnormal is a range error only when it is also *inexact* — see
 /// [`Rounded::range_error`]. In practice a decimal numeral short enough to type
 /// is essentially never an exact subnormal, so `seq 1e-4932`, a perfectly
 /// ordinary-looking operand, is refused; but the rule really is inexactness and
 /// not subnormality, and an exact one is accepted.
-fn decimal_value(neg: bool, digits: &[u8], exp10: i64) -> (ExtF80, bool) {
+fn decimal_value(digits: &[u8], exp10: i64) -> Reading {
     let lead = digits.iter().position(|&c| c != b'0');
     let Some(lead) = lead else {
         // All zeros: exactly zero, whatever the exponent says.
-        return (
-            ExtF80 {
-                neg,
-                ..ExtF80::ZERO
-            },
-            false,
-        );
+        return Reading::Zero;
     };
     let mut significant = digits.get(lead..).unwrap_or_default();
     let mut exp10 = exp10;
@@ -1271,22 +1574,10 @@ fn decimal_value(neg: bool, digits: &[u8], exp10: i64) -> (ExtF80, bool) {
 
     let magnitude = exp10.saturating_add(significant.len() as i64);
     if magnitude > EXPONENT_GUARD {
-        return (
-            ExtF80 {
-                neg,
-                ..ExtF80::INFINITY
-            },
-            true,
-        );
+        return Reading::Overflow;
     }
     if magnitude < -EXPONENT_GUARD {
-        return (
-            ExtF80 {
-                neg,
-                ..ExtF80::ZERO
-            },
-            true,
-        );
+        return Reading::Underflow;
     }
 
     let d = Nat::from_decimal(significant);
@@ -1296,25 +1587,18 @@ fn decimal_value(neg: bool, digits: &[u8], exp10: i64) -> (ExtF80, bool) {
     } else {
         (d, Nat::pow(10, (-exp10) as u32))
     };
-    let got = quotient_to_float(neg, &num, &den);
-    (got.value, got.range_error())
+    quotient_bits(&num, &den)
 }
 
-/// Round `num / den` — both exact, `den` nonzero — to the nearest value.
+/// `num / den` -- both exact, `den` nonzero -- as 65 significant bits and a
+/// sticky bit.
 ///
 /// The numerator is shifted so the quotient is 65 bits before dividing, which
 /// is what keeps the cost linear: algorithm D pays per quotient limb, and three
 /// limbs is all that is ever asked for. The remainder then *is* the sticky bit.
-fn quotient_to_float(neg: bool, num: &Nat, den: &Nat) -> Rounded {
+fn quotient_bits(num: &Nat, den: &Nat) -> Reading {
     if num.is_zero() {
-        return Rounded {
-            value: ExtF80 {
-                neg,
-                ..ExtF80::ZERO
-            },
-            tiny: false,
-            inexact: false,
-        };
+        return Reading::Zero;
     }
     let want = 65_i64;
     let shift = want + den.bit_len() as i64 - num.bit_len() as i64;
@@ -1332,11 +1616,15 @@ fn quotient_to_float(neg: bool, num: &Nat, den: &Nat) -> Rounded {
         sig = (sig << 1) | u128::from(q.bit(i));
     }
     #[allow(clippy::cast_possible_truncation)]
-    round_strtod(neg, sig, -(shift as i32), sticky)
+    Reading::Bits {
+        sig,
+        exp2: -(shift as i32),
+        sticky,
+    }
 }
 
 /// The `0x` numeral path. `at` points just past the `0x`.
-fn scan_hex(s: &[u8], at: usize, neg: bool) -> Scanned {
+fn scan_hex(s: &[u8], at: usize, neg: bool) -> Numeral {
     let mut digits: Vec<u8> = Vec::new();
     let mut i = at;
     while let Some(&c) = s.get(i) {
@@ -1366,17 +1654,15 @@ fn scan_hex(s: &[u8], at: usize, neg: bool) -> Scanned {
     }
 
     if digits.iter().all(|&c| c == b'0') {
-        return Scanned {
-            value: ExtF80 {
-                neg,
-                ..ExtF80::ZERO
-            },
+        return Numeral {
+            neg,
+            reading: Reading::Zero,
             consumed: i,
-            range_error: false,
         };
     }
     let d = Nat::from_hex(&digits);
-    // Keep 65 bits and a sticky bit; `round` wants a guard bit to work with.
+    // Keep 65 bits and a sticky bit; the rounding wants a guard bit to work
+    // with.
     let bits = d.bit_len();
     let (sig_nat, exp2, sticky) = if bits > 65 {
         let drop = bits - 65;
@@ -1394,11 +1680,14 @@ fn scan_hex(s: &[u8], at: usize, neg: bool) -> Scanned {
     }
     let clamped = exp2.clamp(-EXPONENT_GUARD * 8, EXPONENT_GUARD * 8);
     #[allow(clippy::cast_possible_truncation)]
-    let got = round_strtod(neg, sig, clamped as i32, sticky);
-    Scanned {
-        value: got.value,
+    Numeral {
+        neg,
+        reading: Reading::Bits {
+            sig,
+            exp2: clamped as i32,
+            sticky,
+        },
         consumed: i,
-        range_error: got.range_error(),
     }
 }
 
@@ -2022,6 +2311,53 @@ mod tests {
         assert_eq!(strtold(b"infinity").consumed, 8);
         assert_eq!(strtold(b"INFINITY").consumed, 8);
         assert_eq!(strtold(b"5.").consumed, 2);
+    }
+
+    /// `strtod` rounds the exact value once, at 53 bits. Narrowing `strtold`'s
+    /// answer would round twice, and here the first rounding lands exactly on
+    /// a 53-bit tie that the second then breaks downwards: 2^53 + 1 + 2^-11 is
+    /// above the tie and glibc reads it as 2^53 + 2.
+    #[test]
+    fn strtod_rounds_once() {
+        let s = b"9007199254740993.00048828125";
+        let once = strtod(s);
+        assert_eq!(once.value, 9_007_199_254_740_994.0);
+        assert_eq!(once.consumed, s.len());
+        assert!(!once.range_error);
+        assert_eq!(strtold(s).value.to_f64(), 9_007_199_254_740_992.0);
+    }
+
+    #[test]
+    fn strtod_and_strtof_read_what_glibc_reads() {
+        let d = |s: &str| strtod(s.as_bytes());
+        let fl = |s: &str| strtof(s.as_bytes());
+        assert_eq!(d("0.1").value.to_bits(), 0x3fb9_9999_9999_999a);
+        assert_eq!(fl("0.1").value.to_bits(), 0x3dcc_cccd);
+        assert_eq!(d("  -0x1.8p1x").value, -3.0);
+        assert_eq!(d("  -0x1.8p1x").consumed, 10);
+        assert_eq!(d("1e308").value, 1e308);
+        // Overflow and underflow set ERANGE; an exact subnormal does not.
+        let big = d("1e309");
+        assert!(big.value.is_infinite() && big.range_error);
+        let small = fl("1e39");
+        assert!(small.value.is_infinite() && small.range_error);
+        let tiny = d("4.9e-324");
+        assert_eq!((tiny.value.to_bits(), tiny.range_error), (1, true));
+        let exact = d("0x1p-1074");
+        assert_eq!((exact.value.to_bits(), exact.range_error), (1, false));
+        let gone = fl("1e-46");
+        assert_eq!((gone.value.to_bits(), gone.range_error), (0, true));
+        // A NaN's payload is what `strtoull` reads from the parentheses, when
+        // it reads all of them.
+        assert_eq!(d("nan(0x99)").value.to_bits(), 0x7ff8_0000_0000_0099);
+        assert_eq!(d("nan(abc)").value.to_bits(), 0x7ff8_0000_0000_0000);
+        assert_eq!(d("nan(abc)").consumed, 8);
+        assert_eq!(d("-nan").value.to_bits(), 0xfff8_0000_0000_0000);
+        assert_eq!(fl("nan(7)").value.to_bits(), 0x7fc0_0007);
+        // No conversion is +0, whatever the sign said.
+        let none = d("-x");
+        assert_eq!((none.value.to_bits(), none.consumed), (0, 0));
+        assert_eq!(d("-0").value.to_bits(), 0x8000_0000_0000_0000);
     }
 
     #[test]

@@ -1,16 +1,18 @@
-//! Expose [`coreutils::extfloat`] to the differential harness.
+//! Expose [`cprintf::extfloat`] to the differential harness.
 //!
 //! `scripts/extfloat-diff.sh` runs this and a C program built against glibc
 //! over the same cases and compares byte for byte. It is an *example* rather
-//! than a `src/bin/*.rs` because everything in that directory is a coreutil
-//! that gets installed into the image, and this is a test instrument.
+//! than a binary because a binary is installed into the image, and this is a
+//! test instrument.
 //!
-//! Two modes, because reading and writing fail in different ways and a harness
-//! that only checked the round trip would let a parse error and a formatting
-//! error cancel out:
+//! Reading and writing have modes of their own, because they fail in different
+//! ways and a harness that only checked the round trip would let a parse error
+//! and a formatting error cancel out:
 //!
 //! ```text
 //! extfloat-probe read     # one line per case: LITERAL
+//! extfloat-probe readd    # the same, through strtod
+//! extfloat-probe readf    # the same, through strtof
 //! extfloat-probe write    # one line per case: FORMAT<TAB>LITERAL
 //! ```
 //!
@@ -18,9 +20,11 @@
 //! whether it set `ERANGE`, and the exact value it produced, printed as `%La`
 //! so the answer is the bits rather than a rounded view of them. `write`
 //! answers what `printf` would print for a value the C side parses the same
-//! way, which is only meaningful once `read` agrees.
+//! way, which is only meaningful once `read` agrees. `readd` and `readf` answer
+//! the `read` question for `strtod` and `strtof`, with the value as its bits in
+//! hex: `%a` would print every NaN as `nan`, and these keep a NaN's payload.
 //!
-//! Both modes read stdin to end and write **one line per input line**, so a
+//! Every mode reads stdin to end and write **one line per input line**, so a
 //! mismatch's line number is the case's line number. That includes empty input
 //! lines: an empty numeral is a case — `strtold("")` consumes nothing — and a
 //! probe that silently dropped it would shift every later answer up by one and
@@ -29,8 +33,8 @@
 use std::ffi::OsString;
 use std::io::{Read, Write};
 
-use coreutils::extfloat::{self, Spec};
-use coreutils::quote::os_bytes;
+use cprintf::extfloat::{self, Spec};
+use quoting::os_bytes;
 
 fn main() {
     // `args_os`, not `args`: the iterator that yields `String` unwraps, so it
@@ -60,9 +64,11 @@ fn main() {
         let line = line.strip_suffix(b"\r").unwrap_or(line);
         let rendered = match &*mode {
             b"read" => read_case(line),
+            b"readd" => read_double_case(line),
+            b"readf" => read_float_case(line),
             b"write" => write_case(line),
             _ => {
-                eprintln!("extfloat-probe: expected 'read' or 'write'");
+                eprintln!("extfloat-probe: expected 'read', 'readd', 'readf' or 'write'");
                 std::process::exit(2);
             }
         };
@@ -100,6 +106,28 @@ fn read_case(line: &[u8]) -> String {
         "consumed={} range={} value={bits}",
         got.consumed,
         u8::from(got.range_error)
+    )
+}
+
+/// What `strtod` made of the whole line.
+fn read_double_case(line: &[u8]) -> String {
+    let got = extfloat::strtod(line);
+    format!(
+        "consumed={} range={} bits={:016x}",
+        got.consumed,
+        u8::from(got.range_error),
+        got.value.to_bits()
+    )
+}
+
+/// What `strtof` made of the whole line.
+fn read_float_case(line: &[u8]) -> String {
+    let got = extfloat::strtof(line);
+    format!(
+        "consumed={} range={} bits={:08x}",
+        got.consumed,
+        u8::from(got.range_error),
+        got.value.to_bits()
     )
 }
 

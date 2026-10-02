@@ -647,6 +647,7 @@ dependencies = [
  "bignum",
  "blake2 0.1.0",
  "charwidth",
+ "cprintf",
  "ere",
  "errmsg",
  "fnmatch",
@@ -678,6 +679,13 @@ name = "cpio"
 version = "0.1.0"
 dependencies = [
  "modechange",
+ "quoting",
+]
+
+[[package]]
+name = "cprintf"
+version = "0.1.0"
+dependencies = [
  "quoting",
 ]
 

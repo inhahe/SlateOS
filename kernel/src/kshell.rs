@@ -35992,6 +35992,12 @@ fn cmd_fswalk(args: &str) {
                     if result.truncated {
                         shell_println!("(truncated)");
                     }
+                    if result.stats.unwalked > 0 {
+                        shell_println!(
+                            "({} directories not read: past the depth limit, or the queue full)",
+                            result.stats.unwalked
+                        );
+                    }
                 }
                 Err(e) => {
                     shell_println!("Error: {:?}", e);
@@ -36106,6 +36112,12 @@ fn cmd_fswalk(args: &str) {
                     );
                     if result.truncated {
                         shell_println!("(truncated)");
+                    }
+                    if result.stats.unwalked > 0 {
+                        shell_println!(
+                            "({} directories not read: past the depth limit, or the queue full)",
+                            result.stats.unwalked
+                        );
                     }
                 }
                 Err(e) => {
@@ -38079,34 +38091,42 @@ fn cmd_queryable(args: &str) {
     }
 }
 
-/// `fcomment` — file comments and annotations.
+/// `fcomment` — file comments: each file's `user.xdg.comment` attribute
+/// (`fs::fcomment`), which `getfattr` and `setfattr` reach as well.
 fn cmd_fcomment(args: &str) {
     use crate::fs::fcomment;
+    // A comment is bytes; one that is text is shown as text, any other with
+    // its bytes escaped -- never decoded lossily, which would show a different
+    // comment from the one the file has.
+    fn shown(comment: &[u8], limit: usize) -> String {
+        let mut text = match core::str::from_utf8(comment) {
+            Ok(s) => String::from(s),
+            Err(_) => alloc::format!("{}", comment.escape_ascii()),
+        };
+        if let Some((cut, _)) = text.char_indices().nth(limit) {
+            text.truncate(cut);
+            text.push_str("...");
+        }
+        text.replace('\n', " ")
+    }
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
+    let rest_joined = || parts.get(2..).map(|words| words.join(" "));
     match sub {
         "set" => {
             // fcomment set <path> <comment text...>
-            let path_arg = parts.get(1).copied().unwrap_or("");
-            if path_arg.is_empty() || parts.len() < 3 {
+            let (Some(path_arg), Some(comment)) = (parts.get(1), rest_joined()) else {
+                shell_println!("Usage: fcomment set <path> <comment text...>");
+                set_exit(1);
+                return;
+            };
+            if comment.is_empty() {
                 shell_println!("Usage: fcomment set <path> <comment text...>");
                 set_exit(1);
                 return;
             }
             let path = resolve_path(path_arg);
-            // Join remaining parts as comment text.
-            let comment: String =
-                parts[2..]
-                    .iter()
-                    .enumerate()
-                    .fold(String::new(), |mut acc, (i, s)| {
-                        if i > 0 {
-                            acc.push(' ');
-                        }
-                        acc.push_str(s);
-                        acc
-                    });
-            match fcomment::set(&path, &comment) {
+            match fcomment::set(&path, comment.as_bytes()) {
                 Ok(()) => shell_println!(
                     "Comment set on {} ({} bytes)",
                     path.display(),
@@ -38119,39 +38139,15 @@ fn cmd_fcomment(args: &str) {
             }
         }
         "get" | "show" => {
-            let path_arg = parts.get(1).copied().unwrap_or("");
-            if path_arg.is_empty() {
+            let Some(path_arg) = parts.get(1) else {
                 shell_println!("Usage: fcomment get <path>");
                 set_exit(1);
                 return;
-            }
+            };
             let path = resolve_path(path_arg);
             match fcomment::get(&path) {
-                Some(comment) => shell_println!("{}", comment),
-                None => shell_println!("No comment on {}", path.display()),
-            }
-        }
-        "append" => {
-            let path_arg = parts.get(1).copied().unwrap_or("");
-            if path_arg.is_empty() || parts.len() < 3 {
-                shell_println!("Usage: fcomment append <path> <text...>");
-                set_exit(1);
-                return;
-            }
-            let path = resolve_path(path_arg);
-            let text: String =
-                parts[2..]
-                    .iter()
-                    .enumerate()
-                    .fold(String::new(), |mut acc, (i, s)| {
-                        if i > 0 {
-                            acc.push(' ');
-                        }
-                        acc.push_str(s);
-                        acc
-                    });
-            match fcomment::append(&path, &text) {
-                Ok(()) => shell_println!("Appended to comment on {}", path.display()),
+                Ok(Some(comment)) => shell_println!("{}", shown(&comment, usize::MAX)),
+                Ok(None) => shell_println!("No comment on {}", path.display()),
                 Err(e) => {
                     shell_println!("Error: {:?}", e);
                     set_exit(1);
@@ -38159,12 +38155,11 @@ fn cmd_fcomment(args: &str) {
             }
         }
         "rm" | "remove" => {
-            let path_arg = parts.get(1).copied().unwrap_or("");
-            if path_arg.is_empty() {
+            let Some(path_arg) = parts.get(1) else {
                 shell_println!("Usage: fcomment rm <path>");
                 set_exit(1);
                 return;
-            }
+            };
             let path = resolve_path(path_arg);
             match fcomment::remove(&path) {
                 Ok(()) => shell_println!("Comment removed from {}", path.display()),
@@ -38174,37 +38169,43 @@ fn cmd_fcomment(args: &str) {
                 }
             }
         }
-        "search" => {
-            let needle = parts.get(1).copied().unwrap_or("");
-            let root = parts.get(2).map(resolve_path);
-            if needle.is_empty() {
-                shell_println!("Usage: fcomment search <text> [root]");
-                set_exit(1);
-                return;
-            }
-            let results = fcomment::search(needle, root.as_deref().map(Path::new));
-            if results.is_empty() {
-                shell_println!("No matches");
+        "search" | "list" | "" => {
+            // search <text> [root]; list [root]. The root defaults to `/`.
+            let (needle, root_arg) = if sub == "search" {
+                let Some(needle) = parts.get(1) else {
+                    shell_println!("Usage: fcomment search <text> [root]");
+                    set_exit(1);
+                    return;
+                };
+                (Some(*needle), parts.get(2))
             } else {
-                shell_println!("{} results:", results.len());
-                for (path, comment) in &results {
-                    let preview: String = comment.chars().take(60).collect();
-                    let preview = preview.replace('\n', " ");
-                    shell_println!("  {} — {}", path.display(), preview);
+                (None, parts.get(1))
+            };
+            let root = root_arg.map_or_else(|| PathBuf::from("/"), resolve_path);
+            let found = match needle {
+                Some(needle) => fcomment::search(needle.as_bytes(), &root),
+                None => fcomment::list(&root),
+            };
+            match found {
+                Ok(found) => {
+                    if found.comments.is_empty() {
+                        shell_println!("No commented files under {}", root.display());
+                    } else {
+                        shell_println!("{} commented files:", found.comments.len());
+                        for (path, comment) in &found.comments {
+                            shell_println!("  {:40} {}", path.display(), shown(comment, 60));
+                        }
+                    }
+                    if found.incomplete {
+                        shell_println!(
+                            "(not everything under {} was read: there may be more)",
+                            root.display()
+                        );
+                    }
                 }
-            }
-        }
-        "list" | "" => {
-            let root = parts.get(1).map(resolve_path);
-            let all = fcomment::list(root.as_deref().map(Path::new));
-            if all.is_empty() {
-                shell_println!("No commented files");
-            } else {
-                shell_println!("{} commented files:", all.len());
-                for (path, comment) in &all {
-                    let preview: String = comment.chars().take(50).collect();
-                    let preview = preview.replace('\n', " ");
-                    shell_println!("  {:40} {}", path.display(), preview);
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
@@ -38216,28 +38217,25 @@ fn cmd_fcomment(args: &str) {
             }
         },
         "stats" => {
-            let (count, sets, gets, searches) = fcomment::stats();
-            shell_println!("Comments:    {}", count);
-            shell_println!("Set ops:     {}", sets);
-            shell_println!("Get ops:     {}", gets);
-            shell_println!("Search ops:  {}", searches);
+            let (sets, gets, searches) = fcomment::stats();
+            shell_println!("Set or removed: {}", sets);
+            shell_println!("Read:           {}", gets);
+            shell_println!("Searches:       {}", searches);
         }
         "reset" => {
-            fcomment::clear_all();
             fcomment::reset_stats();
-            shell_println!("File comments cleared and stats reset");
+            shell_println!("Statistics reset (comments live with their files: `fcomment rm` one)");
         }
         _ => {
             shell_println!("Usage: fcomment <subcommand>");
-            shell_println!("  set <path> <text...>   Set comment on file");
-            shell_println!("  get <path>             Show comment");
-            shell_println!("  append <path> <text>   Append to comment");
-            shell_println!("  rm <path>              Remove comment");
-            shell_println!("  search <text> [root]   Search comments");
-            shell_println!("  list [root]            List commented files");
+            shell_println!("  set <path> <text...>   Set the comment on a file");
+            shell_println!("  get <path>             Show it");
+            shell_println!("  rm <path>              Remove it");
+            shell_println!("  search <text> [root]   Comments containing text, under root (/)");
+            shell_println!("  list [root]            Commented files under root (/)");
             shell_println!("  test                   Run self-tests");
             shell_println!("  stats                  Show statistics");
-            shell_println!("  reset                  Clear all data and stats");
+            shell_println!("  reset                  Reset the statistics");
             set_exit(1);
         }
     }

@@ -1,5 +1,5 @@
 ### [A] Six fs metadata tables key on the path string, so metadata does not follow a hard-linked file -- and the ACL one is pre-positioned to become a permission bypass -- 2026-09-21
-**Status:** OPEN (5 of 8 converted: flock, sealing, record locks, immutable flags, ACLs. Remaining: `fcomment`, `queryable`, `tags`. `integrity` reclassified as correctly path-keyed; `history` undecided)
+**Status:** OPEN (6 of 8 converted on `main`: flock, sealing, record locks, immutable flags, ACLs, `queryable` (478ee8c4c). `fcomment` fixed on `lane-a-wip` 2026-10-02, awaiting a boot on main: a comment is the file's own `user.xdg.comment` attribute, so it follows the inode with no table at all (design-decisions §1533). Remaining: `tags` (A-Q22). `integrity` reclassified as correctly path-keyed; `history` undecided)
 
 **In short:** the kernel stores several kinds of per-file information -- ACLs,
 comments, tags, version history, integrity hashes -- in side tables looked up

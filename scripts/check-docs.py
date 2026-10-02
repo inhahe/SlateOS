@@ -569,21 +569,21 @@ def _fixture(tmp: Path) -> Path:
     for i in range(MIN_ISSUES):
         (root / D.ISSUES_CLOSED_DIR / f"TD-A-OLD-{i}.md").write_text(
             f"## TD-A-OLD-{i} (lane A, 2026-08-01) — FIXED 2026-08-02\n**Status:** FIXED 2026-08-02\n\nbody\n",
-            encoding="utf-8")
+            encoding="utf-8", newline="")
     (root / D.ISSUES_OPEN_DIR / "TD-B-LIVE.md").write_text(
-        "## TD-B-LIVE (lane B, 2026-10-01) — OPEN\n**Status:** OPEN\n\nbody\n", encoding="utf-8")
+        "## TD-B-LIVE (lane B, 2026-10-01) — OPEN\n**Status:** OPEN\n\nbody\n", encoding="utf-8", newline="")
     (root / D.DECISIONS_DIR / "README.md").write_text(
         "| Band | Owner | Status | Region |\n|---|---|---|---|\n| §1–§99 | history | closed | x |\n"
-        "| §100–§199 | **lane A** | **open** | x |\n| §200–§299 | **lane B** | **open** | x |\n", encoding="utf-8")
-    (root / D.DECISIONS_DIR / "0050-old.md").write_text("## §50 — Old\n", encoding="utf-8")
-    (root / D.DECISIONS_DIR / "0120-a-thing.md").write_text("## 120. A thing\n**Lane:** A\n", encoding="utf-8")
+        "| §100–§199 | **lane A** | **open** | x |\n| §200–§299 | **lane B** | **open** | x |\n", encoding="utf-8", newline="")
+    (root / D.DECISIONS_DIR / "0050-old.md").write_text("## §50 — Old\n", encoding="utf-8", newline="")
+    (root / D.DECISIONS_DIR / "0120-a-thing.md").write_text("## 120. A thing\n**Lane:** A\n", encoding="utf-8", newline="")
     (root / D.QUESTIONS_DIR / "B-Q2.md").write_text("## B-Q2 — [B] Which? — Status: OPEN (raised 2026-10-01)\n",
-                                                    encoding="utf-8")
+                                                    encoding="utf-8", newline="")
     (root / D.QUESTIONS_RESOLVED_DIR / "lane-b.md").write_text("## Resolved — lane B\n\n- B-Q1 — answered\n",
-                                                               encoding="utf-8")
-    (root / D.DEFERRED_DIR / "DQ1.md").write_text("## DQ1 — Later?\n\nTrigger: when X exists.\n", encoding="utf-8")
-    (root / "todo.txt").write_text("## Lane B — userland\n## * write the thing\n##\n", encoding="utf-8")
-    (root / "roadmap.md").write_text("## Phase 1\n- [ ] `[B]` open task\n  - [x] done step\n", encoding="utf-8")
+                                                               encoding="utf-8", newline="")
+    (root / D.DEFERRED_DIR / "DQ1.md").write_text("## DQ1 — Later?\n\nTrigger: when X exists.\n", encoding="utf-8", newline="")
+    (root / "todo.txt").write_text("## Lane B — userland\n## * write the thing\n##\n", encoding="utf-8", newline="")
+    (root / "roadmap.md").write_text("## Phase 1\n- [ ] `[B]` open task\n  - [x] done step\n", encoding="utf-8", newline="")
     return root
 
 
@@ -604,73 +604,73 @@ def self_test() -> int:
     with tempfile.TemporaryDirectory() as t:
         tmp = Path(t)
         root = _fixture(tmp)
-        (root / "bl.json").write_text(json.dumps({"decision_files": ["design-decisions/0050-old.md"]}), encoding="utf-8")
+        (root / "bl.json").write_text(json.dumps({"decision_files": ["design-decisions/0050-old.md"]}), encoding="utf-8", newline="")
         expect("a clean tree has no errors", root, None)
 
         def mutate(name, rule, fn, lane="B", error=True):
             r = _fixture(tmp / name)
-            (r / "bl.json").write_text(json.dumps({"decision_files": ["design-decisions/0050-old.md"]}), encoding="utf-8")
+            (r / "bl.json").write_text(json.dumps({"decision_files": ["design-decisions/0050-old.md"]}), encoding="utf-8", newline="")
             fn(r)
             expect(name, r, rule, lane, error)
 
         mutate("S1 an old-format document with entries", "S1",
-               lambda r: (r / "known-issues.md").write_text("# KI\n\n## TD-B-X (lane B) — OPEN\nbody\n", encoding="utf-8"))
+               lambda r: (r / "known-issues.md").write_text("# KI\n\n## TD-B-X (lane B) — OPEN\nbody\n", encoding="utf-8", newline=""))
         mutate("S2 an issue file without its heading", "S2",
-               lambda r: (r / D.ISSUES_OPEN_DIR / "TD-B-NOHEAD.md").write_text("no heading\n", encoding="utf-8"))
+               lambda r: (r / D.ISSUES_OPEN_DIR / "TD-B-NOHEAD.md").write_text("no heading\n", encoding="utf-8", newline=""))
         mutate("S3 two issue files differing only in case", "S3",
                lambda r: (r / D.ISSUES_CLOSED_DIR / "td-b-live.md").write_text(
-                   "## td-b-live (lane B) — FIXED 2026-10-02\n**Status:** FIXED 2026-10-02\n", encoding="utf-8")
+                   "## td-b-live (lane B) — FIXED 2026-10-02\n**Status:** FIXED 2026-10-02\n", encoding="utf-8", newline="")
                if not (r / D.ISSUES_CLOSED_DIR / "TD-B-LIVE.md").exists() else None)
         mutate("S4 conflict markers left in an entry", "S4",
                lambda r: (r / D.ISSUES_OPEN_DIR / "TD-B-LIVE.md").write_text(
                    "## TD-B-LIVE (lane B, 2026-10-01) — OPEN\n**Status:** OPEN\n<<<<<<< ours\na\n=======\nb\n"
-                   ">>>>>>> theirs\n", encoding="utf-8"))
+                   ">>>>>>> theirs\n", encoding="utf-8", newline=""))
         mutate("I1 a new issue without a Status line", "I1",
                lambda r: (r / D.ISSUES_OPEN_DIR / "TD-B-NEW.md").write_text("## TD-B-NEW (lane B) — OPEN\nbody\n",
-                                                                            encoding="utf-8"))
+                                                                            encoding="utf-8", newline=""))
         mutate("I1 is a warning for another lane's entry", "I1",
                lambda r: (r / D.ISSUES_OPEN_DIR / "TD-C-NEW.md").write_text("## TD-C-NEW (lane C) — OPEN\nbody\n",
-                                                                            encoding="utf-8"), error=False)
+                                                                            encoding="utf-8", newline=""), error=False)
         mutate("I2 a lower-case status marker", "I2",
                lambda r: (r / D.ISSUES_CLOSED_DIR / "TD-B-LOW.md").write_text(
-                   "## TD-B-LOW (lane B, 2026-10-01) -- **fixed 2026-10-02**\n**Status:** fixed\n", encoding="utf-8"))
+                   "## TD-B-LOW (lane B, 2026-10-01) -- **fixed 2026-10-02**\n**Status:** fixed\n", encoding="utf-8", newline=""))
         mutate("I3 a closed issue left among the open", "I3",
                lambda r: (r / D.ISSUES_OPEN_DIR / "TD-B-DONE.md").write_text(
-                   "## TD-B-DONE (lane B) — FIXED 2026-10-02\n**Status:** FIXED 2026-10-02\n", encoding="utf-8"))
+                   "## TD-B-DONE (lane B) — FIXED 2026-10-02\n**Status:** FIXED 2026-10-02\n", encoding="utf-8", newline=""))
         mutate("I3 an OPEN issue filed as resolved", "I3",
                lambda r: (r / D.ISSUES_CLOSED_DIR / "TD-B-REOPENED.md").write_text(
-                   "## TD-B-REOPENED (lane B) — OPEN\n**Status:** OPEN\n", encoding="utf-8"))
+                   "## TD-B-REOPENED (lane B) — OPEN\n**Status:** OPEN\n", encoding="utf-8", newline=""))
         mutate("D1 a decision file named for another number", "D1",
                lambda r: (r / D.DECISIONS_DIR / "0201-wrong.md").write_text("## 202. Wrong\n**Lane:** B\n",
-                                                                            encoding="utf-8"))
+                                                                            encoding="utf-8", newline=""))
         mutate("D2 a new duplicate decision number", "D2",
                lambda r: (r / D.DECISIONS_DIR / "0120-another.md").write_text("## 120. Another\n**Lane:** A\n",
-                                                                              encoding="utf-8"), lane="A")
+                                                                              encoding="utf-8", newline=""), lane="A")
         mutate("D3 a new decision outside its lane's band", "D3",
                lambda r: (r / D.DECISIONS_DIR / "0130-misfiled.md").write_text("## 130. Misfiled\n**Lane:** B\n",
-                                                                               encoding="utf-8"))
+                                                                               encoding="utf-8", newline=""))
         mutate("D3 a new decision without a Lane field", "D3",
-               lambda r: (r / D.DECISIONS_DIR / "0201-nolane.md").write_text("## 201. No lane\n", encoding="utf-8"))
+               lambda r: (r / D.DECISIONS_DIR / "0201-nolane.md").write_text("## 201. No lane\n", encoding="utf-8", newline=""))
         mutate("Q1 a question file whose name is not its id", "Q1",
                lambda r: (r / D.QUESTIONS_DIR / "B-Q9.md").write_text("## B-Q3 — [B] Which? — Status: OPEN\n",
-                                                                      encoding="utf-8"))
+                                                                      encoding="utf-8", newline=""))
         mutate("Q1 an answered question left in the queue", "Q1",
                lambda r: (r / D.QUESTIONS_DIR / "B-Q4.md").write_text("## B-Q4 — [B] Which? — Status: ANSWERED\n",
-                                                                      encoding="utf-8"))
+                                                                      encoding="utf-8", newline=""))
         mutate("Q2 an open question reusing an answered id", "Q2",
                lambda r: (r / D.QUESTIONS_DIR / "B-Q1.md").write_text("## B-Q1 — [B] Again? — Status: OPEN\n",
-                                                                      encoding="utf-8"))
+                                                                      encoding="utf-8", newline=""))
         mutate("F1 a deferred question without a trigger", "F1",
                lambda r: (r / D.DEFERRED_DIR / "DQ2.md").write_text("## DQ2 — [B] Later?\n\nno trigger here\n",
-                                                                     encoding="utf-8"))
+                                                                     encoding="utf-8", newline=""))
         mutate("T1 a done item left in todo.txt", "T1",
                lambda r: (r / "todo.txt").write_text("## Lane B — userland\n## * DONE: the thing\n##\n",
-                                                      encoding="utf-8"))
+                                                      encoding="utf-8", newline=""))
         mutate("R1 a done item left in roadmap.md", "R1",
-               lambda r: (r / "roadmap.md").write_text("## Phase 1\n- [x] `[B]` finished task\n", encoding="utf-8"))
+               lambda r: (r / "roadmap.md").write_text("## Phase 1\n- [x] `[B]` finished task\n", encoding="utf-8", newline=""))
         mutate("R2 a checked item with open sub-items is only a warning", "R2",
                lambda r: (r / "roadmap.md").write_text("## Phase 1\n- [x] `[B]` batch\n  - [ ] part\n",
-                                                       encoding="utf-8"), error=False)
+                                                       encoding="utf-8", newline=""), error=False)
         # R2 goes to whoever owns the open sub-item -- its own tag, else its parent's
         # -- and --list-mixed lists exactly one lane's. The real shape: an untagged
         # parent finished before the lane split, with a lane's new task filed under it.
@@ -678,7 +678,7 @@ def self_test() -> int:
         (r2 / "roadmap.md").write_text(
             "## Phase 1\n- [x] `[B]` b batch\n  - [ ] b part\n  - [x] b done part\n"
             "- [x] old untagged batch\n  - [x] old step\n  - [ ] `[C]` c's new task\n  - [ ] `[A]` a's new task\n"
-            "- [x] untagged batch\n  - [ ] u part\n- [x] `[C]` c finished\n  - [x] all done\n", encoding="utf-8")
+            "- [x] untagged batch\n  - [ ] u part\n- [x] `[C]` c finished\n  - [x] all done\n", encoding="utf-8", newline="")
         res = check(r2, lane="B", strict=False, baseline={})
         got = sorted((f.lane, f.error) for f in res.findings if f.rule == "R2")
         listing = list_mixed(r2, "c")
@@ -693,7 +693,7 @@ def self_test() -> int:
         empty = tmp / "empty"
         (empty / D.ISSUES_OPEN_DIR).mkdir(parents=True)
         (empty / D.DECISIONS_DIR).mkdir()
-        (empty / D.DECISIONS_DIR / "README.md").write_text("| §1–§9 | **lane A** | **open** | x |\n", encoding="utf-8")
+        (empty / D.DECISIONS_DIR / "README.md").write_text("| §1–§9 | **lane A** | **open** | x |\n", encoding="utf-8", newline="")
         res = check(empty, lane="A", strict=False, baseline={})
         ok = bool(res.no_verdict)
         print(f"  {'ok  ' if ok else 'FAIL'} an implausibly empty tree gets no verdict, not a pass")

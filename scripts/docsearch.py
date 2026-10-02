@@ -258,7 +258,7 @@ def ensure_server(root: Path, quiet: bool) -> bool:
             continue
     if proc is None:
         return False
-    _pid_file(root).write_text(str(proc.pid), encoding="utf-8")
+    _pid_file(root).write_text(str(proc.pid), encoding="utf-8", newline="")
     for _ in range(60):
         if _server_up():
             if not quiet:

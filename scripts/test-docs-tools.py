@@ -407,13 +407,13 @@ def stop_server_stops_only_its_own_server() -> None:
                   S._terminate_if_ours(other.pid, exe=Path(t) / "llama-server.exe"), "not ours")
             check("...and is left running", other.poll(), None)
             pid_file = S._pid_file(root)
-            pid_file.write_text(str(other.pid), encoding="utf-8")
+            pid_file.write_text(str(other.pid), encoding="utf-8", newline="")
             msg = S.stop_server(root)
             check("--stop-server leaves a program that is not its server alone",
                   ("left it alone" in msg, other.poll()), (True, None))
             check("...and forgets that pid", pid_file.exists(), False)
             S.SERVER_EXE = Path(sys.executable)  # make `mine` the server, as far as the check can tell
-            pid_file.write_text(str(mine.pid), encoding="utf-8")
+            pid_file.write_text(str(mine.pid), encoding="utf-8", newline="")
             msg = S.stop_server(root)
             check("--stop-server stops the server it started", msg.startswith("stopped the embedding server"), True)
             check("...which has exited", mine.wait(timeout=10) is not None, True)

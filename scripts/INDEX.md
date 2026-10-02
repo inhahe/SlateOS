@@ -141,6 +141,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/check-workspace-lints.py` | Find crates that are not subject to the project's own lint policy. |
 | `scripts/chgrp-diff.sh` | Differential test: our `chgrp` against GNU `chgrp`. |
 | `scripts/chown-diff.sh` | Differential test: our `chown` against GNU `chown`. |
+| `scripts/chroot-diff.sh` | Differential test: our `chroot` against GNU coreutils 9.4's. |
 | `scripts/cksum-diff.sh` | cksum-diff.sh — compare our `cksum` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/clippy-diff.py` | Compare two clippy logs by diagnostic *kind*, so a refactor can be cleared. |
 | `scripts/clippy-sites.py` | Count and list distinct clippy warning sites. |
@@ -498,4 +499,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_488 scripts._
+_489 scripts._

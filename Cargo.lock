@@ -523,17 +523,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "chroot"
-version = "0.1.0"
-dependencies = [
- "authlib",
- "pwdb",
- "quoting",
- "scratchdir",
- "userdb",
-]
-
-[[package]]
 name = "cipher"
 version = "0.5.2"
 dependencies = [

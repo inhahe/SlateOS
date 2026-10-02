@@ -27,7 +27,6 @@ userspace/backup/src/main.rs:argv-as-string
 userspace/bootctl/src/main.rs:argv-as-string
 userspace/cgroup/src/main.rs:argv-as-string
 userspace/chattr/src/main.rs:argv-as-string
-userspace/chroot/src/main.rs:argv-as-string
 userspace/coredumpctl/src/main.rs:argv-as-string
 userspace/cpio/src/main.rs:argv-as-string
 userspace/crond/src/main.rs:argv-as-string

@@ -1,7 +1,7 @@
 # B → D: new coreutils programs for `scripts/rootfs-bin-manifest.txt`
 
 **Status:** OPEN — for lane D: add the names below to the manifest.
-**Grown 2026-10-02** by six more, at the end ("Six more, 2026-10-02").
+**Grown 2026-10-02** by seven more, at the end ("Seven more, 2026-10-02").
 
 **From:** lane B. **Date:** 2026-09-25.
 
@@ -101,11 +101,11 @@ linking.) Whatever the table says is the whole ask.
 programs coreutils had *never* built. It missed the ones that existed as
 standalone crates written here rather than ported -- and since then, under
 design-decisions §1005 (coreutils is the one home for a coreutils program),
-six of those have been replaced by ports of 9.4 and their crates deleted. None
-of the six was on the image, so nothing on the image changes hands; they are
+seven of those have been replaced by ports of 9.4 and their crates deleted. None
+of the seven was on the image, so nothing on the image changes hands; they are
 simply more of this request.
 
-## Six more, 2026-10-02
+## Seven more, 2026-10-02
 
 | Name | What it is for | Checked by |
 |---|---|---|
@@ -115,15 +115,15 @@ simply more of this request.
 | `shuf` | random permutations and samples of lines or numbers | `scripts/shuf-diff.sh` |
 | `tac` | lines (or records) in reverse order | `scripts/tac-diff.sh` |
 | `timeout` | run a command with a time limit, signalling it and its children when time is up | `scripts/timeout-diff.sh` |
+| `chroot` | run a command with another directory as its root, as another user if asked -- what setting up a container or rescuing an installed system starts with | `scripts/chroot-diff.sh` |
 
 None is a fastpy name or `sort` or `sh`, and nothing else stages any of
 them -- `create-ext4-rootfs.sh`'s `PROMOTED` map is the fourteen fastpy
 commands and no others. At the manifest's average of about 813 KiB each, the
-six come to about 5 MiB.
+seven come to about 6 MiB.
 
-Three more will follow the same way, one at a time as each is ported:
-`chroot`, `who` and `stty`, whose standalone crates were not ported from 9.4
-either. When each lands it is added here, so the manifest change can be made
+Two more will follow the same way, one at a time as each is ported: `who`
+and `stty`, whose standalone crates were not ported from 9.4 either. When each lands it is added here, so the manifest change can be made
 once for whatever the table holds at the time.
 
 ## What I need back

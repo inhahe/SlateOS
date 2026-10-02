@@ -4892,12 +4892,16 @@ _Port ext4 first. Don't write a custom filesystem._
   new `libcall::signal` and `libcall::process`, its timer on upstream's `setitimer` arm because
   SlateOS's `timer_settime` arms nothing, `known-issues/B-POSIX-TIMER-SETTIME-REPORTS-SUCCESS-AND-ARMS-NOTHING.md`;
   `coreutils::interval` now `sleep`'s and its duration reader, and `coreutils::sig2str` gained
-  `operand2sig`); and `nproc`,
+  `operand2sig`); `chroot` (2026-10-02, replacing the standalone `userspace/chroot`, which refused
+  every step as unimplemented although the kernel has had native `chroot` and `setgroups` since
+  2026-09-07: upstream's two lookup passes, outside the new root and inside it, with the values
+  carrying over between them as they do there, and the credentials through `libcall::process`);
+  and `nproc`,
   re-ported because the standalone crate that had it was not GNU's and is retired. The multi-personality crates that answered some of these
   names in part lost those branches (§1005: `getopt` printenv/sync/cksum, `pv` truncate and shred, `nproc` arch/pathchk/users, `shuf` numfmt and factor, `base64` base32, `finger` pinky).
-  **Next:** three 9.4 programs exist here only as standalone crates that were not ported from it,
-  and none is on the image: `chroot`, `who` and `stty`. Each comes into coreutils from
-  the 9.4 source with a harness, as `install` and `timeout` did, and its crate is retired. Beyond those,
+  **Next:** two 9.4 programs exist here only as standalone crates that were not ported from it,
+  and neither is on the image: `who` and `stty`. Each comes into coreutils from
+  the 9.4 source with a harness, as `install`, `timeout` and `chroot` did, and its crate is retired. Beyond those,
   **nothing of GNU 9.4 is missing** that has something here to act on. Not ported, for want of what they act on: `chcon`/`runcon` (SELinux contexts) and `stdbuf` (works by
   `LD_PRELOAD` into a dynamically linked program). `[` is `test` under another name and needs only the image alias. None
   ships until lane D lists it: `requests/b-d-new-coreutils-programs-for-the-rootfs-manifest.md`.

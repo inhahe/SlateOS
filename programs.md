@@ -43,7 +43,7 @@ two disagree.
 | `chmod` | Change file mode bits. | yes | `coreutils` |  |
 | `chown` | Change file owner and group. | yes | `coreutils` |  |
 | `chpasswd` | Batch password change (chpasswd/passwd) |  |  |  |
-| `chroot` | Change Root Directory Utility |  |  |  |
+| `chroot` | Run a command with its root directory changed. |  | `coreutils` |  |
 | `cksum` | Print or verify checksums, by default POSIX's 32-bit CRC. |  | `coreutils` |  |
 | `cmp` | Compare two files byte by byte. | yes | `coreutils` |  |
 | `column` | Columnate lists, or lay input out as a table. |  |  |  |

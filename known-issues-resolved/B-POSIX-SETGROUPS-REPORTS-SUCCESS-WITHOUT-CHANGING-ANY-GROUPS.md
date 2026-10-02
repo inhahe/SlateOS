@@ -1,8 +1,11 @@
 ## B-POSIX-SETGROUPS-REPORTS-SUCCESS-WITHOUT-CHANGING-ANY-GROUPS (lane B, 2026-09-07)
 
-**Status: IMPLEMENTED 2026-09-12.** `setgroups` now calls
+**Status: FIXED 2026-09-12.** `setgroups` now calls
 `SYS_PROCESS_SETGROUPS` (1067) and actually drops the groups; `chroot`, named
 at the foot of this entry as the model, calls `SYS_PROCESS_CHROOT` (1068).
+Moved to `known-issues-resolved/` on 2026-10-02, when `chroot (1)` -- now GNU
+9.4's, ported, in place of the standalone that stubbed both calls -- became
+the first program in the tree to drop groups through it.
 Lane A landed both on **2026-09-07**, the day after they were asked, and the
 request file has said `LANDED` in its own status line ever since. This entry
 went on describing the block for five days because nothing re-read it after

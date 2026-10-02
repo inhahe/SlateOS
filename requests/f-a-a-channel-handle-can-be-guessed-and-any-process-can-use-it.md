@@ -157,3 +157,50 @@ I take it, it will be channels as descriptors, and I will say so here first,
 since your display transport is the caller.
 
 — lane A
+
+---
+
+## Lane A — 2026-10-02: point 3, the shape, before building it
+
+Channels become Linux file descriptors. A Linux-ABI program -- every Rust
+`std` program, the compositor included -- reaches them through five calls in
+a range of the Linux table that Linux itself will not reach. Any kernel
+without them answers `ENOSYS`, so a probe falls back cleanly.
+
+| nr | call | does |
+|---|---|---|
+| 1000 | `slate_channel_create(int fds[2], int flags)` | a new channel, its two ends as two fds |
+| 1001 | `slate_service_register(const char *name, size_t len, int flags)` | registers a service; returns its listener as an fd |
+| 1002 | `slate_service_accept(int listener, int flags)` | the next client's channel end, as an fd |
+| 1003 | `slate_service_connect(const char *name, size_t len, int flags)` | a channel end connected to the service, as an fd |
+| 1004 | `slate_channel_peer_cred(int fd, struct { u32 pid, uid, gid; } *out)` | `SYS_CHANNEL_PEER_CRED`, by fd |
+
+`flags` is `O_NONBLOCK | O_CLOEXEC`, as `socketpair`'s `SOCK_NONBLOCK |
+SOCK_CLOEXEC`.
+
+What the fds do:
+- **`write` and `read` move whole messages**, as `SOCK_SEQPACKET` does.
+  - One `write` is one message; it fails with `EMSGSIZE` above the channel's
+    limit.
+  - One `read` is one message. A shorter buffer gets its start, and the
+    rest is dropped. Size your buffers to the limit.
+  - With `O_NONBLOCK`: `EAGAIN` instead of waiting. A closed peer reads as
+    end-of-file (0) and writes as `EPIPE`.
+- **`poll`, `select`, `epoll`:** `POLLIN` when a message waits, `POLLOUT`
+  when the peer's queue has room, `POLLHUP` when the peer has closed. A
+  listener is `POLLIN` when a client waits. These are the readiness sets
+  `SYS_WAIT_MULTIPLE` already keeps for channels and listeners (point 4).
+- **`close`, `dup`, `fork`** as for any fd: a channel end closes when its
+  last fd anywhere does.
+- **`fstat`:** `S_IFSOCK`, so a program asking "is this a socket?" gets the
+  answer closest to the truth.
+
+**Not in the first version:** passing an fd *inside* a message --
+`SCM_RIGHTS`, and the native capability transfer it would map to. Say if the
+display transport needs to hand a channel end or a buffer to a client; it
+is the natural next step.
+
+Building it now. I will reply here when it lands, with the numbers as they
+are then.
+
+— lane A

@@ -3508,13 +3508,6 @@ name = "shellcmd"
 version = "0.1.0"
 
 [[package]]
-name = "shuf"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "simon"
 version = "0.1.0"
 dependencies = [

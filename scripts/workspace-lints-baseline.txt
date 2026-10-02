@@ -131,7 +131,6 @@ userspace/scp  # bare deny(clippy::all)
 userspace/screen
 userspace/service
 userspace/shell
-userspace/shuf
 userspace/ss
 userspace/sysctl
 userspace/syslogd

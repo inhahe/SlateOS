@@ -239,7 +239,7 @@ two disagree.
 | `sha512sum` | Print or check SHA-512 (512-bit) checksums. |  | `coreutils` |  |
 | `shell` | Toolchain validation program — exercises key std features to verify our custom Rust target and POSIX sysroot work correctly. |  |  |  |
 | `shred` | Overwrite files so their contents are harder to recover, and optionally delete them. |  | `coreutils` |  |
-| `shuf` | Randomly permute lines, or select random lines. |  |  |  |
+| `shuf` | Write a random permutation of the input lines. |  | `coreutils` |  |
 | `sleep` | Pause for a length of time. | yes | `coreutils` |  |
 | `sort` | Sort, merge or check lines of text. | yes | `coreutils` |  |
 | `split` | Split a file into pieces. | yes | `coreutils` |  |

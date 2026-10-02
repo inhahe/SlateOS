@@ -23,6 +23,7 @@ What the cases are aimed at, in order of how much it would cost to get wrong:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
@@ -311,6 +312,122 @@ def migrate_then_search() -> None:
               "known-issues/TD-A-NEW.md")
 
 
+@contextlib.contextmanager
+def no_git_env():
+    """For cases that call the tools in this process. They run git with this
+    process's environment, and a hook's GIT_DIR there would point them at the real
+    repository -- its shared cache, its server pid file -- instead of the scratch one."""
+    saved = {k: os.environ.pop(k) for k in list(os.environ) if k.startswith("GIT_")}
+    try:
+        yield
+    finally:
+        os.environ.update(saved)
+
+
+@case
+def semantic_search_waits_for_the_vectors() -> None:
+    """Meaning joins the ranking only once nearly every candidate has a vector: with
+    200 of 1,046 decisions embedded, the embedded ones crowded out the decision a
+    query was about (2026-10-02). And that is decided before a server is started."""
+    import docsearch as S
+    try:
+        import numpy as np
+    except ImportError:
+        print("SKIP  semantic_search_waits_for_the_vectors (numpy is not installed)")
+        return
+    started: list[Path] = []
+    real_ensure = S.ensure_server
+    S.ensure_server = lambda root, quiet: started.append(root) or False  # never a real server here
+    try:
+        with no_git_env(), tempfile.TemporaryDirectory() as t:
+            root = new_repo(Path(t))
+            seed(root)
+            run(root, sys.executable, script("docs-migrate.py"))
+            commit(root, "cutover")
+
+            def search() -> dict:
+                return S.search(root, "body", kinds=[], lane="", status="", since="", n=3, semantic=True,
+                                quiet=True)[1]
+
+            db, cache = S.open_index(root), S.open_cache(root)
+            try:
+                S.refresh(root, db, cache)
+                ents = db.execute("SELECT id, text_hash FROM entries ORDER BY id").fetchall()
+                target = ents[3][0]
+
+                def embed(subset) -> None:
+                    cache.executemany("INSERT OR REPLACE INTO vectors VALUES (?,?,?,?)", [
+                        (th, S.EMBED_MODEL_NAME, 4,
+                         np.asarray([1, 0, 0, 0] if eid == target else [0, 1, 0, 0], dtype=np.float32).tobytes())
+                        for eid, th in subset])
+                    cache.commit()
+
+                check("no vectors: meaning is off, and says why", S.embedded_candidates(db, cache, None),
+                      "no vectors yet")
+                half = ents[: len(ents) // 2]
+                embed(half)
+                got = S.embedded_candidates(db, cache, None)
+                check("half embedded: still off", isinstance(got, str) and "embedded so far" in got, True)
+                info = search()
+                check("...which a search reports, without starting a server",
+                      (info["semantic"].startswith("off (only "), started), (True, []))
+                check("a filter whose entries are all embedded: on",
+                      isinstance(S.embedded_candidates(db, cache, {eid for eid, _ in half}), tuple), True)
+                embed(ents)
+                got = S.embedded_candidates(db, cache, None)
+                check("all embedded: on", isinstance(got, tuple) and len(got[0]) == len(ents), True)
+                ranks = S.semantic_ranks(*got, [0.9, 0.1, 0.0, 0.0])
+                check("the nearest vector ranks first", min(ranks, key=ranks.get), target)
+                info = search()
+                check("...and only now is a server wanted", (len(started), info["semantic"]),
+                      (1, "off (no embedding model on this machine)"))
+            finally:
+                db.close()
+                cache.close()
+    finally:
+        S.ensure_server = real_ensure
+
+
+@case
+def stop_server_stops_only_its_own_server() -> None:
+    """`--stop-server` once reported "not running" about a server that was running
+    (taskkill without /F cannot close a process that has no window) and forgot its
+    pid. It must stop the process it started, and leave alone any other program --
+    including one that has since been given the same PID."""
+    import docsearch as S
+    sleeper = [sys.executable, "-c", "import time; time.sleep(120)"]
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    real_exe = S.SERVER_EXE
+    with no_git_env(), tempfile.TemporaryDirectory() as t:
+        root = new_repo(Path(t))
+        mine = subprocess.Popen(sleeper, creationflags=flags)
+        other = subprocess.Popen(sleeper, creationflags=flags)
+        try:
+            check("a live process running another program is not ours",
+                  S._terminate_if_ours(other.pid, exe=Path(t) / "llama-server.exe"), "not ours")
+            check("...and is left running", other.poll(), None)
+            pid_file = S._pid_file(root)
+            pid_file.write_text(str(other.pid), encoding="utf-8")
+            msg = S.stop_server(root)
+            check("--stop-server leaves a program that is not its server alone",
+                  ("left it alone" in msg, other.poll()), (True, None))
+            check("...and forgets that pid", pid_file.exists(), False)
+            S.SERVER_EXE = Path(sys.executable)  # make `mine` the server, as far as the check can tell
+            pid_file.write_text(str(mine.pid), encoding="utf-8")
+            msg = S.stop_server(root)
+            check("--stop-server stops the server it started", msg.startswith("stopped the embedding server"), True)
+            check("...which has exited", mine.wait(timeout=10) is not None, True)
+            check("a pid whose process has exited is gone", S._terminate_if_ours(mine.pid), "gone")
+            check("no pid file: nothing to stop", S.stop_server(root), "no embedding server was started by docsearch")
+            check("the other program is still running", other.poll(), None)
+        finally:
+            S.SERVER_EXE = real_exe
+            for p in (mine, other):
+                if p.poll() is None:
+                    p.kill()
+                p.wait()
+
+
 def lane_and_cutover(tmp: Path) -> Path:
     """main: base -> cutover (+ a later edit of one entry). lane: base -> its own edits."""
     root = new_repo(tmp)
@@ -396,7 +513,7 @@ def carry_forward_refuses_outside_a_merge() -> None:
 
 
 def main() -> int:
-    if len(CASES) < 9:
+    if len(CASES) < 12:
         print(f"FATAL: only {len(CASES)} cases registered")
         return 1
     for fn in CASES:

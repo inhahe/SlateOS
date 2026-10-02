@@ -788,16 +788,27 @@ def repo_root(start: Path | None = None) -> Path:
     return Path(r.stdout.strip())
 
 
-def git_common_dir(root: Path) -> Path:
-    r = subprocess.run(["git", "-C", str(root), "rev-parse", "--git-common-dir"], capture_output=True, text=True)
-    p = Path(r.stdout.strip())
+def _rev_parse_dir(root: Path, flag: str) -> Path:
+    """A directory git reports for `root`. A failure stops the program: falling back
+    to `root` itself would put the tools' databases inside the working tree. (Git
+    refuses a checkout owned by another user -- "dubious ownership" -- with exactly
+    this kind of silent-looking failure.)"""
+    r = subprocess.run(["git", "-C", str(root), "rev-parse", flag], capture_output=True, text=True)
+    out = r.stdout.strip()
+    if r.returncode != 0 or not out:
+        raise SystemExit(f"git rev-parse {flag} failed in {root}: {r.stderr.strip() or 'no output'}")
+    p = Path(out)
     return p if p.is_absolute() else (root / p).resolve()
+
+
+def git_common_dir(root: Path) -> Path:
+    """The git directory every worktree of `root`'s repository shares."""
+    return _rev_parse_dir(root, "--git-common-dir")
 
 
 def git_dir(root: Path) -> Path:
-    r = subprocess.run(["git", "-C", str(root), "rev-parse", "--git-dir"], capture_output=True, text=True)
-    p = Path(r.stdout.strip())
-    return p if p.is_absolute() else (root / p).resolve()
+    """`root`'s own git directory (a worktree's private one, for a linked worktree)."""
+    return _rev_parse_dir(root, "--git-dir")
 
 
 if __name__ == "__main__":  # a quick census of a checkout, for humans

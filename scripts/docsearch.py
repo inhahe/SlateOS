@@ -36,10 +36,14 @@ WHERE THINGS LIVE.
   <git-common-dir>/docsearch-cache.sqlite   cards and vectors, shared by every worktree
 Both are derived: delete them and the next search rebuilds what it needs.
 
-SEMANTIC QUERIES need the query embedded. If no embedding server answers on
+SEMANTIC QUERIES need vectors for the entries and the query embedded. Meaning joins
+the ranking only once at least 90% of the entries being searched have a vector --
+until then, the few that do would crowd out better keyword matches -- and that is
+decided before any server is started. If no embedding server answers on
 127.0.0.1:8093, one is started on the CPU (no VRAM, ~1 GB RAM) and left running for
-later searches; `--stop-server` stops it. Without the model on this machine, search
-is keyword-only and says so.
+later searches; `--stop-server` stops it (only if that PID is still the server it
+started). Without the model on this machine, search is keyword-only and says so; the
+last line of the output always says whether meaning was used, and if not, why.
 """
 
 from __future__ import annotations
@@ -65,6 +69,7 @@ QUERY_INSTRUCTION = ("Given a question about a software project's issues, design
                      "requests, retrieve the entries that answer it")
 SERVER_PORT = int(os.environ.get("DOCSEARCH_EMBED_PORT", "8093"))
 LLAMA_DIR = Path(os.environ.get("DOCSEARCH_LLAMA_DIR", "D:/ai/llama.cpp/b11344"))
+SERVER_EXE = LLAMA_DIR / "llama-server.exe"
 EMBED_MODEL = Path(os.environ.get("DOCSEARCH_EMBED_MODEL",
                                   "D:/ai/Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf"))
 ID_QUERY = re.compile(r"^(?:\u00a7\s*\d+|\d{1,4}|(?:[A-F]-)?Q\d+|DQ\d+|[A-Za-z0-9]+(?:-[A-Za-z0-9.]+){1,})$")
@@ -234,7 +239,7 @@ def ensure_server(root: Path, quiet: bool) -> bool:
     """An embedding server on SERVER_PORT, started on the CPU if none is running."""
     if _server_up():
         return True
-    exe = LLAMA_DIR / "llama-server.exe"
+    exe = SERVER_EXE
     if not exe.exists() or not EMBED_MODEL.exists():
         return False
     log = open(D.git_common_dir(root) / "docsearch-server.log", "ab")  # noqa: SIM115 - handed to the child
@@ -266,14 +271,86 @@ def ensure_server(root: Path, quiet: bool) -> bool:
     return False
 
 
+def _same_file(a: Path | str, b: Path | str) -> bool:
+    return os.path.normcase(str(Path(a).resolve())) == os.path.normcase(str(Path(b).resolve()))
+
+
+def _terminate_if_ours(pid: int, exe: Path | None = None) -> str:
+    """Terminate `pid` if, and only if, it is still running `exe` (by default the
+    llama-server this script starts).
+
+    The pid file can outlive its process, and Windows reuses PIDs, so the number
+    alone may by now name somebody else's program. The check and the kill go
+    through one process handle, which pins the process: it cannot exit and have its
+    PID handed to another between the two. Returns "stopped", "gone" or "not ours".
+    (`taskkill /PID` without /F cannot do this job at all: it asks the process to
+    close its windows, and a server started detached has none.)"""
+    exe = exe or SERVER_EXE
+    if sys.platform != "win32":
+        # No handle to pin the process with here (short of pidfd), so this is the
+        # best-effort version: check /proc, then signal.
+        try:
+            target = os.readlink(f"/proc/{pid}/exe")
+        except FileNotFoundError:
+            return "gone"
+        except OSError:  # e.g. another user's process: certainly not ours
+            return "not ours"
+        if not _same_file(target, exe):
+            return "not ours"
+        try:
+            os.kill(pid, 15)
+        except ProcessLookupError:
+            return "gone"
+        return "stopped"
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    k32.QueryFullProcessImageNameW.argtypes = (wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                                               ctypes.POINTER(wintypes.DWORD))
+    k32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    k32.TerminateProcess.argtypes = (wintypes.HANDLE, wintypes.UINT)
+    k32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    k32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    # PROCESS_TERMINATE | SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION
+    h = k32.OpenProcess(0x0001 | 0x00100000 | 0x1000, False, pid)
+    if not h:
+        return "gone"
+    try:
+        code = wintypes.DWORD()
+        if not k32.GetExitCodeProcess(h, ctypes.byref(code)) or code.value != 259:  # STILL_ACTIVE
+            return "gone"
+        buf = ctypes.create_unicode_buffer(32768)
+        size = wintypes.DWORD(len(buf))
+        if not k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)) or not _same_file(buf.value, exe):
+            return "not ours"
+        if not k32.TerminateProcess(h, 1):
+            raise OSError(ctypes.get_last_error(), f"TerminateProcess({pid}) failed")
+        k32.WaitForSingleObject(h, 10_000)
+        return "stopped"
+    finally:
+        k32.CloseHandle(h)
+
+
 def stop_server(root: Path) -> str:
     pf = _pid_file(root)
     if not pf.exists():
         return "no embedding server was started by docsearch"
-    pid = int(pf.read_text(encoding="utf-8").strip() or 0)
-    pf.unlink()
-    r = subprocess.run(["taskkill", "/PID", str(pid)], capture_output=True, text=True)
-    return f"stopped pid {pid}" if r.returncode == 0 else f"pid {pid} was not running"
+    try:
+        pid = int(pf.read_text(encoding="utf-8").strip() or 0)
+    except ValueError:
+        pid = 0
+    outcome = _terminate_if_ours(pid) if pid else "gone"
+    # Forget the pid only once it no longer names our server; if termination
+    # raised, the file stays and a second --stop-server can try again.
+    pf.unlink(missing_ok=True)
+    if outcome == "stopped":
+        return f"stopped the embedding server (pid {pid})"
+    if outcome == "not ours":
+        return (f"pid {pid} is no longer the embedding server docsearch started (another program has that "
+                "number now); left it alone")
+    return f"the embedding server docsearch started (pid {pid}) had already exited"
 
 
 def embed_query(q: str) -> list[float] | None:
@@ -288,26 +365,42 @@ def embed_query(q: str) -> list[float] | None:
         return None
 
 
-def semantic_ranks(root: Path, db: sqlite3.Connection, cache: sqlite3.Connection, qvec: list[float],
-                   allowed: set[int] | None) -> dict[int, int]:
-    """entry id -> rank by cosine similarity, over entries that have a vector."""
+MIN_VECTOR_COVERAGE = 0.9
+
+
+def embedded_candidates(db: sqlite3.Connection, cache: sqlite3.Connection,
+                        allowed: set[int] | None) -> tuple[list[int], object] | str:
+    """The candidate entries' ids and their vectors as a matrix -- or, when meaning
+    cannot be used for this search, a short reason why.
+
+    Meaning is only used once nearly every candidate has a vector. While the cache
+    is being filled, the entries that happen to be embedded would outrank better
+    keyword matches that are not: measured, with 200 of 1,046 decisions embedded,
+    the decision a query was about fell out of the top three. Entries added since
+    the last nightly run are the few percent this threshold tolerates; they still
+    rank by their words."""
     try:
         import numpy as np
     except ImportError:
-        return {}
-    vecs = {}
-    for th, blob in cache.execute("SELECT text_hash, vec FROM vectors WHERE model=?", (EMBED_MODEL_NAME,)):
-        vecs[th] = blob
+        return "numpy is not installed"
+    vecs = dict(cache.execute("SELECT text_hash, vec FROM vectors WHERE model=?", (EMBED_MODEL_NAME,)))
     if not vecs:
-        return {}
-    ids, rows = [], []
+        return "no vectors yet"
+    ids, rows, candidates = [], [], 0
     for eid, th in db.execute("SELECT id, text_hash FROM entries"):
-        if th in vecs and (allowed is None or eid in allowed):
-            ids.append(eid)
-            rows.append(np.frombuffer(vecs[th], dtype=np.float32))
-    if not rows:
-        return {}
-    mat = np.vstack(rows)
+        if allowed is None or eid in allowed:
+            candidates += 1
+            if th in vecs:
+                ids.append(eid)
+                rows.append(np.frombuffer(vecs[th], dtype=np.float32))
+    if not rows or len(rows) < MIN_VECTOR_COVERAGE * candidates:
+        return f"only {len(rows)} of {candidates} entries embedded so far"
+    return ids, np.vstack(rows)
+
+
+def semantic_ranks(ids: list[int], mat, qvec: list[float]) -> dict[int, int]:
+    """entry id -> rank by cosine similarity to the query (vectors are unit length)."""
+    import numpy as np
     q = np.asarray(qvec, dtype=np.float32)
     q /= np.linalg.norm(q) or 1.0
     sims = mat @ q
@@ -325,12 +418,28 @@ def fts_query(q: str) -> str:
 
 def search(root: Path, q: str, *, kinds: list[str], lane: str, status: str, since: str, n: int,
            semantic: bool, quiet: bool) -> tuple[list[sqlite3.Row], dict]:
+    """The best `n` entries for `q` and a dict saying how they were found. The rows
+    are fetched in full, so they stay readable after the databases are closed."""
     db = open_index(root)
     db.row_factory = sqlite3.Row
     try:
         cache = open_cache(root)
     except sqlite3.Error:
         cache = None
+    try:
+        return _search(root, db, cache, q, kinds=kinds, lane=lane, status=status, since=since, n=n,
+                       semantic=semantic, quiet=quiet)
+    finally:
+        # Closed here, not left to the garbage collector: on Windows an open
+        # database file cannot be deleted, which a caller cleaning up may need.
+        db.close()
+        if cache is not None:
+            cache.close()
+
+
+def _search(root: Path, db: sqlite3.Connection, cache: sqlite3.Connection | None, q: str, *, kinds: list[str],
+            lane: str, status: str, since: str, n: int, semantic: bool,
+            quiet: bool) -> tuple[list[sqlite3.Row], dict]:
     info = refresh(root, db, cache)
 
     def filters(prefix: str) -> tuple[str, list]:
@@ -379,16 +488,20 @@ def search(root: Path, q: str, *, kinds: list[str], lane: str, status: str, sinc
     sem = {}
     info["semantic"] = "off"
     if semantic and cache is not None:
-        has_vecs = cache.execute("SELECT 1 FROM vectors WHERE model=? LIMIT 1", (EMBED_MODEL_NAME,)).fetchone()
-        if not has_vecs:
-            info["semantic"] = "no vectors yet"
+        # Decide from the cache first: starting the server costs seconds, and is
+        # wasted if the vectors it would be compared with are not there yet.
+        emb = embedded_candidates(db, cache, allowed)
+        if isinstance(emb, str):
+            info["semantic"] = f"off ({emb})"
         elif ensure_server(root, quiet):
             qv = embed_query(qs)
             if qv:
-                sem = semantic_ranks(root, db, cache, qv, allowed)
+                sem = semantic_ranks(*emb, qv)
                 info["semantic"] = "on"
+            else:
+                info["semantic"] = "off (the embedding server did not answer)"
         else:
-            info["semantic"] = "no embedding model on this machine"
+            info["semantic"] = "off (no embedding model on this machine)"
     for eid, rank in bm25.items():
         hits[eid] = hits.get(eid, 0.0) + 1.0 / (60 + rank)
     for eid, rank in sem.items():

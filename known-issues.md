@@ -181433,9 +181433,18 @@ to their types; a device node on ext4 also needs `open` to refuse it (there
 is no device behind a stored major/minor here) rather than read it as a
 file.
 
-### A-NEW-FILES-ARE-OWNED-BY-UID-0-WHOEVER-CREATES-THEM -- 2026-10-02 -- OPEN (lane A)
+### A-NEW-FILES-ARE-OWNED-BY-UID-0-WHOEVER-CREATES-THEM -- 2026-10-02 -- FIXED the same day (lane A)
 
-**Status:** OPEN (lane A).
+**Status:** FIXED 2026-10-02 (lane A), awaiting a boot on `main`. Every VFS
+creation path -- a file made by a write or `O_CREAT`, `mkdir`, `symlink`, a
+socket node, `O_TMPFILE` -- now gives the node its creator's uid and gid
+under the same hold of the filesystem's lock that made it
+(`vfs::init_new_owner`, as Linux's `inode_init_owner`): the directory's
+group instead in a set-group-ID directory, where a new directory is
+set-group-ID too. An overwrite keeps the owner; kernel context makes root's.
+The creator is read before the filesystem's lock is taken. Checked by
+`vfs::owner_self_test`. The quota charge still counts uid 0 for every write
+(`write_file_resolved`'s "until per-process identity is wired up").
 
 **In short:** every file, directory, symlink and socket node a program
 creates is owned by user 0 (root), group 0, whoever created it. Today every

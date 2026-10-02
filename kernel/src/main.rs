@@ -1904,6 +1904,13 @@ extern "C" fn kernel_main() -> ! {
                 selftest::Severity::Diagnostic,
                 fs::vfs::socket_node_self_test(),
             );
+            // Who owns a new node: its creator, a set-group-ID directory's
+            // group, root for the kernel.
+            selftest::dispatch_debug(
+                "VFS new-node owner",
+                selftest::Severity::Diagnostic,
+                fs::vfs::owner_self_test(),
+            );
             // Unix-domain sockets by name: datagrams and streams over abstract
             // names and /tmp nodes (needs the socket nodes above).
             selftest::dispatch_debug(

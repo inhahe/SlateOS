@@ -189,7 +189,6 @@ pub mod hotkeys;
 pub mod hwmonitor;
 pub mod hwrng;
 pub mod ime;
-pub mod immutable;
 pub mod index;
 pub mod inodestat;
 pub mod inputa11y;

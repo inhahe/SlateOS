@@ -1,10 +1,13 @@
 //! Per-file state kept outside the filesystem, and the lifecycle events that
 //! keep it attached to the right file.
 //!
-//! Four kernel tables hold state about files in memory rather than in the
-//! filesystem that holds the files: ACLs ([`super::acl`]), the `chattr`-style
-//! flags ([`super::immutable`]), seals ([`super::sealing`]) and the indexed
-//! attributes of [`super::queryable`]. Since 2026-09-21 each keys its entries
+//! Kernel tables hold state about files in memory rather than in the
+//! filesystem that holds the files: ACLs ([`super::acl`]), seals
+//! ([`super::sealing`]), the indexed attributes of [`super::queryable`], and
+//! which socket a Unix-domain socket's node leads to. The `chattr` flags were
+//! a table here too until 2026-10-02 (`fs::immutable`, which nothing
+//! consulted); they are the inode's now (`vfs::FileAttr`), as Linux keeps
+//! them, and end with it. Since 2026-09-21 each table keys its entries
 //! on the file's [`FileId`] -- `(fs_id, ino)` -- so that two names for one
 //! file share one entry, falling back to the path where a filesystem has no
 //! inode numbers.
@@ -42,7 +45,7 @@
 //! POSIX frees an inode when its last name *and* its last open handle are
 //! gone, so a file unlinked while open is still a file. The state here ends
 //! at the last name regardless, because every consumer reaches it through a
-//! name: ACLs are consulted at path resolution, the flags and seals on path
+//! name: ACLs are consulted at path resolution, the seals on path
 //! operations, and the attributes by path queries. With the last name gone,
 //! nothing can consult any of it for this file again.
 //!
@@ -54,7 +57,7 @@
 //!   goes: nothing maps an identity back to its surviving names.
 //! - A rename rewrites names by scanning each table: nothing when the tables
 //!   are empty, which is almost always, and a few milliseconds at the 65,536
-//!   entries `queryable` and `immutable` allow.
+//!   entries `queryable` allows.
 //!
 //! ## Lock order
 //!
@@ -111,7 +114,6 @@ pub(crate) struct Table {
 /// exercises it with the rest.
 pub(crate) const TABLES: &[Table] = &[
     super::acl::PER_FILE_STATE,
-    super::immutable::PER_FILE_STATE,
     super::sealing::PER_FILE_STATE,
     super::queryable::PER_FILE_STATE,
     // Which socket a Unix-domain socket's node leads to: an entry outliving
@@ -477,7 +479,7 @@ fn check_registry() -> KernelResult<()> {
 /// Boot self-test: drives every table in [`TABLES`] through each lifecycle
 /// event via the real VFS, on `/tmp`.
 ///
-/// Needs `/tmp` mounted and the VFS up; runs after the four tables' own
+/// Needs `/tmp` mounted and the VFS up; runs after the tables' own
 /// self-tests.
 ///
 /// # Errors

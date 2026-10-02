@@ -6023,6 +6023,13 @@ extern "C" fn kernel_main() -> ! {
                 selftest::Severity::Diagnostic,
                 fs::vfs::self_test_attr_rules(),
             );
+            // Seals (`fs::sealing`) as the VFS enforces them on every route
+            // that changes a file's contents, size or mode.
+            selftest::dispatch_debug(
+                "seals through the VFS",
+                selftest::Severity::Diagnostic,
+                fs::vfs::self_test_seal_rules(),
+            );
             // netmon backs /proc/netmon and the `netmon` kshell command.  Its
             // init_defaults() previously seeded three FABRICATED connections (sshd
             // LISTEN :22, a browser ESTABLISHED to 93.184.216.34:443 with real-looking
@@ -6506,11 +6513,6 @@ extern "C" fn kernel_main() -> ! {
                 "fstrim",
                 selftest::Severity::Diagnostic,
                 fs::fstrim::self_test(),
-            );
-            selftest::dispatch_debug(
-                "immutable flags",
-                selftest::Severity::Diagnostic,
-                fs::immutable::self_test(),
             );
             selftest::dispatch_debug(
                 "pathbar",

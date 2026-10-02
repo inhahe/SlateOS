@@ -1740,6 +1740,24 @@ impl HandleFile {
         }
     }
 
+    /// The file's identity -- `None` on a filesystem that gives none -- and
+    /// the name it was opened under: what a seal is keyed and reported by
+    /// (`fs::sealing`).
+    ///
+    /// # Errors
+    ///
+    /// As `check_pin`; the filesystem's.
+    pub fn identity(&self) -> KernelResult<(Option<crate::fs::vfs::FileId>, PathBuf)> {
+        let id = match &self.object {
+            Some(held) => Some(held.id()),
+            None => {
+                self.check_pin()?;
+                crate::fs::Vfs::file_identity_resolved(&self.path)?
+            }
+        };
+        Ok((id, self.path.clone()))
+    }
+
     /// `FS_IOC_SETFLAGS`: the file's attributes (`chattr`), as
     /// `Vfs::set_attributes` decides who may change them.
     ///

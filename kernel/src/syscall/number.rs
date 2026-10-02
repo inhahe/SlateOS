@@ -6428,6 +6428,26 @@ pub const SYS_DEVICE_WRITE: u64 = 1122;
 /// `SYS_DEVICE_CLOSE(kind, handle)` -- let go of the handle.
 pub const SYS_DEVICE_CLOSE: u64 = 1123;
 
+// Seals on a file (1124-1125): `fs::sealing`, design-decisions 1526.
+
+/// `SYS_FS_ADD_SEALS(handle, seals)` -- seal the file `handle` holds,
+/// whatever its name now. `seals` in Linux's `F_SEAL_*` bits: `0x01`
+/// `F_SEAL_SEAL` (no more seals), `0x02` `F_SEAL_SHRINK`, `0x04`
+/// `F_SEAL_GROW`, `0x08` `F_SEAL_WRITE` (no write, and here no truncate
+/// either), `0x20` `F_SEAL_EXEC` (no change to an execute bit). Seals add up
+/// and are never removed; they end with the file. The VFS refuses what they
+/// forbid with `NotPermitted`, on every route to the file.
+///
+/// The handle must be the caller's and open for writing -- Linux's rule for
+/// `F_ADD_SEALS` -- else `NotPermitted`; any other bit, or none,
+/// `InvalidArgument`; a file sealed with `F_SEAL_SEAL` already,
+/// `NotPermitted`. Returns the file's seals after, in the same bits.
+pub const SYS_FS_ADD_SEALS: u64 = 1124;
+
+/// `SYS_FS_GET_SEALS(handle)` -- the seals of the file `handle` holds, in
+/// `SYS_FS_ADD_SEALS`'s bits; 0 for none. Any handle of the caller's.
+pub const SYS_FS_GET_SEALS: u64 = 1125;
+
 /// Bytes [`SYS_UNIX_NAME`] writes: kind, length, 108 bytes of name.
 pub const UNIX_ADDR_LEN: usize = 116;
 /// Bytes [`SYS_UNIX_RECV`] writes at `info_ptr`.

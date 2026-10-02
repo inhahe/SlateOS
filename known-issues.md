@@ -150417,7 +150417,7 @@ just a boundary and is fine to document. The grep that finds them is the phrase
 *accepted but*, and there are nine.
 
 
-## TD-B-ACCESS-CANNOT-SEE-THE-ONE-PERMISSION-MECHANISM-THAT-IS-ENFORCED (lane B, 2026-09-13)
+## TD-B-ACCESS-CANNOT-SEE-THE-ONE-PERMISSION-MECHANISM-THAT-IS-ENFORCED (lane B, 2026-09-13) -- FIXED 2026-10-02
 **Status:** FIXED by lane A on lane-a-wip 2026-10-02, awaiting a boot -- the Linux `access` answers the gates a real open or exec meets (`Vfs::access_gates`): `EPERM` for `W_OK` on an immutable file, the ACLs and capability tags (`EACCES`), `EROFS` for `W_OK` on a read-only mount; not the mode bits (design-decisions §1524)
 
 **In short:** `access(path, W_OK)` answers "yes" for any file that exists. On a
@@ -162788,7 +162788,7 @@ a reader that was never wired up. That one the gate *did* find. This one it
 did not, and the difference between the two is the thing worth knowing.
 ### [A] Eight security-named `fs/` modules claim to enforce something and nothing calls them; `sealing` is the worst of them -- 2026-09-17
 
-**Status:** OPEN
+**Status:** OPEN -- `sealing` FIXED on lane-a-wip 2026-10-02, awaiting a boot: the VFS asks the seal rules on every change of a file's contents, size or mode, by identity (design-decisions §1526); `secureboot` (§1501) and `diskencrypt`'s keys (§1523) done earlier; the rest per §978
 
 **In short:** the kernel has a feature that lets a program mark a file
 permanently unchangeable. You can set the mark, `/proc` will list the file as
@@ -166472,7 +166472,7 @@ Those are features, and dd-950's point is that these modules are the outline
 of them rather than dead weight.
 
 ### [A] Two implementations of file immutability: one real and tested, one decorative -- and I nearly recorded the real one as fake -- 2026-09-18
-**Status:** OPEN -- the real one is complete as of 2026-10-02 (design-decisions §1524: Linux's rules on every filesystem, every refusal `EPERM`, `chattr`'s ioctls); the decorative `fs::immutable` remains, and is lane A's next removal
+**Status:** FIXED 2026-10-02 on lane-a-wip, awaiting a boot -- the real one is complete (design-decisions §1524: Linux's rules on every filesystem, every refusal `EPERM`, `chattr`'s ioctls) and the decorative `fs::immutable` is removed, with its `fflags` command and `/proc/immutable` (§1525)
 
 **In short:** the kernel can mark a file unchangeable, and that genuinely
 works -- writes, truncates and deletes are all refused, checked on every

@@ -58,8 +58,9 @@ use std::rc::Rc;
 /// ends the run.
 pub enum Fatal {
     /// gawk's `fatal:` and its kin: said after `awk: ` and where the program
-    /// was, and the run ends with status 2.
-    Said(String),
+    /// was, and the run ends with status 2. Bytes, because most of them name
+    /// a file or a command, and gawk prints those with `%s`.
+    Said(Str),
     /// Standard output's reader went away. gawk dies of `SIGPIPE` there; this
     /// system does not use signals for process control, so -- as everywhere
     /// in coreutils (`stdfd::reader_gone`) -- the run ends quietly, with the
@@ -67,10 +68,37 @@ pub enum Fatal {
     ReaderGone,
 }
 
+impl Fatal {
+    /// [`Fatal::Said`] from this file's own sentences, built as text.
+    pub fn said(message: impl Into<Str>) -> Fatal {
+        Fatal::Said(message.into())
+    }
+}
+
 impl From<String> for Fatal {
     fn from(s: String) -> Fatal {
+        Fatal::Said(s.into_bytes())
+    }
+}
+
+impl From<Str> for Fatal {
+    fn from(s: Str) -> Fatal {
         Fatal::Said(s)
     }
+}
+
+/// `head NAME tail`, the name as it is: gawk prints file and command names
+/// with `%s`, and a name need not be text.
+fn named(head: &str, name: &[u8], tail: &str) -> Str {
+    let mut said = Vec::with_capacity(
+        head.len()
+            .saturating_add(name.len())
+            .saturating_add(tail.len()),
+    );
+    said.extend_from_slice(head.as_bytes());
+    said.extend_from_slice(name);
+    said.extend_from_slice(tail.as_bytes());
+    said
 }
 
 /// A regex search that gave up is fatal, not a non-match.
@@ -82,7 +110,7 @@ impl From<String> for Fatal {
 /// reading, and it is what `gawk` does with its own regex-cost limits.
 impl From<ere::MatchLimit> for Fatal {
     fn from(e: ere::MatchLimit) -> Fatal {
-        Fatal::Said(e.to_string())
+        Fatal::said(e.to_string())
     }
 }
 
@@ -444,10 +472,10 @@ impl Interp {
         let saved = self.fnr;
         self.fnr = 0;
         if let Some(refusal) = cli_refusal(name, raw) {
-            return Err(Fatal::Said(refusal));
+            return Err(Fatal::said(refusal));
         }
         if self.prog.funcs.iter().any(|f| f.name == name) {
-            return Err(Fatal::Said(format!(
+            return Err(Fatal::said(format!(
                 "fatal: cannot use function `{name}' as variable name"
             )));
         }
@@ -491,7 +519,7 @@ impl Interp {
             return Ok(());
         };
         if matches!(self.globals.get(slot), Some(Cell::Arr(_))) {
-            return Err(Fatal::Said(format!(
+            return Err(Fatal::said(format!(
                 "fatal: attempt to use array `{name}' in a scalar context"
             )));
         }
@@ -531,10 +559,10 @@ impl Interp {
                 self.loc = None;
                 if let Err((name, e)) = self.out.finish_redirects() {
                     self.out.finish_quietly();
-                    return Err(Fatal::Said(format!(
-                        "fatal: flush to \"{}\" failed: {}",
-                        String::from_utf8_lossy(&name),
-                        coreutils::errmsg::strerror(&e)
+                    return Err(Fatal::Said(named(
+                        "fatal: flush to \"",
+                        &name,
+                        &format!("\" failed: {}", coreutils::errmsg::strerror(&e)),
                     )));
                 }
                 match self.out.finish_stdout() {
@@ -585,10 +613,10 @@ impl Interp {
                 MainRead::Record(r) => r,
                 MainRead::Eof => return Ok(()),
                 MainRead::Failed(e) => {
-                    return Err(Fatal::Said(format!(
-                        "fatal: error reading input file `{}': {}",
-                        String::from_utf8_lossy(&self.string_of(V_FILENAME)),
-                        coreutils::errmsg::strerror(&e)
+                    return Err(Fatal::Said(named(
+                        "fatal: error reading input file `",
+                        &self.string_of(V_FILENAME),
+                        &format!("': {}", coreutils::errmsg::strerror(&e)),
                     )));
                 }
             };
@@ -695,10 +723,10 @@ impl Interp {
                         // rendering of a parser's internals but a plain report
                         // about a file, and a script that greps awk's stderr
                         // should not have to know which awk it got.
-                        return Err(Fatal::Said(format!(
-                            "fatal: cannot open file `{}' for reading: {}",
-                            String::from_utf8_lossy(&text),
-                            coreutils::errmsg::strerror(&e)
+                        return Err(Fatal::Said(named(
+                            "fatal: cannot open file `",
+                            &text,
+                            &format!("' for reading: {}", coreutils::errmsg::strerror(&e)),
                         )));
                     }
                 }
@@ -735,12 +763,12 @@ impl Interp {
 
     fn printf_values(&mut self, vals: &[Value], target: Option<(RedirMode, Str)>) -> R<()> {
         let Some(fmt) = vals.first() else {
-            return Err(Fatal::Said("printf: no format string".to_string()));
+            return Err(Fatal::said("printf: no format string".to_string()));
         };
         let fmt = self.to_str(fmt);
         let convfmt = self.string_of(V_CONVFMT);
         let rest = vals.get(1..).unwrap_or_default();
-        let text = crate::fmt::sprintf(&fmt, rest, &convfmt).map_err(Fatal::Said)?;
+        let text = crate::fmt::sprintf(&fmt, rest, &convfmt).map_err(Fatal::said)?;
         self.emit(&text, target, "printf")
     }
 
@@ -751,7 +779,7 @@ impl Interp {
             return match self.out.write_stdout(bytes) {
                 Ok(()) => Ok(()),
                 Err(e) if coreutils::stdfd::reader_gone(&e) => Err(Fatal::ReaderGone),
-                Err(e) => Err(Fatal::Said(format!(
+                Err(e) => Err(Fatal::said(format!(
                     "fatal: {from} to \"standard output\" failed: {}",
                     coreutils::errmsg::strerror(&e)
                 ))),
@@ -760,19 +788,21 @@ impl Interp {
         if name.is_empty() {
             return Err(null_redirect(redirect_symbol(mode)));
         }
-        let shown = String::from_utf8_lossy(&name);
         match self.out.write_to(&name, mode, bytes) {
             Ok(()) => Ok(()),
-            Err(crate::io::OutError::Open(e)) => Err(Fatal::Said(match mode {
-                RedirMode::Pipe => format!(
-                    "fatal: cannot open pipe `{shown}' for output: {}",
-                    coreutils::errmsg::strerror(&e)
-                ),
-                RedirMode::Truncate | RedirMode::Append => format!(
-                    "fatal: cannot redirect to `{shown}': {}",
-                    coreutils::errmsg::strerror(&e)
-                ),
-            })),
+            Err(crate::io::OutError::Open(e)) => {
+                let why = coreutils::errmsg::strerror(&e);
+                Err(Fatal::Said(match mode {
+                    RedirMode::Pipe => named(
+                        "fatal: cannot open pipe `",
+                        &name,
+                        &format!("' for output: {why}"),
+                    ),
+                    RedirMode::Truncate | RedirMode::Append => {
+                        named("fatal: cannot redirect to `", &name, &format!("': {why}"))
+                    }
+                }))
+            }
             // A write that reached standard output through `/dev/stdout`
             // meets its reader going away as standard output does.
             Err(crate::io::OutError::Write(e))
@@ -781,9 +811,10 @@ impl Interp {
             {
                 Err(Fatal::ReaderGone)
             }
-            Err(crate::io::OutError::Write(e)) => Err(Fatal::Said(format!(
-                "fatal: {from} to \"{shown}\" failed: {}",
-                coreutils::errmsg::strerror(&e)
+            Err(crate::io::OutError::Write(e)) => Err(Fatal::Said(named(
+                &format!("fatal: {from} to \""),
+                &name,
+                &format!("\" failed: {}", coreutils::errmsg::strerror(&e)),
             ))),
         }
     }
@@ -797,15 +828,14 @@ impl Interp {
             Err(crate::io::FlushError::Stdout(e)) if coreutils::stdfd::reader_gone(&e) => {
                 Err(Fatal::ReaderGone)
             }
-            Err(crate::io::FlushError::Stdout(e)) => Err(Fatal::Said(format!(
+            Err(crate::io::FlushError::Stdout(e)) => Err(Fatal::said(format!(
                 "fatal: fflush: cannot flush standard output: {}",
                 coreutils::errmsg::strerror(&e)
             ))),
-            Err(crate::io::FlushError::Sink { name, pipe, err }) => Err(Fatal::Said(format!(
-                "fatal: {} flush of `{}' failed: {}",
-                if pipe { "pipe" } else { "file" },
-                String::from_utf8_lossy(&name),
-                coreutils::errmsg::strerror(&err)
+            Err(crate::io::FlushError::Sink { name, pipe, err }) => Err(Fatal::Said(named(
+                &format!("fatal: {} flush of `", if pipe { "pipe" } else { "file" }),
+                &name,
+                &format!("' failed: {}", coreutils::errmsg::strerror(&err)),
             ))),
         }
     }
@@ -841,7 +871,7 @@ impl Interp {
                     // one refused rather than read as 0.
                     let n = c_long(val.to_num());
                     if n < 0 {
-                        return Err(Fatal::Said("fatal: NF set to negative value".to_string()));
+                        return Err(Fatal::said("fatal: NF set to negative value".to_string()));
                     }
                     let n = usize::try_from(n).unwrap_or(usize::MAX).min(16_000_000);
                     self.f.fields.resize(n, Str::new());
@@ -955,7 +985,7 @@ impl Interp {
             && !matches!(val, Value::Uninit)
         {
             let name = self.prog.global_names.get(slot).map_or("?", String::as_str);
-            return Err(Fatal::Said(format!(
+            return Err(Fatal::said(format!(
                 "fatal: attempt to use scalar `{name}' as an array"
             )));
         }
@@ -1332,7 +1362,7 @@ fn redirect_symbol(mode: RedirMode) -> &'static str {
 /// gawk's refusal of a redirection to or from the empty string, which
 /// `redirect_string` makes before it tries anything.
 fn null_redirect(symbol: &str) -> Fatal {
-    Fatal::Said(format!(
+    Fatal::said(format!(
         "fatal: expression for `{symbol}' redirection has null string value"
     ))
 }

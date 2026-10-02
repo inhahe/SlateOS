@@ -39,6 +39,7 @@ use crate::ast::{
 use crate::lex::{BUILTINS, Kw, Lexer, Tok, Token};
 use crate::source::{self, SourceMap};
 use crate::value::Str;
+use coreutils::quote::escape_unprintable;
 use ere::awk::{self as escape, CompileError, Warnings};
 use ere::{Regex, Syntax};
 use std::collections::HashMap;
@@ -126,9 +127,9 @@ pub fn parse(
                 // errors here are compared by presence and keep our wording.
                 let fatal = e.starts_with("fatal: ");
                 messages.push(if fatal {
-                    located(&p.names, map.loc(at), &e)
+                    located(&p.names, map.loc(at), e.as_bytes())
                 } else {
-                    e
+                    e.into_bytes()
                 });
                 return Err(ParseError { fatal, messages });
             }
@@ -166,16 +167,22 @@ pub struct ParseError {
     /// its location prefix can hold any byte, so no test of the text could
     /// tell the two kinds apart for every program.
     pub fatal: bool,
-    /// The diagnostics, each a line after `awk: `, in the order gawk says them.
-    pub messages: Vec<String>,
+    /// The diagnostics, each a line after `awk: `, in the order gawk says them
+    /// -- as bytes, because a location prefix names the program's file and a
+    /// regex in one quotes the program, neither of which need be text.
+    pub messages: Vec<Str>,
 }
 
+/// For a test's failure message only: the program prints the bytes.
+#[cfg(test)]
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.messages.join("\n"))
+        let joined = self.messages.join(&b'\n');
+        f.write_str(&String::from_utf8_lossy(&joined))
     }
 }
 
+#[cfg(test)]
 impl From<ParseError> for String {
     fn from(e: ParseError) -> String {
         e.to_string()
@@ -242,10 +249,19 @@ fn folded_constant(e: &Expr) -> Option<f64> {
 }
 
 /// `message` with gawk's location prefix: `cmd. line:3: fatal: ...`.
-fn located(names: &[Option<Str>], loc: Loc, message: &str) -> String {
-    let mut out = String::from_utf8_lossy(&source::prefix(names, loc)).into_owned();
-    out.push_str(message);
+///
+/// Bytes, because the prefix names the program's file, and a file name need
+/// not be text: gawk prints it with `%s`.
+fn located(names: &[Option<Str>], loc: Loc, message: &[u8]) -> Str {
+    let mut out = source::prefix(names, loc);
+    out.extend_from_slice(message);
     out
+}
+
+/// Stop the parse, saying why. The reason is bytes, as every diagnostic here
+/// is (see [`located`]); most are this file's own sentences, built as text.
+fn halt<T>(message: impl Into<Str>) -> Result<T, Str> {
+    Err(message.into())
 }
 
 struct Parser {
@@ -274,7 +290,7 @@ struct Parser {
     groups: usize,
     /// gawk's `error:`s found so far, each already placed: the parse carries
     /// on past them, and the program does not run.
-    errors: Vec<String>,
+    errors: Vec<Str>,
     /// The token list ends where the lexer stopped with an error, not at the
     /// end of the program, so its last `Eof` is a cut rather than the end.
     cut: bool,
@@ -311,8 +327,11 @@ impl Parser {
 
     /// Report gawk's `error:` at `loc` and carry on parsing.
     fn error(&mut self, loc: Loc, message: &str) {
-        self.errors
-            .push(located(&self.names, loc, &format!("error: {message}")));
+        self.errors.push(located(
+            &self.names,
+            loc,
+            format!("error: {message}").as_bytes(),
+        ));
     }
     fn bump(&mut self) -> Tok {
         let t = self.peek().clone();
@@ -328,11 +347,11 @@ impl Parser {
         }
         false
     }
-    fn expect(&mut self, t: &Tok, what: &str) -> Result<(), String> {
+    fn expect(&mut self, t: &Tok, what: &str) -> Result<(), Str> {
         if self.eat(t) {
             return Ok(());
         }
-        Err(format!(
+        halt(format!(
             "syntax error: expected {what}, found {}",
             describe(self.peek())
         ))
@@ -395,7 +414,7 @@ impl Parser {
     /// newline or one `;`. So a leading `;`, or `;;` between rules, is a syntax
     /// error, as it is in gawk. And BEGIN and END take their `{` on the same
     /// line.
-    fn program(&mut self) -> Result<Program, String> {
+    fn program(&mut self) -> Result<Program, Str> {
         let mut prog = Program::default();
         self.skip_newlines();
         while self.peek() != &Tok::Eof {
@@ -445,7 +464,7 @@ impl Parser {
                 } else {
                     // A pattern alone ends at a newline, one `;`, or the end.
                     if !matches!(self.peek(), Tok::Newline | Tok::Semi | Tok::Eof) {
-                        return Err(format!("syntax error at {}", describe(self.peek())));
+                        return halt(format!("syntax error at {}", describe(self.peek())));
                     }
                     self.eat(&Tok::Semi);
                     self.skip_newlines();
@@ -465,7 +484,7 @@ impl Parser {
                     .and_then(|s| self.funcs.get(*s))
                     .is_some_and(Option::is_some);
                 if !defined {
-                    return Err(format!("calling undefined function {name}"));
+                    return halt(format!("calling undefined function {name}"));
                 }
             }
         }
@@ -487,20 +506,20 @@ impl Parser {
         Ok(prog)
     }
 
-    fn function(&mut self) -> Result<(), String> {
+    fn function(&mut self) -> Result<(), Str> {
         let tok = self.bump();
         let loc = self.loc_prev();
         let name = match tok {
             Tok::Name(n) | Tok::FuncName(n) => n,
             other => {
-                return Err(format!(
+                return halt(format!(
                     "syntax error: expected a function name, found {}",
                     describe(&other)
                 ));
             }
         };
         if BUILTINS.iter().any(|(b, _, _)| *b == name) {
-            return Err(format!("cannot redefine the built-in function {name}"));
+            return halt(format!("cannot redefine the built-in function {name}"));
         }
         self.expect(&Tok::LParen, "`(' after the function name")?;
         let mut params: Vec<String> = Vec::new();
@@ -511,12 +530,12 @@ impl Parser {
                 match self.bump() {
                     Tok::Name(p) => {
                         if params.contains(&p) {
-                            return Err(format!("function {name}: parameter {p} appears twice"));
+                            return halt(format!("function {name}: parameter {p} appears twice"));
                         }
                         params.push(p);
                     }
                     other => {
-                        return Err(format!(
+                        return halt(format!(
                             "syntax error: expected a parameter name, found {}",
                             describe(&other)
                         ));
@@ -532,7 +551,7 @@ impl Parser {
 
         let slot = self.func_slot(&name);
         if self.funcs.get(slot).is_some_and(Option::is_some) {
-            return Err(format!("function {name} is defined twice"));
+            return halt(format!("function {name} is defined twice"));
         }
         self.locals = params
             .iter()
@@ -557,7 +576,7 @@ impl Parser {
 
     // ---- statements -------------------------------------------------------
 
-    fn block(&mut self) -> Result<Vec<Stmt>, String> {
+    fn block(&mut self) -> Result<Vec<Stmt>, Str> {
         self.expect(&Tok::LBrace, "`{'")?;
         let mut out = Vec::new();
         loop {
@@ -566,7 +585,7 @@ impl Parser {
                 return Ok(out);
             }
             if self.peek() == &Tok::Eof {
-                return Err("syntax error: unexpected end of program, `}' missing".to_string());
+                return halt("syntax error: unexpected end of program, `}' missing".to_string());
             }
             out.push(self.stmt()?);
         }
@@ -574,13 +593,13 @@ impl Parser {
 
     /// A statement, plus whatever terminates it, wrapped in the [`Stmt::At`]
     /// that tells a diagnostic raised while it runs which line it is on.
-    fn stmt(&mut self) -> Result<Stmt, String> {
+    fn stmt(&mut self) -> Result<Stmt, Str> {
         let loc = self.loc_here();
         let s = self.bare_stmt()?;
         Ok(Stmt::At(loc, Box::new(s)))
     }
 
-    fn bare_stmt(&mut self) -> Result<Stmt, String> {
+    fn bare_stmt(&mut self) -> Result<Stmt, Str> {
         let s = self.unterminated_stmt()?;
         // A statement that ends in another statement — the body of an `if`, a
         // `while`, a `for` — has already had its terminator eaten by that body,
@@ -600,12 +619,12 @@ impl Parser {
         if matches!(self.peek(), Tok::Newline | Tok::Semi) {
             self.i = self.i.saturating_add(1);
         } else if !matches!(self.peek(), Tok::RBrace | Tok::Eof | Tok::Keyword(Kw::Else)) {
-            return Err(format!("syntax error at {}", describe(self.peek())));
+            return halt(format!("syntax error at {}", describe(self.peek())));
         }
         Ok(s)
     }
 
-    fn unterminated_stmt(&mut self) -> Result<Stmt, String> {
+    fn unterminated_stmt(&mut self) -> Result<Stmt, Str> {
         match self.peek().clone() {
             Tok::LBrace => Ok(Stmt::Block(self.block()?)),
             Tok::Semi => Ok(Stmt::Nop),
@@ -645,14 +664,14 @@ impl Parser {
             Tok::Keyword(Kw::Break) => {
                 self.i = self.i.saturating_add(1);
                 if self.loop_depth == 0 {
-                    return Err("break used outside a loop".to_string());
+                    return halt("break used outside a loop".to_string());
                 }
                 Ok(Stmt::Break)
             }
             Tok::Keyword(Kw::Continue) => {
                 self.i = self.i.saturating_add(1);
                 if self.loop_depth == 0 {
-                    return Err("continue used outside a loop".to_string());
+                    return halt("continue used outside a loop".to_string());
                 }
                 Ok(Stmt::Continue)
             }
@@ -663,7 +682,7 @@ impl Parser {
             Tok::Keyword(Kw::Return) => {
                 self.i = self.i.saturating_add(1);
                 if !self.in_function {
-                    return Err("return used outside a function".to_string());
+                    return halt("return used outside a function".to_string());
                 }
                 Ok(Stmt::Return(self.optional_expr()?))
             }
@@ -675,7 +694,7 @@ impl Parser {
         }
     }
 
-    fn optional_expr(&mut self) -> Result<Option<Expr>, String> {
+    fn optional_expr(&mut self) -> Result<Option<Expr>, Str> {
         if matches!(
             self.peek(),
             Tok::Newline | Tok::Semi | Tok::RBrace | Tok::Eof
@@ -685,7 +704,7 @@ impl Parser {
         Ok(Some(self.expr(false)?))
     }
 
-    fn if_stmt(&mut self) -> Result<Stmt, String> {
+    fn if_stmt(&mut self) -> Result<Stmt, Str> {
         self.i = self.i.saturating_add(1);
         self.expect(&Tok::LParen, "`(' after if")?;
         let cond = self.expr(false)?;
@@ -708,7 +727,7 @@ impl Parser {
         Ok(Stmt::If(cond, then, None))
     }
 
-    fn while_stmt(&mut self) -> Result<Stmt, String> {
+    fn while_stmt(&mut self) -> Result<Stmt, Str> {
         self.i = self.i.saturating_add(1);
         self.expect(&Tok::LParen, "`(' after while")?;
         let cond = self.expr(false)?;
@@ -724,7 +743,7 @@ impl Parser {
         Ok(Stmt::While(cond, Box::new(body?)))
     }
 
-    fn do_stmt(&mut self) -> Result<Stmt, String> {
+    fn do_stmt(&mut self) -> Result<Stmt, Str> {
         self.i = self.i.saturating_add(1);
         self.skip_newlines();
         self.loop_depth = self.loop_depth.saturating_add(1);
@@ -742,7 +761,7 @@ impl Parser {
         Ok(Stmt::DoWhile(Box::new(body), cond))
     }
 
-    fn for_stmt(&mut self) -> Result<Stmt, String> {
+    fn for_stmt(&mut self) -> Result<Stmt, Str> {
         self.i = self.i.saturating_add(1);
         self.expect(&Tok::LParen, "`(' after for")?;
         // `for (x in a)` and `for (i = 1; …)` both start here, so look ahead
@@ -807,11 +826,11 @@ impl Parser {
         })
     }
 
-    fn delete_stmt(&mut self) -> Result<Stmt, String> {
+    fn delete_stmt(&mut self) -> Result<Stmt, Str> {
         let name = match self.bump() {
             Tok::Name(n) | Tok::FuncName(n) => n,
             other => {
-                return Err(format!(
+                return halt(format!(
                     "syntax error: delete wants an array name, found {}",
                     describe(&other)
                 ));
@@ -823,7 +842,7 @@ impl Parser {
             let subs = self.expr_list(&Tok::RBracket)?;
             self.expect(&Tok::RBracket, "`]'")?;
             if subs.is_empty() {
-                return Err("delete: an empty subscript is not a subscript".to_string());
+                return halt("delete: an empty subscript is not a subscript".to_string());
             }
             // A lone name is bare unless a grouping was parsed around it.
             let bare = match subs.as_slice() {
@@ -859,7 +878,7 @@ impl Parser {
         })
     }
 
-    fn print_stmt(&mut self, formatted: bool) -> Result<Stmt, String> {
+    fn print_stmt(&mut self, formatted: bool) -> Result<Stmt, Str> {
         // Inside a print's argument list a bare `>` redirects, so expressions
         // are parsed with `no_gt`. `print (a > b)` still compares, because the
         // parenthesised expression is parsed without the flag.
@@ -872,7 +891,7 @@ impl Parser {
             self.expect(&Tok::RParen, "`)' after the print list")?;
             debug_assert_eq!(self.i, close.saturating_add(1));
             if args.is_empty() {
-                return Err("syntax error: `()' is not an expression".to_string());
+                return halt("syntax error: `()' is not an expression".to_string());
             }
         } else if !matches!(
             self.peek(),
@@ -912,7 +931,7 @@ impl Parser {
             None => None,
         };
         if formatted && args.is_empty() {
-            return Err("printf: no format string".to_string());
+            return halt("printf: no format string".to_string());
         }
         if formatted {
             Ok(Stmt::Printf(args, redirect))
@@ -975,7 +994,7 @@ impl Parser {
     /// to (not including) `end`. A newline may follow a comma -- the lexer
     /// swallows it -- and nowhere else: not after the `(` or `[`, not before a
     /// `,` or the close, as in gawk's grammar.
-    fn expr_list(&mut self, end: &Tok) -> Result<Vec<Expr>, String> {
+    fn expr_list(&mut self, end: &Tok) -> Result<Vec<Expr>, Str> {
         let mut out = Vec::new();
         if self.peek() == end {
             return Ok(out);
@@ -995,7 +1014,7 @@ impl Parser {
     /// checking whether an assignment operator follows, which is how a
     /// recursive-descent parser handles an operator whose left side must be an
     /// lvalue without a separate grammar level for lvalues.
-    fn expr(&mut self, no_gt: bool) -> Result<Expr, String> {
+    fn expr(&mut self, no_gt: bool) -> Result<Expr, Str> {
         let lhs = self.ternary(no_gt)?;
         let op = match self.peek() {
             Tok::Assign => None,
@@ -1010,7 +1029,7 @@ impl Parser {
         self.i = self.i.saturating_add(1);
         let loc = self.loc_prev();
         let ExprKind::Get(target) = lhs.kind else {
-            return Err("syntax error: the left side of an assignment must be a variable, a field or an array element".to_string());
+            return halt("syntax error: the left side of an assignment must be a variable, a field or an array element".to_string());
         };
         let rhs = Box::new(self.expr(no_gt)?);
         Ok(Expr::new(
@@ -1022,7 +1041,7 @@ impl Parser {
         ))
     }
 
-    fn ternary(&mut self, no_gt: bool) -> Result<Expr, String> {
+    fn ternary(&mut self, no_gt: bool) -> Result<Expr, Str> {
         let cond = self.or(no_gt)?;
         if !self.eat(&Tok::Question) {
             return Ok(cond);
@@ -1039,7 +1058,7 @@ impl Parser {
         ))
     }
 
-    fn or(&mut self, no_gt: bool) -> Result<Expr, String> {
+    fn or(&mut self, no_gt: bool) -> Result<Expr, Str> {
         let mut lhs = self.and(no_gt)?;
         while self.eat(&Tok::Or) {
             let loc = self.loc_prev();
@@ -1050,7 +1069,7 @@ impl Parser {
         Ok(lhs)
     }
 
-    fn and(&mut self, no_gt: bool) -> Result<Expr, String> {
+    fn and(&mut self, no_gt: bool) -> Result<Expr, Str> {
         let mut lhs = self.in_expr(no_gt)?;
         while self.eat(&Tok::And) {
             let loc = self.loc_prev();
@@ -1061,7 +1080,7 @@ impl Parser {
         Ok(lhs)
     }
 
-    fn in_expr(&mut self, no_gt: bool) -> Result<Expr, String> {
+    fn in_expr(&mut self, no_gt: bool) -> Result<Expr, Str> {
         let mut lhs = self.match_expr(no_gt)?;
         while self.peek() == &Tok::Keyword(Kw::In) {
             self.i = self.i.saturating_add(1);
@@ -1069,7 +1088,7 @@ impl Parser {
             let name = match self.bump() {
                 Tok::Name(n) => n,
                 other => {
-                    return Err(format!(
+                    return halt(format!(
                         "syntax error: `in' wants an array name, found {}",
                         describe(&other)
                     ));
@@ -1081,7 +1100,7 @@ impl Parser {
         Ok(lhs)
     }
 
-    fn match_expr(&mut self, no_gt: bool) -> Result<Expr, String> {
+    fn match_expr(&mut self, no_gt: bool) -> Result<Expr, Str> {
         let mut lhs = self.relational(no_gt)?;
         loop {
             let neg = match self.peek() {
@@ -1106,7 +1125,7 @@ impl Parser {
     /// Comparison is *non*-associative in awk: `a < b < c` is `(a < b) < c` in
     /// C but a syntax error in POSIX awk. Accepting the C reading would quietly
     /// give a wrong answer, so only one comparison is parsed here.
-    fn relational(&mut self, no_gt: bool) -> Result<Expr, String> {
+    fn relational(&mut self, no_gt: bool) -> Result<Expr, Str> {
         let lhs = self.pipe_getline(no_gt)?;
         let op = match self.peek() {
             Tok::Lt => CmpOp::Lt,
@@ -1132,7 +1151,7 @@ impl Parser {
     /// This sits between comparison and concatenation so that
     /// `"cmd" | getline line > 0` reads as `(("cmd" | getline line) > 0)`,
     /// which is how the idiom is always written.
-    fn pipe_getline(&mut self, no_gt: bool) -> Result<Expr, String> {
+    fn pipe_getline(&mut self, no_gt: bool) -> Result<Expr, Str> {
         let mut lhs = self.concat(no_gt)?;
         while self.peek() == &Tok::Pipe && self.peek_at(1) == &Tok::Keyword(Kw::Getline) {
             self.i = self.i.saturating_add(2);
@@ -1155,7 +1174,7 @@ impl Parser {
     /// `+` and `-` are deliberately not treated as the start of an operand
     /// here, because `a - b` has to be subtraction; the additive level below
     /// has already taken them.
-    fn concat(&mut self, no_gt: bool) -> Result<Expr, String> {
+    fn concat(&mut self, no_gt: bool) -> Result<Expr, Str> {
         let mut lhs = self.additive(no_gt)?;
         while self.starts_operand() {
             let rhs = self.additive(no_gt)?;
@@ -1188,7 +1207,7 @@ impl Parser {
         }
     }
 
-    fn additive(&mut self, no_gt: bool) -> Result<Expr, String> {
+    fn additive(&mut self, no_gt: bool) -> Result<Expr, Str> {
         let mut lhs = self.multiplicative(no_gt)?;
         loop {
             let op = match self.peek() {
@@ -1203,7 +1222,7 @@ impl Parser {
         }
     }
 
-    fn multiplicative(&mut self, no_gt: bool) -> Result<Expr, String> {
+    fn multiplicative(&mut self, no_gt: bool) -> Result<Expr, Str> {
         let mut lhs = self.unary(no_gt)?;
         loop {
             let op = match self.peek() {
@@ -1237,7 +1256,7 @@ impl Parser {
         }
     }
 
-    fn unary(&mut self, no_gt: bool) -> Result<Expr, String> {
+    fn unary(&mut self, no_gt: bool) -> Result<Expr, Str> {
         let kind: fn(Box<Expr>) -> ExprKind = match self.peek() {
             Tok::Not => ExprKind::Not,
             Tok::Minus => ExprKind::Neg,
@@ -1252,7 +1271,7 @@ impl Parser {
 
     /// `^` is right-associative and binds tighter than unary minus on the
     /// right: `2^3^2` is 512, and `-2^2` is -4.
-    fn power(&mut self, no_gt: bool) -> Result<Expr, String> {
+    fn power(&mut self, no_gt: bool) -> Result<Expr, Str> {
         let base = self.postfix(no_gt)?;
         if self.eat(&Tok::Caret) {
             let loc = self.loc_prev();
@@ -1265,7 +1284,7 @@ impl Parser {
         Ok(base)
     }
 
-    fn postfix(&mut self, no_gt: bool) -> Result<Expr, String> {
+    fn postfix(&mut self, no_gt: bool) -> Result<Expr, Str> {
         let e = self.primary(no_gt)?;
         // `x++` only makes sense on an lvalue; `(a+b)++` is a parse of `(a+b)`
         // followed by `++` starting the next operand, and leaving it alone here
@@ -1286,7 +1305,7 @@ impl Parser {
         Ok(e)
     }
 
-    fn primary(&mut self, no_gt: bool) -> Result<Expr, String> {
+    fn primary(&mut self, no_gt: bool) -> Result<Expr, Str> {
         let tok = self.bump();
         // Every primary is placed at its first token: the literal, the name,
         // the `$`, the `++`, the `getline`.
@@ -1320,7 +1339,7 @@ impl Parser {
                     let name = match self.bump() {
                         Tok::Name(n) => n,
                         other => {
-                            return Err(format!(
+                            return halt(format!(
                                 "syntax error: `in' wants an array name, found {}",
                                 describe(&other)
                             ));
@@ -1331,12 +1350,12 @@ impl Parser {
                 }
                 let mut it = items.into_iter();
                 let Some(first) = it.next() else {
-                    return Err("syntax error: `()' is not an expression".to_string());
+                    return halt("syntax error: `()' is not an expression".to_string());
                 };
                 if it.next().is_some() {
                     // `(a, b)` is only a list before `in`; anywhere else it is
                     // a grouping with a stray comma.
-                    return Err(
+                    return halt(
                         "syntax error: a parenthesised list is only allowed before `in'"
                             .to_string(),
                     );
@@ -1352,8 +1371,8 @@ impl Parser {
                     let subs = self.expr_list(&Tok::RBracket)?;
                     self.expect(&Tok::RBracket, "`]'")?;
                     if subs.is_empty() {
-                        return Err(
-                            "syntax error: an empty subscript is not a subscript".to_string()
+                        return halt(
+                            "syntax error: an empty subscript is not a subscript".to_string(),
                         );
                     }
                     ExprKind::Get(Lvalue::Index(v, subs))
@@ -1379,17 +1398,17 @@ impl Parser {
                 };
                 ExprKind::Getline(Box::new(Getline { into, src }))
             }
-            other => return Err(format!("syntax error at {}", describe(&other))),
+            other => return halt(format!("syntax error at {}", describe(&other))),
         };
         Ok(Expr::new(kind, loc))
     }
 
     /// The variable `++`/`--` applies to.
-    fn lvalue_operand(&mut self, no_gt: bool) -> Result<Lvalue, String> {
+    fn lvalue_operand(&mut self, no_gt: bool) -> Result<Lvalue, Str> {
         let e = self.primary(no_gt)?;
         match e.kind {
             ExprKind::Get(lv) => Ok(lv),
-            _ => Err(
+            _ => halt(
                 "syntax error: ++ and -- want a variable, a field or an array element".to_string(),
             ),
         }
@@ -1400,7 +1419,7 @@ impl Parser {
     /// Only a bare name, a subscripted name, or a `$`-field counts. Anything
     /// else is the *next* expression — `getline > 0` compares the result, it
     /// does not read into the variable `0`.
-    fn optional_getline_target(&mut self) -> Result<Option<Lvalue>, String> {
+    fn optional_getline_target(&mut self) -> Result<Option<Lvalue>, Str> {
         match self.peek().clone() {
             Tok::Name(n) => {
                 self.i = self.i.saturating_add(1);
@@ -1423,7 +1442,7 @@ impl Parser {
     }
 
     /// A call of a built-in, placed at its name.
-    fn builtin_call(&mut self, name: &'static str, loc: Loc) -> Result<Expr, String> {
+    fn builtin_call(&mut self, name: &'static str, loc: Loc) -> Result<Expr, Str> {
         let b = builtin_of(name);
         let args = if self.eat(&Tok::LParen) {
             let a = self.expr_list(&Tok::RParen)?;
@@ -1433,7 +1452,7 @@ impl Parser {
             // `length` alone is `length($0)`. It is the only built-in that may
             // be written without parentheses, and POSIX says so explicitly.
             if b != Builtin::Length {
-                return Err(format!(
+                return halt(format!(
                     "syntax error: {name} needs its arguments in parentheses"
                 ));
             }
@@ -1452,7 +1471,7 @@ impl Parser {
             } else {
                 format!("{min} to {max}")
             };
-            return Err(format!(
+            return halt(format!(
                 "{name}: wants {want} arguments, given {}",
                 args.len()
             ));
@@ -1467,13 +1486,13 @@ impl Parser {
                     Some(ExprKind::Get(Lvalue::Var(_)))
                 ) =>
             {
-                return Err("split: the second argument must be an array".to_string());
+                return halt("split: the second argument must be an array".to_string());
             }
             Builtin::Sub | Builtin::Gsub => {
                 if let Some(target) = args.get(2)
                     && !matches!(target.kind, ExprKind::Get(_))
                 {
-                    return Err(format!(
+                    return halt(format!(
                         "{name}: the third argument must be a variable, a field or an array element"
                     ));
                 }
@@ -1525,13 +1544,13 @@ fn builtin_of(name: &str) -> Builtin {
 ///
 /// # Errors
 /// The diagnostic, worded as above.
-pub fn compile_literal(source: &[u8], pattern: &[u8]) -> Result<Regex, String> {
+pub fn compile_literal(source: &[u8], pattern: &[u8]) -> Result<Regex, Str> {
     Regex::new_syntax(pattern, false, Syntax::POSIX_AWK).map_err(|e| {
-        format!(
-            "error: {}: /{}/",
-            e.message(),
-            String::from_utf8_lossy(source)
-        )
+        // The regex as written, which need not be text.
+        let mut said = format!("error: {}: /", e.message()).into_bytes();
+        said.extend_from_slice(source);
+        said.push(b'/');
+        said
     })
 }
 
@@ -1542,14 +1561,16 @@ pub fn compile_literal(source: &[u8], pattern: &[u8]) -> Result<Regex, String> {
 /// # Errors
 /// gawk's fatal diagnostic: `fatal: invalid regexp: <glibc's sentence>:
 /// /<text>/`, or the escape layer's own.
-pub fn compile_dynamic(text: &[u8], warnings: &mut Warnings) -> Result<Regex, String> {
+pub fn compile_dynamic(text: &[u8], warnings: &mut Warnings) -> Result<Regex, Str> {
     escape::compile(text, false, warnings).map_err(|e| match e {
-        CompileError::Nul(n) => format!("fatal: {}", n.message()),
-        CompileError::Regex(e) => format!(
-            "fatal: invalid regexp: {}: /{}/",
-            e.message(),
-            String::from_utf8_lossy(text)
-        ),
+        CompileError::Nul(n) => format!("fatal: {}", n.message()).into_bytes(),
+        CompileError::Regex(e) => {
+            // The regex as computed, which need not be text.
+            let mut said = format!("fatal: invalid regexp: {}: /", e.message()).into_bytes();
+            said.extend_from_slice(text);
+            said.push(b'/');
+            said
+        }
     })
 }
 
@@ -1558,8 +1579,10 @@ fn describe(t: &Tok) -> String {
         Tok::Eof => "the end of the program".to_string(),
         Tok::Newline => "a newline".to_string(),
         Tok::Number(n) => format!("`{n}'"),
-        Tok::Str(s) => format!("the string \"{}\"", String::from_utf8_lossy(s)),
-        Tok::Ere { source, .. } => format!("the regex /{}/", String::from_utf8_lossy(source)),
+        // This file's own wording, not gawk's, so the program's bytes are
+        // escaped where they are not printable rather than passed through.
+        Tok::Str(s) => format!("the string \"{}\"", escape_unprintable(s)),
+        Tok::Ere { source, .. } => format!("the regex /{}/", escape_unprintable(source)),
         Tok::Name(n) | Tok::FuncName(n) => format!("`{n}'"),
         Tok::Builtin(n) => format!("`{n}'"),
         Tok::Keyword(k) => format!("`{}'", keyword_text(*k)),
@@ -1647,6 +1670,17 @@ fn punct_text(t: &Tok) -> &'static str {
 mod tests {
     use super::*;
 
+    impl ParseError {
+        /// The messages as text, to compare with literals. Every program
+        /// these tests parse is text.
+        fn texts(&self) -> Vec<String> {
+            self.messages
+                .iter()
+                .map(|m| String::from_utf8(m.clone()).unwrap())
+                .collect()
+        }
+    }
+
     /// The statement inside the [`Stmt::At`] that every parsed statement
     /// arrives in.
     fn bare(s: &Stmt) -> &Stmt {
@@ -1689,7 +1723,7 @@ mod tests {
         let newline = parse_error("BEGIN { x = 1 }\nBEGIN { print \"a\\\nb\" }");
         assert!(newline.fatal);
         assert_eq!(
-            newline.messages,
+            newline.texts(),
             ["cmd. line:2: fatal: POSIX does not allow physical newlines in string values"]
         );
         // A regex literal that will not compile is gawk's `error:` -- placed,
@@ -1697,7 +1731,7 @@ mod tests {
         let bad_regex = parse_error("BEGIN { x = 1 }\n/a(/");
         assert!(!bad_regex.fatal);
         assert_eq!(
-            bad_regex.messages,
+            bad_regex.texts(),
             [r"cmd. line:2: error: Unmatched ( or \(: /a(/"]
         );
 
@@ -1729,14 +1763,14 @@ mod tests {
             let e = parse_error(src);
             assert!(!e.fatal, "{src}");
             assert_eq!(
-                e.messages,
+                e.texts(),
                 ["cmd. line:1: error: division by zero attempted"],
                 "{src}"
             );
         }
         let m = parse_error("BEGIN { x = 3; print x % 0 }");
         assert_eq!(
-            m.messages,
+            m.texts(),
             ["cmd. line:1: error: division by zero attempted in `%'"]
         );
         // What gawk does not fold, it leaves to run time.
@@ -1759,7 +1793,7 @@ mod tests {
     fn errors_are_collected_in_reading_order() {
         let two = parse_error("BEGIN { print 1/0\n print 2%0 }");
         assert_eq!(
-            two.messages,
+            two.texts(),
             [
                 "cmd. line:1: error: division by zero attempted",
                 "cmd. line:2: error: division by zero attempted in `%'",
@@ -1767,22 +1801,22 @@ mod tests {
         );
         let then_regex = parse_error("BEGIN { print 1/0 }\n/a(/");
         assert_eq!(
-            then_regex.messages,
+            then_regex.texts(),
             [
                 "cmd. line:1: error: division by zero attempted",
                 r"cmd. line:2: error: Unmatched ( or \(: /a(/",
             ]
         );
         let then_syntax = parse_error("BEGIN { print 1/0\n print ( }");
-        assert_eq!(then_syntax.messages.len(), 2, "{then_syntax}");
+        assert_eq!(then_syntax.texts().len(), 2, "{then_syntax}");
         assert_eq!(
-            then_syntax.messages.first().map(String::as_str),
+            then_syntax.texts().first().map(String::as_str),
             Some("cmd. line:1: error: division by zero attempted")
         );
         // A regex literal stops gawk's parse: only the first is reported.
         let regexes = parse_error("/a(/\n/b(/");
         assert_eq!(
-            regexes.messages,
+            regexes.texts(),
             [r"cmd. line:1: error: Unmatched ( or \(: /a(/"]
         );
     }
@@ -1795,7 +1829,7 @@ mod tests {
         let after_error = parse_error("BEGIN { print 1/0 }\nBEGIN { print \"a\\\nb\" }");
         assert!(after_error.fatal);
         assert_eq!(
-            after_error.messages,
+            after_error.texts(),
             [
                 "cmd. line:1: error: division by zero attempted",
                 "cmd. line:2: fatal: POSIX does not allow physical newlines in string values",
@@ -1804,7 +1838,7 @@ mod tests {
         // A syntax error before the lexer stopped is gawk's report, alone.
         let syntax_first = parse_error("BEGIN { print ( }\nBEGIN { print \"a\\\nb\" }");
         assert!(!syntax_first.fatal, "{syntax_first}");
-        assert_eq!(syntax_first.messages.len(), 1, "{syntax_first}");
+        assert_eq!(syntax_first.texts().len(), 1, "{syntax_first}");
         assert!(
             !syntax_first.to_string().contains("POSIX"),
             "{syntax_first}"
@@ -1816,11 +1850,11 @@ mod tests {
     #[test]
     fn next_in_begin_or_end_is_an_error() {
         assert_eq!(
-            parse_error("BEGIN { next }").messages,
+            parse_error("BEGIN { next }").texts(),
             ["cmd. line:1: error: `next' used in BEGIN action"]
         );
         assert_eq!(
-            parse_error("END { x = 1\n nextfile }").messages,
+            parse_error("END { x = 1\n nextfile }").texts(),
             ["cmd. line:2: error: `nextfile' used in END action"]
         );
         let _ = ok("function f() { next } { f() }");

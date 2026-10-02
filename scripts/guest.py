@@ -316,9 +316,9 @@ def start(port: int, timeout: float) -> None:
             cmd, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
             creationflags=flags, close_fds=True,
         )
-    with open(PIDFILE, "w", encoding="utf-8") as f:
+    with open(PIDFILE, "w", encoding="utf-8", newline="") as f:
         f.write(str(proc.pid))
-    with open(PORT_FILE, "w", encoding="utf-8") as f:
+    with open(PORT_FILE, "w", encoding="utf-8", newline="") as f:
         f.write(str(port))
     print("guest: QEMU started (PID %d), serial log %s; waiting for the agent..." % (proc.pid, serial))
     deadline = time.monotonic() + timeout

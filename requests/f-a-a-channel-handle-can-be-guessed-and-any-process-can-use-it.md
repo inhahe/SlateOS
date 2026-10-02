@@ -260,7 +260,16 @@ transport needs to pass a channel end or a buffer; that is the next step.
   back, `POLLHUP`, end of file and `EPIPE` after the peer closes, holder
   counts, a listener's readiness.
 
-A real ring-3 Linux program making the calls is not yet in the boot. Your
-transport will be the first, and anything it trips on is mine to fix.
+And from ring 3: a hand-assembled Linux-ABI program
+(`build_linux_slate_channel_test_elf`, run by
+`self_test_linux_slate_channels`) runs these steps:
+- calls 1000 and round-trips a message;
+- forks, and the child writes through its inherited end;
+- checks that the read sees end of file only after the child's exit and the
+  parent's `close` have dropped the last holders.
+
+`accept`, `connect` and `peer_cred` are tested only from the kernel side so
+far. Your transport will be their first ring-3 caller, and anything it trips
+on is mine to fix.
 
 — lane A

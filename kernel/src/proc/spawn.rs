@@ -22454,6 +22454,85 @@ pub fn self_test_linux_fork_wait() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the SlateOS channel descriptors from a real
+/// Linux-ABI process: [`elf::build_linux_slate_channel_test_elf`] makes a
+/// channel with `slate_channel_create` (1000), round-trips a message, forks
+/// with the child writing through its inherited end, and checks end of file
+/// once every holder of the write end is gone. It exits `0x5C` on success;
+/// `0xC1`-`0xC7` name the step that failed (see the builder).
+///
+/// What the kernel-context self-test cannot reach, this does: the call's
+/// descriptor install and the copy of the two numbers to user memory, `read`
+/// and `write` through the descriptor table, and the holder counts across a
+/// real `fork` and a real process exit. Bounded like the fork test: the
+/// harness never blocks.
+pub fn self_test_linux_slate_channels() -> KernelResult<()> {
+    /// The program's success exit.
+    const OK_EXIT: i32 = 0x5C;
+    /// Scheduler yields the parent, the child and their blocking reads may
+    /// take; the loop ends as soon as the parent is a zombie.
+    const MAX_YIELDS: usize = 1024;
+
+    serial_println!("[spawn] Running Linux slate channel descriptors (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_slate_channel_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-slate-channels"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-slate-channels",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: slate channels spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    for _ in 0..MAX_YIELDS {
+        crate::sched::yield_now();
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break;
+        }
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: slate channels (ring 3) -- not a zombie after {} yields, got {:?} \
+             (blocked in a read that nothing answers, or in wait4)",
+            MAX_YIELDS,
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(OK_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: slate channels (ring 3) -- exit {:?}, expected {} \
+             (0xC1 create, 0xC2 write, 0xC3/0xC4 the read, 0xC5 fork, 0xC6 the child's message, \
+             0xC7 no end of file after every write end closed)",
+            exit_code,
+            OK_EXIT
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux slate channel descriptors (ring 3: create, one write one message, \
+         an end shared across fork, end of file with the last holder): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the full `fork(2)` → child `execve(2)` →
 /// parent `wait4(2)` subprocess cycle — the exact pattern `make`/`gcc`/the
 /// shell use to run a tool and collect its exit status.

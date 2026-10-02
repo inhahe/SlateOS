@@ -3546,6 +3546,16 @@ extern "C" fn kernel_main() -> ! {
         proc::spawn::self_test_linux_fork_wait(),
     );
 
+    // Ring-3 end-to-end test of the SlateOS channel descriptors (1000-1004):
+    // a real Linux-ABI program makes a channel, round-trips a message, shares
+    // an end across fork, and sees end of file with the last holder. Same
+    // bounded, hang-safe harness as the fork test above.
+    selftest::dispatch_debug(
+        "Linux slate channel descriptors (ring 3)",
+        selftest::Severity::Diagnostic,
+        proc::spawn::self_test_linux_slate_channels(),
+    );
+
     // Ring-3 end-to-end test of the full fork → child execve → parent wait4
     // subprocess cycle (the make/gcc pattern): the child execs a staged target
     // and the parent reaps the *target's* exit status.  Same bounded, hang-safe

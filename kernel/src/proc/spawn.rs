@@ -22686,8 +22686,10 @@ pub fn self_test_linux_slate_channels() -> KernelResult<()> {
 /// and by path, a stream through listen/connect/accept with the kernel's
 /// record of the peer, end of file on close, the sender's credentials as an
 /// `SCM_CREDENTIALS` control message once `SO_PASSCRED` asks for them --
-/// recorded by the kernel, or stated by the sender and checked -- a node a
-/// second `bind` finds in use and `unlink` removes.
+/// recorded by the kernel, or stated by the sender and checked -- several
+/// messages a call (`sendmmsg`, `recvmmsg`), `ENOTSOCK` for a descriptor
+/// that is not a socket, and a node a second `bind` finds in use and
+/// `unlink` removes.
 ///
 /// # Errors
 ///
@@ -22759,7 +22761,10 @@ pub fn self_test_linux_unix_sockets() -> KernelResult<()> {
              unlink not ENOENT; 0xE9-0xED credentials: setsockopt(SO_PASSCRED), sendto, \
              recvmsg and its bytes, the SCM_CREDENTIALS message's shape, its pid; 0xEE-0xF1 \
              stated credentials: sendmsg with them, recvmsg not reporting them, a pid naming no \
-             process not ESRCH, a short message not EINVAL)",
+             process not ESRCH, a short message not EINVAL; 0xF2-0xFA batches: sendmmsg, its \
+             msg_lens, recvmmsg, what it received, MSG_DONTWAIT not EAGAIN, MSG_WAITFORONE, a \
+             NULL vector not EFAULT, a bad second entry not answered 1, a directory not \
+             ENOTSOCK)",
             exit_code,
             OK_EXIT
         );
@@ -22767,8 +22772,8 @@ pub fn self_test_linux_unix_sockets() -> KernelResult<()> {
     }
     serial_println!(
         "[spawn]   Linux Unix-domain sockets (ring 3: datagrams by abstract name and by path, \
-         listen/connect/accept, SO_PEERCRED, SCM_CREDENTIALS received and stated, end of \
-         file, EADDRINUSE, unlink): OK"
+         listen/connect/accept, SO_PEERCRED, SCM_CREDENTIALS received and stated, \
+         sendmmsg/recvmmsg, ENOTSOCK, end of file, EADDRINUSE, unlink): OK"
     );
     Ok(())
 }

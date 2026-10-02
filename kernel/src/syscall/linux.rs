@@ -39706,6 +39706,13 @@ fn unix_sendmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
     {
         return linux_err(linux_errno_for(e));
     }
+    // Linux's order: the iovecs come in with the msghdr
+    // (sendmsg_copy_msghdr), the control data after (____sys_sendmsg), and
+    // the control messages are acted on by the socket's own sendmsg.
+    let iovs = match read_iovecs(mh.msg_iov, mh.msg_iovlen) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
     let control = match parse_send_control(mh.msg_control, mh.msg_controllen) {
         Ok(c) => c,
         Err(r) => return r,
@@ -39729,10 +39736,6 @@ fn unix_sendmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
                 Err(e) => return unix_errno(e),
             }
         }
-    };
-    let iovs = match read_iovecs(mh.msg_iov, mh.msg_iovlen) {
-        Ok(v) => v,
-        Err(r) => return r,
     };
     let h = unix_handle(entry);
     let limit = match unix_socket::kind(h) {
@@ -39969,6 +39972,10 @@ fn sys_bind(args: &SyscallArgs) -> SyscallResult {
     if let Err(r) = validate_linux_fd(fd) {
         return r;
     }
+    // ... and ENOTSOCK for a descriptor that is not a socket.
+    if let Err(r) = refuse_non_socket(fd) {
+        return r;
+    }
     // Linux gate 2: move_addr_to_kernel — pointer + length sanity.
     if let Err(r) = validate_sockaddr_in(args.arg1, addr_len) {
         return r;
@@ -40105,6 +40112,10 @@ fn sys_listen(args: &SyscallArgs) -> SyscallResult {
     if let Err(r) = validate_linux_fd(fd) {
         return r;
     }
+    // ... and ENOTSOCK for a descriptor that is not a socket.
+    if let Err(r) = refuse_non_socket(fd) {
+        return r;
+    }
     // Batch 464-equivalent: Linux silently clamps a huge/negative backlog to
     // somaxconn. We pass it through advisory (the daemon manages its own
     // backlog), so a raw i32 is fine.
@@ -40190,6 +40201,10 @@ fn sys_accept(args: &SyscallArgs) -> SyscallResult {
     let fd = args.arg0 as i32;
     // Linux gate 1: fdget(fd) inside do_accept's caller → EBADF.
     if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    // ... and ENOTSOCK for a descriptor that is not a socket.
+    if let Err(r) = refuse_non_socket(fd) {
         return r;
     }
     // Linux gate 2: move_addr_to_user pointer access, only if
@@ -40285,6 +40300,10 @@ fn sys_accept4(args: &SyscallArgs) -> SyscallResult {
     // Linux gate 1: fdget(fd) → EBADF (runs first since
     // Linux 5.6's __sys_accept4 refactor).
     if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    // ... and ENOTSOCK for a descriptor that is not a socket.
+    if let Err(r) = refuse_non_socket(fd) {
         return r;
     }
     // Linux gate 2: SOCK_CLOEXEC (0o2_000_000) and SOCK_NONBLOCK
@@ -40450,6 +40469,13 @@ fn sys_connect(args: &SyscallArgs) -> SyscallResult {
     }
     // Linux gate 2: move_addr_to_kernel pointer + length sanity.
     if let Err(r) = validate_sockaddr_in(args.arg1, addr_len) {
+        return r;
+    }
+    // Linux gate 3: ENOTSOCK for a descriptor that is not a socket --
+    // here, after the address, not beside EBADF as in bind: connect's bare
+    // fdget leaves the type check to __sys_connect_file's sock_from_file,
+    // after move_addr_to_kernel. The asymmetry is Linux's.
+    if let Err(r) = refuse_non_socket(fd) {
         return r;
     }
     if let Ok(entry) = lookup_caller_fd(fd)
@@ -40723,6 +40749,10 @@ fn sys_getsockname(args: &SyscallArgs) -> SyscallResult {
     if let Err(r) = validate_linux_fd(fd) {
         return r;
     }
+    // ... and ENOTSOCK for a descriptor that is not a socket.
+    if let Err(r) = refuse_non_socket(fd) {
+        return r;
+    }
     // Linux gate 2: move_addr_to_user — get_user on addrlen and
     // copy_to_user on addr.  getsockname always writes both, so both
     // pointers are mandatory.
@@ -40807,6 +40837,10 @@ fn sys_getpeername(args: &SyscallArgs) -> SyscallResult {
     let fd = args.arg0 as i32;
     // Linux gate 1: sockfd_lookup_light → EBADF first.
     if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    // ... and ENOTSOCK for a descriptor that is not a socket.
+    if let Err(r) = refuse_non_socket(fd) {
         return r;
     }
     // Linux gate 2: move_addr_to_user pointer access.
@@ -41126,6 +41160,10 @@ fn sys_sendto(args: &SyscallArgs) -> SyscallResult {
     if let Err(r) = validate_linux_fd(fd) {
         return r;
     }
+    // ... and ENOTSOCK for a descriptor that is not a socket.
+    if let Err(r) = refuse_non_socket(fd) {
+        return r;
+    }
     // Linux gate 3: move_addr_to_kernel(addr, addr_len, ...) — only
     // if `addr != NULL`.
     if args.arg4 != 0 {
@@ -41369,6 +41407,10 @@ fn sys_recvfrom(args: &SyscallArgs) -> SyscallResult {
     }
     // Linux gate 2: sockfd_lookup_light → EBADF.
     if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    // ... and ENOTSOCK for a descriptor that is not a socket.
+    if let Err(r) = refuse_non_socket(fd) {
         return r;
     }
     // Linux gate 3: move_addr_to_user pointer access, only if
@@ -41752,6 +41794,11 @@ fn sys_sendmsg(args: &SyscallArgs) -> SyscallResult {
     if let Err(r) = validate_linux_fd(fd) {
         return r;
     }
+    // ... and ENOTSOCK for a descriptor that is not a socket. Kernel context
+    // has no table to look in, and goes on to the pointer gates.
+    if let Err(r) = refuse_non_socket(fd) {
+        return r;
+    }
     // Linux gate 2: copy_msghdr_from_user → EFAULT.  struct msghdr
     // on x86_64 is 56 bytes (msg_name*, msg_namelen, msg_iov*,
     // msg_iovlen, msg_control*, msg_controllen, msg_flags + padding).
@@ -41803,8 +41850,11 @@ fn sys_sendmsg(args: &SyscallArgs) -> SyscallResult {
 fn sys_recvmsg(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
-    // Linux gate 1: sockfd_lookup_light → EBADF.
+    // Linux gate 1: sockfd_lookup_light → EBADF, or ENOTSOCK.
     if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    if let Err(r) = refuse_non_socket(fd) {
         return r;
     }
     // Linux gate 2: msghdr access.  recvmsg is read-modify-write
@@ -41838,152 +41888,275 @@ fn sys_recvmsg(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::EBADF)
 }
 
-/// `sendmmsg(sockfd, msgvec*, vlen, flags)`.
-fn sys_sendmmsg(args: &SyscallArgs) -> SyscallResult {
-    // Batch 438 — fd lookup gates before mmsg pointer validation.
-    //
-    // Linux's __sys_sendmmsg (net/socket.c):
-    //
-    //     int __sys_sendmmsg(int fd, struct mmsghdr __user *mmsg,
-    //                        unsigned int vlen,
-    //                        unsigned int flags,
-    //                        bool forbid_cmsg_compat)
-    //     {
-    //         ...
-    //         if (vlen > UIO_MAXIOV)
-    //             vlen = UIO_MAXIOV;            // silent clamp
-    //
-    //         sock = sockfd_lookup_light(fd, &err,        // Gate 1: fd
-    //                                    &fput_needed);
-    //         if (!sock)
-    //             return err;
-    //         ...
-    //         while (datagrams < vlen) {
-    //             err = ___sys_sendmsg(sock,
-    //                 (struct user_msghdr __user *)entry,
-    //                 &msg_sys, flags, &used_address,
-    //                 MSG_EOR);                  // Gate 2: per-msg
-    //             ...                            //  (copy_msghdr_from_user
-    //                                            //   inside)
-    //         }
-    //         ...
-    //     }
-    //
-    // FD lookup runs FIRST.  No upfront mmsg pointer validation in
-    // Linux — the per-msg loop is where copy_from_user fires, and
-    // only after fd resolves.  Pre-batch we ran MMSG_PTR → FD; a
-    // probe with (bad_fd, NULL, vlen=2) returned EFAULT where Linux
-    // returns EBADF.
-    //
-    // Translator-only swap.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let fd = args.arg0 as i32;
-    #[allow(clippy::cast_possible_truncation)]
-    let vlen = args.arg2 as u32;
-    // Linux gate 1: sockfd_lookup_light → EBADF.
-    if let Err(r) = validate_linux_fd(fd) {
-        return r;
+/// `ENOTSOCK` for a descriptor of the caller's that is not a socket -- the
+/// half of Linux's `sockfd_lookup_light` that `validate_linux_fd` (which
+/// answers `EBADF`) does not do. A caller with no descriptor table (kernel
+/// context) passes, as it passes `validate_linux_fd`.
+fn refuse_non_socket(fd: i32) -> Result<(), SyscallResult> {
+    match lookup_caller_fd(fd) {
+        Ok(e) if !matches!(e.kind, HandleKind::UnixSocket | HandleKind::Socket) => {
+            Err(linux_err(errno::ENOTSOCK))
+        }
+        _ => Ok(()),
     }
-    // vlen==0: Linux's loop body never runs, so the per-msg
-    // pointer access never fires.  Return the terminal EBADF
-    // (matches the "no socket" surface we present here).
-    if vlen == 0 {
-        return linux_err(errno::EBADF);
-    }
-    // Linux gate 2: per-msg copy_msghdr_from_user.  We model this
-    // as an upfront access check on the full mmsghdr vector
-    // (mmsghdr = msghdr (56) + msg_len (4) + 4 pad = 64 bytes per
-    // entry).
-    if args.arg1 == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    let total = (vlen as usize).saturating_mul(64);
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, total) {
-        return linux_err(linux_errno_for(e));
-    }
-    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, total) {
-        return linux_err(linux_errno_for(e));
-    }
-    linux_err(errno::EBADF)
 }
 
-/// `recvmmsg(sockfd, msgvec*, vlen, flags, timeout*)`.
+/// `sizeof(struct mmsghdr)` on x86-64: a `struct msghdr` (56 bytes), the
+/// `unsigned int msg_len` the call fills in, and 4 bytes of padding.
+const MMSGHDR_LEN: u64 = 64;
+
+/// Where `msg_len` sits in a `struct mmsghdr`: just past the `msghdr`.
+const MMSGHDR_MSG_LEN: u64 = 56;
+
+/// The socket descriptor a batched call (`sendmmsg`, `recvmmsg`) works on,
+/// as Linux's `sockfd_lookup_light` finds it: `EBADF` for no descriptor,
+/// `ENOTSOCK` for one that is not a socket. The sockets are the ones
+/// `sendmsg` and `recvmsg` reach -- an `AF_UNIX` socket, or an internet
+/// socket while the network stack runs in userspace; with the stack in the
+/// kernel, an internet socket is `EBADF`, as `sendmsg` answers there.
+///
+/// Kernel context has no descriptor table, so every descriptor is `EBADF`
+/// -- unlike `sendmsg`, which lets kernel context past its descriptor gate to
+/// test the pointer gates behind it. The batched calls' pointer gates are
+/// tested from ring 3 instead, on real sockets.
+fn batch_socket(fd: i32) -> Result<FdEntry, SyscallResult> {
+    let entry = lookup_caller_fd(fd)?;
+    match entry.kind {
+        HandleKind::UnixSocket => Ok(entry),
+        HandleKind::Socket if crate::net::netstack_client::userspace_enabled() => Ok(entry),
+        HandleKind::Socket => Err(linux_err(errno::EBADF)),
+        _ => Err(linux_err(errno::ENOTSOCK)),
+    }
+}
+
+/// Fill in one entry's `msg_len`: how many bytes its send or receive moved.
+fn put_mmsg_len(entry_ptr: u64, len: i64) -> Result<(), SyscallResult> {
+    // A send or receive moves at most a few hundred KiB, so the count fits
+    // the u32 field; saturating keeps an impossible one visible.
+    let bytes = u32::try_from(len).unwrap_or(u32::MAX).to_ne_bytes();
+    // SAFETY: four initialised bytes; copy_to_user validates the destination.
+    unsafe {
+        crate::mm::user::copy_to_user(bytes.as_ptr(), entry_ptr.wrapping_add(MMSGHDR_MSG_LEN), 4)
+    }
+    .map_err(|e| linux_err(linux_errno_for(e)))
+}
+
+/// The bytes a `struct msghdr`'s iovecs offer, for telling a short stream
+/// send from a whole one.
+fn msghdr_offered(msg_ptr: u64) -> Result<u64, SyscallResult> {
+    let mut mh = UserMsgHdr::default();
+    // SAFETY: fifty-six bytes into a fifty-six-byte struct; copy_from_user
+    // validates the source.
+    unsafe { crate::mm::user::copy_from_user(msg_ptr, (&raw mut mh).cast::<u8>(), 56) }
+        .map_err(|e| linux_err(linux_errno_for(e)))?;
+    let iovs = read_iovecs(mh.msg_iov, mh.msg_iovlen)?;
+    Ok(iovs.iter().fold(0u64, |acc, &(_, len)| {
+        acc.saturating_add(u64::try_from(len).unwrap_or(u64::MAX))
+    }))
+}
+
+/// `sendmmsg(sockfd, msgvec*, vlen, flags)` -- `sendmsg` for each entry of
+/// `msgvec`, as Linux's `__sys_sendmmsg`:
+///
+/// - the descriptor first: `EBADF`, or `ENOTSOCK` for one that is not a
+///   socket -- before anything in `msgvec` is read;
+/// - `vlen` is clamped to `UIO_MAXIOV` (1024); 0 sends nothing and answers 0;
+/// - each entry is a `struct mmsghdr`: a `struct msghdr`, sent exactly as
+///   `sendmsg` sends one (an unreadable one is `EFAULT`), then `msg_len`,
+///   filled in with what that send took;
+/// - the first failure ends the run. It is the answer only when nothing was
+///   sent; otherwise the answer is how many entries were, and the failure is
+///   what the next call meets, as on Linux;
+/// - a send that took less than its entry offered (a stream with too little
+///   room) ends the run too, as Linux's `msg_data_left` check does.
+///
+/// Until 2026-10-02 this answered `EBADF` for every socket: there were no
+/// batched sends at all.
+fn sys_sendmmsg(args: &SyscallArgs) -> SyscallResult {
+    /// Linux clamps `vlen` to this rather than refusing more.
+    const UIO_MAXIOV: u32 = 1024;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    #[allow(clippy::cast_possible_truncation)]
+    let vlen = (args.arg2 as u32).min(UIO_MAXIOV);
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg3 as u32;
+    let entry = match batch_socket(fd) {
+        Ok(e) => e,
+        Err(r) => return r,
+    };
+    let mut sent = 0u32;
+    let mut failure = None;
+    for i in 0..vlen {
+        let msg_ptr = args
+            .arg1
+            .wrapping_add(u64::from(i).wrapping_mul(MMSGHDR_LEN));
+        // copy_msghdr_from_user: the entry itself must be readable.
+        if let Err(e) = crate::mm::user::validate_user_read(msg_ptr, 56) {
+            failure = Some(linux_err(linux_errno_for(e)));
+            break;
+        }
+        let offered = match msghdr_offered(msg_ptr) {
+            Ok(n) => n,
+            Err(r) => {
+                failure = Some(r);
+                break;
+            }
+        };
+        let r = match entry.kind {
+            HandleKind::UnixSocket => unix_sendmsg(&entry, msg_ptr, flags),
+            _ => socket_sendmsg(entry, msg_ptr, flags),
+        };
+        // Below zero: an errno, or a restart sentinel the run cannot
+        // continue past either.
+        if r.value < 0 {
+            failure = Some(r);
+            break;
+        }
+        if let Err(fault) = put_mmsg_len(msg_ptr, r.value) {
+            failure = Some(fault);
+            break;
+        }
+        sent = sent.saturating_add(1);
+        if u64::try_from(r.value).unwrap_or(0) < offered {
+            break;
+        }
+    }
+    match failure {
+        Some(r) if sent == 0 => r,
+        _ => SyscallResult::ok(i64::from(sent)),
+    }
+}
+
+/// `recvmmsg(sockfd, msgvec*, vlen, flags, timeout*)` -- `recvmsg` into each
+/// entry of `msgvec`, as Linux's `__sys_recvmmsg` and `do_recvmmsg`:
+///
+/// - the timeout first: unreadable is `EFAULT`, a negative `tv_sec` or a
+///   `tv_nsec` outside `0..1e9` is `EINVAL`; then the descriptor (`EBADF`,
+///   `ENOTSOCK`);
+/// - each entry is a `struct mmsghdr`, received into exactly as `recvmsg`
+///   receives (an unreadable or unwritable one is `EFAULT`), its `msg_len`
+///   filled in with the bytes received;
+/// - `MSG_WAITFORONE`: after the first message, the rest of the run does
+///   not wait (`MSG_DONTWAIT`); the run ends at the first that would;
+/// - the timeout is looked at after each message, so -- as on Linux, whose
+///   man page lists it under BUGS -- it ends a run that is still going but
+///   does not bound the wait for the first message. What is left of it is
+///   written back when anything was received;
+/// - the first failure ends the run, and is the answer only when nothing was
+///   received; otherwise the answer is how many messages were. Linux keeps
+///   such a failure (other than `EAGAIN`) as the socket's pending error for
+///   the next call; here it is not kept, and the next call meets whatever
+///   caused it afresh (known-issues `A-SOCKETS-HAVE-NO-PENDING-ERROR`).
+///
+/// Until 2026-10-02 this answered `EBADF` for every socket.
 fn sys_recvmmsg(args: &SyscallArgs) -> SyscallResult {
-    // Linux gate order (net/socket.c::SYSCALL_DEFINE5(recvmmsg) +
-    // __sys_recvmmsg):
-    //   1. timeout != NULL: get_timespec64 -> EFAULT, then
-    //      timespec64 value validation (tv_sec < 0 ||
-    //      tv_nsec not in [0, NSEC_PER_SEC)) -> EINVAL.  Linux
-    //      validates the values inside __sys_recvmmsg BEFORE
-    //      socket lookup or any per-msg work.
-    //   2. sockfd_lookup_light(fd) -> EBADF.
-    //   3. per-msg loop body: copy_msghdr_from_user on each
-    //      mmsg entry -> EFAULT.  Only runs when vlen > 0.
-    //
-    // Pre-batch (entry 261) we only validated the timeout pointer
-    // was readable — we never copied or parsed the values.  A
-    // probe with a malformed timespec passed silently and fell
-    // through to the terminal EBADF, where Linux returns EINVAL.
-    //
-    // Batch 438 — fd lookup ordered BEFORE per-msg mmsg pointer
-    // validation, matching __sys_recvmmsg's
-    // sockfd_lookup_light → per-msg-loop order.  Pre-batch we ran
-    // MMSG_PTR before FD lookup; a probe with (bad_fd, NULL,
-    // vlen=2, NULL_timeout) returned EFAULT where Linux returns
-    // EBADF.
-    //
-    // Discriminators:
-    //   * (vlen=0, timeout={-1,0}) -> Linux EINVAL; pre-batch EBADF.
-    //   * (vlen=2, mmsg=valid, timeout={0, 1e9}) -> Linux EINVAL;
-    //     pre-batch EBADF.
     const NSEC_PER_SEC: i64 = 1_000_000_000;
+    /// `MSG_WAITFORONE`: wait for the first message only.
+    const MSG_WAITFORONE: u32 = 0x1_0000;
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
     #[allow(clippy::cast_possible_truncation)]
     let vlen = args.arg2 as u32;
+    #[allow(clippy::cast_possible_truncation)]
+    let mut flags = args.arg3 as u32;
+    let timeout_ptr = args.arg4;
 
-    // Gate 1: timeout parsing + value validation.
-    if args.arg4 != 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg4, 16) {
-            return linux_err(linux_errno_for(e));
-        }
+    // Gate 1: the timeout, read and checked before anything else.
+    let deadline = if timeout_ptr == 0 {
+        None
+    } else {
         let mut ts = [0u8; 16];
-        // SAFETY: validate_user_read above covers 16 bytes at args.arg4.
-        if let Err(e) = unsafe { crate::mm::user::copy_from_user(args.arg4, ts.as_mut_ptr(), 16) } {
+        // SAFETY: sixteen bytes into a sixteen-byte buffer; copy_from_user
+        // validates the source.
+        if let Err(e) = unsafe { crate::mm::user::copy_from_user(timeout_ptr, ts.as_mut_ptr(), 16) }
+        {
             return linux_err(linux_errno_for(e));
         }
-        let tv_sec = i64::from_ne_bytes([ts[0], ts[1], ts[2], ts[3], ts[4], ts[5], ts[6], ts[7]]);
-        let tv_nsec =
-            i64::from_ne_bytes([ts[8], ts[9], ts[10], ts[11], ts[12], ts[13], ts[14], ts[15]]);
+        let field = |at: usize| {
+            ts.get(at..at.saturating_add(8))
+                .and_then(|b| <[u8; 8]>::try_from(b).ok())
+                .map_or(0, i64::from_ne_bytes)
+        };
+        let (tv_sec, tv_nsec) = (field(0), field(8));
         if tv_sec < 0 || !(0..NSEC_PER_SEC).contains(&tv_nsec) {
             return linux_err(errno::EINVAL);
         }
-    }
+        let span = u64::try_from(tv_sec)
+            .unwrap_or(0)
+            .saturating_mul(1_000_000_000)
+            .saturating_add(u64::try_from(tv_nsec).unwrap_or(0));
+        Some(crate::hrtimer::now_ns().saturating_add(span))
+    };
 
-    // Gate 2: sockfd_lookup_light → EBADF.  Batch 438 reorder —
-    // Linux runs the fd lookup before the per-msg loop, so a bad
-    // fd surfaces as EBADF regardless of mmsg pointer validity.
-    if let Err(r) = validate_linux_fd(fd) {
-        return r;
+    // Gate 2: the descriptor.
+    let entry = match batch_socket(fd) {
+        Ok(e) => e,
+        Err(r) => return r,
+    };
+
+    let mut received = 0u32;
+    let mut failure = None;
+    while received < vlen {
+        let msg_ptr = args
+            .arg1
+            .wrapping_add(u64::from(received).wrapping_mul(MMSGHDR_LEN));
+        // copy_msghdr_from_user, and the fields recvmsg writes back.
+        let checked = crate::mm::user::validate_user_read(msg_ptr, 56)
+            .and_then(|()| crate::mm::user::validate_user_write(msg_ptr, 56));
+        if let Err(e) = checked {
+            failure = Some(linux_err(linux_errno_for(e)));
+            break;
+        }
+        let this_flags = flags & !MSG_WAITFORONE;
+        let r = match entry.kind {
+            HandleKind::UnixSocket => unix_recvmsg(&entry, msg_ptr, this_flags),
+            _ => socket_recvmsg(entry, msg_ptr, this_flags),
+        };
+        if r.value < 0 {
+            failure = Some(r);
+            break;
+        }
+        if let Err(fault) = put_mmsg_len(msg_ptr, r.value) {
+            failure = Some(fault);
+            break;
+        }
+        received = received.saturating_add(1);
+        if flags & MSG_WAITFORONE != 0 {
+            flags |= msgflags::MSG_DONTWAIT;
+        }
+        if let Some(d) = deadline
+            && crate::hrtimer::now_ns() >= d
+        {
+            break;
+        }
     }
-    // vlen==0: Linux's loop body never runs → terminal EBADF.
-    if vlen == 0 {
-        return linux_err(errno::EBADF);
+    if received == 0 {
+        return failure.unwrap_or(SyscallResult::ok(0));
     }
-    // Gate 3: per-msg copy_msghdr_from_user (modelled as an
-    // upfront access check on the full mmsghdr vector).
-    if args.arg1 == 0 {
-        return linux_err(errno::EFAULT);
+    // What is left of the timeout, written back as Linux does once anything
+    // was received; a timeout that cannot be written back makes the answer
+    // EFAULT, as there.
+    if let Some(d) = deadline {
+        let left = d.saturating_sub(crate::hrtimer::now_ns());
+        let secs = i64::try_from(left / 1_000_000_000).unwrap_or(i64::MAX);
+        let nanos = i64::try_from(left % 1_000_000_000).unwrap_or(0);
+        // struct timespec: tv_sec, then tv_nsec.
+        let mut ts = [0u8; 16];
+        for (dst, src) in ts
+            .iter_mut()
+            .zip(secs.to_ne_bytes().into_iter().chain(nanos.to_ne_bytes()))
+        {
+            *dst = src;
+        }
+        // SAFETY: sixteen initialised bytes; copy_to_user validates the
+        // destination.
+        if let Err(e) = unsafe { crate::mm::user::copy_to_user(ts.as_ptr(), timeout_ptr, 16) } {
+            return linux_err(linux_errno_for(e));
+        }
     }
-    let total = (vlen as usize).saturating_mul(64);
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, total) {
-        return linux_err(linux_errno_for(e));
-    }
-    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, total) {
-        return linux_err(linux_errno_for(e));
-    }
-    linux_err(errno::EBADF)
+    SyscallResult::ok(i64::from(received))
 }
 
 /// `setsockopt(sockfd, level, optname, optval*, optlen)`.
@@ -42017,6 +42190,10 @@ fn sys_setsockopt(args: &SyscallArgs) -> SyscallResult {
     // no-op (caller_pid() == None), but in userspace context it
     // fires before the optval check, matching Linux.
     if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    // ... and ENOTSOCK for a descriptor that is not a socket.
+    if let Err(r) = refuse_non_socket(fd) {
         return r;
     }
     // Gate 3: optval validation (modelled as a pre-handler check
@@ -42132,6 +42309,10 @@ fn sys_getsockopt(args: &SyscallArgs) -> SyscallResult {
     let fd = args.arg0 as i32;
     // Gate 1: fd lookup -> EBADF.
     if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    // ... and ENOTSOCK for a descriptor that is not a socket.
+    if let Err(r) = refuse_non_socket(fd) {
         return r;
     }
     // Gate 2: optlen pointer validation.  In Linux this happens
@@ -42333,6 +42514,10 @@ fn sys_shutdown(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
     if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    // ... and ENOTSOCK for a descriptor that is not a socket.
+    if let Err(r) = refuse_non_socket(fd) {
         return r;
     }
     if let Ok(entry) = lookup_caller_fd(fd)
@@ -95696,7 +95881,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 return Err(KernelError::InternalError);
             }
 
-            // sendmmsg NULL vec with vlen>0 -> EFAULT.
+            // sendmmsg NULL vec with vlen>0 -> EBADF: kernel context has no
+            // descriptor table, and the batched calls look the descriptor up
+            // before they read the vector (the EFAULT behind it is checked
+            // from ring 3, on a real socket: spawn's Unix-socket test).
             let a = SyscallArgs {
                 arg0: 3,
                 arg1: 0,
@@ -95705,8 +95893,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 arg4: 0,
                 arg5: 0,
             };
-            if dispatch_linux(nr::SENDMMSG, &a).value != -i64::from(errno::EFAULT) {
-                serial_println!("[syscall/linux]   FAIL: sendmmsg NULL not EFAULT");
+            if dispatch_linux(nr::SENDMMSG, &a).value != i64::from(errno::EBADF).wrapping_neg() {
+                serial_println!("[syscall/linux]   FAIL: sendmmsg NULL not EBADF");
                 return Err(KernelError::InternalError);
             }
             // sendmmsg valid -> EBADF.
@@ -98902,13 +99090,18 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         //   sendmmsg(99, NULL, vlen=2)   pre EFAULT  Linux EBADF
         //   recvmmsg(99, NULL, vlen=2, NULL_timeout) pre EFAULT Linux EBADF
         //
-        // Kernel-ctx caveat unchanged.
+        // Since 2026-10-02 the batched calls are real (a loop of sendmsg /
+        // recvmsg), and they look the descriptor up before reading the
+        // vector -- so kernel context, which has no descriptor table, gets
+        // EBADF even for a NULL vector, where it used to be let through to
+        // the pointer gate. The EFAULT is checked from ring 3 on a real
+        // socket (spawn's Unix-socket test, steps 0xF2-0xFA).
         {
             let mmsg_buf = [0u8; 128];
             let mmsg_ptr = mmsg_buf.as_ptr() as u64;
 
-            // sendmmsg(fd=3, NULL, vlen=2): fd OK (kernel ctx) →
-            // vlen>0 → NULL ptr → EFAULT.
+            // sendmmsg(fd=3, NULL, vlen=2): no descriptor 3 (kernel ctx)
+            // → EBADF before the vector is looked at.
             let a = SyscallArgs {
                 arg0: 3,
                 arg1: 0,
@@ -98917,15 +99110,15 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 arg4: 0,
                 arg5: 0,
             };
-            if dispatch_linux(nr::SENDMMSG, &a).value != -i64::from(errno::EFAULT) {
+            if dispatch_linux(nr::SENDMMSG, &a).value != i64::from(errno::EBADF).wrapping_neg() {
                 serial_println!(
-                    "[syscall/linux]   FAIL: sendmmsg(NULL, vlen=2) post-reorder not EFAULT ({})",
+                    "[syscall/linux]   FAIL: sendmmsg(NULL, vlen=2) not EBADF ({})",
                     dispatch_linux(nr::SENDMMSG, &a).value
                 );
                 return Err(KernelError::InternalError);
             }
-            // sendmmsg(fd=3, NULL, vlen=0): fd OK → vlen==0 short-
-            // circuit → terminal EBADF.  No pointer access.
+            // sendmmsg(fd=3, NULL, vlen=0): no descriptor 3 (kernel ctx)
+            // → EBADF.  No pointer access.
             let a = SyscallArgs {
                 arg0: 3,
                 arg1: 0,
@@ -98941,8 +99134,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 );
                 return Err(KernelError::InternalError);
             }
-            // sendmmsg(fd=3, valid, vlen=2): fd OK → vlen>0 → ptr OK
-            // → terminal EBADF.
+            // sendmmsg(fd=3, valid, vlen=2): no descriptor 3 → EBADF.
             let a = SyscallArgs {
                 arg0: 3,
                 arg1: mmsg_ptr,
@@ -98960,7 +99152,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             }
 
             // recvmmsg(fd=3, NULL, vlen=2, NULL_timeout): no timeout
-            // gate → fd OK → vlen>0 → NULL ptr → EFAULT.
+            // gate → no descriptor 3 (kernel ctx) → EBADF.
             let a = SyscallArgs {
                 arg0: 3,
                 arg1: 0,
@@ -98969,15 +99161,15 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 arg4: 0,
                 arg5: 0,
             };
-            if dispatch_linux(nr::RECVMMSG, &a).value != -i64::from(errno::EFAULT) {
+            if dispatch_linux(nr::RECVMMSG, &a).value != i64::from(errno::EBADF).wrapping_neg() {
                 serial_println!(
-                    "[syscall/linux]   FAIL: recvmmsg(NULL, vlen=2, NULL_timeout) post-reorder not EFAULT ({})",
+                    "[syscall/linux]   FAIL: recvmmsg(NULL, vlen=2, NULL_timeout) not EBADF ({})",
                     dispatch_linux(nr::RECVMMSG, &a).value
                 );
                 return Err(KernelError::InternalError);
             }
-            // recvmmsg(fd=3, valid, vlen=2, NULL_timeout): fd OK →
-            // vlen>0 → ptr OK → terminal EBADF.
+            // recvmmsg(fd=3, valid, vlen=2, NULL_timeout): no
+            // descriptor 3 → EBADF.
             let a = SyscallArgs {
                 arg0: 3,
                 arg1: mmsg_ptr,
@@ -98993,8 +99185,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 );
                 return Err(KernelError::InternalError);
             }
-            // recvmmsg(fd=3, NULL, vlen=0, NULL_timeout): vlen==0 →
-            // EBADF.
+            // recvmmsg(fd=3, NULL, vlen=0, NULL_timeout): no descriptor 3
+            // → EBADF (with one, vlen 0 would answer 0).
             let a = SyscallArgs {
                 arg0: 3,
                 arg1: 0,

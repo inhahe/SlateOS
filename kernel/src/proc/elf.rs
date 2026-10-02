@@ -2270,6 +2270,16 @@ pub fn build_linux_slate_channel_test_elf() -> alloc::vec::Vec<u8> {
 ///                                             ; and gid, else 0xEF
 ///   the same with a pid naming no process     ; -ESRCH, else 0xF0
 ///   the same with cmsg_len 24                 ; -EINVAL, else 0xF1
+///   ; several messages a call
+///   sendmmsg(d2, ["ping", "pong"] to path, 2) ; 2, else 0xF2; msg_len 4, 4, else 0xF3
+///   recvmmsg(d1, [64-byte, 16-byte], 2)       ; 2, else 0xF4; 4, 4, "ping",
+///                                             ; "pong", else 0xF5
+///   recvmmsg(..., MSG_DONTWAIT) on nothing    ; -EAGAIN, else 0xF6
+///   one sent; recvmmsg(..., 2, MSG_WAITFORONE); 1, else 0xF7
+///   sendmmsg(d2, NULL, 2)                     ; -EFAULT, else 0xF8
+///   sendmmsg with the 2nd entry's bytes at 0x10 ; 1 (the first sent), else 0xF9
+///   d = open("/", O_DIRECTORY); sendmmsg(d, ...), getpeername(d, ...)
+///                                             ; -ENOTSOCK both, else 0xFA
 ///   unlink("/tmp/slt.sock")                   ; 0, else 0xE7
 ///   sendto(d2, "ping", 4, 0, path, 16)        ; -ENOENT, else 0xE8
 ///   exit(0x5D)
@@ -2280,8 +2290,10 @@ pub fn build_linux_slate_channel_test_elf() -> alloc::vec::Vec<u8> {
 /// leads nowhere; datagrams kept whole, with an unnamed sender reported as
 /// such; a listener's backlog, connect and accept; bytes both ways over the
 /// accepted stream; the kernel's record of the peer, both as `SO_PEERCRED`
-/// and as an `SCM_CREDENTIALS` control message; end of file when the client
-/// closes. Tagged `ELFOSABI_GNU` for the SysV stack + Linux ABI.
+/// and as an `SCM_CREDENTIALS` control message; credentials a sender states,
+/// checked; batches of messages each way; `ENOTSOCK` for a descriptor that is
+/// not a socket; end of file when the client closes. Tagged `ELFOSABI_GNU`
+/// for the SysV stack + Linux ABI.
 #[must_use]
 #[allow(
     clippy::indexing_slicing,
@@ -2312,6 +2324,10 @@ pub fn build_linux_unix_socket_test_elf() -> alloc::vec::Vec<u8> {
     const SETSOCKOPT: u32 = 54;
     const SENDMSG: u32 = 46;
     const RECVMSG: u32 = 47;
+    const OPEN: u32 = 2;
+    const GETPEERNAME: u32 = 52;
+    const RECVMMSG: u32 = 299;
+    const SENDMMSG: u32 = 307;
     const EXIT: u32 = 60;
     const UNLINK: u32 = 87;
     // Stack layout (all [rsp + offset]).
@@ -2322,6 +2338,7 @@ pub fn build_linux_unix_socket_test_elf() -> alloc::vec::Vec<u8> {
     const FD_S: u32 = 0x10;
     const FD_D1: u32 = 0x14;
     const FD_D2: u32 = 0x18;
+    const FD_DIR: u32 = 0x1C;
     const DG_ADDR: u32 = 0x20; // "@slt-dg", 9 bytes
     const ST_ADDR: u32 = 0x40; // "@slt-st", 9 bytes
     const PING: u32 = 0x60;
@@ -2337,9 +2354,16 @@ pub fn build_linux_unix_socket_test_elf() -> alloc::vec::Vec<u8> {
     const ONE: u32 = 0x280; // the int 1
     const SEND_MSGHDR: u32 = 0x2C0; // the msghdr sendmsg sends, 56 bytes
     const SEND_CONTROL: u32 = 0x300; // its control messages, 32 bytes
-    const FRAME: u32 = 0x340;
+    const MMSG: u32 = 0x340; // two struct mmsghdr, 64 bytes each
+    const MIOV: u32 = 0x3C0; // their two iovecs
+    const RBUF2: u32 = 0x3E0; // the second receive buffer, 16 bytes
+    const SLASH: u32 = 0x3F0; // "/", NUL-terminated
+    const PONG: u32 = 0x3F8; // "pong"
+    const FRAME: u32 = 0x400;
     /// "ping", little-endian.
     const PING_WORD: u32 = 0x676E_6970;
+    /// "pong", little-endian.
+    const PONG_WORD: u32 = 0x676E_6F70;
 
     let phdr_offset: u64 = 64;
     let code_offset: u64 = 120;
@@ -2732,6 +2756,172 @@ pub fn build_linux_unix_socket_test_elf() -> alloc::vec::Vec<u8> {
     cmp_rax_i8(&mut code, -22); // EINVAL
     jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xF1);
 
+    // --- sendmmsg and recvmmsg: several messages a call ---
+    let mov_r10d_imm = |c: &mut alloc::vec::Vec<u8>, v: u32| {
+        c.extend_from_slice(&[0x41, 0xBA]);
+        c.extend_from_slice(&le(v));
+    };
+    // lea rdx, [rsp + d32]
+    let lea_rdx = |c: &mut alloc::vec::Vec<u8>, d: u32| {
+        c.extend_from_slice(&[0x48, 0x8D, 0x94, 0x24]);
+        c.extend_from_slice(&le(d));
+    };
+    // Two mmsghdrs for sending: each to the path, one iovec each ("ping",
+    // then "pong"), no control, msg_len 0 until the kernel fills it in.
+    let mmsg_send_layout = |c: &mut alloc::vec::Vec<u8>| {
+        lea_rax(c, PING);
+        store_rax(c, MIOV);
+        store_qword(c, MIOV + 8, 4);
+        lea_rax(c, PONG);
+        store_rax(c, MIOV + 16);
+        store_qword(c, MIOV + 24, 4);
+        for (entry, iov) in [(0u32, MIOV), (64, MIOV + 16)] {
+            lea_rax(c, PATH_ADDR);
+            store_rax(c, MMSG + entry); // msg_name
+            store_qword(c, MMSG + entry + 8, 16); // msg_namelen
+            lea_rax(c, iov);
+            store_rax(c, MMSG + entry + 16); // msg_iov
+            store_qword(c, MMSG + entry + 24, 1); // msg_iovlen
+            for off in [32u32, 40, 48, 56] {
+                store_qword(c, MMSG + entry + off, 0); // control, its length, flags, msg_len
+            }
+        }
+    };
+    // The same two for receiving: no name, one emptied buffer each (64 and
+    // 16 bytes), no control.
+    let mmsg_recv_layout = |c: &mut alloc::vec::Vec<u8>| {
+        store_imm(c, BUF, 0);
+        store_imm(c, RBUF2, 0);
+        lea_rax(c, BUF);
+        store_rax(c, MIOV);
+        store_qword(c, MIOV + 8, 64);
+        lea_rax(c, RBUF2);
+        store_rax(c, MIOV + 16);
+        store_qword(c, MIOV + 24, 16);
+        for (entry, iov) in [(0u32, MIOV), (64, MIOV + 16)] {
+            store_qword(c, MMSG + entry, 0);
+            store_qword(c, MMSG + entry + 8, 0);
+            lea_rax(c, iov);
+            store_rax(c, MMSG + entry + 16);
+            store_qword(c, MMSG + entry + 24, 1);
+            for off in [32u32, 40, 48, 56] {
+                store_qword(c, MMSG + entry + off, 0);
+            }
+        }
+    };
+    store_imm(&mut code, PONG, PONG_WORD);
+    // sendmmsg(d2, MMSG, 2, 0): both sent, each msg_len 4.
+    mmsg_send_layout(&mut code);
+    mov_edi_mem(&mut code, FD_D2);
+    lea_rsi(&mut code, MMSG);
+    mov_edx_imm(&mut code, 2);
+    xor_r10d(&mut code);
+    syscall(&mut code, SENDMMSG);
+    cmp_rax_i8(&mut code, 2);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xF2);
+    cmp_mem_imm(&mut code, MMSG + 56, 4);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xF3);
+    cmp_mem_imm(&mut code, MMSG + 64 + 56, 4);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xF3);
+    // recvmmsg(d1, MMSG, 2, 0, NULL): both, in order, each whole.
+    mmsg_recv_layout(&mut code);
+    mov_edi_mem(&mut code, FD_D1);
+    lea_rsi(&mut code, MMSG);
+    mov_edx_imm(&mut code, 2);
+    xor_r10d(&mut code);
+    xor_r8d(&mut code);
+    syscall(&mut code, RECVMMSG);
+    cmp_rax_i8(&mut code, 2);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xF4);
+    cmp_mem_imm(&mut code, MMSG + 56, 4);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xF5);
+    cmp_mem_imm(&mut code, MMSG + 64 + 56, 4);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xF5);
+    cmp_mem_imm(&mut code, BUF, PING_WORD);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xF5);
+    cmp_mem_imm(&mut code, RBUF2, PONG_WORD);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xF5);
+    // Nothing left, and MSG_DONTWAIT: EAGAIN.
+    mov_edi_mem(&mut code, FD_D1);
+    lea_rsi(&mut code, MMSG);
+    mov_edx_imm(&mut code, 2);
+    mov_r10d_imm(&mut code, 0x40); // MSG_DONTWAIT
+    xor_r8d(&mut code);
+    syscall(&mut code, RECVMMSG);
+    cmp_rax_i8(&mut code, -11); // EAGAIN
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xF6);
+    // MSG_WAITFORONE: one waiting, two asked for -- the one, without
+    // waiting for a second.
+    mov_edi_mem(&mut code, FD_D2);
+    lea_rsi(&mut code, PING);
+    mov_edx_imm(&mut code, 4);
+    xor_r10d(&mut code);
+    lea_r8(&mut code, PATH_ADDR);
+    mov_r9d_imm(&mut code, 16);
+    syscall(&mut code, SENDTO);
+    cmp_rax_i8(&mut code, 4);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xF7);
+    mov_edi_mem(&mut code, FD_D1);
+    lea_rsi(&mut code, MMSG);
+    mov_edx_imm(&mut code, 2);
+    mov_r10d_imm(&mut code, 0x1_0000); // MSG_WAITFORONE
+    xor_r8d(&mut code);
+    syscall(&mut code, RECVMMSG);
+    cmp_rax_i8(&mut code, 1);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xF7);
+    // A vector that cannot be read, nothing sent: EFAULT.
+    mov_edi_mem(&mut code, FD_D2);
+    mov_esi_imm(&mut code, 0);
+    mov_edx_imm(&mut code, 2);
+    xor_r10d(&mut code);
+    syscall(&mut code, SENDMMSG);
+    cmp_rax_i8(&mut code, -14); // EFAULT
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xF8);
+    // The second entry's bytes are nowhere: the first goes, and the answer
+    // is 1 rather than the second's EFAULT.
+    mmsg_send_layout(&mut code);
+    store_qword(&mut code, MIOV + 16, 0x10);
+    mov_edi_mem(&mut code, FD_D2);
+    lea_rsi(&mut code, MMSG);
+    mov_edx_imm(&mut code, 2);
+    xor_r10d(&mut code);
+    syscall(&mut code, SENDMMSG);
+    cmp_rax_i8(&mut code, 1);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xF9);
+    mov_edi_mem(&mut code, FD_D1);
+    lea_rsi(&mut code, BUF);
+    mov_edx_imm(&mut code, 64);
+    mov_r10d_imm(&mut code, 0x40); // MSG_DONTWAIT
+    xor_r8d(&mut code);
+    xor_r9d(&mut code);
+    syscall(&mut code, RECVFROM);
+    cmp_rax_i8(&mut code, 4);
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xF9);
+    // A descriptor that is not a socket: ENOTSOCK, from sendmmsg and from
+    // getpeername (the probe an inetd-started program makes of stdin).
+    store_imm(&mut code, SLASH, 0x2F);
+    lea_rdi(&mut code, SLASH);
+    mov_esi_imm(&mut code, 0x1_0000); // O_RDONLY | O_DIRECTORY
+    mov_edx_imm(&mut code, 0);
+    syscall(&mut code, OPEN);
+    test_rax(&mut code);
+    jcc_fail(&mut code, &mut fail_jumps, JS, 0xFA);
+    store_eax(&mut code, FD_DIR);
+    mov_edi_mem(&mut code, FD_DIR);
+    lea_rsi(&mut code, MMSG);
+    mov_edx_imm(&mut code, 1);
+    xor_r10d(&mut code);
+    syscall(&mut code, SENDMMSG);
+    cmp_rax_i8(&mut code, -88); // ENOTSOCK
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xFA);
+    store_imm(&mut code, LEN, 110);
+    mov_edi_mem(&mut code, FD_DIR);
+    lea_rsi(&mut code, FROM);
+    lea_rdx(&mut code, LEN);
+    syscall(&mut code, GETPEERNAME);
+    cmp_rax_i8(&mut code, -88); // ENOTSOCK
+    jcc_fail(&mut code, &mut fail_jumps, JNZ, 0xFA);
+
     // unlink(path): the sun_path inside the address, NUL-terminated
     lea_rdi(&mut code, PATH_ADDR + 2);
     syscall(&mut code, UNLINK);
@@ -2753,7 +2943,7 @@ pub fn build_linux_unix_socket_test_elf() -> alloc::vec::Vec<u8> {
 
     // One failure exit per sentinel.
     let mut fail_at: alloc::vec::Vec<(u8, usize)> = alloc::vec::Vec::new();
-    for sentinel in 0xD1u8..=0xF1 {
+    for sentinel in 0xD1u8..=0xFA {
         fail_at.push((sentinel, code.len()));
         mov_edi_imm(&mut code, u32::from(sentinel));
         syscall(&mut code, EXIT);

@@ -360,22 +360,17 @@ run_case substr "$raw" 2 1
 run_case "$raw" '|' x
 run_case "$raw" = "$raw"
 
-# The regex half is where GNU stops agreeing with itself, and the two cases
-# below are the demonstration. The three cases above establish that GNU calls
-# the undecodable byte a character: `length` says 3, `index ... b` says 3, and
-# `substr ... 2 1` hands the byte back. But its matcher cannot see past it —
-# `.*` matches only the leading `a`, and `a.b` does not match at all. A string
-# that is three characters long to `length` and one character long to `.*` is
-# not a model a script can be written against.
-#
-# Ours counts the byte in both halves (design-decisions.md §322). That is also
-# the only reading under which `expr "$path" : '.*/\(.*\)'` — one of the oldest
-# spellings of `basename` — keeps working on a path this filesystem allows,
-# which is every byte but `/` and NUL.
-xfail_case 'GNU: length calls the undecodable byte a character but the matcher stops at it; ours is bytes throughout (§322)' \
-  "$raw" : '.*'
-xfail_case 'GNU: `a.b` cannot match across an undecodable byte its own `length` counts; ours is bytes throughout (§322)' \
-  "$raw" : 'a.b'
+# The regex half: GNU calls the undecodable byte a character -- `length` says
+# 3, `index ... b` says 3, and `substr ... 2 1` hands the byte back -- but in a
+# UTF-8 locale its matcher does not let `.` take it: `.*` matches only the
+# leading `a`, and `a.b` does not match at all. That is glibc's rule, and the
+# engine follows it since 2026-10-02 (`known-issues.md`
+# B-ERE-DOT-TOOK-A-BYTE-GLIBC-LEAVES); until then these two were deliberate
+# differences, on the argument that `expr "$path" : '.*/\(.*\)'` should work on
+# any path. GNU's answer to that is `LC_ALL=C`, which our regex tools do not
+# yet honour (`TD-B-REGEX-TOOLS-IGNORE-LC-ALL-C`).
+run_case "$raw" : '.*'
+run_case "$raw" : 'a.b'
 
 # --- syntax errors ----------------------------------------------------------
 # Text-compared. Every one of these names the offending argument back to the

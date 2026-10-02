@@ -419,15 +419,14 @@ run_stdin abc.txt $'s/b/x\\\ny/'
 # match them as bytes rather than dropping them.
 run_stdin bytes.txt 's/Z/z/'
 run_stdin bytes.txt 's/[[:print:]]//g'
-# `.` is the one place the two models of "a character" cannot both be right.
-# GNU matches with glibc's multibyte matcher, which in a UTF-8 locale cannot
-# decode `\x80` and so refuses to let `.` match it: `.*` stops dead at the
-# undecodable byte, and `[&]` closes in the middle of the line. Ours is
-# byte-based — `design-decisions.md` §322, the same decision `find -regex`
-# turns on — so `.*` takes the whole line. Every other case over this fixture
-# agrees; only the one whose answer depends on what a character *is* does not.
-xfail_stdin 'a byte-based `.` matches an undecodable byte; glibc'"'"'s does not' \
-  bytes.txt 's/.*/[&]/'
+# `.` and an undecodable byte. GNU matches with glibc's multibyte matcher,
+# which in a UTF-8 locale cannot decode `\x80` and so refuses to let `.`
+# match it: `.*` stops dead at the undecodable byte, and `[&]` closes in the
+# middle of the line. Ours did not, and this case was a deliberate difference
+# until 2026-10-02, when the engine took glibc's rule (`known-issues.md`
+# B-ERE-DOT-TOOK-A-BYTE-GLIBC-LEAVES); now it must agree.
+run_stdin bytes.txt 's/.*/[&]/'
+run_stdin bytes.txt 's/[^Z]*/[&]/'
 
 # --- addresses ---------------------------------------------------------------
 run_stdin nums.txt '2d'

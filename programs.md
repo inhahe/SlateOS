@@ -84,14 +84,14 @@ two disagree.
 | `false` | Do nothing, unsuccessfully. | yes | `coreutils` |  |
 | `fdisk` | Partition table manipulator (GPT/MBR) |  |  |  |
 | `fetch` | HTTP fetch utility (wget/curl-like). | yes | `coreutils` |  |
-| `file` | File Type Identifier |  |  |  |
+| `file` | Determine the type of a file. |  |  |  |
 | `find` | Search for files in a directory hierarchy. | yes | `coreutils` |  |
 | `findfs` | Find a filesystem by label or UUID. |  |  |  |
 | `findmnt` | Find a filesystem. |  |  |  |
 | `finger` | User information lookup |  |  |  |
 | `fio` | A flexible I/O tester for SlateOS. |  |  |  |
 | `flock` | Manage file locks from shell scripts. |  |  |  |
-| `fmt` | `fmt` Utility -- Simple Text Formatter |  |  |  |
+| `fmt` | Fill and join lines into paragraphs of a given width. |  | `coreutils` |  |
 | `fold` | Wrap each input line to fit in a given width. | yes | `coreutils` |  |
 | `free` | Report the amount of free and used memory in the system. | yes | `coreutils` |  |
 | `fsck` | Filesystem Check and Repair Utility |  |  |  |
@@ -170,7 +170,7 @@ two disagree.
 | `mkfifo` | Make FIFOs (named pipes). | yes | `coreutils` |  |
 | `mkfs` | Create Filesystems |  |  |  |
 | `mknod` | Make block or character special files, or FIFOs. |  | `coreutils` |  |
-| `mktemp` | Multi-Personality Utility: mktemp / id / groups / whoami |  |  |  |
+| `mktemp` | Create a temporary file or directory, safely, and print its name. |  | `coreutils` |  |
 | `monctl` | Monitor/Display Control Utility |  |  |  |
 | `more` | File perusal filter for viewing text one screen at a time. | yes | `coreutils` |  |
 | `mount` | Mount/Umount Utility |  |  |  |
@@ -239,7 +239,7 @@ two disagree.
 | `sha512sum` | Print or check SHA-512 (512-bit) checksums. |  | `coreutils` |  |
 | `shell` | Toolchain validation program — exercises key std features to verify our custom Rust target and POSIX sysroot work correctly. |  |  |  |
 | `shred` | Overwrite files so their contents are harder to recover, and optionally delete them. |  | `coreutils` |  |
-| `shuf` | Randomly permute lines, or select random lines. |  |  |  |
+| `shuf` | Write a random permutation of the input lines. |  | `coreutils` |  |
 | `sleep` | Pause for a length of time. | yes | `coreutils` |  |
 | `sort` | Sort, merge or check lines of text. | yes | `coreutils` |  |
 | `split` | Split a file into pieces. | yes | `coreutils` |  |
@@ -261,7 +261,7 @@ two disagree.
 | `sysinfo` | System Information Utility |  |  |  |
 | `syslogd` | System Log Daemon (`syslogd`) |  |  |  |
 | `systemctl` | Multi-personality service management utility for SlateOS. |  |  | `systemd-cat` *(not installed)*, `systemd-cgls` *(not installed)*, `systemd-cgtop` *(not installed)*, `systemd-escape` *(not installed)*, `systemd-path` *(not installed)* |
-| `tac` | Reverse line printer and character reverser for Slate OS |  |  |  |
+| `tac` | Write each file to standard output, last record first. |  | `coreutils` |  |
 | `tail` | Output the last part of files. | yes | `coreutils` |  |
 | `tar` | Tape archive utility. | yes | `coreutils` |  |
 | `tcpdump` | Network Packet Analyzer |  |  |  |

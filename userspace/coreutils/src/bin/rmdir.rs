@@ -240,9 +240,8 @@ fn parse_args(args: &[OsString], posixly_correct: bool) -> Result<Request, getop
             // Under POSIXLY_CORRECT, glibc's getopt stops at the first operand.
             only_operands = posixly_correct;
         } else if let Some(body) = bytes.strip_prefix(b"--") {
-            match parse_long(body, &bytes, &mut flags)? {
-                Some(request) => return Ok(request),
-                None => continue,
+            if let Some(request) = parse_long(body, &bytes, &mut flags)? {
+                return Ok(request);
             }
         } else {
             // Bytes, not `char`s. `-é` is two bytes in UTF-8, and iterating

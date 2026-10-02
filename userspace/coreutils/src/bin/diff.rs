@@ -1142,7 +1142,12 @@ fn compute_diff(
 // crash; it produces a WRONG DIFF, quietly, in a tool whose entire output is a
 // claim about whether two files match. An out-of-range index is loud and
 // immediate; a substituted zero is neither.
-#[allow(clippy::indexing_slicing)]
+//
+// `arithmetic_side_effects` is allowed on both for the same reason: the
+// arithmetic is the indices' -- `i - 1` under `i >= 1`, `k + 1` within the
+// diagonals `-d..=d` -- and a saturated index would be a substituted cell, the
+// quiet wrong answer just described, where an overflow check is a loud one.
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 fn lcs_diff(
     norm_a: &[Vec<u8>],
     norm_b: &[Vec<u8>],
@@ -1200,7 +1205,11 @@ fn lcs_diff(
 // because `lcs_diff` is O(n*m). So failing over to it on an internal
 // inconsistency would trade a wrong answer for a hang, on exactly the inputs
 // that selected this algorithm.
-#[allow(clippy::indexing_slicing, clippy::expect_used)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    clippy::arithmetic_side_effects
+)]
 fn myers_diff(
     norm_a: &[Vec<u8>],
     norm_b: &[Vec<u8>],
@@ -1433,7 +1442,7 @@ fn build_hunks(ops: &[Edit], context: usize) -> Vec<Hunk> {
             .filter(|e| e.op == Op::Equal)
             .count();
 
-        if gap <= 2 * context {
+        if gap <= context.saturating_mul(2) {
             group_end = ci;
         } else {
             groups.push((group_start, group_end));
@@ -1448,7 +1457,7 @@ fn build_hunks(ops: &[Edit], context: usize) -> Vec<Hunk> {
 
     for (gs, ge) in groups {
         let hunk_start = gs.saturating_sub(context);
-        let hunk_end = (ge + context + 1).min(ops.len());
+        let hunk_end = ge.saturating_add(context).saturating_add(1).min(ops.len());
 
         let hunk_ops = ops.get(hunk_start..hunk_end).unwrap_or_default();
 
@@ -1461,11 +1470,11 @@ fn build_hunks(ops: &[Edit], context: usize) -> Vec<Hunk> {
         for Edit { op, .. } in ops.get(..hunk_start).unwrap_or_default() {
             match op {
                 Op::Equal => {
-                    line1 += 1;
-                    line2 += 1;
+                    line1 = line1.saturating_add(1);
+                    line2 = line2.saturating_add(1);
                 }
-                Op::Delete => line1 += 1,
-                Op::Insert => line2 += 1,
+                Op::Delete => line1 = line1.saturating_add(1),
+                Op::Insert => line2 = line2.saturating_add(1),
             }
         }
 
@@ -1479,11 +1488,11 @@ fn build_hunks(ops: &[Edit], context: usize) -> Vec<Hunk> {
         for e in hunk_ops {
             match e.op {
                 Op::Equal => {
-                    count1 += 1;
-                    count2 += 1;
+                    count1 = count1.saturating_add(1);
+                    count2 = count2.saturating_add(1);
                 }
-                Op::Delete => count1 += 1,
-                Op::Insert => count2 += 1,
+                Op::Delete => count1 = count1.saturating_add(1),
+                Op::Insert => count2 = count2.saturating_add(1),
             }
             lines.push(e.clone());
         }
@@ -1518,7 +1527,8 @@ const RESET: &str = "\x1b[0m";
 /// `diff -u | patch` -- since `patch` reads these lines back and compares them
 /// against the file.
 fn write_body_line(w: &mut impl Write, marker: &[u8], text: &[u8], color: Option<&str>) {
-    let mut line: Vec<u8> = Vec::with_capacity(marker.len().saturating_add(text.len()) + 16);
+    let mut line: Vec<u8> =
+        Vec::with_capacity(marker.len().saturating_add(text.len()).saturating_add(16));
     if let Some(c) = color {
         line.extend_from_slice(c.as_bytes());
     }
@@ -1609,7 +1619,7 @@ fn expand_output_tabs(text: &[u8], marker: &[u8], tab_stop: usize) -> Vec<u8> {
             b'\t' => {
                 // Never zero: `column % tab_stop` is below the stop, so a tab
                 // already sitting on one still advances a full stop.
-                let pad = tab_stop.saturating_sub(column % tab_stop);
+                let pad = tab_stop.saturating_sub(column.checked_rem(tab_stop).unwrap_or(0));
                 out.resize(out.len().saturating_add(pad), b' ');
                 column = column.saturating_add(pad);
             }
@@ -1670,9 +1680,13 @@ fn range_str(start: usize, count: usize) -> String {
     if count == 0 {
         format!("{}", start)
     } else if count == 1 {
-        format!("{}", start + 1)
+        format!("{}", start.saturating_add(1))
     } else {
-        format!("{},{}", start + 1, start + count)
+        format!(
+            "{},{}",
+            start.saturating_add(1),
+            start.saturating_add(count)
+        )
     }
 }
 
@@ -1775,8 +1789,8 @@ fn hunk_change_span(hunk: &Hunk) -> (usize, usize, usize, usize) {
     let mut line2_pos = hunk.start2;
     for Edit { op, .. } in &hunk.lines {
         if *op == Op::Equal {
-            line1_pos += 1;
-            line2_pos += 1;
+            line1_pos = line1_pos.saturating_add(1);
+            line2_pos = line2_pos.saturating_add(1);
         } else {
             break;
         }
@@ -1875,8 +1889,8 @@ fn print_normal(hunks: &[Hunk], config: &Config) {
         // Skip leading context to find where changes begin.
         for Edit { op, .. } in &hunk.lines {
             if *op == Op::Equal {
-                line1_pos += 1;
-                line2_pos += 1;
+                line1_pos = line1_pos.saturating_add(1);
+                line2_pos = line2_pos.saturating_add(1);
             } else {
                 break;
             }
@@ -2035,10 +2049,10 @@ fn epoch_parts(t: std::time::SystemTime) -> (i64, u32) {
             let d = e.duration();
             let secs = i64::try_from(d.as_secs()).unwrap_or(0);
             if d.subsec_nanos() == 0 {
-                (-secs, 0)
+                (secs.saturating_neg(), 0)
             } else {
                 (
-                    -secs.saturating_add(1),
+                    secs.saturating_add(1).saturating_neg(),
                     1_000_000_000_u32.saturating_sub(d.subsec_nanos()),
                 )
             }
@@ -2086,8 +2100,8 @@ fn print_unified(hunks: &[Hunk], path1: &Path, path2: &Path, config: &Config) {
 
     for hunk in hunks {
         // Hunk header: @@ -start,count +start,count @@
-        let h1_start = hunk.start1 + 1;
-        let h2_start = hunk.start2 + 1;
+        let h1_start = hunk.start1.saturating_add(1);
+        let h2_start = hunk.start2.saturating_add(1);
         let header = format!(
             "@@ -{} +{} @@",
             range_field(if hunk.count1 == 0 { 0 } else { h1_start }, hunk.count1),
@@ -2199,8 +2213,8 @@ fn print_context(hunks: &[Hunk], path1: &Path, path2: &Path, config: &Config) {
         let changed = has_del && has_ins;
 
         // File 1 section.
-        let f1_start = hunk.start1 + 1;
-        let f1_end = hunk.start1 + hunk.count1;
+        let f1_start = hunk.start1.saturating_add(1);
+        let f1_end = hunk.start1.saturating_add(hunk.count1);
         let _ = writeln!(
             w,
             "{}",
@@ -2244,8 +2258,8 @@ fn print_context(hunks: &[Hunk], path1: &Path, path2: &Path, config: &Config) {
         }
 
         // File 2 section.
-        let f2_start = hunk.start2 + 1;
-        let f2_end = hunk.start2 + hunk.count2;
+        let f2_start = hunk.start2.saturating_add(1);
+        let f2_end = hunk.start2.saturating_add(hunk.count2);
         let _ = writeln!(
             w,
             "{}",

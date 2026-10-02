@@ -647,6 +647,7 @@ dependencies = [
  "bignum",
  "blake2 0.1.0",
  "charwidth",
+ "cprintf",
  "ere",
  "errmsg",
  "fnmatch",
@@ -678,6 +679,13 @@ name = "cpio"
 version = "0.1.0"
 dependencies = [
  "modechange",
+ "quoting",
+]
+
+[[package]]
+name = "cprintf"
+version = "0.1.0"
+dependencies = [
  "quoting",
 ]
 
@@ -1155,6 +1163,13 @@ version = "0.1.0"
 [[package]]
 name = "file"
 version = "0.1.0"
+dependencies = [
+ "charwidth",
+ "errmsg",
+ "getoptlong",
+ "libmagic",
+ "sysroot-dep",
+]
 
 [[package]]
 name = "fileassoc"
@@ -1289,13 +1304,6 @@ dependencies = [
  "guitk",
  "oswindow",
  "randrange",
-]
-
-[[package]]
-name = "fmt"
-version = "0.1.0"
-dependencies = [
- "quoting",
 ]
 
 [[package]]
@@ -1923,6 +1931,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "libmagic"
+version = "0.1.0"
+dependencies = [
+ "charwidth",
+ "cprintf",
+ "ere",
+ "errmsg",
+ "localtime",
+]
+
+[[package]]
 name = "libservicebus"
 version = "0.1.0"
 dependencies = [
@@ -2386,13 +2405,6 @@ dependencies = [
  "procinfo",
  "quoting",
  "scratchdir",
-]
-
-[[package]]
-name = "mktemp"
-version = "0.1.0"
-dependencies = [
- "quoting",
 ]
 
 [[package]]
@@ -2955,9 +2967,11 @@ dependencies = [
 name = "powerctl"
 version = "0.1.0"
 dependencies = [
+ "errmsg",
  "libcall",
  "libservicebus",
  "quoting",
+ "stdfdguard",
  "sysroot-dep",
 ]
 
@@ -3480,13 +3494,6 @@ name = "shellcmd"
 version = "0.1.0"
 
 [[package]]
-name = "shuf"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "simon"
 version = "0.1.0"
 dependencies = [
@@ -3982,13 +3989,6 @@ dependencies = [
  "scratchdir",
  "settingsfile",
  "snapstore",
-]
-
-[[package]]
-name = "tac"
-version = "0.1.0"
-dependencies = [
- "quoting",
 ]
 
 [[package]]

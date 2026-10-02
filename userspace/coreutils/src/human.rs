@@ -213,35 +213,36 @@ pub fn human_readable(n: u64, opts: Opts, from_block_size: u64, to_block_size: u
 
     // The two exact cases, in upstream's order. Anything else falls through to
     // the floating path below.
+    //
+    // The divisions are checked rather than trusted. Each divisor is non-zero
+    // where it is used -- `to_block_size != 0` guards the first branch -- except
+    // one: a `to_block_size` of 0 is a multiple of anything, so it reaches the
+    // second branch with a `divisor` of 0, where upstream would divide by zero.
+    // No caller passes 0; if one did, it would get 0 rather than a crash.
     let exact = if to_block_size <= from_block_size && to_block_size != 0 {
         if from_block_size.is_multiple_of(to_block_size) {
-            let multiplier = from_block_size / to_block_size;
+            let multiplier = from_block_size.checked_div(to_block_size).unwrap_or(0);
             n.checked_mul(multiplier)
                 .map(|amt| (amt, 0u32, Residue::Exact))
         } else {
             None
         }
     } else if from_block_size != 0 && to_block_size.is_multiple_of(from_block_size) {
-        let divisor = to_block_size / from_block_size;
+        let divisor = to_block_size.checked_div(from_block_size).unwrap_or(0);
         // `(n % divisor) * 10` cannot overflow for any divisor a caller can
         // reach here, but saturating it costs nothing and keeps the arithmetic
         // lint quiet without an allow.
-        let r10 = (n % divisor).saturating_mul(10);
-        let r2 = (r10 % divisor).saturating_mul(2);
-        let residue = if r2 < divisor {
-            if r2 > 0 {
-                Residue::BelowHalf
-            } else {
-                Residue::Exact
-            }
-        } else if divisor < r2 {
-            Residue::AboveHalf
-        } else {
-            Residue::Half
+        let r10 = n.checked_rem(divisor).unwrap_or(0).saturating_mul(10);
+        let r2 = r10.checked_rem(divisor).unwrap_or(0).saturating_mul(2);
+        let residue = match r2.cmp(&divisor) {
+            std::cmp::Ordering::Less if r2 > 0 => Residue::BelowHalf,
+            std::cmp::Ordering::Less => Residue::Exact,
+            std::cmp::Ordering::Greater => Residue::AboveHalf,
+            std::cmp::Ordering::Equal => Residue::Half,
         };
         Some((
-            n / divisor,
-            u32::try_from(r10 / divisor).unwrap_or(0),
+            n.checked_div(divisor).unwrap_or(0),
+            u32::try_from(r10.checked_div(divisor).unwrap_or(0)).unwrap_or(0),
             residue,
         ))
     } else {
@@ -259,11 +260,11 @@ pub fn human_readable(n: u64, opts: Opts, from_block_size: u64, to_block_size: u
         // that `--block-size=1M` still prints an `M`. `exponent` is `None` in
         // exactly that case.
         let exponent = exponent.unwrap_or_else(|| {
-            let mut e = 0;
+            let mut e = 0i32;
             let mut power: u64 = 1;
             while power < to_block_size {
                 power = power.saturating_mul(base);
-                e += 1;
+                e = e.saturating_add(1);
                 if e == EXPONENT_MAX {
                     break;
                 }
@@ -320,15 +321,20 @@ fn integer_path(
     if opts.has(Opts::AUTOSCALE) {
         let mut e = 0i32;
         if base <= amt {
+            // `base` is 1000 or 1024, so the checked divisions cannot fail.
             while {
-                let r10 = (amt % base)
+                let r10 = amt
+                    .checked_rem(base)
+                    .unwrap_or(0)
                     .saturating_mul(10)
                     .saturating_add(u64::from(tenths));
-                let r2 = (r10 % base)
+                let r2 = r10
+                    .checked_rem(base)
+                    .unwrap_or(0)
                     .saturating_mul(2)
                     .saturating_add(u64::from(residue.value() >> 1));
-                amt /= base;
-                tenths = u32::try_from(r10 / base).unwrap_or(0);
+                amt = amt.checked_div(base).unwrap_or(0);
+                tenths = u32::try_from(r10.checked_div(base).unwrap_or(0)).unwrap_or(0);
                 let carried = r2.saturating_add(u64::from(residue.value()));
                 residue = if r2 < base {
                     if carried != 0 {
@@ -341,7 +347,7 @@ fn integer_path(
                 } else {
                     Residue::Half
                 };
-                e += 1;
+                e = e.saturating_add(1);
                 base <= amt && e < EXPONENT_MAX
             } {}
 
@@ -350,22 +356,23 @@ fn integer_path(
                 // that rounds up from .95 to 1.0 must widen the integer part,
                 // not print `0.10`.
                 let bump = if round_to_nearest {
-                    residue.value() + (tenths & 1) > 2
+                    residue.value().saturating_add(tenths & 1) > 2
                 } else {
                     ceiling && !residue.is_exact()
                 };
                 if bump {
-                    tenths += 1;
+                    tenths = tenths.saturating_add(1);
                     residue = Residue::Exact;
                     if tenths == 10 {
-                        amt += 1;
+                        amt = amt.saturating_add(1);
                         tenths = 0;
                     }
                 }
 
                 if amt < 10 && (tenths != 0 || !opts.has(Opts::SUPPRESS_POINT_ZERO)) {
                     fraction.push('.');
-                    fraction.push(char::from(b'0' + u8::try_from(tenths).unwrap_or(0)));
+                    // `tenths` is a digit here: below 10, or reset to 0 above.
+                    fraction.push(char::from_digit(tenths, 10).unwrap_or('0'));
                     tenths = 0;
                     residue = Residue::Exact;
                 }
@@ -388,15 +395,18 @@ fn integer_path(
         // What it means: a half or more rounds up unless the value is an exact
         // tie *and* `amt` is even. That is round-half-to-even, with the parity
         // consulted only to break a tie that `rounding == 0` certifies is exact.
-        let up = residue.value() + u32::try_from(amt & 1).unwrap_or(0) > 0;
-        u64::from(tenths) + u64::from(up) > 5
+        let up = residue
+            .value()
+            .saturating_add(u32::try_from(amt & 1).unwrap_or(0))
+            > 0;
+        u64::from(tenths).saturating_add(u64::from(up)) > 5
     } else {
         ceiling && (tenths != 0 || !residue.is_exact())
     };
     if bump {
         amt = amt.saturating_add(1);
         if opts.has(Opts::AUTOSCALE) && amt == base && exponent.is_some_and(|e| e < EXPONENT_MAX) {
-            exponent = exponent.map(|e| e + 1);
+            exponent = exponent.map(|e| e.saturating_add(1));
             if !opts.has(Opts::SUPPRESS_POINT_ZERO) {
                 fraction = ".0".to_string();
             }
@@ -430,7 +440,7 @@ fn floating_path(
     let basef = base as f64;
     loop {
         divisor *= basef;
-        e += 1;
+        e = e.saturating_add(1);
         if !(divisor * basef <= damt && e < EXPONENT_MAX) {
             break;
         }
@@ -451,7 +461,9 @@ fn floating_path(
     // base-1024 term is there because a 1024-scaled value can reach four
     // integer digits where a 1000-scaled one cannot.
     let extra = usize::from(!opts.has(Opts::BASE_1024));
-    if 1 + 2 + extra < text.len() || (opts.has(Opts::SUPPRESS_POINT_ZERO) && text.ends_with('0')) {
+    if extra.saturating_add(1 + 2) < text.len()
+        || (opts.has(Opts::SUPPRESS_POINT_ZERO) && text.ends_with('0'))
+    {
         text = format_fixed(adjust(style, damt * 10.0) / 10.0, 0);
     }
     (text, Some(e))
@@ -467,7 +479,11 @@ fn adjust(style: u32, value: f64) -> f64 {
         let u = value as u64;
         #[allow(clippy::cast_precision_loss)]
         let uf = u as f64;
-        return uf + f64::from(u8::from(style == Opts::CEILING.0 && uf != value));
+        // Exact on purpose: upstream's `u != value` asks whether the
+        // conversion dropped a fraction, which no margin answers.
+        #[allow(clippy::float_cmp)]
+        let truncated = uf != value;
+        return uf + f64::from(u8::from(style == Opts::CEILING.0 && truncated));
     }
     value
 }

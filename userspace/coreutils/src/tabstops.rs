@@ -326,8 +326,11 @@ impl TabStops {
     /// backspace) must rewind `index` too.
     #[must_use]
     pub fn next_stop(&self, column: u64, index: &mut usize) -> Option<u64> {
+        // Each `checked_rem` below is behind its divisor's `!= 0` test, so
+        // none of them can come back `None`.
         if self.size != 0 {
-            return Some(column.wrapping_add(self.size.wrapping_sub(column % self.size)));
+            let into = column.checked_rem(self.size).unwrap_or(0);
+            return Some(column.wrapping_add(self.size.wrapping_sub(into)));
         }
         while let Some(&stop) = self.list.get(*index) {
             if column < stop {
@@ -336,7 +339,8 @@ impl TabStops {
             *index = index.saturating_add(1);
         }
         if self.extend != 0 {
-            return Some(column.wrapping_add(self.extend.wrapping_sub(column % self.extend)));
+            let into = column.checked_rem(self.extend).unwrap_or(0);
+            return Some(column.wrapping_add(self.extend.wrapping_sub(into)));
         }
         if self.increment != 0 {
             let last = self.list.last().copied().unwrap_or(0);
@@ -346,7 +350,8 @@ impl TabStops {
             // anyway, because upstream's `uintmax_t` arithmetic would wrap
             // rather than trap and a divergence here would be silent.
             let past = column.wrapping_sub(last);
-            return Some(column.wrapping_add(self.increment.wrapping_sub(past % self.increment)));
+            let into = past.checked_rem(self.increment).unwrap_or(0);
+            return Some(column.wrapping_add(self.increment.wrapping_sub(into)));
         }
         None
     }

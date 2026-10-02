@@ -2,8 +2,25 @@
 name = "file"
 version = "0.1.0"
 edition = "2024"
-description = "SlateOS file type identification"
+description = "SlateOS file type identification: a port of file 5.45 and libmagic"
+
 [dependencies]
+# file 5.45's library: the database and every test.
+libmagic = { path = "../libmagic" }
+# glibc's getopt_long, for file.c's option walk and its diagnostics.
+getoptlong = { path = "../getoptlong" }
+# strerror(3)'s wording for an I/O error.
+errmsg = { path = "../errmsg" }
+# wcwidth, for the column a name takes.
+charwidth = { path = "../charwidth" }
+
+[build-dependencies]
+# Compiles `magic/` into the database the program carries, as `file -C` does.
+libmagic = { path = "../libmagic" }
+# Tells cargo that the hand-built sysroot libc.a is an input, so a libc
+# rebuild relinks this binary instead of silently leaving it stale. See
+# userspace/sysroot-dep.
+sysroot-dep = { path = "../sysroot-dep" }
 
 [lints]
 workspace = true

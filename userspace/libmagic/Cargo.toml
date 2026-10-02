@@ -1,0 +1,21 @@
+[package]
+name = "libmagic"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS libmagic: a port of file 5.45's library -- the magic database and the tests that identify a file"
+
+[dependencies]
+# C's printf conversions and strtod/strtof, which a magic rule's description
+# and its float values are read and written with.
+cprintf = { path = "../cprintf" }
+# The regex engine, in the C locale a byte at a time, for `regex` rules.
+ere = { path = "../ere" }
+# strerror(3)'s wording for an I/O error.
+errmsg = { path = "../errmsg" }
+# wcwidth and the printable test, for what an answer may print unescaped.
+charwidth = { path = "../charwidth" }
+# The local time zone, for `ldate` rules and Windows times.
+localtime = { path = "../localtime" }
+
+[lints]
+workspace = true

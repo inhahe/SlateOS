@@ -483,10 +483,10 @@ fn out_epoch(out: &mut Vec<u8>, conv: Conv, secs: i64, nsec: u32) {
         for _ in kept..9 {
             divisor = divisor.saturating_mul(10);
         }
-        frac = u64::from(nsec) / divisor;
+        frac = u64::from(nsec).checked_div(divisor).unwrap_or(0);
         if secs < 0 && nsec != 0 {
-            let modulus = 1_000_000_000_u64 / divisor;
-            let lost = u64::from(nsec) % divisor != 0;
+            let modulus = 1_000_000_000_u64.checked_div(divisor).unwrap_or(0);
+            let lost = u64::from(nsec).checked_rem(divisor).unwrap_or(0) != 0;
             frac = modulus.saturating_sub(frac).saturating_sub(u64::from(lost));
             if frac != 0 {
                 sec = sec.saturating_add(1);

@@ -811,18 +811,18 @@ impl SuffixFormat {
             i = i.saturating_add(1);
             if c != b'%' {
                 if spec.is_some() {
-                    tail.push(c)
+                    tail.push(c);
                 } else {
-                    head.push(c)
+                    head.push(c);
                 }
                 continue;
             }
             if format.get(i) == Some(&b'%') {
                 i = i.saturating_add(1);
                 if spec.is_some() {
-                    tail.push(b'%')
+                    tail.push(b'%');
                 } else {
-                    head.push(b'%')
+                    head.push(b'%');
                 }
                 continue;
             }
@@ -886,7 +886,7 @@ impl SuffixFormat {
             spec.width = spec
                 .width
                 .saturating_mul(10)
-                .saturating_add(usize::from(c - b'0'));
+                .saturating_add(usize::from(c.saturating_sub(b'0')));
             i = i.saturating_add(1);
         }
         if format.get(i) == Some(&b'.') {
@@ -898,7 +898,7 @@ impl SuffixFormat {
                 }
                 precision = precision
                     .saturating_mul(10)
-                    .saturating_add(usize::from(c - b'0'));
+                    .saturating_add(usize::from(c.saturating_sub(b'0')));
                 i = i.saturating_add(1);
             }
             spec.precision = Some(precision);

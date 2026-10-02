@@ -189,12 +189,15 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/expand-diff.sh` | Differential test: our expand against GNU expand. |
 | `scripts/expr-diff.sh` | Differential test: our expr against GNU expr, both run inside WSL. |
 | `scripts/extfloat-cases.py` | Generate cases for `scripts/extfloat-diff.sh`. |
-| `scripts/extfloat-diff.sh` | Differential test: our `coreutils::extfloat` against glibc's `strtold` and |
+| `scripts/extfloat-diff.sh` | Differential test: our `cprintf::extfloat` against glibc's `strtold` and |
 | `scripts/extract-tcc-strace.sh` | Extract tcc + crt + libtcc1.a from rootfs.ext4 and strace a hosted compile. |
 | `scripts/factor-diff.sh` | factor-diff.sh — compare our `factor` against GNU's, inside WSL. |
 | `scripts/fastpy-slateos-bundle.py` | Build the tree that puts the fastpy compiler on a SlateOS image. |
-| `scripts/file-isomedia-diff.sh` | Differential test: our `file` against file 5.45's on ISO base media files. |
-| `scripts/file-isomedia-gen.py` | Generate `userspace/file/src/isomedia_table.rs` from file 5.45's magic. |
+| `scripts/file-diff.sh` | Differential test: our `file` against file 5.45, built from the release. |
+| `scripts/file-gen-cdf.py` | Generate Composite Document Files (OLE2) for testing libmagic's readcdf.c. |
+| `scripts/file-gen-elf.py` | Generate ELF files exercising every path of libmagic's readelf.c. |
+| `scripts/file-gen-z.py` | Generate compressed files for testing `file -z` (libmagic's compress.c). |
+| `scripts/file-magic-vendor.py` | Vendor file 5.45's magic database into `userspace/file/magic/`. |
 | `scripts/find-claimed-acts.py` | Which programs tell the user they DID something they cannot do? |
 | `scripts/find-diff.sh` | Differential test: our find against GNU find. |
 | `scripts/find-drawn-only-settings.py` | Which settings does a window let you change, and then only draw? |
@@ -211,6 +214,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/findmnt-diff.sh` | Differential test: our `findmnt` against util-linux 2.39.3's. |
 | `scripts/flake-hunt.sh` | flake-hunt.sh — run a crate's test suite N times and report only the runs |
 | `scripts/flock-diff.sh` | Differential test: our `flock` against util-linux 2.39.3's. |
+| `scripts/fmt-diff.sh` | fmt-diff.sh — compare our `fmt` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/fold-diff.sh` | Differential test: our fold against GNU fold. |
 | `scripts/free-diff.sh` | Differential test: our `free` against procps-ng `free`. |
 | `scripts/frozen-flag-survey.py` | Boolean fields an app reads and can never change. |
@@ -261,6 +265,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/make-spike/run.sh` | Cross-compile upstream GNU make and link it against SlateOS's own libc.a. |
 | `scripts/merge-readiness.py` | Say whether incoming `origin/main` commits land in the part of the tree your |
 | `scripts/mknod-diff.sh` | mknod-diff.sh — compare our `mknod` against GNU's, inside WSL. |
+| `scripts/mktemp-diff.sh` | mktemp-diff.sh — compare our `mktemp` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/more-diff.sh` | Differential test: our more against util-linux's more. |
 | `scripts/mountpoint-diff.sh` | Differential test: our `mountpoint` against util-linux 2.39.3's. |
 | `scripts/msysbash.py` | The bash this repository's shell scripts actually run under -- found, not assumed. |
@@ -380,6 +385,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/sharutils-ref.sh` | Unpacks Ubuntu's sharutils package, without root, as the uuencode/uudecode harness reference. |
 | `scripts/shellcheck-all.sh` | Run shellcheck over every script in this directory and below it. |
 | `scripts/shred-diff.sh` | shred-diff.sh — compare our `shred` against GNU coreutils 9.4's, inside WSL. |
+| `scripts/shuf-diff.sh` | shuf-diff.sh — compare our `shuf` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/smartcols-cases.py` | Scripts for scripts/smartcols-diff.sh: tables to build, each printed. |
 | `scripts/smartcols-diff.sh` | Differential test: `userspace/smartcols`, the port of libsmartcols, against |
 | `scripts/snapshot-todo2.sh` | Commit the current todo2.txt to local-only history on the orphan branch |
@@ -405,6 +411,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/symbolize.py` | Turn the raw addresses in a kernel panic into `symbol+offset`. |
 | `scripts/sync-diff.sh` | sync-diff.sh — compare our `sync` against the real GNU one, inside WSL. |
 | `scripts/syslog-client-check.sh` | What `libcsyslog`'s callers actually send to the system log, end to end. |
+| `scripts/tac-diff.sh` | tac-diff.sh — compare our `tac` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/tail-diff.sh` | Differential test: our tail against GNU tail. |
 | `scripts/tar-diff.sh` | Differential test: our tar against GNU tar. |
 | `scripts/tee-diff.sh` | Differential test: our tee against GNU coreutils' tee. |
@@ -426,6 +433,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/test-diff-bound.sh` | Two-probe test for the bound that `diff-wsl.sh` puts around every harness. |
 | `scripts/test-diff-forward.sh` | Does a `DIFF_*` knob set on the command line reach the far side of the WSL |
 | `scripts/test-diff.sh` | Differential test: our `test` against GNU `test`. |
+| `scripts/test-docs-tools.py` | Tests for the shared-document tooling: doc_entries.py, docs_layout.py, |
 | `scripts/test-fastpy-slateos-bundle.py` | Regression tests for `scripts/fastpy-slateos-bundle.py`. |
 | `scripts/test-gather-notices.py` | The gate that keeps the image's third-party notices complete (design-decisions §1433). |
 | `scripts/test-gittree.py` | Tests for `scripts/gittree.py` — reading many blobs out of one git process. |
@@ -488,4 +496,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_478 scripts._
+_486 scripts._

@@ -1,1430 +1,816 @@
-//! Slate OS File Type Identifier
+//! `file` -- determine the type of a file. A port of file 5.45 (Ian F.
+//! Darwin, Christos Zoulas and others), libmagic and its magic database
+//! included.
 //!
-//! Determines file types by examining file contents (magic numbers and byte
-//! patterns) rather than relying on file extensions. Modeled after the Unix
-//! `file` command.
+//! This is `src/file.c`: the command line. Everything it reports comes from
+//! libmagic's modules, each a port of the libmagic source file of the same
+//! name -- `apprentice` reads the magic database, `softmagic` runs its rules,
+//! `funcs::file_buffer` decides which tests run in which order, `encoding` and
+//! `ascmagic` describe text. They are ports function by function, measured
+//! against file 5.45 by `scripts/file-diff.sh`, and keep upstream's behaviour
+//! where it is odd, because what `file` prints is read by scripts.
 //!
-//! # Usage
+//! The library is `userspace/libmagic`. The database is file 5.45's own
+//! (`magic/`, vendored by `scripts/file-magic-vendor.py`), compiled by
+//! `build.rs` with that library exactly as `file -C` compiles it, and carried
+//! inside the program ([`database`]): used in place, as upstream uses its
+//! installed `magic.mgc`, when nothing is installed at the default path.
 //!
-//! ```text
-//! file [options] <file...>
-//! file -i document.pdf
-//! file --json *.bin
-//! file -f filelist.txt
-//! ```
+//! Where this deliberately differs from upstream:
+//!
+//! | Upstream | Here | Why |
+//! |---|---|---|
+//! | the database is `magic.mgc`, installed | the same `magic.mgc`, built into the program | the image need not carry a file only this program reads |
+//! | `-S` turns off the seccomp sandbox | accepted, and does nothing | SlateOS has no seccomp; there is no sandbox to turn off |
 
-use std::env;
-use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, Read, Write};
-use std::process;
+// The workspace's lint policy, less two of its defensive lints, as for
+// libmagic: this is file.c's arithmetic and indexing -- counts of arguments
+// and errors, columns of a name, offsets into the option documentation's
+// fixed strings -- each bounded where it is made.
+#![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 
-mod isomedia;
-mod isomedia_table;
+mod database {
+    //! The database this program carries: file 5.45's magic (`magic/`),
+    //! compiled by the build script exactly as `file -C` compiles it. It is
+    //! used in place of an installed `magic.mgc` when nothing is installed at
+    //! the default path -- in place meaning as it lies, which is why it is
+    //! aligned for a rule (`libmagic::magic::Magic`, 8 bytes).
 
-/// Number of bytes to read from the head of each file for identification.
-const MAGIC_BUF_SIZE: usize = 8192;
-
-// ============================================================================
-// Configuration
-// ============================================================================
-
-/// Output format mode.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum OutputMode {
-    /// Human-readable description (default).
-    Description,
-    /// MIME type string.
-    Mime,
-    /// JSON object per file.
-    Json,
-}
-
-/// Parsed command-line options.
-struct Options {
-    /// Do not print the filename prefix.
-    brief: bool,
-    /// Output mode.
-    mode: OutputMode,
-    /// Show all matching types instead of just the first.
-    keep_going: bool,
-    /// Follow symbolic links.
-    dereference: bool,
-    /// Attempt to look inside compressed files.
-    try_compressed: bool,
-    /// Use NUL byte as output line terminator instead of newline.
-    nul_terminate: bool,
-    /// Files to identify.
-    files: Vec<String>,
-}
-
-impl Default for Options {
-    fn default() -> Self {
-        Self {
-            brief: false,
-            mode: OutputMode::Description,
-            keep_going: false,
-            dereference: false,
-            try_compressed: false,
-            nul_terminate: false,
-            files: Vec::new(),
-        }
-    }
-}
-
-// ============================================================================
-// Identified file type
-// ============================================================================
-
-/// Result of identifying a file's type.
-struct FileType {
-    /// Human-readable description (e.g. "PNG image data, 800 x 600").
-    description: String,
-    /// MIME type (e.g. "image/png").
-    mime: String,
-}
-
-// ============================================================================
-// Argument parsing
-// ============================================================================
-
-/// Print usage information and exit.
-fn usage() -> ! {
-    let msg = "\
-Usage: file [options] <file...>
-
-Determine file type by examining contents.
-
-Options:
-  -b, --brief           Do not prepend filenames to output
-  -i, --mime            Output MIME type instead of description
-  -k, --keep-going      Show all matching types, not just the first
-  -L, --dereference     Follow symbolic links
-  -z                    Try to look inside compressed files
-  -f <namefile>         Read filenames from the given file
-      --json            Output as JSON
-  -0                    NUL-terminate output lines
-  -h, --help            Show this help
-  --                    End of options";
-    eprintln!("{msg}");
-    process::exit(0);
-}
-
-/// Parse command-line arguments into an `Options` struct.
-fn parse_args() -> Result<Options, String> {
-    let args: Vec<String> = env::args().skip(1).collect();
-    let mut opts = Options::default();
-    let mut i = 0;
-    let mut end_of_opts = false;
-
-    while i < args.len() {
-        let Some(arg) = args.get(i) else {
-            break;
-        };
-
-        if end_of_opts || !arg.starts_with('-') {
-            opts.files.push(arg.clone());
-            i = i.saturating_add(1);
-            continue;
-        }
-
-        if arg == "--" {
-            end_of_opts = true;
-            i = i.saturating_add(1);
-            continue;
-        }
-
-        // Long options.
-        if let Some(rest) = arg.strip_prefix("--") {
-            match rest {
-                "help" => usage(),
-                "brief" => opts.brief = true,
-                "mime" => opts.mode = OutputMode::Mime,
-                "keep-going" => opts.keep_going = true,
-                "dereference" => opts.dereference = true,
-                "json" => opts.mode = OutputMode::Json,
-                _ => return Err(format!("unknown option: --{rest}")),
-            }
-            i = i.saturating_add(1);
-            continue;
-        }
-
-        // Short options (may be grouped, e.g. -bik).
-        let chars: Vec<char> = arg.get(1..).unwrap_or_default().chars().collect();
-        let mut j = 0;
-        while j < chars.len() {
-            let Some(&opt) = chars.get(j) else {
-                break;
-            };
-            match opt {
-                'h' => usage(),
-                'b' => opts.brief = true,
-                'i' => opts.mode = OutputMode::Mime,
-                'k' => opts.keep_going = true,
-                'L' => opts.dereference = true,
-                'z' => opts.try_compressed = true,
-                '0' => opts.nul_terminate = true,
-                'f' => {
-                    // -f requires a value: remainder of this group or next arg.
-                    // `get(..).filter(non-empty)` rather than `j + 1 <
-                    // chars.len()`: the slice from one-past-the-end is `Some`
-                    // and empty, which is not a filename.
-                    let rest_of_group = chars
-                        .get(j.saturating_add(1)..)
-                        .filter(|r| !r.is_empty())
-                        .map(|r| r.iter().collect::<String>());
-                    let namefile = if let Some(rest) = rest_of_group {
-                        rest
-                    } else if let Some(next) = args.get(i.saturating_add(1)) {
-                        i = i.saturating_add(1);
-                        next.clone()
-                    } else {
-                        return Err("option -f requires a filename".into());
-                    };
-                    let names = read_namefile(&namefile)?;
-                    opts.files.extend(names);
-                    // Consumed rest of group or next arg; advance.
-                    j = chars.len();
-                    continue;
-                }
-                c => return Err(format!("unknown option: -{c}")),
-            }
-            j = j.saturating_add(1);
-        }
-        i = i.saturating_add(1);
+    /// Bytes at the alignment of `A`.
+    #[repr(C)]
+    struct AlignedAs<A, B: ?Sized> {
+        _align: [A; 0],
+        bytes: B,
     }
 
-    if opts.files.is_empty() {
-        return Err("no files specified (use -h for help)".into());
-    }
-
-    Ok(opts)
-}
-
-/// Read filenames from a namefile (one filename per line).
-fn read_namefile(path: &str) -> Result<Vec<String>, String> {
-    let file = File::open(path).map_err(|e| format!("{path}: {e}"))?;
-    let reader = BufReader::new(file);
-    let mut names = Vec::new();
-    for line in reader.lines() {
-        let line = line.map_err(|e| format!("{path}: {e}"))?;
-        let trimmed = line.trim();
-        if !trimmed.is_empty() {
-            names.push(trimmed.to_string());
-        }
-    }
-    Ok(names)
-}
-
-// ============================================================================
-// Magic-number identification
-// ============================================================================
-
-/// Read up to `MAGIC_BUF_SIZE` bytes from the beginning of a file.
-fn read_magic_bytes(path: &str) -> io::Result<Vec<u8>> {
-    let mut file = File::open(path)?;
-    let mut buf = vec![0u8; MAGIC_BUF_SIZE];
-    let mut total = 0;
-    loop {
-        if total >= buf.len() {
-            break;
-        }
-        let Some(rest) = buf.get_mut(total..) else {
-            break;
-        };
-        let n = file.read(rest)?;
-        if n == 0 {
-            break;
-        }
-        total = total.saturating_add(n);
-    }
-    buf.truncate(total);
-    Ok(buf)
-}
-
-// ---------------------------------------------------------------------------
-// Bounded reads
-//
-// Each of these used to guard itself with `offset + N`, which is an addition
-// that can overflow, and each now uses `get(offset..)`, which cannot.
-//
-// **This is defence in depth, NOT the repair of a live bug, and the first
-// version of this comment said otherwise.** It claimed the guard "was bypassed
-// on exactly the inputs it existed for". That is false on this target and the
-// reason is worth keeping: every offset `file` passes in comes from a `u32`
-// field widened to `usize` -- `pe_offset` is `read_u32_le(buf, 0x3C) as usize`
-// -- so on x86_64 the operands are bounded by 2^32 and their sum cannot reach
-// `usize::MAX`. The shape is the classic wrappable bounds check; the TYPES
-// make it unreachable here.
-//
-// What is true, and why the rewrite stays:
-//
-//   * the functions are public to the rest of this file and nothing in their
-//     signatures says "offsets must be u32-bounded" -- the next caller to
-//     compute an offset rather than read one restores the hazard silently;
-//   * the same shape IS live on a 32-bit target, where `u32 as usize` spans
-//     the whole range;
-//   * `get(offset..)?.get(..N)?` is shorter than the guard it replaces and has
-//     no arithmetic to audit, so the safe version costs nothing.
-//
-// The test below pins the behaviour at `usize::MAX` directly, which is the
-// honest way to state it: the FUNCTION is now total over its argument domain,
-// whatever its callers happen to pass today.
-//
-// Found while putting this crate under the workspace lint policy, which had
-// never applied to it. `arithmetic_side_effects` flagged the additions; it
-// does not, and cannot, say whether a caller can reach them.
-// ---------------------------------------------------------------------------
-
-/// Check whether the buffer starts with the given byte sequence.
-#[inline]
-fn starts_with(buf: &[u8], magic: &[u8]) -> bool {
-    buf.starts_with(magic)
-}
-
-/// Check whether `needle` appears at `offset` in `buf`.
-#[inline]
-fn has_at(buf: &[u8], offset: usize, needle: &[u8]) -> bool {
-    buf.get(offset..)
-        .is_some_and(|tail| tail.starts_with(needle))
-}
-
-/// The `N` bytes at `offset`, or `None` if they are not all there.
-#[inline]
-fn bytes_at<const N: usize>(buf: &[u8], offset: usize) -> Option<[u8; N]> {
-    buf.get(offset..)?.get(..N)?.try_into().ok()
-}
-
-/// Read a little-endian u16 from a buffer at the given offset.
-fn read_u16_le(buf: &[u8], offset: usize) -> Option<u16> {
-    bytes_at::<2>(buf, offset).map(u16::from_le_bytes)
-}
-
-/// Read a little-endian u32 from a buffer at the given offset.
-fn read_u32_le(buf: &[u8], offset: usize) -> Option<u32> {
-    bytes_at::<4>(buf, offset).map(u32::from_le_bytes)
-}
-
-/// Read a big-endian u32 from a buffer at the given offset.
-fn read_u32_be(buf: &[u8], offset: usize) -> Option<u32> {
-    bytes_at::<4>(buf, offset).map(u32::from_be_bytes)
-}
-
-// ============================================================================
-// Individual format detectors
-// ============================================================================
-
-/// Detect ELF binaries.
-fn detect_elf(buf: &[u8]) -> Option<FileType> {
-    if !starts_with(buf, b"\x7fELF") {
-        return None;
-    }
-    if buf.len() < 18 {
-        return Some(FileType {
-            description: "ELF (too short to parse)".into(),
-            mime: "application/x-elf".into(),
-        });
-    }
-
-    let class = match buf.get(4)? {
-        1 => "32-bit",
-        2 => "64-bit",
-        _ => "unknown-class",
-    };
-    let endian = match buf.get(5)? {
-        1 => "LSB",
-        2 => "MSB",
-        _ => "unknown-endian",
-    };
-    let etype = read_u16_le(buf, 16).unwrap_or(0);
-    let type_str = match etype {
-        0 => "no type",
-        1 => "relocatable",
-        2 => "executable",
-        3 => "shared object",
-        4 => "core file",
-        _ => "unknown type",
-    };
-    let machine = read_u16_le(buf, 18).unwrap_or(0);
-    let machine_str = match machine {
-        0x03 => "Intel 80386",
-        0x3E => "x86-64",
-        0x28 => "ARM",
-        0xB7 => "AArch64",
-        0xF3 => "RISC-V",
-        _ => "unknown arch",
+    static DATABASE: &AlignedAs<u64, [u8]> = &AlignedAs {
+        _align: [],
+        bytes: *include_bytes!(concat!(env!("OUT_DIR"), "/magic.mgc")),
     };
 
-    Some(FileType {
-        description: format!("ELF {class} {endian} {type_str}, {machine_str}"),
-        mime: match etype {
-            2 => "application/x-executable".into(),
-            3 => "application/x-sharedlib".into(),
-            1 => "application/x-object".into(),
-            4 => "application/x-coredump".into(),
-            _ => "application/x-elf".into(),
-        },
-    })
-}
-
-/// Detect PE/COFF (Windows executables).
-fn detect_pe(buf: &[u8]) -> Option<FileType> {
-    if !starts_with(buf, b"MZ") {
-        return None;
-    }
-    // Read e_lfanew at offset 0x3C.
-    let pe_offset = read_u32_le(buf, 0x3C)? as usize;
-    if !has_at(buf, pe_offset, b"PE\0\0") {
-        return Some(FileType {
-            description: "MS-DOS executable".into(),
-            mime: "application/x-dosexec".into(),
-        });
-    }
-
-    // COFF header starts at pe_offset + 4.
-    let coff_base = pe_offset.saturating_add(4);
-    let machine = read_u16_le(buf, coff_base)?;
-    let machine_str = match machine {
-        0x8664 => "x86-64",
-        0x014C => "Intel 80386",
-        0xAA64 => "Aarch64",
-        _ => "unknown arch",
-    };
-
-    // Optional header magic at coff_base + 20.
-    let opt_magic = read_u16_le(buf, coff_base.saturating_add(20)).unwrap_or(0);
-    let pe_type = match opt_magic {
-        0x10B => "PE32",
-        0x20B => "PE32+",
-        _ => "PE",
-    };
-
-    // Check characteristics for DLL.
-    let characteristics = read_u16_le(buf, coff_base.saturating_add(18)).unwrap_or(0);
-    let kind = if characteristics & 0x2000 != 0 {
-        "DLL"
-    } else {
-        "executable"
-    };
-
-    Some(FileType {
-        description: format!("{pe_type} {kind}, {machine_str}"),
-        // PE files (both DLLs and executables) share the same MIME type.
-        mime: "application/x-dosexec".into(),
-    })
-}
-
-/// Detect shell scripts (shebang lines).
-fn detect_shebang(buf: &[u8]) -> Option<FileType> {
-    if !starts_with(buf, b"#!") {
-        return None;
-    }
-    // Extract the first line (up to newline or end of buffer, max 256 bytes).
-    let limit = buf.len().min(256);
-    let first_line_end = buf
-        .get(..limit)
-        .unwrap_or(buf)
-        .iter()
-        .position(|&b| b == b'\n')
-        .unwrap_or(limit);
-    // `starts_with(b"#!")` above guarantees `first_line_end >= 2`, so this
-    // range is always valid; `get` states that rather than relying on it.
-    let line = buf.get(2..first_line_end).unwrap_or_default();
-
-    // Parse interpreter path.
-    let line_str = core::str::from_utf8(line).unwrap_or("").trim();
-    let interp = if let Some(rest) = line_str.strip_prefix("/usr/bin/env ") {
-        rest.split_whitespace().next().unwrap_or("unknown")
-    } else {
-        // Take just the basename of the interpreter path.
-        line_str
-            .split_whitespace()
-            .next()
-            .and_then(|p| p.rsplit('/').next())
-            .unwrap_or("unknown")
-    };
-
-    let mime = match interp {
-        "python" | "python3" | "python2" => "text/x-python",
-        "ruby" => "text/x-ruby",
-        "perl" => "text/x-perl",
-        "node" | "nodejs" => "application/javascript",
-        "bash" | "sh" | "zsh" | "fish" | "dash" | "ksh" | "csh" | "tcsh" => "text/x-shellscript",
-        _ => "text/x-script",
-    };
-
-    Some(FileType {
-        description: format!("{interp} script, ASCII text executable"),
-        mime: mime.into(),
-    })
-}
-
-/// Detect archive and compression formats.
-fn detect_archive(buf: &[u8]) -> Option<FileType> {
-    // tar: "ustar" at offset 257.
-    if has_at(buf, 257, b"ustar") {
-        return Some(FileType {
-            description: "POSIX tar archive".into(),
-            mime: "application/x-tar".into(),
-        });
-    }
-    // zip
-    if starts_with(buf, b"PK\x03\x04") {
-        // Check for specific zip-based formats.
-        if buf.len() >= 30 {
-            let name_len = read_u16_le(buf, 26).unwrap_or(0) as usize;
-            // `get(30..)` then `get(..name_len)`: no addition, so a
-            // `name_len` near the top of its range cannot wrap the check.
-            if let Some(name) = buf.get(30..).and_then(|tail| tail.get(..name_len)) {
-                if name.starts_with(b"META-INF/") {
-                    return Some(FileType {
-                        description: "Java archive (JAR)".into(),
-                        mime: "application/java-archive".into(),
-                    });
-                }
-                if name == b"[Content_Types].xml" || name.starts_with(b"word/") {
-                    return Some(FileType {
-                        description: "Microsoft Office Open XML document".into(),
-                        mime: "application/vnd.openxmlformats-officedocument\
-                            .wordprocessingml.document"
-                            .into(),
-                    });
-                }
-            }
-        }
-        return Some(FileType {
-            description: "Zip archive data".into(),
-            mime: "application/zip".into(),
-        });
-    }
-    // gzip
-    if starts_with(buf, b"\x1f\x8b") {
-        return Some(FileType {
-            description: "gzip compressed data".into(),
-            mime: "application/gzip".into(),
-        });
-    }
-    // bzip2
-    if starts_with(buf, b"BZ") && buf.get(2) == Some(&b'h') {
-        return Some(FileType {
-            description: "bzip2 compressed data".into(),
-            mime: "application/x-bzip2".into(),
-        });
-    }
-    // xz
-    if starts_with(buf, b"\xfd7zXZ\x00") {
-        return Some(FileType {
-            description: "XZ compressed data".into(),
-            mime: "application/x-xz".into(),
-        });
-    }
-    // zstd
-    if starts_with(buf, b"\x28\xb5\x2f\xfd") {
-        return Some(FileType {
-            description: "Zstandard compressed data".into(),
-            mime: "application/zstd".into(),
-        });
-    }
-    // 7z
-    if starts_with(buf, b"7z\xbc\xaf\x27\x1c") {
-        return Some(FileType {
-            description: "7-zip archive data".into(),
-            mime: "application/x-7z-compressed".into(),
-        });
-    }
-    // rar
-    if starts_with(buf, b"Rar!") {
-        return Some(FileType {
-            description: "RAR archive data".into(),
-            mime: "application/vnd.rar".into(),
-        });
-    }
-
-    None
-}
-
-/// Detect image formats.
-fn detect_image(buf: &[u8]) -> Option<FileType> {
-    // PNG
-    if starts_with(buf, b"\x89PNG\r\n\x1a\n") {
-        let mut desc = String::from("PNG image data");
-        // IHDR chunk starts at offset 8 (4-byte length + 4-byte type), data
-        // at offset 16: width(4) + height(4).
-        if buf.len() >= 24
-            && has_at(buf, 12, b"IHDR")
-            && let (Some(w), Some(h)) = (read_u32_be(buf, 16), read_u32_be(buf, 20))
-        {
-            desc = format!("PNG image data, {w} x {h}");
-        }
-        return Some(FileType {
-            description: desc,
-            mime: "image/png".into(),
-        });
-    }
-    // JPEG
-    if starts_with(buf, b"\xff\xd8\xff") {
-        return Some(FileType {
-            description: "JPEG image data".into(),
-            mime: "image/jpeg".into(),
-        });
-    }
-    // GIF
-    if starts_with(buf, b"GIF87a") || starts_with(buf, b"GIF89a") {
-        let mut desc = String::from("GIF image data");
-        if buf.len() >= 10
-            && let (Some(w), Some(h)) = (read_u16_le(buf, 6), read_u16_le(buf, 8))
-        {
-            desc = format!("GIF image data, {w} x {h}");
-        }
-        return Some(FileType {
-            description: desc,
-            mime: "image/gif".into(),
-        });
-    }
-    // BMP
-    if starts_with(buf, b"BM") && buf.len() >= 6 {
-        return Some(FileType {
-            description: "BMP image data".into(),
-            mime: "image/bmp".into(),
-        });
-    }
-    // WebP: RIFF....WEBP
-    if starts_with(buf, b"RIFF") && has_at(buf, 8, b"WEBP") {
-        return Some(FileType {
-            description: "WebP image data".into(),
-            mime: "image/webp".into(),
-        });
-    }
-    // TIFF (little-endian or big-endian)
-    if starts_with(buf, b"II\x2a\x00") {
-        return Some(FileType {
-            description: "TIFF image data, little-endian".into(),
-            mime: "image/tiff".into(),
-        });
-    }
-    if starts_with(buf, b"MM\x00\x2a") {
-        return Some(FileType {
-            description: "TIFF image data, big-endian".into(),
-            mime: "image/tiff".into(),
-        });
-    }
-    // ICO
-    if starts_with(buf, b"\x00\x00\x01\x00") && buf.len() >= 6 {
-        return Some(FileType {
-            description: "MS Windows icon resource".into(),
-            mime: "image/vnd.microsoft.icon".into(),
-        });
-    }
-
-    None
-}
-
-/// Detect SVG (may start with `<svg` or `<?xml` containing `<svg`).
-///
-/// This is checked separately from other images because it requires text
-/// scanning and could false-positive if checked too early.
-fn detect_svg(buf: &[u8]) -> Option<FileType> {
-    // Only examine text-like content (first few KB).
-    let limit = buf.len().min(4096);
-    let text = core::str::from_utf8(buf.get(..limit).unwrap_or(buf)).ok()?;
-    let lower = text.to_ascii_lowercase();
-    if lower.contains("<svg") {
-        return Some(FileType {
-            description: "SVG Scalable Vector Graphics image".into(),
-            mime: "image/svg+xml".into(),
-        });
-    }
-    None
-}
-
-/// Detect document formats (PDF, HTML, XML).
-fn detect_document(buf: &[u8]) -> Option<FileType> {
-    // PDF
-    if starts_with(buf, b"%PDF") {
-        let mut desc = String::from("PDF document");
-        // Try to extract version from "%PDF-X.Y".
-        if buf.len() >= 8
-            && let Ok(header) = core::str::from_utf8(buf.get(..buf.len().min(16)).unwrap_or(buf))
-            && let Some(ver) = header.strip_prefix("%PDF-")
-        {
-            let ver_end = ver
-                .find(|c: char| !c.is_ascii_digit() && c != '.')
-                .unwrap_or(ver.len());
-            if ver_end > 0 {
-                desc = format!("PDF document, version {}", &ver[..ver_end]);
-            }
-        }
-        return Some(FileType {
-            description: desc,
-            mime: "application/pdf".into(),
-        });
-    }
-
-    // HTML detection (case-insensitive).
-    let limit = buf.len().min(1024);
-    if let Ok(text) = core::str::from_utf8(buf.get(..limit).unwrap_or(buf)) {
-        let lower = text.trim_start().to_ascii_lowercase();
-        if lower.starts_with("<!doctype html") || lower.starts_with("<html") {
-            return Some(FileType {
-                description: "HTML document, ASCII text".into(),
-                mime: "text/html; charset=us-ascii".into(),
-            });
-        }
-    }
-
-    // XML (but not SVG or HTML -- SVG is handled separately).
-    if starts_with(buf, b"<?xml") {
-        return Some(FileType {
-            description: "XML document text".into(),
-            mime: "application/xml".into(),
-        });
-    }
-
-    None
-}
-
-/// Detect media/audio formats.
-fn detect_media(buf: &[u8]) -> Option<FileType> {
-    // FLAC
-    if starts_with(buf, b"fLaC") {
-        return Some(FileType {
-            description: "FLAC audio bitstream data".into(),
-            mime: "audio/flac".into(),
-        });
-    }
-    // OGG
-    if starts_with(buf, b"OggS") {
-        return Some(FileType {
-            description: "Ogg data".into(),
-            mime: "audio/ogg".into(),
-        });
-    }
-    // MP3 with ID3 tag
-    if starts_with(buf, b"ID3") {
-        return Some(FileType {
-            description: "Audio file with ID3 version 2 tag".into(),
-            mime: "audio/mpeg".into(),
-        });
-    }
-    // MP3 sync word
-    if buf.first() == Some(&0xFF) && buf.get(1).is_some_and(|b| (b & 0xE0) == 0xE0) {
-        return Some(FileType {
-            description: "MPEG ADTS audio data".into(),
-            mime: "audio/mpeg".into(),
-        });
-    }
-    // WAV: RIFF....WAVE
-    if starts_with(buf, b"RIFF") && has_at(buf, 8, b"WAVE") {
-        return Some(FileType {
-            description: "RIFF WAVE audio data".into(),
-            mime: "audio/x-wav".into(),
-        });
-    }
-    // MIDI
-    if starts_with(buf, b"MThd") {
-        return Some(FileType {
-            description: "Standard MIDI data".into(),
-            mime: "audio/midi".into(),
-        });
-    }
-    // ISO base media -- MP4, QuickTime, 3GP, AVIF, HEIF...: "ftyp" at offset
-    // 4, then file 5.45's own rules for the brand after it (`isomedia`).
-    if has_at(buf, 4, b"ftyp") {
-        let (description, mime) = isomedia::identify(buf);
-        return Some(FileType {
-            description,
-            mime: mime.into(),
-        });
-    }
-
-    None
-}
-
-/// Detect structured data formats (JSON, YAML, SQLite, TOML).
-fn detect_data(buf: &[u8]) -> Option<FileType> {
-    // SQLite (binary, check first).
-    if starts_with(buf, b"SQLite format 3") {
-        return Some(FileType {
-            description: "SQLite 3.x database".into(),
-            mime: "application/vnd.sqlite3".into(),
-        });
-    }
-
-    // The remaining data formats are text-based; require valid UTF-8.
-    let text = core::str::from_utf8(buf).ok()?;
-    let trimmed = text.trim_start();
-
-    // JSON: starts with { or [.
-    if trimmed.starts_with('{') || trimmed.starts_with('[') {
-        // Quick plausibility check: look for a quote after the opening brace.
-        if let Some(after_brace) = trimmed.strip_prefix('{') {
-            let rest = after_brace.trim_start();
-            if rest.starts_with('"') || rest.starts_with('}') {
-                return Some(FileType {
-                    description: "JSON text data".into(),
-                    mime: "application/json".into(),
-                });
-            }
-        } else {
-            // Array: check for a value after [.
-            let rest = trimmed[1..].trim_start();
-            if rest.starts_with('"')
-                || rest.starts_with('{')
-                || rest.starts_with('[')
-                || rest.starts_with(']')
-                || rest.starts_with(|c: char| c.is_ascii_digit() || c == '-')
-                || rest.starts_with("true")
-                || rest.starts_with("false")
-                || rest.starts_with("null")
-            {
-                return Some(FileType {
-                    description: "JSON text data".into(),
-                    mime: "application/json".into(),
-                });
-            }
-        }
-    }
-
-    // YAML: starts with "---" or "%YAML".
-    if trimmed.starts_with("---") || trimmed.starts_with("%YAML") {
-        return Some(FileType {
-            description: "YAML document text".into(),
-            mime: "text/yaml".into(),
-        });
-    }
-
-    // TOML: heuristic -- look for [section] headers and key = value patterns.
-    if detect_toml_heuristic(trimmed) {
-        return Some(FileType {
-            description: "TOML configuration text".into(),
-            mime: "application/toml".into(),
-        });
-    }
-
-    None
-}
-
-/// Simple heuristic to detect TOML files.
-///
-/// Looks for lines matching `[section]` and `key = value` patterns.
-fn detect_toml_heuristic(text: &str) -> bool {
-    let mut has_section = false;
-    let mut has_kvpair = false;
-    let mut lines_checked: u32 = 0;
-
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            has_section = true;
-        }
-        if let Some(eq_pos) = trimmed.find('=') {
-            let key = trimmed[..eq_pos].trim();
-            // Keys should be identifier-like.
-            if !key.is_empty()
-                && key
-                    .chars()
-                    .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.')
-            {
-                has_kvpair = true;
-            }
-        }
-        lines_checked = lines_checked.saturating_add(1);
-        if lines_checked > 30 {
-            break;
-        }
-    }
-
-    // Require both a section header and at least one key-value pair.
-    has_section && has_kvpair
-}
-
-/// Detect compiled/binary formats (Java class, Mach-O, WASM).
-fn detect_compiled(buf: &[u8]) -> Option<FileType> {
-    // Java class file.
-    if starts_with(buf, b"\xca\xfe\xba\xbe") {
-        // Disambiguate from Mach-O fat binary: Java class has version in
-        // bytes 4-7 where minor is typically small. A fat binary has a count
-        // of architectures in bytes 4-7 (usually < 20).
-        let major = read_u16_le(buf, 6).unwrap_or(0);
-        // Java class major versions range roughly 45-67+. Fat binary arch
-        // counts are usually 1-5.
-        if major >= 44 {
-            return Some(FileType {
-                description: "compiled Java class data".into(),
-                mime: "application/x-java-applet".into(),
-            });
-        }
-        // Likely a Mach-O fat binary.
-        return Some(FileType {
-            description: "Mach-O universal binary".into(),
-            mime: "application/x-mach-binary".into(),
-        });
-    }
-    // Mach-O 32-bit.
-    if starts_with(buf, b"\xfe\xed\xfa\xce") {
-        return Some(FileType {
-            description: "Mach-O 32-bit executable".into(),
-            mime: "application/x-mach-binary".into(),
-        });
-    }
-    // Mach-O 64-bit.
-    if starts_with(buf, b"\xcf\xfa\xed\xfe") {
-        return Some(FileType {
-            description: "Mach-O 64-bit executable".into(),
-            mime: "application/x-mach-binary".into(),
-        });
-    }
-    // WebAssembly.
-    if starts_with(buf, b"\x00asm") {
-        return Some(FileType {
-            description: "WebAssembly (wasm) binary module".into(),
-            mime: "application/wasm".into(),
-        });
-    }
-
-    None
-}
-
-// ============================================================================
-// Text heuristics
-// ============================================================================
-
-/// Classification of text encoding detected via heuristics.
-enum TextKind {
-    /// Pure 7-bit ASCII text.
-    Ascii,
-    /// Valid UTF-8 text with multi-byte sequences.
-    Utf8,
-    /// Text with bytes > 127 that are not valid UTF-8 (likely ISO-8859).
-    Iso8859,
-    /// Binary data (contains NUL bytes or other non-text indicators).
-    Binary,
-}
-
-/// Classify buffer content by scanning byte patterns.
-fn classify_text(buf: &[u8]) -> TextKind {
-    if buf.is_empty() {
-        return TextKind::Ascii;
-    }
-
-    let mut has_high_bytes = false;
-    let mut i = 0;
-
-    while i < buf.len() {
-        let Some(&b) = buf.get(i) else {
-            break;
-        };
-
-        // NUL byte is a strong binary indicator.
-        if b == 0 {
-            return TextKind::Binary;
-        }
-
-        // Control characters that are not typical in text files.
-        if b < 0x08 || (b > 0x0D && b < 0x1B) || (b > 0x1B && b < 0x20) {
-            // Allow BEL(7), BS(8), HT(9), LF(10), VT(11), FF(12), CR(13),
-            // ESC(27), and printable range. Everything else is suspicious.
-            return TextKind::Binary;
-        }
-
-        if b > 127 {
-            has_high_bytes = true;
-            // Check for valid UTF-8 multi-byte sequences.
-            let seq_len = match b {
-                0xC2..=0xDF => 2,
-                0xE0..=0xEF => 3,
-                0xF0..=0xF4 => 4,
-                _ => return TextKind::Iso8859, // Invalid UTF-8 lead byte.
-            };
-            if i.saturating_add(seq_len) > buf.len() {
-                // Incomplete sequence at buffer end -- tolerate, but note the
-                // high bytes.
-                break;
-            }
-            // Verify continuation bytes.
-            // The bound above guarantees these are present; `get` states
-            // that rather than trusting it, and a missing byte reads as an
-            // invalid continuation, which is the safe direction.
-            let valid = (1..seq_len).all(|j| {
-                buf.get(i.saturating_add(j))
-                    .is_some_and(|c| c & 0xC0 == 0x80)
-            });
-            if !valid {
-                return TextKind::Iso8859;
-            }
-            i = i.saturating_add(seq_len);
-            continue;
-        }
-
-        i = i.saturating_add(1);
-    }
-
-    if has_high_bytes {
-        TextKind::Utf8
-    } else {
-        TextKind::Ascii
+    /// The compiled database.
+    pub fn builtin() -> &'static [u8] {
+        &DATABASE.bytes
     }
 }
 
-/// Produce a `FileType` from text-heuristic classification.
-fn text_type(buf: &[u8]) -> FileType {
-    match classify_text(buf) {
-        TextKind::Ascii => FileType {
-            description: "ASCII text".into(),
-            mime: "text/plain; charset=us-ascii".into(),
-        },
-        TextKind::Utf8 => FileType {
-            description: "UTF-8 Unicode text".into(),
-            mime: "text/plain; charset=utf-8".into(),
-        },
-        TextKind::Iso8859 => FileType {
-            description: "ISO-8859 text".into(),
-            mime: "text/plain; charset=iso-8859-1".into(),
-        },
-        TextKind::Binary => FileType {
-            description: "data".into(),
-            mime: "application/octet-stream".into(),
-        },
-    }
-}
+use std::ffi::OsString;
+use std::io::{BufRead, Write};
 
-// ============================================================================
-// Top-level identification
-// ============================================================================
+use getoptlong::{Opt, Program, Takes};
 
-/// One magic-number detector's signature: takes the file's leading bytes,
-/// returns `Some(FileType)` on match or `None` to skip.
-type Detector = fn(&[u8]) -> Option<FileType>;
+use libmagic::apprentice::{self, Action, os_bytes};
+use libmagic::funcs::{self, Ms, decode_utf8, iswprint};
+use libmagic::magic::{self, *};
+use libmagic::magicapi::{self, Param};
+use libmagic::{cstd, out};
 
-/// Ordered list of magic-number detectors. Checked in priority order; the
-/// first match wins (unless `--keep-going` is set).
-const DETECTORS: &[Detector] = &[
-    detect_elf,
-    detect_pe,
-    detect_shebang,
-    detect_archive,
-    detect_image,
-    detect_document,
-    detect_svg,
-    detect_media,
-    detect_data,
-    detect_compiled,
+/// The option string: upstream's `OPTSTRING`.
+const OPTSTRING: &str = "bcCde:Ef:F:hiklLm:nNpP:rsSvzZ0";
+
+/// `file_opts.h`'s long options, in its order -- which is part of the
+/// interface: an abbreviation is resolved against it.
+const LONG_OPTIONS: &[(&str, Takes)] = &[
+    ("help", Takes::Nothing),
+    ("version", Takes::Nothing),
+    ("magic-file", Takes::Required),
+    ("uncompress", Takes::Nothing),
+    ("uncompress-noreport", Takes::Nothing),
+    ("brief", Takes::Nothing),
+    ("checking-printout", Takes::Nothing),
+    ("exclude", Takes::Required),
+    ("exclude-quiet", Takes::Required),
+    ("files-from", Takes::Required),
+    ("separator", Takes::Required),
+    ("mime", Takes::Nothing),
+    ("apple", Takes::Nothing),
+    ("extension", Takes::Nothing),
+    ("mime-type", Takes::Nothing),
+    ("mime-encoding", Takes::Nothing),
+    ("keep-going", Takes::Nothing),
+    ("list", Takes::Nothing),
+    ("dereference", Takes::Nothing),
+    ("no-dereference", Takes::Nothing),
+    ("no-buffer", Takes::Nothing),
+    ("no-pad", Takes::Nothing),
+    ("print0", Takes::Nothing),
+    ("preserve-date", Takes::Nothing),
+    ("parameter", Takes::Required),
+    ("raw", Takes::Nothing),
+    ("special-files", Takes::Nothing),
+    ("no-sandbox", Takes::Nothing),
+    ("compile", Takes::Nothing),
+    ("debug", Takes::Nothing),
 ];
 
-/// Identify the type of a file given its leading bytes.
-///
-/// Returns one or more `FileType` results. With `keep_going`, all matching
-/// detectors contribute; otherwise only the first match is returned.
-fn identify(buf: &[u8], keep_going: bool) -> Vec<FileType> {
-    if buf.is_empty() {
-        return vec![FileType {
-            description: "empty".into(),
-            mime: "application/x-empty".into(),
-        }];
-    }
-
-    let mut results = Vec::new();
-
-    for detector in DETECTORS {
-        if let Some(ft) = detector(buf) {
-            results.push(ft);
-            if !keep_going {
-                return results;
-            }
-        }
-    }
-
-    // Fall back to text heuristics if no magic matched (or in keep-going
-    // mode, append text classification).
-    if results.is_empty() {
-        results.push(text_type(buf));
-    }
-
-    results
+/// The short option a long one is (`long_options[].val`), or the long-only
+/// ones by name.
+fn long_to_short(name: &str) -> Option<u8> {
+    Some(match name {
+        "version" => b'v',
+        "magic-file" => b'm',
+        "uncompress" => b'z',
+        "uncompress-noreport" => b'Z',
+        "brief" => b'b',
+        "checking-printout" => b'c',
+        "exclude" => b'e',
+        "files-from" => b'f',
+        "separator" => b'F',
+        "mime" => b'i',
+        "keep-going" => b'k',
+        "list" => b'l',
+        "dereference" => b'L',
+        "no-dereference" => b'h',
+        "no-buffer" => b'n',
+        "no-pad" => b'N',
+        "print0" => b'0',
+        "preserve-date" => b'p',
+        "parameter" => b'P',
+        "raw" => b'r',
+        "special-files" => b's',
+        "no-sandbox" => b'S',
+        "compile" => b'C',
+        "debug" => b'd',
+        _ => return None,
+    })
 }
 
-/// Identify a special file (directory, symlink, device, etc.) by its metadata.
-fn identify_special(path: &str, dereference: bool) -> Option<FileType> {
-    let meta = if dereference {
-        fs::metadata(path).ok()?
-    } else {
-        fs::symlink_metadata(path).ok()?
+/// `nv`: the tests `-e` can exclude.
+const NV: &[(&str, u32)] = &[
+    ("apptype", MAGIC_NO_CHECK_APPTYPE),
+    ("ascii", MAGIC_NO_CHECK_ASCII),
+    ("cdf", MAGIC_NO_CHECK_CDF),
+    ("compress", MAGIC_NO_CHECK_COMPRESS),
+    ("csv", MAGIC_NO_CHECK_CSV),
+    ("elf", MAGIC_NO_CHECK_ELF),
+    ("encoding", MAGIC_NO_CHECK_ENCODING),
+    ("soft", MAGIC_NO_CHECK_SOFT),
+    ("tar", MAGIC_NO_CHECK_TAR),
+    ("json", MAGIC_NO_CHECK_JSON),
+    ("simh", MAGIC_NO_CHECK_SIMH),
+    // A synonym for `ascii`.
+    ("text", MAGIC_NO_CHECK_TEXT),
+    // Obsolete: accepted and ignored.
+    ("tokens", MAGIC_NO_CHECK_TOKENS),
+];
+
+/// `pm`: the limits `-P` can set.
+struct ParamDef {
+    name: &'static str,
+    def: usize,
+    desc: &'static str,
+    tag: Param,
+}
+
+const PM: &[ParamDef] = &[
+    ParamDef { name: "bytes", def: funcs::FILE_BYTES_MAX, desc: "max bytes to look inside file", tag: Param::Bytes },
+    ParamDef { name: "elf_notes", def: funcs::FILE_ELF_NOTES_MAX as usize, desc: "max ELF notes processed", tag: Param::ElfNotes },
+    ParamDef { name: "elf_phnum", def: funcs::FILE_ELF_PHNUM_MAX as usize, desc: "max ELF prog sections processed", tag: Param::ElfPhnum },
+    ParamDef { name: "elf_shnum", def: funcs::FILE_ELF_SHNUM_MAX as usize, desc: "max ELF sections processed", tag: Param::ElfShnum },
+    ParamDef { name: "elf_shsize", def: funcs::FILE_ELF_SHSIZE_MAX, desc: "max ELF section size", tag: Param::ElfShsize },
+    ParamDef { name: "encoding", def: funcs::FILE_ENCODING_MAX, desc: "max bytes to scan for encoding", tag: Param::Encoding },
+    ParamDef { name: "indir", def: funcs::FILE_INDIR_MAX as usize, desc: "recursion limit for indirection", tag: Param::Indir },
+    ParamDef { name: "name", def: funcs::FILE_NAME_MAX as usize, desc: "use limit for name/use magic", tag: Param::Name },
+    ParamDef { name: "regex", def: magic::FILE_REGEX_MAX, desc: "length limit for REGEX searches", tag: Param::Regex },
+];
+
+/// The command line's state: upstream's file-scope globals.
+struct Cli {
+    progname: Vec<u8>,
+    bflag: u32,
+    nopad: bool,
+    nobuffer: bool,
+    nulsep: u32,
+    separator: Vec<u8>,
+    posixly: bool,
+    /// `pm[].value` and `pm[].set`.
+    params: Vec<Option<usize>>,
+}
+
+/// The `Usage:` text, with the program name thrice.
+fn usage(cli: &Cli) -> ! {
+    out::flush();
+    let pn = &cli.progname;
+    let mut w = b"Usage: ".to_vec();
+    w.extend_from_slice(pn);
+    w.extend_from_slice(b" [-bcCdEhikLlNnprsSvzZ0] [--apple] [--extension] [--mime-encoding]\n");
+    w.extend_from_slice(b"            [--mime-type] [-e <testname>] [-F <separator>]  [-f <namefile>]\n");
+    w.extend_from_slice(b"            [-m <magicfiles>] [-P <parameter=value>] [--exclude-quiet]\n");
+    w.extend_from_slice(b"            <file> ...\n       ");
+    w.extend_from_slice(pn);
+    w.extend_from_slice(b" -C [-m <magicfiles>]\n       ");
+    w.extend_from_slice(pn);
+    w.extend_from_slice(b" [--help]\n");
+    let _written = std::io::stderr().write_all(&w);
+    std::process::exit(1);
+}
+
+/// `defprint`: ` (default)` after the option that is the default, and the
+/// line's end.
+fn defprint(cli: &Cli, def: u32, w: &mut Vec<u8>) {
+    if def == 0 {
+        return;
+    }
+    if (def & 1 != 0 && cli.posixly) || (def & 2 != 0 && !cli.posixly) {
+        w.extend_from_slice(b" (default)");
+    }
+    w.push(b'\n');
+}
+
+/// `docprint`: an option's documentation, with `%e` and `%P` expanded.
+fn docprint(cli: &Cli, opts: &str, def: u32, w: &mut Vec<u8>) {
+    let ob = opts.as_bytes();
+    let Some(p) = ob.iter().position(|&c| c == b'%') else {
+        w.extend_from_slice(ob);
+        defprint(cli, def, w);
+        return;
     };
-
-    let ft = meta.file_type();
-
-    if !dereference && ft.is_symlink() {
-        // Read the link target for display.
-        let target = fs::read_link(path)
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| "unknown".into());
-        return Some(FileType {
-            description: format!("symbolic link to {target}"),
-            mime: "inode/symlink".into(),
-        });
+    let mut sp = p.saturating_sub(1);
+    while sp > 0 && ob[sp] == b' ' {
+        sp -= 1;
     }
-    if ft.is_dir() {
-        return Some(FileType {
-            description: "directory".into(),
-            mime: "inode/directory".into(),
-        });
-    }
-
-    // On Unix-like systems, check for special file types via the mode bits.
-    // For portability, we use cfg attributes.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::FileTypeExt;
-        if ft.is_block_device() {
-            return Some(FileType {
-                description: "block special device".into(),
-                mime: "inode/blockdevice".into(),
-            });
-        }
-        if ft.is_char_device() {
-            return Some(FileType {
-                description: "character special device".into(),
-                mime: "inode/chardevice".into(),
-            });
-        }
-        if ft.is_fifo() {
-            return Some(FileType {
-                description: "fifo (named pipe)".into(),
-                mime: "inode/fifo".into(),
-            });
-        }
-        if ft.is_socket() {
-            return Some(FileType {
-                description: "socket".into(),
-                mime: "inode/socket".into(),
-            });
-        }
-    }
-
-    None
-}
-
-// ============================================================================
-// Output formatting
-// ============================================================================
-
-/// Write a JSON-escaped string to the output (no surrounding quotes).
-fn write_json_escaped(out: &mut impl Write, s: &str) -> io::Result<()> {
-    for ch in s.chars() {
-        match ch {
-            '"' => write!(out, "\\\"")?,
-            '\\' => write!(out, "\\\\")?,
-            '\n' => write!(out, "\\n")?,
-            '\r' => write!(out, "\\r")?,
-            '\t' => write!(out, "\\t")?,
-            c if (c as u32) < 0x20 => write!(out, "\\u{:04x}", c as u32)?,
-            c => write!(out, "{c}")?,
-        }
-    }
-    Ok(())
-}
-
-/// Emit one file's result.
-fn emit_result(
-    out: &mut impl Write,
-    opts: &Options,
-    path: &str,
-    types: &[FileType],
-) -> io::Result<()> {
-    let terminator = if opts.nul_terminate { '\0' } else { '\n' };
-
-    match opts.mode {
-        OutputMode::Json => {
-            write!(out, "{{\"filename\":\"")?;
-            write_json_escaped(out, path)?;
-            write!(out, "\",")?;
-            if let [only] = types {
-                write!(out, "\"type\":\"")?;
-                write_json_escaped(out, &only.description)?;
-                write!(out, "\",\"mime\":\"")?;
-                write_json_escaped(out, &only.mime)?;
-                write!(out, "\"")?;
-            } else {
-                write!(out, "\"types\":[")?;
-                for (idx, ft) in types.iter().enumerate() {
-                    if idx > 0 {
-                        write!(out, ",")?;
-                    }
-                    write!(out, "{{\"type\":\"")?;
-                    write_json_escaped(out, &ft.description)?;
-                    write!(out, "\",\"mime\":\"")?;
-                    write_json_escaped(out, &ft.mime)?;
-                    write!(out, "\"}}")?;
+    w.extend_from_slice(&ob[..p]);
+    let pad = p - sp - 1;
+    match ob.get(p + 1) {
+        Some(b'e') => {
+            let mut comma = false;
+            for (i, (name, _)) in NV.iter().enumerate() {
+                if comma {
+                    w.extend_from_slice(b", ");
                 }
-                write!(out, "]")?;
-            }
-            write!(out, "}}{terminator}")?;
-        }
-        OutputMode::Mime => {
-            let mime_str: String = types
-                .iter()
-                .map(|ft| ft.mime.as_str())
-                .collect::<Vec<_>>()
-                .join("; ");
-            if opts.brief {
-                write!(out, "{mime_str}{terminator}")?;
-            } else {
-                write!(out, "{path}: {mime_str}{terminator}")?;
+                comma = true;
+                w.extend_from_slice(name.as_bytes());
+                if i != 0 && i % 5 == 0 && i != NV.len() - 1 {
+                    w.extend_from_slice(b",\n");
+                    w.extend(std::iter::repeat_n(b' ', pad));
+                    comma = false;
+                }
             }
         }
-        OutputMode::Description => {
-            let desc_str: String = types
-                .iter()
-                .map(|ft| ft.description.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            if opts.brief {
-                write!(out, "{desc_str}{terminator}")?;
-            } else {
-                write!(out, "{path}: {desc_str}{terminator}")?;
+        Some(b'P') => {
+            for (i, p) in PM.iter().enumerate() {
+                w.extend_from_slice(format!("{:>9} {:>7} {}", p.name, p.def, p.desc).as_bytes());
+                if i != PM.len() - 1 {
+                    w.push(b'\n');
+                    w.extend(std::iter::repeat_n(b' ', pad));
+                }
             }
         }
+        _ => {}
     }
-    Ok(())
+    w.extend_from_slice(ob.get(p + 2..).unwrap_or_default());
 }
 
-// ============================================================================
-// Entry point
-// ============================================================================
-
-/// Process a single file path and emit its type.
-fn process_file(out: &mut impl Write, opts: &Options, path: &str) -> io::Result<()> {
-    // Check for special files first (directory, symlink, device, etc.).
-    if let Some(ft) = identify_special(path, opts.dereference) {
-        emit_result(out, opts, path, &[ft])?;
-        return Ok(());
-    }
-
-    // Read magic bytes.
-    match read_magic_bytes(path) {
-        Ok(buf) => {
-            let types = identify(&buf, opts.keep_going);
-            emit_result(out, opts, path, &types)?;
+/// `help`: `--help`, from `file_opts.h`.
+fn help(cli: &Cli) -> ! {
+    // (short, long, def, doc); a short of 0 is a long-only option.
+    let opts: &[(u8, &str, u32, &str)] = &[
+        (0, "help", 0, "                 display this help and exit\n"),
+        (b'v', "version", 0, "              output version information and exit\n"),
+        (b'm', "magic-file", 0, " LIST      use LIST as a colon-separated list of magic\n                               number files\n"),
+        (b'z', "uncompress", 0, "           try to look inside compressed files\n"),
+        (b'Z', "uncompress-noreport", 0, "  only print the contents of compressed files\n"),
+        (b'b', "brief", 0, "                do not prepend filenames to output lines\n"),
+        (b'c', "checking-printout", 0, "    print the parsed form of the magic file, use in\n                               conjunction with -m to debug a new magic file\n                               before installing it\n"),
+        (b'e', "exclude", 0, " TEST         exclude TEST from the list of test to be\n                               performed for file. Valid tests are:\n                               %e\n"),
+        (0, "exclude-quiet", 0, " TEST   like exclude, but ignore unknown tests\n"),
+        (b'f', "files-from", 0, " FILE      read the filenames to be examined from FILE\n"),
+        (b'F', "separator", 0, " STRING     use string as separator instead of `:'\n"),
+        (b'i', "mime", 0, "                 output MIME type strings (--mime-type and\n                               --mime-encoding)\n"),
+        (0, "apple", 0, "                output the Apple CREATOR/TYPE\n"),
+        (0, "extension", 0, "            output a slash-separated list of extensions\n"),
+        (0, "mime-type", 0, "            output the MIME type\n"),
+        (0, "mime-encoding", 0, "        output the MIME encoding\n"),
+        (b'k', "keep-going", 0, "           don't stop at the first match\n"),
+        (b'l', "list", 0, "                 list magic strength\n"),
+        (b'L', "dereference", 1, "          follow symlinks (default if POSIXLY_CORRECT is set)"),
+        (b'h', "no-dereference", 2, "       don't follow symlinks (default if POSIXLY_CORRECT is not set)"),
+        (b'n', "no-buffer", 0, "            do not buffer output\n"),
+        (b'N', "no-pad", 0, "               do not pad output\n"),
+        (b'0', "print0", 0, "               terminate filenames with ASCII NUL\n"),
+        (b'p', "preserve-date", 0, "        preserve access times on files\n"),
+        (b'P', "parameter", 0, "            set file engine parameter limits\n                               %P\n"),
+        (b'r', "raw", 0, "                  don't translate unprintable chars to \\ooo\n"),
+        (b's', "special-files", 0, "        treat special (block/char devices) files as\n                             ordinary ones\n"),
+        (b'S', "no-sandbox", 0, "           disable system call sandboxing\n"),
+        (b'C', "compile", 0, "              compile file specified by -m\n"),
+        (b'd', "debug", 0, "                print debugging messages\n"),
+    ];
+    let mut w = b"Usage: file [OPTION...] [FILE...]\nDetermine type of FILEs.\n\n".to_vec();
+    for &(short, long, def, doc) in opts {
+        if short == 0 {
+            w.extend_from_slice(format!("      --{long}").as_bytes());
+        } else {
+            w.extend_from_slice(format!("  -{}, --{long}", char::from(short)).as_bytes());
         }
-        Err(e) => {
-            // Report the error inline, same as real `file` does.
-            let terminator = if opts.nul_terminate { '\0' } else { '\n' };
-            if opts.brief {
-                write!(out, "cannot open: {e}{terminator}")?;
-            } else {
-                write!(out, "{path}: cannot open: {e}{terminator}")?;
+        docprint(cli, doc, def, &mut w);
+    }
+    w.extend_from_slice(b"\nReport bugs to https://bugs.astron.com/\n");
+    out::write(&w);
+    out::flush();
+    std::process::exit(0);
+}
+
+/// `file_warn`: `file: message`, and the error `errno` would hold.
+fn file_warn(cli: &Cli, msg: &[u8], errno: Option<funcs::Errno>) {
+    let mut w = cli.progname.clone();
+    w.extend_from_slice(b": ");
+    w.extend_from_slice(msg);
+    if let Some(k) = errno {
+        let e = k.to_error();
+        w.extend_from_slice(format!(" ({})", errmsg::strerror(&e)).as_bytes());
+    }
+    w.push(b'\n');
+    let _written = std::io::stderr().write_all(&w);
+}
+
+/// `file_errx`: `file: message`, and exit 1.
+fn file_errx(cli: &Cli, msg: &[u8]) -> ! {
+    out::flush();
+    let mut w = cli.progname.clone();
+    w.extend_from_slice(b": ");
+    w.extend_from_slice(msg);
+    w.push(b'\n');
+    let _written = std::io::stderr().write_all(&w);
+    std::process::exit(1);
+}
+
+/// C's `atoi`: white space, a sign, digits, as an `int`.
+fn atoi(s: &[u8]) -> i32 {
+    let mut i = 0usize;
+    while s.get(i).copied().is_some_and(cstd::isspace) {
+        i += 1;
+    }
+    let neg = s.get(i) == Some(&b'-');
+    if matches!(s.get(i), Some(b'+' | b'-')) {
+        i += 1;
+    }
+    let mut v: i32 = 0;
+    while let Some(&d) = s.get(i).filter(|d| d.is_ascii_digit()) {
+        v = v.wrapping_mul(10).wrapping_add(i32::from(d - b'0'));
+        i += 1;
+    }
+    if neg { v.wrapping_neg() } else { v }
+}
+
+/// `setparam`: `-P name=value`, the name matched as a prefix of a parameter's.
+fn setparam(cli: &mut Cli, p: &[u8]) {
+    if let Some(eq) = p.iter().position(|&c| c == b'=') {
+        let key = &p[..eq];
+        for (i, pm) in PM.iter().enumerate() {
+            // `strncmp(p, pm[i].name, s - p)`: the given name, as a prefix.
+            let name = pm.name.as_bytes();
+            let n = key.len();
+            let a = |j: usize| key.get(j).copied().unwrap_or(0);
+            let b = |j: usize| name.get(j).copied().unwrap_or(0);
+            let mut equal = true;
+            for j in 0..n {
+                if a(j) != b(j) {
+                    equal = false;
+                    break;
+                }
+                if a(j) == 0 {
+                    break;
+                }
+            }
+            if !equal {
+                continue;
+            }
+            #[allow(clippy::cast_sign_loss)]
+            let v = i64::from(atoi(&p[eq + 1..])) as usize;
+            cli.params[i] = Some(v);
+            return;
+        }
+    }
+    let mut msg = b"Unknown param ".to_vec();
+    msg.extend_from_slice(p);
+    file_errx(cli, &msg);
+}
+
+/// `applyparam`.
+fn applyparam(cli: &Cli, ms: &mut Ms) {
+    for (i, pm) in PM.iter().enumerate() {
+        if let Some(v) = cli.params[i] {
+            magicapi::magic_setparam(ms, pm.tag, v);
+        }
+    }
+}
+
+/// `load`: a magic set with its database, or `None` after saying why.
+fn load(cli: &Cli, magicfile: Option<&[u8]>, flags: u32) -> Option<Ms> {
+    let mut ms = magicapi::magic_open(flags);
+    ms.utf8 = codeset_is_utf8();
+    ms.builtin = Some(database::builtin());
+    if magicapi::magic_load(&mut ms, magicfile) == -1 {
+        let e = magicapi::magic_error(&ms).unwrap_or_default();
+        file_warn(cli, &e, ms.errno);
+        return None;
+    }
+    if let Some(e) = magicapi::magic_error(&ms) {
+        file_warn(cli, &e, ms.errno);
+    }
+    Some(ms)
+}
+
+/// Whether `setlocale(LC_CTYPE, "")` leaves a UTF-8 codeset: the first of
+/// `LC_ALL`, `LC_CTYPE` and `LANG` that is set and not empty names the
+/// locale, and its codeset -- after the `.`, before any `@` -- is UTF-8 in any
+/// spelling. (`smartcols::tty::codeset_is_utf8`'s rule.)
+fn codeset_is_utf8() -> bool {
+    let name = ["LC_ALL", "LC_CTYPE", "LANG"]
+        .iter()
+        .filter_map(std::env::var_os)
+        .find(|v| !v.is_empty());
+    let Some(name) = name else {
+        return false;
+    };
+    let name = os_bytes(&name);
+    let Some(dot) = name.iter().position(|&b| b == b'.') else {
+        return false;
+    };
+    let codeset: Vec<u8> = name[dot + 1..]
+        .iter()
+        .take_while(|&&b| b != b'@')
+        .filter(|&&b| b != b'-')
+        .map(u8::to_ascii_lowercase)
+        .collect();
+    codeset == b"utf8"
+}
+
+/// `file_mbswidth`: the columns a name takes as it is printed -- an escaped
+/// byte four.
+fn file_mbswidth(ms: &Ms, s: &[u8]) -> usize {
+    let raw = ms.flags & MAGIC_RAW != 0;
+    let s = cstd::cstr(s);
+    let mut width = 0usize;
+    let mut i = 0usize;
+    while i < s.len() {
+        let rest = &s[i..];
+        let decoded = if ms.utf8 {
+            decode_utf8(rest)
+        } else {
+            rest.first().filter(|c| c.is_ascii()).map(|&c| (char::from(c), 1))
+        };
+        match decoded {
+            None => {
+                width += 4;
+                i += 1;
+            }
+            Some((c, n)) => {
+                let w = charwidth::char_width(c).unwrap_or(0);
+                width += if raw || iswprint(c) { if w > 0 { w } else { 1 } } else { 4 };
+                i += n;
             }
         }
     }
-
-    Ok(())
+    width
 }
 
-fn run() -> Result<(), String> {
-    let opts = parse_args()?;
-    let stdout = io::stdout();
-    let mut out = io::BufWriter::new(stdout.lock());
+/// `file_octal`.
+fn file_octal(w: &mut Vec<u8>, c: u8) {
+    w.push(b'\\');
+    w.push(((c >> 6) & 7) + b'0');
+    w.push(((c >> 3) & 7) + b'0');
+    w.push((c & 7) + b'0');
+}
 
-    for path in &opts.files {
-        process_file(&mut out, &opts, path).map_err(|e| format!("{path}: {e}"))?;
+/// `fname_print`: a name with what the terminal should not be sent as
+/// `\ooo` -- a character that is not printable as its low byte only, as
+/// upstream does.
+fn fname_print(ms: &Ms, name: &[u8], w: &mut Vec<u8>) {
+    let s = cstd::cstr(name);
+    let mut i = 0usize;
+    while i < s.len() {
+        let rest = &s[i..];
+        let decoded = if ms.utf8 {
+            decode_utf8(rest)
+        } else {
+            rest.first().filter(|c| c.is_ascii()).map(|&c| (char::from(c), 1))
+        };
+        match decoded {
+            None => {
+                file_octal(w, s[i]);
+                i += 1;
+            }
+            Some((c, n)) => {
+                if iswprint(c) {
+                    w.extend_from_slice(&rest[..n]);
+                } else {
+                    #[allow(clippy::cast_possible_truncation)]
+                    file_octal(w, u32::from(c) as u8);
+                }
+                i += n;
+            }
+        }
     }
-
-    out.flush().map_err(|e| format!("write error: {e}"))?;
-    Ok(())
 }
 
+/// `process`: one name, and its type. 1 when it failed.
+fn process(cli: &Cli, ms: &mut Ms, inname: &[u8], wid: usize) -> i32 {
+    let c = if cli.nulsep > 1 { 0u8 } else { b'\n' };
+    let std_in = inname == b"-";
+    let mut w = Vec::new();
+    if wid > 0 && cli.bflag == 0 {
+        let pname: &[u8] = if std_in { b"/dev/stdin" } else { inname };
+        if ms.flags & MAGIC_RAW == 0 {
+            fname_print(ms, pname, &mut w);
+        } else {
+            w.extend_from_slice(cstd::cstr(pname));
+        }
+        if cli.nulsep != 0 {
+            w.push(0);
+        }
+        if cli.nulsep < 2 {
+            w.extend_from_slice(&cli.separator);
+            let pad = if cli.nopad { 0 } else { wid.saturating_sub(file_mbswidth(ms, inname)) };
+            w.extend(std::iter::repeat_n(b' ', pad));
+            w.push(b' ');
+        }
+    }
+    out::write(&w);
+    let typ = magicapi::magic_file(ms, if std_in { None } else { Some(inname) });
+    let mut w = Vec::new();
+    let failed = match &typ {
+        None => {
+            w.extend_from_slice(b"ERROR: ");
+            match magicapi::magic_error(ms) {
+                Some(e) => w.extend_from_slice(&e),
+                None => w.extend_from_slice(b"(null)"),
+            }
+            w.push(c);
+            true
+        }
+        Some(t) => {
+            w.extend_from_slice(t);
+            w.push(c);
+            false
+        }
+    };
+    out::write(&w);
+    if cli.nobuffer {
+        out::flush();
+    }
+    i32::from(failed || out::failed())
+}
+
+/// `unwrap`: the names in a file (or standard input for `-`), one a line.
+fn unwrap(cli: &Cli, ms: &mut Ms, fname: &[u8]) -> i32 {
+    let reader: Box<dyn BufRead> = if fname == b"-" {
+        Box::new(std::io::BufReader::new(std::io::stdin()))
+    } else {
+        match std::fs::File::open(apprentice::os_path(fname)) {
+            Ok(f) => Box::new(std::io::BufReader::new(f)),
+            Err(e) => {
+                let mut msg = b"Cannot open `".to_vec();
+                msg.extend_from_slice(fname);
+                msg.push(b'\'');
+                file_warn(cli, &msg, Some(funcs::Errno::of(&e)));
+                return 1;
+            }
+        }
+    };
+    let mut e = 0;
+    let mut wid = 0usize;
+    let mut names: Vec<Vec<u8>> = Vec::new();
+    for line in reader.split(b'\n').map_while(Result::ok) {
+        let mut line = line;
+        // `getline` keeps the newline; upstream strips it, and nothing else.
+        // `split` already took it; a NUL ends the name as C reads it.
+        if let Some(nul) = line.iter().position(|&c| c == 0) {
+            line.truncate(nul);
+        }
+        let cwid = file_mbswidth(ms, &line);
+        if cli.nobuffer {
+            e |= process(cli, ms, &line, cwid);
+            continue;
+        }
+        wid = wid.max(cwid);
+        names.push(line);
+    }
+    if !cli.nobuffer {
+        for n in &names {
+            e |= process(cli, ms, n, wid);
+        }
+    }
+    e
+}
+
+#[allow(clippy::too_many_lines)]
 fn main() {
-    if let Err(msg) = run() {
-        eprintln!("file: {msg}");
-        process::exit(1);
-    }
-}
+    let argv: Vec<OsString> = std::env::args_os().collect();
+    let arg0 = argv.first().map(|a| os_bytes(a)).unwrap_or_default();
+    let progname = match arg0.iter().rposition(|&c| c == b'/') {
+        Some(p) => arg0[p + 1..].to_vec(),
+        None => arg0.clone(),
+    };
+    let mut cli = Cli {
+        progname,
+        bflag: 0,
+        nopad: false,
+        nobuffer: false,
+        nulsep: 0,
+        separator: b":".to_vec(),
+        posixly: std::env::var_os("POSIXLY_CORRECT").is_some(),
+        params: vec![None; PM.len()],
+    };
+    out::init();
+    let mut flags: u32 = if cli.posixly { MAGIC_SYMLINK } else { 0 };
+    let mut action: Option<Action> = None;
+    let mut didsomefiles = 0;
+    let mut errflg = 0;
+    let mut e = 0;
+    let mut magic: Option<Ms> = None;
+    let mut magicfile: Option<Vec<u8>> = None;
+    let mut operands: Vec<Vec<u8>> = Vec::new();
 
-// ============================================================================
-// Tests
-//
-// This crate had none. Almost all of it is pure functions over a byte slice,
-// which is the easiest thing in the tree to test and the most consequential to
-// get wrong: `file` is what a script asks before deciding how to open
-// something.
-//
-// Fixtures are built from numeric bytes rather than escaped string literals,
-// so what the test asserts about is visible as the numbers the format
-// actually specifies.
-// ============================================================================
-
-#[cfg(test)]
-// CLAUDE.md: the five defensive lints are for production code and are allowed
-// in `#[cfg(test)]`, where panicking on bad data is the point of the test.
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects
-)]
-mod tests {
-    use super::*;
-
-    /// A minimal 64-bit little-endian x86-64 ELF executable header.
-    fn elf64_exec() -> Vec<u8> {
-        let mut b = vec![0u8; 20];
-        b[0] = 0x7f;
-        b[1] = b'E';
-        b[2] = b'L';
-        b[3] = b'F';
-        b[4] = 2; // class: 64-bit
-        b[5] = 1; // data: little-endian
-        b[16] = 2; // e_type: executable
-        b[17] = 0;
-        b[18] = 0x3e; // e_machine: x86-64
-        b[19] = 0;
-        b
-    }
-
-    /// The readers are TOTAL over their argument domain: any offset, including
-    /// `usize::MAX`, gets `None` rather than a panic.
-    ///
-    /// Against the old code every assertion here panics rather than failing,
-    /// because `offset + N` overflows. **That does not mean a caller could
-    /// reach it** -- every offset this file passes in is a `u32` widened to
-    /// `usize`, so on x86_64 the sum is bounded well below `usize::MAX`. The
-    /// first version of this comment claimed a live bug; it is defence in
-    /// depth, and the distinction is the difference between reading a shape
-    /// and reading the types.
-    #[test]
-    fn a_huge_offset_cannot_wrap_the_bounds_check() {
-        let buf = [0u8; 8];
-
-        assert_eq!(read_u16_le(&buf, usize::MAX), None);
-        assert_eq!(read_u16_le(&buf, usize::MAX - 1), None);
-        assert_eq!(read_u32_le(&buf, usize::MAX - 3), None);
-        assert_eq!(read_u32_be(&buf, usize::MAX - 3), None);
-        assert!(!has_at(&buf, usize::MAX, b"xy"));
-        assert!(!has_at(&buf, usize::MAX - 1, b"xy"));
-
-        // ...and an offset just past the end, which is the ordinary case the
-        // guard was always right about.
-        assert_eq!(read_u16_le(&buf, 7), None);
-        assert_eq!(read_u16_le(&buf, 6), Some(0));
-    }
-
-    /// The readers still read. A wrong answer here would be a worse outcome
-    /// than the panic they replace.
-    #[test]
-    fn the_bounded_readers_still_read_the_right_bytes() {
-        let buf = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06];
-        assert_eq!(read_u16_le(&buf, 0), Some(0x0201));
-        assert_eq!(read_u16_le(&buf, 1), Some(0x0302));
-        assert_eq!(read_u32_le(&buf, 0), Some(0x0403_0201));
-        assert_eq!(read_u32_be(&buf, 0), Some(0x0102_0304));
-        assert_eq!(read_u32_le(&buf, 2), Some(0x0605_0403));
-        assert!(has_at(&buf, 2, &[0x03, 0x04]));
-        assert!(!has_at(&buf, 2, &[0x03, 0x05]));
-        assert!(starts_with(&buf, &[0x01, 0x02]));
-        assert!(!starts_with(&buf, &[0x02]));
-    }
-    #[test]
-    fn an_elf_executable_is_described_and_typed() {
-        let t = detect_elf(&elf64_exec()).expect("an ELF header must be recognised");
-        assert_eq!(t.description, "ELF 64-bit LSB executable, x86-64");
-        assert_eq!(t.mime, "application/x-executable");
-    }
-
-    #[test]
-    fn a_shared_object_gets_the_shared_library_mime() {
-        // The distinction a caller acts on: a .so must not be reported as
-        // something to execute.
-        let mut b = elf64_exec();
-        b[16] = 3; // e_type: shared object
-        let t = detect_elf(&b).expect("recognised");
-        assert!(t.description.contains("shared object"), "{}", t.description);
-        assert_eq!(t.mime, "application/x-sharedlib");
-    }
-
-    #[test]
-    fn a_truncated_elf_says_so_rather_than_guessing() {
-        // Four magic bytes and nothing else. The alternative -- reading past
-        // the end and reporting whatever fell out -- is the failure this
-        // branch exists to avoid.
-        let t = detect_elf(&[0x7f, b'E', b'L', b'F']).expect("magic is still ELF");
-        assert_eq!(t.description, "ELF (too short to parse)");
-        assert_eq!(t.mime, "application/x-elf");
-    }
-
-    #[test]
-    fn something_that_is_not_an_elf_is_not_claimed_as_one() {
-        assert!(detect_elf(b"MZ some windows thing").is_none());
-        assert!(detect_elf(b"").is_none());
-        // One byte short of the magic: the classic off-by-one in a prefix test.
-        assert!(detect_elf(&[0x7f, b'E', b'L']).is_none());
-    }
-
-    /// A PNG header carrying an IHDR chunk of `w` x `h`.
-    fn png(w: u32, h: u32) -> Vec<u8> {
-        let mut b = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
-        b.extend_from_slice(&[0, 0, 0, 13]); // IHDR length
-        b.extend_from_slice(b"IHDR");
-        b.extend_from_slice(&w.to_be_bytes());
-        b.extend_from_slice(&h.to_be_bytes());
-        b
-    }
-
-    #[test]
-    fn a_png_reports_its_dimensions_big_endian() {
-        // PNG stores its dimensions big-endian, which is the one thing a
-        // little-endian-by-habit reader gets wrong. 800 x 600 read as
-        // little-endian would be 537,919,488 x 671,088,640.
-        let t = detect_image(&png(800, 600)).expect("recognised");
-        assert_eq!(t.description, "PNG image data, 800 x 600");
-        assert_eq!(t.mime, "image/png");
-    }
-
-    #[test]
-    fn a_png_without_a_complete_ihdr_omits_the_dimensions_rather_than_inventing_them() {
-        let mut b = png(800, 600);
-        b.truncate(20); // header + IHDR tag + width, but no height
-        let t = detect_image(&b).expect("the magic is still a PNG");
-        assert_eq!(t.description, "PNG image data");
-        assert_eq!(t.mime, "image/png");
+    let prog = Program::new("file", 1);
+    let args = argv.get(1..).unwrap_or_default();
+    for item in prog.parse(args, OPTSTRING, LONG_OPTIONS).keep_going(true) {
+        let (c, optarg): (u8, Option<Vec<u8>>) = match item {
+            Err(err) => {
+                // glibc's getopt prints its complaint as it goes, named by
+                // `argv[0]` as given -- not the basename `file` names itself
+                // by -- and `file` counts it and shows the usage at the end.
+                out::flush();
+                let mut w = arg0.clone();
+                w.extend_from_slice(b": ");
+                w.extend_from_slice(err.sentence.as_bytes());
+                w.push(b'\n');
+                let _written = std::io::stderr().write_all(&w);
+                errflg += 1;
+                continue;
+            }
+            Ok(Opt::Operand(o)) => {
+                operands.push(os_bytes(o));
+                continue;
+            }
+            Ok(Opt::Short(c, v)) => (c, v.map(|v| os_bytes(&v))),
+            Ok(Opt::Long(name, v)) => {
+                let v = v.map(|v| os_bytes(&v));
+                match name {
+                    "help" => help(&cli),
+                    "apple" => {
+                        flags |= MAGIC_APPLE;
+                        continue;
+                    }
+                    "extension" => {
+                        flags |= MAGIC_EXTENSION;
+                        continue;
+                    }
+                    "mime-type" => {
+                        flags |= MAGIC_MIME_TYPE;
+                        continue;
+                    }
+                    "mime-encoding" => {
+                        flags |= MAGIC_MIME_ENCODING;
+                        continue;
+                    }
+                    "exclude-quiet" => {
+                        let arg = v.unwrap_or_default();
+                        if let Some((_, bit)) = NV.iter().find(|(n, _)| n.as_bytes() == arg.as_slice()) {
+                            flags |= bit;
+                        }
+                        continue;
+                    }
+                    other => match long_to_short(other) {
+                        Some(c) => (c, v),
+                        None => continue,
+                    },
+                }
+            }
+        };
+        let arg = optarg.unwrap_or_default();
+        match c {
+            b'0' => cli.nulsep += 1,
+            b'b' => cli.bflag += 1,
+            b'c' => action = Some(Action::Check),
+            b'C' => action = Some(Action::Compile),
+            b'd' => flags |= MAGIC_DEBUG | MAGIC_CHECK,
+            b'E' => flags |= MAGIC_ERROR,
+            b'e' => {
+                if let Some((_, bit)) = NV.iter().find(|(n, _)| n.as_bytes() == arg.as_slice()) {
+                    flags |= bit;
+                } else {
+                    errflg += 1;
+                }
+            }
+            b'f' => {
+                if action.is_some() {
+                    usage(&cli);
+                }
+                if magic.is_none() {
+                    match load(&cli, magicfile.as_deref(), flags) {
+                        Some(m) => magic = Some(m),
+                        None => {
+                            out::flush();
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                if let Some(ms) = magic.as_mut() {
+                    applyparam(&cli, ms);
+                    e |= unwrap(&cli, ms, &arg);
+                }
+                didsomefiles += 1;
+            }
+            b'F' => cli.separator = arg,
+            b'i' => flags |= MAGIC_MIME,
+            b'k' => flags |= MAGIC_CONTINUE,
+            b'l' => action = Some(Action::List),
+            b'm' => magicfile = Some(arg),
+            b'n' => cli.nobuffer = true,
+            b'N' => cli.nopad = true,
+            b'p' => flags |= MAGIC_PRESERVE_ATIME,
+            b'P' => setparam(&mut cli, &arg),
+            b'r' => flags |= MAGIC_RAW,
+            b's' => flags |= MAGIC_DEVICES,
+            // There is no sandbox to turn off.
+            b'S' => {}
+            b'v' => {
+                let path = magicfile
+                    .clone()
+                    .unwrap_or_else(|| apprentice::magic_getpath(None, action.unwrap_or(Action::Load)));
+                let mut w = cli.progname.clone();
+                w.extend_from_slice(b"-5.45\nmagic file from ");
+                w.extend_from_slice(&path);
+                w.push(b'\n');
+                out::write(&w);
+                out::flush();
+                std::process::exit(0);
+            }
+            b'z' => flags |= MAGIC_COMPRESS,
+            b'Z' => flags |= MAGIC_COMPRESS | MAGIC_COMPRESS_TRANSP,
+            b'L' => flags |= MAGIC_SYMLINK,
+            b'h' => flags &= !MAGIC_SYMLINK,
+            _ => errflg += 1,
+        }
     }
 
-    #[test]
-    fn a_jpeg_is_not_confused_with_a_png() {
-        let t = detect_image(&[0xff, 0xd8, 0xff, 0xe0]).expect("recognised");
-        assert_eq!(t.description, "JPEG image data");
-        assert_eq!(t.mime, "image/jpeg");
+    if errflg != 0 {
+        usage(&cli);
+    }
+    if e != 0 {
+        out::flush();
+        std::process::exit(e);
     }
 
-    #[test]
-    fn the_integer_readers_refuse_to_read_past_the_end() {
-        // Every detector above depends on these answering None rather than
-        // panicking or wrapping around on a short file, and a truncated file
-        // is the ordinary case for this program.
-        let b = [0x01, 0x02, 0x03, 0x04];
-        assert_eq!(read_u32_le(&b, 0), Some(0x0403_0201));
-        assert_eq!(read_u32_be(&b, 0), Some(0x0102_0304));
-        assert_eq!(read_u16_le(&b, 0), Some(0x0201));
-        assert_eq!(read_u32_le(&b, 1), None, "one byte short must be None");
-        assert_eq!(read_u32_be(&b, 4), None, "at the end must be None");
-        assert_eq!(read_u16_le(&b, 3), None);
-        assert_eq!(read_u32_le(&[], 0), None);
-    }
+    let rc = 'run: {
+        if let Some(act) = action {
+            // Do not check or compile ~/.magic unless asked to.
+            let mut ms = magicapi::magic_open(flags | MAGIC_CHECK);
+            ms.utf8 = codeset_is_utf8();
+            ms.builtin = Some(database::builtin());
+            let c = match act {
+                Action::Check => magicapi::magic_check(&mut ms, magicfile.as_deref()),
+                Action::Compile => magicapi::magic_compile(&mut ms, magicfile.as_deref()),
+                Action::List => magicapi::magic_list(&mut ms, magicfile.as_deref()),
+                Action::Load => 0,
+            };
+            if c == -1 {
+                out::flush();
+                let msg = magicapi::magic_error(&ms).unwrap_or_default();
+                let mut w = cli.progname.clone();
+                w.extend_from_slice(b": ");
+                w.extend_from_slice(&msg);
+                w.push(b'\n');
+                let _written = std::io::stderr().write_all(&w);
+                break 'run 1;
+            }
+            break 'run 0;
+        }
+        if magic.is_none() {
+            match load(&cli, magicfile.as_deref(), flags) {
+                Some(m) => magic = Some(m),
+                None => {
+                    out::flush();
+                    std::process::exit(1);
+                }
+            }
+        }
+        let Some(ms) = magic.as_mut() else {
+            break 'run 1;
+        };
+        applyparam(&cli, ms);
 
-    #[test]
-    fn the_prefix_helpers_handle_a_needle_longer_than_the_buffer() {
-        assert!(starts_with(b"GIF89a", b"GIF"));
-        assert!(!starts_with(b"GI", b"GIF"), "a short buffer cannot match");
-        assert!(has_at(b"....IHDR", 4, b"IHDR"));
-        assert!(
-            !has_at(b"....IHD", 4, b"IHDR"),
-            "must not read past the end"
-        );
-        assert!(
-            !has_at(b"IHDR", 99, b"IHDR"),
-            "an offset past the end is false"
-        );
+        if operands.is_empty() {
+            if didsomefiles == 0 {
+                usage(&cli);
+            }
+            break 'run e;
+        }
+        let wid = operands.iter().map(|o| file_mbswidth(ms, o)).max().unwrap_or(0);
+        // `-bb`: brief only for a single file (undocumented upstream).
+        if cli.bflag == 2 {
+            cli.bflag = u32::from(operands.len() <= 1);
+        }
+        for o in &operands {
+            e |= process(&cli, ms, o, wid);
+        }
+        e
+    };
+    let mut rc = rc;
+    if !cli.nobuffer && !out::flush() {
+        rc |= 1;
     }
+    std::process::exit(rc);
 }

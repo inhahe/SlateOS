@@ -1,0 +1,4 @@
+# file 5.45's magic, byte for byte. build.rs compiles it into the program, and
+# a CR that a Windows checkout's line-ending conversion added to each line
+# would end up in every rule's description.
+magic/** -text

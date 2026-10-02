@@ -342,6 +342,21 @@
 #
 # Exit 0 = allow the push, non-zero = abort it.
 
+# Ignore SIGPIPE, before anything is written: otherwise a push whose output is
+# piped into something that stops reading -- `git push ... 2>&1 | head -5` --
+# goes through with every gate failing. Measured 2026-10-02 on Git for
+# Windows: when `head` exits, this shell's next write to the pipe kills it with
+# SIGPIPE, and git.exe, a native Windows program, reads that death as exit 0 --
+# the push is allowed. A one-line hook that printed after `head` was gone and
+# then exited 1 published its commit through `| head -1` and refused it
+# without the pipe, and this hook let a push through `| head -60` nine seconds
+# after logging a text-mode-writes refusal. Ignored, the write fails with
+# EPIPE instead, nothing that matters to the verdict was going to that pipe,
+# and the hook reaches the exit it decided on. (No pipeline here relies on
+# SIGPIPE to stop a producer: each is finite, and git exits quietly on EPIPE
+# whatever this shell ignores.)
+trap '' PIPE
+
 set -u
 
 # Reached through the trampoline .git/hooks/pre-push installs, or as a copy?

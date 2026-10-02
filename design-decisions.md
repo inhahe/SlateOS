@@ -83964,6 +83964,83 @@ and with a function's parameter, copied into a variable or element
 **Revisit when** the reference changes: if this awk is ever held to POSIX
 alone, or to a different awk, option B becomes the better fit.
 
+## 1058. `file` carries file 5.45's database compiled and uses it in place, and libmagic is a library of its own
+
+**Date:** 2026-10-02
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** `file` needs its database of 22,642 rules. Upstream installs
+it as an 8.5 MB compiled file (`magic.mgc`) and uses the rules straight from
+it, without converting them, which is why it starts in about 2 ms. Ours first
+carried the rules' *text* and parsed it at every start -- about 30 ms, fifteen
+times slower, which a script that runs `file` once per name pays every time.
+Now the build compiles the text exactly as `file -C` does, the program carries
+the compiled bytes, and it uses them where they lie, as upstream does: 2.1 ms
+a run against upstream's 1.8. The price is size: the program is 9.4 MB, the
+database 8.5 MB of it -- about what upstream's install takes too, in separate
+files. So that the build could do the compiling, the library half of
+the port moved out of `file` into a crate of its own, `userspace/libmagic`,
+which is also what lets any other program identify files without running
+`file`.
+
+| Option | For | Against |
+|---|---|---|
+| **A. Compile at build time, carry the `.mgc`, use it in place** (chosen) | Starts as upstream starts: 2.1 ms a run against upstream's 1.8 (an ELF file; best of 5 x 100 runs). The bytes are the ones `file -C` writes, which `scripts/file-diff.sh` holds equal to upstream's compiler, so the rules the program runs are exactly the rules upstream runs from `magic.mgc`. The database is part of the program's read-only data: paged in as it is touched and shared by every `file` running at once, as upstream's mapped file is. A rule that does not compile fails the build. | A 9.4 MB program. Using the bytes in place needs a rule (`Magic`) laid out exactly as the compiled record, which `magic.rs` asserts field by field at compile time, and one `unsafe` reinterpretation, which checks the header, the counts and the alignment first and otherwise decodes. A build script, and a crate split so it can call the library, which a build then compiles twice (for the build script, for the program). |
+| D. The same database with its runs of zeros packed (8.5 MB to 0.8), decoded at start | A 1.7 MB program. This entry's first choice, in commit 9ef81fa88 (`pack_mgc`, `unpack_mgc`). | 10.7 ms a run: decoding 22,642 records into structures is most of it. |
+| E. Packed, and unpacked at start into memory that is then used in place | A 1.7 MB program; not measured, but writing 8.5 MB of fresh memory at every start is about 2-3 ms more than A. | Each run's own 8.5 MB, where A's is shared. |
+| B. Carry the text, parse at start | One crate; nothing generated. | ~30 ms a run. |
+| C. Install `magic.mgc` in the image | Exactly upstream's layout. | A file that can go missing, or go stale against the program. Still supported: a database installed at the default path is read in preference, as upstream reads it. |
+
+**Where it bites.** `userspace/file/build.rs` (the compile);
+`userspace/file/src/main.rs`, whose `database` carries the bytes aligned for a
+rule; `libmagic::magic::Magic` (`#[repr(C)]`, the layout assertions);
+`libmagic::apprentice::{compile_mgc, map_builtin, in_place}`; and
+`apprentice_map`, which uses the carried database when nothing is installed at
+`/usr/share/misc/magic` (`Ms::builtin`). Rules are held as
+`Cow<'static, [Magic]>` (`MagicMap`, `MList`): borrowed when in place, owned
+when read from text or a file. A big-endian machine would decode rather than
+borrow; SlateOS has none. One visible consequence, and it is upstream's:
+`file -C` and `file -c` with no `-m` look for the *text* at the default path,
+as they do on an ordinary install, and say "could not find any valid magic
+files!"; `file -l` lists the carried database.
+
+**Revisit when** the image's size matters more than `file`'s start: D's code
+is in the history, and E is a small change from it. `file` is not yet in the
+image (`scripts/rootfs-bin-manifest.txt`), so today the size costs nothing
+there.
+
+## 1059. `file -z` inflates with zlib's semantics, in a decoder of its own
+
+**Date:** 2026-10-02
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** `file -z` describes what is inside a gzip or zlib stream, and
+for a damaged one it prints the error zlib gives, word for word --
+`ERROR:[zlib: invalid distance too far back]`. The system's decoder, the
+`deflate` crate, cannot give those answers: it folds a dozen of zlib's
+messages into one error, treats a truncated stream as an error where zlib
+hands back what it decoded, and stops at a full buffer where zlib reads on
+to the next block's header. So `libmagic` has its own small decoder
+(`src/zlib.rs`) written to answer as zlib's `inflate` answers. That is a
+second DEFLATE decoder in the tree, which the `deflate` crate's documentation
+argues against.
+
+| Option | For | Against |
+|---|---|---|
+| **A. A decoder with zlib's semantics in libmagic** (chosen) | `file -z`'s output is upstream's, damaged and truncated streams included: `scripts/file-diff.sh` reaches every message zlib gives on 2,000 crafted streams with no difference. Small (one file), safe Rust, no `unsafe`. | A second parser of untrusted compressed data to keep correct; the `deflate` crate's doc warns against exactly this. |
+| B. Use the `deflate` crate | One decoder. | Different words for errors, and different *answers* for truncated input -- `file -z` on a cut-off download would print an error where upstream describes the contents. |
+| C. Give the `deflate` crate zlib's error detail and partial-output behaviour | One decoder, exact. | Changes a crate the kernel and three other lanes use, for one caller's fidelity, and its table-driven decoder's structure differs from zlib's enough that "the point zlib raises it" would be a redesign, not a variant. |
+
+**Mitigations.** The decoder reads bit by bit with every access checked
+(`get`), and it is exercised by the harness's crafted streams in a debug
+build with overflow checks. It decodes only for identification -- never
+into anything kept.
+
+**Revisit when** the `deflate` crate grows a zlib-compatible mode for other
+reasons; then this should become a call to it.
+
 ## 834. Selection is a change of colour, not of weight
 
 **Date:** 2026-09-12

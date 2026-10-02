@@ -651,7 +651,7 @@ fn render_row(cells: &[String], specs: &[Spec]) -> String {
         if i > 0 {
             out.push(' ');
         }
-        let last = i + 1 == cells.len();
+        let last = i.saturating_add(1) == cells.len();
         let Some(spec) = specs.get(i) else { continue };
         let Some(col) = COLUMNS.get(spec.col) else {
             continue;

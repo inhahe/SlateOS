@@ -945,9 +945,12 @@ struct GrepArgs {
     opts: Options,
     /// Patterns given directly, by `-e` or as the first operand.
     patterns: Vec<Vec<u8>>,
-    /// Files named by `-f`, whose lines are patterns. Read by `main`, so that
-    /// argument parsing stays a pure function of argv.
-    pattern_files: Vec<OsString>,
+    /// Files named by `-f`, whose lines are patterns, each with how many of
+    /// [`GrepArgs::patterns`] came before it on the command line. Upstream
+    /// reads `-e` and `-f` in the order given, and that is the order its
+    /// diagnostics name them in. Read by `main`, so that argument parsing
+    /// stays a pure function of argv.
+    pattern_files: Vec<(usize, OsString)>,
     files: Vec<OsString>,
     /// Whether the sole operand is a `.` this parser supplied rather than one
     /// the caller wrote, in which case the walk's names print without their
@@ -1414,7 +1417,7 @@ fn perl_unsupported() -> getopt::Error {
 fn parse_args(argv: &[OsString]) -> Result<Request, getopt::Error> {
     let mut opts = Options::default();
     let mut patterns: Vec<Vec<u8>> = Vec::new();
-    let mut pattern_files: Vec<OsString> = Vec::new();
+    let mut pattern_files: Vec<(usize, OsString)> = Vec::new();
     let mut operands: Vec<OsString> = Vec::new();
     let mut matcher: Option<Matcher> = None;
     let mut show_help = false;
@@ -1539,7 +1542,7 @@ fn parse_args(argv: &[OsString]) -> Result<Request, getopt::Error> {
             Flag::Short(b'e') => {
                 patterns.extend(split_arg_patterns(&quote::os_bytes(&required(value))));
             }
-            Flag::Short(b'f') => pattern_files.push(required(value)),
+            Flag::Short(b'f') => pattern_files.push((patterns.len(), required(value))),
             Flag::Short(b'm') => {
                 opts.max_count = max_count_arg(&quote::os_bytes(&required(value)))?;
             }
@@ -1934,7 +1937,19 @@ fn quote_ere(literal: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Compile every pattern, or name the first one that will not compile.
+/// A pattern that will not compile: which one, by its place in the list, and
+/// glibc's sentence for why -- which is all upstream prints of it, after the
+/// `FILE:LINE:` of a pattern that came from a `-f` file.
+#[cfg_attr(test, derive(Debug))]
+struct Refused {
+    index: usize,
+    message: &'static str,
+}
+
+/// Compile every pattern, or say which of them will not compile -- all of
+/// them, in order, as upstream does: each is `regex_compile`d in turn, and
+/// the run stops only after the last (`compilation_failed`). A pattern given
+/// twice is compiled, and refused, once.
 ///
 /// The second half of the answer is the diagnostics to print before searching:
 /// egrep syntax accepts shapes POSIX-extended refuses, and GNU says so rather
@@ -1947,16 +1962,17 @@ fn quote_ere(literal: &[u8]) -> Vec<u8> {
 fn compile_patterns(
     patterns: &[Vec<u8>],
     opts: &Options,
-) -> Result<(Vec<Pat>, Vec<String>), String> {
+) -> Result<(Vec<Pat>, Vec<String>), Vec<Refused>> {
     let mut out = Vec::with_capacity(patterns.len());
     let mut warnings = Vec::new();
+    let mut refused = Vec::new();
     // GNU collapses duplicate patterns, which is invisible in the output of a
     // search -- two copies of a pattern select the same lines as one -- and
     // visible here: `grep -E -e '*a' -e '*a'` warns once, `-e '*a' -e '*b'`
     // twice. Measured. Doing it for real rather than only for the diagnostic
     // also saves the duplicate its search.
     let mut seen: BTreeSet<&[u8]> = BTreeSet::new();
-    for p in patterns {
+    for (index, p) in patterns.iter().enumerate() {
         if !seen.insert(p.as_slice()) {
             continue;
         }
@@ -2003,22 +2019,20 @@ fn compile_patterns(
                 }));
                 out.push(Pat::Re(re));
             }
-            Err(e) => {
-                // Escaped, not lossy: a pattern is an argv token, so it is a
-                // byte string and need not decode. `from_utf8_lossy` would
-                // substitute U+FFFD and hand the user a message naming a
-                // *different* pattern from the one they typed, which is the one
-                // thing this diagnostic exists to get right. See
-                // design-decisions.md §369.
-                return Err(format!(
-                    "{}: {}",
-                    quote::escape_unprintable(p),
-                    quote::escape_unprintable(&e.detail)
-                ));
-            }
+            // glibc's sentence and not the pattern: upstream's
+            // `error (0, 0, "%s", err)`, where `err` is what
+            // `re_compile_pattern` returned -- `grep: Unmatched ( or \(`.
+            Err(e) => refused.push(Refused {
+                index,
+                message: e.message(),
+            }),
         }
     }
-    Ok((out, warnings))
+    if refused.is_empty() {
+        Ok((out, warnings))
+    } else {
+        Err(refused)
+    }
 }
 
 /// Whether a byte can be part of a word, for `-w`.
@@ -2569,8 +2583,20 @@ fn run_main() -> ExitCode {
     };
     resolve_colors(&mut parsed.opts);
 
-    let mut patterns = parsed.patterns;
-    for pf in &parsed.pattern_files {
+    // Every pattern in command-line order, with where it came from: a line of
+    // a `-f` file is named in a diagnostic as upstream's `pattern_file_name`
+    // names it, `FILE:LINE:` (`-:2:` for standard input), and a pattern given
+    // directly is not named at all.
+    let mut patterns: Vec<Vec<u8>> = Vec::new();
+    let mut origins: Vec<Option<(&OsString, usize)>> = Vec::new();
+    let mut given = parsed.patterns.into_iter();
+    let mut taken = 0;
+    for (before, pf) in &parsed.pattern_files {
+        for p in given.by_ref().take(before.saturating_sub(taken)) {
+            patterns.push(p);
+            origins.push(None);
+        }
+        taken = taken.max(*before);
         let raw = if pf == "-" {
             let mut buf = Vec::new();
             io::stdin().read_to_end(&mut buf).map(|_| buf)
@@ -2578,12 +2604,21 @@ fn run_main() -> ExitCode {
             fs::read(pf)
         };
         match raw {
-            Ok(raw) => patterns.extend(split_patterns(&raw)),
+            Ok(raw) => {
+                for (line, p) in split_patterns(&raw).into_iter().enumerate() {
+                    patterns.push(p);
+                    origins.push(Some((pf, line.saturating_add(1))));
+                }
+            }
             Err(e) => {
                 diag!("grep: {}: {}", quotef_os(pf), strerror(&e));
                 return ExitCode::from(2);
             }
         }
+    }
+    for p in given {
+        patterns.push(p);
+        origins.push(None);
     }
 
     let pats = match compile_patterns(&patterns, &parsed.opts) {
@@ -2598,8 +2633,19 @@ fn run_main() -> ExitCode {
             }
             p
         }
-        Err(e) => {
-            diag!("grep: {e}");
+        Err(refused) => {
+            for r in refused {
+                // The file's name as given, which need not be text: upstream
+                // prints it with `%s`.
+                let mut line = b"grep: ".to_vec();
+                if let Some(Some((file, number))) = origins.get(r.index) {
+                    line.extend_from_slice(&quote::os_bytes(file));
+                    line.extend_from_slice(format!(":{number}: ").as_bytes());
+                }
+                line.extend_from_slice(r.message.as_bytes());
+                line.push(b'\n');
+                coreutils::stdfd::diag_bytes(&line);
+            }
             return ExitCode::from(2);
         }
     };
@@ -4615,14 +4661,49 @@ mod tests {
             syntax: Syntax::Extended,
             ..Options::default()
         };
+        // glibc's sentence and nothing else, as upstream prints it. Which
+        // sentence turns on what follows the `[`: nothing at all is glibc's
+        // REG_BADPAT, an unclosed list REG_EBRACK. Both measured, GNU grep
+        // 3.11.
         let err = compile_patterns(&[b"a[".to_vec()], &o).err().unwrap();
-        assert!(err.contains("a["), "{err}");
+        assert_eq!(
+            err.first().map(|r| (r.index, r.message)),
+            Some((0, "Invalid regular expression"))
+        );
+        let err = compile_patterns(&[b"a[b".to_vec()], &o).err().unwrap();
+        assert_eq!(
+            err.first().map(|r| r.message),
+            Some("Unmatched [, [^, [:, [., or [=")
+        );
         // A reference to a group the pattern does not have is a compile error,
         // not a literal digit.
         let err = compile_patterns(&[b"\\(a\\)\\2".to_vec()], &Options::default())
             .err()
             .unwrap();
-        assert!(err.contains("backreference"), "{err}");
+        assert_eq!(
+            err.first().map(|r| r.message),
+            Some("Invalid back reference")
+        );
+    }
+
+    #[test]
+    fn every_pattern_that_will_not_compile_is_refused_once_in_order() {
+        let pats = [
+            b"ok".to_vec(),
+            b"a[b".to_vec(),
+            b"fine".to_vec(),
+            b"\\(".to_vec(),
+            b"a[b".to_vec(),
+        ];
+        let err = compile_patterns(&pats, &Options::default()).err().unwrap();
+        let got: Vec<(usize, &str)> = err.iter().map(|r| (r.index, r.message)).collect();
+        assert_eq!(
+            got,
+            [
+                (1, "Unmatched [, [^, [:, [., or [="),
+                (3, "Unmatched ( or \\(")
+            ]
+        );
     }
 
     #[test]

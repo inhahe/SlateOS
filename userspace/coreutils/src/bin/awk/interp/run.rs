@@ -590,10 +590,7 @@ impl Interp {
     fn store(&mut self, p: &Place, v: Value) -> R<()> {
         match p {
             Place::Var(var) => self.set_var(*var, v),
-            Place::Field(n) => {
-                let s = self.to_str(&v).as_ref().clone();
-                self.set_field(*n, s)
-            }
+            Place::Field(n) => self.set_field(*n, v),
             Place::Elem(a, subs) => {
                 let convfmt = self.convfmt();
                 // An element keeps its own copy of a field, as a variable does.

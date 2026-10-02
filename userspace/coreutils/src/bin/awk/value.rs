@@ -578,34 +578,102 @@ pub fn num_to_str(n: f64, fmt: &[u8]) -> Str {
     i.to_string().into_bytes()
 }
 
-/// Whether the whole string is a number, and if so which — the strnum test.
+/// Whether the whole string is a number, and if so which — the strnum test,
+/// as gawk's `r_force_number` makes it under `--posix`.
 ///
 /// The *whole* string, up to surrounding blanks: `" 12 "` is a number and
-/// `"12x"` is not. `inf` and `nan` are deliberately excluded, because a field
-/// reading `nan` in a data file is far more likely to be a word than a float,
-/// and POSIX mode in gawk excludes them for the same reason.
+/// `"12x"` is not. `--posix` hands the rest to C's `strtod` unfiltered, so
+/// everything `strtod` reads is a number: hexadecimal (`0x1A`, `0x1p-3`),
+/// `inf` and `infinity`, `nan` and `nan(...)`, in any case. (This excluded
+/// those until 2026-10-01, on the belief that gawk's POSIX mode did; it is
+/// gawk's *non*-POSIX mode that does.) A single character must be a digit.
 #[must_use]
 pub fn numeric_string(s: &[u8]) -> Option<f64> {
     let t = trim_blanks(s);
-    if t.is_empty() {
-        return None;
+    match t {
+        [] => None,
+        [c] => c.is_ascii_digit().then(|| f64::from(c.wrapping_sub(b'0'))),
+        _ => {
+            let (n, used) = strtod(t)?;
+            if used != t.len() {
+                return None;
+            }
+            // gawk gives a NaN written with a minus its sign itself, in case
+            // `strtod` did not.
+            if n.is_nan() && t.first() == Some(&b'-') && !n.is_sign_negative() {
+                return Some(-n);
+            }
+            Some(n)
+        }
     }
-    let (n, used) = num_prefix(t)?;
-    if used == t.len() { Some(n) } else { None }
 }
 
-/// The longest numeric prefix of `s`, and how many bytes it used — `strtod`
-/// without the errno.
+/// The longest numeric prefix of `s`, and how many bytes it used: C's
+/// `strtod`, which is what gawk converts a string with -- so `"0x1A" + 0` is
+/// 26, `"inf" + 0` is `+inf` and `"3abc" + 0` is 3. Leading blanks are skipped
+/// and counted.
 #[must_use]
 pub fn num_prefix(s: &[u8]) -> Option<(f64, usize)> {
+    strtod(s)
+}
+
+/// glibc's `strtod`: the longest prefix of `s` that is a number -- decimal,
+/// hexadecimal, `inf`/`infinity` or `nan`/`nan(chars)`, any case, with a sign
+/// -- correctly rounded, and the bytes it took (leading blanks included), or
+/// `None` where there is no number at all. A value too large is an infinity
+/// and one too small a zero or a subnormal, as `strtod` returns them with
+/// `ERANGE` -- which gawk accepts.
+#[must_use]
+pub fn strtod(s: &[u8]) -> Option<(f64, usize)> {
     let mut i = 0usize;
     while matches!(s.get(i), Some(b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)) {
         i = i.saturating_add(1);
     }
-    let start = i;
+    let negative = s.get(i) == Some(&b'-');
     if matches!(s.get(i), Some(b'+' | b'-')) {
         i = i.saturating_add(1);
     }
+    let rest = s.get(i..).unwrap_or_default();
+    let (magnitude, used) = if let Some(found) = hex_prefix(rest) {
+        found
+    } else if let Some(used) = word_prefix(rest, b"infinity").or_else(|| word_prefix(rest, b"inf"))
+    {
+        (f64::INFINITY, used)
+    } else if let Some(used) = word_prefix(rest, b"nan") {
+        // `nan(n-char-sequence)`: letters, digits and `_`, closed; an
+        // unclosed one leaves just the `nan`.
+        let mut j = used;
+        if rest.get(j) == Some(&b'(') {
+            let mut k = j.saturating_add(1);
+            while matches!(rest.get(k), Some(c) if c.is_ascii_alphanumeric() || *c == b'_') {
+                k = k.saturating_add(1);
+            }
+            if rest.get(k) == Some(&b')') {
+                j = k.saturating_add(1);
+            }
+        }
+        (f64::NAN, j)
+    } else {
+        decimal_prefix(rest)?
+    };
+    let n = if negative { -magnitude } else { magnitude };
+    Some((n, i.saturating_add(used)))
+}
+
+/// `word`, in any case, at the start of `s`: how long it is, if it is there.
+fn word_prefix(s: &[u8], word: &[u8]) -> Option<usize> {
+    let head = s.get(..word.len())?;
+    head.eq_ignore_ascii_case(word).then_some(word.len())
+}
+
+/// An unsigned decimal number at the start of `s`, as `strtod` and awk's
+/// own numeric constants read one: digits with an optional point (at least
+/// one digit, before or after it), then an exponent only if it is complete --
+/// `1e` is the number 1 followed by the letter e, not a malformed float.
+/// Correctly rounded, as `strtod` is.
+#[must_use]
+pub fn decimal_prefix(s: &[u8]) -> Option<(f64, usize)> {
+    let mut i = 0usize;
     let mut digits = 0usize;
     while matches!(s.get(i), Some(c) if c.is_ascii_digit()) {
         i = i.saturating_add(1);
@@ -621,8 +689,6 @@ pub fn num_prefix(s: &[u8]) -> Option<(f64, usize)> {
     if digits == 0 {
         return None;
     }
-    // An exponent only counts if it is complete: `1e` is the number 1 followed
-    // by the letter e, not a malformed float.
     if matches!(s.get(i), Some(b'e' | b'E')) {
         let mut j = i.saturating_add(1);
         if matches!(s.get(j), Some(b'+' | b'-')) {
@@ -635,10 +701,144 @@ pub fn num_prefix(s: &[u8]) -> Option<(f64, usize)> {
             i = j;
         }
     }
-    let text = s.get(start..i)?;
+    let text = s.get(..i)?;
     // Every byte in `text` is ASCII by construction above.
     let n: f64 = std::str::from_utf8(text).ok()?.parse().ok()?;
     Some((n, i))
+}
+
+/// A hexadecimal number at the start of `s`, as `strtod` reads one: `0x`,
+/// hex digits with an optional point (at least one digit), then a binary
+/// exponent `p` only if it is complete; correctly rounded, to nearest with
+/// ties to even. `None` without a digit after the `0x` -- `strtod` then reads
+/// the `0` alone, which is the decimal reading's to give.
+fn hex_prefix(s: &[u8]) -> Option<(f64, usize)> {
+    if !matches!(s, [b'0', b'x' | b'X', ..]) {
+        return None;
+    }
+    let mut i = 2usize;
+    // The significant digits, gathered into 64 bits; what does not fit only
+    // matters as "something non-zero was cut off".
+    let mut mantissa: u64 = 0;
+    let mut kept = 0i64; // digits gathered
+    let mut sticky = false;
+    let mut int_digits = 0i64; // digits before the point, leading zeros included
+    let mut leading_zeros = 0i64;
+    let mut any = false;
+    let mut seen_point = false;
+    loop {
+        match s.get(i) {
+            Some(b'.') if !seen_point => seen_point = true,
+            Some(c) if c.is_ascii_hexdigit() => {
+                any = true;
+                let d = u64::from(char::from(*c).to_digit(16).unwrap_or(0));
+                if !seen_point {
+                    int_digits = int_digits.saturating_add(1);
+                }
+                if mantissa == 0 && d == 0 && kept == 0 {
+                    leading_zeros = leading_zeros.saturating_add(1);
+                } else if kept < 16 {
+                    mantissa = (mantissa << 4) | d;
+                    kept = kept.saturating_add(1);
+                } else if d != 0 {
+                    sticky = true;
+                }
+            }
+            _ => break,
+        }
+        i = i.saturating_add(1);
+    }
+    if !any {
+        return None;
+    }
+    let mut exp: i64 = 0;
+    if matches!(s.get(i), Some(b'p' | b'P')) {
+        let mut j = i.saturating_add(1);
+        let neg = s.get(j) == Some(&b'-');
+        if matches!(s.get(j), Some(b'+' | b'-')) {
+            j = j.saturating_add(1);
+        }
+        if matches!(s.get(j), Some(c) if c.is_ascii_digit()) {
+            while let Some(c) = s.get(j).filter(|c| c.is_ascii_digit()) {
+                // Far past any exponent that could matter; held there.
+                exp = exp
+                    .saturating_mul(10)
+                    .saturating_add(i64::from(c.wrapping_sub(b'0')))
+                    .min(1_i64 << 40);
+                j = j.saturating_add(1);
+            }
+            if neg {
+                exp = exp.saturating_neg();
+            }
+            i = j;
+        }
+    }
+    // value = mantissa * 2^e2 (+ something below it when `sticky`): every
+    // digit not gathered scales the gathered ones by 16, and every digit
+    // after the point divides by 16.
+    let e2 = exp.saturating_add(
+        int_digits
+            .saturating_sub(leading_zeros)
+            .saturating_sub(kept)
+            .saturating_mul(4),
+    );
+    Some((round_binary(mantissa, e2, sticky), i))
+}
+
+/// `m * 2^e2`, plus a little more when `sticky`, as the nearest `f64`, ties to
+/// even: the rounding `strtod` does, subnormals and overflow to infinity
+/// included.
+fn round_binary(m: u64, e2: i64, sticky: bool) -> f64 {
+    if m == 0 {
+        return 0.0;
+    }
+    let lz = i64::from(m.leading_zeros());
+    let m = m << lz;
+    // The exponent of `m`'s leading bit, now bit 63.
+    let top = e2.saturating_sub(lz).saturating_add(63);
+    // Bits kept: 53 for a normal result, fewer below the normal range.
+    let keep = if top >= -1022 {
+        53
+    } else {
+        top.saturating_add(1075)
+    };
+    if keep < 0 {
+        return 0.0;
+    }
+    let dropped = 64i64.saturating_sub(keep); // 11 ..= 64
+    let (mut q, round_up) = if dropped >= 64 {
+        // Nothing kept: the value is at least half the smallest subnormal,
+        // and exactly half only when nothing else was cut off.
+        let half = 1u64 << 63;
+        (0u64, m > half || (m == half && sticky))
+    } else {
+        let d = u32::try_from(dropped).unwrap_or(63);
+        let q = m >> d;
+        let rem = m & ((1u64 << d).wrapping_sub(1));
+        let half = 1u64 << d.saturating_sub(1);
+        let up = rem > half || (rem == half && (sticky || q & 1 == 1));
+        (q, up)
+    };
+    if round_up {
+        q = q.saturating_add(1);
+    }
+    if top >= -1022 {
+        // Normal: q is 2^52 ..= 2^53; a carry out moves up a binade.
+        let (q, top) = if q >> 53 != 0 {
+            (q >> 1, top.saturating_add(1))
+        } else {
+            (q, top)
+        };
+        if top > 1023 {
+            return f64::INFINITY;
+        }
+        let biased = u64::try_from(top.saturating_add(1023)).unwrap_or(0);
+        f64::from_bits((biased << 52) | (q & ((1u64 << 52) - 1)))
+    } else {
+        // Subnormal: q is the stored mantissa; a carry into bit 52 is the
+        // smallest normal number, which the same bits spell.
+        f64::from_bits(q)
+    }
 }
 
 /// `s` without leading and trailing blanks, for the strnum test.
@@ -934,8 +1134,75 @@ mod tests {
         assert_eq!(numeric_string(b"12x"), None);
         assert_eq!(numeric_string(b""), None);
         assert_eq!(numeric_string(b"+.5"), Some(0.5));
-        // Not numbers, on purpose: a field reading `nan` is a word.
-        assert_eq!(numeric_string(b"nan"), None);
-        assert_eq!(numeric_string(b"inf"), None);
+        // One character must be a digit; `strtod` would not take the others
+        // anyway.
+        assert_eq!(numeric_string(b"7"), Some(7.0));
+        assert_eq!(numeric_string(b"."), None);
+        assert_eq!(numeric_string(b"+"), None);
+        // `--posix` hands the rest to `strtod`: hexadecimal, infinities and
+        // NaNs are numbers (gawk 5.2.1, measured).
+        assert_eq!(numeric_string(b"0x1A"), Some(26.0));
+        assert_eq!(numeric_string(b" 0x1p3 "), Some(8.0));
+        assert_eq!(numeric_string(b"inf"), Some(f64::INFINITY));
+        assert_eq!(numeric_string(b"-Infinity"), Some(f64::NEG_INFINITY));
+        assert!(numeric_string(b"nan").is_some_and(|n| n.is_nan() && !n.is_sign_negative()));
+        assert!(numeric_string(b"-nan").is_some_and(|n| n.is_nan() && n.is_sign_negative()));
+        assert!(numeric_string(b"NaN(12_ab)").is_some_and(f64::is_nan));
+        // Only whole: `0x` alone is the 0 and a letter; `nan(` is unclosed.
+        assert_eq!(numeric_string(b"0x"), None);
+        assert_eq!(numeric_string(b"nan("), None);
+        assert_eq!(numeric_string(b"infinit"), None);
+    }
+
+    /// glibc's `strtod`, case by case as gawk 5.2.1 `--posix` printed them
+    /// (`target/drafts/strtod-probe.sh`).
+    #[test]
+    fn strtod_reads_what_glibc_reads() {
+        let n = |s: &str| strtod(s.as_bytes()).map(|(n, _)| n);
+        let used = |s: &str| strtod(s.as_bytes()).map(|(_, u)| u);
+        assert_eq!(n("0x"), Some(0.0));
+        assert_eq!(used("0x"), Some(1));
+        assert_eq!(n("0x1g"), Some(1.0));
+        assert_eq!(n("0x.8"), Some(0.5));
+        assert_eq!(n("0x1p-2"), Some(0.25));
+        assert_eq!(n("0X1P+3"), Some(8.0));
+        assert_eq!(n("-0x10"), Some(-16.0));
+        assert_eq!(n("0x1.8p1"), Some(3.0));
+        assert_eq!(n("0x0.001"), Some(1.0 / 4096.0));
+        assert_eq!(used("0x1.p"), Some(4));
+        // Ties to even at 53 bits, and a long mantissa's tail as a sticky bit.
+        assert_eq!(n("0x1.fffffffffffff8p0"), Some(2.0));
+        assert_eq!(n("0x1.fffffffffffff7p0"), Some(1.999_999_999_999_999_8));
+        assert_eq!(
+            n("0x123456789abcdef123p0"),
+            Some(3.358_127_276_707_303_3e20)
+        );
+        // Subnormals, the halfway point below the smallest, and overflow.
+        assert_eq!(n("0x1p-1074"), Some(4.940_656_458_412_465_4e-324));
+        assert_eq!(n("0x1p-1075"), Some(0.0));
+        assert_eq!(n("0x1.8p-1075"), Some(4.940_656_458_412_465_4e-324));
+        assert_eq!(n("0x1p-1022"), Some(f64::MIN_POSITIVE));
+        assert_eq!(n("0x1p1024"), Some(f64::INFINITY));
+        assert_eq!(n("0x1p1023"), Some(2f64.powi(1023)));
+        assert_eq!(n("0x1.fffffffffffffp1023"), Some(f64::MAX));
+        assert_eq!(n("0x1p99999999999999999999"), Some(f64::INFINITY));
+        assert_eq!(n("0x1p-99999999999999999999"), Some(0.0));
+        // The words, any case, and how much each takes.
+        assert_eq!(n("infinity"), Some(f64::INFINITY));
+        assert_eq!(used("infinit"), Some(3));
+        assert_eq!(used("  -INF"), Some(6));
+        assert_eq!(used("nan()"), Some(5));
+        assert_eq!(used("nan(12ab_)x"), Some(10));
+        assert_eq!(used("nan("), Some(3));
+        // Decimal as before, and nothing where there is no number.
+        assert_eq!(n("  -2.5e2xyz"), Some(-250.0));
+        assert_eq!(n("5."), Some(5.0));
+        assert_eq!(n("1e400"), Some(f64::INFINITY));
+        assert_eq!(n("1e-400"), Some(0.0));
+        assert_eq!(n("in"), None);
+        assert_eq!(n("-"), None);
+        assert_eq!(n(" "), None);
+        // The decimal reader the lexer uses takes no hexadecimal.
+        assert_eq!(decimal_prefix(b"0x1A"), Some((0.0, 1)));
     }
 }

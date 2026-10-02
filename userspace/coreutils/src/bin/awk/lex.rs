@@ -467,29 +467,14 @@ impl<'a> Lexer<'a> {
         t
     }
 
+    /// A numeric constant: decimal only. gawk's `--posix` implies its
+    /// `--traditional`, under which its scanner stops a number at the `x` of
+    /// `0x1A` (and reads `011` as eleven), so `print 0x1A` prints `0` joined
+    /// to the variable `x1A`. Measured; this read hexadecimal until
+    /// 2026-10-01.
     fn number(&mut self) -> f64 {
-        // Hexadecimal constants are not POSIX awk, but every implementation
-        // that reads them agrees on the syntax and a program containing `0xff`
-        // means it.
-        if self.peek() == Some(b'0') && matches!(self.at(1), Some(b'x' | b'X')) {
-            let start = self.i.saturating_add(2);
-            let mut j = start;
-            while matches!(self.src.get(j), Some(d) if d.is_ascii_hexdigit()) {
-                j = j.saturating_add(1);
-            }
-            if j > start {
-                let text = self.src.get(start..j).unwrap_or_default();
-                self.i = j;
-                let mut n: f64 = 0.0;
-                for d in text {
-                    let v = f64::from(char::from(*d).to_digit(16).unwrap_or(0));
-                    n = n.mul_add(16.0, v);
-                }
-                return n;
-            }
-        }
         let rest = self.src.get(self.i..).unwrap_or_default();
-        match crate::value::num_prefix(rest) {
+        match crate::value::decimal_prefix(rest) {
             Some((n, used)) => {
                 self.i = self.i.saturating_add(used);
                 n
@@ -947,14 +932,34 @@ mod tests {
     #[test]
     fn numbers_in_every_shape_awk_accepts() {
         assert_eq!(
-            toks("1 1.5 .5 1e3 1E-2 0x1f"),
+            toks("1 1.5 .5 1e3 1E-2 5. 011"),
             vec![
                 Tok::Number(1.0),
                 Tok::Number(1.5),
                 Tok::Number(0.5),
                 Tok::Number(1000.0),
                 Tok::Number(0.01),
-                Tok::Number(31.0),
+                Tok::Number(5.0),
+                // Decimal, not octal: gawk's `--posix` is `--traditional`.
+                Tok::Number(11.0),
+                Tok::Eof
+            ]
+        );
+    }
+
+    /// gawk's `--posix` scanner stops a number at the `x` of `0x1f`, so it is
+    /// the number 0 and then the name `x1f`: `print 0x1A` prints `0`.
+    #[test]
+    fn a_hexadecimal_constant_is_a_zero_and_a_name() {
+        assert_eq!(
+            toks("0x1f 1e 1.2.3"),
+            vec![
+                Tok::Number(0.0),
+                Tok::Name("x1f".into()),
+                Tok::Number(1.0),
+                Tok::Name("e".into()),
+                Tok::Number(1.2),
+                Tok::Number(0.3),
                 Tok::Eof
             ]
         );

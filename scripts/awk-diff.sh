@@ -128,6 +128,12 @@ printf 'a:b;c\n'                                            > semi.txt
 printf '9 10 1.5\n'                                         > keys.txt
 printf '0 x\n'                                              > zero.txt
 printf '0\n'                                                > zline.txt
+# What `strtod` reads, as input: hex, the words, and what is only a prefix.
+printf '0x1A inf nan -nan +inf infinity NAN 0x 0x1p3 1e5 nan(x) 0x0\n' > hexes.txt
+# Fields and records that look numeric, for what a field holds.
+printf '10.0 b c\n'                                         > dec.txt
+printf 'x\n10.0\n'                                          > xdec.txt
+printf 'a b c\n'                                            > abc3.txt
 
 # Program files, for -f.
 printf '{ print "P1:" $0 }\n'                               > p1.awk
@@ -1414,6 +1420,59 @@ run_case abc 'BEGIN { getline a["x"] < "/dev/null"; print ("x" in a) }'
 run_case abc 'BEGIN { r = (getline a["x"] < "/nonexistent/file"); print r, ("x" in a) }'
 run_case abc 'BEGIN { sub(/z/, "y", a["x"]); print ("x" in a) }'
 run_case abc 'BEGIN { if (!("x" in a)) print "absent"; print length(a["x"]), ("x" in a) }'
+
+# --- numbers as `strtod` reads them ----------------------------------------------
+# gawk's `--posix` converts text with C's `strtod` and nothing in front of it,
+# so hexadecimal, infinities and NaNs are numbers -- in a string converted, and
+# in input deciding what is a strnum. Until 2026-10-01 this read decimal only,
+# on the belief that gawk's POSIX mode filtered the rest; it is its non-POSIX
+# mode that does.
+run_case abc 'BEGIN { print "0x1A"+0, "0x"+0, "0x1g"+0, "0x.8"+0, "0x1p-2"+0, "0X1P+3"+0, "-0x10"+0, "0x1.8p1"+0 }'
+run_case abc 'BEGIN { print "infinity"+0, "infinit"+0, "INFINITY"+0, "-Inf"+0, "+inf"+0, "infx"+0 }'
+run_case abc 'BEGIN { print "nan()"+0, "nan(12ab_)"+0, "nan("+0, "NaN"+0, "-nan"+0, "+nan"+0 }'
+run_case abc 'BEGIN { printf "%.17g %.17g\n", "0x1.fffffffffffff8p0"+0, "0x123456789abcdef123p0"+0 }'
+run_case abc 'BEGIN { printf "%.17g %.17g %.17g\n", "0x1p-1074"+0, "0x1p-1075"+0, "0x1.8p-1075"+0 }'
+run_case abc 'BEGIN { print "0x1p1024"+0, "0x1p1023"+0, "1e400"+0, "1e-400"+0, " 0x10 "+0 }'
+run_case hexes '{ for (i = 1; i <= NF; i++) printf "%s:%d ", $i, ($i == $i + 0); print "" }'
+run_case hexes '{ for (i = 1; i <= NF; i++) printf "%s:%s ", $i, ($i ? "T" : "F"); print "" }'
+run_case hexes '{ print ($1 == 26), ($1 < 27), ($2 > 1e308), ($9 == 8), ($12 ? "T" : "F") }'
+file_case -v 'x=0x10' 'BEGIN { print x + 0, (x == 16) }'
+file_case 'BEGIN { printf "%d %d %s\n", "0x10", "inf", int("0x1F") }'
+file_case 'BEGIN { print substr("abcdef", "0x2", "0x2") }'
+file_case 'BEGIN { x = "nan" + 0; y = -x; print x, y, (x == x), (x != x) }'
+# Numeric constants in the program are decimal only: gawk's `--posix` is also
+# its `--traditional`, whose scanner stops at the `x` -- `0x1A` is the number 0
+# and the variable `x1A` -- and reads `011` as eleven.
+file_case 'BEGIN { print 0x1A, 0x1A + 0, 011, 1e, 1.2.3 }'
+
+# --- what a field holds --------------------------------------------------------------
+# A field holds what was put in it, as in gawk: split from input it is input,
+# but `$2 = "10.0"` makes it that string and `$2 = 10` that number; `$0` read is
+# input, assigned is what was assigned, and rebuilt from its fields a string.
+# Until 2026-10-01 every field and `$0` read back as input whatever was put in.
+run_case dec '{ $2 = "10.0"; print ($2 == 10) }'
+run_case dec '{ $2 = 10; print ($2 == "10.0"), ($2 < 9), ($2 == 10) }'
+run_case dec '{ $2 = "10.0"; x = $0; print ($2 == 10) }'
+run_case dec '{ $2 = "x"; y = $0; print ($1 == 10) }'
+run_case dec '{ $0 = "10.0"; print ($1 == 10), ($0 == 10) }'
+run_case dec '{ $0 = $1; print ($0 == 10) }'
+run_case dec '{ print ($0 == 10) }'
+run_case dec '{ $1 = $1; print ($0 == 10), ($1 == 10) }'
+run_case dec '{ sub(/1/, "1"); print ($0 == 10), ($1 == 10) }'
+run_case dec '{ sub(/1/, "1", $1); print ($1 == 10) }'
+run_case dec '{ NF = 1; print ($0 == 10) }'
+run_case dec '{ $2 = 3.14159; CONVFMT = "%.2g"; print; print $2 }'
+run_case dec '{ $2 = 3.14159; x = $0; CONVFMT = "%.2g"; print }'
+run_case xdec 'NR == 1 { getline; print ($0 == 10) }'
+run_case xdec 'NR == 1 { getline x; $0 = x; print ($0 == 10), ($1 == 10) }'
+# Assigning OFS rebuilds a `$0` whose fields changed first, with the OFS it
+# replaces (gawk's `set_OFS`): `$3 = "x"; OFS = "-"; print` prints `a b x`.
+run_case abc3 '{ $3 = "x"; OFS = "-"; print }'
+run_case abc3 '{ $3 = "x"; OFS = "-"; print $0; $1 = "y"; print }'
+run_case abc3 '{ OFS = "-"; $3 = "x"; print }'
+run_case abc3 '{ NF = 2; OFS = "-"; print }'
+run_case abc3 '{ $2 = "y"; OFS = "-"; $3 = "x"; print }'
+run_case abc3 '{ $3 = "x"; ORS = "|\n"; print }'
 
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 if [ "$xpass" -gt 0 ]; then

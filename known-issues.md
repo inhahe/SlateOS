@@ -179748,9 +179748,9 @@ the fix needs a case per row that the approximation gets wrong, measured.
 there yet (no intervals, a context-dependent leading `*`, limited operators) --
 rather than to a boolean, and measure every row in `find-diff.sh`.
 
-## B-AWK-GAWK-FIDELITY-SWEEP -- 54 ways our awk and gawk --posix part, three of them losing data (lane B, 2026-10-01) — **open**
+## B-AWK-GAWK-FIDELITY-SWEEP -- 55 ways our awk and gawk --posix part, three of them losing data (lane B, 2026-10-01) — **open**
 
-**Status:** OPEN — the worklist below; each row is closed by the commit that fixes it. **FIXED so far:** 5, 16, 28 (the parser half: the print list, `next` in BEGIN/END, constant zero divisors); 1, 2, 3, 6, 11, 12, 13, 17, 18, 25, 26, 29, 31 (compiling to instructions, §1056: recursion, `exit`/`next` through calls, one evaluation of a read-modify-write target, gawk's `^`, `getline` and directory operands, the reworded fatals, extra arguments, multi-line placement, stdout flushed before a warning); 4, 14, 15, 19, 20, 21, 22, 23, 27, 30, 33 (gawk's output errors, `close`/`fflush`/`system`, `NR`/`FNR` as longs, `arg_assign` for operands and `-v`, `substr`, the math warnings, the null and failed redirections); 7, 8, 9, 10, 24 (`printf` as gawk's `format_tree`, numbers as strings as its `format_val`); 32, 34 (gawk --posix's newline and separator grammar; `func` an ordinary name); 37, 40, 41, 42, 43, 44, 45, 51 (arrays as gawk lays them out, and the values they hand back: `array.rs`, and gawk's lazily-typed nodes in `value.rs`). 48 is a deliberate difference (`main.rs`). All 2026-10-01.
+**Status:** OPEN — the worklist below; each row is closed by the commit that fixes it. **FIXED so far:** 5, 16, 28 (the parser half: the print list, `next` in BEGIN/END, constant zero divisors); 1, 2, 3, 6, 11, 12, 13, 17, 18, 25, 26, 29, 31 (compiling to instructions, §1056: recursion, `exit`/`next` through calls, one evaluation of a read-modify-write target, gawk's `^`, `getline` and directory operands, the reworded fatals, extra arguments, multi-line placement, stdout flushed before a warning); 4, 14, 15, 19, 20, 21, 22, 23, 27, 30, 33 (gawk's output errors, `close`/`fflush`/`system`, `NR`/`FNR` as longs, `arg_assign` for operands and `-v`, `substr`, the math warnings, the null and failed redirections); 7, 8, 9, 10, 24 (`printf` as gawk's `format_tree`, numbers as strings as its `format_val`); 32, 34 (gawk --posix's newline and separator grammar; `func` an ordinary name); 37, 40, 41, 42, 43, 44, 45, 51 (arrays as gawk lays them out, and the values they hand back: `array.rs`, and gawk's lazily-typed nodes in `value.rs`). 46, 55 (numbers as `strtod` reads them; program constants decimal only); 52, 53 (a field and `$0` hold what was assigned; `OFS` assignment rebuilds first). 48 is a deliberate difference (`main.rs`). All 2026-10-01.
 
 **In short:** four probe batches of `awk` against `gawk --posix` (about 230
 programs, `target/drafts/loc-probe*.sh`) found real bugs well beyond the
@@ -179811,15 +179811,16 @@ This entry is the worklist; each item is closed by the commit that fixes it.
 | 43 | `getline a[k] < f` at end of file, `sub(re, s, a[k])` matching nothing | no element made | the element exists (`Op_subscript_lhs`) | **fixed** 2026-10-01 |
 | 44 | a string array's index that came from input | a strnum, always | a strnum only while the input is unsettled (its `STRING` flag); after a comparison, and for a `-v` value, a plain string. A field stored in a variable or element is a copy (`UNFIELD`) | **fixed** 2026-10-01 |
 | 45 | comparing a NaN | C's rule always | C's when neither side is flagged a string, else `cmp_awknums` (NaN equal to NaN and above everything) | **fixed** 2026-10-01 |
-| 46 | `"0x1A"+0`, `"inf"+0`, `"nan"+0`; input `0x1A`, `inf`, `nan` | 0, 0, 0; strings | 26, `+inf`, `+nan`; numbers -- `--posix` takes `strtod` whole, hex and all | wrong answer |
+| 46 | `"0x1A"+0`, `"inf"+0`, `"nan"+0`; input `0x1A`, `inf`, `nan` | 0, 0, 0; strings | 26, `+inf`, `+nan`; numbers -- `--posix` takes `strtod` whole, hex and all | **fixed** 2026-10-01 |
 | 47 | `TEXTDOMAIN` | unset | `messages`: gawk installs it under `--posix` too | missing variable |
 | 48 | `ENVIRON` with `AWKPATH`/`AWKLIBPATH` unset | absent | both added, naming gawk's library directories | **deliberate** (`main.rs`): this awk searches no path and loads no extensions |
 | 49 | `ARGV[1] = 5` with the 5 never converted to text | opens `5` | skipped: the number has no string (`stlen` 0) | quirk; the root of 38 |
 | 50 | `length(arr)` | the count | fatal `length: received array argument` under `--posix` | to decide: every other awk counts |
 | 51 | assigning an index from `for (k in a)` to `OFS`, `ORS`, `SUBSEP`, `CONVFMT`, `OFMT` | left a number | made a string at once (`set_OFS` and the rest call `force_string`) | **fixed** 2026-10-01 |
-| 52 | `OFS = x` after `$3 = "y"` | `$0` rebuilt with the new `OFS` when read | rebuilt with the old one at the assignment (`set_OFS` rebuilds first): `a b y` | wrong output |
-| 53 | a field or `$0` assigned a string; `$0` after `sub()` or a rebuild | read back as input, a strnum | the assigned value's type kept; a rebuilt `$0` a plain string: `$2 = "10.0"; $2 == 10` is false | wrong answer |
+| 52 | `OFS = x` after `$3 = "y"` | `$0` rebuilt with the new `OFS` when read | rebuilt with the old one at the assignment (`set_OFS` rebuilds first): `a b y` | **fixed** 2026-10-01 |
+| 53 | a field or `$0` assigned a string; `$0` after `sub()` or a rebuild | read back as input, a strnum | the assigned value's type kept; a rebuilt `$0` a plain string: `$2 = "10.0"; $2 == 10` is false | **fixed** 2026-10-01 |
 | 54 | `$5` past `NF` compared with 0 | equal (POSIX's uninitialized value) | unequal: gawk's `Null_field` is the string `""` | gawk departs from POSIX; to decide |
+| 55 | a hexadecimal constant `0x1A` in the program; `011` | 26; 11 | the number 0 and then the variable `x1A`; 11 (`--posix` implies gawk's `--traditional`, whose scanner stops at the `x`) | **fixed** 2026-10-01 |
 
 **Proper fix.** Each row, faithfully, against gawk 5.2.1's own source
 (`/tmp/gawk-ref` in WSL), with a harness row. Structural ones first. Every

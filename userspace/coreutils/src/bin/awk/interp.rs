@@ -23,6 +23,12 @@
 //! program that tests `$1 > 0` and then stores `a[$1]` stores what gawk
 //! stores.
 //!
+//! What a field holds is what was put there, as in gawk: a field split from
+//! input is input (a strnum when it looks like a number), but `$2 = "10.0"`
+//! makes `$2` the string `"10.0"` -- so `$2 == 10` is false -- and `$2 = 10`
+//! the number. `$0` likewise: input when read, whatever was assigned when
+//! assigned, and a plain string when rebuilt from its fields.
+//!
 //! ## Where a character is not a byte
 //!
 //! Records, fields and every string are bytes, because awk is a filter and a
@@ -140,8 +146,12 @@ enum Fs {
 struct Fields {
     record: Str,
     fields: Vec<Str>,
-    /// `$0` as a value, once read: the one node every reader shares.
+    /// `$0` as a value, once read or assigned: the one node every reader
+    /// shares.
     record_value: Option<Value>,
+    /// Whether `$0` came from input, which makes it input once read; a `$0`
+    /// rebuilt from its fields is a plain string.
+    record_input: bool,
     /// Each field as a value, once read; `None` until then. Kept the length
     /// of `fields`.
     field_values: Vec<Option<Value>>,
@@ -157,6 +167,7 @@ impl Fields {
             record: Str::new(),
             fields: Vec::new(),
             record_value: None,
+            record_input: true,
             field_values: Vec::new(),
             split_valid: true,
             record_valid: true,
@@ -847,8 +858,13 @@ impl Interp {
                 // gawk's `set_OFS`, `set_ORS`, `set_SUBSEP`, `set_CONVFMT`
                 // and `set_OFMT` take the new value's text at once
                 // (`force_string`), which settles an index from `for (k in
-                // a)` into a string there and then.
+                // a)` into a string there and then. `set_OFS` first rebuilds
+                // a `$0` whose fields have changed, with the OFS it is
+                // replacing: `$3 = "x"; OFS = "-"; print` prints `a b x`.
                 V_OFS | V_ORS | V_SUBSEP | V_CONVFMT | V_OFMT => {
+                    if slot == V_OFS {
+                        self.rebuild_record();
+                    }
                     let _ = self.to_str(&val);
                 }
                 V_NR | V_FNR => {
@@ -966,9 +982,13 @@ impl Interp {
         if n == 0 {
             self.rebuild_record();
             let f = &mut self.f;
-            let v = f
-                .record_value
-                .get_or_insert_with(|| Value::from_field(f.record.clone(), FieldNode::Record));
+            let v = f.record_value.get_or_insert_with(|| {
+                if f.record_input {
+                    Value::from_field(f.record.clone(), FieldNode::Record)
+                } else {
+                    Value::str(f.record.clone())
+                }
+            });
             return Ok(v.clone());
         }
         self.ensure_split()?;
@@ -989,9 +1009,16 @@ impl Interp {
         Ok(v)
     }
 
-    fn set_field(&mut self, n: usize, s: Str) -> R<()> {
+    /// `$n = v`: gawk's `Op_store_field`. The field holds `v` itself -- a
+    /// copy, if `v` is another field (`UNFIELD`) -- and its text; `$0` is to
+    /// be rebuilt. `$0 = v` makes `v` the record, to be split again.
+    fn set_field(&mut self, n: usize, v: Value) -> R<()> {
+        let v = v.unfield();
+        let text = self.to_str(&v).as_ref().clone();
         if n == 0 {
-            self.set_record(s);
+            self.set_record(text);
+            self.f.record_value = Some(v);
+            self.f.record_input = false;
             return Ok(());
         }
         self.ensure_split()?;
@@ -1000,19 +1027,21 @@ impl Interp {
         }
         self.f.field_values.resize(self.f.fields.len(), None);
         if let Some(slot) = self.f.fields.get_mut(n.saturating_sub(1)) {
-            *slot = s;
+            *slot = text;
         }
         if let Some(slot) = self.f.field_values.get_mut(n.saturating_sub(1)) {
-            *slot = None;
+            *slot = Some(v);
         }
         self.f.record_valid = false;
         self.f.record_value = None;
         Ok(())
     }
 
+    /// A record read from input: `$0` and, once split, its fields are input.
     fn set_record(&mut self, rec: Str) {
         self.f.record = rec;
         self.f.record_value = None;
+        self.f.record_input = true;
         self.f.record_valid = true;
         self.f.split_valid = false;
     }
@@ -1147,8 +1176,9 @@ impl Interp {
     ///
     /// Every reader of the record goes through here rather than touching
     /// `self.f.record`, because `$2 = "x"` leaves the stored record stale on
-    /// purpose: rebuilding on assignment would join with whatever `OFS` was at
-    /// that moment, and awk joins with `OFS` as it is when `$0` is *read*.
+    /// purpose: gawk rebuilds when `$0` is next *read*, with the `OFS` then in
+    /// force -- or, if `OFS` is assigned first, with the `OFS` it replaces
+    /// (see `set_var`).
     fn record(&mut self) -> &Str {
         self.rebuild_record();
         &self.f.record
@@ -1160,15 +1190,24 @@ impl Interp {
             return;
         }
         let ofs = self.string_of(V_OFS);
+        let convfmt = self.convfmt();
         let mut out = Str::new();
         for (i, f) in self.f.fields.iter().enumerate() {
             if i > 0 {
                 out.extend_from_slice(&ofs);
             }
-            out.extend_from_slice(f);
+            // A number assigned to a field takes its text now, with the
+            // CONVFMT in force now, as gawk's `force_string` re-formats a
+            // number whose format has changed since.
+            match self.f.field_values.get(i) {
+                Some(Some(v @ Value::Num(_))) => out.extend_from_slice(&v.to_str(&convfmt)),
+                _ => out.extend_from_slice(f),
+            }
         }
         self.f.record = out;
+        // Rebuilt, `$0` is a string: gawk makes it with `make_str_node`.
         self.f.record_value = None;
+        self.f.record_input = false;
         self.f.record_valid = true;
     }
 }

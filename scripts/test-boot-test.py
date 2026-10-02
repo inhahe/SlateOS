@@ -135,7 +135,7 @@ def drop_fixture(path):
     """
     for attempt in range(1, _RMTREE_ATTEMPTS + 1):
         try:
-            shutil.rmtree(path)
+            gitenv.remove_tree(path, attempts=1)
         except FileNotFoundError:
             return
         except OSError as exc:
@@ -291,7 +291,7 @@ def available_bashes(candidates=BASH_CANDIDATES):
             seen.add(view)
             found.append(candidate)
     finally:
-        shutil.rmtree(probe, ignore_errors=True)
+        gitenv.remove_tree(probe)
     return found
 
 
@@ -392,7 +392,7 @@ class ScratchRepo:
         return f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
 
     def close(self):
-        shutil.rmtree(self.path, ignore_errors=True)
+        gitenv.remove_tree(self.path)
 
 
 def _quote(path):
@@ -464,7 +464,7 @@ def test_the_check_reads_the_tree_under_test_not_the_callers_cwd():
                 check(f"{tag} ...and the excluded records still are not",
                       _only_records_dirty(fragment, elsewhere, bash), 0)
             finally:
-                shutil.rmtree(elsewhere, ignore_errors=True)
+                gitenv.remove_tree(elsewhere)
         finally:
             repo.close()
 

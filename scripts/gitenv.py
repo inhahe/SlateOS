@@ -86,7 +86,10 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shutil
+import stat
 import sys
+import time
 
 # Variables that redirect git to a specific repository, index, object store or
 # config file. Everything here is documented in git(1) "ENVIRONMENT VARIABLES"
@@ -165,3 +168,48 @@ def scrub_environ() -> list[str]:
     for name in removed:
         del os.environ[name]
     return removed
+
+
+def _writable_and_again(func, path, exc: BaseException) -> None:
+    """`shutil.rmtree`'s error handler for `remove_tree`.
+
+    A read-only file: clear the bit and do the failed step again. git makes
+    every object and pack file read-only, and Windows will not unlink a
+    read-only file, so without this the first object stops the removal. Gone
+    already: nothing to do. Anything else is a real failure, raised.
+    """
+    if isinstance(exc, FileNotFoundError):
+        return
+    if not isinstance(exc, PermissionError):
+        raise exc
+    os.chmod(path, os.lstat(path).st_mode | stat.S_IWRITE)
+    func(path)
+
+
+def remove_tree(path: str | os.PathLike[str], attempts: int = 5, backoff: float = 0.05) -> None:
+    """Remove a throwaway repository -- or any fixture directory -- whole.
+
+    `shutil.rmtree(path, ignore_errors=True)`, which the fixtures here used,
+    fails silently on the first of git's read-only object files on Windows and
+    leaves the whole fixture behind: 43 of `test-gate-cache.py`'s were found
+    in the temp directory on 2026-10-02, and `test-boot-history-commit.py`
+    said "[WinError 5] Access is denied" on every run. This clears the bit
+    and carries on, and retries the whole removal a few times with a short
+    backoff, because Windows keeps a handle on a just-written file for a
+    moment (the indexer, Defender) and a directory cannot go while one is
+    held. What still cannot be removed is raised: a fixture left behind is a
+    leak worth hearing about. A tree that is not there is not an error.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            if sys.version_info >= (3, 12):
+                shutil.rmtree(path, onexc=_writable_and_again)
+            else:
+                shutil.rmtree(path, onerror=lambda f, p, ei: _writable_and_again(f, p, ei[1]))
+            return
+        except FileNotFoundError:
+            return
+        except OSError:
+            if attempt == attempts:
+                raise
+            time.sleep(backoff * attempt)

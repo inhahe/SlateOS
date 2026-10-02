@@ -6958,34 +6958,6 @@ check_lane_c_gui_gates() {
         return 1
     fi
 
-    # The tech-debt index, which is a machine interface whether or not anyone
-    # meant it to be: every triage figure quoted in this project comes out of
-    # a grep on `known-issues.md`'s headings. Two shapes have already made one
-    # of those figures wrong -- a lowercase `-- fixed` marker that a
-    # case-sensitive grep counts as open, and a closed entry quoting its own
-    # original text under a second `##` heading, so every count sees it twice.
-    # Neither is visible by reading; both are one regex to refuse.
-    if ! run_checker known-issues-index-selftest "$py" \
-        "$PROJECT_ROOT/scripts/check-known-issues-index.py" --self-test; then
-        echo "" >&2
-        echo "ERROR: refusing to build.  The known-issues index gate no longer" >&2
-        echo "agrees with its own fixtures, so its verdict on the file means" >&2
-        echo "nothing.  An anchored regex that lost its MULTILINE flag matched" >&2
-        echo "zero of 223 headings once already." >&2
-        return 1
-    fi
-
-    echo "=== Checking that the tech-debt index can still be counted ==="
-    if ! run_checker known-issues-index "$py" \
-        "$PROJECT_ROOT/scripts/check-known-issues-index.py"; then
-        echo "" >&2
-        echo "ERROR: refusing to build.  A heading above breaks the contract" >&2
-        echo "every triage grep depends on: either two entries share a slug, so" >&2
-        echo "each is counted twice, or a status marker is lowercase, so a" >&2
-        echo "case-sensitive grep counts a closed entry as open." >&2
-        return 1
-    fi
-
     # A gate that has stopped scanning reports zero findings exactly as a
     # clean tree does, so the key-release gate is checked against its own
     # fixture before its verdict on the tree is believed.
@@ -7823,125 +7795,73 @@ check_python_suites() {
 
 check_python_suites
 
-# Keep `design-decisions.md`'s per-lane numbering bands intact.
+# Keep the shared entry documents well-formed and honest about status:
+# scripts/check-docs.py.
 #
-# WHY THIS IS A BUILD GATE AND NOT A LINT.  `design-decisions.md` is written by
-# three lanes at once, and the bands are what let them do that: each lane
-# inserts inside its own numeric range, so each lane's insertion point is a
-# different line offset and git never has to compare two lanes' prose.  When
-# that slips, git does not say so.  On 2026-08-27 lanes A and B both wrote a
-# section 626; git reported a 350-line `CONFLICT (content)` naming neither the
-# duplication nor the number, and it was caught only because lane A happened to
-# grep afterwards.  Writing the checker found nine *more* live duplicates
-# (268-276) that nobody had caught at all.  A convention that is enforced by
-# remembering to grep is not enforced.
+# Until 2026-10-02 this was three gates -- check-design-decisions-bands.py (each
+# lane inserting inside its own numeric band, so two lanes never wrote the same
+# line offset of one file), check-open-questions.py (no question filed below
+# `# Resolved`) and check-known-issues-index.py (unique heading slugs, upper-case
+# status markers). Each guarded a failure of a single file written by several
+# lanes at once. Since the cutover every issue, decision and question is its own
+# file (scripts/docs_layout.py), so those failures cannot happen, and check-docs.py
+# carries forward what they protected -- section numbers inside each lane's open
+# band and never reissued, `**Lane:**` on every new decision, an
+# `open-questions/` that holds only OPEN questions named by their ids, upper-case
+# status markers -- plus the done/open split: closed issues in
+# known-issues-resolved/, no done items left in todo.txt or roadmap.md.
 #
-# WHY IT RUNS HERE, BEFORE THE BUILD.  It costs ~0.3 s and needs no toolchain,
-# and the thing it protects is a document -- so failing before an hour of build
-# and boot is the whole benefit.  It cannot fail on anything that was already
-# in the tree: existing sections are grandfathered by
-# `scripts/design-decisions-baseline.json`, so it fires only on something added
-# after it landed.
+# WHY IT RUNS HERE, BEFORE THE BUILD: it costs about a second and needs no
+# toolchain, and what it protects is a document, so failing before an hour of
+# build and boot is the whole benefit. Only this lane's own entries can fail it;
+# another lane's are printed as warnings (design-decisions §903: a build must not
+# refuse over a sentence only another lane may edit). What the cutover inherited
+# is grandfathered in scripts/docs-baseline.json, so it fires only on something
+# added after it.
 #
-# It exits 1 for "the document is wrong" and 2 for "the checker could not run"
-# (missing baseline, unreadable file); both stop the build, but the message
-# distinguishes them, because sending a reader to the document when the checker
-# is what broke wastes the trip.
-check_design_decisions_bands() {
+# Exit 1 is "the documents are wrong", 2 "no verdict" (unreadable tree, a parse
+# that came back implausibly empty); run_checker reports the difference.
+check_docs() {
     local py=""
     if command -v python &>/dev/null; then
         py=python
     elif command -v python3 &>/dev/null; then
         py=python3
     else
-        echo "=== design-decisions.md band check: skipped (no python) ===" >&2
+        echo "=== shared-documents check: skipped (no python) ===" >&2
         return 0
     fi
 
-    echo "=== Checking design-decisions.md numbering bands ==="
-    local rc
-    run_checker check-design-decisions-bands "$py" -u \
-        "$PROJECT_ROOT/scripts/check-design-decisions-bands.py" && rc=0 || rc=$?
-    if [ "$rc" -eq 0 ]; then
-        return 0
-    fi
-
-    # No `rc -eq 2` arm any more: this gate used to carry its own "a broken
-    # checker, not a broken document" branch, which was the right instinct and
-    # covered one exit code out of all the ways a checker can fail to reach a
-    # verdict -- an uncaught exception exits *1*, so it landed in the accusing
-    # branch below.  run_checker now makes that distinction for every gate in
-    # the file, and never returns anything but 0 or 1, so the arm would be dead
-    # code claiming a guarantee it no longer provides.
-    echo "" >&2
-    echo "ERROR: refusing to build.  design-decisions.md violates the" >&2
-    echo "per-lane numbering bands.  Two lanes sharing a section number is" >&2
-    echo "invisible to git, which is why this is a gate.  The rule is in" >&2
-    echo "the file's own 'Numbering and file order' header; run" >&2
-    echo "    python scripts/check-design-decisions-bands.py" >&2
-    echo "for your lane's next number and the line to insert after." >&2
-    exit 1
-}
-
-check_design_decisions_bands
-
-# `open-questions.md` is the operator's decision queue, and its one structural
-# rule -- open questions in the body, answered ones below `# Resolved` -- was
-# broken eight times before anything checked it.  Three separate lanes filed a
-# new question into the archive, because that is simply where the file ends,
-# and an open question filed under `# Resolved` is invisible: the operator
-# reads the queue from the top and never reaches it.
-#
-# Warnings rather than failures for two of the rules, which is the whole
-# design: a missing `C-Q<n>` identifier and a duplicate number whose copies are
-# all *archived* are both reported and neither stops the build.  A gate that
-# hard-failed on another lane's heading text would be cross-lane breakage --
-# lane A's build would refuse over a sentence only lane C may edit -- and
-# rewriting an archived entry to satisfy a checker would falsify the record of
-# what those numbers meant when they were answered.  See design-decisions.md
-# §903.
-check_open_questions() {
-    local py=""
-    if command -v python &>/dev/null; then
-        py=python
-    elif command -v python3 &>/dev/null; then
-        py=python3
-    else
-        echo "=== open-questions.md check: skipped (no python) ===" >&2
-        return 0
-    fi
-
-    echo "=== Checking the open-questions gate against its fixtures ==="
-    if ! run_checker check-open-questions-selftest "$py" -u \
-        "$PROJECT_ROOT/scripts/check-open-questions.py" --self-test; then
+    echo "=== Checking the shared-documents gate against its fixtures ==="
+    if ! run_checker check-docs-selftest "$py" -u \
+        "$PROJECT_ROOT/scripts/check-docs.py" --self-test; then
         echo "" >&2
-        echo "ERROR: refusing to build.  The open-questions gate no longer" >&2
+        echo "ERROR: refusing to build.  The shared-documents gate no longer" >&2
         echo "agrees with its own fixtures, so its verdict means nothing." >&2
         exit 1
     fi
 
-    echo "=== Checking open-questions.md structure ==="
-    if run_checker check-open-questions "$py" -u \
-        "$PROJECT_ROOT/scripts/check-open-questions.py"; then
+    echo "=== Checking the shared entry documents ==="
+    if run_checker check-docs "$py" -u "$PROJECT_ROOT/scripts/check-docs.py"; then
         return 0
     fi
 
     echo "" >&2
-    echo "ERROR: refusing to build.  open-questions.md is structurally wrong." >&2
-    echo "" >&2
-    echo "Almost always this is a new question appended to the end of the" >&2
-    echo "file, which puts it below \`# Resolved\` among the answered ones." >&2
-    echo "The operator reads the queue from the top, so a question filed" >&2
-    echo "there is not a question that was asked -- move it up into the body." >&2
-    echo "" >&2
-    echo "The other two causes: a body entry whose \`Status:\` is no longer" >&2
-    echo "OPEN (it has been answered, so it belongs in the archive index)," >&2
-    echo "and two entries sharing one identifier while at least one is still" >&2
-    echo "open (an answer naming that number could not be acted on)." >&2
+    echo "ERROR: refusing to build.  One of this lane's entries in the shared" >&2
+    echo "documents breaks a rule; each error above names the file and the rule." >&2
+    echo "The usual ones:" >&2
+    echo "  * a new decision without \`**Lane:**\` or outside your open band:" >&2
+    echo "        python scripts/check-docs.py --next-decision <lane>" >&2
+    echo "  * a new issue without a \`**Status:**\` line, or a lower-case marker" >&2
+    echo "  * a closed issue still in known-issues/ (git mv it to" >&2
+    echo "    known-issues-resolved/), or a done item left in roadmap.md:" >&2
+    echo "        python scripts/check-docs.py --fix-roadmap" >&2
+    echo "  * an old single-file document holding entries after a merge:" >&2
+    echo "        python scripts/docs-carry-forward.py" >&2
     exit 1
 }
 
-check_open_questions
+check_docs
 
 # A `---` on the line directly below prose is a setext underline, not a thematic
 # break: Markdown renders that paragraph's last line as an `<h2>` and drops the

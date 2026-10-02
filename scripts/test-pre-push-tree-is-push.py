@@ -131,7 +131,7 @@ def main() -> int:
         rc, _ = run(repo, fn, f" {head}", "kernel/", "scripts/")
         check("several paths, all clean, run the gate", rc, 0)
     finally:
-        shutil.rmtree(repo, ignore_errors=True)
+        gitenv.remove_tree(repo)
 
     print()
     if failures:

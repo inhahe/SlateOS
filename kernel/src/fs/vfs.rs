@@ -1161,6 +1161,17 @@ pub trait FileSystem: Send {
         None
     }
 
+    /// The volume's own identity, which travels with it from machine to
+    /// machine and outlives any mount of it: ext4's superblock UUID
+    /// (`s_uuid`), as `blkid` prints it.
+    ///
+    /// `None` for a filesystem without one (memfs, procfs, FAT here) and for an
+    /// all-zero UUID, which names no volume in particular. The deferred-operation
+    /// queue (`fs::deferred_ops`) files a volume's entries under it.
+    fn volume_uuid(&self) -> Option<[u8; 16]> {
+        None
+    }
+
     /// Discard (TRIM) the filesystem's free space on the backing device.
     ///
     /// Walks the free-space metadata and issues
@@ -1671,6 +1682,40 @@ pub struct FileId {
     pub fs_id: u64,
     /// Filesystem-local inode number (guaranteed non-zero in a `FileId`).
     pub ino: u64,
+}
+
+/// A mounted filesystem, as [`Vfs::volume_of`] reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VolumeInfo {
+    /// Where it is mounted.
+    pub mount: PathBuf,
+    /// Its type name (`"ext4"`, `"memfs"`, ...).
+    pub fs_type: String,
+    /// The mount's never-reused id: the `fs_id` half of every [`FileId`] on it.
+    pub fs_id: u64,
+    /// Whether it is mounted read-only.
+    pub read_only: bool,
+    /// The volume's own UUID ([`FileSystem::volume_uuid`]), if it has one.
+    pub uuid: Option<[u8; 16]>,
+}
+
+/// What a deferred delete or rename would act on ([`Vfs::deferral_target`]).
+#[derive(Debug, Clone)]
+pub struct DeferralTarget {
+    /// The name, as the host spells it (no namespace left to apply).
+    pub path: PathBuf,
+    /// The directory holding the name.
+    pub parent: PathBuf,
+    /// The file the name leads to now, the final component not followed.
+    pub id: FileId,
+    /// What kind of file it is.
+    pub entry_type: EntryType,
+    /// Its `chattr` marks.
+    pub attributes: FileAttr,
+    /// Its directory's `chattr` marks.
+    pub parent_attributes: FileAttr,
+    /// The filesystem it is on.
+    pub volume: VolumeInfo,
 }
 
 /// Which of the three renames a caller is asking for.
@@ -5151,24 +5196,166 @@ impl Vfs {
         Ok(mp.options)
     }
 
+    /// The mounted filesystem an already-resolved host `path` is on: where it
+    /// is mounted, its type, its `fs_id`, whether it is read-only, and the
+    /// volume's own UUID ([`FileSystem::volume_uuid`]).
+    ///
+    /// The mount table's lock is released before the filesystem's is taken
+    /// for the UUID, as everywhere else ([`MountPoint::fs_type`]).
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` when nothing is mounted over `path` (only before the root
+    /// is).
+    pub fn volume_of(path: impl AsRef<Path>) -> KernelResult<VolumeInfo> {
+        let path = path.as_ref();
+        let (fs, info) = {
+            let vfs = VFS.lock();
+            // The longest mount path over `path`, the later of two equal ones
+            // -- the one that shadows -- as `check_writable` chooses.
+            let mut best: Option<&MountPoint> = None;
+            for mp in &vfs.mounts {
+                if mount_matches(&mp.path, path)
+                    && best.is_none_or(|b| mp.path.len() >= b.path.len())
+                {
+                    best = Some(mp);
+                }
+            }
+            let mp = best.ok_or(KernelError::NotFound)?;
+            (
+                Arc::clone(&mp.fs),
+                VolumeInfo {
+                    mount: mp.path.clone(),
+                    fs_type: mp.fs_type.clone(),
+                    fs_id: mp.fs_id,
+                    read_only: mp.options.read_only,
+                    uuid: None,
+                },
+            )
+        };
+        let uuid = fs.lock().volume_uuid();
+        Ok(VolumeInfo { uuid, ..info })
+    }
+
+    /// The mounted filesystem `path` is on, with `path` resolved as the caller
+    /// resolves it (its namespace; every symlink followed) and the caller's
+    /// permission gate asked whether it may look (`Metadata`): for a request
+    /// that names a volume by any path on it, as `statfs` does.
+    ///
+    /// # Errors
+    ///
+    /// As resolution and the gate fail.
+    pub fn volume_named_by(path: impl AsRef<Path>) -> KernelResult<VolumeInfo> {
+        let host = Self::resolve_follow(path.as_ref())?;
+        check_path_access(&host, PathAccess::Metadata)?;
+        Self::volume_of(&host)
+    }
+
+    /// What a deferred delete or rename of `path` would act on
+    /// (`fs::deferred_ops`): the name as the host spells it, with the final
+    /// component not followed -- a deferred delete removes the name it was
+    /// given, as `unlink` does -- the file's identity, kind and `chattr`
+    /// marks, its directory and that directory's marks, and the volume.
+    ///
+    /// In the caller's context: its namespace resolves the path, and its
+    /// permission gate decides whether it may look (`Metadata`).
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` for a missing name; `DeviceBusy` for a mount point, which no
+    /// delete or rename could act on while it is one; `NotSupported` on a
+    /// filesystem without stable inode numbers, where nothing could say later
+    /// that the file is still the same one; the gate's error.
+    pub fn deferral_target(path: impl AsRef<Path>) -> KernelResult<DeferralTarget> {
+        let host = Self::resolve_no_follow(path.as_ref())?;
+        check_path_access(&host, PathAccess::Metadata)?;
+        let volume = Self::volume_of(&host)?;
+        let (fs, fs_id, _opts, relative) = resolve_mount(&host)?;
+        if relative.as_bytes() == b"/" {
+            return Err(KernelError::DeviceBusy);
+        }
+        let (meta, parent_attributes) = {
+            let mut guard = fs.lock();
+            let meta = guard.lmetadata(&relative)?;
+            let rel_parent = relative.parent().unwrap_or(Path::new("/"));
+            // A directory whose marks cannot be read has none to refuse by;
+            // the operation itself is checked again when it runs.
+            let parent_attributes = guard
+                .metadata(rel_parent)
+                .map_or(FileAttr::NONE, |m| m.attributes);
+            (meta, parent_attributes)
+        };
+        if meta.ino == 0 {
+            return Err(KernelError::NotSupported);
+        }
+        let parent = host.parent().unwrap_or(Path::new("/")).to_path_buf();
+        Ok(DeferralTarget {
+            path: host,
+            parent,
+            id: FileId {
+                fs_id,
+                ino: meta.ino,
+            },
+            entry_type: meta.entry_type,
+            attributes: meta.attributes,
+            parent_attributes,
+            volume,
+        })
+    }
+
+    /// The name a deferred rename would move its file to, as the host spells
+    /// it (the caller's namespace applied, the final component not followed
+    /// and not required to exist), and the `fs_id` of the filesystem it is on.
+    ///
+    /// The caller's gate is asked whether it may look (`Metadata`), as for
+    /// the target: a name under a directory its capability tags refuse it is
+    /// not one it may learn anything about.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` when a directory on the way is missing; `DeviceBusy` for a
+    /// mount point; the gate's error.
+    pub fn deferral_destination(path: impl AsRef<Path>) -> KernelResult<(PathBuf, u64)> {
+        let host = Self::resolve_no_follow(path.as_ref())?;
+        check_path_access(&host, PathAccess::Metadata)?;
+        let (_fs, fs_id, _opts, relative) = resolve_mount(&host)?;
+        if relative.as_bytes() == b"/" {
+            return Err(KernelError::DeviceBusy);
+        }
+        Ok((host, fs_id))
+    }
+
     /// Re-mount a filesystem with new options (e.g., `remount,ro`).
     pub fn remount(mount_path: impl AsRef<Path>, options: MountOptions) -> KernelResult<()> {
         // Same normalisation as `mount`/`unmount`: identify the mount by its
         // canonical spelling, not by the caller's.
         let mount_path = &normalize_mount_path(mount_path.as_ref());
-        let mut vfs = VFS.lock();
-        for mp in &mut vfs.mounts {
-            if mp.path.as_path() == mount_path.as_path() {
-                crate::serial_println!(
-                    "[vfs] Remounted '{}' with options: {}",
-                    mount_path.display(),
-                    options.to_string(),
-                );
-                mp.options = options;
-                return Ok(());
-            }
+        let became_writable = {
+            let mut vfs = VFS.lock();
+            let Some(mp) = vfs
+                .mounts
+                .iter_mut()
+                .find(|mp| mp.path.as_path() == mount_path.as_path())
+            else {
+                return Err(KernelError::NotFound);
+            };
+            crate::serial_println!(
+                "[vfs] Remounted '{}' with options: {}",
+                mount_path.display(),
+                options.to_string(),
+            );
+            let became_writable = mp.options.read_only && !options.read_only;
+            mp.options = options;
+            became_writable
+        };
+        // A volume that was read-only is the commonest reason an operation
+        // was deferred, and what clears it is this, not a mount: replay its
+        // queue now, as a mount does (`fs::deferred_ops`). Best-effort, as
+        // there: the remount has happened whatever the replay finds.
+        if became_writable {
+            super::deferred_ops::replay_on_mount(mount_path);
         }
-        Err(KernelError::NotFound)
+        Ok(())
     }
 
     /// Find mount-point names that are direct children of `dir_path`, each
@@ -9118,7 +9305,7 @@ pub const S_ISGID: u16 = 0o2000;
 /// filesystem's lock.
 fn creator_ids() -> (u32, u32) {
     let task = crate::sched::current_task_id();
-    match crate::proc::thread::owner_process(task) {
+    match crate::proc::thread::acting_process(task) {
         Some(pid) if pid != 0 => crate::proc::pcb::process_uid_gid(pid).unwrap_or((0, 0)),
         _ => (0, 0),
     }
@@ -9172,7 +9359,7 @@ fn init_new_owner(
 /// process being torn down), which the permission checks let pass.
 fn caller_uid_gid() -> Option<(u32, u32)> {
     let task_id = crate::sched::current_task_id();
-    let pid = match crate::proc::thread::owner_process(task_id) {
+    let pid = match crate::proc::thread::acting_process(task_id) {
         Some(pid) if pid != 0 => pid,
         _ => return None,
     };
@@ -9492,9 +9679,10 @@ pub(crate) fn check_path_access(path: &Path, want: PathAccess) -> KernelResult<(
         return Ok(());
     }
 
-    // Get the calling process's PID.
+    // Get the calling process's PID: none for a kernel task, or a task
+    // acting with the kernel's authority (`proc::thread::as_kernel`).
     let task_id = crate::sched::current_task_id();
-    let pid = match crate::proc::thread::owner_process(task_id) {
+    let pid = match crate::proc::thread::acting_process(task_id) {
         Some(pid) if pid != 0 => pid,
         _ => return Ok(()), // Kernel task or PID 0 — bypass.
     };
@@ -9556,7 +9744,7 @@ pub(crate) fn check_object_access(
         return Ok(());
     }
     let task_id = crate::sched::current_task_id();
-    let pid = match crate::proc::thread::owner_process(task_id) {
+    let pid = match crate::proc::thread::acting_process(task_id) {
         Some(pid) if pid != 0 => pid,
         _ => return Ok(()), // Kernel task or PID 0 -- bypass.
     };
@@ -14141,9 +14329,8 @@ pub fn self_test_acl_door() -> KernelResult<()> {
         // Through the permission gate's own decision, with the caller's
         // identity given (`path_access_verdict`): a self-test runs as a kernel
         // task, which `check_path_access` lets through before asking.
-        let check = |uid: u32, want: PathAccess| {
-            path_access_verdict(Path::new(FILE), uid, uid, &[], want)
-        };
+        let check =
+            |uid: u32, want: PathAccess| path_access_verdict(Path::new(FILE), uid, uid, &[], want);
         if check(2000, PathAccess::Write).is_err() || check(3000, PathAccess::Write).is_ok() {
             return fail("the stored ACL does not decide as it says");
         }

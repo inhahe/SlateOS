@@ -6448,6 +6448,50 @@ pub const SYS_FS_ADD_SEALS: u64 = 1124;
 /// `SYS_FS_ADD_SEALS`'s bits; 0 for none. Any handle of the caller's.
 pub const SYS_FS_GET_SEALS: u64 = 1125;
 
+// Deferred filesystem operations (1126-1128): `fs::deferred_ops`,
+// design-decisions 1529, for `rm`/`mv` and the file manager to offer "do it
+// when the volume can"
+// (`requests/b-ade-deferred-ops-needs-a-syscall-and-a-queue-that-can-live-off-the-volume.md`).
+
+/// `SYS_FS_DEFER(op, path, path_len, dest, dest_len, reason)` -- queue a
+/// delete (`op` 1) or rename (`op` 2, to `dest`) of the name `path` that
+/// cannot happen now, to run when its volume is mounted or remounted
+/// read-write. `reason`, for the queue's reader only: 1 the volume is busy, 2
+/// read-only, 3 full. Returns the entry's id.
+///
+/// The kernel takes everything that decides what is done and for whom: the
+/// file is the one `path` names now (the final component not followed), by
+/// its inode on its volume, and the caller's uid, gid and groups are recorded.
+/// It must be allowed now what it asks (rule 3: never escalate a denial) and
+/// is checked again when the operation runs. `File` capability with
+/// `DELETE` for a delete, `WRITE` for a rename.
+///
+/// `InvalidArgument`: an unknown `op` or `reason`, an empty or relative path
+/// (paths are absolute here, as for every native path call), a rename with
+/// no `dest` or a delete with one. `NotFound`: no such name (an absent
+/// volume's paths included -- an absent volume cannot be queued for).
+/// `NotSupported`: a filesystem without stable inode numbers or a UUID.
+/// `DeviceBusy`: `path` or `dest` is a mount point. `CrossDevice`: `dest` on
+/// another volume. `PermissionDenied`/`NotPermitted`: the caller could not do
+/// it with nothing in the way. `ResourceExhausted`: the volume has 4096
+/// entries. Otherwise what kept both places from taking the entry -- the
+/// volume itself, then the system volume's `/var/lib/deferred-ops/<uuid>/`.
+pub const SYS_FS_DEFER: u64 = 1126;
+
+/// `SYS_FS_DEFER_LIST(path, path_len, buf, buf_len)` -- the queued operations
+/// of the volume `path` is on that the caller may see -- its own, or every
+/// one for root -- written to `buf`: for each, an `id=<n>` line, the entry's
+/// own `key=value` lines (`fs::deferred_ops`'s format) and a blank line.
+/// Returns the bytes written; `BufferTooSmall` with nothing written when they
+/// would not fit in `buf_len` (or past 16 MiB). `File` capability with `READ`.
+pub const SYS_FS_DEFER_LIST: u64 = 1127;
+
+/// `SYS_FS_DEFER_CANCEL(path, path_len, id)` -- cancel entry `id` of the
+/// volume `path` is on. Whoever queued it, or root; anyone else
+/// `NotPermitted`. `NotFound` for no such entry. `File` capability with
+/// `DELETE`.
+pub const SYS_FS_DEFER_CANCEL: u64 = 1128;
+
 /// Bytes [`SYS_UNIX_NAME`] writes: kind, length, 108 bytes of name.
 pub const UNIX_ADDR_LEN: usize = 116;
 /// Bytes [`SYS_UNIX_RECV`] writes at `info_ptr`.

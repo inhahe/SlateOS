@@ -75,7 +75,7 @@ class Fixture:
         return p.returncode, p.stdout, notes[-1] if notes else ""
 
     def cleanup(self) -> None:
-        shutil.rmtree(self.root, ignore_errors=True)
+        gitenv.remove_tree(self.root)
 
 
 def git(repo: str, *args: str) -> str:
@@ -266,7 +266,7 @@ def cases(fx: Fixture) -> None:
     _, _, note = fx.run(leaver)
     check("a directory the run made and left behind is not stored",
           ("not stored" in note, "left" in note), (True, True))
-    shutil.rmtree(made, ignore_errors=True)
+    gitenv.remove_tree(made)
 
     # --- the tracer is never why a gate fails -----------------------------------
     # A real difference the tracer makes: its DirEntry stand-in (which is how

@@ -136,7 +136,7 @@ impl Caller {
     #[must_use]
     pub fn current() -> Self {
         let task = crate::sched::current_task_id();
-        let pid = crate::proc::thread::owner_process(task).filter(|&pid| pid != 0);
+        let pid = crate::proc::thread::acting_process(task).filter(|&pid| pid != 0);
         let uid = pid
             .and_then(crate::proc::pcb::get_credentials)
             .map(|c| c.uid);

@@ -1180,6 +1180,101 @@ fn stage_segments(
 }
 
 // ---------------------------------------------------------------------------
+// The memory map the new kernel sees
+// ---------------------------------------------------------------------------
+
+/// The firmware memory-map type that is dead once the jump is made becomes
+/// `USABLE`: the old kernel image and modules, and the old bootloader-reclaimable
+/// memory (its Limine structures), are all free to the new kernel. Every other
+/// type is kept.
+fn converted_base_type(type_: u64) -> u64 {
+    match type_ {
+        memmap_type::EXECUTABLE_AND_MODULES | memmap_type::BOOTLOADER_RECLAIMABLE => {
+            memmap_type::USABLE
+        }
+        other => other,
+    }
+}
+
+/// Build the memory map the new kernel should see, from the firmware's.
+///
+/// The firmware map is still readable at handoff time — SlateOS never reclaims
+/// bootloader-reclaimable memory, so the Limine responses persist — and is the
+/// base. Dead old types become `USABLE` ([`converted_base_type`]); then
+/// `overlays` impose the handoff's own types on their ranges: the destination as
+/// `EXECUTABLE_AND_MODULES` (so the new kernel does not allocate over itself) and
+/// the regions it must read during early boot and keep — the handoff page tables
+/// (which *become* its kernel tables) and the Limine responses — as
+/// `BOOTLOADER_RECLAIMABLE` (which the new kernel's allocator does not touch).
+/// The staged source frames and the trampoline control page need no overlay:
+/// once the copy and jump are done they are free, so leaving them `USABLE` is
+/// correct. ACPI, reserved, framebuffer and bad-memory regions are kept as-is.
+///
+/// `overlays` is a list of `(range, type)`; the ranges must not overlap one
+/// another. Adjacent same-type ranges in the result are merged. A sub-range
+/// covered by neither a firmware entry nor an overlay is a gap and is omitted,
+/// exactly as the firmware map omits the gaps between its entries.
+#[must_use]
+pub fn adjust_memory_map(
+    firmware: &[&MemmapEntry],
+    overlays: &[(PhysRange, u64)],
+) -> alloc::vec::Vec<(u64, u64, u64)> {
+    // Every edge at which the type can change: firmware entry and overlay bounds.
+    let mut bounds: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+    for e in firmware {
+        bounds.push(e.base);
+        bounds.push(e.base.saturating_add(e.length));
+    }
+    for (r, _) in overlays {
+        bounds.push(r.start);
+        bounds.push(r.end);
+    }
+    bounds.sort_unstable();
+    bounds.dedup();
+
+    // Classify each gap between consecutive edges: an overlay wins, else the
+    // firmware entry that covers it (type converted), else it is a hole.
+    let mut raw: alloc::vec::Vec<(u64, u64, u64)> = alloc::vec::Vec::new();
+    for pair in bounds.windows(2) {
+        let &[lo, hi] = pair else { continue };
+        if lo >= hi {
+            continue;
+        }
+        let type_ = overlays
+            .iter()
+            .find(|(r, _)| r.start <= lo && lo < r.end)
+            .map(|(_, t)| *t)
+            .or_else(|| {
+                firmware
+                    .iter()
+                    .find(|e| e.base <= lo && lo < e.base.saturating_add(e.length))
+                    .map(|e| converted_base_type(e.type_))
+            });
+        if let Some(t) = type_ {
+            raw.push((lo, hi, t));
+        }
+    }
+
+    // Merge adjacent ranges of the same type into single entries.
+    let mut merged: alloc::vec::Vec<(u64, u64, u64)> = alloc::vec::Vec::new();
+    for (lo, hi, t) in raw {
+        if let Some(last) = merged.last_mut() {
+            if last.1 == lo && last.2 == t {
+                last.1 = hi;
+                continue;
+            }
+        }
+        merged.push((lo, hi, t));
+    }
+
+    // Return as (base, length, type).
+    merged
+        .into_iter()
+        .map(|(lo, hi, t)| (lo, hi.saturating_sub(lo), t))
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 
@@ -1528,6 +1623,50 @@ pub fn self_test() -> KernelResult<()> {
         }
         // SAFETY: nothing is reading these frames.
         unsafe { staged.free() };
+    }
+
+    // ---- the adjusted memory map (pure) ----
+    let fw0 = MemmapEntry { base: 0, length: 0x10000, type_: memmap_type::USABLE };
+    // The old kernel image, and old bootloader-reclaimable, both become usable.
+    let fw1 = MemmapEntry {
+        base: 0x10000,
+        length: 0x10000,
+        type_: memmap_type::EXECUTABLE_AND_MODULES,
+    };
+    let fw2 = MemmapEntry {
+        base: 0x20000,
+        length: 0x1000,
+        type_: memmap_type::BOOTLOADER_RECLAIMABLE,
+    };
+    let fw3 = MemmapEntry {
+        base: 0x21000,
+        length: 0x1000,
+        type_: memmap_type::ACPI_RECLAIMABLE,
+    };
+    let fw4 = MemmapEntry {
+        base: 0x22000,
+        length: 0x1000,
+        type_: memmap_type::RESERVED,
+    };
+    let fw: [&MemmapEntry; 5] = [&fw0, &fw1, &fw2, &fw3, &fw4];
+    let overlays = [
+        (PhysRange { start: 0x1000, end: 0x5000 }, memmap_type::EXECUTABLE_AND_MODULES),
+        (PhysRange { start: 0x5000, end: 0x6000 }, memmap_type::BOOTLOADER_RECLAIMABLE),
+    ];
+    let adjusted = adjust_memory_map(&fw, &overlays);
+    let expected: [(u64, u64, u64); 6] = [
+        (0x0, 0x1000, memmap_type::USABLE),
+        (0x1000, 0x4000, memmap_type::EXECUTABLE_AND_MODULES),
+        (0x5000, 0x1000, memmap_type::BOOTLOADER_RECLAIMABLE),
+        // 0x6000..0x21000: tail of the first usable, the old kernel, and old
+        // bootloader-reclaimable all merge into one usable run.
+        (0x6000, 0x1b000, memmap_type::USABLE),
+        (0x21000, 0x1000, memmap_type::ACPI_RECLAIMABLE),
+        (0x22000, 0x1000, memmap_type::RESERVED),
+    ];
+    selftest::check_eq!(adjusted.len(), expected.len(), "adjusted map entry count");
+    for (i, want) in expected.iter().enumerate() {
+        selftest::check_eq!(adjusted.get(i), Some(want), "adjusted map entry");
     }
 
     Ok(())

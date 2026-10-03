@@ -284,7 +284,7 @@ MUTATIONS = [
         'Ctrl+Left nudges the cursor instead of going to the marker',
         '            Key::Left | Key::Right => {\n                let forward = key.key == Key::Right;\n                self.with_open(|o| {\n                    o.to_marker(forward);\n                });',
         '            Key::Left | Key::Right => {\n                let forward = key.key == Key::Right;\n                self.with_open(|o| o.nudge(if forward { 0.1 } else { -0.1 }));',
-        ['a_chord_is_not_a_recorder_key_and_altgr_is_not_ctrl'],
+        ['the_cursor_moves_by_the_keys', 'a_chord_is_not_a_recorder_key_and_altgr_is_not_ctrl'],
     ),
 ]
 

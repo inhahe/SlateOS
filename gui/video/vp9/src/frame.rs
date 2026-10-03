@@ -29,6 +29,12 @@ pub trait Pixel: Copy + Default + PartialEq + Send + Sync + core::fmt::Debug + '
     fn from_int(v: i32) -> Self;
     /// The frame, if its samples are of this type.
     fn from_any(f: &AnyFrame) -> Option<&FrameBuf<Self>>;
+    /// The samples as bytes, if they are bytes (an 8-bit stream's): lets a
+    /// hot loop take a path written for bytes. `None` for 16-bit samples.
+    /// Which it is is settled when the code is compiled, not per call.
+    fn bytes(s: &[Self]) -> Option<&[u8]>;
+    /// `bytes`, for writing.
+    fn bytes_mut(s: &mut [Self]) -> Option<&mut [u8]>;
 }
 
 impl Pixel for u8 {
@@ -48,6 +54,14 @@ impl Pixel for u8 {
             AnyFrame::High(_) => None,
         }
     }
+    #[inline(always)]
+    fn bytes(s: &[Self]) -> Option<&[u8]> {
+        Some(s)
+    }
+    #[inline(always)]
+    fn bytes_mut(s: &mut [Self]) -> Option<&mut [u8]> {
+        Some(s)
+    }
 }
 
 impl Pixel for u16 {
@@ -65,6 +79,14 @@ impl Pixel for u16 {
             AnyFrame::High(f) => Some(f),
             AnyFrame::Eight(_) => None,
         }
+    }
+    #[inline(always)]
+    fn bytes(_: &[Self]) -> Option<&[u8]> {
+        None
+    }
+    #[inline(always)]
+    fn bytes_mut(_: &mut [Self]) -> Option<&mut [u8]> {
+        None
     }
 }
 

@@ -114,9 +114,16 @@ fn px<P: Pixel>(plane: &[P], stride: usize, x: usize, y: usize) -> i32 {
         .map_or(0, |p| p.int())
 }
 
+/// A block's predicted samples before they are stored, `[row][column]`.
+/// The decoder keeps one and lends it to every prediction, so that
+/// predicting a 4x4 block does not clear 4 KiB first.
+pub type Prediction = [[i32; 32]; 32];
+
 /// Predict the `4 << tx_size` square block at (`x0`, `y0`) of `plane` with
 /// `mode`, reading its neighbours from the same plane: libvpx's
-/// `vp9_predict_intra_block` and `build_intra_predictors(_high)`.
+/// `vp9_predict_intra_block` and `build_intra_predictors(_high)`. `out` is
+/// scratch space; what it holds before and after is of no consequence.
+#[allow(clippy::too_many_arguments)]
 pub fn predict<P: Pixel>(
     plane: &mut [P],
     stride: usize,
@@ -126,6 +133,7 @@ pub fn predict<P: Pixel>(
     tx_size: TxSize,
     e: &Edges,
     bit_depth: u8,
+    out: &mut Prediction,
 ) {
     let bs = 4usize << tx_size.min(3);
     let base = 128i32 << (bit_depth.clamp(8, 12) - 8);
@@ -212,7 +220,7 @@ pub fn predict<P: Pixel>(
     }
 
     let max = (1i32 << bit_depth.clamp(8, 12)) - 1;
-    let out = kernel(mode, bs, &edge, e.have_left, e.have_top, base, max);
+    kernel(mode, bs, &edge, e.have_left, e.have_top, base, max, out);
 
     for (r, row) in out.iter().enumerate().take(bs) {
         let start = (y0 + r) * stride + x0;
@@ -224,8 +232,10 @@ pub fn predict<P: Pixel>(
     }
 }
 
-/// Run `mode`'s predictor for a `bs`-pixel block over `edge`. DC chooses
-/// its variant by which edges exist; TM clips to `0..=max`.
+/// Run `mode`'s predictor for a `bs`-pixel block over `edge`, writing every
+/// sample of the block's `bs` x `bs` corner of `out`. DC chooses its
+/// variant by which edges exist; TM clips to `0..=max`.
+#[allow(clippy::too_many_arguments)]
 fn kernel(
     mode: PredictionMode,
     bs: usize,
@@ -234,10 +244,10 @@ fn kernel(
     have_top: bool,
     base: i32,
     max: i32,
-) -> [[i32; 32]; 32] {
-    let mut out = [[0i32; 32]; 32];
+    out: &mut Prediction,
+) {
     match (mode, bs) {
-        (DC_PRED, _) => dc(edge, bs, have_left, have_top, base, &mut out),
+        (DC_PRED, _) => dc(edge, bs, have_left, have_top, base, out),
         (V_PRED, _) => {
             for row in out.iter_mut().take(bs) {
                 for c in 0..bs {
@@ -258,22 +268,26 @@ fn kernel(
                 }
             }
         }
-        (D207_PRED, 4) => d207_4x4(edge, &mut out),
-        (D63_PRED, 4) => d63_4x4(edge, &mut out),
-        (D45_PRED, 4) => d45_4x4(edge, &mut out),
-        (D117_PRED, 4) => d117_4x4(edge, &mut out),
-        (D135_PRED, 4) => d135_4x4(edge, &mut out),
-        (D153_PRED, 4) => d153_4x4(edge, &mut out),
-        (D207_PRED, _) => d207(edge, bs, &mut out),
-        (D63_PRED, _) => d63(edge, bs, &mut out),
-        (D45_PRED, _) => d45(edge, bs, &mut out),
-        (D117_PRED, _) => d117(edge, bs, &mut out),
-        (D135_PRED, _) => d135(edge, bs, &mut out),
-        (D153_PRED, _) => d153(edge, bs, &mut out),
-        _ => {}
+        (D207_PRED, 4) => d207_4x4(edge, out),
+        (D63_PRED, 4) => d63_4x4(edge, out),
+        (D45_PRED, 4) => d45_4x4(edge, out),
+        (D117_PRED, 4) => d117_4x4(edge, out),
+        (D135_PRED, 4) => d135_4x4(edge, out),
+        (D153_PRED, 4) => d153_4x4(edge, out),
+        (D207_PRED, _) => d207(edge, bs, out),
+        (D63_PRED, _) => d63(edge, bs, out),
+        (D45_PRED, _) => d45(edge, bs, out),
+        (D117_PRED, _) => d117(edge, bs, out),
+        (D135_PRED, _) => d135(edge, bs, out),
+        (D153_PRED, _) => d153(edge, bs, out),
+        // Not an intra mode, which the mode readers never produce: a flat
+        // block rather than whatever the scratch held.
+        _ => {
+            for row in out.iter_mut().take(bs) {
+                row[..bs].fill(base);
+            }
+        }
     }
-
-    out
 }
 
 /// libvpx's `dc_predictor`, `dc_top_predictor`, `dc_left_predictor` and
@@ -791,7 +805,10 @@ mod tests {
                         for l in edge.left.iter_mut().take(bs) {
                             *l = (rng.next() & mask) as i32;
                         }
-                        let out = kernel(mode, bs, &edge, have_left, have_top, base, max);
+                        // Garbage in the scratch first: a sample the kernel left
+                        // unwritten would change the hash.
+                        let mut out = [[-1; 32]; 32];
+                        kernel(mode, bs, &edge, have_left, have_top, base, max, &mut out);
                         for row in out.iter().take(bs) {
                             for &v in row.iter().take(bs) {
                                 h = if bd == 8 {
@@ -835,16 +852,56 @@ mod tests {
     fn missing_edges_read_as_127_above_and_129_left() {
         let mut p = plane(64, 64, |_, _| 50);
         // No row above: V predicts 127 everywhere.
-        predict(&mut p, 64, 0, 0, V_PRED, 0, &edges(false, false), 8);
+        predict(
+            &mut p,
+            64,
+            0,
+            0,
+            V_PRED,
+            0,
+            &edges(false, false),
+            8,
+            &mut [[0; 32]; 32],
+        );
         assert!((0..4).all(|y| p[y * 64..y * 64 + 4].iter().all(|&v| v == 127)));
         // No column to the left: H predicts 129.
-        predict(&mut p, 64, 8, 8, H_PRED, 1, &edges(true, false), 8);
+        predict(
+            &mut p,
+            64,
+            8,
+            8,
+            H_PRED,
+            1,
+            &edges(true, false),
+            8,
+            &mut [[0; 32]; 32],
+        );
         assert!((8..16).all(|y| p[y * 64 + 8..y * 64 + 16].iter().all(|&v| v == 129)));
         // At 10 bits, one either side of 512.
         let mut q = vec![0u16; 64 * 64];
-        predict(&mut q, 64, 0, 0, V_PRED, 0, &edges(false, false), 10);
+        predict(
+            &mut q,
+            64,
+            0,
+            0,
+            V_PRED,
+            0,
+            &edges(false, false),
+            10,
+            &mut [[0; 32]; 32],
+        );
         assert_eq!(q[0], 511);
-        predict(&mut q, 64, 0, 0, H_PRED, 0, &edges(false, false), 10);
+        predict(
+            &mut q,
+            64,
+            0,
+            0,
+            H_PRED,
+            0,
+            &edges(false, false),
+            10,
+            &mut [[0; 32]; 32],
+        );
         assert_eq!(q[0], 513);
     }
 
@@ -858,7 +915,7 @@ mod tests {
             frame_width: 16,
             ..edges(true, true)
         };
-        predict(&mut p, 64, 12, 8, V_PRED, 1, &e, 8);
+        predict(&mut p, 64, 12, 8, V_PRED, 1, &e, 8, &mut [[0; 32]; 32]);
         assert_eq!(
             &p[8 * 64 + 12..8 * 64 + 20],
             &[12, 13, 14, 15, 15, 15, 15, 15]
@@ -870,7 +927,7 @@ mod tests {
             frame_height: 10,
             ..edges(true, true)
         };
-        predict(&mut p, 64, 8, 4, H_PRED, 1, &e, 8);
+        predict(&mut p, 64, 8, 4, H_PRED, 1, &e, 8, &mut [[0; 32]; 32]);
         let col: Vec<u8> = (4..12).map(|y| p[y * 64 + 8]).collect();
         assert_eq!(col, vec![4, 5, 6, 7, 8, 9, 9, 9]);
     }
@@ -886,16 +943,26 @@ mod tests {
         // 4x4 with the pixels above-right: D45's bottom-right corner is
         // libvpx's H, above[7] = 10 * 15.
         let mut p = plane(64, 64, ramp);
-        predict(&mut p, 64, 8, 4, D45_PRED, 0, &right, 8);
+        predict(&mut p, 64, 8, 4, D45_PRED, 0, &right, 8, &mut [[0; 32]; 32]);
         assert_eq!(p[7 * 64 + 11], 150);
         // Without them, the row past the block repeats above[3] = 110.
         let mut p = plane(64, 64, ramp);
-        predict(&mut p, 64, 8, 4, D45_PRED, 0, &edges(true, true), 8);
+        predict(
+            &mut p,
+            64,
+            8,
+            4,
+            D45_PRED,
+            0,
+            &edges(true, true),
+            8,
+            &mut [[0; 32]; 32],
+        );
         assert_eq!(p[7 * 64 + 11], 110);
         // 8x8 never reads past its own width: above[8] repeats above[7] =
         // 150, so AVG3(140, 150, 150) = 148 rather than the real 150.
         let mut p = plane(64, 64, ramp);
-        predict(&mut p, 64, 8, 4, D45_PRED, 1, &right, 8);
+        predict(&mut p, 64, 8, 4, D45_PRED, 1, &right, 8, &mut [[0; 32]; 32]);
         assert_eq!(p[4 * 64 + 8 + 6], 148);
     }
 
@@ -905,9 +972,29 @@ mod tests {
         // exist; libvpx never asks, and here asking is harmless.
         let mut p = plane(64, 64, |_, _| 9);
         for mode in 0..10 {
-            predict(&mut p, 64, 0, 0, mode, 2, &edges(true, true), 8);
+            predict(
+                &mut p,
+                64,
+                0,
+                0,
+                mode,
+                2,
+                &edges(true, true),
+                8,
+                &mut [[0; 32]; 32],
+            );
         }
         let mut q = vec![0u16; 16];
-        predict(&mut q, 4, 0, 0, TM_PRED, 3, &edges(true, true), 12);
+        predict(
+            &mut q,
+            4,
+            0,
+            0,
+            TM_PRED,
+            3,
+            &edges(true, true),
+            12,
+            &mut [[0; 32]; 32],
+        );
     }
 }

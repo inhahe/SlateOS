@@ -144,6 +144,7 @@ pub(crate) fn build_inter_predictors_sb<P: Pixel>(
     mi: &ModeInfo,
     pos: &BlockPos,
     bit_depth: u8,
+    scratch: &mut McScratch<P>,
 ) -> Result<(), Error> {
     let k = kernel(mi.interp_filter);
     let max = (1i32 << bit_depth.clamp(8, 12)) - 1;
@@ -192,11 +193,13 @@ pub(crate) fn build_inter_predictors_sb<P: Pixel>(
                     for x in 0..n4_w {
                         let mv = average_split_mvs(ss_x, ss_y, mi, r, i);
                         i += 1;
-                        predict(frame, reference, &geo, 4 * x as i32, 4 * y as i32, 4, 4, mv);
+                        let piece = (4 * x as i32, 4 * y as i32, 4, 4);
+                        predict(frame, reference, &geo, piece, mv, scratch);
                     }
                 }
             } else {
-                predict(frame, reference, &geo, 0, 0, n4w_x4, n4h_x4, mi.mv[r]);
+                let piece = (0, 0, n4w_x4, n4h_x4);
+                predict(frame, reference, &geo, piece, mi.mv[r], scratch);
             }
         }
     }
@@ -284,19 +287,23 @@ fn clamp_mv_to_umv_border_sb(pos: &BlockPos, mv: Mv, bw: i32, bh: i32, ss_x: u32
     }
 }
 
-/// Predict the `w` x `h` piece at (`x`, `y`) of a block from one reference:
-/// libvpx's `dec_build_inter_predictors`.
-#[allow(clippy::too_many_arguments)]
+/// Predict the `w` x `h` piece at (`x`, `y`) of a block -- `piece` is
+/// `(x, y, w, h)` -- from one reference: libvpx's
+/// `dec_build_inter_predictors`.
 fn predict<P: Pixel>(
     frame: &mut FrameBuf<P>,
     reference: &FrameBuf<P>,
     g: &Geometry<'_>,
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
+    piece: (i32, i32, i32, i32),
     mv: Mv,
+    scratch: &mut McScratch<P>,
 ) {
+    let (x, y, w, h) = piece;
+    let McScratch {
+        temp,
+        border,
+        zeros,
+    } = scratch;
     let plane = g.plane;
     let ref_plane = &reference.planes[plane.min(2)];
     let frame_width = ref_plane.crop_width as i32;
@@ -394,7 +401,7 @@ fn predict<P: Pixel>(
             // repeated, then the prediction from it.
             let b_w = (x1 - x0 + 1).max(1) as usize;
             let b_h = (y1 - y0 + 1).max(1) as usize;
-            let mut mc = vec![P::default(); b_w * b_h];
+            border.resize(b_w * b_h, P::default());
             build_mc_border(
                 ref_plane,
                 x0,
@@ -403,16 +410,18 @@ fn predict<P: Pixel>(
                 b_h,
                 frame_width,
                 frame_height,
-                &mut mc,
+                border,
             );
             let offset = y_pad * 3 * b_w + x_pad * 3;
             let src = Source {
-                data: &mc,
+                data: border,
                 stride: b_w,
                 origin: offset,
+                zeros,
             };
             convolve(
                 &src,
+                temp,
                 &mut dst_plane.data,
                 dst_start,
                 dst_stride,
@@ -443,9 +452,11 @@ fn predict<P: Pixel>(
             data: &ref_plane.data,
             stride: ref_stride,
             origin: origin as usize,
+            zeros,
         };
         convolve(
             &src,
+            temp,
             &mut dst_plane.data,
             dst_start,
             dst_stride,
@@ -458,7 +469,7 @@ fn predict<P: Pixel>(
     } else {
         let b_w = w.max(1);
         let b_h = h.max(1);
-        let mut mc = vec![P::default(); b_w * b_h];
+        border.resize(b_w * b_h, P::default());
         build_mc_border(
             ref_plane,
             buf_x,
@@ -467,15 +478,17 @@ fn predict<P: Pixel>(
             b_h,
             frame_width,
             frame_height,
-            &mut mc,
+            border,
         );
         let src = Source {
-            data: &mc,
+            data: border,
             stride: b_w,
             origin: 0,
+            zeros,
         };
         convolve(
             &src,
+            temp,
             &mut dst_plane.data,
             dst_start,
             dst_stride,
@@ -490,6 +503,8 @@ fn predict<P: Pixel>(
 
 /// libvpx's `build_mc_border`: copy the `b_w` x `b_h` block at (`x`, `y`)
 /// of `plane`, repeating the edge pixels of its `w` x `h` picture outward.
+/// Each row is a run repeating the left edge, a copy, and a run repeating
+/// the right edge, as libvpx builds it.
 #[allow(clippy::too_many_arguments)]
 fn build_mc_border<P: Pixel>(
     plane: &crate::frame::Plane<P>,
@@ -502,15 +517,59 @@ fn build_mc_border<P: Pixel>(
     out: &mut [P],
 ) {
     let stride = plane.stride;
-    for (row, line) in out.chunks_mut(b_w).take(b_h).enumerate() {
-        let yy = (y + row as i32).clamp(0, (h - 1).max(0)) as usize;
-        let base = yy * stride;
-        for (col, p) in line.iter_mut().enumerate() {
-            let xx = (x + col as i32).clamp(0, (w - 1).max(0)) as usize;
-            *p = plane.data.get(base + xx).copied().unwrap_or_default();
+    let (w, h) = (w.max(1), h.max(1));
+    let bw = b_w as i32;
+    let left = (-x).clamp(0, bw) as usize;
+    let right = (x + bw - w).clamp(0, bw) as usize;
+    let copy = b_w.saturating_sub(left + right);
+    // The first column copied, and the picture's last.
+    let first = (x + left as i32).max(0) as usize;
+    let last = (w - 1) as usize;
+    for (row, line) in out.chunks_exact_mut(b_w).take(b_h).enumerate() {
+        let yy = (y + row as i32).clamp(0, h - 1) as usize;
+        let Some(src) = plane.data.get(yy * stride..) else {
+            line.fill(P::default());
+            continue;
+        };
+        let (l, rest) = line.split_at_mut(left);
+        let (c, r) = rest.split_at_mut(copy);
+        l.fill(src.first().copied().unwrap_or_default());
+        match src.get(first..first + copy) {
+            Some(s) => c.copy_from_slice(s),
+            None => c.fill(P::default()),
+        }
+        r.fill(src.get(last).copied().unwrap_or_default());
+    }
+}
+
+/// Scratch space a frame's inter predictions reuse from block to block, so
+/// that predicting allocates nothing.
+pub(crate) struct McScratch<P> {
+    /// The 2-D filter's horizontal pass: up to 135 rows of 64 (libvpx's
+    /// `temp[64 * 135]`), clipped samples as libvpx keeps them.
+    temp: Vec<P>,
+    /// An edge-extended copy of a reference block (`build_mc_border`).
+    border: Vec<P>,
+    /// Zeros, read in place of a row the geometry never reaches outside its
+    /// frame -- so a filter loop needs no check per sample.
+    zeros: Vec<P>,
+}
+
+impl<P: Pixel> McScratch<P> {
+    pub(crate) fn new() -> Self {
+        Self {
+            temp: vec![P::default(); 64 * 135],
+            border: Vec::new(),
+            zeros: vec![P::default(); ROW_SPAN_MAX],
         }
     }
 }
+
+/// The widest run of reference samples one output row reads: the 64th
+/// output's position -- outputs step at most two samples, a reference being
+/// at most twice the frame's size (`valid_ref_frame_size`), from a start of
+/// at most 15/16 -- plus the 8-tap filter's reach.
+const ROW_SPAN_MAX: usize = ((15 + 63 * 32) >> SUBPEL_BITS) + SUBPEL_TAPS;
 
 /// Where a prediction reads from: `data[origin]` is the reference block's
 /// top-left pixel (before the filter's reach), rows `stride` apart.
@@ -518,18 +577,22 @@ struct Source<'a, P> {
     data: &'a [P],
     stride: usize,
     origin: usize,
+    /// Read in place of a row outside `data`.
+    zeros: &'a [P],
 }
 
-impl<P: Pixel> Source<'_, P> {
-    /// The sample at (`x`, `y`) relative to the origin; 0 outside the data,
+impl<'a, P: Pixel> Source<'a, P> {
+    /// `len` samples of row `y` from column `x`, both relative to the
+    /// origin: one bounds check for the run. Zeros if it leaves the data,
     /// which the callers' geometry never asks for.
     #[inline(always)]
-    fn at(&self, x: isize, y: isize) -> i32 {
-        let i = self.origin as isize + y * self.stride as isize + x;
-        if i < 0 {
-            return 0;
-        }
-        self.data.get(i as usize).map_or(0, |p| p.int())
+    fn row(&self, x: isize, y: isize, len: usize) -> &'a [P] {
+        let start = self.origin as isize + y * self.stride as isize + x;
+        usize::try_from(start)
+            .ok()
+            .and_then(|s| self.data.get(s..s + len))
+            .or_else(|| self.zeros.get(..len))
+            .unwrap_or_default()
     }
 }
 
@@ -542,18 +605,261 @@ struct Filters {
     y_step_q4: i32,
 }
 
-/// libvpx's `ROUND_POWER_OF_TWO(sum, FILTER_BITS)`, clipped.
+/// libvpx's `ROUND_POWER_OF_TWO(sum, FILTER_BITS)`: the bias added before
+/// the shift.
+const ROUND: i32 = 64;
+
+/// One row of the horizontal filter into `acc`, before the rounding shift:
+/// libvpx's `convolve_horiz` for one row. `src` starts three samples left of
+/// the first output. Unscaled, every output has the same phase, and the sum
+/// is taken one tap at a time across the row, which the compiler vectorises.
 #[inline(always)]
-fn round_clip(sum: i32, max: i32) -> i32 {
-    ((sum + 64) >> 7).clamp(0, max)
+fn filter_h<P: Pixel>(src: &[P], f: &Filters, acc: &mut [i32]) {
+    if f.x_step_q4 == 16 {
+        let k = &f.kernel[(f.x0_q4 & SUBPEL_MASK) as usize];
+        acc.fill(ROUND);
+        for (t, &tap) in k.iter().enumerate() {
+            let tap = i32::from(tap);
+            let s = src.get(t..).unwrap_or_default();
+            for (a, &p) in acc.iter_mut().zip(s) {
+                *a += p.int() * tap;
+            }
+        }
+    } else {
+        let mut x_q4 = f.x0_q4;
+        for a in acc.iter_mut() {
+            let k = &f.kernel[(x_q4 & SUBPEL_MASK) as usize];
+            let at = (x_q4 >> SUBPEL_BITS) as usize;
+            let s = src.get(at..at + SUBPEL_TAPS).unwrap_or_default();
+            *a = ROUND
+                + s.iter()
+                    .zip(k)
+                    .map(|(&p, &tap)| p.int() * i32::from(tap))
+                    .sum::<i32>();
+            x_q4 += f.x_step_q4;
+        }
+    }
+}
+
+/// One row of the vertical filter into `acc`, before the rounding shift,
+/// from the eight rows it reads: libvpx's `convolve_vert` for one row.
+#[inline(always)]
+fn filter_v<P: Pixel>(rows: [&[P]; SUBPEL_TAPS], k: &[i16; 8], acc: &mut [i32]) {
+    acc.fill(ROUND);
+    for (row, &tap) in rows.iter().zip(k) {
+        let tap = i32::from(tap);
+        for (a, &p) in acc.iter_mut().zip(*row) {
+            *a += p.int() * tap;
+        }
+    }
+}
+
+/// Write a row of filter sums to `dst`, shifted and clipped -- or, for a
+/// compound block's second reference, averaged into what is there
+/// (libvpx's `vpx_convolve_avg`: `ROUND_POWER_OF_TWO(dst + pred, 1)`).
+#[inline(always)]
+fn store<P: Pixel>(dst: &mut [P], acc: &[i32], avg: bool, max: i32) {
+    if avg {
+        for (d, &a) in dst.iter_mut().zip(acc) {
+            *d = P::from_int((d.int() + (a >> 7).clamp(0, max) + 1) >> 1);
+        }
+    } else {
+        for (d, &a) in dst.iter_mut().zip(acc) {
+            *d = P::from_int((a >> 7).clamp(0, max));
+        }
+    }
+}
+
+// --- 8-bit samples, unscaled: the common case, in 16-bit lanes ------------------------------
+//
+// Baseline x86-64 (SSE2) multiplies 16-bit lanes eight at a time and has no
+// 32-bit multiply, so the 8-bit filters take their sums in 16 bits. A sample
+// times a tap fits (255 * 128 < 2^15); a whole sum need not, but once
+// `SUM_OFFSET` is added it lies in 0..=65535 for every kernel -- checked
+// below, at compile time -- so wrapping arithmetic modulo 2^16 gives it
+// exactly. The results are libvpx's, bit for bit.
+
+/// Added to every 8-bit sum so that it is never negative and never past
+/// 65535. A multiple of 128, so the rounding shift can be taken before it is
+/// removed: `(sum + ROUND + SUM_OFFSET) >> 7` is `((sum + ROUND) >> 7) + 128`.
+const SUM_OFFSET: i32 = 128 * 128;
+
+/// Every kernel's sums, offset, fit 16 bits: the most negative sum is 255
+/// times the negative taps, the most positive 255 times the positive ones.
+const _: () = {
+    let kernels = [
+        &tables::SUB_PEL_FILTERS_8,
+        &tables::SUB_PEL_FILTERS_8LP,
+        &tables::SUB_PEL_FILTERS_8S,
+        &tables::BILINEAR_FILTERS,
+    ];
+    let mut i = 0;
+    while i < kernels.len() {
+        let mut phase = 0;
+        while phase < 16 {
+            let (mut pos, mut neg, mut t) = (0i32, 0i32, 0);
+            while t < 8 {
+                let tap = kernels[i][phase][t] as i32;
+                if tap > 0 {
+                    pos += tap;
+                } else {
+                    neg += tap;
+                }
+                t += 1;
+            }
+            assert!(255 * neg + SUM_OFFSET >= 0);
+            assert!(255 * pos + SUM_OFFSET + ROUND <= 65535);
+            phase += 1;
+        }
+        i += 1;
+    }
+};
+
+/// A 16-bit sum, offset and rounded, as the clipped sample: libvpx's
+/// `clip_pixel(ROUND_POWER_OF_TWO(sum, FILTER_BITS))`. In 16-bit lanes:
+/// a shift, a subtraction and a saturating pack.
+#[inline(always)]
+fn finish_u8(acc: u16) -> u8 {
+    ((acc >> 7) as i16 - (SUM_OFFSET >> 7) as i16).clamp(0, 255) as u8
+}
+
+/// One row of the horizontal filter at one phase, `W` outputs: output `j`
+/// from `src[j..j + 8]`, so `src` starts three samples left of the first
+/// output. A short `src`, which the geometry never gives, reads as zeros.
+#[inline(always)]
+fn h_row_u8<const W: usize>(src: &[u8], k: &[i16; 8]) -> [u16; W] {
+    let mut acc = [(SUM_OFFSET + ROUND) as u16; W];
+    let Some(src) = src.get(..W + SUBPEL_TAPS - 1) else {
+        return acc;
+    };
+    for (t, &tap) in k.iter().enumerate() {
+        let tap = tap as u16;
+        for (a, &p) in acc.iter_mut().zip(&src[t..t + W]) {
+            *a = a.wrapping_add(u16::from(p).wrapping_mul(tap));
+        }
+    }
+    acc
+}
+
+/// One row of the vertical filter at one phase, `W` outputs, from the eight
+/// rows it reads. A short row reads as zeros.
+#[inline(always)]
+fn v_row_u8<const W: usize>(rows: &[&[u8]; SUBPEL_TAPS], k: &[i16; 8]) -> [u16; W] {
+    let mut acc = [(SUM_OFFSET + ROUND) as u16; W];
+    for (row, &tap) in rows.iter().zip(k) {
+        let Some(row) = row.get(..W) else {
+            continue;
+        };
+        let tap = tap as u16;
+        for (a, &p) in acc.iter_mut().zip(row) {
+            *a = a.wrapping_add(u16::from(p).wrapping_mul(tap));
+        }
+    }
+    acc
+}
+
+/// Write a row of filter results to `dst`, or average them into it
+/// (libvpx's `vpx_convolve_avg`: `ROUND_POWER_OF_TWO(dst + pred, 1)`).
+#[inline(always)]
+fn put_u8<const W: usize>(dst: &mut [u8], acc: &[u16; W], avg: bool) {
+    let Some(dst) = dst.get_mut(..W) else {
+        return;
+    };
+    if avg {
+        for (d, &a) in dst.iter_mut().zip(acc) {
+            *d = ((u16::from(*d) + u16::from(finish_u8(a)) + 1) >> 1) as u8;
+        }
+    } else {
+        for (d, &a) in dst.iter_mut().zip(acc) {
+            *d = finish_u8(a);
+        }
+    }
+}
+
+/// `convolve` for 8-bit samples, an unscaled reference and a block `W`
+/// samples wide. With the width a constant, every row has a length the
+/// compiler knows, and each pass is a handful of vector operations per row.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn convolve_u8<const W: usize>(
+    src: &Source<'_, u8>,
+    temp: &mut [u8],
+    dst: &mut [u8],
+    dst_start: usize,
+    dst_stride: usize,
+    f: &Filters,
+    h: usize,
+    avg: bool,
+) {
+    let kx = &f.kernel[(f.x0_q4 & SUBPEL_MASK) as usize];
+    let ky = &f.kernel[(f.y0_q4 & SUBPEL_MASK) as usize];
+    match (f.x0_q4 != 0, f.y0_q4 != 0) {
+        (false, false) => {
+            // vpx_convolve_copy, or vpx_convolve_avg.
+            for y in 0..h {
+                let s = src.row(0, y as isize, W);
+                let Some(d) = dst
+                    .get_mut(dst_start + y * dst_stride..)
+                    .and_then(|d| d.get_mut(..W))
+                else {
+                    continue;
+                };
+                if avg {
+                    for (d, &p) in d.iter_mut().zip(s) {
+                        *d = ((u16::from(*d) + u16::from(p) + 1) >> 1) as u8;
+                    }
+                } else if d.len() == s.len() {
+                    d.copy_from_slice(s);
+                }
+            }
+        }
+        (true, false) => {
+            for y in 0..h {
+                let acc = h_row_u8::<W>(src.row(-3, y as isize, W + SUBPEL_TAPS - 1), kx);
+                if let Some(d) = dst.get_mut(dst_start + y * dst_stride..) {
+                    put_u8(d, &acc, avg);
+                }
+            }
+        }
+        (false, true) => {
+            for y in 0..h {
+                let rows = core::array::from_fn(|t| src.row(0, (y + t) as isize - 3, W));
+                let acc = v_row_u8::<W>(&rows, ky);
+                if let Some(d) = dst.get_mut(dst_start + y * dst_stride..) {
+                    put_u8(d, &acc, avg);
+                }
+            }
+        }
+        (true, true) => {
+            // Horizontally into seven more rows than the block, starting
+            // three above it, `W` apart; then vertically from those.
+            for (iy, out) in temp
+                .chunks_exact_mut(W)
+                .take(h + SUBPEL_TAPS - 1)
+                .enumerate()
+            {
+                let acc = h_row_u8::<W>(src.row(-3, iy as isize - 3, W + SUBPEL_TAPS - 1), kx);
+                put_u8(out, &acc, false);
+            }
+            let temp: &[u8] = temp;
+            for y in 0..h {
+                let rows = core::array::from_fn(|t| temp.get((y + t) * W..).unwrap_or_default());
+                let acc = v_row_u8::<W>(&rows, ky);
+                if let Some(d) = dst.get_mut(dst_start + y * dst_stride..) {
+                    put_u8(d, &acc, avg);
+                }
+            }
+        }
+    }
 }
 
 /// The prediction: libvpx's `vpx_convolve8` (and every special case of it),
 /// written to `dst` or, for a compound block's second reference, averaged
-/// into it.
+/// into it. `temp` is the 2-D filter's intermediate block.
 #[allow(clippy::too_many_arguments)]
 fn convolve<P: Pixel>(
     src: &Source<'_, P>,
+    temp: &mut [P],
     dst: &mut [P],
     dst_start: usize,
     dst_stride: usize,
@@ -565,47 +871,87 @@ fn convolve<P: Pixel>(
 ) {
     let w = w.min(64);
     let h = h.min(64);
-    let mut out = [[0i32; 64]; 64];
+    if f.x_step_q4 == 16
+        && f.y_step_q4 == 16
+        && let (Some(data), Some(zeros), Some(temp8), Some(dst8)) = (
+            P::bytes(src.data),
+            P::bytes(src.zeros),
+            P::bytes_mut(temp),
+            P::bytes_mut(dst),
+        )
+    {
+        let src8 = Source {
+            data,
+            stride: src.stride,
+            origin: src.origin,
+            zeros,
+        };
+        let args = (&src8, temp8, dst8, dst_start, dst_stride, f, h, avg);
+        let (s, t, d, ds, dss, f, h, avg) = args;
+        match w {
+            4 => return convolve_u8::<4>(s, t, d, ds, dss, f, h, avg),
+            8 => return convolve_u8::<8>(s, t, d, ds, dss, f, h, avg),
+            16 => return convolve_u8::<16>(s, t, d, ds, dss, f, h, avg),
+            32 => return convolve_u8::<32>(s, t, d, ds, dss, f, h, avg),
+            64 => return convolve_u8::<64>(s, t, d, ds, dss, f, h, avg),
+            // Every block is 4 to 64 samples wide, a power of two; anything
+            // else takes the general path below.
+            _ => {}
+        }
+    }
     let horizontal = f.x0_q4 != 0 || f.x_step_q4 != 16;
     let vertical = f.y0_q4 != 0 || f.y_step_q4 != 16;
-    let taps = |phase: i32| &f.kernel[(phase & SUBPEL_MASK) as usize];
+    // The source samples one row of the horizontal filter reads.
+    let span = ((((w as i32 - 1) * f.x_step_q4 + f.x0_q4) >> SUBPEL_BITS) as usize + SUBPEL_TAPS)
+        .min(ROW_SPAN_MAX);
+    let mut acc = [0i32; 64];
+    let acc = &mut acc[..w];
 
     if !horizontal && !vertical {
         // vpx_convolve_copy.
-        for (y, row) in out.iter_mut().enumerate().take(h) {
-            for (x, v) in row.iter_mut().enumerate().take(w) {
-                *v = src.at(x as isize, y as isize);
+        for y in 0..h {
+            let s = src.row(0, y as isize, w);
+            let Some(d) = dst
+                .get_mut(dst_start + y * dst_stride..)
+                .and_then(|d| d.get_mut(..w))
+            else {
+                continue;
+            };
+            if avg {
+                for (d, &p) in d.iter_mut().zip(s) {
+                    *d = P::from_int((d.int() + p.int() + 1) >> 1);
+                }
+            } else if d.len() == s.len() {
+                d.copy_from_slice(s);
             }
         }
     } else if !vertical {
         // vpx_convolve8_horiz: no vertical pass.
-        for (y, row) in out.iter_mut().enumerate().take(h) {
-            let mut x_q4 = f.x0_q4;
-            for v in row.iter_mut().take(w) {
-                let sx = (x_q4 >> SUBPEL_BITS) as isize - 3;
-                let k = taps(x_q4);
-                let mut sum = 0i32;
-                for (t, &tap) in k.iter().enumerate() {
-                    sum += src.at(sx + t as isize, y as isize) * i32::from(tap);
-                }
-                *v = round_clip(sum, max);
-                x_q4 += f.x_step_q4;
-            }
+        for y in 0..h {
+            filter_h(src.row(-3, y as isize, span), f, acc);
+            let Some(d) = dst
+                .get_mut(dst_start + y * dst_stride..)
+                .and_then(|d| d.get_mut(..w))
+            else {
+                continue;
+            };
+            store(d, acc, avg, max);
         }
     } else if !horizontal {
-        // vpx_convolve8_vert: no horizontal pass.
-        for x in 0..w {
-            let mut y_q4 = f.y0_q4;
-            for row in out.iter_mut().take(h) {
-                let sy = (y_q4 >> SUBPEL_BITS) as isize - 3;
-                let k = taps(y_q4);
-                let mut sum = 0i32;
-                for (t, &tap) in k.iter().enumerate() {
-                    sum += src.at(x as isize, sy + t as isize) * i32::from(tap);
-                }
-                row[x] = round_clip(sum, max);
-                y_q4 += f.y_step_q4;
-            }
+        // vpx_convolve8_vert: no horizontal pass, the rows read straight
+        // from the source, starting three above the output's.
+        for y in 0..h {
+            let y_q4 = f.y0_q4 + y as i32 * f.y_step_q4;
+            let top = (y_q4 >> SUBPEL_BITS) as isize - 3;
+            let rows = core::array::from_fn(|t| src.row(0, top + t as isize, w));
+            filter_v(rows, &f.kernel[(y_q4 & SUBPEL_MASK) as usize], acc);
+            let Some(d) = dst
+                .get_mut(dst_start + y * dst_stride..)
+                .and_then(|d| d.get_mut(..w))
+            else {
+                continue;
+            };
+            store(d, acc, avg, max);
         }
     } else {
         // vpx_convolve8: horizontally into an intermediate block that starts
@@ -613,50 +959,34 @@ fn convolve<P: Pixel>(
         let intermediate_height =
             ((((h as i32 - 1) * f.y_step_q4 + f.y0_q4) >> SUBPEL_BITS) as usize + SUBPEL_TAPS)
                 .min(135);
-        let mut temp = vec![0i32; 64 * 135];
-        for (iy, row) in temp.chunks_mut(64).take(intermediate_height).enumerate() {
-            let y = iy as isize - 3;
-            let mut x_q4 = f.x0_q4;
-            for v in row.iter_mut().take(w) {
-                let sx = (x_q4 >> SUBPEL_BITS) as isize - 3;
-                let k = taps(x_q4);
-                let mut sum = 0i32;
-                for (t, &tap) in k.iter().enumerate() {
-                    sum += src.at(sx + t as isize, y) * i32::from(tap);
-                }
-                *v = round_clip(sum, max);
-                x_q4 += f.x_step_q4;
+        for (iy, out) in temp
+            .chunks_exact_mut(64)
+            .take(intermediate_height)
+            .enumerate()
+        {
+            filter_h(src.row(-3, iy as isize - 3, span), f, acc);
+            for (o, &a) in out.iter_mut().zip(acc.iter()) {
+                *o = P::from_int((a >> 7).clamp(0, max));
             }
         }
-        for x in 0..w {
-            let mut y_q4 = f.y0_q4;
-            for row in out.iter_mut().take(h) {
-                // temp row 3 is the source's row 0.
-                let sy = (y_q4 >> SUBPEL_BITS) as usize;
-                let k = taps(y_q4);
-                let mut sum = 0i32;
-                for (t, &tap) in k.iter().enumerate() {
-                    let v = temp.get((sy + t) * 64 + x).copied().unwrap_or(0);
-                    sum += v * i32::from(tap);
-                }
-                row[x] = round_clip(sum, max);
-                y_q4 += f.y_step_q4;
-            }
-        }
-    }
-
-    for (y, row) in out.iter().enumerate().take(h) {
-        let start = dst_start + y * dst_stride;
-        let Some(line) = dst.get_mut(start..start + w) else {
-            continue;
-        };
-        for (d, &v) in line.iter_mut().zip(row) {
-            *d = if avg {
-                // vpx_convolve_avg: ROUND_POWER_OF_TWO(dst + pred, 1).
-                P::from_int((d.int() + v + 1) >> 1)
-            } else {
-                P::from_int(v)
+        let temp: &[P] = temp;
+        for y in 0..h {
+            let y_q4 = f.y0_q4 + y as i32 * f.y_step_q4;
+            // Intermediate row 3 is the source's row 0, so the filter's
+            // reach starts at the output row's own index.
+            let top = (y_q4 >> SUBPEL_BITS) as usize;
+            let rows = core::array::from_fn(|t| {
+                let start = (top + t) * 64;
+                temp.get(start..start + w).unwrap_or_default()
+            });
+            filter_v(rows, &f.kernel[(y_q4 & SUBPEL_MASK) as usize], acc);
+            let Some(d) = dst
+                .get_mut(dst_start + y * dst_stride..)
+                .and_then(|d| d.get_mut(..w))
+            else {
+                continue;
             };
+            store(d, acc, avg, max);
         }
     }
 }

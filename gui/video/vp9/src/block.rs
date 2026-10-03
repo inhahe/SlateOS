@@ -55,7 +55,7 @@ use crate::detokenize::{self, BlockCounts, Scan};
 use crate::frame::{AnyFrame, FrameBuf, Pixel};
 use crate::header::{self, Segmentation};
 use crate::idct;
-use crate::inter::{self, ScaleFactors};
+use crate::inter::{self, McScratch, ScaleFactors};
 use crate::intra::{self, Edges};
 use crate::probs::{Counts, FrameContext, MvComponentCounts, MvCounts};
 use crate::tables;
@@ -343,6 +343,8 @@ fn decode_tiles_t<P: Pixel>(
         left_seg: [0; 8],
         token_cache: [0; 1024],
         dqcoeff: vec![0; 32 * 32],
+        mc: McScratch::new(),
+        intra_out: [[0; 32]; 32],
         tile: TileInfo {
             mi_col_start: 0,
             mi_col_end: 0,
@@ -420,6 +422,10 @@ struct Dec<'a, P: Pixel> {
     left_seg: [u8; 8],
     token_cache: [u8; 1024],
     dqcoeff: Vec<i32>,
+    /// Inter prediction's scratch space, reused from block to block.
+    mc: McScratch<P>,
+    /// Intra prediction's scratch block, likewise.
+    intra_out: intra::Prediction,
     tile: TileInfo,
 }
 
@@ -670,7 +676,14 @@ impl<P: Pixel> Dec<'_, P> {
             self.reset_skip_context(&pos);
         }
         let skip_lf = if mi.is_inter() {
-            inter::build_inter_predictors_sb(self.frame, &self.refs, &mi, &pos, info.bit_depth)?;
+            inter::build_inter_predictors_sb(
+                self.frame,
+                &self.refs,
+                &mi,
+                &pos,
+                info.bit_depth,
+                &mut self.mc,
+            )?;
             if mi.skip {
                 false
             } else {
@@ -837,7 +850,17 @@ impl<P: Pixel> Dec<'_, P> {
                 frame_width: p.width,
                 frame_height: p.height,
             };
-            intra::predict(&mut p.data, p.stride, x0, y0, mode, tx_size, &edges, bd);
+            intra::predict(
+                &mut p.data,
+                p.stride,
+                x0,
+                y0,
+                mode,
+                tx_size,
+                &edges,
+                bd,
+                &mut self.intra_out,
+            );
         }
         if intra && mi.skip {
             return 0;

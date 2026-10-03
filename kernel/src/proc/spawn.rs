@@ -28597,15 +28597,22 @@ fn oils_invoke(
 /// | 3 | YSH: `json write` | YSH and its JSON writer |
 /// | 4 | YSH: a division by zero | the same exception path from YSH, status 3 |
 ///
-/// Skips, counted, until lane D stages `/bin/oils-for-unix` and `/bin/ysh`.
+/// Skips, counted, until lane D stages `/bin/oils-for-unix` and `/bin/ysh`
+/// on the image (`/mnt/bin/...` while the self-tests run).
 ///
 /// # Errors
 ///
 /// `InternalError` naming the case whose status, stdout or stderr differed.
 pub fn self_test_oils() -> KernelResult<()> {
     const RUNG: &str = "genuine Oils (OSH and YSH)";
+    // Where the programs will be once the image is the root. argv[0] names
+    // these, since Oils picks OSH or YSH by the name it was run as.
     const OILS: &str = "/bin/oils-for-unix";
     const YSH: &str = "/bin/ysh";
+    // Where they are during the boot's self-tests: the image is at /mnt
+    // until the pivot, as the bash and CPython rungs read theirs.
+    const OILS_ON_IMAGE: &str = "/mnt/bin/oils-for-unix";
+    const YSH_ON_IMAGE: &str = "/mnt/bin/ysh";
 
     struct Case {
         label: &'static str,
@@ -28664,12 +28671,12 @@ pub fn self_test_oils() -> KernelResult<()> {
         },
     ];
 
-    if pathz_missing(RUNG, &[OILS, YSH]) {
+    if pathz_missing(RUNG, &[OILS_ON_IMAGE, YSH_ON_IMAGE]) {
         return Ok(());
     }
     serial_println!("[spawn] Running {} test...", RUNG);
-    let oils = crate::fs::Vfs::read_file(OILS)?;
-    let ysh = crate::fs::Vfs::read_file(YSH)?;
+    let oils = crate::fs::Vfs::read_file(OILS_ON_IMAGE)?;
+    let ysh = crate::fs::Vfs::read_file(YSH_ON_IMAGE)?;
 
     for case in CASES {
         let elf = if case.exe == YSH { &ysh } else { &oils };

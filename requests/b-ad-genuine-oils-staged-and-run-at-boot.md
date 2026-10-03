@@ -68,8 +68,10 @@ four lines exactly as the table gives them, on `lane-a` now and on `main`
 with lane A's next green boot.
 
 - **Until lane D stages them,** it skips, counted, through the same
-  `pathz_missing` every rootfs rung uses: `/bin/oils-for-unix` and
-  `/bin/ysh` are both required. It is a visible skip, not a quiet pass.
+  `pathz_missing` every rootfs rung uses: the image's `/bin/oils-for-unix`
+  and `/bin/ysh` are both required. While the self-tests run, the image is
+  at `/mnt`, so the rung reads `/mnt/bin/...`, as the bash and CPython rungs
+  do. It is a visible skip, not a quiet pass.
 - **Once both are there,** each case must match:
   - the status exactly;
   - stdout byte for byte;

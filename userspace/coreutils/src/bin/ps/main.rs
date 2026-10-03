@@ -642,8 +642,9 @@ impl Ps {
                 self.bsd_v_format = b"FB_v";
             }
             b"irix" | b"sgi" => {
-                let xpg = env_bytes("_XPG").unwrap_or_default();
-                if !matches!(xpg.first(), Some(b'1'..=b'9')) {
+                // `_XPG` unset and `_XPG` not starting with 1-9 are one case.
+                let xpg = env_bytes("_XPG").and_then(|v| v.first().copied());
+                if !matches!(xpg, Some(b'1'..=b'9')) {
                     self.personality = per::IRIX_L;
                 }
             }
@@ -659,44 +660,52 @@ impl Ps {
 
     /// `self_info`: `--info`.
     fn self_info(&mut self) {
-        let show = |f: &[u8]| {
-            String::from_utf8_lossy(if f.is_empty() { b"(none)" } else { f }).into_owned()
+        // Bytes throughout: the personality text is the environment's, which
+        // need not be UTF-8, and is printed as given.
+        let mut text: Vec<u8> = Vec::new();
+        let show = |text: &mut Vec<u8>, label: &str, f: &[u8]| {
+            text.extend_from_slice(label.as_bytes());
+            text.extend_from_slice(if f.is_empty() { b"(none)" } else { f });
+            text.push(b'\n');
         };
-        let opt = |f: Option<&[u8]>| show(f.unwrap_or(b""));
-        let text = format!(
-            "BSD j    {}\nBSD l    {}\nBSD s    {}\nBSD u    {}\nBSD v    {}\n\
-             SysV -f  {}\nSysV -fl {}\nSysV -j  {}\nSysV -l  {}\n\n\
-             SlateOS coreutils version 0.1.0\n\
-             Compiled with: rustc, against SlateOS's C library\n\n\
-             header_gap={} lines_to_next_header={}\nscreen_cols={} screen_rows={}\n\n\
-             personality=0x{:08x} (from \"{}\")\nEUID={} TTY={},{} page_size={}\n\
-             sizeof(proc_t)={} sizeof(long)=8 sizeof(long)=8\narchdefs: x86_64\n",
-            show(self.bsd_j_format),
-            show(self.bsd_l_format),
-            show(self.bsd_s_format),
-            show(self.bsd_u_format),
-            show(self.bsd_v_format),
-            opt(self.sysv_f_format),
-            opt(self.sysv_fl_format),
-            opt(self.sysv_j_format),
-            opt(self.sysv_l_format),
-            self.header_gap,
-            self.lines_to_next_header,
-            self.screen_cols,
-            self.screen_rows,
-            self.personality,
-            String::from_utf8_lossy(&self.saved_personality_text),
-            i32::from_le_bytes(self.cached_euid.to_le_bytes()),
-            coreutils::procps::devname::major(u64::from(u32::from_le_bytes(
-                self.cached_tty.to_le_bytes()
-            ))),
-            coreutils::procps::devname::minor(u64::from(u32::from_le_bytes(
-                self.cached_tty.to_le_bytes()
-            ))),
-            self.page_size,
-            std::mem::size_of::<items::Val>().saturating_mul(70),
+        show(&mut text, "BSD j    ", self.bsd_j_format);
+        show(&mut text, "BSD l    ", self.bsd_l_format);
+        show(&mut text, "BSD s    ", self.bsd_s_format);
+        show(&mut text, "BSD u    ", self.bsd_u_format);
+        show(&mut text, "BSD v    ", self.bsd_v_format);
+        show(&mut text, "SysV -f  ", self.sysv_f_format.unwrap_or(b""));
+        show(&mut text, "SysV -fl ", self.sysv_fl_format.unwrap_or(b""));
+        show(&mut text, "SysV -j  ", self.sysv_j_format.unwrap_or(b""));
+        show(&mut text, "SysV -l  ", self.sysv_l_format.unwrap_or(b""));
+        let tty = u64::from(u32::from_le_bytes(self.cached_tty.to_le_bytes()));
+        text.extend_from_slice(
+            format!(
+                "\nSlateOS coreutils version 0.1.0\n\
+                 Compiled with: rustc, against SlateOS's C library\n\n\
+                 header_gap={} lines_to_next_header={}\nscreen_cols={} screen_rows={}\n\n\
+                 personality=0x{:08x} (from \"",
+                self.header_gap,
+                self.lines_to_next_header,
+                self.screen_cols,
+                self.screen_rows,
+                self.personality,
+            )
+            .as_bytes(),
         );
-        self.eprint(text.as_bytes());
+        text.extend_from_slice(&self.saved_personality_text);
+        text.extend_from_slice(
+            format!(
+                "\")\nEUID={} TTY={},{} page_size={}\n\
+                 sizeof(proc_t)={} sizeof(long)=8 sizeof(long)=8\narchdefs: x86_64\n",
+                i32::from_le_bytes(self.cached_euid.to_le_bytes()),
+                coreutils::procps::devname::major(tty),
+                coreutils::procps::devname::minor(tty),
+                self.page_size,
+                std::mem::size_of::<items::Val>().saturating_mul(70),
+            )
+            .as_bytes(),
+        );
+        self.eprint(&text);
     }
 
     /// `finalize_stacks`: register what selection, state, sorting and every

@@ -375,7 +375,7 @@ impl Item {
             | I::NsUts => f.ns = true,
             I::OomAdj | I::OomScore => f.oom = true,
             I::SdMach | I::SdOuid | I::SdSeat | I::SdSess | I::SdSlice | I::SdUnit | I::SdUunit => {
-                f.systemd = true
+                f.systemd = true;
             }
             I::SmapPrvTotal | I::SmapPss => f.smaps = true,
         }

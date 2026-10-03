@@ -181,8 +181,14 @@ impl Devname {
     /// `driver_name`.
     fn driver_name(&mut self, maj: u32, min: u32) -> Option<Vec<u8>> {
         if self.drivers.is_none() {
-            let text = read_once(&self.root.join("tty/drivers"), 9999).unwrap_or_default();
-            self.drivers = Some(parse_drivers(&text));
+            // `load_drivers`: a file that cannot be opened or read is no
+            // drivers at all (`tty_map = -1`), and names come from the other
+            // three guesses -- which is what SlateOS, with no such file, gets.
+            let drivers = match read_once(&self.root.join("tty/drivers"), 9999) {
+                Some(text) => parse_drivers(&text),
+                None => Vec::new(),
+            };
+            self.drivers = Some(drivers);
         }
         let tmn = self
             .drivers

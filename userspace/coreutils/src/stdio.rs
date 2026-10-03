@@ -381,6 +381,8 @@ struct MemorySource {
     fail: Option<i32>,
     seekable: bool,
     reads: Vec<usize>,
+    /// What closing it answers: `None` succeeds, `Some(errno)` fails.
+    close_result: Option<i32>,
 }
 
 #[cfg(test)]
@@ -657,6 +659,48 @@ impl StdioReader {
         }
     }
 
+    /// gnulib's `close_stdin`, up to its message: give the read-ahead back to
+    /// a descriptor that can seek, then `close_stream` the stream.
+    ///
+    /// `close_stream` reports a stream on which a read failed (`ferror`), and
+    /// a close that failed for any reason but `EBADF` on a stream with nothing
+    /// pending -- which for an input stream is every close. So a standard
+    /// input that was closed when the program started fails here only if
+    /// something tried to read it, which is what makes `ln -i a b <&-` say
+    /// `ln: error closing file: Bad file descriptor` and `ln a b <&-` say
+    /// nothing.
+    ///
+    /// # Errors
+    ///
+    /// `Err(Some(reason))` with the failing call's reason, or `Err(None)` for
+    /// a stream that had failed a read and then closed cleanly: `close_stream`
+    /// zeroes `errno` then, so upstream's message carries no reason.
+    pub fn close_stdin(mut self) -> Result<(), Option<io::Error>> {
+        // `freadahead (stdin) > 0`, and then `fseeko (stdin, 0, SEEK_CUR)`
+        // succeeding, is what `sync` asks: a descriptor that cannot seek
+        // (`ESPIPE`) keeps its bytes and is not a failure.
+        let synced = self.sync();
+        let prev_fail = self.error;
+        let closed = match self.source {
+            Source::Descriptor(fd) => stdfd::close_descriptor(fd),
+            Source::File(f) => stdfd::close(f),
+            #[cfg(test)]
+            Source::Memory(m) => m
+                .close_result
+                .map_or(Ok(()), |errno| Err(io::Error::from_raw_os_error(errno))),
+        };
+        let stream = match closed {
+            Err(e) if prev_fail || e.raw_os_error() != Some(EBADF) => Err(Some(e)),
+            Err(_) | Ok(()) if !prev_fail => Ok(()),
+            Err(_) | Ok(()) => Err(None),
+        };
+        match (stream, synced) {
+            (Err(reason), _) => Err(reason),
+            (Ok(()), Err(e)) => Err(Some(e)),
+            (Ok(()), Ok(())) => Ok(()),
+        }
+    }
+
     /// `_IO_new_file_sync` for a stream being read: seek back over the
     /// unread bytes and drop them. A descriptor that cannot seek keeps them.
     fn sync(&mut self) -> io::Result<()> {
@@ -710,7 +754,7 @@ fn is_char_device(_meta: &std::fs::Metadata) -> bool {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 mod tests {
-    use super::{Buffering, Memory, MemorySource, Sink, Source, StdioFile, StdioReader};
+    use super::{Buffering, EBADF, Memory, MemorySource, Sink, Source, StdioFile, StdioReader};
 
     fn memory(block: usize, room: usize) -> Sink {
         Sink::Memory(Memory {
@@ -839,6 +883,7 @@ mod tests {
             fail: None,
             seekable,
             reads: Vec::new(),
+            close_result: None,
         }))
     }
 
@@ -954,5 +999,78 @@ mod tests {
         assert!(r.has_error());
         r.clear_error();
         assert!(!r.has_error());
+    }
+
+    // ------------------------------------------------------- close_stdin
+
+    /// What `close_stdin` decided.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Verdict {
+        Quiet,
+        /// A failure reported without a reason -- `errno` zeroed.
+        NoReason,
+        Reason(i32),
+    }
+
+    fn close_verdict(r: StdioReader) -> Verdict {
+        match r.close_stdin() {
+            Ok(()) => Verdict::Quiet,
+            Err(None) => Verdict::NoReason,
+            Err(Some(e)) => Verdict::Reason(e.raw_os_error().unwrap_or(0)),
+        }
+    }
+
+    #[test]
+    fn close_stdin_is_quiet_for_a_stream_that_read_cleanly() {
+        let mut r = source(b"y\nrest\n", 4, true);
+        assert_eq!(line(&mut r), b"y\n");
+        assert_eq!(close_verdict(r), Verdict::Quiet);
+    }
+
+    #[test]
+    fn close_stdin_is_quiet_for_a_closed_descriptor_nobody_read() {
+        // `ln a b <&-`: `fclose` fails with `EBADF`, and `close_stream`
+        // excuses exactly that when nothing was pending and no read failed.
+        let mut r = source(b"", 4, true);
+        mem(&mut r).close_result = Some(EBADF);
+        assert_eq!(close_verdict(r), Verdict::Quiet);
+    }
+
+    #[test]
+    fn close_stdin_reports_a_read_that_failed_with_the_close_reason() {
+        // `ln -i a b <&-`: the read fails, then the close fails with `EBADF`,
+        // and that is the reason printed.
+        let mut r = source(b"", 4, true);
+        mem(&mut r).fail = Some(EBADF);
+        mem(&mut r).close_result = Some(EBADF);
+        let mut out = Vec::new();
+        assert!(r.read_until(b'\n', &mut out).is_err());
+        assert_eq!(close_verdict(r), Verdict::Reason(EBADF));
+    }
+
+    #[test]
+    fn close_stdin_reports_a_failed_read_without_a_reason_when_the_close_worked() {
+        // `ln -i a b < dir`: `EISDIR` on the read, a clean close, and
+        // `close_stream` zeroes `errno` -- `ln: error closing file`.
+        let mut r = source(b"", 4, true);
+        mem(&mut r).fail = Some(21);
+        let mut out = Vec::new();
+        assert!(r.read_until(b'\n', &mut out).is_err());
+        assert_eq!(close_verdict(r), Verdict::NoReason);
+    }
+
+    #[test]
+    fn close_stdin_reports_a_close_that_failed_for_another_reason() {
+        let mut r = source(b"", 4, true);
+        mem(&mut r).close_result = Some(5);
+        assert_eq!(close_verdict(r), Verdict::Reason(5));
+    }
+
+    #[test]
+    fn close_stdin_lets_a_pipe_keep_its_read_ahead() {
+        // `fseeko` fails with `ESPIPE`, so there is no flush and no failure.
+        let mut r = source(b"y\nrest\n", 8, false);
+        assert_eq!(line(&mut r), b"y\n");
+        assert_eq!(close_verdict(r), Verdict::Quiet);
     }
 }

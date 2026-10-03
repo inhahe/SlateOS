@@ -227,6 +227,10 @@ struct RealTree {
     /// `st_dev` → filesystem type, read once from `/proc/self/mountinfo`.
     mounts: HashMap<u64, Vec<u8>>,
     users: pwdb::Db,
+    /// Standard input, as C's `stdin`: one stream for every `-ok` prompt of
+    /// the run, so that the lines one prompt's read brought in are there for
+    /// the next. See [`RealTree::confirm`].
+    answers: std::cell::RefCell<yesno::StdinAnswers>,
 }
 
 #[cfg(unix)]
@@ -235,6 +239,7 @@ impl RealTree {
         Self {
             mounts: read_mountinfo(),
             users: pwdb::Db::load(),
+            answers: std::cell::RefCell::new(yesno::StdinAnswers::new()),
         }
     }
 }
@@ -456,7 +461,11 @@ impl Tree for RealTree {
         // which fails on input that is not UTF-8 and so declined a `y` typed
         // after a stray high byte — a terminal in a single-byte locale sends
         // exactly that, and `rm -i`, reading bytes, accepted it.
-        yesno::yesno(&mut yesno::StdinAnswers::new())
+        //
+        // One stream for the run, not one per prompt: stdio reads a block, and
+        // a stream made for one prompt and dropped would take the next
+        // prompt's answers with it.
+        yesno::yesno(&mut *self.answers.borrow_mut())
     }
 }
 
@@ -5208,7 +5217,13 @@ fn run_main() -> ExitCode {
         .map(|a| os_bytes(&a).into_owned())
         .collect();
     let tree = RealTree::new();
-    ExitCode::from(u8::try_from(run(&argv, &tree)).unwrap_or(1))
+    let status = run(&argv, &tree);
+    // What glibc's `exit` does to a stream nobody closed: findutils registers
+    // no `close_stdin`, but `exit` still gives a seekable standard input back
+    // the answers `-ok` read ahead -- measured, `{ find a b -ok true \; ; cat; }
+    // < answers` leaves `cat` the rest.
+    tree.answers.into_inner().into_stream().exit_sync();
+    ExitCode::from(u8::try_from(status).unwrap_or(1))
 }
 
 // ---------------------------------------------------------------------------

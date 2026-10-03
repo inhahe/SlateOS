@@ -1048,6 +1048,45 @@ pub fn close_stdout_with(program: &str, out: Stream, earned: ExitCode, failure: 
     close_stdout_bytes(program.as_bytes(), out, earned, failure)
 }
 
+/// gnulib's `atexit (close_stdin)`, for the utilities upstream registers it
+/// in -- `cp`, `install`, `ln`, `mv` and `rm`, the ones whose `-i` reads
+/// answers from standard input.
+///
+/// `stdin` is the stream the answers were read through, which this closes
+/// (see [`crate::stdio::StdioReader::close_stdin`]): read-ahead goes back to
+/// a seekable descriptor, so `{ rm -i a; cat; } < answers` leaves `cat` the
+/// lines `rm` did not use, and a stream on which a read failed is reported --
+///
+/// ```text
+/// ln: error closing file: Bad file descriptor
+/// ```
+///
+/// -- before [`close_stdout`] does its work, whose own failure is reported
+/// after it. Either failure is status 1, whatever was earned: upstream's
+/// handler `_exit`s with `exit_failure`.
+pub fn close_stdin_and_stdout(
+    program: &str,
+    stdin: crate::stdio::StdioReader,
+    out: Stream,
+    earned: ExitCode,
+) -> ExitCode {
+    let failed = stdin.close_stdin().err();
+    match &failed {
+        Some(Some(e)) => diag_line(&format!("{program}: error closing file: {}", strerror(e))),
+        Some(None) => diag_line(&format!("{program}: error closing file")),
+        None => {}
+    }
+    let status = close_stdout(program, out, earned);
+    if failed.is_some() {
+        // `_exit (exit_failure)`, after `close_stdout` has had its say. A
+        // diagnostic lost on the way is status 1 as well, so nothing is
+        // hidden by not asking.
+        ExitCode::FAILURE
+    } else {
+        status
+    }
+}
+
 /// [`close_stdout_with`] for a program named by bytes -- see
 /// [`write_error_bytes`]. procps' `close_stdout` is gnulib's in all that
 /// matters here: silent for a reader that left (`EPIPE`), `write error`

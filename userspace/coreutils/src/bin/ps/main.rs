@@ -306,7 +306,15 @@ pub struct Ps {
 
     // --- the library ---
     pub registry: Registry,
+    /// The password database, once read. `None` until something needs a name;
+    /// a test sets it so that what a `USER` column says does not depend on
+    /// the machine the test runs on.
     pub pw: Option<Pwcache>,
+    /// Who `ps` is running as: `geteuid`, asked once in [`Ps::new`]. The
+    /// default selection is "this user's processes on this terminal", so a
+    /// test that builds its own `/proc` must also say whose it is -- the
+    /// tests' world is root's, and they run as whoever runs them.
+    pub euid: u32,
     pub sys: SysCache,
     pub out: Vec<u8>,
 }
@@ -391,6 +399,7 @@ impl Ps {
             task_format_list: Vec::new(),
             registry: Registry::default(),
             pw: None,
+            euid: effective_uid(),
             sys,
             out: Vec::new(),
         }
@@ -512,7 +521,7 @@ impl Ps {
         self.all_processes = false;
         self.bsd_c_option = false;
         self.bsd_e_option = false;
-        self.cached_euid = effective_uid();
+        self.cached_euid = self.euid;
         self.cached_tty = cached_tty;
         self.forest_type = 0;
         self.format_flags = 0;
@@ -959,6 +968,16 @@ mod tests {
         let mut argv = vec![b"ps".to_vec()];
         argv.extend(args.iter().map(|a| a.as_bytes().to_vec()));
         let mut ps = Ps::new(root.to_path_buf(), argv, true, Zone::utc());
+        // The world is root's, and so is this `ps`, whoever runs the test --
+        // and its password database names root and nobody else, so uid 1000
+        // has no name. Both used to come from the machine: the Windows host
+        // has no users and answers 0 to `geteuid`, which is why these tests
+        // passed there and failed on Linux, where they had never been run.
+        ps.euid = 0;
+        ps.pw = Some(Pwcache::with_db(pwdb::Db::from_bytes(
+            b"root:x:0:0:root:/root:/bin/sh\n",
+            b"root:x:0:\n",
+        )));
         let code = match ps.run() {
             Ok(()) => 0,
             Err(Exit::Status(c)) => c,
@@ -1002,12 +1021,11 @@ mod tests {
                 "pid,time,bsdtime,uid,user",
             ],
         );
-        // No password database on the test host: the user is the number.
         assert_eq!(
             out,
             "  PID     TIME   TIME   UID USER\n  \
-             100 00:00:02   0:02     0 0\n  \
-             200 00:00:00   0:00     0 0\n"
+             100 00:00:02   0:02     0 root\n  \
+             200 00:00:00   0:00     0 root\n"
         );
         fs::remove_dir_all(&root).unwrap();
     }

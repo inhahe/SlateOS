@@ -17,10 +17,13 @@ runs -- goes in green, and two did on 2026-10-03.
 |---|---|---|
 | `coreutils` | `pgrep::tests::selection_follows_upstreams_order`, `names_and_command_lines_go_with_the_pids` | asserted ascending PIDs from a fixture directory; ext4 lists in hash order, NTFS sorts |
 | `udevd` | `tests::daemon_reload_rules` | "reload from a nonexistent directory" read the real `/etc/udev/rules.d`, which exists under Linux |
+| `coreutils` | `ps` `tests::cpu_time_and_ownership_columns`, `the_default_selection_is_ours_on_our_terminal` | took the `USER` column's names from the machine's password database (none on the Windows host, so `0`; `root` on Linux) and `ps`'s own uid from `geteuid` (0 on the Windows host, the tester's on Linux) |
 
-Both fixed (`ef8c1ca44`, `b2edfd373`). Both were found by running
-`scripts/coreutils-check.sh --only linux` by hand, which is the point: nothing
-in the normal workflow runs it with tests.
+All fixed (`ef8c1ca44`, `b2edfd373`, and the `ps` pair on 2026-10-03, by
+giving the tests their own password database and uid). All were found by
+running the Linux half by hand, which is the point: nothing in the normal
+workflow runs it with tests. After the `ps` fix, every test in `coreutils`
+passes on Linux (`cargo test --no-fail-fast -p coreutils`, 2026-10-03).
 
 ### Why the gate says what it says
 

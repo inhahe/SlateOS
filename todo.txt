@@ -59221,21 +59221,24 @@ ordinary boot path. All of it lives in `kernel/src/kexec.rs`.
   addresses (4 KiB, per-segment perms) pointing at the destination; frame
   tracking + free-on-error.
 
-**Remaining (stage 5), in dependency order:**
-1. **Stage the image** (`stage_image`): allocate source frames (not necessarily
-   contiguous), copy each segment's `filesz` bytes and zero to `memsz`, and
-   build the page list `[(src_phys, dst_phys, len)]` where
-   `dst = dest_base + (vaddr - min_vaddr)`. Testable at boot (allocate, copy,
-   verify bytes + list), independent of stage 4.
-2. **Adjust the memory map** (`adjust_memory_map`): from the firmware map
-   (`parse_boot_info`, still valid -- bootloader-reclaimable is never reclaimed),
-   mark the destination run EXECUTABLE_AND_MODULES, the handoff frames (staging,
-   tables, responses, control page) BOOTLOADER_RECLAIMABLE, and the old kernel's
-   own EXECUTABLE_AND_MODULES + old bootloader-reclaimable USABLE. Pure/testable;
-   fiddly range-overlay over the sorted map.
-3. **Patch the requests**: write each response's HHDM pointer into the request's
-   `response` field (`+REQUEST_RESPONSE_OFFSET`) in the staged image, and set the
-   base-revision tag's revision word (`+BASE_REVISION_WORD_OFFSET`) to 0.
+**Done since (stage 5.1-5.4, each committed, clippy-green, boot-pending):**
+- 5.1 `stage_image` + `StagedImage`/`CopyOp`: segment bytes into frames + the
+  trampoline's source->dest copy list.
+- 5.2 `adjust_memory_map`: the firmware map with dead old types -> USABLE and the
+  handoff's overlays (dest EXECUTABLE_AND_MODULES, kept regions
+  BOOTLOADER_RECLAIMABLE), merged.
+- 5.3 `patch_requests` + `ResponseAddrs`: response pointers into the image's
+  requests + base-revision word to 0.
+- 5.4 `plan_destination_high` + `prepare_handoff` + `PreparedHandoff` +
+  `boot::memory_map` + `top_of_managed_ram`: the whole preparation, with an
+  integration self-test that prepares a handoff against the real memory map and
+  frees it (parse->plan->tables->responses->patch->stage->collision check). Only
+  HHDM/memmap/executable-address/RSDP responses are built; framebuffer and
+  kernel-file are left unanswered (new kernel boots serial-only, no cmdline/
+  symbols) -- COMPLETE THESE for a full-fidelity restart.
+
+**Remaining (the irreversible jump; integration-only, needs a boot-test kexec
+mode to validate), in dependency order:**
 4. **Quiesce** (integration-only, cannot self-test -- would break the running
    kernel): interrupts off; mask every IOAPIC redirection entry; stop the LAPIC
    timer (`apic::stop_timer`); clear PCI Bus Master Enable on every function

@@ -71,6 +71,14 @@ const MAX_WAITERS: usize = 32;
 // WaitQueue
 // ---------------------------------------------------------------------------
 
+/// What an empty waiter slot holds. Not 0: task 0 -- the boot thread, which
+/// runs the self-tests -- is a task that waits, and with 0 for "empty" its
+/// registration wrote nothing anyone could see. `wake_one` skipped it, the
+/// next waiter could take its slot, and the boot thread slept for ever: the
+/// hang that stopped every lane A boot since 2026-09-27 at the kmutex
+/// no-starvation test. Task ids count up from 0 and never reach `u64::MAX`.
+const NO_WAITER: u64 = u64::MAX;
+
 /// A queue of tasks waiting for an event or condition.
 ///
 /// Tasks call [`wait()`](Self::wait) to sleep until another task calls
@@ -87,7 +95,7 @@ impl WaitQueue {
     /// Create a new, empty wait queue.
     pub const fn new() -> Self {
         Self {
-            waiters: Mutex::new([0u64; MAX_WAITERS]),
+            waiters: Mutex::new([NO_WAITER; MAX_WAITERS]),
         }
     }
 
@@ -108,7 +116,7 @@ impl WaitQueue {
         // Add ourselves to the waiter list.
         loop {
             let mut guard = self.waiters.lock();
-            if let Some(slot) = guard.iter_mut().find(|s| **s == 0) {
+            if let Some(slot) = guard.iter_mut().find(|s| **s == NO_WAITER) {
                 *slot = task_id;
                 drop(guard);
                 break;
@@ -173,7 +181,7 @@ impl WaitQueue {
             // (if still Running).
             loop {
                 let mut guard = self.waiters.lock();
-                if let Some(slot) = guard.iter_mut().find(|s| **s == 0) {
+                if let Some(slot) = guard.iter_mut().find(|s| **s == NO_WAITER) {
                     *slot = task_id;
                     drop(guard);
                     break;
@@ -188,7 +196,7 @@ impl WaitQueue {
                 // Condition met — unregister and return.
                 let mut guard = self.waiters.lock();
                 if let Some(slot) = guard.iter_mut().find(|s| **s == task_id) {
-                    *slot = 0;
+                    *slot = NO_WAITER;
                 }
                 return;
             }
@@ -204,7 +212,7 @@ impl WaitQueue {
             {
                 let mut guard = self.waiters.lock();
                 if let Some(slot) = guard.iter_mut().find(|s| **s == task_id) {
-                    *slot = 0;
+                    *slot = NO_WAITER;
                 }
             }
 
@@ -250,7 +258,7 @@ impl WaitQueue {
             // Register as a waiter BEFORE checking, same as wait_until.
             {
                 let mut guard = self.waiters.lock();
-                if let Some(slot) = guard.iter_mut().find(|s| **s == 0) {
+                if let Some(slot) = guard.iter_mut().find(|s| **s == NO_WAITER) {
                     *slot = task_id;
                 } else {
                     // Queue full — yield and retry.
@@ -267,7 +275,7 @@ impl WaitQueue {
             if condition(woken) {
                 let mut guard = self.waiters.lock();
                 if let Some(slot) = guard.iter_mut().find(|s| **s == task_id) {
-                    *slot = 0;
+                    *slot = NO_WAITER;
                 }
                 return true;
             }
@@ -289,7 +297,7 @@ impl WaitQueue {
             {
                 let mut guard = self.waiters.lock();
                 if let Some(slot) = guard.iter_mut().find(|s| **s == task_id) {
-                    *slot = 0;
+                    *slot = NO_WAITER;
                 }
             }
 
@@ -347,7 +355,7 @@ impl WaitQueue {
             // Register as waiter BEFORE checking condition.
             {
                 let mut guard = self.waiters.lock();
-                if let Some(slot) = guard.iter_mut().find(|s| **s == 0) {
+                if let Some(slot) = guard.iter_mut().find(|s| **s == NO_WAITER) {
                     *slot = task_id;
                 } else {
                     // Queue full — yield and retry.
@@ -364,7 +372,7 @@ impl WaitQueue {
             if condition(woken) {
                 let mut guard = self.waiters.lock();
                 if let Some(slot) = guard.iter_mut().find(|s| **s == task_id) {
-                    *slot = 0;
+                    *slot = NO_WAITER;
                 }
                 return true;
             }
@@ -375,7 +383,7 @@ impl WaitQueue {
                 // Already past deadline — remove from waiters and check.
                 let mut guard = self.waiters.lock();
                 if let Some(slot) = guard.iter_mut().find(|s| **s == task_id) {
-                    *slot = 0;
+                    *slot = NO_WAITER;
                 }
                 return condition(woken);
             }
@@ -390,7 +398,7 @@ impl WaitQueue {
             {
                 let mut guard = self.waiters.lock();
                 if let Some(slot) = guard.iter_mut().find(|s| **s == task_id) {
-                    *slot = 0;
+                    *slot = NO_WAITER;
                 }
             }
 
@@ -410,9 +418,9 @@ impl WaitQueue {
     /// Safe to call from any context (including ISR via try_wake).
     pub fn wake_one(&self) -> bool {
         let mut guard = self.waiters.lock();
-        if let Some(slot) = guard.iter_mut().find(|s| **s != 0) {
+        if let Some(slot) = guard.iter_mut().find(|s| **s != NO_WAITER) {
             let task_id = *slot;
-            *slot = 0;
+            *slot = NO_WAITER;
             drop(guard);
             super::wake(task_id)
         } else {
@@ -434,11 +442,11 @@ impl WaitQueue {
         {
             let mut guard = self.waiters.lock();
             for slot in guard.iter_mut() {
-                if *slot != 0 {
+                if *slot != NO_WAITER {
                     if let Some(dest) = ids.get_mut(count) {
                         *dest = *slot;
                     }
-                    *slot = 0;
+                    *slot = NO_WAITER;
                     count = count.saturating_add(1);
                 }
             }
@@ -447,7 +455,7 @@ impl WaitQueue {
         // Wake all collected tasks (lock released).
         let mut woken = 0usize;
         for id in ids.iter().take(count) {
-            if *id != 0 && super::wake(*id) {
+            if super::wake(*id) {
                 woken = woken.saturating_add(1);
             }
         }
@@ -464,9 +472,9 @@ impl WaitQueue {
     /// was held.
     pub fn try_wake_one(&self) -> bool {
         if let Some(mut guard) = self.waiters.try_lock() {
-            if let Some(slot) = guard.iter_mut().find(|s| **s != 0) {
+            if let Some(slot) = guard.iter_mut().find(|s| **s != NO_WAITER) {
                 let task_id = *slot;
-                *slot = 0;
+                *slot = NO_WAITER;
                 drop(guard);
                 return super::try_wake(task_id);
             }
@@ -478,14 +486,14 @@ impl WaitQueue {
     #[must_use]
     pub fn waiter_count(&self) -> usize {
         let guard = self.waiters.lock();
-        guard.iter().filter(|&&id| id != 0).count()
+        guard.iter().filter(|&&id| id != NO_WAITER).count()
     }
 
     /// Whether the queue has any waiters.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         let guard = self.waiters.lock();
-        guard.iter().all(|&id| id == 0)
+        guard.iter().all(|&id| id == NO_WAITER)
     }
 }
 
@@ -604,6 +612,68 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     );
     serial_println!("[waitqueue]   wait_timeout_ns (long, already true): OK");
 
+    // --- 10. The task running this -- task 0 at boot -- can wait. ---
+    self_test_the_boot_thread_waits()?;
+
     serial_println!("[waitqueue] Self-test PASSED");
+    Ok(())
+}
+
+/// The queue [`self_test_the_boot_thread_waits`] parks on.
+static BOOT_WAIT_QUEUE: WaitQueue = WaitQueue::new();
+/// Raised by the waker just before it wakes.
+static BOOT_WAIT_FLAG: AtomicU64 = AtomicU64::new(0);
+/// Set by the waker if it saw the waiter registered.
+static BOOT_WAIT_SEEN: AtomicU64 = AtomicU64::new(0);
+
+/// [`self_test_the_boot_thread_waits`]'s waker: wait (boundedly) until the
+/// waiter is visible on the queue, then raise the flag and wake it.
+extern "C" fn boot_wait_waker(_arg: u64) {
+    for _ in 0..500 {
+        if BOOT_WAIT_QUEUE.waiter_count() == 1 {
+            BOOT_WAIT_SEEN.store(1, Ordering::Release);
+            break;
+        }
+        super::sleep_ms(1);
+    }
+    BOOT_WAIT_FLAG.store(1, Ordering::Release);
+    BOOT_WAIT_QUEUE.wake_one();
+}
+
+/// The task running the boot self-tests -- task 0 -- parks on a queue and a
+/// second task, which waits until it can *see* the registration, wakes it.
+///
+/// Until 2026-10-03 an empty waiter slot was 0, so task 0's registration was
+/// invisible: `waiter_count` said 0, `wake_one` passed it by, and a boot
+/// thread waiting on a `KMutex` slept for ever -- the hang that stopped every
+/// lane A boot since 2026-09-27 at the kmutex no-starvation test. The wait is
+/// bounded, so a regression fails here instead of hanging the boot.
+fn self_test_the_boot_thread_waits() -> crate::error::KernelResult<()> {
+    BOOT_WAIT_FLAG.store(0, Ordering::Release);
+    BOOT_WAIT_SEEN.store(0, Ordering::Release);
+    let me = super::current_task_id();
+    if let Err(e) = super::spawn(b"waitqueue-waker", 16, boot_wait_waker, 0, 0) {
+        serial_println!("[waitqueue]   FAIL: could not start the waker: {:?}", e);
+        return Err(e);
+    }
+    let woke = BOOT_WAIT_QUEUE.wait_timeout_ns(
+        || BOOT_WAIT_FLAG.load(Ordering::Acquire) != 0,
+        3_000_000_000,
+    );
+    let seen = BOOT_WAIT_SEEN.load(Ordering::Acquire) != 0;
+    if !woke || !seen {
+        serial_println!(
+            "[waitqueue]   FAIL: task {} waiting on a queue: woken {}, its registration \
+             seen by the waker {}",
+            me,
+            woke,
+            seen
+        );
+        return Err(crate::error::KernelError::InternalError);
+    }
+    serial_println!(
+        "[waitqueue]   a waiter that is task {} is seen on the queue and woken: OK",
+        me
+    );
     Ok(())
 }

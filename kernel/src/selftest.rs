@@ -30,6 +30,7 @@
 use crate::serial_println;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 // ---------------------------------------------------------------------------
 // Severity classification (§914)
@@ -72,18 +73,54 @@ pub enum Severity {
 /// `cpu::halt_loop()` pattern scattered across `main.rs` with a single
 /// dispatch point that cannot misclassify a test's severity.
 ///
+/// The test is passed as a closure, not as its result, so that a boot with
+/// `selftest.skip=1` ([`skip`]) never runs it: an argument is evaluated
+/// before the call it is passed to, so a result-taking `dispatch` could only
+/// skip the reporting. The call stays written as a call (`|| x::self_test()`
+/// rather than `x::self_test`) because the wiring gates
+/// (`check-self-tests-wired`, `check-ran-if`) find a test by its call.
+///
 /// # Examples
 ///
 /// ```ignore
 /// use crate::selftest::{Severity, dispatch};
 ///
 /// // Integrity — halts on failure:
-/// dispatch("Frame allocator", Severity::Integrity, mm::frame::self_test());
+/// dispatch("Frame allocator", Severity::Integrity, || mm::frame::self_test());
 ///
 /// // Diagnostic — logs and continues:
-/// dispatch("ACPI", Severity::Diagnostic, acpi::self_test());
+/// dispatch("ACPI", Severity::Diagnostic, || acpi::self_test());
 /// ```
-pub fn dispatch<E: core::fmt::Display>(name: &str, severity: Severity, result: Result<(), E>) {
+pub fn dispatch<E: core::fmt::Display>(
+    name: &str,
+    severity: Severity,
+    test: impl FnOnce() -> Result<(), E>,
+) {
+    if skip() {
+        return;
+    }
+    report(name, severity, test());
+}
+
+/// Like [`dispatch`] but formats the error with `Debug` (`{:?}`) instead of
+/// `Display`.  Many subsystem self-tests return error types that derive
+/// `Debug` but do not implement `Display` — this variant covers those.
+pub fn dispatch_debug<E: core::fmt::Debug>(
+    name: &str,
+    severity: Severity,
+    test: impl FnOnce() -> Result<(), E>,
+) {
+    if skip() {
+        return;
+    }
+    report_debug(name, severity, test());
+}
+
+/// Report the result of a test that has already run, on its severity, as
+/// [`dispatch`] does. For a check inside a larger test whose outcome is
+/// computed before it is judged (`proc::spawn`'s ring-3 checks); a test to be
+/// run is passed to [`dispatch`], which can then not run it.
+pub fn report<E: core::fmt::Display>(name: &str, severity: Severity, result: Result<(), E>) {
     if let Err(e) = result {
         match severity {
             Severity::Integrity => {
@@ -101,10 +138,8 @@ pub fn dispatch<E: core::fmt::Display>(name: &str, severity: Severity, result: R
     }
 }
 
-/// Like [`dispatch`] but formats the error with `Debug` (`{:?}`) instead of
-/// `Display`.  Many subsystem self-tests return error types that derive
-/// `Debug` but do not implement `Display` — this variant covers those.
-pub fn dispatch_debug<E: core::fmt::Debug>(name: &str, severity: Severity, result: Result<(), E>) {
+/// [`report`] with the error formatted with `Debug`, as [`dispatch_debug`].
+pub fn report_debug<E: core::fmt::Debug>(name: &str, severity: Severity, result: Result<(), E>) {
     if let Err(e) = result {
         match severity {
             Severity::Integrity => {
@@ -143,21 +178,70 @@ pub fn dispatch_debug<E: core::fmt::Debug>(name: &str, severity: Severity, resul
 /// `SLATE_CMDLINE="selftest.keep_going=1" scripts/boot-test.sh`.
 #[must_use]
 pub fn keep_going() -> bool {
-    use core::sync::atomic::{AtomicU8, Ordering};
-    /// 0 not looked yet, 1 no, 2 yes. The command line never changes.
     static ANSWER: AtomicU8 = AtomicU8::new(0);
-    match ANSWER.load(Ordering::Relaxed) {
+    cmdline_flag(&ANSWER, b"selftest.keep_going")
+}
+
+// ---------------------------------------------------------------------------
+// Not running them at all (`selftest.skip=1`)
+// ---------------------------------------------------------------------------
+
+/// Whether this boot runs no self-tests: the kernel command line holds
+/// `selftest.skip=1`. [`dispatch`] and [`dispatch_debug`] then return
+/// without running the test they were given.
+///
+/// For a boot that is wanted for what it runs rather than for what it proves:
+/// `scripts/guest.py`'s guest (design-decisions 1534), which boots what the
+/// last boot test built so that a program can be copied in and tried. Its
+/// agent starts after the self-tests, which take about 13 minutes under
+/// emulation, and a test that halts would stop the guest before the agent
+/// answered at all (known-issues `A-GUEST-BOOTS-THE-WHOLE-SELF-TEST-SUITE-
+/// FIRST`).
+///
+/// A boot with it proves nothing, so `scripts/boot-test.sh` refuses it: a
+/// boot test that skipped its tests would pass on whatever kernel it was
+/// given. The first skip says so on the serial line, once.
+#[must_use]
+pub fn skip() -> bool {
+    static ANSWER: AtomicU8 = AtomicU8::new(0);
+    static SAID: AtomicBool = AtomicBool::new(false);
+    let yes = cmdline_flag(&ANSWER, b"selftest.skip");
+    if yes && !SAID.swap(true, Ordering::Relaxed) {
+        serial_println!(
+            "[selftest] selftest.skip: this boot runs no self-tests and proves nothing"
+        );
+    }
+    yes
+}
+
+/// Whether the kernel command line sets the boolean `key`: a word that is
+/// `key`, or `key=` followed by `1`, `yes`, `true` or nothing -- the values
+/// `fs::kernparam::is_set` takes. Read here rather than there because the
+/// first self-tests run before `kernparam` is initialised.
+///
+/// `answer` caches it, as the command line never changes: 0 not looked yet,
+/// 1 no, 2 yes.
+fn cmdline_flag(answer: &AtomicU8, key: &[u8]) -> bool {
+    match answer.load(Ordering::Relaxed) {
         1 => false,
         2 => true,
         _ => {
             let yes = crate::boot::kernel_cmdline_bytes().is_some_and(|line| {
                 line.split(u8::is_ascii_whitespace)
-                    .any(|token| token == b"selftest.keep_going=1")
+                    .any(|word| flag_word_sets(word, key))
             });
-            ANSWER.store(if yes { 2 } else { 1 }, Ordering::Relaxed);
+            answer.store(if yes { 2 } else { 1 }, Ordering::Relaxed);
             yes
         }
     }
+}
+
+/// Whether one command-line word sets the boolean `key` (see [`cmdline_flag`]).
+fn flag_word_sets(word: &[u8], key: &[u8]) -> bool {
+    matches!(
+        word.strip_prefix(key),
+        Some(b"" | b"=" | b"=1" | b"=yes" | b"=true")
+    )
 }
 
 /// One part of a self-test made of many parts (`linux::self_test`'s are
@@ -684,6 +768,37 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     let found = suites.iter().any(|s| s.name == "kobject");
     assert!(found, "should find kobject test");
     serial_println!("[selftest]   Lookup: OK");
+
+    // Test 4: which command-line words set a boolean flag. `selftest.skip`
+    // turns every later test off, so a word that set it by accident -- a
+    // prefix match on `selftest.skipped=1`, a `=0` read as present -- would
+    // make a boot test pass on nothing; boot-test.sh refuses the flag, and
+    // this is the kernel's half of not being fooled by a near miss.
+    let key = b"selftest.skip".as_slice();
+    for (word, sets) in [
+        (b"selftest.skip".as_slice(), true),
+        (b"selftest.skip=", true),
+        (b"selftest.skip=1", true),
+        (b"selftest.skip=yes", true),
+        (b"selftest.skip=true", true),
+        (b"selftest.skip=0", false),
+        (b"selftest.skip=no", false),
+        (b"selftest.skip=10", false),
+        (b"selftest.skipped=1", false),
+        (b"xselftest.skip=1", false),
+        (b"selftest.keep_going=1", false),
+        (b"", false),
+    ] {
+        if flag_word_sets(word, key) != sets {
+            serial_println!(
+                "[selftest]   FAIL: {:?} {} selftest.skip",
+                core::str::from_utf8(word),
+                if sets { "should set" } else { "should not set" }
+            );
+            return Err(crate::error::KernelError::InternalError);
+        }
+    }
+    serial_println!("[selftest]   Command-line flags: 12 words read as kernparam reads them: OK");
 
     serial_println!("[selftest] Self-test PASSED");
     Ok(())

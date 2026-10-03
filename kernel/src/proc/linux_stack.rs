@@ -430,7 +430,7 @@ fn base_auxv(
 //      diagnostic anywhere.  That is strictly worse than the loud ring-0 #PF
 //      tracked as `W-KERNEL-COW-WRITE`, because nothing reports it at all.
 //   2. **No CoW break and no demand-population.**  `copy_to_user_as` resolves
-//      through `user_page_phys`, which asks the owning process's fault
+//      through `touch_remote_page`, which asks the owning process's fault
 //      resolver to do what the hardware fault would have done — populate a
 //      committed-but-absent page, or break a CoW — and only then walks again.
 //      The loop here treated both states as `InvalidAddress`.

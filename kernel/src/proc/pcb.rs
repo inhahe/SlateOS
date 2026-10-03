@@ -6157,7 +6157,16 @@ fn resolve_subpaged_fault(
             // `free_frame` uncharges the cgroup via `FRAME_CGROUP`.
             let _ = unsafe { frame::free_frame(phys_frame) };
         }
-        return false;
+        // Every covered subpage present means another CPU's fault on this
+        // frame populated them first: resolved, and the access runs again.
+        // Until 2026-10-03 this was a failure, and the second of two threads
+        // touching the frame at once was sent SIGSEGV.
+        let covered_present = subpages.iter().enumerate().all(|(i, fill)| {
+            #[allow(clippy::arithmetic_side_effects)]
+            let sub_va = frame_base + (i as u64) * (HW_PAGE_SIZE as u64);
+            fill.is_none() || page_table::translate(pml4_phys, VirtAddr::new(sub_va)).is_some()
+        });
+        return covered_present && subpages.iter().any(Option::is_some);
     }
 
     // Flush the whole frame's TLB entries (cross-CPU shootdown).
@@ -6178,20 +6187,86 @@ fn resolve_subpaged_fault(
     true
 }
 
-/// Resolve a user-space page fault against a process's VMA list.
-///
-/// Called from the page fault handler (IDT vector 14) when a user-mode
-/// fault occurs on a lazy-allocated region.  This function:
+/// What [`resolve_fault`] made of a page fault.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaultOutcome {
+    /// The page is there now: run the access again.
+    Resolved,
+    /// Nothing the kernel can do: no region covers the address, or the
+    /// access is one it does not allow.
+    Unresolvable,
+    /// The process table was held elsewhere, and the caller asked not to
+    /// wait for it: nothing is known yet, so try again.
+    Busy,
+}
+
+/// Resolve a page fault in `pid`'s address space against its VMA list:
+/// break a copy-on-write share, or populate a committed page that is not
+/// there yet (demand paging), as the hardware fault would have.
 ///
 /// 1. Looks up the faulting address in the process's VMA list.
 /// 2. Checks permissions against the error code.
 /// 3. For Anonymous VMAs: allocates a frame, zeroes it, maps it.
 ///
-/// Uses `try_lock()` to avoid deadlock if the process table is already
-/// held (e.g., from a syscall that triggered a fault).
+/// **The process table being held is not an answer.** Both paths read
+/// the table, and another CPU holding it says nothing about the fault.
+/// Until 2026-10-03 the resolver only tried the lock and reported a
+/// busy table as an unresolvable fault, so a program could be killed
+/// with `SIGSEGV` for a copy-on-write write after `fork`, and a syscall
+/// given a fresh buffer could fail with `EFAULT`, whenever another CPU
+/// happened to hold the table.
 ///
-/// Returns `true` if the fault was resolved, `false` if not.
+/// - `wait`: wait for the table, unless the calling task holds it
+///   already (a kernel path that faulted under it), in which case
+///   waiting could never end and the fault is `Busy`. For callers in
+///   thread context ([`try_resolve_fault`]) and for the #PF handler on a
+///   user-mode fault, which runs with interrupts on.
+/// - not `wait`: `Busy` at once, for a caller with interrupts off, which
+///   must not wait for a holder that may be waiting for a TLB shootdown
+///   on it; it retries the access instead. The copy-on-write break and
+///   swap-in under it still wait for the address space's page-table lock
+///   (`mm::as_lock`), so such a caller must not reach them.
+pub fn resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64, wait: bool) -> FaultOutcome {
+    let mut busy = false;
+    if resolve_fault_inner(pid, fault_addr, error_code, wait, &mut busy) {
+        FaultOutcome::Resolved
+    } else if busy {
+        FaultOutcome::Busy
+    } else {
+        FaultOutcome::Unresolvable
+    }
+}
+
+/// [`resolve_fault`] for a caller in thread context: waits for the process
+/// table, and is `true` only if the fault was resolved.
 pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bool {
+    resolve_fault(pid, fault_addr, error_code, true) == FaultOutcome::Resolved
+}
+
+/// The process table, for [`resolve_fault`]: at once when it is free; with
+/// `wait`, after waiting for it, unless the calling task holds it already.
+/// `None` is "busy".
+fn lock_table_for_fault(
+    wait: bool,
+) -> Option<crate::sync::MutexGuard<'static, BTreeMap<ProcessId, Process>>> {
+    if let Some(table) = PROCESS_TABLE.try_lock() {
+        return Some(table);
+    }
+    if wait && !PROCESS_TABLE.held_by_current_task() {
+        return Some(PROCESS_TABLE.lock());
+    }
+    None
+}
+
+/// [`resolve_fault`]'s body: `true` when resolved; `false` with `busy` set
+/// when the table could not be had (see [`lock_table_for_fault`]).
+fn resolve_fault_inner(
+    pid: ProcessId,
+    fault_addr: u64,
+    error_code: u64,
+    wait: bool,
+    busy: &mut bool,
+) -> bool {
     use crate::mm::fault::PageFaultError;
     use crate::mm::frame::{self, FRAME_SIZE};
     use crate::mm::page_table::{self, PageFlags, VirtAddr};
@@ -6208,7 +6283,8 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
     // A present page with the COW bit set means this page is shared
     // and needs to be copied on first write.
     if error.is_present() && error.is_write() {
-        let Some(table) = PROCESS_TABLE.try_lock() else {
+        let Some(table) = lock_table_for_fault(wait) else {
+            *busy = true;
             return false;
         };
         let Some(proc) = table.get(&pid) else {
@@ -6230,9 +6306,10 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
         return false;
     }
 
-    // Try to acquire the process table lock.  If it's already held,
-    // we can't resolve (avoid deadlock).
-    let Some(table) = PROCESS_TABLE.try_lock() else {
+    // The process table, for the VMA lookup (see `resolve_fault` on why a
+    // busy table is not an unresolvable fault).
+    let Some(table) = lock_table_for_fault(wait) else {
+        *busy = true;
         return false;
     };
     let Some(proc) = table.get(&pid) else {
@@ -6279,6 +6356,32 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
     // approximation wrong for guard pages). See design-decisions §32.
     if !flags.contains(PageFlags::USER_ACCESSIBLE) {
         return false;
+    }
+
+    // A swapped-out frame comes back from swap, each 4 KiB part with the
+    // flags its entry kept (`mm::swap::swap_in_page`) -- never demand-paged
+    // anew over its swap entries, which replaced the data with zeros and
+    // leaked the slot. Until 2026-10-03 the #PF handler alone looked for swap
+    // first, and the kernel faulting a page in on a process's behalf (a
+    // syscall's buffer, `process_vm_readv`) came straight here.
+    let swapped = pml4_phys != 0 && {
+        // SAFETY: `pml4_phys` is the process's own PML4, read through the
+        // HHDM.
+        unsafe { crate::mm::swap::is_swapped(pml4_phys, VirtAddr::new(frame_base)) }
+    };
+    if swapped {
+        drop(table);
+        // SAFETY: as above; a part of the frame holds a swap entry.
+        return match unsafe { crate::mm::swap::swap_in_page(pml4_phys, VirtAddr::new(frame_base)) }
+        {
+            Ok(Some(kept)) => {
+                crate::mm::swap::register_reclaimable(pml4_phys, frame_base, kept);
+                true
+            }
+            // Another CPU brought it back first, and registered it.
+            Ok(None) => true,
+            Err(_) => false,
+        };
     }
 
     // Decide how to populate the new frame.  Anonymous/Stack pages are
@@ -6460,13 +6563,35 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
     // Map the frame.
     // SAFETY: pml4_phys is the process's valid PML4, phys_frame is
     // freshly allocated, virt is within a VMA that permits this mapping.
-    let map_result = unsafe { page_table::map_frame(pml4_phys, virt, phys_frame, flags) };
+    //
+    // Under the address space's page-table lock (`mm::as_lock`): `map_frame`
+    // checks each entry is absent and then writes it, and two CPUs
+    // demand-paging the same page could otherwise both see it absent and
+    // both write, leaking one frame and losing what was written to it. The
+    // allocation and the file read above stay outside: they may block.
+    let map_result = {
+        let _held = crate::mm::as_lock::lock(pml4_phys);
+        // SAFETY: as above.
+        unsafe { page_table::map_frame(pml4_phys, virt, phys_frame, flags) }
+    };
 
-    if map_result.is_err() {
-        // Map failed — free the frame.
-        // SAFETY: phys_frame was just allocated and not exposed.
-        let _ = unsafe { frame::free_frame(phys_frame) };
-        return false;
+    match map_result {
+        Ok(()) => {}
+        Err(KernelError::AlreadyExists) => {
+            // Another CPU's fault populated the page first: this frame is not
+            // needed, and the access runs again on that one. Until 2026-10-03
+            // this was a failure, and the second of two threads touching a
+            // fresh page at once was sent SIGSEGV.
+            // SAFETY: phys_frame was just allocated and not exposed.
+            let _ = unsafe { frame::free_frame(phys_frame) };
+            return true;
+        }
+        Err(_) => {
+            // Map failed — free the frame.
+            // SAFETY: phys_frame was just allocated and not exposed.
+            let _ = unsafe { frame::free_frame(phys_frame) };
+            return false;
+        }
     }
 
     // Flush TLB so the CPU sees the new mapping.
@@ -6564,14 +6689,29 @@ fn resolve_file_cached(
     };
 
     let virt = VirtAddr::new(frame_base);
-    // SAFETY: `pml4_phys` is the faulting process's valid PML4, `phys_frame`
-    // is a live cache frame holding our caller reference, and `virt` lies in
-    // a VMA that permits this (read-only) mapping.
-    let map_result = unsafe { page_table::map_frame(pml4_phys, virt, phys_frame, map_flags) };
-    if map_result.is_err() {
-        // Mapping failed — drop our caller reference on the cache frame.
-        crate::mm::page_cache::release(phys_frame);
-        return false;
+    // Under the address space's page-table lock, as the anonymous demand
+    // path installs (`mm::as_lock`): two CPUs mapping the same page must not
+    // both see it absent and both write.
+    let map_result = {
+        let _held = crate::mm::as_lock::lock(pml4_phys);
+        // SAFETY: `pml4_phys` is the faulting process's valid PML4,
+        // `phys_frame` is a live cache frame holding our caller reference,
+        // and `virt` lies in a VMA that permits this (read-only) mapping.
+        unsafe { page_table::map_frame(pml4_phys, virt, phys_frame, map_flags) }
+    };
+    match map_result {
+        Ok(()) => {}
+        Err(KernelError::AlreadyExists) => {
+            // Another CPU's fault mapped the page first; this reference is
+            // not needed, and the access runs again.
+            crate::mm::page_cache::release(phys_frame);
+            return true;
+        }
+        Err(_) => {
+            // Mapping failed — drop our caller reference on the cache frame.
+            crate::mm::page_cache::release(phys_frame);
+            return false;
+        }
     }
 
     // Flush the TLB so the CPU observes the new mapping.
@@ -6812,19 +6952,33 @@ fn destroy_process_resources(
 /// reads atomics only).
 static DEFERRED_ADDRESS_SPACES: Mutex<Vec<(u64, Vec<TaskId>)>> = Mutex::new(Vec::new());
 
-/// The pins on process address spaces, by PML4, with how many each has
-/// ([`AsPin`]). A free waits until its count is gone
-/// ([`free_address_space_when_unused`], [`free_deferred_address_spaces`]).
+/// The pins on process address spaces, by PML4 ([`AsPin`]), and which are
+/// being torn down in place by exec ([`ExecTeardown`]). A free waits until a
+/// space's pins are gone ([`free_address_space_when_unused`],
+/// [`free_deferred_address_spaces`]); an entry exists only while a space has
+/// pins or a teardown.
 ///
 /// Taken under [`PROCESS_TABLE`] by [`pin_address_space`], and alone
 /// everywhere else; nothing is taken while it is held.
-static ADDRESS_SPACE_PINS: Mutex<BTreeMap<u64, usize>> = Mutex::named(BTreeMap::new(), b"as_pins");
+static ADDRESS_SPACE_PINS: Mutex<BTreeMap<u64, PinState>> =
+    Mutex::named(BTreeMap::new(), b"as_pins");
+
+/// One address space's entry in [`ADDRESS_SPACE_PINS`].
+#[derive(Default)]
+struct PinState {
+    /// How many [`AsPin`]s hold it.
+    pins: usize,
+    /// Exec is clearing its user half in place ([`ExecTeardown`]): no pin is
+    /// given out until it is done.
+    exec_teardown: bool,
+}
 
 /// A hold on a process's address space -- Linux's `mmget_not_zero`/`mmput`.
-/// While one lives, the page tables and frames it names are not freed,
-/// whatever becomes of the process meanwhile. The process may exit, its
-/// address space be released at its zombie transition
-/// ([`release_address_space`]), or the process be reaped.
+/// While one lives, the page tables it names are not freed, whatever becomes
+/// of the process meanwhile. The process may exit, its address space be
+/// released at its zombie transition ([`release_address_space`]), or the
+/// process be reaped; and exec does not clear the user half under it
+/// ([`ExecTeardown`] waits for it).
 ///
 /// For a caller that walks *another* process's page tables after letting
 /// go of the process table: `process_vm_readv`/`writev`. Until 2026-10-02
@@ -6832,9 +6986,11 @@ static ADDRESS_SPACE_PINS: Mutex<BTreeMap<u64, usize>> = Mutex::named(BTreeMap::
 /// the tables under its walk. A process's own threads need no pin: an
 /// address space is not freed while a thread of it can still run on it.
 ///
-/// It keeps the tables, not what is mapped in them. The process may still
-/// unmap a page while the holder reads it
-/// (`known-issues` `TD-A-CROSS-PROCESS-COPY-RACES-THE-TARGETS-OWN-UNMAP`).
+/// It keeps the tables, not what is mapped in them: the process may still
+/// unmap a page while the holder reads it. The frame under a page the holder
+/// touches is kept by `mm::frame`'s remote-copy windows instead
+/// (`mm::user::copy_from_user_as`), since 2026-10-03 (known-issues
+/// `TD-A-CROSS-PROCESS-COPY-RACES-THE-TARGETS-OWN-UNMAP`).
 #[must_use]
 pub struct AsPin {
     pml4: u64,
@@ -6853,15 +7009,18 @@ impl Drop for AsPin {
         let last = {
             let mut pins = ADDRESS_SPACE_PINS.lock();
             match pins.get_mut(&self.pml4) {
-                Some(count) if *count > 1 => {
-                    *count = count.saturating_sub(1);
+                Some(state) if state.pins > 1 => {
+                    state.pins = state.pins.saturating_sub(1);
                     false
                 }
-                Some(_) => {
-                    pins.remove(&self.pml4);
+                Some(state) => {
+                    state.pins = 0;
+                    if !state.exec_teardown {
+                        pins.remove(&self.pml4);
+                    }
                     true
                 }
-                // Every pin is counted before it exists (`pin_address_space`).
+                // Every pin is counted before it exists (`try_pin`).
                 None => false,
             }
         };
@@ -6876,20 +7035,106 @@ impl Drop for AsPin {
 /// Pin `pid`'s address space ([`AsPin`]). `None` for a process that is not
 /// in the table, or that has no address space: never given one, or
 /// released at its exit ([`release_address_space`]).
+///
+/// While exec is clearing the space in place ([`ExecTeardown`]) this waits,
+/// yielding, until it is done: the tables are being freed, and the pin that
+/// would keep them is what the teardown waited out before it began. The
+/// holder then sees the new image.
 pub fn pin_address_space(pid: ProcessId) -> Option<AsPin> {
+    loop {
+        match try_pin(pid) {
+            PinAttempt::Pinned(pin) => return Some(pin),
+            PinAttempt::NoAddressSpace => return None,
+            PinAttempt::ExecTeardown => crate::sched::yield_now(),
+        }
+    }
+}
+
+/// What one attempt at [`pin_address_space`] found.
+enum PinAttempt {
+    Pinned(AsPin),
+    NoAddressSpace,
+    ExecTeardown,
+}
+
+/// One attempt at [`pin_address_space`], which does not wait.
+fn try_pin(pid: ProcessId) -> PinAttempt {
     let table = PROCESS_TABLE.lock();
-    let pml4 = table.get(&pid).map(|p| p.pml4_phys).filter(|&p| p != 0)?;
+    let Some(pml4) = table.get(&pid).map(|p| p.pml4_phys).filter(|&p| p != 0) else {
+        return PinAttempt::NoAddressSpace;
+    };
     // Counted before the table's lock is let go: a release or a reap takes
     // the PML4 out of the table under that lock, and finds this pin after.
     let mut pins = ADDRESS_SPACE_PINS.lock();
-    let count = pins.entry(pml4).or_insert(0);
-    *count = count.saturating_add(1);
-    Some(AsPin { pml4 })
+    let state = pins.entry(pml4).or_default();
+    if state.exec_teardown {
+        return PinAttempt::ExecTeardown;
+    }
+    state.pins = state.pins.saturating_add(1);
+    PinAttempt::Pinned(AsPin { pml4 })
 }
 
-/// Whether any [`AsPin`] holds `pml4`.
+/// Whether any [`AsPin`] holds `pml4`, or exec is tearing it down.
 fn address_space_pinned(pml4: u64) -> bool {
-    ADDRESS_SPACE_PINS.lock().contains_key(&pml4)
+    ADDRESS_SPACE_PINS
+        .lock()
+        .get(&pml4)
+        .is_some_and(|state| state.pins > 0 || state.exec_teardown)
+}
+
+/// Exec's hold on its process's address space while it clears the user half
+/// in place (`proc::spawn::exec_process`): begun only once no [`AsPin`] holds
+/// the space ([`begin_exec_teardown`]), and no pin is given out while it
+/// lives. Dropped once the old image's tables are gone and the space is
+/// empty, which is a state a walker can meet safely.
+///
+/// A pin keeps the tables from being freed, but exec frees them without
+/// freeing the address space: it keeps the PML4 and clears everything under
+/// it. Until 2026-10-03 nothing kept that from happening under a
+/// `process_vm_readv` walking the same tables (known-issues
+/// `TD-A-CROSS-PROCESS-COPY-RACES-THE-TARGETS-OWN-UNMAP`). Linux gives the
+/// new image a new mm instead, and the old one goes when its last
+/// `mmget` does.
+#[must_use]
+pub struct ExecTeardown {
+    pml4: u64,
+}
+
+impl Drop for ExecTeardown {
+    fn drop(&mut self) {
+        let mut pins = ADDRESS_SPACE_PINS.lock();
+        if let Some(state) = pins.get_mut(&self.pml4) {
+            state.exec_teardown = false;
+            if state.pins == 0 {
+                pins.remove(&self.pml4);
+            }
+        }
+    }
+}
+
+/// Begin exec's in-place teardown of the address space at `pml4`
+/// ([`ExecTeardown`]): wait, yielding, until no pin holds it, then hold it
+/// against new ones. A pin lasts one `process_vm_readv`/`writev` call, so
+/// the wait is that long at most.
+pub fn begin_exec_teardown(pml4: u64) -> ExecTeardown {
+    loop {
+        if let Some(teardown) = try_begin_exec_teardown(pml4) {
+            return teardown;
+        }
+        crate::sched::yield_now();
+    }
+}
+
+/// One attempt at [`begin_exec_teardown`]: `None` while a pin holds `pml4`,
+/// or another teardown does.
+fn try_begin_exec_teardown(pml4: u64) -> Option<ExecTeardown> {
+    let mut pins = ADDRESS_SPACE_PINS.lock();
+    let state = pins.entry(pml4).or_default();
+    if state.pins > 0 || state.exec_teardown {
+        return None;
+    }
+    state.exec_teardown = true;
+    Some(ExecTeardown { pml4 })
 }
 
 /// Release `pid`'s address space as it becomes a zombie -- Linux's
@@ -8237,6 +8482,7 @@ pub fn self_test() -> KernelResult<()> {
     test_may_inspect()?;
     test_deferred_address_space()?;
     test_address_space_pin_and_release()?;
+    test_exec_teardown_holds_out_pins()?;
     test_cpu_time_accounting()?;
     test_io_accounting()?;
     test_job_control_state()?;
@@ -8247,6 +8493,8 @@ pub fn self_test() -> KernelResult<()> {
     test_reserve_unmapped_area()?;
     test_reset_linux_state_for_exec()?;
     test_prot_none()?;
+    test_fault_with_the_table_held()?;
+    test_fault_swaps_in()?;
     test_rlimits()?;
     test_canonical_path()?;
 
@@ -8611,6 +8859,165 @@ fn test_prot_none() -> KernelResult<()> {
 
     destroy(pid);
     serial_println!("[proc]   real PROT_NONE (resolver gate + mprotect round-trip): OK");
+    Ok(())
+}
+
+/// A fault met with the process table held is `Busy`, not `Unresolvable`
+/// ([`resolve_fault`]): the #PF handler retries it rather than killing the
+/// process, and a waiting caller that holds the table itself gets an answer
+/// rather than a self-deadlock. Once the table is free, the same fault
+/// resolves.
+///
+/// Both holds are this task's: for the no-wait call it stands for another
+/// CPU holding the table, and for the waiting call it is the caller's own.
+/// A wait for another CPU's hold needs a second CPU, and is
+/// `PROCESS_TABLE.lock()`.
+fn test_fault_with_the_table_held() -> KernelResult<()> {
+    use crate::mm::page_table::PageFlags;
+
+    let frame = crate::mm::frame::FRAME_SIZE as u64;
+    let pid = create("fault-busy-test", 0);
+    set_running(pid)?;
+    if get_pml4(pid).is_none_or(|p| p == 0) {
+        serial_println!("[proc]   FAIL: busy-table fault test process has no PML4");
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
+
+    // A committed anonymous frame, not populated yet: a read of it
+    // demand-pages.
+    let base: u64 = 0x0000_0031_0000_0000; // clear of test_prot_none's window
+    let flags = PageFlags::PRESENT
+        | PageFlags::WRITABLE
+        | PageFlags::USER_ACCESSIBLE
+        | PageFlags::NO_EXECUTE;
+    if let Err(e) = add_vma(
+        pid,
+        Vma {
+            start: base,
+            end: base.saturating_add(frame),
+            kind: VmaKind::Anonymous,
+            flags,
+        },
+    ) {
+        serial_println!("[proc]   FAIL: busy-table fault add_vma {:?}", e);
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
+
+    // A user read fault: not present, not a write.
+    let read_fault = 1 << 2;
+    let (no_wait, waiting_holder) = {
+        let _table = PROCESS_TABLE.lock();
+        (
+            resolve_fault(pid, base, read_fault, false),
+            resolve_fault(pid, base, read_fault, true),
+        )
+    };
+    let free = resolve_fault(pid, base, read_fault, false);
+    destroy(pid);
+
+    if no_wait != FaultOutcome::Busy
+        || waiting_holder != FaultOutcome::Busy
+        || free != FaultOutcome::Resolved
+    {
+        serial_println!(
+            "[proc]   FAIL: busy-table fault: table held, no wait {:?}; table held by the \
+             waiter {:?}; table free {:?} (want Busy, Busy, Resolved)",
+            no_wait,
+            waiting_holder,
+            free
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[proc]   a fault met with the process table held is retried, not refused, and \
+         resolves once it is free: OK"
+    );
+    Ok(())
+}
+
+/// A page the kernel faults in on a process's behalf -- a syscall's buffer,
+/// `process_vm_readv` -- comes back from swap when it is there
+/// ([`resolve_fault`]), with its data. Until 2026-10-03 the resolver
+/// demand-paged a page of zeros over the swap entry, which only the #PF
+/// handler looked for.
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+fn test_fault_swaps_in() -> KernelResult<()> {
+    use crate::mm::page_table::{self, PageFlags, VirtAddr};
+
+    fn fail(pid: ProcessId, what: &str) -> KernelResult<()> {
+        serial_println!("[proc]   FAIL: fault from swap: {}", what);
+        destroy(pid);
+        Err(KernelError::InternalError)
+    }
+    let frame = crate::mm::frame::FRAME_SIZE as u64;
+    let pattern = |i: u64| (i % 241) as u8;
+
+    let pid = create("fault-swap-test", 0);
+    set_running(pid)?;
+    let Some(pml4) = get_pml4(pid).filter(|&p| p != 0) else {
+        return fail(pid, "the test process has no PML4");
+    };
+    let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
+    let base: u64 = 0x0000_0032_0000_0000; // clear of the other fault tests'
+    let flags = PageFlags::PRESENT
+        | PageFlags::WRITABLE
+        | PageFlags::USER_ACCESSIBLE
+        | PageFlags::NO_EXECUTE;
+    if add_vma(
+        pid,
+        Vma {
+            start: base,
+            end: base + frame,
+            kind: VmaKind::Anonymous,
+            flags,
+        },
+    )
+    .is_err()
+    {
+        return fail(pid, "add_vma");
+    }
+
+    // Populate the page, and fill it.
+    if resolve_fault(pid, base, 1 << 2, true) != FaultOutcome::Resolved {
+        return fail(pid, "the first touch did not demand-page");
+    }
+    let Some(phys) = page_table::translate(pml4, VirtAddr::new(base)) else {
+        return fail(pid, "the populated page is not mapped");
+    };
+    for i in 0..frame {
+        // SAFETY: the frame just mapped, through the HHDM, in bounds.
+        unsafe { ((phys + hhdm + i) as *mut u8).write(pattern(i)) };
+    }
+
+    // Out to swap; then the kernel faults it in for a read in its second part.
+    // SAFETY: the test process's own PML4, the page mapped.
+    if let Err(e) = unsafe { crate::mm::swap::swap_out_page(pml4, VirtAddr::new(base)) } {
+        serial_println!("[proc]   (swap-out gave {:?})", e);
+        return fail(pid, "swap-out");
+    }
+    let outcome = resolve_fault(pid, base + 5000, 1 << 2, true);
+    let back = page_table::translate(pml4, VirtAddr::new(base));
+    let data_ok = back.is_some_and(|phys| {
+        (0..frame).all(|i| {
+            // SAFETY: the frame swap-in mapped, through the HHDM, in bounds.
+            unsafe { ((phys + hhdm + i) as *const u8).read() == pattern(i) }
+        })
+    });
+    destroy(pid);
+    if outcome != FaultOutcome::Resolved || !data_ok {
+        serial_println!(
+            "[proc]   FAIL: fault from swap: resolved {:?}; data came back {}",
+            outcome,
+            data_ok
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[proc]   a page the kernel faults in from swap comes back with its data, not \
+         zeros: OK"
+    );
     Ok(())
 }
 
@@ -10288,6 +10695,72 @@ fn test_address_space_pin_and_release() -> KernelResult<()> {
     serial_println!(
         "[proc]   address space released at a zombie's exit, and a pin holds it until it \
          goes: OK"
+    );
+    Ok(())
+}
+
+/// Exec's in-place teardown waits for the pins on its address space and
+/// gives out no new one while it lasts ([`ExecTeardown`]); while it lasts the
+/// space counts as held for a free, and a second teardown is refused. Once
+/// it ends, pins are given out again and the space's entry is gone.
+fn test_exec_teardown_holds_out_pins() -> KernelResult<()> {
+    let pid = create("exec-teardown-test", 0);
+    let Some(pml4) = get_pml4(pid).filter(|&p| p != 0) else {
+        serial_println!("[proc]   FAIL: exec teardown: the test process got no address space");
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    };
+
+    // A pin held: the teardown cannot begin.
+    let pin = match try_pin(pid) {
+        PinAttempt::Pinned(pin) => Some(pin),
+        PinAttempt::NoAddressSpace | PinAttempt::ExecTeardown => None,
+    };
+    let pinned_first = pin.is_some();
+    let waits_for_pin = try_begin_exec_teardown(pml4).is_none();
+    drop(pin);
+
+    // No pin: it begins, and holds pins out while it lives.
+    let teardown = try_begin_exec_teardown(pml4);
+    let began = teardown.is_some();
+    let holds_out = matches!(try_pin(pid), PinAttempt::ExecTeardown);
+    let counted = address_space_pinned(pml4);
+    let one_at_a_time = try_begin_exec_teardown(pml4).is_none();
+    drop(teardown);
+
+    // Ended: a pin is given out again, and when it goes the entry goes too.
+    let pinnable = matches!(try_pin(pid), PinAttempt::Pinned(_));
+    let entry_gone = !ADDRESS_SPACE_PINS.lock().contains_key(&pml4);
+    destroy(pid);
+
+    let all = [
+        pinned_first,
+        waits_for_pin,
+        began,
+        holds_out,
+        counted,
+        one_at_a_time,
+        pinnable,
+        entry_gone,
+    ];
+    if all.contains(&false) {
+        serial_println!(
+            "[proc]   FAIL: exec teardown: pinned {} waits for the pin {} began {} holds pins \
+             out {} counted as held {} one at a time {} pinnable after {} entry gone {}",
+            pinned_first,
+            waits_for_pin,
+            began,
+            holds_out,
+            counted,
+            one_at_a_time,
+            pinnable,
+            entry_gone
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[proc]   exec's in-place teardown waits for the pins on its space and gives out no \
+         new one until it ends: OK"
     );
     Ok(())
 }

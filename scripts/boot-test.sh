@@ -2111,6 +2111,32 @@ for arg in "$@"; do
     esac
 done
 
+# A boot test proves a kernel by running its self-tests. `selftest.skip` turns
+# every one of them off -- it exists for scripts/guest.py's guest, which boots
+# what this script built so that a program can be tried in it -- and a boot that
+# ran none would pass on any kernel, so it is refused here, before the gates
+# and the build, whatever value it is given. `bench.skip` leaves the benchmark
+# task unstarted, which only matters to a --bench run: it would wait for a
+# BENCH_OK that never comes. `read -a` rather than an unquoted expansion, which
+# would glob.
+read -r -a _slate_words <<< "${SLATE_CMDLINE:-}"
+for _word in "${_slate_words[@]}"; do
+    case "$_word" in
+        selftest.skip|selftest.skip=*)
+            echo "ERROR: SLATE_CMDLINE holds '$_word'. selftest.skip, in any form, is" >&2
+            echo "       scripts/guest.py's: a boot test that runs no self-tests proves nothing." >&2
+            exit 1
+            ;;
+        bench.skip|bench.skip=*)
+            if [ "$BENCH" -eq 1 ]; then
+                echo "ERROR: SLATE_CMDLINE holds '$_word', and --bench waits for the" >&2
+                echo "       benchmarks it leaves unrun." >&2
+                exit 1
+            fi
+            ;;
+    esac
+done
+
 # A quarter of the tree's floor, unless the caller named one.  Resolved here
 # rather than at the assignment above so that --min-free-gb=N moves both, which
 # is what someone raising or lowering "the floor" means.  A quarter because the

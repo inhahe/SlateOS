@@ -49,6 +49,22 @@ const HW_PAGES_PER_FRAME: usize = FRAME_SIZE / HW_PAGE_SIZE;
 /// set.  Determines whether to copy the page (shared) or just mark it
 /// writable (last reference).
 ///
+/// **In two halves.** [`prepare_cow`] reads the entries and, for a shared
+/// frame, copies it into a new one -- unlocked, since it allocates and
+/// copies 16 KiB. [`install_cow`] then changes the entries and settles the
+/// refcount under the address space's page-table lock
+/// ([`super::as_lock`]), installing only over entries that are still what
+/// the copy was made from. Until 2026-10-03 one function did both with no
+/// lock, and two threads breaking the same page on two CPUs each installed
+/// a copy -- losing a write made between the two copies -- and each dropped
+/// the address space's reference to the shared frame, one too many: with
+/// two children sharing it, one child then wrote the page in place under
+/// the other and freed it on exit. The second break now finds the work done,
+/// frees its copy, and the write runs again.
+///
+/// Waits for the lock, so it is for thread context, or the #PF handler with
+/// interrupts on (the handler turns them back on for a user-mode fault).
+///
 /// ## Arguments
 ///
 /// - `pml4_phys`: the PML4 physical address of the faulting address space.
@@ -56,15 +72,45 @@ const HW_PAGES_PER_FRAME: usize = FRAME_SIZE / HW_PAGE_SIZE;
 ///
 /// ## Returns
 ///
-/// `Ok(())` if the fault was resolved (the CPU should retry the write).
+/// `Ok(())` if the fault was resolved (the CPU should retry the write) --
+/// including when another CPU resolved it first.
 ///
 /// ## Errors
 ///
 /// - [`KernelError::PageFault`] — the page is not a CoW page.
 /// - [`KernelError::OutOfMemory`] — no physical frame available for the copy.
 /// - [`KernelError::NotSupported`] — subsystem not initialized.
-#[allow(clippy::arithmetic_side_effects)]
 pub fn resolve_cow_fault(pml4_phys: u64, fault_addr: u64) -> KernelResult<()> {
+    let prepared = prepare_cow(pml4_phys, fault_addr)?;
+    let _held = super::as_lock::lock(pml4_phys);
+    install_cow(pml4_phys, prepared)
+}
+
+/// What the slow half of a copy-on-write break found and made
+/// ([`prepare_cow`]), for [`install_cow`].
+struct CowPrep {
+    /// The 16 KiB frame the group's COW entries share.
+    frame_base: u64,
+    /// The virtual base of the frame's four 4 KiB entries.
+    group_virt_base: u64,
+    /// The copy, when the frame was shared; `None` when this address space
+    /// looked like its only owner, and may make it writable in place.
+    copy: Option<PhysFrame>,
+    /// Which parts the copy holds: those that were COW entries on the shared
+    /// frame when it was made.
+    copied: [bool; HW_PAGES_PER_FRAME],
+}
+
+/// The slow half of [`resolve_cow_fault`], with no lock: check the faulting
+/// entry is a COW entry, and, if its frame is shared, copy every part of the
+/// group that is a COW entry on it into a new frame, at the same offsets.
+///
+/// The copy can be made unlocked because a frame shared copy-on-write is
+/// read-only to every mapper while it is shared: none writes it in place
+/// until it is the last ([`install_cow`]'s sole-owner case), and this
+/// address space's own reference keeps it shared until the install drops it.
+#[allow(clippy::arithmetic_side_effects)]
+fn prepare_cow(pml4_phys: u64, fault_addr: u64) -> KernelResult<CowPrep> {
     let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
 
     // Align down to the 4 KiB hardware page boundary.
@@ -87,173 +133,183 @@ pub fn resolve_cow_fault(pml4_phys: u64, fault_addr: u64) -> KernelResult<()> {
     // 16 KiB frames), so we check the frame's refcount.
     let frame_base = old_phys & !(FRAME_SIZE as u64 - 1);
     let frame = PhysFrame::from_addr(frame_base).ok_or(KernelError::InternalError)?;
-    let rc = frame::refcount(frame);
-
-    if rc <= 1 {
-        // We're the sole owner — just make pages writable (no copy).
-        //
-        // OPT: Eagerly resolve all 4 sibling 4 KiB pages within the
-        // same 16 KiB frame, not just the faulting page.  This prevents
-        // up to 3 additional CoW faults for pages that share the same
-        // frame.  Each frame is mapped as 4 consecutive PTEs, so the
-        // sibling pages are at predictable virtual addresses.
-        //
-        // Based on Linux mm/memory.c do_wp_page() which also batches
-        // nearby pages to amortize TLB flushes and fault overhead.
-        let page_index = ((old_phys - frame_base) as usize) / HW_PAGE_SIZE;
-        let group_virt_base = hw_page_base - (page_index as u64 * HW_PAGE_SIZE as u64);
-
-        for i in 0..HW_PAGES_PER_FRAME {
-            let sibling_virt = VirtAddr::new(group_virt_base + (i as u64 * HW_PAGE_SIZE as u64));
-
-            // SAFETY: pml4_phys is valid (same address space).
-            if let Ok(sibling_pte) = unsafe { read_pte(pml4_phys, sibling_virt, hhdm) } {
-                if sibling_pte.is_present() && sibling_pte.is_cow() {
-                    // Verify it's part of the same physical frame.
-                    let sib_frame_base = sibling_pte.phys_addr() & !(FRAME_SIZE as u64 - 1);
-                    if sib_frame_base == frame_base {
-                        let mut new_flags = sibling_pte.flags() | PageFlags::WRITABLE;
-                        new_flags = PageFlags::from_bits(new_flags.bits() & !PageFlags::COW.bits());
-                        let new_pte = PageTableEntry::new(sibling_pte.phys_addr(), new_flags);
-                        // SAFETY: pml4_phys is valid, sibling_virt is in the same frame group.
-                        unsafe {
-                            write_pte(pml4_phys, sibling_virt, new_pte, hhdm).ok();
-                        }
-                    }
-                }
-            }
-        }
-
-        // Flush TLB for the entire frame group (4 pages).
-        crate::tlb::flush_range(group_virt_base, HW_PAGES_PER_FRAME as u32);
-
-        super::fault::record_cow();
-        return Ok(());
-    }
-
-    // Shared page (refcount > 1) — need to copy.
-    //
-    // OPT: Batch all 4 pages of the 16 KiB frame together.  Instead of
-    // copying just the faulting 4 KiB page (wasting 12 KiB of the new
-    // frame), we scan all 4 sibling PTEs in the frame group.  Any that
-    // are present + CoW + point to the same old frame are copied into
-    // the corresponding offset of a single new frame.  This:
-    //   1. Eliminates up to 3 additional CoW faults
-    //   2. Uses the full 16 KiB of the allocated frame (no waste)
-    //   3. Amortizes the TLB flush across all 4 pages
-    //
-    // Refcounting: the per-frame refcount counts *address-space
-    // references* to the 16 KiB frame, NOT individual 4 KiB PTEs.  Each
-    // address space that maps any sub-PTE of the frame contributes exactly
-    // one reference (set to 1 at alloc, +1 per fork via
-    // `clone_address_space_cow`, -1 when the address space's LAST sub-PTE
-    // leaves the frame — whether via this CoW copy or via teardown in
-    // `clear_user_address_space`).  We therefore only drop our reference
-    // *after* the copy loop, and only if no sibling still points into the
-    // old frame (see the `old_still_referenced` check below).  A
-    // read-only shared sibling that lives in the same frame keeps the
-    // reference alive even though it is not copied here.
-    //
-    // Based on Linux mm/memory.c do_wp_page() + copy_page_range().  Linux
-    // refcounts per `struct page` and adjusts once per shared mapping that
-    // is broken, which is the same per-address-space accounting we use.
-
-    // Compute the frame group's virtual base address.
     let page_index = ((old_phys - frame_base) as usize) / HW_PAGE_SIZE;
     let group_virt_base = hw_page_base - (page_index as u64 * HW_PAGE_SIZE as u64);
 
-    // Allocate one new 16 KiB frame for all resolved siblings.
+    if frame::refcount(frame) <= 1 {
+        // We look like the sole owner: no copy, the install makes the
+        // entries writable in place.
+        return Ok(CowPrep {
+            frame_base,
+            group_virt_base,
+            copy: None,
+            copied: [false; HW_PAGES_PER_FRAME],
+        });
+    }
+
+    // Shared: copy every part of the group that is a COW entry on this
+    // frame into one new frame, at the same offset. One 16 KiB frame for up
+    // to four parts uses the whole frame, saves up to three more faults and
+    // amortizes the TLB flush (Linux's do_wp_page batches nearby pages too).
     let new_frame = {
         let _own = super::frame_owner::OwnerScope::new(super::frame_owner::Owner::Cow);
         frame::alloc_frame()?
     };
     let new_phys = new_frame.addr();
-
-    let mut pages_resolved = 0u32;
-
-    for i in 0..HW_PAGES_PER_FRAME {
+    let mut copied = [false; HW_PAGES_PER_FRAME];
+    for (i, part) in copied.iter_mut().enumerate() {
         let sibling_virt = VirtAddr::new(group_virt_base + (i as u64 * HW_PAGE_SIZE as u64));
-
         // SAFETY: pml4_phys is valid (same address space).
-        let sibling_pte = match unsafe { read_pte(pml4_phys, sibling_virt, hhdm) } {
-            Ok(pte) => pte,
-            Err(_) => continue, // Unmapped intermediate — skip.
+        let Ok(sibling_pte) = (unsafe { read_pte(pml4_phys, sibling_virt, hhdm) }) else {
+            continue; // Unmapped intermediate -- skip.
         };
-
         if !sibling_pte.is_present() || !sibling_pte.is_cow() {
-            continue; // Not a CoW page — leave it alone.
+            continue; // Not a CoW page -- leave it alone.
         }
-
-        // Verify this sibling references the same physical frame.
         let sib_phys = sibling_pte.phys_addr();
-        let sib_frame_base = sib_phys & !(FRAME_SIZE as u64 - 1);
-        if sib_frame_base != frame_base {
-            continue; // Different frame — not our business.
+        if sib_phys & !(FRAME_SIZE as u64 - 1) != frame_base {
+            continue; // Different frame -- not our business.
         }
-
-        // Compute offsets within old and new frames.
-        let sib_page_offset = (sib_phys - frame_base) as usize;
-        let new_4k_phys = new_phys + sib_page_offset as u64;
-
-        // Copy 4 KiB from old frame to new frame via HHDM.
-        let src = (sib_phys + hhdm) as *const u8;
-        let dst = (new_4k_phys + hhdm) as *mut u8;
-        // SAFETY: Both addresses are valid (old is allocated + HHDM,
-        // new is freshly allocated + HHDM).  No overlap (different frames).
+        let offset = sib_phys - frame_base;
+        // Copy 4 KiB from the old frame to the same offset in the new one.
+        // SAFETY: both through the HHDM; the old frame is mapped and shared
+        // read-only (see above), the new one freshly allocated and ours;
+        // different frames, so no overlap.
         unsafe {
-            core::ptr::copy_nonoverlapping(src, dst, HW_PAGE_SIZE);
+            core::ptr::copy_nonoverlapping(
+                (sib_phys + hhdm) as *const u8,
+                (new_phys + offset + hhdm) as *mut u8,
+                HW_PAGE_SIZE,
+            );
         }
-
-        // Update PTE: point to new frame, set WRITABLE, clear COW.
-        let mut new_flags = sibling_pte.flags() | PageFlags::WRITABLE;
-        new_flags = PageFlags::from_bits(new_flags.bits() & !PageFlags::COW.bits());
-        let new_pte = PageTableEntry::new(new_4k_phys, new_flags);
-
-        // SAFETY: pml4_phys is valid, sibling_virt is in the same group.
-        unsafe {
-            write_pte(pml4_phys, sibling_virt, new_pte, hhdm).ok();
-        }
-        pages_resolved += 1;
+        *part = true;
     }
 
-    if pages_resolved == 0 {
-        // No CoW sibling shared the old frame (e.g. a read-only shared
-        // sibling triggered a spurious lookup) — release the unused copy.
-        // SAFETY: new_frame was just allocated and is unmapped.
-        let _ = unsafe { frame::free_frame(new_frame) };
+    Ok(CowPrep {
+        frame_base,
+        group_virt_base,
+        copy: Some(new_frame),
+        copied,
+    })
+}
+
+/// The install half of [`resolve_cow_fault`], under the address space's
+/// page-table lock: change only the entries that are still COW entries on
+/// the frame [`prepare_cow`] found, and drop this address space's reference
+/// to that frame once, when the last of its entries leaves it.
+///
+/// Another CPU that broke the same page first left nothing to change: the
+/// copy is freed, and the write runs again on what that CPU installed.
+#[allow(clippy::arithmetic_side_effects)]
+fn install_cow(pml4_phys: u64, prep: CowPrep) -> KernelResult<()> {
+    let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
+    let CowPrep {
+        frame_base,
+        group_virt_base,
+        copy,
+        copied,
+    } = prep;
+    let frame = PhysFrame::from_addr(frame_base).ok_or(KernelError::InternalError)?;
+    let sibling = |i: usize| VirtAddr::new(group_virt_base + (i as u64 * HW_PAGE_SIZE as u64));
+    // Whether part `i` is still a COW entry on the shared frame, and its entry.
+    let still_cow = |i: usize| -> Option<PageTableEntry> {
+        // SAFETY: pml4_phys is valid (same address space).
+        let pte = unsafe { read_pte(pml4_phys, sibling(i), hhdm) }.ok()?;
+        (pte.is_present()
+            && pte.is_cow()
+            && pte.phys_addr() & !(FRAME_SIZE as u64 - 1) == frame_base)
+            .then_some(pte)
+    };
+
+    let Some(new_frame) = copy else {
+        // Prepared as the sole owner. Not if the frame has gained an owner
+        // since: the write then runs again, faults, and copies.
+        if frame::refcount(frame) > 1 {
+            return Ok(());
+        }
+        // Make every part still COW on the frame writable, in place.
+        for i in 0..HW_PAGES_PER_FRAME {
+            if let Some(pte) = still_cow(i) {
+                let flags = PageFlags::from_bits(
+                    (pte.flags() | PageFlags::WRITABLE).bits() & !PageFlags::COW.bits(),
+                );
+                // SAFETY: pml4_phys is valid; part `i` of the same group.
+                unsafe {
+                    write_pte(
+                        pml4_phys,
+                        sibling(i),
+                        PageTableEntry::new(pte.phys_addr(), flags),
+                        hhdm,
+                    )
+                    .ok();
+                }
+            }
+        }
+        crate::tlb::flush_range(group_virt_base, HW_PAGES_PER_FRAME as u32);
         super::fault::record_cow();
+        return Ok(());
+    };
+
+    // Install the copy over each part that is still the COW entry it was
+    // copied from.
+    let new_phys = new_frame.addr();
+    let mut installed = 0u32;
+    for (i, &was_copied) in copied.iter().enumerate() {
+        if !was_copied {
+            continue;
+        }
+        let Some(pte) = still_cow(i) else {
+            continue;
+        };
+        let offset = pte.phys_addr() - frame_base;
+        let flags = PageFlags::from_bits(
+            (pte.flags() | PageFlags::WRITABLE).bits() & !PageFlags::COW.bits(),
+        );
+        // SAFETY: pml4_phys is valid; part `i` of the same group; the copy
+        // at `offset` holds this part's data.
+        unsafe {
+            write_pte(
+                pml4_phys,
+                sibling(i),
+                PageTableEntry::new(new_phys + offset, flags),
+                hhdm,
+            )
+            .ok();
+        }
+        installed += 1;
+    }
+
+    if installed == 0 {
+        // Another CPU broke the page first (or no part was COW on the frame
+        // any more): nothing of the copy is used.
+        // SAFETY: allocated by prepare_cow and never mapped.
+        let _ = unsafe { frame::free_frame(new_frame) };
         return Ok(());
     }
 
-    // Determine whether this address space still references the OLD frame
-    // through any sibling in the group.  After a partial resolve, some
-    // sub-PTEs can legitimately remain on the old frame — most commonly a
-    // read-only *shared* sibling (no COW bit) that lives in the same
-    // 16 KiB frame as a writable CoW sibling (the ELF loader packs a
-    // read-only segment tail and a writable segment head into one frame).
-    // Such a sibling was NOT copied above, so this address space keeps a
-    // genuine reference to the old frame.
-    //
-    // The per-frame refcount counts *address-space references*, so we may
-    // only drop our reference (ref_dec + rmap remove) when NO sub-PTE of
-    // the group still points into the old frame.  Decrementing while a
-    // sibling still maps it would under-count the refcount and free a
-    // frame that is still mapped here and in other address spaces — the
-    // Path-Z #12 dash-pipeline #GP was exactly this double-decrement.
-    let mut old_still_referenced = false;
-    for i in 0..HW_PAGES_PER_FRAME {
-        let sibling_virt = VirtAddr::new(group_virt_base + (i as u64 * HW_PAGE_SIZE as u64));
+    // Whether this address space still references the OLD frame through any
+    // part of the group. After a partial resolve some parts can
+    // legitimately remain on it -- most commonly a read-only *shared* part
+    // (no COW bit) living in the same 16 KiB frame as a writable CoW part
+    // (the ELF loader packs a read-only segment tail and a writable segment
+    // head into one frame). The per-frame refcount counts *address-space
+    // references*, so the reference goes only when NO part still points into
+    // the old frame: decrementing while one does under-counts it and frees a
+    // frame still mapped here and elsewhere (the Path-Z #12 dash-pipeline #GP
+    // was exactly this double-decrement).
+    let old_still_referenced = (0..HW_PAGES_PER_FRAME).any(|i| {
         // SAFETY: pml4_phys is valid (same address space).
-        if let Ok(p) = unsafe { read_pte(pml4_phys, sibling_virt, hhdm) } {
-            if p.is_present() && (p.phys_addr() & !(FRAME_SIZE as u64 - 1)) == frame_base {
-                old_still_referenced = true;
-                break;
-            }
-        }
-    }
+        unsafe { read_pte(pml4_phys, sibling(i), hhdm) }
+            .is_ok_and(|p| p.is_present() && p.phys_addr() & !(FRAME_SIZE as u64 - 1) == frame_base)
+    });
 
     // The new frame is now mapped at this group's virtual base.
     super::rmap::add(new_phys, pml4_phys, group_virt_base);
+
+    // Flush before the reference goes: until every CPU has dropped its
+    // stale entry for the old frame, this address space can still read it,
+    // and a reference given up could let its last other owner free it.
+    crate::tlb::flush_range(group_virt_base, HW_PAGES_PER_FRAME as u32);
 
     if !old_still_referenced {
         // This address space's last reference to the old frame is gone.
@@ -261,9 +317,6 @@ pub fn resolve_cow_fault(pml4_phys: u64, fault_addr: u64) -> KernelResult<()> {
         // SAFETY: old frame is a valid allocated frame.
         let _ = unsafe { frame::ref_dec(frame) };
     }
-
-    // Flush TLB for the entire frame group.
-    crate::tlb::flush_range(group_virt_base, HW_PAGES_PER_FRAME as u32);
 
     super::fault::record_cow();
     Ok(())
@@ -403,16 +456,6 @@ pub unsafe fn mark_cow(pml4_phys: u64, virt: VirtAddr) -> KernelResult<()> {
 
 /// Number of page table entries per table (PML4/PDPT/PD/PT).
 const ENTRIES_PER_TABLE: usize = 512;
-
-/// Default flags applied when a swapped-out page is faulted back in.
-///
-/// Mirrors the page-fault handler's swap-in path (`idt.rs`), which does
-/// not track per-page protection and restores pages as user RW + NX.
-/// fork() uses the same defaults when it must bring a swapped-out parent
-/// page back to RAM before sharing it copy-on-write.
-fn swap_in_default_flags() -> PageFlags {
-    PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER_ACCESSIBLE | PageFlags::NO_EXECUTE
-}
 
 /// Compose a user-half virtual address from its four page-table indices.
 ///
@@ -642,37 +685,53 @@ unsafe fn clone_user_half(parent_pml4: u64, child_pml4: u64, hhdm: u64) -> Kerne
                 for base_pt_idx in (0..ENTRIES_PER_TABLE).step_by(HW_PAGES_PER_FRAME) {
                     let group_virt = compose_virt(pml4_idx, pdpt_idx, pd_idx, base_pt_idx);
 
-                    // SAFETY: pt valid, base_pt_idx < 512.
-                    let base_pte = unsafe { page_table::read_entry(pt, base_pt_idx, hhdm) };
+                    let virt = VirtAddr::new(group_virt);
 
-                    // Swapped-out frame: bring it back to RAM (in the
-                    // parent) before sharing.  A 16 KiB frame is swapped as
-                    // a unit, so the base PTE carrying a swap entry means
-                    // the whole group is swapped.
-                    if !base_pte.is_present() && base_pte.is_swap() {
-                        let virt = VirtAddr::new(group_virt);
-                        // SAFETY: parent_pml4 valid, PTE holds a swap entry.
-                        unsafe {
-                            super::swap::swap_in_page(parent_pml4, virt, swap_in_default_flags())?;
+                    loop {
+                        // Swapped-out frame: bring it back to RAM (in the
+                        // parent) before sharing, each part as it was. A
+                        // 16 KiB frame is swapped as a unit, but any part may
+                        // be the one still naming the slot (one unmapped since
+                        // gave its entry up), so every part is looked at
+                        // (`swap::is_swapped`). Unlocked: it reads the slot,
+                        // and takes the lock itself to install.
+                        // SAFETY: parent_pml4 is valid (the caller's contract).
+                        if unsafe { super::swap::is_swapped(parent_pml4, virt) } {
+                            // SAFETY: parent_pml4 valid, a part holds a swap entry.
+                            if let Some(flags) =
+                                unsafe { super::swap::swap_in_page(parent_pml4, virt)? }
+                            {
+                                // Re-register so the page can be evicted again.
+                                super::swap::register_reclaimable(parent_pml4, group_virt, flags);
+                            }
                         }
-                        // Re-register so the page can be evicted again.
-                        super::swap::register_reclaimable(
-                            parent_pml4,
-                            group_virt,
-                            swap_in_default_flags(),
-                        );
-                    }
 
-                    // SAFETY: all tables valid; group_virt is the group base.
-                    unsafe {
-                        clone_frame_group(
-                            parent_pml4,
-                            child_pml4,
-                            group_virt,
-                            pt,
-                            base_pt_idx,
-                            hhdm,
-                        )?;
+                        // The group is shared under the parent's page-table lock
+                        // (`super::as_lock`), so no copy-on-write break or swap-in
+                        // of the same group installs while it is marked and
+                        // copied. Group by group, not for the whole clone: a big
+                        // address space would hold every other thread's fault for
+                        // the length of the fork.
+                        let held = super::as_lock::lock(parent_pml4);
+                        // Swapped out again since the look above: bring it back
+                        // again, rather than share it as a gap.
+                        // SAFETY: as above.
+                        if unsafe { super::swap::is_swapped(parent_pml4, virt) } {
+                            drop(held);
+                            continue;
+                        }
+                        // SAFETY: all tables valid; group_virt is the group base.
+                        unsafe {
+                            clone_frame_group(
+                                parent_pml4,
+                                child_pml4,
+                                group_virt,
+                                pt,
+                                base_pt_idx,
+                                hhdm,
+                            )?;
+                        }
+                        break;
                     }
                 }
             }
@@ -736,6 +795,15 @@ pub unsafe fn clone_address_space_cow(parent_pml4: u64) -> KernelResult<u64> {
         return Err(e);
     }
 
+    // The parent's writable pages are copy-on-write now and shared with the
+    // child. A `process_vm_writev` into one of them that passed its checks
+    // before the change is still writing the frame both now hold; it must end
+    // before the child can run and copy that frame, or the child keeps half
+    // of the write. One that checks after the change finds the page
+    // read-only and breaks the share first (`mm::frame`'s remote-copy
+    // windows).
+    frame::wait_for_open_remote_copies();
+
     serial_println!(
         "[cow] Cloned address space: parent={:#x} -> child={:#x}",
         parent_pml4,
@@ -768,6 +836,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
     // Test 4: Shared-frame CoW resolution (refcount > 1).
     test_cow_resolve_shared();
+    test_cow_break_twice()?;
 
     // Test 5: Address-space duplication for fork().
     test_clone_address_space_cow();
@@ -1228,6 +1297,87 @@ fn test_cow_resolve_sole_owner() {
     }
 
     serial_println!("[cow]   Sole-owner CoW resolve: OK");
+}
+/// Two CPUs breaking the same copy-on-write page: both prepare a copy, the
+/// first installs, the second finds nothing left to change and frees its copy.
+/// The entries end on the first copy, and the shared frame loses this address
+/// space's reference once. Driven as the two
+/// halves interleave on two CPUs -- prepare, prepare, install, install --
+/// which is what happened unlocked before 2026-10-03, when each install
+/// installed and each dropped a reference.
+#[allow(clippy::arithmetic_side_effects)]
+fn test_cow_break_twice() -> KernelResult<()> {
+    use crate::mm::page_table::{self, PageFlags, VirtAddr};
+
+    fn fail(what: &str) -> KernelResult<()> {
+        serial_println!("[cow]   FAIL: break twice: {}", what);
+        Err(KernelError::InternalError)
+    }
+
+    let pml4 = page_table::alloc_pml4()?;
+    let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
+    let base: u64 = 0x0000_0041_0000_0000;
+    let shared = frame::alloc_frame()?;
+    // SAFETY: a fresh frame through the HHDM.
+    unsafe { core::ptr::write_bytes((shared.addr() + hhdm) as *mut u8, 0x5A, FRAME_SIZE) };
+    let flags = PageFlags::PRESENT
+        | PageFlags::WRITABLE
+        | PageFlags::USER_ACCESSIBLE
+        | PageFlags::NO_EXECUTE;
+    // SAFETY: this test's address space; a fresh frame.
+    unsafe { page_table::map_frame(pml4, VirtAddr::new(base), shared, flags)? };
+    // Shared, as fork leaves it: a second owner, and every part COW.
+    // SAFETY: the frame is allocated.
+    unsafe { frame::ref_inc(shared)? };
+    for i in 0..HW_PAGES_PER_FRAME {
+        // SAFETY: the parts are mapped.
+        unsafe { mark_cow(pml4, VirtAddr::new(base + (i * HW_PAGE_SIZE) as u64))? };
+    }
+
+    let first = prepare_cow(pml4, base)?;
+    let second = prepare_cow(pml4, base + 5000)?;
+    let first_copy = first.copy.map(|f| f.addr());
+    let second_copy = second.copy.map(|f| f.addr());
+    {
+        let _held = super::as_lock::lock(pml4);
+        install_cow(pml4, first)?;
+    }
+    {
+        let _held = super::as_lock::lock(pml4);
+        install_cow(pml4, second)?;
+    }
+
+    // SAFETY: this test's address space.
+    let entry = unsafe { read_pte(pml4, VirtAddr::new(base), hhdm)? };
+    let on_first = first_copy.is_some_and(|f| entry.phys_addr() & !(FRAME_SIZE as u64 - 1) == f);
+    let writable = entry.flags().contains(PageFlags::WRITABLE) && !entry.is_cow();
+    let one_reference_dropped = frame::refcount(shared) == 1;
+    let both_copied = first_copy.is_some() && second_copy.is_some() && first_copy != second_copy;
+
+    // Clean up: the test address space (which frees the first copy), and the
+    // stand-in second owner's reference to the shared frame.
+    // SAFETY: never loaded in any CR3; nothing else uses it.
+    unsafe { page_table::destroy_user_address_space(pml4) };
+    // SAFETY: the shared frame's last reference is the stand-in's.
+    let _ = unsafe { frame::free_frame(shared) };
+
+    let checks = [
+        ("both CPUs prepared their own copy", both_copied),
+        ("the entries are on the first copy", on_first),
+        ("the entries are writable and no longer COW", writable),
+        (
+            "the shared frame lost one reference, not two",
+            one_reference_dropped,
+        ),
+    ];
+    if let Some((what, _)) = checks.iter().find(|(_, ok)| !ok) {
+        return fail(what);
+    }
+    serial_println!(
+        "[cow]   break twice: the first install wins, the second frees its copy, and the \
+         shared frame loses one reference: OK"
+    );
+    Ok(())
 }
 
 /// Test CoW resolution when the frame is shared (refcount > 1).

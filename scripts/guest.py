@@ -59,6 +59,13 @@ DEFAULT_PORT = 4555
 AGENT_PORT_NAME = "org.slateos.agent.0"
 PROTOCOL_VERSION = 1
 
+# Added to the kernel command line in the guest's copy of the ESP: no boot
+# self-tests and no boot benchmarks, so the agent answers once the system is up
+# rather than after the whole suite, and a self-test that halts cannot stop
+# the guest first (kernel/src/selftest.rs, `skip`). boot-test.sh refuses
+# both, so neither can reach a boot test.
+GUEST_CMDLINE_WORDS = ("selftest.skip=1", "bench.skip=1")
+
 QEMU_CANDIDATES = (
     "C:/Program Files/qemu/qemu-system-x86_64.exe",
     "/usr/bin/qemu-system-x86_64",
@@ -253,6 +260,40 @@ def qemu_command(port: int, esp: str, swap: str, rootfs: str | None, serial: str
     return cmd
 
 
+def guest_limine_conf(text: str) -> str:
+    """`text`, the boot test's limine.conf, with GUEST_CMDLINE_WORDS on the
+    first entry's command line -- the entry Limine starts by itself.
+
+    The boot test gives that entry a `cmdline:` line after its `kernel_path:`
+    (boot-test.sh, where it writes $ESP_DIR/limine.conf); the words go on the
+    end of it. An entry without one gets one in the same place. Later entries
+    (the recovery entry) are left as they are."""
+    lines = text.split("\n")
+    entry = 0
+    cmdline = None
+    kernel_path = None
+    for i, line in enumerate(lines):
+        if line.startswith("/"):
+            entry += 1
+            continue
+        if entry != 1:
+            continue
+        words = line.split()
+        if words[:1] == ["cmdline:"] and cmdline is None:
+            cmdline = i
+        elif words[:1] == ["kernel_path:"] and kernel_path is None:
+            kernel_path = i
+    extra = " ".join(GUEST_CMDLINE_WORDS)
+    if cmdline is not None:
+        lines[cmdline] = lines[cmdline].rstrip() + " " + extra
+    elif kernel_path is not None:
+        lines.insert(kernel_path + 1, "    cmdline: " + extra)
+    else:
+        raise Usage("limine.conf's first entry has no kernel_path: line, so the guest's "
+                    "command line has nowhere to go")
+    return "\n".join(lines)
+
+
 def running_pid() -> int | None:
     """The PID this tool recorded, when that process is still alive."""
     try:
@@ -310,6 +351,14 @@ def start(port: int, timeout: float) -> None:
     if os.path.exists(esp):
         shutil.rmtree(esp)
     shutil.copytree(esp_src, esp)
+    conf = os.path.join(esp, "limine.conf")
+    try:
+        with open(conf, encoding="utf-8", newline="") as f:
+            text = f.read()
+    except OSError as e:
+        raise Usage("%s cannot be read (%s): run scripts/boot-test.sh once to build it" % (conf, e))
+    with open(conf, "w", encoding="utf-8", newline="") as f:
+        f.write(guest_limine_conf(text))
     serial = os.path.join(GUEST_DIR, "serial.txt")
     cmd = qemu_command(port, esp, swap, rootfs if os.path.exists(rootfs) else None, serial)
     with open(os.path.join(GUEST_DIR, "qemu.log"), "wb") as log:

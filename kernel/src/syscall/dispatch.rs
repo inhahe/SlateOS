@@ -105,9 +105,10 @@ use super::number::{
     SYS_THREAD_RESUME, SYS_THREAD_SET_PRIORITY, SYS_THREAD_SUSPEND, SYS_TIMER_CANCEL,
     SYS_TIMER_CREATE, SYS_TTY_ACQUIRE_CTTY, SYS_TTY_FLUSH, SYS_TTY_GET_PGRP, SYS_TTY_GET_TERMIOS,
     SYS_TTY_READ, SYS_TTY_RELEASE_CTTY, SYS_TTY_SET_PGRP, SYS_TTY_SET_TERMIOS, SYS_UDP_BIND,
-    SYS_UDP_CLOSE, SYS_UDP_CONNECT, SYS_UDP_LOCAL_PORT, SYS_UDP_MCAST_JOIN, SYS_UDP_MCAST_LEAVE,
-    SYS_UDP_RECV, SYS_UDP_RX_FRONT_BYTES, SYS_UDP_RX_READY, SYS_UDP_SEND, SYS_WAIT_MULTIPLE,
-    SYS_YIELD,
+    SYS_UDP_CLOSE, SYS_UDP_CONNECT, SYS_UDP_GET_OPTION, SYS_UDP_LOCAL_PORT, SYS_UDP_MCAST_JOIN,
+    SYS_UDP_MCAST_JOIN6, SYS_UDP_MCAST_LEAVE, SYS_UDP_MCAST_LEAVE6, SYS_UDP_RECV, SYS_UDP_RECV6,
+    SYS_UDP_RX_FRONT_BYTES, SYS_UDP_RX_READY, SYS_UDP_SEND, SYS_UDP_SEND6, SYS_UDP_SET_OPTION,
+    SYS_WAIT_MULTIPLE, SYS_YIELD,
 };
 use super::number::{
     SYS_DEVICE_CLOSE, SYS_DEVICE_IOCTL, SYS_DEVICE_OPEN, SYS_DEVICE_READ, SYS_DEVICE_WRITE,
@@ -735,6 +736,12 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_UDP_LOCAL_PORT as usize] = Some(handlers::sys_udp_local_port);
     handlers[SYS_UDP_MCAST_JOIN as usize] = Some(handlers::sys_udp_mcast_join);
     handlers[SYS_UDP_MCAST_LEAVE as usize] = Some(handlers::sys_udp_mcast_leave);
+    handlers[SYS_UDP_SEND6 as usize] = Some(handlers::sys_udp_send6);
+    handlers[SYS_UDP_RECV6 as usize] = Some(handlers::sys_udp_recv6);
+    handlers[SYS_UDP_MCAST_JOIN6 as usize] = Some(handlers::sys_udp_mcast_join6);
+    handlers[SYS_UDP_MCAST_LEAVE6 as usize] = Some(handlers::sys_udp_mcast_leave6);
+    handlers[SYS_UDP_SET_OPTION as usize] = Some(handlers::sys_udp_set_option);
+    handlers[SYS_UDP_GET_OPTION as usize] = Some(handlers::sys_udp_get_option);
     handlers[SYS_DNS_RESOLVE as usize] = Some(handlers::sys_dns_resolve);
     handlers[SYS_DNS_REVERSE_RESOLVE as usize] = Some(handlers::sys_dns_reverse_resolve);
     handlers[SYS_NET_STAT as usize] = Some(handlers::sys_net_stat);
@@ -1085,6 +1092,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_priority_doors()?;
     test_dispatch_exec_close()?;
     test_dispatch_native_socket_possession()?;
+    test_dispatch_udp_v6_and_options()?;
     test_dispatch_tioc_and_watch_records()?;
     test_cpu_current()?;
     test_dispatch_shared_anonymous_memory()?;
@@ -3568,6 +3576,126 @@ fn test_dispatch_priority_doors() -> KernelResult<()> {
     serial_println!(
         "[syscall]   SYS_PROCESS_GET_PRIORITY (1088), SYS_PROCESS_SET_PRIORITY (1089), \
          SYS_PROCESS_SET_NICE's raise: OK"
+    );
+    Ok(())
+}
+
+/// The IPv6 UDP calls and the multicast options through the syscall layer,
+/// with real user memory (`SYS_UDP_SEND6` .. `SYS_UDP_GET_OPTION`, 1129-1134).
+/// A socket joins an IPv6 group named in its own memory and sets hop limit 0,
+/// so nothing leaves the machine. It sends to the group and receives its own
+/// datagram back, with the source in the 18-byte record. An option reads back
+/// as set, and an option number that does not exist is refused.
+fn test_dispatch_udp_v6_and_options() -> KernelResult<()> {
+    use super::number::{MAP_READ, MAP_WRITE};
+    use crate::cap::{ResourceType, Rights};
+    use crate::mm::user::{copy_from_user_as, copy_to_user_as};
+    use crate::proc::pcb::{self, ProcessId};
+    use crate::proc::thread::{self_test_as_process, self_test_in_process};
+
+    /// A link-scoped group nothing else here joins.
+    const GROUP: [u8; 16] = [0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0x43];
+    const PORT: u16 = 47_812;
+    const PAYLOAD: &[u8] = b"udp6 through the syscall layer";
+
+    fn fail(msg: &str, pid: ProcessId) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: UDP over IPv6: {}", msg);
+        pcb::destroy(pid);
+        Err(KernelError::InternalError)
+    }
+    let args = |arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2,
+        arg3,
+        arg4,
+        arg5: 0,
+    };
+    let code = |e: KernelError| i64::from(e.code());
+
+    let pid = pcb::create("udp6-dispatch", 0);
+    if pcb::grant_capability(pid, ResourceType::Socket, 0, Rights::READ | Rights::WRITE).is_err() {
+        return fail("could not grant the Socket capability", pid);
+    }
+    // A page of the process's memory: the group at 0, the payload at 64, the
+    // receive buffer at 256, the source record at 512.
+    let mapped = self_test_as_process(pid, || {
+        dispatch(SYS_MMAP, &args(0, 0x4000, MAP_READ | MAP_WRITE, 0, 0)).value
+    });
+    let Ok(page) = u64::try_from(mapped) else {
+        return fail("could not map the process's memory", pid);
+    };
+    let Some(pml4) = pcb::get_pml4(pid).filter(|&p| p != 0) else {
+        return fail("the process has no address space", pid);
+    };
+    let (group_at, payload_at, buf_at, src_at) = (
+        page,
+        page.saturating_add(64),
+        page.saturating_add(256),
+        page.saturating_add(512),
+    );
+    if copy_to_user_as(pml4, group_at, &GROUP).is_err()
+        || copy_to_user_as(pml4, payload_at, PAYLOAD).is_err()
+    {
+        return fail("could not write into the process's memory", pid);
+    }
+    let call = |nr: u64, a: SyscallArgs| self_test_in_process(pid, || dispatch(nr, &a).value);
+
+    let Some(Ok(h)) = call(SYS_UDP_BIND, args(u64::from(PORT), 0, 0, 0, 0)).map(u64::try_from)
+    else {
+        return fail("could not bind a UDP socket", pid);
+    };
+    let joined = call(SYS_UDP_MCAST_JOIN6, args(h, group_at, 0, 0, 0)) == Some(0);
+    let hops_set = call(SYS_UDP_SET_OPTION, args(h, 3, 0, 0, 0)) == Some(0);
+    let hops_read = call(SYS_UDP_GET_OPTION, args(h, 3, 0, 0, 0)) == Some(0);
+    let no_such =
+        call(SYS_UDP_SET_OPTION, args(h, 99, 1, 0, 0)) == Some(code(KernelError::InvalidArgument));
+    let len = PAYLOAD.len() as u64;
+    let sent = call(
+        SYS_UDP_SEND6,
+        args(h, group_at, u64::from(PORT), payload_at, len),
+    ) == Some(0);
+    let received = call(SYS_UDP_RECV6, args(h, buf_at, 64, src_at, 0));
+    let mut buf = [0u8; 64];
+    let mut src = [0u8; 18];
+    let read_back = copy_from_user_as(pml4, buf_at, &mut buf).is_ok()
+        && copy_from_user_as(pml4, src_at, &mut src).is_ok();
+    let empty =
+        call(SYS_UDP_RECV6, args(h, buf_at, 64, 0, 0)) == Some(code(KernelError::WouldBlock));
+    let closed = call(SYS_UDP_CLOSE, args(h, 0, 0, 0, 0)) == Some(0);
+
+    if !(joined && hops_set && hops_read) {
+        return fail("the join or the hop-limit option did not take", pid);
+    }
+    if !no_such {
+        return fail("an option that does not exist was taken", pid);
+    }
+    let payload_ok = received == Some(len as i64) && buf.get(..PAYLOAD.len()) == Some(PAYLOAD);
+    // The source: this machine's link-local address (a link-scoped group's
+    // source), then the socket's own port, little-endian.
+    let source_ok = src.get(..2) == Some([0xfe, 0x80].as_slice())
+        && src.get(16..) == Some(PORT.to_le_bytes().as_slice());
+    if !(sent && read_back && payload_ok && source_ok) {
+        serial_println!(
+            "[syscall]     sent {}, received {:?}, source {:02x?}",
+            sent,
+            received,
+            src
+        );
+        return fail(
+            "the socket's own datagram to the group did not come back to it",
+            pid,
+        );
+    }
+    if !(empty && closed) {
+        return fail("a second receive found something, or the close failed", pid);
+    }
+
+    pcb::destroy(pid);
+    serial_println!(
+        "[syscall]   SYS_UDP_SEND6/RECV6/MCAST_JOIN6/SET_OPTION/GET_OPTION (1129-1134): a \
+         group joined from user memory, hop limit 0, the datagram looped back with its \
+         source: OK"
     );
     Ok(())
 }

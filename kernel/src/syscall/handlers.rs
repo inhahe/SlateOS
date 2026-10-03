@@ -15622,17 +15622,215 @@ pub fn sys_udp_send(args: &SyscallArgs) -> SyscallResult {
             Err(e) => return SyscallResult::err(e),
         };
 
-    // Look up the actual bound port from the socket handle.
-    let src_port: u16 = match crate::net::udp::local_port(handle) {
-        Some(port) => port,
-        None => {
-            // Invalid or inactive handle — cannot send.
-            return SyscallResult::err(KernelError::InvalidHandle);
-        }
-    };
-
-    match crate::net::udp::send(src_port, dst_ip, dst_port, &data) {
+    // From the socket: its port, its namespace, and for a group its
+    // multicast TTL and loop (`udp::send_from`). Until 2026-10-02 this sent
+    // from the root namespace at TTL 64 whatever the socket asked.
+    match crate::net::udp::send_from(handle, dst_ip, dst_port, &data) {
         Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// Read the 16-byte IPv6 address at user pointer `ptr`.
+fn read_user_ipv6(ptr: u64) -> Result<crate::net::ipv6::Ipv6Addr, KernelError> {
+    if ptr == 0 {
+        return Err(KernelError::InvalidArgument);
+    }
+    let mut raw = [0u8; 16];
+    // SAFETY: sixteen bytes into a sixteen-byte kernel buffer;
+    // `copy_from_user` validates the user range and brackets the load with
+    // STAC/CLAC.
+    unsafe { crate::mm::user::copy_from_user(ptr, raw.as_mut_ptr(), raw.len()) }?;
+    Ok(crate::net::ipv6::Ipv6Addr(raw))
+}
+
+/// `SYS_UDP_SEND6` -- send a datagram from a UDP socket to an IPv6 address.
+///
+/// `arg0`: socket handle. `arg1`: pointer to the 16-byte destination address.
+/// `arg2`: destination port. `arg3`/`arg4`: the data.
+pub fn sys_udp_send6(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::Socket, crate::cap::Rights::WRITE) {
+        return SyscallResult::err(e);
+    }
+    let pin = match native_socket_slot(args.arg0, NativeKind::Udp) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let dst_ip = match read_user_ipv6(args.arg1) {
+        Ok(a) => a,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let dst_port = match u16::try_from(args.arg2) {
+        Ok(p) if p != 0 => p,
+        _ => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+    let Ok(len) = usize::try_from(args.arg4) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    if args.arg3 == 0 && len > 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    // Copied first: what reaches the wire is what was checked.
+    let data = match crate::mm::user::read_user_vec(args.arg3, len, crate::net::udp::MAX_PAYLOAD) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
+    };
+    match crate::net::udp::send_v6_from(pin.slot(), dst_ip, dst_port, &data) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_UDP_RECV6` -- receive one of a UDP socket's IPv6 datagrams
+/// (non-blocking).
+///
+/// `arg0`: socket handle. `arg1`/`arg2`: the buffer and its capacity.
+/// `arg3`: pointer to 18 bytes for the source (address, then port, LE), or
+/// null. `arg4`: `MSG_PEEK` (0x02), `MSG_TRUNC` (0x20).
+pub fn sys_udp_recv6(args: &SyscallArgs) -> SyscallResult {
+    const MSG_PEEK: u64 = 0x02;
+    const MSG_TRUNC: u64 = 0x20;
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::Socket, crate::cap::Rights::READ) {
+        return SyscallResult::err(e);
+    }
+    let pin = match native_socket_slot(args.arg0, NativeKind::Udp) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let Ok(cap) = usize::try_from(args.arg2) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    if args.arg1 == 0 && cap > 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    // Both destinations are checked before the dequeue, so a bad pointer
+    // costs an error rather than a datagram with nowhere to go.
+    if cap > 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg1, cap) {
+            return SyscallResult::err(e);
+        }
+    }
+    if args.arg3 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg3, 18) {
+            return SyscallResult::err(e);
+        }
+    }
+    let datagram = if args.arg4 & MSG_PEEK != 0 {
+        crate::net::udp::peek_v6(pin.slot())
+    } else {
+        crate::net::udp::recv_v6(pin.slot())
+    };
+    let Some(datagram) = datagram else {
+        return SyscallResult::err(KernelError::WouldBlock);
+    };
+    let copy_len = datagram.data.len().min(cap);
+    if copy_len > 0 {
+        // SAFETY: `datagram.data` is a live kernel `Vec` of at least
+        // `copy_len` bytes; `copy_to_user` re-validates the destination and
+        // brackets the store with STAC/CLAC.
+        if let Err(e) =
+            unsafe { crate::mm::user::copy_to_user(datagram.data.as_ptr(), args.arg1, copy_len) }
+        {
+            return SyscallResult::err(e);
+        }
+    }
+    if args.arg3 != 0 {
+        let mut src = [0u8; 18];
+        if let Some(addr) = src.get_mut(..16) {
+            addr.copy_from_slice(&datagram.src_ip.0);
+        }
+        if let Some(port) = src.get_mut(16..) {
+            port.copy_from_slice(&datagram.src_port.to_le_bytes());
+        }
+        // SAFETY: `src` is a live 18-byte kernel array; `copy_to_user`
+        // validates the destination and brackets the store with STAC/CLAC.
+        if let Err(e) = unsafe { crate::mm::user::copy_to_user(src.as_ptr(), args.arg3, src.len()) }
+        {
+            return SyscallResult::err(e);
+        }
+    }
+    // MSG_TRUNC: the datagram's real size, even when it did not fit.
+    let returned = if args.arg4 & MSG_TRUNC != 0 {
+        datagram.data.len()
+    } else {
+        copy_len
+    };
+    #[allow(clippy::cast_possible_wrap)] // at most a datagram's 65,535 bytes
+    SyscallResult::ok(returned as i64)
+}
+
+/// `SYS_UDP_MCAST_JOIN6` and `SYS_UDP_MCAST_LEAVE6`: `join` says which.
+fn udp_mcast6(args: &SyscallArgs, join: bool) -> SyscallResult {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::Socket, crate::cap::Rights::WRITE) {
+        return SyscallResult::err(e);
+    }
+    let pin = match native_socket_slot(args.arg0, NativeKind::Udp) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let group = match read_user_ipv6(args.arg1) {
+        Ok(g) => g,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let result = if join {
+        crate::net::udp::join_group_v6(pin.slot(), group)
+    } else {
+        crate::net::udp::leave_group_v6(pin.slot(), group)
+    };
+    match result {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_UDP_MCAST_JOIN6` -- join an IPv6 multicast group on a UDP socket.
+///
+/// `arg0`: socket handle. `arg1`: pointer to the 16-byte group address.
+pub fn sys_udp_mcast_join6(args: &SyscallArgs) -> SyscallResult {
+    udp_mcast6(args, true)
+}
+
+/// `SYS_UDP_MCAST_LEAVE6` -- leave an IPv6 multicast group.
+///
+/// `arg0`: socket handle. `arg1`: pointer to the 16-byte group address.
+pub fn sys_udp_mcast_leave6(args: &SyscallArgs) -> SyscallResult {
+    udp_mcast6(args, false)
+}
+
+/// `SYS_UDP_SET_OPTION` -- set a UDP socket's multicast option.
+///
+/// `arg0`: socket handle. `arg1`: option (`udp::McastOption`). `arg2`: value.
+pub fn sys_udp_set_option(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::Socket, crate::cap::Rights::WRITE) {
+        return SyscallResult::err(e);
+    }
+    let pin = match native_socket_slot(args.arg0, NativeKind::Udp) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let Some(option) = crate::net::udp::McastOption::from_raw(args.arg1) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    match crate::net::udp::set_option(pin.slot(), option, args.arg2) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_UDP_GET_OPTION` -- read a UDP socket's multicast option.
+///
+/// `arg0`: socket handle. `arg1`: option (`udp::McastOption`).
+pub fn sys_udp_get_option(args: &SyscallArgs) -> SyscallResult {
+    let pin = match native_socket_slot(args.arg0, NativeKind::Udp) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let Some(option) = crate::net::udp::McastOption::from_raw(args.arg1) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    match crate::net::udp::get_option(pin.slot(), option) {
+        #[allow(clippy::cast_possible_wrap)] // at most 255
+        Ok(value) => SyscallResult::ok(value as i64),
         Err(e) => SyscallResult::err(e),
     }
 }

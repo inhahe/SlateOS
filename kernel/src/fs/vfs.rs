@@ -6979,29 +6979,46 @@ impl Vfs {
     }
 
     /// Find the file an xattr call names, and check what Linux checks before
-    /// it reads the attribute's name: for a change, the namespace's and the
-    /// mount's writability (Linux's `mnt_want_write`); then the capability
-    /// tags, which deny reaching the object at all. `follow`: a trailing link
-    /// is followed, or is the target itself.
+    /// it reads the attribute's name: that it exists (Linux's `user_path_at`);
+    /// for a change, the namespace's and the mount's writability (Linux's
+    /// `mnt_want_write`); then the capability tags, which deny reaching the
+    /// object at all. `follow`: a trailing link is followed, or is the target
+    /// itself.
     ///
     /// # Errors
     ///
-    /// The path's; `ReadOnlyFilesystem` for a change; a capability tag's.
+    /// The path's (`NotFound` for a file that is not there); then
+    /// `ReadOnlyFilesystem` for a change; a capability tag's.
     pub fn xattr_target(
         path: impl AsRef<Path>,
         follow: bool,
         access: xattr_policy::Access,
     ) -> KernelResult<XattrTarget> {
         let path = path.as_ref();
-        if access == xattr_policy::Access::Write {
-            crate::ipc::namespace::check_writable(path)?;
-        }
-        let path = if follow {
+        let resolved = if follow {
             Self::resolve_follow(path)?
         } else {
             Self::resolve_no_follow(path)?
         };
-        Self::xattr_target_checked(path, follow, access)
+        // The file is looked up before anything else is decided, as
+        // `user_path_at` does. Until 2026-10-02 nothing here looked it up -- a
+        // missing name resolves to itself -- so a missing file was found only
+        // when the attribute was read, after its name: `getxattr` of an empty
+        // name on a missing path answered ERANGE, where Linux answers ENOENT
+        // (rq42).
+        {
+            let (fs, _id, _opts, relative) = resolve_mount(&resolved)?;
+            let mut guard = fs.lock();
+            if follow {
+                guard.stat(&relative)?;
+            } else {
+                guard.lstat(&relative)?;
+            }
+        }
+        if access == xattr_policy::Access::Write {
+            crate::ipc::namespace::check_writable(path)?;
+        }
+        Self::xattr_target_checked(resolved, follow, access)
     }
 
     /// [`xattr_target`](Self::xattr_target) for a host path already

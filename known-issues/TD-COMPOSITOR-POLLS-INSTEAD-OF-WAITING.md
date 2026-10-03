@@ -1,8 +1,5 @@
 ## TD-COMPOSITOR-POLLS-INSTEAD-OF-WAITING (lane C, 2026-08-17) - **fixed 2026-09-25 (lane F)**
 
-**Status:** FIXED 2026-09-25 (lane F), on `main` and boot-tested many times
-since. Lane C's entry to move to `known-issues-resolved/`.
-
 > **Fixed 2026-09-25 (lane F).** The server loop now *waits*: between ticks it
 > blocks on its listener, every client, the display's input devices and a
 > deadline — the next owed frame, a hotplug probe, a key repeat, a slow key's

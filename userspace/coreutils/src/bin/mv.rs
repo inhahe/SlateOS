@@ -4870,24 +4870,25 @@ mod tests {
         let mut answers = Canned::new(&[]);
         let flags = MvFlags::default();
         let mut copied = Copied::default();
-        let mut job = Job {
-            flags: &flags,
-            out: &mut out,
-            err: &mut err,
-            answers: &mut answers,
-            copied: &mut copied,
-            umask: coreutils::umask::current(),
-        };
-        assert!(!directory_named_again(
-            &mut job, &earlier, &src, &other, None
-        ));
-        assert!(!directory_named_again(
-            &mut job, &earlier, &earlier, &other, None
-        ));
-        assert!(directory_named_again(
-            &mut job, &earlier, &src, &earlier, None
-        ));
-        drop(job);
+        {
+            let mut job = Job {
+                flags: &flags,
+                out: &mut out,
+                err: &mut err,
+                answers: &mut answers,
+                copied: &mut copied,
+                umask: coreutils::umask::current(),
+            };
+            assert!(!directory_named_again(
+                &mut job, &earlier, &src, &other, None
+            ));
+            assert!(!directory_named_again(
+                &mut job, &earlier, &earlier, &other, None
+            ));
+            assert!(directory_named_again(
+                &mut job, &earlier, &src, &earlier, None
+            ));
+        }
         assert_eq!(
             String::from_utf8_lossy(&err),
             format!(

@@ -1,4 +1,16 @@
-## TD-B-SHRED-RANDOM-SOURCE-IS-REFUSED-NOT-HONOURED — 2026-09-15 — OPEN
+## TD-B-SHRED-RANDOM-SOURCE-IS-REFUSED-NOT-HONOURED — filed 2026-09-15 (lane B)
+
+**Status:** FIXED 2026-09-25 (lane B, `e82a88d47`), found closed 2026-10-03.
+The `shred` this entry is about -- a personality of `userspace/pv` with its own
+`XorShift64` pass scheme -- is gone. `shred` is GNU coreutils 9.4's, ported
+into coreutils (`userspace/coreutils/src/bin/shred.rs`), and reads
+`--random-source=FILE` as GNU does, through gnulib's `randread`
+(`coreutils::randint`): the file is the byte stream for the schedule and every
+random pass. `scripts/shred-diff.sh` depends on exactly that to make both
+programs write the same bytes. B-Q20, the question below, was answered on the
+same grounds (§1052). On `main`, and through its boot tests, since 2026-09-25.
+
+*The entry as filed:*
 
 **In short:** `shred --random-source=FILE` now fails before touching the file
 instead of silently using a different source of random bytes. Implementing it

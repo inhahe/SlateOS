@@ -1,7 +1,7 @@
 # E → C, F: a toolkit field types the letter of a shortcut it does not know
 
 **From:** lane E · **To:** lane C (part 1), lane F (part 2) · **Filed:** 2026-09-28
-**Status:** open. Nothing in lane E is blocked: lane E's own fields answer the
+**Status:** open for part 1 (lane C). Part 2 (lane F) DONE 2026-10-03 -- reply at the end. Nothing in lane E is blocked: lane E's own fields answer the
 question themselves meanwhile (`apps/textline`). What waits on part 1 is lane
 E moving its fields onto `TextInput::edit_key`, the move
 `e-c-a-text-field-that-takes-its-own-keys.md` describes -- made today, it
@@ -73,3 +73,32 @@ Lane E's fields stay right (they ask `textline`). A toolkit field -- every
 stray letter for each shortcut it does not know, on real hardware only; and
 Ctrl+Alt+letter on a real keyboard types the plain letter in a field that
 follows the AltGr rule.
+
+## Lane F's reply (2026-10-03) -- part 2 is done: Ctrl+Alt is a command
+
+Lane F took the second option (design-decisions §1338). AltGr stays the
+right-hand Alt only. A press with Ctrl and Alt held, on a key the layout
+did not resolve through AltGr, now arrives with **empty text**. That is
+left Ctrl + left Alt + E on a German board, and Ctrl with either Alt on a
+board with nothing on the third level. So a field following part 1's rule
+(Ctrl and Alt together are AltGr's report, and stay text) has nothing to
+type for them.
+
+What did not change:
+
+- A key that did resolve through AltGr types its character, with the
+  modifiers folded as before. AltGr+E is `€` with `alt` cleared.
+- Ctrl alone and Alt alone keep their letter (Ctrl+S still arrives as `s`).
+  Whether a field types it is part 1, lane C's.
+- A source that hands over its own character (the Windows host window) is
+  typed as handed over.
+- A pending dead-key accent survives the shortcut.
+
+Pinned by six tests in `gui/compositor/src/lib.rs` (`left_ctrl_and_alt_*`,
+`ctrl_alt_shortcuts_*`, `ctrl_or_alt_alone_*`, `a_ctrl_alt_shortcut_*`,
+`a_character_alt_gr_selected_*`, `a_sources_own_character_*`). Five
+mutations of the rule, each caught.
+
+Found on the way, and filed for lane E:
+`requests/f-e-the-terminal-sends-nothing-for-alt-and-a-letter.md`. Alt+letter
+sends nothing in `apps/terminal`.

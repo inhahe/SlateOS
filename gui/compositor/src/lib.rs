@@ -9085,7 +9085,8 @@ impl Compositor {
         level.shift |= stuck.shift;
         let (key, laid_out) = keymap::key_for_layout(self.layout, scancode, level);
         let mut modifiers = self.modifiers.modifiers();
-        if keymap::resolves_through_alt_gr(self.layout, scancode, level) {
+        let through_alt_gr = keymap::resolves_through_alt_gr(self.layout, scancode, level);
+        if through_alt_gr {
             // AltGr spent itself selecting a character, so it is not also an
             // Alt chord. Without this a German user typing `@` (AltGr+Q) sends
             // every application an Alt+Q, and the menu bar answers first.
@@ -9104,6 +9105,17 @@ impl Compositor {
         modifiers.alt |= stuck.alt;
         modifiers.shift |= stuck.shift;
         modifiers.super_key |= stuck.super_key;
+
+        // A Ctrl+Alt chord the layout did not resolve through AltGr is a
+        // command and types nothing. AltGr is the right-hand Alt only, so
+        // left Ctrl + left Alt + E is a shortcut, not Windows' stand-in for
+        // AltGr+E -- and a text field that reads Ctrl and Alt together as
+        // AltGr's report, which is how Windows and a remote client on it send
+        // AltGr, must not be handed the plain `e` to type
+        // (`requests/e-cf-a-toolkit-field-types-the-letter-of-a-shortcut-it-does-not-know.md`,
+        // part 2; design-decisions §1338). After the sticky merge, so a stuck
+        // Ctrl+Alt is a command too.
+        let ctrl_alt_command = modifiers.ctrl && modifiers.alt && !through_alt_gr;
 
         // The recovery chord is the compositor's own, and is checked before
         // the grab table so that no client can claim it: it exists for when
@@ -9197,6 +9209,10 @@ impl Compositor {
         // keystroke could only ever produce one.
         let text = match (character, pressed) {
             (Some(from_source), true) => from_source.to_string(),
+            // Not through the dead-key machine either, so an accent waiting
+            // for its vowel is still waiting after the shortcut, as it is
+            // after any command chord.
+            (None, true) if ctrl_alt_command => String::new(),
             (None, true) => self.dead_keys.press(
                 self.layout,
                 scancode,
@@ -14409,6 +14425,164 @@ mod tests {
             k.modifiers.alt,
             "US QWERTY has no third level to spend it on"
         );
+    }
+
+    /// The key presses reaching the focused window, decoded as a client
+    /// sees them.
+    fn typed_keys(comp: &mut Compositor) -> Vec<ClientKeyEvent> {
+        decode_drained(comp)
+            .into_iter()
+            .filter_map(|e| match e.event {
+                ClientEvent::Key(k) if k.pressed => Some(k),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn press_keys(comp: &mut Compositor, scancodes: &[u32]) {
+        for &scancode in scancodes {
+            comp.handle_input(InputEvent::KeyDown {
+                scancode,
+                character: None,
+            });
+        }
+    }
+
+    fn release_keys(comp: &mut Compositor, scancodes: &[u32]) {
+        for &scancode in scancodes.iter().rev() {
+            comp.handle_input(InputEvent::KeyUp { scancode });
+        }
+    }
+
+    /// The press of `key` among what the focused window was sent.
+    fn press_of(comp: &mut Compositor, key: Key) -> ClientKeyEvent {
+        typed_keys(comp)
+            .into_iter()
+            .find(|k| k.key == key)
+            .unwrap_or_else(|| panic!("no {key:?} key event"))
+    }
+
+    const LEFT_CTRL: u32 = 0x1D;
+    const LEFT_ALT: u32 = 0x38;
+    const ALT_GR: u32 = 0xE038;
+    const KEY_E: u32 = 0x12;
+
+    /// Left Ctrl + left Alt is a command, not AltGr: on a German board it
+    /// carries no text, where a field reading Ctrl and Alt together as
+    /// AltGr's report would type the `e`. AltGr itself still types `€`.
+    #[test]
+    fn left_ctrl_and_alt_are_a_command_and_carry_no_text() {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        comp.create_window("Focused".to_string(), 400, 300, 1);
+        comp.set_input_settings(settings_using("de-qwertz"));
+        let _ = decode_drained(&mut comp);
+
+        press_keys(&mut comp, &[LEFT_CTRL, LEFT_ALT, KEY_E]);
+        release_keys(&mut comp, &[LEFT_CTRL, LEFT_ALT, KEY_E]);
+        let e = press_of(&mut comp, Key::E);
+        assert_eq!(e.text, "", "a Ctrl+Alt shortcut typed its letter");
+        assert!(
+            e.modifiers.ctrl && e.modifiers.alt,
+            "and it is still the chord"
+        );
+
+        press_keys(&mut comp, &[ALT_GR, KEY_E]);
+        release_keys(&mut comp, &[ALT_GR, KEY_E]);
+        let e = press_of(&mut comp, Key::E);
+        assert_eq!(
+            e.text, "\u{20AC}",
+            "AltGr+E is the euro sign on a German board"
+        );
+        assert!(!e.modifiers.alt && !e.modifiers.ctrl);
+    }
+
+    /// On a board with no third level the rule is the same, from either Alt:
+    /// Ctrl+Alt+T and its kind are shortcuts, and type nothing.
+    #[test]
+    fn ctrl_alt_shortcuts_type_nothing_on_a_us_board_either() {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        comp.create_window("Focused".to_string(), 400, 300, 1);
+        comp.set_input_settings(settings_using("us-qwerty"));
+        let _ = decode_drained(&mut comp);
+
+        for alt in [LEFT_ALT, ALT_GR] {
+            press_keys(&mut comp, &[LEFT_CTRL, alt, KEY_E]);
+            release_keys(&mut comp, &[LEFT_CTRL, alt, KEY_E]);
+            let e = press_of(&mut comp, Key::E);
+            assert_eq!(e.text, "", "with {alt:#x}");
+            assert!(e.modifiers.ctrl && e.modifiers.alt);
+        }
+    }
+
+    /// Only Ctrl and Alt together lose their text: Ctrl or Alt alone still
+    /// carries the letter, for a terminal, or a field's own rule, to decide
+    /// on (`requests/e-cf-...`, part 1, is the toolkit's).
+    #[test]
+    fn ctrl_or_alt_alone_still_carries_its_letter() {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        comp.create_window("Focused".to_string(), 400, 300, 1);
+        comp.set_input_settings(settings_using("de-qwertz"));
+        let _ = decode_drained(&mut comp);
+
+        for held in [LEFT_CTRL, LEFT_ALT] {
+            press_keys(&mut comp, &[held, KEY_E]);
+            release_keys(&mut comp, &[held, KEY_E]);
+            assert_eq!(press_of(&mut comp, Key::E).text, "e", "held {held:#x}");
+        }
+    }
+
+    /// A Ctrl+Alt shortcut in the middle of an accent leaves the accent
+    /// waiting for its vowel, as any other command chord does.
+    #[test]
+    fn a_ctrl_alt_shortcut_leaves_a_pending_accent_waiting() {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        comp.create_window("Focused".to_string(), 400, 300, 1);
+        comp.set_input_settings(settings_using("de-qwertz"));
+        let _ = decode_drained(&mut comp);
+
+        press_keys(&mut comp, &[0x0D]); // the acute accent, dead on German
+        release_keys(&mut comp, &[0x0D]);
+        press_keys(&mut comp, &[LEFT_CTRL, LEFT_ALT, KEY_E]);
+        release_keys(&mut comp, &[LEFT_CTRL, LEFT_ALT, KEY_E]);
+        press_keys(&mut comp, &[KEY_E]);
+        let texts: Vec<String> = typed_keys(&mut comp).into_iter().map(|k| k.text).collect();
+        assert_eq!(
+            texts.last().map(String::as_str),
+            Some("\u{e9}"),
+            "the accent did not survive the shortcut: {texts:?}"
+        );
+    }
+
+    /// A key the layout did resolve through AltGr types its character even
+    /// with left Ctrl and Alt held as well: the rule is for chords that
+    /// selected no character, and this one selected `€`.
+    #[test]
+    fn a_character_alt_gr_selected_survives_ctrl_and_alt_held_beside_it() {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        comp.create_window("Focused".to_string(), 400, 300, 1);
+        comp.set_input_settings(settings_using("de-qwertz"));
+        let _ = decode_drained(&mut comp);
+
+        press_keys(&mut comp, &[LEFT_CTRL, LEFT_ALT, ALT_GR, KEY_E]);
+        assert_eq!(press_of(&mut comp, Key::E).text, "\u{20AC}");
+    }
+
+    /// A source that hands over its own character -- the Windows host
+    /// window, whose AltGr arrives as Ctrl+Alt -- has resolved AltGr itself,
+    /// and its character is typed whatever the compositor's layout says.
+    #[test]
+    fn a_sources_own_character_is_typed_under_ctrl_and_alt() {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        comp.create_window("Focused".to_string(), 400, 300, 1);
+        comp.set_input_settings(settings_using("us-qwerty"));
+        let _ = decode_drained(&mut comp);
+
+        press_keys(&mut comp, &[LEFT_CTRL, ALT_GR]);
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: KEY_E,
+            character: Some('\u{20AC}'),
+        });
+        assert_eq!(press_of(&mut comp, Key::E).text, "\u{20AC}");
     }
 
     #[test]

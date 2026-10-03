@@ -30,4 +30,12 @@ changes nothing about text -- option A?). The answer decides this entry:
 | A (UTF-8 everywhere) | close it: `LC_ALL=C` means nothing anywhere, and `tac`'s switch (`compile` in `tac.rs`) comes out too |
 
 Until then the tools read UTF-8 as `osh` does by the operator's §104, and `tac`
-alone reads bytes under `LC_ALL=C` -- the reading B would give everything.
+reads bytes under `LC_ALL=C` -- the reading B would give everything.
+
+**The procps ports follow the locale too** (2026-10-02/03), because upstream's
+do and their harnesses compare `LC_ALL=C` runs against it: `ps` and `w`
+escape a command line byte by byte outside a UTF-8 locale
+(`coreutils::procps::escape_str`), and `pgrep`/`pkill` compile their pattern
+a byte at a time there (`coreutils/src/pgrep.rs`, `regcomp`). They are in
+`tac`'s position: under B nothing changes; under A each one's
+`ctype_is_utf8()` test comes out with `tac`'s.

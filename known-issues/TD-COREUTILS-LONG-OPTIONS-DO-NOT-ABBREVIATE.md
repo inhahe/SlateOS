@@ -1,4 +1,17 @@
-## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 18 of 85 converted)**
+## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open: one program left, `kill`, frozen by B-Q22**
+
+**Status:** OPEN -- re-measured 2026-10-03, and down to one program. Every
+other program in `userspace/coreutils/src/bin/` parses through the shared
+`getopt` (directly, or through its library module: the digests, `basenc`,
+`ls`, `pgrep`), and the sixteen whose GNU originals use gnulib's
+`parse_long_options` or `parse_gnu_standard_options_only` instead were
+compared with GNU 9.4 on abbreviated `--help`/`--version` (208 cases). One
+differed: `expr`, which matched its two options whole where gnulib accepts any
+unambiguous prefix of a lone argument -- fixed the same day, with cases in
+`scripts/expr-diff.sh`. The one program left is **`kill`**, which still
+matches `--signal`, `--list` and `--table` whole; it is not converted because
+open question B-Q22 is deciding which `kill` the system keeps, and the answer
+decides what there is to convert.
 
 **In short:** GNU lets you shorten a long option to any unambiguous prefix —
 `cat --squeeze` means `--squeeze-blank`, `ls --col` means `--color`. Ours accepts

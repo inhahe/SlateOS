@@ -1,6 +1,7 @@
 ## TD-B-PS-IS-NOT-PROCPS-AND-NAMES-EVERY-TERMINAL-A-PTY (lane B, 2026-10-02)
 
-**Status:** FIXED 2026-10-02 (lane B), boot confirmation pending. `ps` is
+**Status:** FIXED 2026-10-02 (lane B); boot-tested on main 2026-10-03
+(`0178758f5`, published as `352c31c23`). `ps` is
 procps-ng 4.0.4's, ported into coreutils (`userspace/coreutils/src/bin/ps/`),
 with the library parts it reads -- `readproc`, `devname`, `pwcache`, and the
 `pid_max`/`btime`/`MemTotal` readers -- in `coreutils::procps`, which `w` now

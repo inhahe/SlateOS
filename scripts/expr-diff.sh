@@ -441,6 +441,40 @@ help_shape() {
 }
 help_shape
 
+# A lone `--help` or `--version` may be abbreviated -- `expr --he`, `expr --v`
+# -- because GNU's `expr` hands its single argument to gnulib's
+# `parse_long_options`, which is `getopt_long` over those two options with its
+# complaints silenced. Their texts are not GNU's to compare (see above), so
+# the case asks each program whether the abbreviation is *the same request* as
+# the full spelling: identical output and status, on both sides.
+abbrev_case() {
+  local short=$1 full=$2 side a b ok=yes
+  for side in ours gnu; do
+    a=$(mktemp); b=$(mktemp)
+    run_side "$side" "$a" "$a.err" "$short"; echo "rc=$?" >>"$a"
+    run_side "$side" "$b" "$b.err" "$full"; echo "rc=$?" >>"$b"
+    cmp -s "$a" "$b" && cmp -s "$a.err" "$b.err" || ok=no
+    rm -f "$a" "$a.err" "$b" "$b.err"
+  done
+  REPORT="  expr $short and expr $full differ on at least one side"
+  report "$ok" "expr $short (the same as expr $full, on both sides)"
+}
+abbrev_case --he --help
+abbrev_case --h --help
+abbrev_case --hel --help
+abbrev_case --v --version
+abbrev_case --ver --version
+abbrev_case --versio --version
+# And what `getopt` would refuse is not an option at all, but a one-string
+# expression, printed back: an argument neither option takes, a name neither
+# begins, a short option, and `--=x`, whose empty name every option begins.
+run_case --help=x
+run_case --he=x
+run_case --x
+run_case --helpx
+run_case -h
+run_case --=x
+
 # --- backreferences ---------------------------------------------------------
 run_case abc : '\(a\)\1'
 run_case aab : '\(a\)\1'

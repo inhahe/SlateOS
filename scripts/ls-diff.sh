@@ -567,6 +567,43 @@ vdir --color=always t
 vdir nosuchfile
 vdir --zzz
 
+# --- --hyperlink: OSC 8 links to each name ---
+# The links carry this directory's absolute path, the same for both sides,
+# and the host name, also the same. The fixture's names with a space, a
+# quote, a tab and a byte that is not UTF-8 are what %-escaping is for; the
+# quoting styles with outer quotes put the link inside them when names are
+# aligned on those quotes.
+ls --hyperlink=always t
+ls --hyperlink=always -l t
+ls --hyperlink t
+ls --hyperlink=auto t
+ls --hyperlink=never t
+ls --hyperlink=nosuch t
+ls --hyperlink=always -a t
+ls --hyperlink=always -R t
+ls --hyperlink=always -d t t/dir
+ls --hyperlink=always t/a t/link
+ls --hyperlink=always -lL t
+ls --hyperlink=always --color=always t
+ls --hyperlink=always -l --color=always t
+ls --hyperlink=always -F t
+ls --hyperlink=always --quoting-style=shell-escape t
+ls --hyperlink=always --quoting-style=shell-escape -l t
+ls --hyperlink=always --quoting-style=c t
+ls --hyperlink=always -b t
+ls --hyperlink=always -q t
+ls --hyperlink=always -1 t
+ls --hyperlink=always -x t
+ls --hyperlink=always -m t
+ls --hyperlink=always -i t
+ls --hyperlink=always -l --dired t
+ls --hyperlink=always -f t/a t/bb
+ls -f --hyperlink=always t/a t/bb
+ls --hyperlink=always nosuchfile
+ls --hyperlink=always t/dangle
+dir --hyperlink=always t
+vdir --hyperlink=always t
+
 # --- deliberately different ---
 !--help text is ours|ls --help
 !--version text is ours|ls --version
@@ -574,8 +611,6 @@ vdir --zzz
 !--version text is ours|dir --version
 !--help text is ours|vdir --help
 !--version text is ours|vdir --version
-!hyperlinks are not implemented; known-issues TD-B-LS-ACCEPTS-HYPERLINK-WITHOUT-EMITTING-IT|ls --hyperlink=always t
-!hyperlinks are not implemented|ls --hyperlink=always -l t
 CASES
 
 # The unreadable-directory case only means anything as a non-root user.

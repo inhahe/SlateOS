@@ -30,3 +30,19 @@ directory it just made, following for one it found, exactly upstream's
 `SAVEWD_CHDIR_NOFOLLOW` rule. `scripts/install-diff.sh` cannot see the
 difference (it has no long names and no racing writer), so the test is a
 unit test with a 5000-byte name and one that swaps a component mid-walk.
+
+**Checked 2026-10-03: on SlateOS the fix would buy nothing yet, so it waits
+on two other entries.** SlateOS's libc accepts `O_PATH` and gives the
+descriptor Linux's `EBADF` on every operation that would touch the file
+(`posix/src/file.rs`, `reject_path_fd_entry`), but the open itself still goes
+to the kernel as an ordinary open (`SYS_FS_OPEN_MODE`), so a directory its
+caller may search and not read -- the `0711` case above -- cannot be opened
+at all. And every `*at` call, `mkdirat` and `openat` included, is carried out
+by gluing the name onto the text of the path the descriptor was opened with,
+then walking that path from the root again
+(`B-POSIX-THE-AT-FAMILY-IS-TEXTUAL`). A descriptor walk on SlateOS would
+therefore re-walk by name at every step: no longer names than `PATH_MAX`, and
+no protection from a component swapped mid-walk -- exactly what it has now.
+Under Linux, where the harness runs, it would differ; on the system it ships
+on, not until those land. **Trigger:** `B-POSIX-THE-AT-FAMILY-IS-TEXTUAL`
+closed, and an `O_PATH` open that needs only search permission.

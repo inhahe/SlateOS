@@ -1,5 +1,21 @@
-### [B] TD-B-LS-ACCEPTS-HYPERLINK-WITHOUT-EMITTING-IT — 2026-08-22 — OPEN (tech debt)
-**Status:** OPEN — re-verified 2026-09-24: `print_hyperlink` is still read only to cancel `--dired`.
+### [B] TD-B-LS-ACCEPTS-HYPERLINK-WITHOUT-EMITTING-IT — filed 2026-08-22 (tech debt)
+**Status:** FIXED 2026-10-03 (lane B), boot confirmation pending. Both missing
+pieces had arrived since this was written -- `coreutils::canon` is gnulib's
+`canonicalize_filename_mode` (for `readlink` and `realpath`), and
+`libcall::hostname_into` is `gethostname` -- so `ls` now does what upstream
+does: `--hyperlink` stats every entry (`needs_stat`'s clause), gives each its
+`CAN_MISSING` canonical name before the stat (`error canonicalizing` on
+failure), and `print_name_with_quoting` wraps the name in OSC 8 with the
+RFC 3986 escaping of `file_escape` -- inside the colour, inside the outer
+quotes when names align on them, and around a link target with the link's
+own name, as upstream has it. A `-R` heading links to its directory too.
+`scripts/ls-diff.sh`: the two cases that were expected to differ, and 28
+more (colours, `-l`, `-R`, `-F`, quoting styles, `-f` before and after,
+`--dired`), all agree: 252 of 252 comparable cases.
+
+*The entry as filed:*
+
+**Status then:** OPEN — re-verified 2026-09-24: `print_hyperlink` is still read only to cancel `--dired`.
 
 **What it is.** `ls --hyperlink[=WHEN]` parses, validates its argument and sets
 `Settings::print_hyperlink`, and then nothing reads it. GNU wraps each name in

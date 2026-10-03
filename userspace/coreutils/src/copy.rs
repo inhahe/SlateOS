@@ -2698,8 +2698,17 @@ fn copy_tree<E: Write>(
                 // asymmetry is upstream's and is worth reading twice — a moved
                 // *file* is announced as `copied 'a' -> 'b'`, naming both ends,
                 // while a moved *directory* names only the end that was made.
+                //
+                // Under `-v` only, as both are upstream (`if (x->verbose)`
+                // wraps the pair). The `else` arm's [`announce`] checks for
+                // itself; this one printed regardless until 2026-10-03, so a
+                // plain `mv` of a directory across filesystems listed each
+                // directory it made -- found by `mv-diff.sh`'s first such case
+                // without `-v`.
                 if run.opts.move_mode {
-                    let _ = writeln!(run.out, "created directory {}", quoteaf_os(dest));
+                    if run.opts.verbose {
+                        let _ = writeln!(run.out, "created directory {}", quoteaf_os(dest));
+                    }
                 } else {
                     announce(run, src, dest, None);
                 }

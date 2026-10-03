@@ -1,0 +1,57 @@
+## 1339. VP9 is libvpx's decoder ported to Rust, decoder first, checked frame by frame against libvpx's conformance vectors
+
+**Date:** 2026-10-03
+**Lane:** F
+**Decided by:** Claude (autonomous), carrying out the operator's §1332 ("do
+vp9 ... preferably find ... cpu fallback either way - multithreaded").
+
+**In short:** SlateOS will decode VP9 video, the format most WebM files and
+most of YouTube use, with a Rust translation of Google's reference
+decoder (libvpx). It is checked against libvpx's own test suite: 314 videos,
+each with a fingerprint of every decoded frame, so "it works" means it
+produces exactly the same pixels as the reference. The encoder, which
+remote desktop needs to film the screen, comes after, using the decoder as
+its check. The first program to benefit is the video player, which today
+says "nothing here decodes video".
+
+**What was decided.**
+
+- **A Rust port, not libvpx's C compiled in.** The tree builds with no C
+  compiler -- not for host tests, not for the Linux lint, not for SlateOS
+  (`gui/tsgrammar`'s reason for converting tree-sitter's C rather than
+  compiling it). Adding one for a codec that parses hostile input would also
+  bring libvpx's C memory-safety record with it.
+  CVE-2023-5217, exploited in the wild, was in libvpx's VP8 encoder. The
+  port is of libvpx v1.17.0's C reference paths, function for function,
+  in safe Rust: `gui/video/vp9`, a crate of its own beside `rav1d`.
+- **Decoder first.** It has a user today (lane E's video player and media
+  tools), it is deterministic, so correctness is provable to the bit, and it
+  is the test oracle for the encoder: anything the encoder writes must decode.
+- **The test is libvpx's.** `test/test_vector_test.cc` decodes each vector
+  and compares an MD5 of every output frame with the vector's `.md5` file.
+  The port does the same, with the same MD5 rule (`test/md5_helper.h`):
+  visible rows only, chroma rounded up, two bytes a sample above 8 bits. A
+  subset of small vectors is committed. The full set of 314 (26 MB) is
+  fetched into `target/` and run when present.
+- **Threads after correctness.** VP9 frames split into tiles that decode
+  independently, and libvpx threads by tile columns and by loop-filter rows.
+  The thread count is the machine's core count, as §1332 asks. It comes once
+  single-threaded decoding matches every vector, so threading cannot hide a
+  decoding bug.
+- **No hand-written SIMD for now.** Like `rav1d` here, the speed is the
+  compiler's. Rust's intrinsics need no assembler, so this is not
+  `open-questions.md` F-Q4 (dav1d's assembly), and a committed benchmark
+  decides whether they are worth it.
+- **A hostile stream never panics.** Every index derived from the stream is
+  bounded or checked, and arithmetic that a crafted stream could overflow
+  wraps, as libvpx's C does, so a bad file decodes to garbage or an error,
+  never a crash.
+
+**Alternatives.**
+
+| | For | Against |
+|---|---|---|
+| Port to Rust (chosen) | no C compiler in any build; memory-safe on hostile input; the house way (`webp/lossy` is libwebp's VP8 ported) | the most work |
+| Compile libvpx's C | least work; libvpx's SIMD for free | a C toolchain in every build, and C parsing hostile video |
+| Machine-translate with c2rust, as rav1d began | fast to a first decode | 100k lines of `unsafe` Rust that are C in disguise, to clean up by hand anyway |
+| Write a VP9 decoder from the specification | no inherited structure | the "write" §1332 prefers to avoid, and nothing to be bit-exact against except libvpx |

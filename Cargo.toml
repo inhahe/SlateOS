@@ -6,8 +6,10 @@ members = [
     "gui/*",
     # Lane F's video codecs, each its own crate under `gui/video/`, which
     # `gui/*` cannot reach and which is itself excluded below. The first is
-    # rav1d, the AV1 decoder, vendored (`gui/video/rav1d/VENDORED.md`).
+    # rav1d, the AV1 decoder, vendored (`gui/video/rav1d/VENDORED.md`); the
+    # second, vp9, libvpx's VP9 decoder ported (design-decisions.md §1339).
     "gui/video/rav1d",
+    "gui/video/vp9",
     "init/*",
     "net/*",
     "userspace/*",

@@ -404,6 +404,40 @@ pub type TtyId = u32;
 /// The physical keyboard-and-screen terminal.
 pub const CONSOLE: TtyId = 0;
 
+/// Linux's device major for `/dev/console` (with `/dev/tty`, 5:0, and
+/// `/dev/ptmx`, 5:2).
+pub const LINUX_CONSOLE_MAJOR: u32 = 5;
+/// Linux's minor for `/dev/console` under [`LINUX_CONSOLE_MAJOR`].
+pub const LINUX_CONSOLE_MINOR: u32 = 1;
+/// Linux's device major for pseudo-terminal slaves: `/dev/pts/N` is
+/// `136:N`.
+pub const LINUX_PTS_MAJOR: u32 = 136;
+
+/// Linux's `new_encode_dev`: the 32-bit device number `/proc/<pid>/stat`
+/// field 7 (`tty_nr`) is written in -- the minor's low byte in bits 0-7, the
+/// major in bits 8-19, the rest of the minor from bit 20 -- which `ps`
+/// decodes to name a terminal.
+#[must_use]
+pub const fn new_encode_dev(major: u32, minor: u32) -> u32 {
+    (minor & 0xff) | ((major & 0xfff) << 8) | ((minor & !0xff) << 12)
+}
+
+/// The Linux device numbers of terminal `tty`, `(major, minor)`: the console
+/// is `/dev/console`, 5:1; pseudo-terminal slave `N` is `/dev/pts/N`, 136:N,
+/// where `N` is its id -- the number libc's `/dev/pts/N` names
+/// (`posix/src/file.rs`, `open_pty_device`). Linux's own numbering, so a
+/// program that decodes a terminal's number (`ps`) or compares it with a
+/// device's `st_rdev` (`w`) needs no SlateOS knowledge
+/// (requests/b-ad-proc-stat-reports-no-controlling-terminal.md).
+#[must_use]
+pub const fn linux_dev(tty: TtyId) -> (u32, u32) {
+    if tty == CONSOLE {
+        (LINUX_CONSOLE_MAJOR, LINUX_CONSOLE_MINOR)
+    } else {
+        (LINUX_PTS_MAJOR, tty)
+    }
+}
+
 /// Where a terminal device's line discipline gets raw input bytes, and where
 /// its echo goes.
 ///
@@ -2241,6 +2275,15 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // termios round-trips losslessly through the 36-byte wire format.
     let back = Termios::from_bytes(&t.to_bytes());
     selftest::check_eq!(t, back, "termios round-trip");
+
+    // Terminal device numbers, as Linux encodes them (new_encode_dev):
+    // /dev/console 5:1 is 0x501, /dev/pts/3 is 0x8803, and a minor past 255
+    // carries its high bits from bit 20 -- /dev/pts/256 is 0x108800.
+    selftest::check_eq!(new_encode_dev(5, 1), 0x501, "console's tty_nr");
+    selftest::check_eq!(new_encode_dev(136, 3), 0x8803, "pts/3's tty_nr");
+    selftest::check_eq!(new_encode_dev(136, 256), 0x10_8800, "pts/256's tty_nr");
+    selftest::check_eq!(linux_dev(CONSOLE), (5, 1), "the console is 5:1");
+    selftest::check_eq!(linux_dev(7), (136, 7), "pty 7 is pts/7, 136:7");
     crate::serial_println!("[tty]   termios round-trip + defaults: OK");
 
     // Raw mode: clearing ICANON|ECHO survives serialisation.

@@ -2858,6 +2858,26 @@ fn reader_may_inspect(task: u64) -> bool {
 /// the memory layout (which undoes address randomisation), and I/O counters.
 const INSPECT_FILES: &[&str] = &["environ", "auxv", "maps", "io"];
 
+/// `/proc/<pid>/stat` fields 7 and 8 for process `proc_id`: the Linux
+/// device number of its session's controlling terminal (Linux's
+/// `new_encode_dev` of [`crate::tty::linux_dev`]: the console 5:1, a pty
+/// slave `/dev/pts/N` 136:N), and that terminal's foreground process group;
+/// `0` and `-1` when the session holds no terminal, as Linux prints them.
+/// Both belong to the session, so every thread of a process reports the
+/// same. Until 2026-10-03 every process printed `0 -1`, so `ps` named no
+/// terminal and `w` counted every process on the machine as the console's
+/// (requests/b-ad-proc-stat-reports-no-controlling-terminal.md).
+pub(crate) fn ctty_stat_fields(proc_id: u64) -> (u32, i64) {
+    let Some(tty) = crate::proc::pcb::ctty_tty_of(proc_id) else {
+        return (0, -1);
+    };
+    let (major, minor) = crate::tty::linux_dev(tty);
+    let tpgid = crate::proc::pcb::ctty_fg_pgrp(tty)
+        .and_then(|g| i64::try_from(g).ok())
+        .unwrap_or(-1);
+    (crate::tty::new_encode_dev(major, minor), tpgid)
+}
+
 /// `/proc/<pid>/task/<tid>/stat` — per-thread task statistics.
 ///
 /// Same 52-field layout as [`gen_pid_stat`], but the thread-specific fields
@@ -2990,6 +3010,7 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64, inspect: bool) ->
     // Linux's kernel-thread convention.
     let pgrp = crate::proc::pcb::get_pgid(proc_id).unwrap_or(0);
     let session = crate::proc::pcb::get_sid(proc_id).unwrap_or(0);
+    let (tty_nr, tpgid) = ctty_stat_fields(proc_id);
 
     // starttime (field 22): the boot-relative tick when this task was
     // created, in clock ticks at USER_HZ.  The native timer ticks at
@@ -3039,7 +3060,7 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64, inspect: bool) ->
     // 49:arg_end 50:env_start 51:env_end 52:exit_code
     // One space between every field, terminated by a single newline.
     // Placeholders left-to-right: pid comm state ppid pgrp session
-    // <tty_nr/tpgid/flags=0/-1/0> <minflt..cmajflt=0> utime stime
+    // tty_nr tpgid <flags=0> <minflt..cmajflt=0> utime stime
     // cutime cstime priority nice num_threads itrealvalue=0
     // starttime vsize rss rsslim <startcode..kstkeip=0> signal=0 blocked
     // sigignore sigcatch wchan <nswap/cnswap=0> exit_signal=17 processor
@@ -3053,12 +3074,14 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64, inspect: bool) ->
     out.extend_from_slice(format!("{} (", task.id).as_bytes());
     out.extend_from_slice(name);
     let text = format!(
-        ") {} {} {} {} 0 -1 0 {} {} {} {} {} {} {} {} {} {} {} 0 {} {} {} {} \
+        ") {} {} {} {} {} {} 0 {} {} {} {} {} {} {} {} {} {} {} 0 {} {} {} {} \
          0 0 0 0 0 0 {} {} {} {} 0 0 17 {} 0 0 0 0 0 0 0 0 0 0 0 0 {}\n",
         state_char,
         ppid,
         pgrp,
         session,
+        tty_nr,
+        tpgid,
         minflt,
         cminflt,
         majflt,
@@ -18069,6 +18092,20 @@ pub fn self_test() -> KernelResult<()> {
         );
         return Err(KernelError::InternalError);
     }
+    // Fields 7 (tty_nr) and 8 (tpgid), at indices 4 and 5: this task's
+    // session's terminal, which for a kernel task is none -- 0 and -1.
+    let (tty_nr, tpgid) = ctty_stat_fields(owner);
+    if (field(4), field(5)) != (Some(i64::from(tty_nr)), Some(tpgid)) {
+        serial_println!(
+            "[procfs]   FAIL: stat tty_nr/tpgid = {:?}/{:?}, expected {}/{}",
+            field(4),
+            field(5),
+            tty_nr,
+            tpgid
+        );
+        return Err(KernelError::InternalError);
+    }
+    self_test_ctty_stat_fields()?;
     // Field 22 (starttime) must equal the live task's captured start_tick.
     // rest_fields is field3-based, so field 22 sits at index 22 - 3 == 19.
     // This guards the field-position wiring (a regression would shift every
@@ -18720,4 +18757,58 @@ fn test_pid_signal_sets() -> KernelResult<()> {
             Err(KernelError::InternalError)
         }
     }
+}
+
+/// `/proc/<pid>/stat` fields 7 and 8 for a process whose session holds a
+/// terminal: a fresh session leader acquires a new pty's slave as its
+/// controlling terminal and must read as `/dev/pts/N` (136:N, Linux's
+/// encoding) with its own group in the foreground; after it gives the
+/// terminal up, `0` and `-1` again.
+fn self_test_ctty_stat_fields() -> KernelResult<()> {
+    use crate::proc::pcb;
+    use crate::tty::pty;
+
+    let pid = pcb::create("ctty-stat", 0);
+    let Ok((master, slave)) = pty::create() else {
+        pcb::destroy(pid);
+        crate::serial_println!("[procfs]   FAIL: could not create a pty for the tty_nr check");
+        return Err(KernelError::InternalError);
+    };
+    let id = slave.id();
+    let pgid = pcb::get_pgid(pid).and_then(|g| i64::try_from(g).ok());
+    let acquired = pcb::ctty_acquire(pid, id).is_ok();
+    let held = ctty_stat_fields(pid);
+    // Releasing returns the foreground group it hung up; the check is that
+    // the fields go back, so the group itself is not needed here.
+    let _ = pcb::ctty_release(pid);
+    let released = ctty_stat_fields(pid);
+    // Closing an end returns the groups owed a hangup; the session gave the
+    // terminal up above, so there are none to signal.
+    let _ = pty::close(slave);
+    let _ = pty::close(master);
+    pcb::destroy(pid);
+
+    let want = (
+        crate::tty::new_encode_dev(crate::tty::LINUX_PTS_MAJOR, id),
+        pgid.unwrap_or(-1),
+    );
+    if !acquired || pgid.is_none() || held != want || released != (0, -1) {
+        crate::serial_println!(
+            "[procfs]   FAIL: tty_nr/tpgid with pts/{} held {:?} (want {:?}, acquired {}), \
+             released {:?} (want (0, -1))",
+            id,
+            held,
+            want,
+            acquired,
+            released
+        );
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!(
+        "[procfs]   stat tty_nr/tpgid: pts/{} reads {:#x}/{} while held, 0/-1 after: OK",
+        id,
+        held.0,
+        held.1
+    );
+    Ok(())
 }

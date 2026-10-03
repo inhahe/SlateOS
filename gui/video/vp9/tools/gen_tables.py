@@ -14,8 +14,8 @@ the shape the Rust side declares: a table that does not fit is an error that
 names it, never a truncation or a guess.
 """
 
-import math
 import re
+import subprocess
 import sys
 
 #: C names the initializers use, by value.
@@ -355,9 +355,18 @@ def main() -> int:
             out.append(f"/// libvpx's `{cname}`.")
         out.append(f"pub const {rname}: {rust_type(ty, shape)} = {rust_array(values, shape, ty)};")
         out.append("")
-    # Bytes, not text: on Windows a text-mode stdout turns every newline into
-    # CRLF, and the file must be what the generator writes, byte for byte.
-    sys.stdout.buffer.write("\n".join(out).encode("utf-8"))
+    # Through rustfmt, so the file is formatted the way every Rust file in the
+    # tree is (the pre-push gate formats each file on its own, and allows no
+    # exceptions), and so that regenerating and diffing still compares like
+    # with like. Bytes, not text: on Windows a text-mode stdout turns every
+    # newline into CRLF.
+    formatted = subprocess.run(
+        ["rustfmt", "--edition", "2024", "--emit", "stdout"],
+        input="\n".join(out).encode("utf-8"),
+        capture_output=True,
+        check=True,
+    ).stdout
+    sys.stdout.buffer.write(formatted.replace(b"\r\n", b"\n"))
     return 0
 
 

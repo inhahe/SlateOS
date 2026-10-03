@@ -31,10 +31,8 @@ pub mod bits;
 pub mod boolread;
 pub mod common;
 pub mod probs;
-// Generated from libvpx by `tools/gen_tables.py`; rustfmt would reflow it, and
-// the file must stay byte for byte what the generator writes so that it can
-// be regenerated and diffed.
-#[rustfmt::skip]
+// Generated from libvpx by `tools/gen_tables.py`, which formats what it
+// writes, so regenerating and diffing compares like with like.
 pub mod tables;
 
 /// Why a frame could not be decoded.

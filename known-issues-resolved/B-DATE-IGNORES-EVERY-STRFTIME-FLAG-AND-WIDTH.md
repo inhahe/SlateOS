@@ -1,6 +1,6 @@
 ## B-DATE-IGNORES-EVERY-STRFTIME-FLAG-AND-WIDTH (lane B, 2026-09-14)
 
-**Status:** flags and widths **FIXED 2026-09-14**; the `-d` grammar remains open
+**Status:** FIXED. Flags and widths 2026-09-14; the `-d` grammar the same day in `5627cb65f`, and replaced on 2026-09-25 by `4dc586eb4`, a port of GNU's own `parse_datetime` from its Bison tables. Confirmed 2026-10-02 by `scripts/date-diff.sh`: 189 cases agreeing, none differing, and two (`--help`, `--version`) that differ on purpose.
 
 `localtime::strftime` now reads flags and a width before the conversion, so
 all seven flag/width cases pass: `scripts/date-diff.sh` went **80 passed / 41

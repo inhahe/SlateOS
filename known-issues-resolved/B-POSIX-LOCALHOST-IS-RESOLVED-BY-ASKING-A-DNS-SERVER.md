@@ -1,4 +1,4 @@
-## B-POSIX-LOCALHOST-IS-RESOLVED-BY-ASKING-A-DNS-SERVER (lane B, 2026-09-14) — OPEN, fix is lane A's
+## B-POSIX-LOCALHOST-IS-RESOLVED-BY-ASKING-A-DNS-SERVER (lane B, 2026-09-14) — FIXED 2026-09-27, by lanes A and D
 
 **Status:** FIXED 2026-09-27 -- the kernel's resolver consults its hosts table (`requests/a-b-dns-resolve-now-consults-the-hosts-table.md`), and the C library reads `/etc/hosts` before it asks the kernel (lane D, `D-POSIX-HOSTS-FILE-WAS-NEVER-READ`).
 

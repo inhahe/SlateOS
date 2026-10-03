@@ -362,11 +362,18 @@ fi
 run_case 13010000
 
 # --- long-option abbreviation -----------------------------------------------------------------------
+#
+# Each one is anchored with `-d`, for the reason at the top of this file. `--u`
+# and `--iso` were bare until 2026-10-02, and `--u` duly differed once, by the
+# second that ticked between the two invocations. What they test is that the
+# abbreviation is ACCEPTED -- `--u` names three options (`--uct`, `--utc`,
+# `--universal`) that getopt_long counts as one because they are spelled
+# identically in the table -- and an anchored instant tests that as well.
 run_case --dat=@0
 run_case --ref=stamped.txt
-run_case --iso
+run_case --iso -d @1000000000
 run_case --rfc
-run_case --u
+run_case --u -d @1000000000
 
 # --- the two whose text is ours -----------------------------------------------------------------------
 xfail_case "our help text, not the GNU project's" --help

@@ -1,5 +1,7 @@
 ## B-DUP-DATE-PAIR-RETIRED (lane B, 2026-09-12)
 
+**Status:** FIXED 2026-09-12 in `cbf5d1f24`, which deleted the standalone; the coreutils half has since closed the harness (189 agreeing, none differing, 2026-10-02).
+
 **Measured, then deleted.** `scripts/date-diff.sh` against both halves, same
 harness, same cases, minutes apart:
 

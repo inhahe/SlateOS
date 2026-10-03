@@ -1,5 +1,7 @@
 ## TD-B-DATE-IS-THE-SECOND-PAIR-THE-STANDALONE-WINS (lane B, 2026-09-11)
 
+**Status:** FIXED. The port went the other way round from the plan below -- the coreutils `date` grew past the standalone (80 cases to 52) and the standalone was deleted on 2026-09-12 (`cbf5d1f24`, `B-DUP-DATE-PAIR-RETIRED`) -- and every row of the work list is closed: `scripts/date-diff.sh` has 189 cases agreeing and none differing on 2026-10-02.
+
 `scripts/date-diff.sh`, 121 cases against a GNU coreutils 9.4 built from source:
 
 | half | passed | differed |

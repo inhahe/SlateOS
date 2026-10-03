@@ -890,183 +890,258 @@ fn filter_selectively_horiz<P: Pixel>(
 // the compiler turns into vector operations. A lane whose mask is off writes
 // back what it read, so the results are the C's.
 
-/// Eight lines across an edge, side by side: `v[k][j]` is sample `k` of line
-/// `j`, in order across the edge -- `p7` to `p0` then `q0` to `q7` for the
-/// 16-wide filter, `p3` to `q3` for the others.
-type Lanes<const K: usize> = [[i32; 8]; K];
+/// One sample of each of eight lines across an edge.
+///
+/// Sixteen bits hold every value the filters compute, at every bit depth:
+/// samples are at most 12 bits, the narrow filter's arithmetic at most
+/// 3 * 4095 + 2048, the 7-tap sums 8 * 4095 + 4. Only the 15-tap sums at
+/// 12 bits (16 * 4095 + 8) do not fit; they are never negative, so they are
+/// taken unsigned. Eight 16-bit lanes are one SSE2 register.
+type Lane = [i16; 8];
+
+/// `K` samples across an edge for eight lines: `v[k][j]` is sample `k` of
+/// line `j`, in order across the edge -- `p7` to `p0` then `q0` to `q7` for
+/// the 16-wide filter, `p3` to `q3` for the others.
+type Lanes<const K: usize> = [Lane; K];
 
 /// One filter call's thresholds, scaled to the bit depth.
 #[derive(Clone, Copy)]
 struct Thresholds {
-    limit: i32,
-    blimit: i32,
-    hev: i32,
+    limit: i16,
+    blimit: i16,
+    hev: i16,
     /// The flatness threshold: 1, scaled.
-    flat: i32,
+    flat: i16,
     /// 128, scaled: what makes a sample signed for the narrow filter.
-    off: i32,
+    off: i16,
 }
 
 impl Thresholds {
     fn new(l: &FilterLimits, shift: u32) -> Self {
         Self {
-            limit: i32::from(l.lim) << shift,
-            blimit: i32::from(l.mblim) << shift,
-            hev: i32::from(l.hev_thr) << shift,
+            limit: i16::from(l.lim) << shift,
+            blimit: i16::from(l.mblim) << shift,
+            hev: i16::from(l.hev_thr) << shift,
             flat: 1 << shift,
             off: 128 << shift,
         }
     }
 }
 
-/// libvpx's `filter_mask`: whether a line is filtered at all.
+/// A lane mask, all ones where `ok`: what a comparison of vectors gives.
 #[inline(always)]
-fn filter_mask(t: &Thresholds, [p3, p2, p1, p0, q0, q1, q2, q3]: [i32; 8]) -> bool {
-    (p3 - p2).abs() <= t.limit
-        && (p2 - p1).abs() <= t.limit
-        && (p1 - p0).abs() <= t.limit
-        && (q1 - q0).abs() <= t.limit
-        && (q2 - q1).abs() <= t.limit
-        && (q3 - q2).abs() <= t.limit
-        && (p0 - q0).abs() * 2 + (p1 - q1).abs() / 2 <= t.blimit
+fn ones(ok: bool) -> i16 {
+    -i16::from(ok)
+}
+
+/// Each lane of `a` where the mask `m` is set, else of `b`.
+#[inline(always)]
+fn select(m: &Lane, a: &Lane, b: &Lane) -> Lane {
+    let mut out = [0; 8];
+    for j in 0..8 {
+        out[j] = (m[j] & a[j]) | (!m[j] & b[j]);
+    }
+    out
+}
+
+/// libvpx's `filter_mask`: which lines are filtered at all.
+#[inline(always)]
+fn filter_mask(t: &Thresholds, [p3, p2, p1, p0, q0, q1, q2, q3]: &[Lane; 8]) -> Lane {
+    let mut m = [0; 8];
+    for j in 0..8 {
+        let ok = ((p3[j] - p2[j]).abs() <= t.limit)
+            & ((p2[j] - p1[j]).abs() <= t.limit)
+            & ((p1[j] - p0[j]).abs() <= t.limit)
+            & ((q1[j] - q0[j]).abs() <= t.limit)
+            & ((q2[j] - q1[j]).abs() <= t.limit)
+            & ((q3[j] - q2[j]).abs() <= t.limit)
+            & ((p0[j] - q0[j]).abs() * 2 + ((p1[j] - q1[j]).abs() >> 1) <= t.blimit);
+        m[j] = ones(ok);
+    }
+    m
 }
 
 /// libvpx's `flat_mask4`: `p3..p1` within the flatness threshold of `p0`,
 /// and `q1..q3` of `q0`. Given the outer samples in place of the inner
 /// ones, the larger part of `flat_mask5`.
 #[inline(always)]
-fn flat_mask4(t: &Thresholds, [p3, p2, p1, p0, q0, q1, q2, q3]: [i32; 8]) -> bool {
-    (p1 - p0).abs() <= t.flat
-        && (q1 - q0).abs() <= t.flat
-        && (p2 - p0).abs() <= t.flat
-        && (q2 - q0).abs() <= t.flat
-        && (p3 - p0).abs() <= t.flat
-        && (q3 - q0).abs() <= t.flat
+fn flat_mask4(t: &Thresholds, [p3, p2, p1, p0, q0, q1, q2, q3]: &[Lane; 8]) -> Lane {
+    let mut m = [0; 8];
+    for j in 0..8 {
+        let ok = ((p1[j] - p0[j]).abs() <= t.flat)
+            & ((q1[j] - q0[j]).abs() <= t.flat)
+            & ((p2[j] - p0[j]).abs() <= t.flat)
+            & ((q2[j] - q0[j]).abs() <= t.flat)
+            & ((p3[j] - p0[j]).abs() <= t.flat)
+            & ((q3[j] - q0[j]).abs() <= t.flat);
+        m[j] = ones(ok);
+    }
+    m
 }
 
-/// libvpx's `filter4` on `p1 p0 q0 q1`, as new values for them; with the
-/// mask off, the values it was given.
+/// libvpx's `filter4` on `p1 p0 q0 q1`, as new values for them; where the
+/// mask is off, the values it was given.
 #[inline(always)]
-fn filter4(t: &Thresholds, mask: bool, [p1, p0, q0, q1]: [i32; 4]) -> [i32; 4] {
+fn filter4(t: &Thresholds, mask: &Lane, [p1, p0, q0, q1]: [&Lane; 4]) -> [Lane; 4] {
     let (lo, hi) = (-t.off, t.off - 1);
-    let sc = |x: i32| x.clamp(lo, hi);
-    let (ps1, ps0, qs0, qs1) = (p1 - t.off, p0 - t.off, q0 - t.off, q1 - t.off);
-    let hev = (p1 - p0).abs() > t.hev || (q1 - q0).abs() > t.hev;
-    // The outer taps only where the edge varies a lot.
-    let f = if hev { sc(ps1 - qs1) } else { 0 };
-    let f = if mask { sc(f + 3 * (qs0 - ps0)) } else { 0 };
-    // One side rounded up, the other down.
-    let f1 = sc(f + 4) >> 3;
-    let f2 = sc(f + 3) >> 3;
-    let outer = if hev { 0 } else { (f1 + 1) >> 1 };
-    [
-        sc(ps1 + outer) + t.off,
-        sc(ps0 + f2) + t.off,
-        sc(qs0 - f1) + t.off,
-        sc(qs1 - outer) + t.off,
-    ]
-}
-
-/// The flat 7-tap filter of libvpx's `filter8`: new `p2..q2`.
-#[inline(always)]
-fn flat8([p3, p2, p1, p0, q0, q1, q2, q3]: [i32; 8]) -> [i32; 6] {
-    let r = |x: i32| (x + 4) >> 3;
-    [
-        r(3 * p3 + 2 * p2 + p1 + p0 + q0),
-        r(2 * p3 + p2 + 2 * p1 + p0 + q0 + q1),
-        r(p3 + p2 + p1 + 2 * p0 + q0 + q1 + q2),
-        r(p2 + p1 + p0 + 2 * q0 + q1 + q2 + q3),
-        r(p1 + p0 + q0 + 2 * q1 + q2 + 2 * q3),
-        r(p0 + q0 + q1 + 2 * q2 + 3 * q3),
-    ]
-}
-
-/// The flat 15-tap filter of libvpx's `filter16`: new `p6..q6`. Output `i`
-/// is the fifteen samples centred on it -- the end samples repeated past the
-/// line's ends -- plus itself once more, so a running sum computes them all.
-#[inline(always)]
-fn flat16(s: &[i32; 16]) -> [i32; 14] {
-    let at = |m: isize| s[m.clamp(0, 15) as usize];
-    let mut sum: i32 = (-6..=8).map(at).sum();
-    let mut out = [0; 14];
-    for (i, o) in (1..15isize).zip(out.iter_mut()) {
-        *o = (sum + at(i) + 8) >> 4;
-        sum += at(i + 8) - at(i - 7);
+    let mut out = [[0; 8]; 4];
+    for j in 0..8 {
+        let sc = |x: i16| x.clamp(lo, hi);
+        let (ps1, ps0, qs0, qs1) = (p1[j] - t.off, p0[j] - t.off, q0[j] - t.off, q1[j] - t.off);
+        let hev = ones(((p1[j] - p0[j]).abs() > t.hev) | ((q1[j] - q0[j]).abs() > t.hev));
+        // The outer taps only where the edge varies a lot.
+        let f = sc(ps1 - qs1) & hev;
+        let f = sc(f + 3 * (qs0 - ps0)) & mask[j];
+        // One side rounded up, the other down.
+        let f1 = sc(f + 4) >> 3;
+        let f2 = sc(f + 3) >> 3;
+        let outer = ((f1 + 1) >> 1) & !hev;
+        out[0][j] = sc(ps1 + outer) + t.off;
+        out[1][j] = sc(ps0 + f2) + t.off;
+        out[2][j] = sc(qs0 - f1) + t.off;
+        out[3][j] = sc(qs1 - outer) + t.off;
     }
     out
 }
 
-/// libvpx's `vpx_lpf_*_4`, eight lines at once: `p3..q3` in, `p1..q1` out.
+/// The flat 7-tap filter of libvpx's `filter8`: new `p2..q2`.
 #[inline(always)]
-fn lanes4(v: &mut Lanes<8>, t: &Thresholds) {
-    let mut out = *v;
+fn flat8([p3, p2, p1, p0, q0, q1, q2, q3]: &[Lane; 8]) -> [Lane; 6] {
+    let mut out = [[0; 8]; 6];
     for j in 0..8 {
-        let s: [i32; 8] = core::array::from_fn(|k| v[k][j]);
-        let f4 = filter4(t, filter_mask(t, s), [s[2], s[3], s[4], s[5]]);
-        for (k, &x) in (2..6).zip(&f4) {
-            out[k][j] = x;
+        let r = |x: i16| (x + 4) >> 3;
+        let [p3, p2, p1, p0, q0, q1, q2, q3] =
+            [p3[j], p2[j], p1[j], p0[j], q0[j], q1[j], q2[j], q3[j]];
+        out[0][j] = r(3 * p3 + 2 * p2 + p1 + p0 + q0);
+        out[1][j] = r(2 * p3 + p2 + 2 * p1 + p0 + q0 + q1);
+        out[2][j] = r(p3 + p2 + p1 + 2 * p0 + q0 + q1 + q2);
+        out[3][j] = r(p2 + p1 + p0 + 2 * q0 + q1 + q2 + q3);
+        out[4][j] = r(p1 + p0 + q0 + 2 * q1 + q2 + 2 * q3);
+        out[5][j] = r(p0 + q0 + q1 + 2 * q2 + 3 * q3);
+    }
+    out
+}
+
+/// The flat 15-tap filter of libvpx's `filter16`: new `p6..q6`. Output `i`
+/// is the fifteen samples centred on it -- the end samples repeated past the
+/// line's ends -- plus itself once more, so a running sum computes them
+/// all. The sums are unsigned (see [`Lane`]); added and taken away in turn,
+/// they wrap modulo 2^16 to the exact value.
+#[inline(always)]
+fn flat16(s: &Lanes<16>) -> [Lane; 14] {
+    let u = |k: usize, j: usize| s[k][j] as u16;
+    let mut sum = [0u16; 8];
+    for (j, sum) in sum.iter_mut().enumerate() {
+        // Output 1's window: p7 seven times, then p6 to q0.
+        *sum = 7 * u(0, j);
+        for k in 1..=8 {
+            *sum += u(k, j);
         }
     }
-    *v = out;
+    let mut out = [[0; 8]; 14];
+    for i in 1..15usize {
+        let (add, take) = ((i + 8).min(15), i.saturating_sub(7));
+        for j in 0..8 {
+            out[i - 1][j] = (sum[j].wrapping_add(u(i, j)).wrapping_add(8) >> 4) as i16;
+            sum[j] = sum[j].wrapping_add(u(add, j)).wrapping_sub(u(take, j));
+        }
+    }
+    out
+}
+
+/// Whether any lane of a mask is set.
+#[inline(always)]
+fn any(m: &Lane) -> bool {
+    m.iter().fold(0, |a, &x| a | x) != 0
+}
+
+/// How far either side of an edge a filter changed samples: 2 (`p1..q1`),
+/// 3 (`p2..q2`) or 7 (`p6..q6`).
+type Reach = usize;
+
+/// libvpx's `vpx_lpf_*_4`, eight lines at once: `p3..q3` in, `p1..q1` out.
+/// Like each of these, returns how far it changed samples, if it changed
+/// any -- skipping, as libvpx's SIMD does, what no lane needs.
+#[inline(always)]
+fn lanes4(v: &mut Lanes<8>, t: &Thresholds) -> Option<Reach> {
+    let mask = filter_mask(t, v);
+    if !any(&mask) {
+        return None;
+    }
+    let f4 = filter4(t, &mask, [&v[2], &v[3], &v[4], &v[5]]);
+    v[2..6].copy_from_slice(&f4);
+    Some(2)
 }
 
 /// libvpx's `vpx_lpf_*_8`, eight lines at once: `p3..q3` in, `p2..q2` out.
 #[inline(always)]
-fn lanes8(v: &mut Lanes<8>, t: &Thresholds) {
-    let mut out = *v;
-    for j in 0..8 {
-        let s: [i32; 8] = core::array::from_fn(|k| v[k][j]);
-        let mask = filter_mask(t, s);
-        let flat = mask && flat_mask4(t, s);
-        let f4 = filter4(t, mask, [s[2], s[3], s[4], s[5]]);
-        let f8 = flat8(s);
-        for k in 1..7 {
-            let narrow = if (2..6).contains(&k) { f4[k - 2] } else { s[k] };
-            out[k][j] = if flat { f8[k - 1] } else { narrow };
-        }
+fn lanes8(v: &mut Lanes<8>, t: &Thresholds) -> Option<Reach> {
+    let mask = filter_mask(t, v);
+    if !any(&mask) {
+        return None;
     }
-    *v = out;
+    let flat = select(&mask, &flat_mask4(t, v), &[0; 8]);
+    let f4 = filter4(t, &mask, [&v[2], &v[3], &v[4], &v[5]]);
+    if !any(&flat) {
+        v[2..6].copy_from_slice(&f4);
+        return Some(2);
+    }
+    let f8 = flat8(v);
+    for k in 1..7 {
+        let narrow = if (2..6).contains(&k) { f4[k - 2] } else { v[k] };
+        v[k] = select(&flat, &f8[k - 1], &narrow);
+    }
+    Some(3)
 }
 
 /// libvpx's `vpx_lpf_*_16`, eight lines at once: `p7..q7` in, `p6..q6` out.
 #[inline(always)]
-fn lanes16(v: &mut Lanes<16>, t: &Thresholds) {
-    let mut out = *v;
+fn lanes16(v: &mut Lanes<16>, t: &Thresholds) -> Option<Reach> {
+    let inner: [Lane; 8] = [v[4], v[5], v[6], v[7], v[8], v[9], v[10], v[11]];
+    let mask = filter_mask(t, &inner);
+    if !any(&mask) {
+        return None;
+    }
+    let flat = select(&mask, &flat_mask4(t, &inner), &[0; 8]);
+    let f4 = filter4(t, &mask, [&v[6], &v[7], &v[8], &v[9]]);
+    if !any(&flat) {
+        v[6..10].copy_from_slice(&f4);
+        return Some(2);
+    }
+    // libvpx's flat_mask5: p7..p4 and q4..q7 against p0 and q0 too.
+    let outer = flat_mask4(t, &[v[1], v[2], v[3], v[7], v[8], v[12], v[13], v[14]]);
+    let mut flat2 = [0; 8];
     for j in 0..8 {
-        let s: [i32; 16] = core::array::from_fn(|k| v[k][j]);
-        let inner: [i32; 8] = core::array::from_fn(|k| s[k + 4]);
-        let mask = filter_mask(t, inner);
-        let flat = mask && flat_mask4(t, inner);
-        // libvpx's flat_mask5: p7..p4 and q4..q7 against p0 and q0 too.
-        let outer = [s[1], s[2], s[3], s[7], s[8], s[12], s[13], s[14]];
-        let flat2 = flat
-            && flat_mask4(t, outer)
-            && (s[0] - s[7]).abs() <= t.flat
-            && (s[15] - s[8]).abs() <= t.flat;
-        let f4 = filter4(t, mask, [s[6], s[7], s[8], s[9]]);
-        let f8 = flat8(inner);
-        let f16 = flat16(&s);
-        for k in 1..15 {
+        let ends = ((v[0][j] - v[7][j]).abs() <= t.flat) & ((v[15][j] - v[8][j]).abs() <= t.flat);
+        flat2[j] = flat[j] & outer[j] & ones(ends);
+    }
+    let f8 = flat8(&inner);
+    if !any(&flat2) {
+        for k in 5..11 {
             let narrow = if (6..10).contains(&k) {
                 f4[k - 6]
             } else {
-                s[k]
+                v[k]
             };
-            let eight = if (5..11).contains(&k) {
-                f8[k - 5]
-            } else {
-                s[k]
-            };
-            out[k][j] = if flat2 {
-                f16[k - 1]
-            } else if flat {
-                eight
-            } else {
-                narrow
-            };
+            v[k] = select(&flat, &f8[k - 5], &narrow);
         }
+        return Some(3);
     }
-    *v = out;
+    let f16 = flat16(v);
+    for k in 1..15 {
+        let narrow = if (6..10).contains(&k) {
+            f4[k - 6]
+        } else {
+            v[k]
+        };
+        let eight = if (5..11).contains(&k) {
+            f8[k - 5]
+        } else {
+            v[k]
+        };
+        v[k] = select(&flat2, &f16[k - 1], &select(&flat, &eight, &narrow));
+    }
+    Some(7)
 }
 
 /// The eight lines across a horizontal edge at `at` (the first sample below
@@ -1079,30 +1154,29 @@ fn load_h<P: Pixel, const K: usize>(s: &[P], at: usize, stride: usize) -> Option
     for (k, lane) in v.iter_mut().enumerate() {
         let row = s.get(top + k * stride..)?.get(..8)?;
         for (x, &p) in lane.iter_mut().zip(row) {
-            *x = p.int();
+            *x = p.int() as i16;
         }
     }
     Some(v)
 }
 
-/// Write samples `from..to` of each line back across a horizontal edge.
+/// Write back the samples within `R` of a horizontal edge.
 #[inline(always)]
-fn store_h<P: Pixel, const K: usize>(
+fn store_h<P: Pixel, const K: usize, const R: usize>(
     s: &mut [P],
     at: usize,
     stride: usize,
     v: &Lanes<K>,
-    (from, to): (usize, usize),
 ) {
     let Some(top) = at.checked_sub(K / 2 * stride) else {
         return;
     };
-    for (k, lane) in v.iter().enumerate().take(to).skip(from) {
+    for k in K / 2 - R..K / 2 + R {
         let Some(row) = s.get_mut(top + k * stride..).and_then(|r| r.get_mut(..8)) else {
             continue;
         };
-        for (p, &x) in row.iter_mut().zip(lane) {
-            *p = P::from_int(x);
+        for (p, &x) in row.iter_mut().zip(&v[k]) {
+            *p = P::from_int(i32::from(x));
         }
     }
 }
@@ -1116,20 +1190,19 @@ fn load_v<P: Pixel, const K: usize>(s: &[P], at: usize, stride: usize) -> Option
     for j in 0..8 {
         let line = s.get(left + j * stride..)?.get(..K)?;
         for (lane, &p) in v.iter_mut().zip(line) {
-            lane[j] = p.int();
+            lane[j] = p.int() as i16;
         }
     }
     Some(v)
 }
 
-/// Write samples `from..to` of each line back across a vertical edge.
+/// Write back the samples within `R` of a vertical edge.
 #[inline(always)]
-fn store_v<P: Pixel, const K: usize>(
+fn store_v<P: Pixel, const K: usize, const R: usize>(
     s: &mut [P],
     at: usize,
     stride: usize,
     v: &Lanes<K>,
-    (from, to): (usize, usize),
 ) {
     let Some(left) = at.checked_sub(K / 2) else {
         return;
@@ -1138,8 +1211,8 @@ fn store_v<P: Pixel, const K: usize>(
         let Some(line) = s.get_mut(left + j * stride..).and_then(|r| r.get_mut(..K)) else {
             continue;
         };
-        for (p, lane) in line.iter_mut().zip(v).take(to).skip(from) {
-            *p = P::from_int(lane[j]);
+        for k in K / 2 - R..K / 2 + R {
+            line[k] = P::from_int(i32::from(v[k][j]));
         }
     }
 }
@@ -1147,29 +1220,38 @@ fn store_v<P: Pixel, const K: usize>(
 /// Run `filter` on `count` lines (a multiple of eight) across an edge at
 /// `at`: a vertical edge if `across` is 1 (the lines are rows, `along` the
 /// stride), else a horizontal one (`across` the stride, the lines columns).
-/// `written` is the range of samples the filter may change.
-#[allow(clippy::too_many_arguments)]
+/// Writes back the samples the filter says it changed.
 #[inline(always)]
 fn lpf<P: Pixel, const K: usize>(
     s: &mut [P],
     at: usize,
-    across: usize,
-    along: usize,
+    (across, along): (usize, usize),
     count: usize,
-    written: (usize, usize),
     t: &Thresholds,
-    filter: impl Fn(&mut Lanes<K>, &Thresholds),
+    filter: impl Fn(&mut Lanes<K>, &Thresholds) -> Option<Reach>,
 ) {
     for g in 0..count / 8 {
         let at = at + g * 8 * along;
         if across == 1 {
-            if let Some(mut v) = load_v::<P, K>(s, at, along) {
-                filter(&mut v, t);
-                store_v(s, at, along, &v, written);
+            let Some(mut v) = load_v::<P, K>(s, at, along) else {
+                continue;
+            };
+            match filter(&mut v, t) {
+                Some(2) => store_v::<P, K, 2>(s, at, along, &v),
+                Some(3) => store_v::<P, K, 3>(s, at, along, &v),
+                Some(7) => store_v::<P, K, 7>(s, at, along, &v),
+                _ => {}
             }
-        } else if let Some(mut v) = load_h::<P, K>(s, at, across) {
-            filter(&mut v, t);
-            store_h(s, at, across, &v, written);
+        } else {
+            let Some(mut v) = load_h::<P, K>(s, at, across) else {
+                continue;
+            };
+            match filter(&mut v, t) {
+                Some(2) => store_h::<P, K, 2>(s, at, across, &v),
+                Some(3) => store_h::<P, K, 3>(s, at, across, &v),
+                Some(7) => store_h::<P, K, 7>(s, at, across, &v),
+                _ => {}
+            }
         }
     }
 }
@@ -1185,7 +1267,7 @@ fn lpf_4<P: Pixel>(
     count: usize,
 ) {
     let t = Thresholds::new(l, ctx.shift);
-    lpf::<P, 8>(s, at, across, along, count, (2, 6), &t, lanes4);
+    lpf::<P, 8>(s, at, (across, along), count, &t, lanes4);
 }
 
 /// libvpx's `vpx_lpf_*_8` along 8 pixels of an edge at `at`.
@@ -1198,7 +1280,7 @@ fn lpf_8<P: Pixel>(
     l: &FilterLimits,
 ) {
     let t = Thresholds::new(l, ctx.shift);
-    lpf::<P, 8>(s, at, across, along, 8, (1, 7), &t, lanes8);
+    lpf::<P, 8>(s, at, (across, along), 8, &t, lanes8);
 }
 
 /// libvpx's `mb_lpf_*_edge_w`: the 16-wide filter along `count` pixels.
@@ -1212,7 +1294,7 @@ fn lpf_16<P: Pixel>(
     count: usize,
 ) {
     let t = Thresholds::new(l, ctx.shift);
-    lpf::<P, 16>(s, at, across, along, count, (1, 15), &t, lanes16);
+    lpf::<P, 16>(s, at, (across, along), count, &t, lanes16);
 }
 
 fn lpf_vertical_4<P: Pixel>(
@@ -1287,9 +1369,30 @@ mod tests {
     /// libvpx's `vpx_dsp/loopfilter.c`, one line at a time as its C does it:
     /// the reference the eight-lane filters are checked against.
     mod reference {
-        use super::super::Thresholds;
+        use crate::header::FilterLimits;
 
-        fn mask(t: &Thresholds, s: &[i32]) -> bool {
+        /// libvpx's thresholds for one call, in the C's own ints.
+        pub struct Thresholds {
+            limit: i32,
+            blimit: i32,
+            hev: i32,
+            pub flat: i32,
+            off: i32,
+        }
+
+        impl Thresholds {
+            pub fn new(l: &FilterLimits, shift: u32) -> Self {
+                Self {
+                    limit: i32::from(l.lim) << shift,
+                    blimit: i32::from(l.mblim) << shift,
+                    hev: i32::from(l.hev_thr) << shift,
+                    flat: 1 << shift,
+                    off: 128 << shift,
+                }
+            }
+        }
+
+        pub fn mask(t: &Thresholds, s: &[i32]) -> bool {
             let [p3, p2, p1, p0, q0, q1, q2, q3] = [s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]];
             !((p3 - p2).abs() > t.limit
                 || (p2 - p1).abs() > t.limit
@@ -1301,7 +1404,7 @@ mod tests {
         }
 
         /// `flat_mask4(thresh, p3, p2, p1, p0, q0, q1, q2, q3)`.
-        fn flat(t: &Thresholds, [p3, p2, p1, p0, q0, q1, q2, q3]: [i32; 8]) -> bool {
+        pub fn flat(t: &Thresholds, [p3, p2, p1, p0, q0, q1, q2, q3]: [i32; 8]) -> bool {
             !((p1 - p0).abs() > t.flat
                 || (q1 - q0).abs() > t.flat
                 || (p2 - p0).abs() > t.flat
@@ -1453,7 +1556,7 @@ mod tests {
         if vertical {
             at + j * stride + i - k / 2
         } else {
-            at + j + (i - k / 2) * stride
+            at + j + i * stride - k / 2 * stride
         }
     }
 
@@ -1468,7 +1571,7 @@ mod tests {
             for trial in 0..600 {
                 let level = rng.below(64) as u8;
                 let l = limits(level, rng.below(8) as u8);
-                let t = Thresholds::new(&l, shift);
+                let t = reference::Thresholds::new(&l, shift);
                 let table = [l; 64];
                 let ctx = Ctx {
                     limits: &table,
@@ -1519,16 +1622,16 @@ mod tests {
     #[test]
     fn the_test_lines_reach_every_16_wide_outcome() {
         let mut rng = Lcg(0x10f1_17e5);
-        let t = Thresholds::new(&limits(40, 0), 0);
+        let t = reference::Thresholds::new(&limits(40, 0), 0);
         let mut seen = [0u32; 4];
         for _ in 0..2000 {
             let s: [i32; 16] = line(&mut rng, 16, 8).try_into().unwrap();
             let inner: [i32; 8] = core::array::from_fn(|k| s[k + 4]);
-            let mask = filter_mask(&t, inner);
-            let flat = mask && flat_mask4(&t, inner);
+            let mask = reference::mask(&t, &inner);
+            let flat = mask && reference::flat(&t, inner);
             let outer = [s[1], s[2], s[3], s[7], s[8], s[12], s[13], s[14]];
             let flat2 = flat
-                && flat_mask4(&t, outer)
+                && reference::flat(&t, outer)
                 && (s[0] - s[7]).abs() <= t.flat
                 && (s[15] - s[8]).abs() <= t.flat;
             let outcome = if flat2 {

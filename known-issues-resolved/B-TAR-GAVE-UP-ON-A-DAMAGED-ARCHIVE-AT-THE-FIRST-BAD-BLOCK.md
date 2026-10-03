@@ -1,6 +1,6 @@
 ## B-TAR-GAVE-UP-ON-A-DAMAGED-ARCHIVE-AT-THE-FIRST-BAD-BLOCK (lane B, 2026-10-03)
 
-**Status:** FIXED 2026-10-03 (lane B), boot confirmation pending.
+**Status:** FIXED 2026-10-03 (lane B); boot-confirmed on main at 8be413362 (the boot of 583c2a823 passed).
 
 **In short:** When one block in the middle of an archive is damaged, GNU tar
 says `Skipping to next header` and carries on: the members after the damage

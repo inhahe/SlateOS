@@ -1,6 +1,6 @@
 ## B-TAR-RESTORED-AS-ROOT-GAVE-EVERY-FILE-TO-ROOT (lane B, 2026-10-03)
 
-**Status:** FIXED 2026-10-03 (lane B), boot confirmation pending.
+**Status:** FIXED 2026-10-03 (lane B); boot-confirmed on main at 8be413362 (the boot of 583c2a823 passed).
 
 **In short:** Restoring a backup as root with GNU tar gives every file back to
 the user and group it belonged to, and keeps its exact permissions -- setuid

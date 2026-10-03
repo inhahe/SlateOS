@@ -1,6 +1,6 @@
 ## B-TAR-WROTE-AN-ARCHIVE-FOR-A-PIPE-INTO-A-FILE-CALLED-DASH (lane B, 2026-10-03)
 
-**Status:** FIXED 2026-10-03 (lane B), boot confirmation pending.
+**Status:** FIXED 2026-10-03 (lane B); boot-confirmed on main at 8be413362 (the boot of 583c2a823 passed).
 
 **In short:** `tar -cf - dir | ssh host tar -xf -` is how a directory is moved
 through a pipe, and the `-` in it means "standard output" (or "standard

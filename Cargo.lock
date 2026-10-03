@@ -4137,6 +4137,7 @@ dependencies = [
  "oswindow",
  "termchild",
  "terminal",
+ "textline",
  "tzrules",
 ]
 

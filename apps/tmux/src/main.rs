@@ -1822,25 +1822,32 @@ impl Multiplexer {
     /// copy mode, which has the keyboard as it does in tmux -- and then
     /// everything else, which is the program's in the active pane.
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        // The multiplexer's own keys are plain, nothing held but Shift: a
+        // chord with Alt or the Windows key is the window's or the desktop's
+        // -- or, with Alt, the program's in the pane -- and arrives carrying
+        // its key. Alt+Y answered "close this pane?" with yes.
+        let plain = textline::is_plain(key.modifiers);
         // Above everything that swallows keys: a list you cannot dismiss from
         // the state you reached it in is the failure this ordering avoids.
-        if key.key == Key::F1 {
+        if key.key == Key::F1 && plain {
             self.show_help = !self.show_help;
             return EventResult::Consumed;
         }
         if self.show_help {
             // Modal: `d` detaches and `&` closes a window, and neither should
             // happen from behind a list somebody is reading.
-            if matches!(key.key, Key::Escape | Key::Enter) {
+            if plain && matches!(key.key, Key::Escape | Key::Enter) {
                 self.show_help = false;
             }
             return EventResult::Consumed;
         }
         if let Some(confirm) = self.confirm.take() {
-            if key
-                .typed()
-                .next()
-                .is_some_and(|c| c.eq_ignore_ascii_case(&'y'))
+            // A `y` typed, plain or with AltGr -- not a chord carrying it.
+            if textline::types_into_field(key)
+                && key
+                    .typed()
+                    .next()
+                    .is_some_and(|c| c.eq_ignore_ascii_case(&'y'))
             {
                 self.confirmed(confirm);
             } else {
@@ -1856,8 +1863,10 @@ impl Multiplexer {
             return self.handle_prefixed_key(key);
         }
         // Ctrl+B arms the prefix. This is the one chord the multiplexer keeps
-        // for itself; everything else Ctrl is the pane's.
-        if key.modifiers.ctrl && key.key == Key::B {
+        // for itself; everything else Ctrl is the pane's. A Ctrl chord, not
+        // Ctrl held: AltGr arrives as Ctrl+Alt, and what it types is the
+        // pane's.
+        if textline::is_ctrl_chord(key.modifiers) && key.key == Key::B {
             self.prefix_state = PrefixState::Prefix;
             return EventResult::Consumed;
         }
@@ -1865,7 +1874,7 @@ impl Multiplexer {
             return self.handle_chooser_key(key);
         }
         if self.detached {
-            if key.key == Key::Enter {
+            if key.key == Key::Enter && plain {
                 self.attach(self.active_session);
             }
             return EventResult::Consumed;
@@ -1891,30 +1900,36 @@ impl Multiplexer {
         // ratio, a field nothing else ever wrote. Up and Down move a
         // top/bottom divider the way Left and Right move a left/right one;
         // which kind of divider it is comes from the split itself.
-        match key.key {
-            Key::Left | Key::Up => {
-                self.resize_active_split(-RESIZE_STEP);
-                return EventResult::Consumed;
+        if textline::is_plain(key.modifiers) {
+            match key.key {
+                Key::Left | Key::Up => {
+                    self.resize_active_split(-RESIZE_STEP);
+                    return EventResult::Consumed;
+                }
+                Key::Right | Key::Down => {
+                    self.resize_active_split(RESIZE_STEP);
+                    return EventResult::Consumed;
+                }
+                _ => {}
             }
-            Key::Right | Key::Down => {
-                self.resize_active_split(RESIZE_STEP);
-                return EventResult::Consumed;
-            }
-            _ => {}
         }
         // The prefix twice sends the program a Ctrl+B of its own, as tmux's
         // `send-prefix`: otherwise nothing running under the multiplexer could
         // ever be sent one.
-        if key.modifiers.ctrl && key.key == Key::B {
+        if textline::is_ctrl_chord(key.modifiers) && key.key == Key::B {
             if let Some(pane) = self.active_pane_mut() {
                 pane.term.handle_event(&Event::Key(key.clone()));
             }
             return EventResult::Consumed;
         }
-        // Otherwise the prefix is followed by a *character*. A key that
-        // carries none is not a command, and is spent rather than leaving the
-        // prefix armed for whatever comes next.
-        if let Some(ch) = key.typed().next() {
+        // Otherwise the prefix is followed by a *character* typed -- plain,
+        // or with AltGr. A key that carries none is not a command, nor is a
+        // chord carrying its letter (Alt+X closed a pane as `x`), and either
+        // is spent rather than leaving the prefix armed for whatever comes
+        // next.
+        if textline::types_into_field(key)
+            && let Some(ch) = key.typed().next()
+        {
             self.process_prefix_key(ch);
         }
         EventResult::Consumed
@@ -2008,7 +2023,10 @@ impl Multiplexer {
     /// place to read, and a key that typed into the shell behind it would
     /// land somewhere the user is not looking.
     fn handle_copy_key(&mut self, key: &KeyEvent) -> EventResult {
+        // The named keys plain and the letters typed: a chord with Alt or the
+        // Windows key carries its key, and Alt+Q left copy mode as `q` does.
         let command = match key.key {
+            _ if !textline::is_plain(key.modifiers) && !textline::types_into_field(key) => None,
             Key::Escape => Some('q'),
             Key::Up => Some('k'),
             Key::Down => Some('j'),
@@ -2034,18 +2052,23 @@ impl Multiplexer {
     }
 
     /// Keys while the `:` prompt is open.
+    ///
+    /// Its Enter and Escape are plain, and it types what was typed, with
+    /// AltGr+Q's `@` among it: Alt+X put an `x` in the command. Backspace is
+    /// refused only to Alt and the Windows key.
     fn handle_command_key(&mut self, key: &KeyEvent) -> EventResult {
+        let plain = textline::is_plain(key.modifiers);
         match key.key {
-            Key::Escape => {
+            Key::Escape if plain => {
                 self.command_mode = false;
                 self.command_input.clear();
             }
-            Key::Enter => {
+            Key::Enter if plain => {
                 let cmd = std::mem::take(&mut self.command_input);
                 self.command_mode = false;
                 self.process_command(&cmd);
             }
-            Key::Backspace => {
+            Key::Backspace if !textline::is_alt_or_windows_chord(key.modifiers) => {
                 // Never past the `:` itself: the prompt is the mode indicator,
                 // and a prompt that can be deleted leaves the user typing into
                 // an empty line with no way to tell what it is.
@@ -2054,6 +2077,9 @@ impl Multiplexer {
                 }
             }
             _ => {
+                if !textline::types_into_field(key) {
+                    return EventResult::Ignored;
+                }
                 let typed: String = key.typed().collect();
                 if typed.is_empty() {
                     return EventResult::Ignored;
@@ -2066,8 +2092,11 @@ impl Multiplexer {
 
     /// Keys while the session or window chooser is open. Modal: a key that
     /// fell through to the shell behind the list would type somewhere the
-    /// user cannot see.
+    /// user cannot see. Its keys are plain: Alt+Enter attached a session.
     fn handle_chooser_key(&mut self, key: &KeyEvent) -> EventResult {
+        if !textline::is_plain(key.modifiers) {
+            return EventResult::Consumed;
+        }
         match key.key {
             Key::Escape => {
                 self.session_chooser = false;
@@ -4393,6 +4422,104 @@ mod tests {
                 .filter_map(|part| part.trim().chars().next())
                 .collect(),
         }
+    }
+
+    /// **A chord is neither a multiplexer key nor typing, and AltGr+B is
+    /// not Ctrl+B**: a chord carries its letter, so after the prefix Alt+%
+    /// split the pane as `%` does, Alt+Y answered "close this pane?" with
+    /// yes, Alt+X typed an `x` into the `:` prompt, Alt+Enter attached from
+    /// the session list and Alt+Q left copy mode; and AltGr+B -- whatever
+    /// the layout types there -- armed the prefix as Ctrl+B does, instead of
+    /// reaching the shell. A character an AltGr+key chord types is a command
+    /// after the prefix and text in the prompt, as a plain key's is.
+    #[test]
+    fn a_chord_is_neither_a_multiplexer_key_nor_typing() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let chord = |k: Key, text: &str, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: text.to_owned(),
+            })
+        };
+        let (mut mux, shells) = scripted();
+
+        // AltGr+B is the pane's, as what it typed.
+        mux.handle_event(&chord(Key::B, "{", altgr));
+        assert_eq!(mux.prefix_state, PrefixState::Normal, "AltGr+B armed");
+        assert_eq!(shell(&shells, 0).borrow().sent, b"{", "the shell lost it");
+
+        // After the prefix: a chord is spent, AltGr's character is a command.
+        for held in [Modifiers::alt(), Modifiers::super_key()] {
+            mux.handle_event(&key_ev(Key::B, "", true));
+            mux.handle_event(&chord(Key::Num5, "%", held));
+            assert_eq!(panes_in_active_window(&mux), 1, "{held:?}+% split");
+            assert_eq!(mux.prefix_state, PrefixState::Normal, "{held:?} kept it");
+        }
+        mux.handle_event(&key_ev(Key::B, "", true));
+        mux.handle_event(&chord(Key::Backslash, "|", altgr));
+        assert_eq!(panes_in_active_window(&mux), 2, "AltGr's | did not split");
+        // Nor does a chorded arrow move the divider.
+        let ratio = |m: &Multiplexer| match &m.active_window().unwrap().layout {
+            LayoutNode::Split { ratio, .. } => *ratio,
+            LayoutNode::Leaf(_) => panic!("no split"),
+        };
+        let at = ratio(&mux);
+        for held in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            mux.handle_event(&key_ev(Key::B, "", true));
+            mux.handle_event(&chord(Key::Right, "", held));
+            assert!(
+                (ratio(&mux) - at).abs() < f32::EPSILON,
+                "{held:?}+Right moved the divider"
+            );
+            assert_eq!(mux.prefix_state, PrefixState::Normal, "{held:?} kept it");
+        }
+
+        // "Close this pane?" answers a typed y only.
+        for held in [Modifiers::alt(), Modifiers::super_key(), Modifiers::ctrl()] {
+            prefixed(&mut mux, 'x');
+            assert!(mux.confirm.is_some(), "control: x asks");
+            mux.handle_event(&chord(Key::Y, "y", held));
+            assert_eq!(panes_in_active_window(&mux), 2, "{held:?}+Y closed it");
+        }
+
+        // The prompt: Enter and Escape plain, and only what was typed.
+        prefixed(&mut mux, ':');
+        assert!(mux.command_mode, "control: : opens the prompt");
+        mux.handle_event(&chord(Key::X, "x", Modifiers::alt()));
+        mux.handle_event(&chord(Key::X, "x", Modifiers::super_key()));
+        mux.handle_event(&chord(Key::Q, "@", altgr));
+        mux.handle_event(&chord(Key::Backspace, "", Modifiers::alt()));
+        mux.handle_event(&chord(Key::Enter, "", Modifiers::alt()));
+        mux.handle_event(&chord(Key::Escape, "", Modifiers::super_key()));
+        assert!(mux.command_mode, "a chorded Enter or Escape closed it");
+        assert_eq!(mux.command_input, ":@", "a command's letter, or AltGr lost");
+        mux.handle_event(&press(Key::Escape));
+
+        // The session list keeps the keyboard and answers plain keys.
+        prefixed(&mut mux, 's');
+        assert!(mux.session_chooser, "control: s opens the list");
+        mux.handle_event(&chord(Key::Enter, "", Modifiers::alt()));
+        mux.handle_event(&chord(Key::Escape, "", Modifiers::super_key()));
+        assert!(mux.session_chooser, "a chorded Enter or Escape closed it");
+        mux.handle_event(&press(Key::Escape));
+
+        // So does copy mode.
+        prefixed(&mut mux, '[');
+        assert!(active_pane(&mux).copy_mode, "control: [ enters copy mode");
+        mux.handle_event(&chord(Key::Q, "q", Modifiers::alt()));
+        mux.handle_event(&chord(Key::Escape, "", Modifiers::super_key()));
+        assert!(active_pane(&mux).copy_mode, "a chord left copy mode");
+
+        // And the list of keys.
+        mux.handle_event(&press(Key::Escape));
+        mux.handle_event(&chord(Key::F1, "", Modifiers::alt()));
+        assert!(!mux.show_help, "Alt+F1 raised the list of keys");
     }
 
     #[test]

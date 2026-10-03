@@ -85,9 +85,9 @@ MUTATIONS = [
     ),
     (
         "the prefix twice sends nothing",
-        "        if key.modifiers.ctrl && key.key == Key::B {\n"
+        "        if textline::is_ctrl_chord(key.modifiers) && key.key == Key::B {\n"
         "            if let Some(pane) = self.active_pane_mut() {",
-        "        if key.modifiers.ctrl && key.key == Key::B {\n"
+        "        if textline::is_ctrl_chord(key.modifiers) && key.key == Key::B {\n"
         "            if let Some(pane) = None::<&mut Pane> {",
         ["the_prefix_twice_sends_the_program_a_ctrl_b"],
     ),
@@ -330,6 +330,72 @@ MUTATIONS = [
         "            match App::on_wake(&mut pane.term) {\n                Response::Exit => finished.push(pane.id),",
         "            match App::on_wake(&mut pane.term) {\n                Response::Exit => {}",
         ["a_wake_reads_every_shell_and_closes_a_pane_whose_shell_is_done"],
+    ),
+    (
+        'a chord raises the list of keys',
+        '        if key.key == Key::F1 && plain {',
+        '        if key.key == Key::F1 {',
+        ['a_chord_is_neither_a_multiplexer_key_nor_typing'],
+    ),
+    (
+        'a chord answers "close this pane?"',
+        '            if textline::types_into_field(key)\n                && key',
+        '            if key.types_text()\n                && key',
+        ['a_chord_is_neither_a_multiplexer_key_nor_typing'],
+    ),
+    (
+        'AltGr+B arms the prefix',
+        '        if textline::is_ctrl_chord(key.modifiers) && key.key == Key::B {\n            self.prefix_state = PrefixState::Prefix;',
+        '        if key.modifiers.ctrl && key.key == Key::B {\n            self.prefix_state = PrefixState::Prefix;',
+        ['a_chord_is_neither_a_multiplexer_key_nor_typing'],
+    ),
+    (
+        'a chorded arrow after the prefix moves the divider',
+        '        if textline::is_plain(key.modifiers) {\n            match key.key {\n                Key::Left | Key::Up => {',
+        '        if !key.pressed || key.pressed {\n            match key.key {\n                Key::Left | Key::Up => {',
+        ['a_chord_is_neither_a_multiplexer_key_nor_typing'],
+    ),
+    (
+        'a chord after the prefix is a command',
+        '        if textline::types_into_field(key)\n            && let Some(ch) = key.typed().next()',
+        '        if key.types_text()\n            && let Some(ch) = key.typed().next()',
+        ['a_chord_is_neither_a_multiplexer_key_nor_typing'],
+    ),
+    (
+        'a chord works copy mode',
+        '            _ if !textline::is_plain(key.modifiers) && !textline::types_into_field(key) => None,\n',
+        '',
+        ['a_chord_is_neither_a_multiplexer_key_nor_typing'],
+    ),
+    (
+        'a chorded Escape closes the prompt',
+        '            Key::Escape if plain => {\n                self.command_mode = false;',
+        '            Key::Escape => {\n                self.command_mode = false;',
+        ['a_chord_is_neither_a_multiplexer_key_nor_typing'],
+    ),
+    (
+        'a chorded Enter runs the prompt',
+        '            Key::Enter if plain => {\n                let cmd = std::mem::take(&mut self.command_input);',
+        '            Key::Enter => {\n                let cmd = std::mem::take(&mut self.command_input);',
+        ['a_chord_is_neither_a_multiplexer_key_nor_typing'],
+    ),
+    (
+        'Alt+Backspace deletes from the prompt',
+        '            Key::Backspace if !textline::is_alt_or_windows_chord(key.modifiers) => {',
+        '            Key::Backspace => {',
+        ['a_chord_is_neither_a_multiplexer_key_nor_typing'],
+    ),
+    (
+        "the prompt types a command's letter",
+        '                if !textline::types_into_field(key) {\n                    return EventResult::Ignored;\n                }\n',
+        '',
+        ['a_chord_is_neither_a_multiplexer_key_nor_typing'],
+    ),
+    (
+        'a chord works the session list',
+        '        if !textline::is_plain(key.modifiers) {\n            return EventResult::Consumed;\n        }\n',
+        '',
+        ['a_chord_is_neither_a_multiplexer_key_nor_typing'],
     ),
 ]
 

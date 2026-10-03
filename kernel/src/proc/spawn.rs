@@ -28519,6 +28519,192 @@ pub fn self_test_bash_on_slateos_libc() -> KernelResult<()> {
     }
 }
 
+/// Run the genuine Oils shell once -- `argv` from `exe_path` -- with stdout and
+/// stderr captured to files, as `cmake_invoke` does. Returns the exit status
+/// and both streams.
+///
+/// # Errors
+///
+/// The capture files' open, or the spawn.
+fn oils_invoke(
+    exe_elf: &[u8],
+    exe_path: &str,
+    argv: &[&[u8]],
+) -> KernelResult<(Option<i32>, alloc::vec::Vec<u8>, alloc::vec::Vec<u8>)> {
+    use crate::fs::handle;
+
+    /// A shell starting up and running one line; bounds a hang.
+    const MAX_YIELDS: usize = 1_048_576;
+    const OUT: &str = "/tmp/oils-rung.out";
+    const ERR: &str = "/tmp/oils-rung.err";
+
+    // Fresh files per run, so a read-back can only see this run's bytes.
+    let _ = crate::fs::Vfs::remove(OUT);
+    let _ = crate::fs::Vfs::remove(ERR);
+    let flags = handle::OpenFlags::WRITE
+        .union(handle::OpenFlags::CREATE)
+        .union(handle::OpenFlags::TRUNCATE);
+    let out_handle = handle::open(OUT, flags)?;
+    let err_handle = handle::open(ERR, flags)?;
+    let fd_map = [
+        (0_i32, fd_handle_type::CONSOLE, 0_u64),
+        (1_i32, fd_handle_type::FILE, out_handle),
+        (2_i32, fd_handle_type::FILE, err_handle),
+    ];
+    let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C", b"HOME=/tmp"];
+    let caps = [(
+        ResourceType::File,
+        1u64,
+        Rights::READ | Rights::WRITE | Rights::METADATA,
+    )];
+    let options = SpawnOptions {
+        name: "spawn-test-oils",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &fd_map,
+        argv,
+        envp,
+        exe_path: Some(exe_path.as_bytes()),
+        cwd: Some(b"/tmp"),
+        uid_gid: None,
+    };
+    let result = spawn_process(exe_elf, &options)?;
+    for _ in 0..MAX_YIELDS {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break;
+        }
+        crate::sched::yield_now();
+    }
+    let finished = pcb::state(result.pid) == Some(pcb::ProcessState::Zombie);
+    let exit_code = pcb::exit_code(result.pid).filter(|_| finished);
+    let out = crate::fs::Vfs::read_file(OUT).unwrap_or_default();
+    let err = crate::fs::Vfs::read_file(ERR).unwrap_or_default();
+    teardown_fixture(result.pid, result.task_id);
+    Ok((exit_code, out, err))
+}
+
+/// The genuine Oils shell (`oils-for-unix`: OSH and YSH, built from upstream's
+/// C++ against SlateOS's C library) runs here, by lane B's request
+/// (`requests/b-ad-genuine-oils-staged-and-run-at-boot.md`; the operator's
+/// choice of default shell, design-decisions 1043). Four lines, each measured
+/// from the same release on Linux:
+///
+/// | Case | What it runs | What it shows |
+/// |---|---|---|
+/// | 1 | OSH: a command substitution, a function's status, extended globs in `[[ ]]` and `case` | a fork, a pipe and a wait; `fnmatch`'s `FNM_EXTMATCH` |
+/// | 2 | OSH: an unset variable's `?` | a C++ exception thrown and caught -- an abort here means libunwind found no unwind tables |
+/// | 3 | YSH: `json write` | YSH and its JSON writer |
+/// | 4 | YSH: a division by zero | the same exception path from YSH, status 3 |
+///
+/// Skips, counted, until lane D stages `/bin/oils-for-unix` and `/bin/ysh`.
+///
+/// # Errors
+///
+/// `InternalError` naming the case whose status, stdout or stderr differed.
+pub fn self_test_oils() -> KernelResult<()> {
+    const RUNG: &str = "genuine Oils (OSH and YSH)";
+    const OILS: &str = "/bin/oils-for-unix";
+    const YSH: &str = "/bin/ysh";
+
+    struct Case {
+        label: &'static str,
+        exe: &'static str,
+        argv: &'static [&'static [u8]],
+        stdout: &'static [u8],
+        /// What stderr must end with (after trailing newlines), or empty for
+        /// nothing at all.
+        stderr_tail: &'static [u8],
+        status: i32,
+    }
+    const CASES: &[Case] = &[
+        Case {
+            label: "1 OSH: substitution, status, extended globs",
+            exe: OILS,
+            argv: &[
+                b"/bin/oils-for-unix",
+                b"osh",
+                b"-c",
+                b"echo osh-ok; [[ ab == @(ab|cd) ]] && echo extglob-ok; f() { return 3; }; f; \
+                  echo status=$?; x=$(echo sub); echo \"$x\"; \
+                  case abc in @(x|abc)) echo case-ok;; esac",
+            ],
+            stdout: b"osh-ok\nextglob-ok\nstatus=3\nsub\ncase-ok\n",
+            stderr_tail: b"",
+            status: 0,
+        },
+        Case {
+            label: "2 OSH: an exception from an unset variable",
+            exe: OILS,
+            argv: &[
+                b"/bin/oils-for-unix",
+                b"osh",
+                b"-c",
+                b"echo before; : ${undefined_var?boom}; echo not-reached",
+            ],
+            stdout: b"before\n",
+            stderr_tail: b"[ -c flag ]:1: fatal: Var undefined_var is unset: 'boom'",
+            status: 1,
+        },
+        Case {
+            label: "3 YSH: json write",
+            exe: YSH,
+            argv: &[b"/bin/ysh", b"-c", b"json write ({x: 42})"],
+            stdout: b"{\n  \"x\": 42\n}\n",
+            stderr_tail: b"",
+            status: 0,
+        },
+        Case {
+            label: "4 YSH: an exception from a division by zero",
+            exe: YSH,
+            argv: &[b"/bin/ysh", b"-c", b"var x = 1 / 0"],
+            stdout: b"",
+            stderr_tail: b"[ -c flag ]:1: fatal: Divide by zero",
+            status: 3,
+        },
+    ];
+
+    if pathz_missing(RUNG, &[OILS, YSH]) {
+        return Ok(());
+    }
+    serial_println!("[spawn] Running {} test...", RUNG);
+    let oils = crate::fs::Vfs::read_file(OILS)?;
+    let ysh = crate::fs::Vfs::read_file(YSH)?;
+
+    for case in CASES {
+        let elf = if case.exe == YSH { &ysh } else { &oils };
+        let (status, out, err) = oils_invoke(elf, case.exe, case.argv)?;
+        // Without its trailing newlines.
+        let kept = err
+            .iter()
+            .rposition(|&b| b != b'\n')
+            .map_or(0, |last| last.saturating_add(1));
+        let err_trimmed = err.get(..kept).unwrap_or(&[]);
+        let stderr_ok = if case.stderr_tail.is_empty() {
+            err.is_empty()
+        } else {
+            err_trimmed.ends_with(case.stderr_tail)
+        };
+        if status != Some(case.status) || out.as_slice() != case.stdout || !stderr_ok {
+            serial_println!(
+                "[spawn]   FAIL: Oils {} -- status {:?} (want {}), stdout `{}`, stderr `{}`",
+                case.label,
+                status,
+                case.status,
+                out.escape_ascii(),
+                err.escape_ascii()
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    serial_println!(
+        "[spawn]   {} (OSH's substitution, status and extended globs; C++ exceptions from \
+         OSH and YSH; YSH's JSON writer): OK",
+        RUNG
+    );
+    Ok(())
+}
+
 /// **CPython 3.12.3**, cross-compiled from source and linked against **our own
 /// `libc.a`**, starts, imports from a zipped standard library, and writes the
 /// result of five separate checks to a file.

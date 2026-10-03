@@ -4053,6 +4053,15 @@ extern "C" fn kernel_main() -> ! {
                 proc::spawn::self_test_bash_on_slateos_libc(),
             );
 
+            // The genuine Oils shell (OSH and YSH, upstream's C++ on our libc),
+            // lane B's choice of default shell: four lines measured on Linux.
+            // Skips, counted, until lane D stages /bin/oils-for-unix.
+            selftest::dispatch_debug(
+                "Genuine Oils shell",
+                selftest::Severity::Diagnostic,
+                proc::spawn::self_test_oils(),
+            );
+
             // CPython 3.12.3 on OUR libc.a — the widest consumer the library has
             // (478 external symbols resolved, against bash's far smaller share).
             // Deliberately AFTER bash: bash is the cheaper, older, better

@@ -1760,7 +1760,121 @@ extract_case 'a directory is stamped when the extraction leaves it' unsorted.tar
 extract_case 'and kept when nothing outside it is asked for'       unsorted.tar d
 
 # ===========================================================================
-# 14. the known divergences
+# 14. owners and modes, as root and not
+# ===========================================================================
+# Extracting as root, GNU gives every member the owner the archive records --
+# by *name* where this machine knows it, by number otherwise -- and restores
+# modes exactly, setuid bits and all, without the umask. As anyone else it does
+# neither, unless asked: `--same-owner`, `-p`. `--no-same-owner`,
+# `--no-same-permissions` and `--numeric-owner` move each the other way. This
+# tar did none of it: a backup restored as root came back owned by root.
+#
+# Root is a user namespace (`unshare -mUr`), where only the caller's own uid is
+# mapped -- to 0. So giving a member to `root` succeeds there and giving it to
+# uid 1000 fails with `Invalid argument`, on both sides alike, which is enough
+# to see which members each tar tried to give to whom, in which order, and
+# with what modes left behind. The fixtures are made by GNU with `--owner` and
+# `--group`, so the names and numbers in them are exactly what each case says.
+mkdir -p ownsrc/d
+printf 'a\n' > ownsrc/f; printf 'x\n' > ownsrc/suid; printf 'g\n' > ownsrc/d/g
+chmod 0777 ownsrc/f; chmod 4755 ownsrc/suid; chmod 0700 ownsrc/d
+ln ownsrc/f ownsrc/hard
+ln -s f ownsrc/rel
+ln -s /etc/passwd ownsrc/abs
+mkfifo ownsrc/pipe
+touch -d '2020-01-02 03:04:05' ownsrc/f ownsrc/suid ownsrc/d/g ownsrc/d ownsrc/pipe ownsrc
+touch -h -d '2019-05-06 07:08:09' ownsrc/rel ownsrc/abs
+own_make() { ( cd ownsrc && "$gnu_real" --format=ustar --sort=name "$@" -cf "../$OWNOUT" . ); }
+OWNOUT=own-root.tar     own_make --owner=root:0 --group=root:0
+OWNOUT=own-user.tar     own_make --owner="$(id -un):$(id -u)" --group="$(id -gn):$(id -g)"
+OWNOUT=own-unknown.tar  own_make --owner=nosuchuser:4321 --group=nosuchgroup:4321
+OWNOUT=own-mismatch.tar own_make --owner=root:4321 --group=root:4321
+
+# What a tree looks like with its owners: the manifest's columns plus `%u:%g`.
+own_manifest() {
+  ( cd "$1" 2>/dev/null || return 0
+    find . -mindepth 1 | LC_ALL=C sort | while IFS= read -r q; do
+      stat -c '%A %u:%g %n' -- "$q"
+    done )
+}
+
+# root_case LABEL ARGS... -- `tar ARGS` as root in a fresh directory, the tree
+# and its owners taken inside the namespace, where they mean something.
+root_side() {
+  local side=$1 res=$2; shift 2
+  rm -rf "$res.d"; mkdir "$res.d"
+  ( cd "$res.d" && PATH="$bindir/$side:$PATH" \
+    diff_run timeout -k 2 60 unshare -mUr sh -c '
+      res=$1; shift
+      tar "$@" >"$res.out" 2>"$res.err"; echo "$?" >"$res.rc"
+      find . -mindepth 1 | LC_ALL=C sort | while IFS= read -r q; do
+        stat -c "%A %u:%g %n" -- "$q"
+      done >"$res.tree"
+    ' _ "$res" "$@" )
+}
+root_case() {
+  local label="$1"; shift
+  local o=$DIFF_TMP/ro g=$DIFF_TMP/rg f
+  rm -rf "$o".* "$g".*
+  root_side ours "$o" "$@"
+  root_side gnu "$g" "$@"
+  if ! [ -s "$o.rc" ] || ! [ -s "$g.rc" ]; then
+    AGREED=no
+    REPORT="  the namespace could not be set up"
+  else
+    AGREED=yes
+    for f in out err rc tree; do
+      cmp -s "$o.$f" "$g.$f" || AGREED=no
+    done
+    REPORT=$(printf '  ours: rc=%s err{%s}\n        tree{%s}\n  gnu : rc=%s err{%s}\n        tree{%s}' \
+      "$(cat "$o.rc")" "$(tr '\n' '|' <"$o.err")" "$(tr '\n' '|' <"$o.tree")" \
+      "$(cat "$g.rc")" "$(tr '\n' '|' <"$g.err")" "$(tr '\n' '|' <"$g.tree")")
+  fi
+  report "as root: tar $* ($label)"
+}
+
+if ! unshare -mUr true 2>/dev/null; then
+  echo "SKIP section 14's root cases: no user namespace can be made here"
+else
+  root_case 'members owned by root'             -xf "$work/own-root.tar"
+  root_case 'owned by someone who cannot be'    -xf "$work/own-user.tar"
+  root_case 'and verbosely: errors between'     -xvf "$work/own-user.tar"
+  root_case 'names unknown here: the numbers'   -xf "$work/own-unknown.tar"
+  root_case 'a name beats its number'           -xf "$work/own-mismatch.tar"
+  root_case 'unless --numeric-owner'            --numeric-owner -xf "$work/own-mismatch.tar"
+  root_case 'not at all with --no-same-owner'   --no-same-owner -xf "$work/own-user.tar"
+  root_case 'the umask with --no-same-permissions' --no-same-permissions -xf "$work/own-root.tar"
+  root_case 'both off: an ordinary extraction'  --no-same-owner --no-same-permissions -xf "$work/own-user.tar"
+fi
+
+# As an ordinary user. Giving a file to yourself is allowed, and to root is not.
+own_case() {
+  local label="$1"; shift
+  local o_rc g_rc o_tree g_tree
+  rm -rf od gd; mkdir od gd
+  ( cd od && diff_run timeout -k 2 60 env PATH="$bindir/ours" tar "$@" \
+      </dev/null >"$DIFF_TMP/o.out" 2>"$DIFF_TMP/o.err" ); o_rc=$?
+  ( cd gd && diff_run timeout -k 2 60 env PATH="$bindir/gnu" tar "$@" \
+      </dev/null >"$DIFF_TMP/g.out" 2>"$DIFF_TMP/g.err" ); g_rc=$?
+  o_tree=$(own_manifest od); g_tree=$(own_manifest gd)
+  settle "$o_rc" "$g_rc" "tree{$(printf '%s' "$o_tree" | tr '\n' '|')}" \
+                         "tree{$(printf '%s' "$g_tree" | tr '\n' '|')}"
+  report "as a user: tar $* ($label)"
+}
+own_case 'nobody is given anything'           -xf "$work/own-root.tar"
+own_case '--same-owner, to root: refused'     --same-owner -xf "$work/own-root.tar"
+own_case '--same-owner, to yourself: fine'    --same-owner -xf "$work/own-user.tar"
+own_case '-p keeps setuid and skips the umask' -xpf "$work/own-root.tar"
+
+# `--numeric-owner` when listing and creating: numbers on the line, no names in
+# the header.
+list_case 'numbers instead of names'          --numeric-owner -tvf own-user.tar
+list_case 'and names otherwise'               -tvf own-user.tar
+create_case 'with --numeric-owner'            --numeric-owner tree
+create_case 'with --numeric-owner, -vv'       --numeric-owner -vv tree
+
+# ===========================================================================
+# 15. the known divergences
 # ===========================================================================
 plain_xcase \
   "GNU's -Z is compression, which this tar does not implement; the message is a refusal either way, and the wording of a refusal for an option we do not have is not something to copy" \

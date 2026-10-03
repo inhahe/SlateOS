@@ -7,7 +7,11 @@
 //! Each of those has GNU's long spelling too — `--create`, `--extract` (or
 //! `--get`), `--list`, `--verbose`, `--file`, `--directory`,
 //! `--preserve-permissions` (or `--same-permissions`) — abbreviable to any
-//! unambiguous prefix, and `--` ends the options. `-?`/`--help`, `--usage` and
+//! unambiguous prefix, and `--` ends the options. Owners and modes follow GNU:
+//! as root an extraction gives every member its archived owner (by name where
+//! this machine knows it) and its exact mode, and `--same-owner`,
+//! `--no-same-owner`, `--no-same-permissions` and `--numeric-owner` adjust
+//! that; see [`Ownership`]. `-?`/`--help`, `--usage` and
 //! `--version` answer and exit 0. The other 160 long options GNU has are
 //! **recognised and refused** rather than ignored; see
 //! [`LONG_OPTIONS`] for why a table of names this tar does not implement is
@@ -533,12 +537,23 @@ struct TarArgs {
     /// `-t`/`--list`, which is why `tar -tt` is `tar -tv`. See [`Verbose`] for
     /// what each level renders.
     verbose: u8,
-    /// `-p`, `--same-permissions`: restore the stored mode exactly, umask and
-    /// setuid bits included. Without it a non-root extraction applies
-    /// `mode & 0o777 & !umask`, which is what GNU does and what this tar did
-    /// not do at all — it left every extracted file at whatever `File::create`
-    /// produced.
-    same_permissions: bool,
+    /// `-p`, `--same-permissions` (`Some(true)`) or `--no-same-permissions`
+    /// (`Some(false)`), the last one written winning; `None` if neither was.
+    /// With it, the stored mode is restored exactly, umask and setuid bits
+    /// included; without it an extraction applies `mode & 0o777 & !umask`.
+    /// `None` means GNU's default, which is "on" for the superuser and "off"
+    /// for everyone else -- see [`Ownership::resolve`].
+    same_permissions: Option<bool>,
+    /// `--same-owner` (`Some(true)`) or `--no-same-owner` (`Some(false)`), the
+    /// last one written winning; `None` for GNU's default, which is again "on"
+    /// for the superuser only. On, every extracted member is given the owner
+    /// the archive records for it.
+    same_owner: Option<bool>,
+    /// `--numeric-owner`: the archive's numeric ids are the owner, and the
+    /// user and group *names* beside them are neither read nor written --
+    /// `-c` stores them empty, `-tv` shows the numbers, and `-x` gives files
+    /// the numbers even where this machine knows the names.
+    numeric_owner: bool,
     /// What to do about something already standing where a member is to go.
     /// See [`OldFiles`].
     old_files: OldFiles,
@@ -594,7 +609,9 @@ impl Default for TarArgs {
         Self {
             mode: Mode::default(),
             verbose: 0,
-            same_permissions: false,
+            same_permissions: None,
+            same_owner: None,
+            numeric_owner: false,
             old_files: OldFiles::default(),
             archive_file: None,
             archives_named: 0,
@@ -1047,7 +1064,7 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             // [`Verbose`].
             Opt::Short(b't', _) => out.list()?,
             Opt::Short(b'v', _) => out.verbose = out.verbose.saturating_add(1),
-            Opt::Short(b'p', _) => out.same_permissions = true,
+            Opt::Short(b'p', _) => out.same_permissions = Some(true),
             Opt::Short(b'k', _) => out.old_files.choose(OldFiles::Keep)?,
             Opt::Short(b'U', _) => out.old_files.choose(OldFiles::UnlinkFirst)?,
             Opt::Short(b'f', value) => out.name_archive(value),
@@ -1080,7 +1097,13 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
                 "extract" | "get" => out.mode.choose(Mode::Extract)?,
                 "list" => out.list()?,
                 "verbose" => out.verbose = out.verbose.saturating_add(1),
-                "preserve-permissions" | "same-permissions" => out.same_permissions = true,
+                "preserve-permissions" | "same-permissions" => out.same_permissions = Some(true),
+                "no-same-permissions" => out.same_permissions = Some(false),
+                // The ownership family. Each pair is one setting, the last one
+                // written winning, as GNU's `same_owner_option` is one int.
+                "same-owner" => out.same_owner = Some(true),
+                "no-same-owner" => out.same_owner = Some(false),
+                "numeric-owner" => out.numeric_owner = true,
                 "file" => out.name_archive(value),
                 "directory" => out.chdirs.extend(value),
                 // Both spellings of the record size. See
@@ -1256,10 +1279,20 @@ Examples:
   -C, --directory=DIR        change to directory DIR
   -f, --file=ARCHIVE         use archive file ARCHIVE; with no -f the archive
                                is standard input or standard output
-  -p, --preserve-permissions, --same-permissions
-                             extract the stored permissions exactly, rather
-                               than applying the umask
   -v, --verbose              list each file as it is processed
+
+ Handling of file attributes:
+
+      --no-same-owner        extract files as yourself (default for ordinary
+                             users)
+      --no-same-permissions  apply the user's umask when extracting permissions
+                             from the archive (default for ordinary users)
+      --numeric-owner        always use numbers for user/group names
+  -p, --preserve-permissions, --same-permissions
+                             extract information about file permissions
+                             (default for superuser)
+      --same-owner           try extracting files with the same ownership as
+                             exists in the archive (default for superuser)
 
  Overwrite control:
 
@@ -1312,18 +1345,25 @@ instead of doing something else and reporting success.
 /// `v` and `k` before `U`. The value-taking letters follow in GNU's order too —
 /// `[-C DIR] [-T FILE] [-X FILE] [-f ARCHIVE] [-F NAME] [-L NUMBER] [-b BLOCKS]`
 /// there, so `-b` goes after `-f` here. The long names come from the same line
-/// and put the overwrite family between `--directory` and
-/// `--preserve-permissions`, which is where argp's table has it and *not* where
-/// the help text does; the two record-size spellings likewise follow
-/// `--file=ARCHIVE` and precede `--verbose`.
+/// and put the overwrite family between `--directory` and the file-attribute
+/// family, which is where argp's table has it and *not* where the help text
+/// does; that family runs `--no-same-owner`, `--no-same-permissions`,
+/// `--numeric-owner`, `--preserve-permissions`, `--same-permissions`,
+/// `--same-owner` -- not alphabetical, the table's own order, measured -- and
+/// the two record-size spellings follow `--file=ARCHIVE` and precede
+/// `--verbose`. The
+/// lines are broken where argp breaks them, at the last whole item that fits in
+/// 79 columns.
 fn usage_text() -> String {
     "\
 Usage: tar [-ctxkUpv?] [-C DIR] [-f ARCHIVE] [-b BLOCKS] [--create] [--list]
             [--extract] [--get] [--directory=DIR] [--keep-newer-files]
             [--keep-old-files] [--overwrite] [--skip-old-files]
-            [--unlink-first] [--preserve-permissions] [--same-permissions]
-            [--file=ARCHIVE] [--blocking-factor=BLOCKS] [--record-size=NUMBER]
-            [--verbose] [--help] [--usage] [--version] [FILE]...
+            [--unlink-first] [--no-same-owner] [--no-same-permissions]
+            [--numeric-owner] [--preserve-permissions] [--same-permissions]
+            [--same-owner] [--file=ARCHIVE] [--blocking-factor=BLOCKS]
+            [--record-size=NUMBER] [--verbose] [--help] [--usage] [--version]
+            [FILE]...
 "
     .to_string()
 }
@@ -1461,6 +1501,7 @@ fn main() {
                     &parsed.files,
                     verbose,
                     parsed.record_size,
+                    parsed.numeric_owner,
                 )
             }
             #[cfg(not(unix))]
@@ -1477,7 +1518,7 @@ fn main() {
             // goes there.
             Verbose::new(parsed.verbose, false),
             &parsed.files,
-            parsed.same_permissions,
+            Ownership::resolve(&parsed),
             parsed.old_files,
             parsed.record_size,
         ),
@@ -1485,6 +1526,7 @@ fn main() {
             archive,
             &parsed.chdirs,
             parsed.verbose,
+            parsed.numeric_owner,
             &parsed.files,
             parsed.record_size,
         ),
@@ -2428,6 +2470,9 @@ struct Creator<'a, 'w> {
     /// The archive is `/dev/null`, so no regular file is opened: see
     /// [`is_dev_null`] and [`Creator::dumpable`].
     dev_null: bool,
+    /// `--numeric-owner`: no user or group names in the headers, and numbers
+    /// in the `-vv` lines. See [`TarArgs::numeric_owner`].
+    numeric: bool,
     verbose: Verbose,
     /// 0, or [`EXIT_FATAL`] once anything has gone wrong. A member that cannot
     /// be archived sets this and is skipped; it does not abandon the archive.
@@ -2534,7 +2579,13 @@ impl Creator<'_, '_> {
             uname,
             gname,
         };
-        let line = long_line(&member, linkname, &mut self.ugswidth, &self.zone);
+        let line = long_line(
+            &member,
+            linkname,
+            &mut self.ugswidth,
+            &self.zone,
+            self.numeric,
+        );
         self.verbose.write(&line);
     }
 
@@ -2633,9 +2684,13 @@ impl Creator<'_, '_> {
         TarHeader::set_octal(&mut header.uid, u64::from(meta.uid()));
         TarHeader::set_octal(&mut header.gid, u64::from(meta.gid()));
         // Beside each number, the name it stands for here. The number alone is
-        // meaningless on any other machine; see [`OwnerNames`].
-        TarHeader::set_owner_name(&mut header.uname, self.owners.user(meta.uid()));
-        TarHeader::set_owner_name(&mut header.gname, self.owners.group(meta.gid()));
+        // meaningless on any other machine; see [`OwnerNames`]. Not under
+        // `--numeric-owner`, which is GNU's way of saying the number is the
+        // owner: the fields are left empty, which is how ustar says "no name".
+        if !self.numeric {
+            TarHeader::set_owner_name(&mut header.uname, self.owners.user(meta.uid()));
+            TarHeader::set_owner_name(&mut header.gname, self.owners.group(meta.gid()));
+        }
         TarHeader::set_octal(&mut header.size, 0);
         TarHeader::set_octal(&mut header.mtime, meta.mtime().unsigned_abs());
         header.magic = *b"ustar\0";
@@ -3192,6 +3247,7 @@ fn do_create(
     files: &[Operand],
     verbose: Verbose,
     record_size: u64,
+    numeric: bool,
 ) -> i32 {
     use std::os::unix::fs::MetadataExt;
     // `None` is standard output; see [`resolve_archive`]. Either way the
@@ -3246,6 +3302,7 @@ fn do_create(
         out: &mut out,
         label: archive_label(archive),
         dev_null,
+        numeric,
         verbose,
         status: 0,
         links: BTreeMap::new(),
@@ -3933,6 +3990,137 @@ fn read_umask() -> u32 {
     *UMASK.get_or_init(coreutils::umask::current)
 }
 
+/// Whether extracted files get the archive's owners and its exact modes, and
+/// how an owner is read off a member: GNU's `same_owner_option`,
+/// `same_permissions_option` and `numeric_owner_option`, as `extr_init` leaves
+/// them.
+///
+/// Measured against GNU tar 1.35 as root (in a user namespace) and as an
+/// ordinary user:
+///
+/// | | ordinary user | root |
+/// |---|---|---|
+/// | owner | stays the extracting user's | the archive's, by name where this machine knows it |
+/// | mode | `stored & 0o777 & !umask` | `stored`, setuid bits and all |
+///
+/// and `--same-owner`, `--no-same-owner`, `-p` and `--no-same-permissions` move
+/// either row to the other column. A root restore that does not give files back
+/// to their owners hands every file in a backup to root.
+#[derive(Clone, Copy)]
+struct Ownership {
+    /// Give each member the owner the archive records for it.
+    restore_owner: bool,
+    /// Restore stored modes exactly -- setuid bits kept, umask not applied.
+    exact_modes: bool,
+    /// `--numeric-owner`: the archive's numbers are the owner, and its names
+    /// are not consulted.
+    numeric: bool,
+    /// The process is the superuser -- GNU's `we_are_root`. It is what turns
+    /// both defaults on, and it also decides a new directory's first mode; see
+    /// [`Ownership::safe_dir_mode`].
+    root: bool,
+}
+
+impl Ownership {
+    /// GNU's `extr_init`: each option as it was given, or -- where it was not
+    /// -- on for the superuser and off for everyone else.
+    fn resolve(args: &TarArgs) -> Self {
+        let root = coreutils::fsattr::chown_privileges();
+        Self {
+            restore_owner: args.same_owner.unwrap_or(root),
+            exact_modes: args.same_permissions.unwrap_or(root),
+            numeric: args.numeric_owner,
+            root,
+        }
+    }
+
+    /// The mode a regular file, fifo or device is *created* with, before its
+    /// data is written and its stored metadata applied: GNU's
+    /// `st_mode & MODE_RWX & ~(same_owner ? S_IRWXG | S_IRWXO : 0)`, which the
+    /// umask then narrows as it narrows any `open`.
+    ///
+    /// The stored bits, not the blanket `0666` this tar used. That difference
+    /// was a leak: a member stored `0600` -- a private key in a backup, say --
+    /// was created world-readable and only narrowed once the run reached its
+    /// end, and anyone who opened it in between kept the open descriptor. And
+    /// when the file is about to be given to its owner, it is created private to
+    /// the extracting user until then, so that nobody else can open it in the
+    /// window before the `chown`.
+    fn creation_mode(self, stored: u32) -> u32 {
+        let private = if self.restore_owner { 0o077 } else { 0 };
+        stored & 0o777 & !private
+    }
+
+    /// GNU's `safe_dir_mode`: the mode a directory member is created with.
+    ///
+    /// Only the owner's bits when owners or exact modes are being restored, so
+    /// that, in GNU's words, "processes owned by other users do not
+    /// inadvertently create files under this directory that inherit the wrong
+    /// owner, group, or permissions"; and for anyone but root, write and search
+    /// for the owner whatever the stored mode says, so that the members inside
+    /// it can be created. The stored mode is applied when the extraction is
+    /// done with the directory -- see [`DelayedDir`].
+    fn safe_dir_mode(self, stored: u32) -> u32 {
+        let kept = if self.restore_owner || self.exact_modes {
+            0o700
+        } else {
+            0o777
+        };
+        let writable = if self.root { 0 } else { 0o300 };
+        (stored & kept) | writable
+    }
+}
+
+/// Who a member belongs to on this machine: GNU's `decode_header`, which
+/// prefers the archive's user and group *names*, looked up here, to its numbers,
+/// and falls back to the numbers where a name is empty or unknown.
+///
+/// The name wins because the number is only meaningful on the machine that
+/// wrote it: an archive from a system where `alice` is uid 1001 should give
+/// `alice`'s files to this machine's `alice`, whatever her uid is here.
+/// Measured: a member stored as `root` with uid 4321 is extracted as uid 0.
+struct OwnerLookup {
+    /// `None` under `--numeric-owner`, where names are not consulted at all,
+    /// and when owners are not being restored, where nothing asks.
+    db: Option<pwdb::Db>,
+}
+
+impl OwnerLookup {
+    fn new(own: Ownership) -> Self {
+        Self {
+            db: (own.restore_owner && !own.numeric).then(pwdb::Db::load),
+        }
+    }
+
+    /// The `(uid, gid)` `member` is to be given.
+    fn ids(&self, member: &Member) -> (u32, u32) {
+        let Some(db) = &self.db else {
+            return (member.uid, member.gid);
+        };
+        let uid = Some(member.uname.as_slice())
+            .filter(|n| !n.is_empty())
+            .and_then(|n| db.user_by_name(n))
+            .map_or(member.uid, |u| u.uid);
+        let gid = Some(member.gname.as_slice())
+            .filter(|n| !n.is_empty())
+            .and_then(|n| db.group_by_name(n))
+            .map_or(member.gid, |g| g.gid);
+        (uid, gid)
+    }
+}
+
+/// What an extracted member is to end up as, worked out once per member.
+#[derive(Clone, Copy)]
+struct Shape {
+    /// The mode applied last, after the owner -- a `chown` can clear setuid
+    /// bits, so the mode has to follow it. See [`extraction_mode`].
+    mode: u32,
+    /// The mode it is created with. See [`Ownership::creation_mode`].
+    create_mode: u32,
+    /// The owner it is given, when owners are being restored.
+    owner: Option<(u32, u32)>,
+}
+
 /// The mode an extracted member actually gets.
 ///
 /// Measured against GNU as a non-root user: by default the stored mode is
@@ -3969,10 +4157,30 @@ fn extraction_mode(stored: u32, same_permissions: bool, umask: u32) -> u32 {
 /// The wording of the mode failure is GNU's, symbolic bits and all
 /// (`Cannot change mode to rwxr-xr-x`), which is why [`mode_string`] is shared
 /// with the `-tv` listing rather than each having its own.
-fn restore_metadata(at: &Located, name: &[u8], mode: u32, mtime: i64, status: &mut i32) {
+///
+/// The owner, when one is to be restored, goes between the two -- GNU's
+/// `set_stat` order -- because changing a file's owner can clear its setuid and
+/// setgid bits, so the mode must come after it to survive. It is never given
+/// through a symlink: if the member was swapped for one since it was created,
+/// it is the link that changes hands, not whatever the link names, which in a
+/// directory someone else can write to is the difference between restoring a
+/// backup and giving away `/etc/shadow`.
+fn restore_metadata(
+    at: &Located,
+    name: &[u8],
+    mode: u32,
+    mtime: i64,
+    owner: Option<(u32, u32)>,
+    status: &mut i32,
+) {
     if let Err(e) = at.set_mtime(mtime) {
         diag!("tar: {}: Cannot utime: {}", escape(name), strerror(&e));
         *status = EXIT_FATAL;
+    }
+    if let Some((uid, gid)) = owner
+        && let Err(e) = at.set_owner(uid, gid, false)
+    {
+        report_owner_failure(name, uid, gid, &e, status);
     }
     if let Err(e) = at.set_mode(mode) {
         let bits = mode_string(mode, b'0');
@@ -3985,6 +4193,51 @@ fn restore_metadata(at: &Located, name: &[u8], mode: u32, mtime: i64, status: &m
         );
         *status = EXIT_FATAL;
     }
+}
+
+/// [`restore_metadata`] for a symlink: its own mtime and its own owner, and no
+/// mode, which a symlink does not have. GNU's `set_stat` with `SYMTYPE`, whose
+/// failures are reported only where the system *implements* the call -- a
+/// filesystem that cannot stamp or give away a link is not an error.
+fn restore_symlink_metadata(
+    at: &Located,
+    name: &[u8],
+    mtime: i64,
+    owner: Option<(u32, u32)>,
+    status: &mut i32,
+) {
+    if let Err(e) = at.set_symlink_mtime(mtime)
+        && implemented(&e)
+    {
+        diag!("tar: {}: Cannot utime: {}", escape(name), strerror(&e));
+        *status = EXIT_FATAL;
+    }
+    if let Some((uid, gid)) = owner
+        && let Err(e) = at.set_owner(uid, gid, false)
+        && implemented(&e)
+    {
+        report_owner_failure(name, uid, gid, &e, status);
+    }
+}
+
+/// GNU's `implemented`: the call failed, rather than not existing here.
+fn implemented(e: &io::Error) -> bool {
+    /// `ENOSYS`, and `ENOTSUP`, which Linux spells the same as `EOPNOTSUPP`.
+    const ENOSYS: i32 = 38;
+    const ENOTSUP: i32 = 95;
+    !matches!(e.raw_os_error(), Some(ENOSYS | ENOTSUP))
+}
+
+/// GNU's `chown_error_details`. An error, not a warning -- measured, a root
+/// restore whose owners cannot be given exits 2 -- and worded with the numbers
+/// actually asked for, after any name was looked up.
+fn report_owner_failure(name: &[u8], uid: u32, gid: u32, e: &io::Error, status: &mut i32) {
+    diag!(
+        "tar: {}: Cannot change ownership to uid {uid}, gid {gid}: {}",
+        escape(name),
+        strerror(e)
+    );
+    *status = EXIT_FATAL;
 }
 
 /// Create something for the member called `name`, beneath `root`, replacing
@@ -4198,7 +4451,7 @@ fn make_ancestors(root: &Dir, name: &[u8], status: &mut i32) {
         // components rejoined: it is what the diagnostic prints, and a name
         // with a doubled slash must be named back the way it was written.
         let ancestor = name.get(..i).unwrap_or(name);
-        match root.locate(ancestor).and_then(|at| at.mkdir()) {
+        match root.locate(ancestor).and_then(|at| at.mkdir(0o777)) {
             Ok(()) => failure = None,
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => failure = None,
             Err(e) => {
@@ -4461,10 +4714,13 @@ struct Located {
 #[cfg(unix)]
 impl Located {
     /// `mkdir`, plain: `EEXIST` comes straight back out.
-    fn mkdir(&self) -> io::Result<()> {
-        // 0o777 is masked by the umask, which is what `fs::create_dir` passes
-        // too; the archive's own mode is applied afterwards.
-        self.dir.mkdir(&self.leaf, 0o777)
+    ///
+    /// `mode` is masked by the umask, as any `mkdir`'s is; a directory
+    /// *member*'s own mode is applied afterwards, once the extraction is done
+    /// with it. An intermediate directory -- one the archive does not hold a
+    /// member for -- is made `0o777`, what `fs::create_dir` passes too.
+    fn mkdir(&self, mode: u32) -> io::Result<()> {
+        self.dir.mkdir(&self.leaf, mode)
     }
 
     /// `mkdir` for a directory *member*, where an existing directory is success.
@@ -4480,8 +4736,8 @@ impl Located {
     /// and reports success — leaving the symlink in place for every member that
     /// followed to be written through. Not following the link is the whole of
     /// the difference, and [`Located::is_real_dir`] is where it lives.
-    fn mkdir_member(&self) -> io::Result<()> {
-        match self.mkdir() {
+    fn mkdir_member(&self, mode: u32) -> io::Result<()> {
+        match self.mkdir(mode) {
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists && self.is_real_dir() => Ok(()),
             other => other,
         }
@@ -4617,10 +4873,11 @@ impl Located {
     /// paths this program takes -- but it costs nothing and the guarantee is
     /// worth stating outright rather than deducing from the flag two lines above.
     ///
-    /// 0o666 is the mode `File::create` would have asked for, and the umask
-    /// takes it down from there; the archive's own mode is applied afterwards.
-    fn create_file(&self) -> io::Result<File> {
-        self.dir.create_new(&self.leaf, 0o666)
+    /// `mode` is the member's own permission bits, narrowed by the umask --
+    /// see [`Ownership::creation_mode`] for why it is not the `0o666` this used
+    /// to be. The archive's exact mode is applied afterwards.
+    fn create_file(&self, mode: u32) -> io::Result<File> {
+        self.dir.create_new(&self.leaf, mode)
     }
 
     /// [`create_file`](Self::create_file) as `--overwrite` wants it: keep the
@@ -4646,8 +4903,8 @@ impl Located {
     /// A **directory** in the way is deliberately not recovered from: `openat`
     /// says `EISDIR`, and GNU reports `Cannot open: Is a directory` and exits 2
     /// rather than removing it. `--overwrite` truncates; it does not delete.
-    fn create_file_overwriting(&self) -> io::Result<File> {
-        self.dir.create_truncating(&self.leaf, 0o666)
+    fn create_file_overwriting(&self, mode: u32) -> io::Result<File> {
+        self.dir.create_truncating(&self.leaf, mode)
     }
 
     /// Clear the leaf out of the way for `-U`, before anything is created.
@@ -4760,6 +5017,12 @@ impl Located {
     fn set_mode(&self, mode: u32) -> io::Result<()> {
         self.chmod(mode)
     }
+
+    /// Give the leaf the owner `uid` and group `gid` -- the leaf itself when
+    /// `follow` is false, which is how a symlink's own owner is set.
+    fn set_owner(&self, uid: u32, gid: u32, follow: bool) -> io::Result<()> {
+        self.dir.chown(&self.leaf, uid, gid, follow)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4833,12 +5096,13 @@ impl Located {
         self.dir.join(os_from_bytes(&self.leaf))
     }
 
-    fn mkdir(&self) -> io::Result<()> {
+    /// No permission bits off unix; `mode` is the unix arm's.
+    fn mkdir(&self, _mode: u32) -> io::Result<()> {
         fs::create_dir(self.path())
     }
 
-    fn mkdir_member(&self) -> io::Result<()> {
-        match self.mkdir() {
+    fn mkdir_member(&self, mode: u32) -> io::Result<()> {
+        match self.mkdir(mode) {
             Err(e)
                 if e.kind() == io::ErrorKind::AlreadyExists
                     && fs::symlink_metadata(self.path()).is_ok_and(|m| m.is_dir()) =>
@@ -4861,14 +5125,15 @@ impl Located {
         fs::hard_link(target.path(), self.path())
     }
 
-    fn create_file(&self) -> io::Result<File> {
+    /// No permission bits off unix; `mode` is the unix arm's.
+    fn create_file(&self, _mode: u32) -> io::Result<File> {
         fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(self.path())
     }
 
-    fn create_file_overwriting(&self) -> io::Result<File> {
+    fn create_file_overwriting(&self, _mode: u32) -> io::Result<File> {
         fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -4911,7 +5176,7 @@ impl Located {
     }
 
     fn create_placeholder(&self) -> io::Result<()> {
-        self.create_file().map(drop)
+        self.create_file(0).map(drop)
     }
 
     /// `(0, 0)` for everything: there is no inode number to compare here, so the
@@ -4974,6 +5239,12 @@ impl Located {
     /// A no-op off unix, where there are no permission bits to set.
     #[allow(clippy::unnecessary_wraps)] // The signature is the unix arm's.
     fn set_mode(&self, _mode: u32) -> io::Result<()> {
+        Ok(())
+    }
+
+    /// A no-op off unix, where there are no numeric owners to give away.
+    #[allow(clippy::unnecessary_wraps)] // The signature is the unix arm's.
+    fn set_owner(&self, _uid: u32, _gid: u32, _follow: bool) -> io::Result<()> {
         Ok(())
     }
 }
@@ -5171,6 +5442,8 @@ struct DelayedDir {
     name: Vec<u8>,
     mode: u32,
     mtime: i64,
+    /// The owner it is given, when owners are being restored.
+    owner: Option<(u32, u32)>,
     /// Waits for the delayed links, not just for the members inside it: set for
     /// `.`, and for the directory a delayed link is made in, whose mtime making
     /// the link would otherwise undo. See [`mark_after_links`].
@@ -5194,6 +5467,7 @@ fn delay_dir(dirs: &mut Vec<DelayedDir>, entry: DelayedDir) {
         };
         same.mode = entry.mode;
         same.mtime = entry.mtime;
+        same.owner = entry.owner;
         i
     } else {
         dirs.push(entry);
@@ -5332,7 +5606,7 @@ fn set_dir_stat(roots: &mut Roots, chdirs: &[OsString], dir: &DelayedDir, status
         }
     };
     match root.locate(&dir.name) {
-        Ok(at) => restore_metadata(&at, &dir.name, dir.mode, dir.mtime, status),
+        Ok(at) => restore_metadata(&at, &dir.name, dir.mode, dir.mtime, dir.owner, status),
         Err(e) => {
             // The directory was made, and resolved, a moment ago. That it does
             // not resolve now means the tree changed underneath the extraction,
@@ -5423,14 +5697,7 @@ fn apply_delayed_links(
             *status = EXIT_FATAL;
             continue;
         }
-        if let Err(e) = at.set_symlink_mtime(link.mtime) {
-            diag!(
-                "tar: {}: Cannot utime: {}",
-                escape(&link.name),
-                strerror(&e)
-            );
-            *status = EXIT_FATAL;
-        }
+        restore_symlink_metadata(&at, &link.name, link.mtime, link.owner, status);
     }
 }
 
@@ -5479,7 +5746,7 @@ fn do_extract(
     chdirs: &[OsString],
     verbose: Verbose,
     members: &[Operand],
-    same_permissions: bool,
+    own: Ownership,
     old_files: OldFiles,
     record_size: u64,
 ) -> i32 {
@@ -5518,6 +5785,9 @@ fn do_extract(
     let mut prefixes = PrefixNotice::new();
     let mut selector = Selector::new(members, chdirs.len());
     let umask = read_umask();
+    // The passwd and group files, read once, when names are to be turned into
+    // owners. See [`OwnerLookup`].
+    let owners = OwnerLookup::new(own);
     // Only `-xvv` uses these, but both are cheap and reading `TZ` once up front
     // is what stops a long extraction from straddling a zone change mid-file —
     // the same reason `do_list_main` resolves it before the first member.
@@ -5597,7 +5867,13 @@ fn do_extract(
         // running `ugswidth` maximum lives beside the walk here exactly as it
         // does in `list_archive`.
         if verbose.long() {
-            verbose.write(&long_line(member, &link_target, &mut ugswidth, &zone));
+            verbose.write(&long_line(
+                member,
+                &link_target,
+                &mut ugswidth,
+                &zone,
+                own.numeric,
+            ));
         } else {
             verbose.line(raw_name);
         }
@@ -5630,6 +5906,14 @@ fn do_extract(
             return Handled::Skip;
         }
 
+        // What this member is to end up as: its final mode, the mode it is
+        // made with, and -- when owners are being restored -- its owner.
+        let shape = Shape {
+            mode: extraction_mode(member.mode, own.exact_modes, umask),
+            create_mode: own.creation_mode(member.mode),
+            owner: own.restore_owner.then(|| owners.ids(member)),
+        };
+
         match member.typeflag {
             _ if member.is_dir() => {
                 // A directory member is stored as `d/`, but every diagnostic
@@ -5658,9 +5942,21 @@ fn do_extract(
                 // The mtime plays no part: an on-disk directory is exempt from
                 // the age test (see [`keeps_newer`]), so what decides is only
                 // whether the removal succeeds (`tar-knf3.sh`).
-                let create: fn(&Located) -> io::Result<()> = match old_files {
-                    OldFiles::Keep | OldFiles::Skip | OldFiles::KeepNewer => Located::mkdir,
-                    _ => Located::mkdir_member,
+                //
+                // Either way it is made with GNU's `safe_dir_mode`, not its
+                // stored mode, which is applied when the extraction is done
+                // with it. See [`Ownership::safe_dir_mode`].
+                let first_mode = own.safe_dir_mode(member.mode);
+                let plain = matches!(
+                    old_files,
+                    OldFiles::Keep | OldFiles::Skip | OldFiles::KeepNewer
+                );
+                let create = |at: &Located| {
+                    if plain {
+                        at.mkdir(first_mode)
+                    } else {
+                        at.mkdir_member(first_mode)
+                    }
                 };
                 match create_at(root, &name, ovw, &mut status, create) {
                     Err(NotCreated::Failed(e)) => {
@@ -5685,8 +5981,9 @@ fn do_extract(
                         DelayedDir {
                             level,
                             name,
-                            mode: extraction_mode(member.mode, same_permissions, umask),
+                            mode: shape.mode,
                             mtime: member.mtime,
+                            owner: shape.owner,
                             after_links: false,
                         },
                     ),
@@ -5705,8 +6002,7 @@ fn do_extract(
                     contiguous_warned = true;
                     diag!("tar: Extracting contiguous files as regular files");
                 }
-                let mode = extraction_mode(member.mode, same_permissions, umask);
-                extract_plain(root, input, &name, member, mode, ovw, &mut status)
+                extract_plain(root, input, &name, member, shape, ovw, &mut status)
             }
             b'2' if is_delayed_target(&member.linkname) => {
                 // A symlink out of the destination — absolute, or climbing —
@@ -5730,6 +6026,7 @@ fn do_extract(
                             name: name.clone(),
                             target: member.linkname.clone(),
                             mtime: member.mtime,
+                            owner: shape.owner,
                             id,
                             dir: level,
                         });
@@ -5771,10 +6068,13 @@ fn do_extract(
                     // it points at, which for an archived `-> /etc/passwd` is
                     // the whole attack.
                     Ok((at, ())) => {
-                        if let Err(e) = at.set_symlink_mtime(member.mtime) {
-                            diag!("tar: {}: Cannot utime: {}", escape(&name), strerror(&e));
-                            status = EXIT_FATAL;
-                        }
+                        restore_symlink_metadata(
+                            &at,
+                            &name,
+                            member.mtime,
+                            shape.owner,
+                            &mut status,
+                        );
                     }
                 }
                 Handled::Skip
@@ -5812,24 +6112,29 @@ fn do_extract(
                 Handled::Skip
             }
             b'6' => {
-                let mode = extraction_mode(member.mode, same_permissions, umask);
-                match create_at(root, &name, ovw, &mut status, |at| at.make_fifo(mode)) {
+                let create = |at: &Located| at.make_fifo(shape.create_mode);
+                match create_at(root, &name, ovw, &mut status, create) {
                     Err(NotCreated::Failed(e) | NotCreated::Immovable(e)) => {
                         diag!("tar: {}: Cannot mkfifo: {}", escape(&name), strerror(&e));
                         status = EXIT_FATAL;
                     }
                     Err(NotCreated::Silent) => {}
-                    Ok((at, ())) => {
-                        restore_metadata(&at, &name, mode, member.mtime, &mut status);
-                    }
+                    Ok((at, ())) => restore_metadata(
+                        &at,
+                        &name,
+                        shape.mode,
+                        member.mtime,
+                        shape.owner,
+                        &mut status,
+                    ),
                 }
                 Handled::Skip
             }
             b'3' | b'4' => {
-                let mode = extraction_mode(member.mode, same_permissions, umask);
                 let block = member.typeflag == b'4';
-                let create =
-                    |at: &Located| at.make_device(mode, block, member.devmajor, member.devminor);
+                let create = |at: &Located| {
+                    at.make_device(shape.create_mode, block, member.devmajor, member.devminor)
+                };
                 match create_at(root, &name, ovw, &mut status, create) {
                     Err(NotCreated::Failed(e) | NotCreated::Immovable(e)) => {
                         // `Operation not permitted` for everyone but root, and
@@ -5840,9 +6145,14 @@ fn do_extract(
                         status = EXIT_FATAL;
                     }
                     Err(NotCreated::Silent) => {}
-                    Ok((at, ())) => {
-                        restore_metadata(&at, &name, mode, member.mtime, &mut status);
-                    }
+                    Ok((at, ())) => restore_metadata(
+                        &at,
+                        &name,
+                        shape.mode,
+                        member.mtime,
+                        shape.owner,
+                        &mut status,
+                    ),
                 }
                 Handled::Skip
             }
@@ -5864,8 +6174,7 @@ fn do_extract(
                     escape(&name),
                     escape(&[other])
                 );
-                let mode = extraction_mode(member.mode, same_permissions, umask);
-                extract_plain(root, input, &name, member, mode, ovw, &mut status)
+                extract_plain(root, input, &name, member, shape, ovw, &mut status)
             }
         }
     });
@@ -5919,11 +6228,11 @@ fn extract_plain(
     input: &mut dyn Read,
     name: &[u8],
     member: &Member,
-    mode: u32,
+    shape: Shape,
     ovw: Overwriting,
     status: &mut i32,
 ) -> Handled {
-    if extract_regular_file(root, input, name, member, mode, ovw, status) {
+    if extract_regular_file(root, input, name, member, shape, ovw, status) {
         Handled::Consumed
     } else {
         Handled::Truncated
@@ -5975,6 +6284,9 @@ struct DelayedLink {
     name: Vec<u8>,
     target: Vec<u8>,
     mtime: i64,
+    /// The owner the link is given once it exists, when owners are being
+    /// restored -- the link's own, not its target's.
+    owner: Option<(u32, u32)>,
     /// Which `-C` level the member belonged to, so the link is created under
     /// the destination its placeholder went to rather than under whichever one
     /// happened to be current when the archive ended. See [`Roots`].
@@ -6019,6 +6331,7 @@ fn archive_label(archive: Option<&OsStr>) -> Vec<u8> {
 fn open_for_member(
     root: &Dir,
     name: &[u8],
+    mode: u32,
     ovw: Overwriting,
     status: &mut i32,
 ) -> Option<(Located, File)> {
@@ -6026,10 +6339,13 @@ fn open_for_member(
     // is done about its failure: `O_TRUNC` where the others use `O_EXCL`, so the
     // inode survives and every other name for it changes with the contents. See
     // [`Located::create_file_overwriting`].
-    let create: fn(&Located) -> io::Result<File> = if ovw.old_files == OldFiles::Overwrite {
-        Located::create_file_overwriting
-    } else {
-        Located::create_file
+    let overwrite = ovw.old_files == OldFiles::Overwrite;
+    let create = |at: &Located| {
+        if overwrite {
+            at.create_file_overwriting(mode)
+        } else {
+            at.create_file(mode)
+        }
     };
     match create_at(root, name, ovw, status, create) {
         Ok(pair) => Some(pair),
@@ -6059,7 +6375,7 @@ fn extract_regular_file(
     input: &mut dyn Read,
     name: &[u8],
     member: &Member,
-    mode: u32,
+    shape: Shape,
     ovw: Overwriting,
     status: &mut i32,
 ) -> bool {
@@ -6069,7 +6385,7 @@ fn extract_regular_file(
     // That is as true of a member `--skip-old-files` stepped over as of one that
     // could not be opened — the bytes are in the stream either way, and the
     // headers after them only line up if they are read.
-    let mut opened = open_for_member(root, name, ovw, status);
+    let mut opened = open_for_member(root, name, shape.create_mode, ovw, status);
 
     let mut remaining = size;
     let mut block = [0u8; BLOCK_SIZE];
@@ -6107,7 +6423,7 @@ fn extract_regular_file(
             diag!("tar: {}: Cannot write: {}", escape(name), strerror(&e));
             *status = EXIT_FATAL;
         } else {
-            restore_metadata(&at, name, mode, member.mtime, status);
+            restore_metadata(&at, name, shape.mode, member.mtime, shape.owner, status);
         }
     }
     true
@@ -6117,6 +6433,7 @@ fn do_list_main(
     archive: Option<&OsStr>,
     chdirs: &[OsString],
     verbose: u8,
+    numeric: bool,
     members: &[Operand],
     record_size: u64,
 ) -> i32 {
@@ -6159,6 +6476,7 @@ fn do_list_main(
         input.as_mut(),
         &mut Listing,
         verbose,
+        numeric,
         &mut selector,
         &zone,
         chdirs,
@@ -6228,6 +6546,7 @@ fn list_archive(
     input: &mut dyn Read,
     out: &mut dyn Write,
     verbose: u8,
+    numeric: bool,
     selector: &mut Selector,
     zone: &localtime::Zone,
     chdirs: &[OsString],
@@ -6281,7 +6600,7 @@ fn list_archive(
         // its own terms: GNU's output is not feedable back either, and a name
         // containing a newline would put two lines in the manifest.
         let line = if verbose >= 2 {
-            long_line(member, &link_target, &mut ugswidth, zone)
+            long_line(member, &link_target, &mut ugswidth, zone, numeric)
         } else {
             let mut l = escape(&member.name).into_bytes();
             l.push(b'\n');
@@ -6314,17 +6633,20 @@ fn long_line(
     link_target: &[u8],
     ugswidth: &mut usize,
     zone: &localtime::Zone,
+    numeric: bool,
 ) -> Vec<u8> {
-    // ustar stores the owner's *name* beside the number; `--numeric-owner`
-    // leaves it empty and GNU then prints the number. Falling back the other
-    // way — looking the uid up in this machine's passwd file — would be wrong:
-    // the archive may come from a machine where uid 1000 is someone else.
-    let user = if member.uname.is_empty() {
+    // ustar stores the owner's *name* beside the number; an archive written
+    // with `--numeric-owner` leaves it empty, and GNU then prints the number --
+    // as it does for any archive when this run was given `--numeric-owner`
+    // (`numeric`). Falling back the other way — looking the uid up in this
+    // machine's passwd file — would be wrong: the archive may come from a
+    // machine where uid 1000 is someone else.
+    let user = if numeric || member.uname.is_empty() {
         member.uid.to_string().into_bytes()
     } else {
         member.uname.clone()
     };
-    let group = if member.gname.is_empty() {
+    let group = if numeric || member.gname.is_empty() {
         member.gid.to_string().into_bytes()
     } else {
         member.gname.clone()
@@ -6581,6 +6903,7 @@ mod tests {
             &mut &input[..],
             out,
             1,
+            false,
             &mut sel,
             &Zone::utc(),
             &[],
@@ -6598,6 +6921,7 @@ mod tests {
             &mut &input[..],
             out,
             2,
+            false,
             &mut sel,
             &Zone::utc(),
             &[],
@@ -6818,7 +7142,7 @@ mod tests {
         .unwrap();
         assert_eq!(a.mode, Mode::Create);
         assert_eq!(a.verbose, 1);
-        assert!(a.same_permissions);
+        assert_eq!(a.same_permissions, Some(true));
         assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("out.tar")));
         assert_eq!(a.chdirs, s(&["/tmp"]));
         assert_eq!(a.names(), s(&["x"]));
@@ -6843,15 +7167,17 @@ mod tests {
         // Two names, one option, in both of GNU's pairs.
         assert_eq!(run_args(&s(&["--get"])).unwrap().mode, Mode::Extract);
         assert_eq!(run_args(&s(&["--extract"])).unwrap().mode, Mode::Extract);
-        assert!(
+        assert_eq!(
             run_args(&s(&["--same-permissions"]))
                 .unwrap()
-                .same_permissions
+                .same_permissions,
+            Some(true)
         );
-        assert!(
+        assert_eq!(
             run_args(&s(&["--preserve-permissions"]))
                 .unwrap()
-                .same_permissions
+                .same_permissions,
+            Some(true)
         );
     }
 
@@ -7741,6 +8067,10 @@ mod tests {
             "--file",
             "--preserve-permissions",
             "--same-permissions",
+            "--no-same-permissions",
+            "--same-owner",
+            "--no-same-owner",
+            "--numeric-owner",
             "--verbose",
             "--keep-newer-files",
             "--keep-old-files",
@@ -9176,6 +9506,7 @@ mod tests {
             name: name.to_vec(),
             mode: 0o755,
             mtime: 0,
+            owner: None,
             after_links: false,
         }
     }
@@ -9225,5 +9556,97 @@ mod tests {
         let mut dirs = vec![waiting(b"a")];
         mark_parent_after_links(&mut dirs, b"z/link");
         assert!(!dirs[0].after_links);
+    }
+
+    // ---------------- owners and modes ----------------
+
+    #[test]
+    fn the_ownership_options_are_three_way_and_the_last_one_wins() {
+        let a = run_args(&s(&["-x", "--same-owner", "--no-same-owner"])).unwrap();
+        assert_eq!(a.same_owner, Some(false));
+        let a = run_args(&s(&["-x", "--no-same-permissions", "-p"])).unwrap();
+        assert_eq!(a.same_permissions, Some(true));
+        let a = run_args(&s(&["-x", "-p", "--no-same-permissions"])).unwrap();
+        assert_eq!(a.same_permissions, Some(false));
+        assert!(run_args(&s(&["-x", "--numeric-owner"])).unwrap().numeric_owner);
+        // Given nothing, nothing is decided here: the default is the
+        // superuser's question, answered by `Ownership::resolve`.
+        let a = run_args(&s(&["-x"])).unwrap();
+        assert_eq!(
+            (a.same_owner, a.same_permissions, a.numeric_owner),
+            (None, None, false)
+        );
+    }
+
+    fn ownership(restore_owner: bool, exact_modes: bool, root: bool) -> Ownership {
+        Ownership {
+            restore_owner,
+            exact_modes,
+            numeric: false,
+            root,
+        }
+    }
+
+    #[test]
+    fn a_file_is_made_with_its_own_bits_and_private_until_it_changes_hands() {
+        // An ordinary user: the stored permission bits, never more -- a 0600
+        // member is never readable by anyone else, not even mid-write -- and
+        // never the setuid bit, which only the final mode may carry.
+        let user = ownership(false, false, false);
+        assert_eq!(user.creation_mode(0o600), 0o600);
+        assert_eq!(user.creation_mode(0o4755), 0o755);
+        assert_eq!(user.creation_mode(0o000), 0o000);
+        // Restoring owners: the owner's bits only, until the `chown`.
+        let root = ownership(true, true, true);
+        assert_eq!(root.creation_mode(0o644), 0o600);
+        assert_eq!(root.creation_mode(0o750), 0o700);
+    }
+
+    #[test]
+    fn a_directory_is_made_with_gnus_safe_mode() {
+        // An ordinary user: the stored bits plus write and search for the
+        // owner, so that the members inside it can be created.
+        let user = ownership(false, false, false);
+        assert_eq!(user.safe_dir_mode(0o555), 0o755);
+        assert_eq!(user.safe_dir_mode(0o700), 0o700);
+        // Root restoring owners: the owner's bits only, nothing added.
+        let root = ownership(true, true, true);
+        assert_eq!(root.safe_dir_mode(0o755), 0o700);
+        assert_eq!(root.safe_dir_mode(0o555), 0o500);
+        // `-p` as an ordinary user: the owner's bits, plus write and search.
+        assert_eq!(ownership(false, true, false).safe_dir_mode(0o755), 0o700);
+    }
+
+    #[test]
+    fn an_owner_is_found_by_name_and_otherwise_by_number() {
+        let db = pwdb::Db::from_bytes(
+            b"root:x:0:0::/root:/bin/sh\nalice:x:1001:1001::/home/alice:/bin/sh\n",
+            b"root:x:0:\nstaff:x:50:\n",
+        );
+        let lookup = OwnerLookup { db: Some(db) };
+        let member = |uname: &[u8], gname: &[u8]| {
+            decode_member(&make_full_header(
+                b"f", 0o644, 4321, 4322, 0, 0, b'0', b"", uname, gname,
+            ))
+        };
+        // The names win: the numbers are only meaningful where they were made.
+        assert_eq!(lookup.ids(&member(b"alice", b"staff")), (1001, 50));
+        assert_eq!(lookup.ids(&member(b"root", b"root")), (0, 0));
+        // A name this machine does not know, or no name, is the number.
+        assert_eq!(lookup.ids(&member(b"mallory", b"staff")), (4321, 50));
+        assert_eq!(lookup.ids(&member(b"", b"")), (4321, 4322));
+        // `--numeric-owner` (or not restoring owners): numbers only.
+        let numeric = OwnerLookup { db: None };
+        assert_eq!(numeric.ids(&member(b"alice", b"staff")), (4321, 4322));
+    }
+
+    #[test]
+    fn a_missing_call_is_not_a_failed_one() {
+        // GNU's `implemented`: `ENOSYS` and `ENOTSUP` say the system cannot do
+        // this to a symlink at all, and are not reported.
+        assert!(!implemented(&io::Error::from_raw_os_error(38)));
+        assert!(!implemented(&io::Error::from_raw_os_error(95)));
+        assert!(implemented(&io::Error::from_raw_os_error(1)));
+        assert!(implemented(&io::Error::from_raw_os_error(22)));
     }
 }

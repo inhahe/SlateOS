@@ -2568,6 +2568,10 @@ fn alloc_order_constrained_inner(order: usize, max_addr: u64) -> KernelResult<Ph
 /// - The caller must ensure no references to the frame's memory remain.
 #[allow(clippy::indexing_slicing)]
 pub unsafe fn free_frame(frame: PhysFrame) -> KernelResult<()> {
+    // Not while a cross-address-space copy is touching it: the caller has
+    // unmapped it, but a copy that found it before then may still be inside.
+    wait_for_remote_copies(frame.addr(), 0);
+
     // Uncharge cgroup before returning the frame to the free pool.
     // Done up front so the accounting is updated promptly.
     uncharge_cgroup_free(frame.addr(), 1);
@@ -2673,6 +2677,9 @@ pub unsafe fn free_frame(frame: PhysFrame) -> KernelResult<()> {
 /// - Must not be freed more than once.
 /// - The caller must ensure no references to the block's memory remain.
 pub unsafe fn free_order(frame: PhysFrame, order: usize) -> KernelResult<()> {
+    // As `free_frame`: not under a cross-address-space copy.
+    wait_for_remote_copies(frame.addr(), order);
+
     // Uncharge cgroup BEFORE the physical free (order doesn't matter
     // for correctness, but doing it first means the accounting is
     // updated before the frame is visible on the free list).
@@ -3008,6 +3015,150 @@ pub unsafe fn ref_dec(frame: PhysFrame) -> KernelResult<u16> {
 }
 
 // ---------------------------------------------------------------------------
+// Frames a cross-address-space copy is touching
+// ---------------------------------------------------------------------------
+//
+// `process_vm_readv`/`writev` copy through another process's page tables by
+// hand (`mm::user::copy_from_user_as`/`copy_to_user_as`), touching the frame a
+// page maps through the HHDM. Nothing the copy holds stops that process from
+// unmapping the page at the same moment, and the frame could then be freed,
+// handed to someone else and written by the copy -- or read by it, giving away
+// what its next owner put there (known-issues
+// `TD-A-CROSS-PROCESS-COPY-RACES-THE-TARGETS-OWN-UNMAP`).
+//
+// Linux pins the page: `pin_user_pages_remote` takes a reference under the
+// target mm's `mmap_lock`. Here each page's touch is a short window with
+// interrupts off ([`RemoteCopyWindow`]). In it the copier announces the page it
+// is about to touch, then checks that the mapping it found the page through
+// still maps it. And every free waits out any window that announced a page
+// inside what it frees ([`wait_for_remote_copies`]), after its caller has
+// taken that out of every page table.
+//
+// That is the store-buffering pattern, SeqCst on both sides. The free has
+// cleared the mapping, then fences and reads the announcements; the copier
+// announces, then reads the mapping. At least one of them sees the other's
+// write, so either the free waits for the touch to end, or the copier sees the
+// page gone and touches nothing.
+//
+// The wait is short and cannot deadlock. A window is one page-table walk and
+// at most one 4 KiB copy, with interrupts off: it is never preempted or
+// interrupted, it takes no lock and it waits for nothing, so whatever the
+// waiting free holds, the window ends.
+
+/// CPUs inside a remote-copy window now. A free reads it to skip the scan of
+/// [`REMOTE_COPY_PAGES`] when there is none: every free pays one fence and
+/// this load, and no more.
+static REMOTE_COPY_WINDOWS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+/// The 4 KiB page each CPU's remote-copy window is touching, by physical
+/// address; 0 when it has announced none.
+static REMOTE_COPY_PAGES: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+
+/// One remote-copy window (see the section above).
+///
+/// Opened with interrupts disabled, and dropped before they are enabled
+/// again: a window that could be preempted or interrupted could keep a free
+/// waiting for as long as it was away.
+pub(crate) struct RemoteCopyWindow {
+    /// This CPU's slot in [`REMOTE_COPY_PAGES`].
+    slot: &'static AtomicU64,
+}
+
+impl RemoteCopyWindow {
+    /// Open a window on this CPU. Interrupts must stay disabled until it is
+    /// dropped.
+    ///
+    /// # Errors
+    ///
+    /// `InternalError` if this CPU's index has no slot: `fast_cpu_index` is
+    /// below `MAX_CPUS` by construction, so this does not happen, but a
+    /// window without a slot would protect nothing.
+    pub(crate) fn open() -> KernelResult<Self> {
+        let slot = REMOTE_COPY_PAGES
+            .get(crate::smp::fast_cpu_index())
+            .ok_or(KernelError::InternalError)?;
+        REMOTE_COPY_WINDOWS.fetch_add(1, Ordering::SeqCst);
+        Ok(Self { slot })
+    }
+
+    /// Announce the 4 KiB page holding the physical address `phys` as the
+    /// one this window is about to touch.
+    ///
+    /// The caller must then check again that the mapping it found `phys`
+    /// through still maps it, and touch the page only if it does: a free that
+    /// ran before the announcement could be seen will have taken the mapping
+    /// away first.
+    pub(crate) fn announce(&self, phys: u64) {
+        let page = phys & !(crate::mm::page_table::HW_PAGE_SIZE as u64).wrapping_sub(1);
+        self.slot.store(page, Ordering::SeqCst);
+    }
+}
+
+impl Drop for RemoteCopyWindow {
+    fn drop(&mut self) {
+        // Release: the touch happens-before a free that sees the slot clear.
+        self.slot.store(0, Ordering::Release);
+        REMOTE_COPY_WINDOWS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Whether some remote-copy window has announced a page inside the
+/// `order`-sized block at `addr`.
+fn remote_copy_touches(addr: u64, order: usize) -> bool {
+    let len = u64::try_from(FRAME_SIZE)
+        .unwrap_or(u64::MAX)
+        .checked_shl(u32::try_from(order).unwrap_or(u32::MAX))
+        .unwrap_or(u64::MAX);
+    let block = addr..addr.saturating_add(len);
+    REMOTE_COPY_PAGES.iter().any(|slot| {
+        let page = slot.load(Ordering::SeqCst);
+        page != 0 && block.contains(&page)
+    })
+}
+
+/// Wait until no remote-copy window is touching a page inside the
+/// `order`-sized block at `addr` (see the section above). Every free calls it
+/// before the block can be handed out again, and so after its caller has
+/// taken the block out of every page table.
+fn wait_for_remote_copies(addr: u64, order: usize) {
+    // Orders the caller's page-table writes before the reads below: the
+    // half of the store-buffering pattern that is the free's.
+    core::sync::atomic::fence(Ordering::SeqCst);
+    if REMOTE_COPY_WINDOWS.load(Ordering::SeqCst) == 0 {
+        return;
+    }
+    while remote_copy_touches(addr, order) {
+        core::hint::spin_loop();
+    }
+}
+
+/// Wait until every remote-copy window open now has closed.
+///
+/// For a page-table change that frees nothing but must not overlap a copy
+/// in flight: fork making a parent's writable pages copy-on-write
+/// (`mm::cow::clone_address_space_cow`). A remote write already past its
+/// checks lands in the frame the child now shares, so it has to finish
+/// before the child can run and copy the frame, or the child keeps half of
+/// it. A window opened after the change sees the page read-only and breaks
+/// the share first.
+pub(crate) fn wait_for_open_remote_copies() {
+    core::sync::atomic::fence(Ordering::SeqCst);
+    if REMOTE_COPY_WINDOWS.load(Ordering::SeqCst) == 0 {
+        return;
+    }
+    for slot in &REMOTE_COPY_PAGES {
+        let seen = slot.load(Ordering::SeqCst);
+        if seen == 0 {
+            continue;
+        }
+        while slot.load(Ordering::SeqCst) == seen {
+            core::hint::spin_loop();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Self-test (runs during boot)
 // ---------------------------------------------------------------------------
 
@@ -3150,6 +3301,9 @@ pub fn self_test() -> KernelResult<()> {
     // -- Test 8: The ISA DMA zone is kept for the allocations that need it --
     test_dma_zone_kept()?;
 
+    // -- Test 9: A remote-copy window's page is what a free waits on --------
+    test_remote_copy_window()?;
+
     skips.report("[mm]");
     serial_println!("[mm] Frame allocator self-test PASSED{}", skips.suffix());
     Ok(())
@@ -3262,6 +3416,62 @@ fn test_zeroed_alloc_inner(skips: &mut crate::fs::selftest::Skips) -> KernelResu
 /// ([`DMA_ZONE_END`]): with frames free above it, ordinary allocations --
 /// single frames through the per-CPU caches and a multi-frame block through
 /// the buddy lists -- never land inside it, while a `Below16M` request does.
+/// While a remote-copy window has announced a page, a free of the frame
+/// holding it, or of a block around that frame, would wait for it
+/// ([`remote_copy_touches`]), and a free of the next frame would not. Once
+/// the window closes nothing waits, and the open-window count is back where
+/// it was. A free with no window open returns at once.
+///
+/// The waiting itself takes two CPUs to watch and is not driven here; this is
+/// the decision it waits on.
+#[allow(clippy::arithmetic_side_effects)]
+fn test_remote_copy_window() -> KernelResult<()> {
+    let frame = alloc_frame()?;
+    let addr = frame.addr();
+    let hw = crate::mm::page_table::HW_PAGE_SIZE as u64;
+    let frame_len = FRAME_SIZE as u64;
+    // An address inside the frame's third 4 KiB page, not at its start: the
+    // announcement is of the page.
+    let inside = addr + 2 * hw + 123;
+    let block4 = addr & !(4 * frame_len - 1);
+    let open_before = REMOTE_COPY_WINDOWS.load(Ordering::SeqCst);
+
+    let during = crate::cpu::without_interrupts(|| -> KernelResult<[bool; 4]> {
+        let window = RemoteCopyWindow::open()?;
+        window.announce(inside);
+        let seen = [
+            remote_copy_touches(addr, 0),
+            remote_copy_touches(block4, 2),
+            !remote_copy_touches(addr + frame_len, 0),
+            REMOTE_COPY_WINDOWS.load(Ordering::SeqCst) == open_before + 1,
+        ];
+        drop(window);
+        Ok(seen)
+    })?;
+    let after =
+        !remote_copy_touches(addr, 0) && REMOTE_COPY_WINDOWS.load(Ordering::SeqCst) == open_before;
+    // SAFETY: allocated above, never mapped, freed once.
+    unsafe { free_frame(frame)? };
+
+    if during.contains(&false) || !after {
+        serial_println!(
+            "[mm]   FAIL: remote-copy window: frame {} block {} next frame clear {} counted {}; \
+             clear after {}",
+            during[0],
+            during[1],
+            during[2],
+            during[3],
+            after
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[mm]   remote-copy window: its page holds the frees of its frame and block, not \
+         the next frame's, and nothing once it closes: OK"
+    );
+    Ok(())
+}
+
 /// The free lists keep every zone block behind every block above it
 /// ([`validate_free_lists`]), and a zone frame freed goes back to them
 /// rather than to a cache.

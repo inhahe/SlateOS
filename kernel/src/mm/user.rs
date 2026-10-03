@@ -47,6 +47,7 @@
 // that `scripts/kasan-build.sh` sets; the ordinary build never sees it.)
 #![cfg_attr(kasan_instrumented, sanitize(address = "off"))]
 
+use super::frame;
 use super::page_table::{self, PageFlags, USER_SPACE_END, VirtAddr};
 use crate::error::{KernelError, KernelResult};
 use crate::proc::thread;
@@ -520,30 +521,92 @@ pub unsafe fn copy_to_user(kernel_src: *const u8, user_dst: u64, len: usize) -> 
 // Cross-address-space user memory copies
 // ---------------------------------------------------------------------------
 
-/// Resolve the physical address backing user virtual address `va` in the
-/// address space rooted at `pml4`, optionally requiring the page to be
-/// writable.
+/// Touch the page holding user address `va` in the address space rooted at
+/// `pml4`: `touch` gets the HHDM address of `va` itself (its offset in the
+/// page applied) and must stay within that 4 KiB page. With
+/// `need_writable` the page must be writable.
 ///
-/// Returns the full physical address (including the page offset).
+/// **The frame cannot be freed under the touch.** The target may unmap the
+/// page at the same moment, and nothing here holds it mapped, so the touch
+/// runs inside a remote-copy window ([`frame::RemoteCopyWindow`]): interrupts
+/// off, the page announced, and the mapping walked a second time after the
+/// announcement. A free of the frame waits for a window that announced it,
+/// and a free the announcement came too late for has unmapped the page
+/// before it looked, so the second walk sees the page gone or moved and the
+/// frame is not touched. Linux pins the page instead
+/// (`pin_user_pages_remote`, under the target's `mmap_lock`). Until
+/// 2026-10-03 the copy held only the address-space pin (`pcb::AsPin`) and
+/// touched whatever the first walk found (known-issues
+/// `TD-A-CROSS-PROCESS-COPY-RACES-THE-TARGETS-OWN-UNMAP`).
 ///
-/// A first failure is not final. Two perfectly ordinary states make the raw
-/// page walk fail on an address the owning process would have had no trouble
-/// with — an absent page that is committed but not yet populated, and a
-/// present-but-read-only page whose `COW` bit means "copy me on write". Both
-/// are what the hardware fault handler exists to fix, and neither can fix
-/// itself here, because nothing is going to fault: this walk reads the page
-/// table by hand through the HHDM. So on failure we ask the owning process's
-/// resolver to do what the fault would have done, then walk once more. See
-/// [`try_resolve_remote`] for why one retry is the right number.
-fn user_page_phys(pml4: u64, va: u64, need_writable: bool) -> KernelResult<u64> {
-    if let Ok(phys) = user_page_phys_once(pml4, va, need_writable) {
-        return Ok(phys);
+/// **A first failure to find the page is not final.** Two perfectly ordinary
+/// states make the raw page walk fail on an address the owning process would
+/// have had no trouble with — an absent page that is committed but not yet
+/// populated, and a present-but-read-only page whose `COW` bit means "copy
+/// me on write". Both are what the hardware fault handler exists to fix, and
+/// neither can fix itself here, because nothing is going to fault: this walk
+/// reads the page table by hand through the HHDM. So on failure we ask the
+/// owning process's resolver to do what the fault would have done, outside
+/// the window (it allocates and takes locks), then walk once more. See
+/// [`try_resolve_remote`] for why one resolution is the right number.
+///
+/// A page that moves between the two walks of a window is looked up again;
+/// one that keeps moving for [`REMOTE_PAGE_ATTEMPTS`] lookups is reported as
+/// unusable rather than chased for ever.
+fn touch_remote_page<R>(
+    pml4: u64,
+    va: u64,
+    need_writable: bool,
+    touch: impl FnOnce(u64) -> R,
+) -> KernelResult<R> {
+    /// What one window found.
+    enum Found<R> {
+        /// The page was there both times, and was touched.
+        Touched(R),
+        /// The page was gone or different at the second walk.
+        Moved,
+        /// The first walk found no usable page.
+        Absent(KernelError),
     }
-    if !try_resolve_remote(pml4, va, need_writable) {
-        return Err(KernelError::InvalidAddress);
+
+    let hhdm = page_table::hhdm().ok_or(KernelError::InvalidAddress)?;
+    let mut touch = Some(touch);
+    let mut resolved = false;
+    for _ in 0..REMOTE_PAGE_ATTEMPTS {
+        let found = crate::cpu::without_interrupts(|| -> KernelResult<Found<R>> {
+            // Dropped at the end of this closure, before interrupts return.
+            let window = frame::RemoteCopyWindow::open()?;
+            let phys = match user_page_phys_once(pml4, va, need_writable) {
+                Ok(phys) => phys,
+                Err(e) => return Ok(Found::Absent(e)),
+            };
+            window.announce(phys);
+            if user_page_phys_once(pml4, va, need_writable).ok() != Some(phys) {
+                return Ok(Found::Moved);
+            }
+            let kva = hhdm.checked_add(phys).ok_or(KernelError::InvalidAddress)?;
+            let touch = touch.take().ok_or(KernelError::InternalError)?;
+            Ok(Found::Touched(touch(kva)))
+        })?;
+        match found {
+            Found::Touched(result) => return Ok(result),
+            Found::Moved => {}
+            Found::Absent(_) if !resolved => {
+                resolved = true;
+                if !try_resolve_remote(pml4, va, need_writable) {
+                    return Err(KernelError::InvalidAddress);
+                }
+            }
+            Found::Absent(e) => return Err(e),
+        }
     }
-    user_page_phys_once(pml4, va, need_writable)
+    Err(KernelError::InvalidAddress)
 }
+
+/// How many times [`touch_remote_page`] looks a page up before calling it
+/// unusable: a page that moves between the two walks of every one of them
+/// is being remapped faster than it can be copied.
+const REMOTE_PAGE_ATTEMPTS: usize = 64;
 
 /// One raw page-table walk, with no attempt to resolve what it finds.
 fn user_page_phys_once(pml4: u64, va: u64, need_writable: bool) -> KernelResult<u64> {
@@ -627,7 +690,7 @@ fn try_resolve_remote(pml4: u64, va: u64, need_writable: bool) -> bool {
 ///
 /// A page that is absent but committed is populated first, exactly as a real
 /// read fault by the owning process would have populated it — see
-/// [`user_page_phys`].
+/// [`touch_remote_page`].
 ///
 /// # Errors
 ///
@@ -652,24 +715,24 @@ pub fn copy_from_user_as(pml4: u64, user_src: u64, dst: &mut [u8]) -> KernelResu
     if end > USER_SPACE_END {
         return Err(KernelError::InvalidAddress);
     }
-    let hhdm = page_table::hhdm().ok_or(KernelError::InvalidAddress)?;
-
     let mut copied: usize = 0;
     let mut va = user_src;
     while copied < len {
         let page_off = va & (PAGE_SIZE - 1);
         let in_page = (PAGE_SIZE - page_off) as usize;
         let n = in_page.min(len - copied);
-        let phys = user_page_phys(pml4, va, false)?;
-        let kva = hhdm.checked_add(phys).ok_or(KernelError::InvalidAddress)?;
-        // SAFETY: `phys` is a mapped physical address returned by translate();
-        // the HHDM maps all physical memory, so `kva` is a valid readable
-        // kernel pointer to `n` bytes that stay within a single 4 KiB page.
-        let src = unsafe { core::slice::from_raw_parts(kva as *const u8, n) };
         let next = copied.checked_add(n).ok_or(KernelError::InvalidAddress)?;
-        dst.get_mut(copied..next)
-            .ok_or(KernelError::InvalidAddress)?
-            .copy_from_slice(src);
+        let chunk = dst
+            .get_mut(copied..next)
+            .ok_or(KernelError::InvalidAddress)?;
+        touch_remote_page(pml4, va, false, |kva| {
+            // SAFETY: `kva` is the HHDM address of `va`, in a page the
+            // target maps and that cannot be freed while this runs
+            // (`touch_remote_page`); the HHDM maps all physical memory, and
+            // the `n` bytes from `kva` stay within that one 4 KiB page.
+            let src = unsafe { core::slice::from_raw_parts(kva as *const u8, n) };
+            chunk.copy_from_slice(src);
+        })?;
         copied = next;
         va = va
             .checked_add(n as u64)
@@ -688,7 +751,7 @@ pub fn copy_from_user_as(pml4: u64, user_src: u64, dst: &mut [u8]) -> KernelResu
 /// "Must be" in the sense of `get_user_pages(FOLL_WRITE)`, not in the sense of
 /// a precondition the caller has to arrange: a destination page that is absent
 /// but committed is populated, and one that is present-but-CoW has its CoW
-/// broken, before the write — see [`user_page_phys`]. A target that has just
+/// broken, before the write — see [`touch_remote_page`]. A target that has just
 /// forked has an entirely CoW address space, so without that this would fail on
 /// every page of the most ordinary case there is.
 ///
@@ -714,24 +777,22 @@ pub fn copy_to_user_as(pml4: u64, user_dst: u64, src: &[u8]) -> KernelResult<()>
     if end > USER_SPACE_END {
         return Err(KernelError::InvalidAddress);
     }
-    let hhdm = page_table::hhdm().ok_or(KernelError::InvalidAddress)?;
-
     let mut copied: usize = 0;
     let mut va = user_dst;
     while copied < len {
         let page_off = va & (PAGE_SIZE - 1);
         let in_page = (PAGE_SIZE - page_off) as usize;
         let n = in_page.min(len - copied);
-        let phys = user_page_phys(pml4, va, true)?;
-        let kva = hhdm.checked_add(phys).ok_or(KernelError::InvalidAddress)?;
         let next = copied.checked_add(n).ok_or(KernelError::InvalidAddress)?;
         let chunk = src.get(copied..next).ok_or(KernelError::InvalidAddress)?;
-        // SAFETY: `phys` is a mapped, writable physical address (checked via
-        // translate_flags); the HHDM maps all physical memory, so `kva` is a
-        // valid writable kernel pointer to `n` bytes within a single 4 KiB
-        // page.
-        let out = unsafe { core::slice::from_raw_parts_mut(kva as *mut u8, n) };
-        out.copy_from_slice(chunk);
+        touch_remote_page(pml4, va, true, |kva| {
+            // SAFETY: `kva` is the HHDM address of `va`, in a page the
+            // target maps writable and that cannot be freed while this runs
+            // (`touch_remote_page`); the `n` bytes from `kva` stay within
+            // that one 4 KiB page.
+            let out = unsafe { core::slice::from_raw_parts_mut(kva as *mut u8, n) };
+            out.copy_from_slice(chunk);
+        })?;
         copied = next;
         va = va
             .checked_add(n as u64)

@@ -2466,9 +2466,15 @@ pub fn exec_process(
     // entries will be flushed by the new mappings (or by the return to
     // ring 3 which will touch new pages).
     serial_println!("[exec] Tearing down old address space for process {}", pid);
+    // Not under a `process_vm_readv`/`writev` walking these tables from
+    // another process: this frees them while keeping the PML4, which that
+    // caller's pin does not prevent. Waits out the pins there are, and gives
+    // out no new one until the space is empty (`pcb::ExecTeardown`).
+    let teardown = pcb::begin_exec_teardown(pml4_phys);
     unsafe {
         page_table::clear_user_address_space(pml4_phys);
     }
+    drop(teardown);
 
     // The page tables and frames are gone; drop the matching VMA metadata
     // (and release any file-backed mapping references) so the new image

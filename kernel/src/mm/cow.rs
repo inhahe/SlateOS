@@ -736,6 +736,15 @@ pub unsafe fn clone_address_space_cow(parent_pml4: u64) -> KernelResult<u64> {
         return Err(e);
     }
 
+    // The parent's writable pages are copy-on-write now and shared with the
+    // child. A `process_vm_writev` into one of them that passed its checks
+    // before the change is still writing the frame both now hold; it must end
+    // before the child can run and copy that frame, or the child keeps half
+    // of the write. One that checks after the change finds the page
+    // read-only and breaks the share first (`mm::frame`'s remote-copy
+    // windows).
+    frame::wait_for_open_remote_copies();
+
     serial_println!(
         "[cow] Cloned address space: parent={:#x} -> child={:#x}",
         parent_pml4,

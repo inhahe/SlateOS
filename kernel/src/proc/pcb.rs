@@ -6812,19 +6812,33 @@ fn destroy_process_resources(
 /// reads atomics only).
 static DEFERRED_ADDRESS_SPACES: Mutex<Vec<(u64, Vec<TaskId>)>> = Mutex::new(Vec::new());
 
-/// The pins on process address spaces, by PML4, with how many each has
-/// ([`AsPin`]). A free waits until its count is gone
-/// ([`free_address_space_when_unused`], [`free_deferred_address_spaces`]).
+/// The pins on process address spaces, by PML4 ([`AsPin`]), and which are
+/// being torn down in place by exec ([`ExecTeardown`]). A free waits until a
+/// space's pins are gone ([`free_address_space_when_unused`],
+/// [`free_deferred_address_spaces`]); an entry exists only while a space has
+/// pins or a teardown.
 ///
 /// Taken under [`PROCESS_TABLE`] by [`pin_address_space`], and alone
 /// everywhere else; nothing is taken while it is held.
-static ADDRESS_SPACE_PINS: Mutex<BTreeMap<u64, usize>> = Mutex::named(BTreeMap::new(), b"as_pins");
+static ADDRESS_SPACE_PINS: Mutex<BTreeMap<u64, PinState>> =
+    Mutex::named(BTreeMap::new(), b"as_pins");
+
+/// One address space's entry in [`ADDRESS_SPACE_PINS`].
+#[derive(Default)]
+struct PinState {
+    /// How many [`AsPin`]s hold it.
+    pins: usize,
+    /// Exec is clearing its user half in place ([`ExecTeardown`]): no pin is
+    /// given out until it is done.
+    exec_teardown: bool,
+}
 
 /// A hold on a process's address space -- Linux's `mmget_not_zero`/`mmput`.
-/// While one lives, the page tables and frames it names are not freed,
-/// whatever becomes of the process meanwhile. The process may exit, its
-/// address space be released at its zombie transition
-/// ([`release_address_space`]), or the process be reaped.
+/// While one lives, the page tables it names are not freed, whatever becomes
+/// of the process meanwhile. The process may exit, its address space be
+/// released at its zombie transition ([`release_address_space`]), or the
+/// process be reaped; and exec does not clear the user half under it
+/// ([`ExecTeardown`] waits for it).
 ///
 /// For a caller that walks *another* process's page tables after letting
 /// go of the process table: `process_vm_readv`/`writev`. Until 2026-10-02
@@ -6832,9 +6846,11 @@ static ADDRESS_SPACE_PINS: Mutex<BTreeMap<u64, usize>> = Mutex::named(BTreeMap::
 /// the tables under its walk. A process's own threads need no pin: an
 /// address space is not freed while a thread of it can still run on it.
 ///
-/// It keeps the tables, not what is mapped in them. The process may still
-/// unmap a page while the holder reads it
-/// (`known-issues` `TD-A-CROSS-PROCESS-COPY-RACES-THE-TARGETS-OWN-UNMAP`).
+/// It keeps the tables, not what is mapped in them: the process may still
+/// unmap a page while the holder reads it. The frame under a page the holder
+/// touches is kept by `mm::frame`'s remote-copy windows instead
+/// (`mm::user::copy_from_user_as`), since 2026-10-03 (known-issues
+/// `TD-A-CROSS-PROCESS-COPY-RACES-THE-TARGETS-OWN-UNMAP`).
 #[must_use]
 pub struct AsPin {
     pml4: u64,
@@ -6853,15 +6869,18 @@ impl Drop for AsPin {
         let last = {
             let mut pins = ADDRESS_SPACE_PINS.lock();
             match pins.get_mut(&self.pml4) {
-                Some(count) if *count > 1 => {
-                    *count = count.saturating_sub(1);
+                Some(state) if state.pins > 1 => {
+                    state.pins = state.pins.saturating_sub(1);
                     false
                 }
-                Some(_) => {
-                    pins.remove(&self.pml4);
+                Some(state) => {
+                    state.pins = 0;
+                    if !state.exec_teardown {
+                        pins.remove(&self.pml4);
+                    }
                     true
                 }
-                // Every pin is counted before it exists (`pin_address_space`).
+                // Every pin is counted before it exists (`try_pin`).
                 None => false,
             }
         };
@@ -6876,20 +6895,106 @@ impl Drop for AsPin {
 /// Pin `pid`'s address space ([`AsPin`]). `None` for a process that is not
 /// in the table, or that has no address space: never given one, or
 /// released at its exit ([`release_address_space`]).
+///
+/// While exec is clearing the space in place ([`ExecTeardown`]) this waits,
+/// yielding, until it is done: the tables are being freed, and the pin that
+/// would keep them is what the teardown waited out before it began. The
+/// holder then sees the new image.
 pub fn pin_address_space(pid: ProcessId) -> Option<AsPin> {
+    loop {
+        match try_pin(pid) {
+            PinAttempt::Pinned(pin) => return Some(pin),
+            PinAttempt::NoAddressSpace => return None,
+            PinAttempt::ExecTeardown => crate::sched::yield_now(),
+        }
+    }
+}
+
+/// What one attempt at [`pin_address_space`] found.
+enum PinAttempt {
+    Pinned(AsPin),
+    NoAddressSpace,
+    ExecTeardown,
+}
+
+/// One attempt at [`pin_address_space`], which does not wait.
+fn try_pin(pid: ProcessId) -> PinAttempt {
     let table = PROCESS_TABLE.lock();
-    let pml4 = table.get(&pid).map(|p| p.pml4_phys).filter(|&p| p != 0)?;
+    let Some(pml4) = table.get(&pid).map(|p| p.pml4_phys).filter(|&p| p != 0) else {
+        return PinAttempt::NoAddressSpace;
+    };
     // Counted before the table's lock is let go: a release or a reap takes
     // the PML4 out of the table under that lock, and finds this pin after.
     let mut pins = ADDRESS_SPACE_PINS.lock();
-    let count = pins.entry(pml4).or_insert(0);
-    *count = count.saturating_add(1);
-    Some(AsPin { pml4 })
+    let state = pins.entry(pml4).or_default();
+    if state.exec_teardown {
+        return PinAttempt::ExecTeardown;
+    }
+    state.pins = state.pins.saturating_add(1);
+    PinAttempt::Pinned(AsPin { pml4 })
 }
 
-/// Whether any [`AsPin`] holds `pml4`.
+/// Whether any [`AsPin`] holds `pml4`, or exec is tearing it down.
 fn address_space_pinned(pml4: u64) -> bool {
-    ADDRESS_SPACE_PINS.lock().contains_key(&pml4)
+    ADDRESS_SPACE_PINS
+        .lock()
+        .get(&pml4)
+        .is_some_and(|state| state.pins > 0 || state.exec_teardown)
+}
+
+/// Exec's hold on its process's address space while it clears the user half
+/// in place (`proc::spawn::exec_process`): begun only once no [`AsPin`] holds
+/// the space ([`begin_exec_teardown`]), and no pin is given out while it
+/// lives. Dropped once the old image's tables are gone and the space is
+/// empty, which is a state a walker can meet safely.
+///
+/// A pin keeps the tables from being freed, but exec frees them without
+/// freeing the address space: it keeps the PML4 and clears everything under
+/// it. Until 2026-10-03 nothing kept that from happening under a
+/// `process_vm_readv` walking the same tables (known-issues
+/// `TD-A-CROSS-PROCESS-COPY-RACES-THE-TARGETS-OWN-UNMAP`). Linux gives the
+/// new image a new mm instead, and the old one goes when its last
+/// `mmget` does.
+#[must_use]
+pub struct ExecTeardown {
+    pml4: u64,
+}
+
+impl Drop for ExecTeardown {
+    fn drop(&mut self) {
+        let mut pins = ADDRESS_SPACE_PINS.lock();
+        if let Some(state) = pins.get_mut(&self.pml4) {
+            state.exec_teardown = false;
+            if state.pins == 0 {
+                pins.remove(&self.pml4);
+            }
+        }
+    }
+}
+
+/// Begin exec's in-place teardown of the address space at `pml4`
+/// ([`ExecTeardown`]): wait, yielding, until no pin holds it, then hold it
+/// against new ones. A pin lasts one `process_vm_readv`/`writev` call, so
+/// the wait is that long at most.
+pub fn begin_exec_teardown(pml4: u64) -> ExecTeardown {
+    loop {
+        if let Some(teardown) = try_begin_exec_teardown(pml4) {
+            return teardown;
+        }
+        crate::sched::yield_now();
+    }
+}
+
+/// One attempt at [`begin_exec_teardown`]: `None` while a pin holds `pml4`,
+/// or another teardown does.
+fn try_begin_exec_teardown(pml4: u64) -> Option<ExecTeardown> {
+    let mut pins = ADDRESS_SPACE_PINS.lock();
+    let state = pins.entry(pml4).or_default();
+    if state.pins > 0 || state.exec_teardown {
+        return None;
+    }
+    state.exec_teardown = true;
+    Some(ExecTeardown { pml4 })
 }
 
 /// Release `pid`'s address space as it becomes a zombie -- Linux's
@@ -8237,6 +8342,7 @@ pub fn self_test() -> KernelResult<()> {
     test_may_inspect()?;
     test_deferred_address_space()?;
     test_address_space_pin_and_release()?;
+    test_exec_teardown_holds_out_pins()?;
     test_cpu_time_accounting()?;
     test_io_accounting()?;
     test_job_control_state()?;
@@ -10288,6 +10394,72 @@ fn test_address_space_pin_and_release() -> KernelResult<()> {
     serial_println!(
         "[proc]   address space released at a zombie's exit, and a pin holds it until it \
          goes: OK"
+    );
+    Ok(())
+}
+
+/// Exec's in-place teardown waits for the pins on its address space and
+/// gives out no new one while it lasts ([`ExecTeardown`]); while it lasts the
+/// space counts as held for a free, and a second teardown is refused. Once
+/// it ends, pins are given out again and the space's entry is gone.
+fn test_exec_teardown_holds_out_pins() -> KernelResult<()> {
+    let pid = create("exec-teardown-test", 0);
+    let Some(pml4) = get_pml4(pid).filter(|&p| p != 0) else {
+        serial_println!("[proc]   FAIL: exec teardown: the test process got no address space");
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    };
+
+    // A pin held: the teardown cannot begin.
+    let pin = match try_pin(pid) {
+        PinAttempt::Pinned(pin) => Some(pin),
+        PinAttempt::NoAddressSpace | PinAttempt::ExecTeardown => None,
+    };
+    let pinned_first = pin.is_some();
+    let waits_for_pin = try_begin_exec_teardown(pml4).is_none();
+    drop(pin);
+
+    // No pin: it begins, and holds pins out while it lives.
+    let teardown = try_begin_exec_teardown(pml4);
+    let began = teardown.is_some();
+    let holds_out = matches!(try_pin(pid), PinAttempt::ExecTeardown);
+    let counted = address_space_pinned(pml4);
+    let one_at_a_time = try_begin_exec_teardown(pml4).is_none();
+    drop(teardown);
+
+    // Ended: a pin is given out again, and when it goes the entry goes too.
+    let pinnable = matches!(try_pin(pid), PinAttempt::Pinned(_));
+    let entry_gone = !ADDRESS_SPACE_PINS.lock().contains_key(&pml4);
+    destroy(pid);
+
+    let all = [
+        pinned_first,
+        waits_for_pin,
+        began,
+        holds_out,
+        counted,
+        one_at_a_time,
+        pinnable,
+        entry_gone,
+    ];
+    if all.contains(&false) {
+        serial_println!(
+            "[proc]   FAIL: exec teardown: pinned {} waits for the pin {} began {} holds pins \
+             out {} counted as held {} one at a time {} pinnable after {} entry gone {}",
+            pinned_first,
+            waits_for_pin,
+            began,
+            holds_out,
+            counted,
+            one_at_a_time,
+            pinnable,
+            entry_gone
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[proc]   exec's in-place teardown waits for the pins on its space and gives out no \
+         new one until it ends: OK"
     );
     Ok(())
 }

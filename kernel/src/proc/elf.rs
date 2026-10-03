@@ -2278,8 +2278,8 @@ pub fn build_linux_slate_channel_test_elf() -> alloc::vec::Vec<u8> {
 ///   one sent; recvmmsg(..., 2, MSG_WAITFORONE); 1, else 0xF7
 ///   sendmmsg(d2, NULL, 2)                     ; -EFAULT, else 0xF8
 ///   sendmmsg with the 2nd entry's bytes at 0x10 ; 1 (the first sent), else 0xF9
-///   d = open("/", O_DIRECTORY); sendmmsg(d, ...), getpeername(d, ...)
-///                                             ; -ENOTSOCK both, else 0xFA
+///   d = open("/", O_DIRECTORY)               ; a descriptor, else 0xFE
+///   sendmmsg(d, ...), getpeername(d, ...)     ; -ENOTSOCK both, else 0xFA
 ///   setsockopt(d1, SO_RCVTIMEO, {0, 50000})   ; 0, else 0xFB
 ///   recvfrom(d1, ...) on nothing, blocking    ; -EAGAIN after 50 ms, else 0xFC
 ///   setsockopt(d1, SO_RCVTIMEO, {0, 1000000}) ; -EDOM, else 0xFD
@@ -2908,7 +2908,8 @@ pub fn build_linux_unix_socket_test_elf() -> alloc::vec::Vec<u8> {
     mov_edx_imm(&mut code, 0);
     syscall(&mut code, OPEN);
     test_rax(&mut code);
-    jcc_fail(&mut code, &mut fail_jumps, JS, 0xFA);
+    // Its own code: a refused open is the harness's fault, not the probes'.
+    jcc_fail(&mut code, &mut fail_jumps, JS, 0xFE);
     store_eax(&mut code, FD_DIR);
     mov_edi_mem(&mut code, FD_DIR);
     lea_rsi(&mut code, MMSG);

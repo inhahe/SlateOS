@@ -22800,11 +22800,16 @@ pub fn self_test_linux_unix_sockets() -> KernelResult<()> {
     let exe_elf = elf::build_linux_unix_socket_test_elf();
     let argv: &[&[u8]] = &[b"spawn-test-unix-sockets"];
     let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // A File READ capability, for the one plain file the program opens: `/`,
+    // the descriptor that is not a socket. Spawned with none, its open was
+    // refused and the run ended at 0xFA without reaching the ENOTSOCK probes it
+    // was there for (rq42, 2026-10-02).
+    let caps = [(ResourceType::File, 0u64, Rights::READ)];
     let options = SpawnOptions {
         name: "spawn-test-unix-sockets",
         parent: 0,
         priority: DEFAULT_PRIORITY,
-        capabilities: &[],
+        capabilities: &caps,
         fd_map: &[],
         argv,
         envp,
@@ -22853,7 +22858,8 @@ pub fn self_test_linux_unix_sockets() -> KernelResult<()> {
              msg_lens, recvmmsg, what it received, MSG_DONTWAIT not EAGAIN, MSG_WAITFORONE, a \
              NULL vector not EFAULT, a bad second entry not answered 1, a directory not \
              ENOTSOCK; 0xFB-0xFD SO_RCVTIMEO: setsockopt, a blocking receive not EAGAIN when \
-             it ran out, a whole second of microseconds not EDOM)",
+             it ran out, a whole second of microseconds not EDOM; 0xFE the directory's own \
+             open)",
             exit_code,
             OK_EXIT
         );

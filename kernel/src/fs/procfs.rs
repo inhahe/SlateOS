@@ -2871,11 +2871,10 @@ pub(crate) fn ctty_stat_fields(proc_id: u64) -> (u32, i64) {
     let Some(tty) = crate::proc::pcb::ctty_tty_of(proc_id) else {
         return (0, -1);
     };
-    let (major, minor) = crate::tty::linux_dev(tty);
     let tpgid = crate::proc::pcb::ctty_fg_pgrp(tty)
         .and_then(|g| i64::try_from(g).ok())
         .unwrap_or(-1);
-    (crate::tty::new_encode_dev(major, minor), tpgid)
+    (crate::tty::linux_dev(tty).linux_encode(), tpgid)
 }
 
 /// `/proc/<pid>/task/<tid>/stat` — per-thread task statistics.
@@ -18789,7 +18788,8 @@ fn self_test_ctty_stat_fields() -> KernelResult<()> {
     pcb::destroy(pid);
 
     let want = (
-        crate::tty::new_encode_dev(crate::tty::LINUX_PTS_MAJOR, id),
+        crate::fs::devnum::DevNum::new(crate::fs::devnum::UNIX98_PTY_SLAVE_MAJOR, id)
+            .linux_encode(),
         pgid.unwrap_or(-1),
     );
     if !acquired || pgid.is_none() || held != want || released != (0, -1) {

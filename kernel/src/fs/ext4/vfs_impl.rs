@@ -155,6 +155,7 @@ impl Ext4Fs {
             entry_type,
             ino: u64::from(ino),
             dev: 0,
+            rdev: inode_rdev(&inode),
             created_ns,
             modified_ns,
             accessed_ns,
@@ -288,8 +289,12 @@ impl FileSystem for Ext4Fs {
                 self.read_symlink_target(ino, &inode)
             }
             file_type::S_IFDIR => Err(KernelError::IsADirectory),
-            // A socket's node has nothing behind it to read.
-            file_type::S_IFSOCK => Err(KernelError::NoSuchDeviceOrAddress),
+            // A socket's node has nothing behind it to read, and nor has a
+            // device node stored here: no driver answers for its number (Linux
+            // says ENXIO too).
+            file_type::S_IFSOCK | file_type::S_IFCHR | file_type::S_IFBLK => {
+                Err(KernelError::NoSuchDeviceOrAddress)
+            }
             _ => Err(KernelError::NotSupported),
         }
     }
@@ -2207,7 +2212,9 @@ fn dir_type_to_entry_type(ftype: u8) -> EntryType {
         dir_type::REG_FILE => EntryType::File,
         dir_type::SYMLINK => EntryType::Symlink,
         dir_type::SOCK => EntryType::Socket,
-        // Fallback for block/char/fifo: known-issues
+        dir_type::CHRDEV => EntryType::CharDevice,
+        dir_type::BLKDEV => EntryType::BlockDevice,
+        // Fallback for a FIFO, which the VFS has no type for yet: known-issues
         // A-NO-NAMED-PIPES-AND-EXT4-DEVICE-NODES-READ-AS-FILES.
         _ => EntryType::File,
     }
@@ -2220,8 +2227,36 @@ fn mode_to_entry_type(mode: u16) -> EntryType {
         file_type::S_IFREG => EntryType::File,
         file_type::S_IFLNK => EntryType::Symlink,
         file_type::S_IFSOCK => EntryType::Socket,
+        // Device nodes are devices: until 2026-10-03 they read as regular
+        // files, so `[ -c ]` and `ls -l` were wrong for any on an ext4
+        // volume. (A FIFO still reads as a file: the VFS has no type for
+        // one yet.)
+        file_type::S_IFCHR => EntryType::CharDevice,
+        file_type::S_IFBLK => EntryType::BlockDevice,
         _ => EntryType::File,
     }
+}
+
+/// The device a character or block device inode names, as Linux's ext4
+/// stores it (`ext4_iget`): the old 8:8 encoding in `i_block[0]` when that
+/// is non-zero, else the new encoding in `i_block[1]` (`new_decode_dev`:
+/// major in bits 8-19, minor in bits 0-7 and 20-31). [`DevNum::NONE`] for
+/// any other inode, whose `i_block` holds block pointers or an extent tree.
+fn inode_rdev(inode: &super::ondisk::Ext4Inode) -> crate::fs::devnum::DevNum {
+    use crate::fs::devnum::DevNum;
+    let kind = inode.i_mode & file_type::S_IFMT;
+    if kind != file_type::S_IFCHR && kind != file_type::S_IFBLK {
+        return DevNum::NONE;
+    }
+    let old = inode.i_block[0];
+    if old != 0 {
+        return DevNum::new((old >> 8) & 0xff, old & 0xff);
+    }
+    let new = inode.i_block[1];
+    DevNum::new(
+        (new & 0xf_ff00) >> 8,
+        (new & 0xff) | ((new >> 12) & 0xf_ff00),
+    )
 }
 
 /// The directory-entry type byte for an inode of type `mode_type`

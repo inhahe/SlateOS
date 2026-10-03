@@ -1,6 +1,6 @@
 ### A-NO-NAMED-PIPES-AND-EXT4-DEVICE-NODES-READ-AS-FILES -- 2026-10-02 -- OPEN (lane A)
 
-**Status:** OPEN (lane A).
+**Status:** OPEN (lane A) -- the ext4 device-node half fixed on lane-a-wip 2026-10-03, awaiting a boot on main: character and block device inodes read as devices with their numbers, and refuse reads with ENXIO. FIFOs remain.
 
 **In short:** two kinds of special file are missing or misreported.
 - **Named pipes (FIFOs) do not exist.** `mkfifo` and `mknod(path, S_IFIFO)`

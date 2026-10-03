@@ -32,6 +32,7 @@
 //! │   │       └── type                  Usable RAM, Reserved, ACPI NVS, ...
 //! │   ├── block/                        One per registered block device
 //! │   │   └── <name>/                   e.g. vda; absent if not registered
+//! │   │       ├── dev                   Device number, major:minor (read-only)
 //! │   │       ├── sector_count          Capacity in sectors (read-only)
 //! │   │       ├── sector_size           Bytes per sector (read-only)
 //! │   │       └── read_only             1 if write-protected (read-only)
@@ -230,7 +231,7 @@ const MEMORY_FILES: &[&str] = &["total_kb", "available_kb"];
 /// `sector_size` would be wrong on any device that is not 512 -- and every
 /// device here is 512 today, which is the condition that would let that bug
 /// ship unnoticed. Each of these three names means exactly one thing.
-const BLOCK_FILES: &[&str] = &["sector_count", "sector_size", "read_only"];
+const BLOCK_FILES: &[&str] = &["dev", "sector_count", "sector_size", "read_only"];
 
 /// Per-region files under `/sys/devices/memmap/<N>/`.
 ///
@@ -842,17 +843,21 @@ fn gen_block_file(dev: &str, name: &str) -> KernelResult<Vec<u8>> {
         .iter()
         .find(|d| d.name == dev)
         .ok_or(KernelError::NotFound)?;
-    let v = match name {
-        "sector_count" => info.sector_count,
-        "sector_size" => u64::from(info.sector_size),
-        "read_only" => u64::from(info.read_only),
+    let text = match name {
+        // The number `stat` reports for `/dev/<name>` (`fs::devnum`), in
+        // Linux's spelling; `0:0` for a device no numbering describes.
+        "dev" => {
+            let n = crate::fs::devnum::for_block(dev);
+            format!("{}:{}", n.major, n.minor)
+        }
+        "sector_count" => format!("{}", info.sector_count),
+        "sector_size" => format!("{}", info.sector_size),
+        "read_only" => format!("{}", u8::from(info.read_only)),
         _ => return Err(KernelError::NotFound),
     };
-    Ok(format!(
-        "{v}
-"
-    )
-    .into_bytes())
+    let mut out = text.into_bytes();
+    out.push(b'\n');
+    Ok(out)
 }
 
 fn gen_cpu_topo_file(cpu_idx: usize, name: &str) -> KernelResult<Vec<u8>> {
@@ -2568,6 +2573,20 @@ pub fn self_test() -> KernelResult<()> {
                 if got_s.parse::<u64>() != Ok(expect) {
                     serial_println!(
                         "[sysfs]   FAIL: {path} reads {got_s:?}, registry says {expect}"
+                    );
+                    return Err(KernelError::IoError);
+                }
+            }
+            // `dev` is the number `stat` gives `/dev/<name>`.
+            let dev_path = format!("/devices/block/{}/dev", d.name);
+            let n = crate::fs::devnum::for_block(&d.name);
+            let want_dev = format!("{}:{}", n.major, n.minor);
+            match fs.read_file(Path::new(&dev_path)) {
+                Ok(got) if core::str::from_utf8(&got).unwrap_or("").trim() == want_dev => {}
+                other => {
+                    serial_println!(
+                        "[sysfs]   FAIL: {dev_path} reads {:?}, want {want_dev}",
+                        other
                     );
                     return Err(KernelError::IoError);
                 }

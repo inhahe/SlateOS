@@ -103,6 +103,7 @@ pub mod detailcols;
 pub mod devfreq;
 pub mod devfs;
 pub mod devicemgr;
+pub mod devnum;
 pub mod devpair;
 pub mod dictation;
 pub mod directio;

@@ -424,6 +424,7 @@ impl MemFsNode {
             entry_type: self.entry_type(),
             ino: self.ino,
             dev: 0,
+            rdev: crate::fs::devnum::DevNum::NONE,
             created_ns: self.created_ns,
             modified_ns: self.modified_ns,
             accessed_ns: self.accessed_ns,

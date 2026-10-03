@@ -3346,6 +3346,7 @@ impl FileSystem for FatFs {
                     // (cluster 0) report 0 = "not available".
                     ino: u64::from(e.first_cluster),
                     dev: 0,
+                    rdev: crate::fs::devnum::DevNum::NONE,
                     created_ns,
                     modified_ns,
                     accessed_ns,

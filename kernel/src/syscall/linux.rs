@@ -20695,7 +20695,7 @@ fn fill_stat_from_meta(buf: &mut [u8; STAT_SIZE], meta: &crate::fs::FileMeta) {
     put_u32(buf, 28, meta.uid); // st_uid
     put_u32(buf, 32, meta.gid); // st_gid
     // 36..=39: __pad0
-    put_u64(buf, 40, 0); // st_rdev
+    put_u64(buf, 40, u64::from(meta.rdev.linux_encode())); // st_rdev
     put_u64(buf, 48, meta.size); // st_size
     put_u64(buf, 56, 16 * 1024); // st_blksize
     put_u64(buf, 64, meta.blocks); // st_blocks (512-byte units)
@@ -20764,7 +20764,8 @@ fn fill_statx_from_meta(buf: &mut [u8; STATX_SIZE], meta: &crate::fs::FileMeta) 
     put_u32(buf, 104, to_nsec(ctime));
     put_i64(buf, 112, to_sec(mtime)); // stx_mtime
     put_u32(buf, 120, to_nsec(mtime));
-    // 128..136: stx_rdev_major/minor, 0 (no device nodes here).
+    put_u32(buf, 128, meta.rdev.major); // stx_rdev_major
+    put_u32(buf, 132, meta.rdev.minor); // stx_rdev_minor
     put_u32(buf, 136, 0); // stx_dev_major: anonymous filesystems are major 0
     put_u32(buf, 140, meta.dev); // stx_dev_minor
 }
@@ -20807,6 +20808,54 @@ fn stat_meta_for_path(path: &Path, follow: bool) -> Result<crate::fs::FileMeta, 
             linux_err(linux_errno_for(other))
         }
     })
+}
+
+/// The device a non-file descriptor stands for, as `fstat`'s `st_rdev`
+/// reports it: the number `stat` gives the node it was opened as
+/// ([`crate::fs::devfs`]'s table, Linux's numbering). libdrm checks this --
+/// `drmGetDevice2` refuses an fd whose major is not 226 -- so a DRM fd must
+/// carry it. [`DevNum::NONE`](crate::fs::devnum::DevNum::NONE) for an object
+/// that is no device (pipes, sockets, the anonymous-inode family).
+fn rdev_for_fd(entry: &crate::proc::linux_fd::FdEntry) -> crate::fs::devnum::DevNum {
+    use crate::fs::devnum::{ALSA_MAJOR, DRM_MAJOR, DevNum, INPUT_MAJOR};
+    use crate::proc::linux_fd::HandleKind;
+    match entry.kind {
+        HandleKind::Console => crate::tty::linux_dev(crate::tty::CONSOLE),
+        HandleKind::DrmCard => {
+            let h = crate::drm::card_fd::DrmCardHandle::from_raw(entry.raw_handle);
+            let card = crate::drm::card_fd::device(h)
+                .and_then(|d| u32::try_from(d).ok())
+                .unwrap_or(0);
+            // A render node's minors start at 128, as `renderD128`'s do.
+            let base: u32 = if crate::drm::card_fd::is_render_node(h) == Some(true) {
+                128
+            } else {
+                0
+            };
+            DevNum::new(DRM_MAJOR, base.saturating_add(card.min(63)))
+        }
+        HandleKind::AlsaPcm => {
+            let h = crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(entry.raw_handle);
+            // Card 0, device 0: playback at static minor 16, capture at 24.
+            if crate::ipc::alsa_pcm::is_capture(h) == Some(true) {
+                DevNum::new(ALSA_MAJOR, 24)
+            } else {
+                DevNum::new(ALSA_MAJOR, 16)
+            }
+        }
+        HandleKind::AlsaControl => DevNum::new(ALSA_MAJOR, 0),
+        HandleKind::Evdev => {
+            let h = crate::evdev_fd::EvdevHandle::from_raw(entry.raw_handle);
+            // event0 is the keyboard and event1 the mouse, as `try_open_evdev`
+            // and devfs's table have them.
+            match crate::evdev_fd::device(h) {
+                Some(crate::evdev::InputDevice::Keyboard) => DevNum::new(INPUT_MAJOR, 64),
+                Some(crate::evdev::InputDevice::Mouse) => DevNum::new(INPUT_MAJOR, 65),
+                None => DevNum::NONE,
+            }
+        }
+        _ => DevNum::NONE,
+    }
 }
 
 /// Fill a 144-byte struct stat for the given Linux fd-table entry.
@@ -20919,7 +20968,7 @@ fn fill_stat_for_fd(buf: &mut [u8; STAT_SIZE], entry: &crate::proc::linux_fd::Fd
     put_u32(buf, 28, 0); // st_uid
     put_u32(buf, 32, 0); // st_gid
     // 36..=39: __pad0 (already zero)
-    put_u64(buf, 40, 0); // st_rdev
+    put_u64(buf, 40, u64::from(rdev_for_fd(entry).linux_encode())); // st_rdev
     put_u64(buf, 48, st_size); // st_size
     put_u64(buf, 56, blksize); // st_blksize
     put_u64(buf, 64, 0); // st_blocks
@@ -21311,8 +21360,11 @@ fn fill_statx_for_fd(buf: &mut [u8; STATX_SIZE], entry: &crate::proc::linux_fd::
     put_u32(buf, 104, now_nsec);
     put_i64(buf, 112, now_sec);
     put_u32(buf, 120, now_nsec);
-    // Remaining fields (rdev/dev/mnt_id/dio/subvol/atomic/spare3)
-    // stay zero — we have no device-major/minor or mount table.
+    let rdev = rdev_for_fd(entry);
+    put_u32(buf, 128, rdev.major); // stx_rdev_major
+    put_u32(buf, 132, rdev.minor); // stx_rdev_minor
+    // Remaining fields (dev/mnt_id/dio/subvol/atomic/spare3) stay zero --
+    // these objects live on no filesystem.
 }
 
 /// `statx(dirfd, path, flags, mask, statxbuf)`.

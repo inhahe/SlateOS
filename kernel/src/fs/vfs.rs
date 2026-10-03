@@ -328,6 +328,10 @@ pub struct FileMeta {
     /// names of one file from two files. Until 2026-10-01 every file reported
     /// 0, so files on two filesystems that shared an inode number were one.
     pub dev: u32,
+    /// The device a character or block device node names (`st_rdev`), in
+    /// Linux's numbering ([`crate::fs::devnum`]); [`DevNum::NONE`] for
+    /// anything that is not a device node.
+    pub rdev: crate::fs::devnum::DevNum,
 
     // --- Timestamps (nanoseconds since the Unix epoch, wall-clock;
     //     0 = not available). These are absolute wall-clock times, not
@@ -410,6 +414,7 @@ impl FileMeta {
             entry_type,
             ino: 0,
             dev: 0,
+            rdev: crate::fs::devnum::DevNum::NONE,
             created_ns: 0,
             modified_ns: 0,
             accessed_ns: 0,
@@ -433,6 +438,7 @@ impl FileMeta {
             entry_type,
             ino: 0,
             dev: 0,
+            rdev: crate::fs::devnum::DevNum::NONE,
             created_ns: now,
             modified_ns: now,
             accessed_ns: now,

@@ -107,6 +107,7 @@ use alloc::vec::Vec;
 use alloc::collections::BTreeMap;
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::devnum::{ALSA_MAJOR, DRM_MAJOR, DevNum, INPUT_MAJOR, MEM_MAJOR, TTYAUX_MAJOR};
 use crate::fs::path::{Path, PathBuf};
 use crate::fs::vfs::{
     DirEntry, EntryType, FileAttr, FileMeta, FileSystem, FsInfo, Timestamp, metadata_now_ns,
@@ -208,6 +209,11 @@ struct DevNode {
     entry_type: EntryType,
     /// Unix permission bits.
     mode: u16,
+    /// The device number `stat` reports as `st_rdev`: Linux's for the same
+    /// node ([`crate::fs::devnum`]); [`DevNum::NONE`] for a file or a
+    /// directory, and for the three `std*` nodes, which stand for whatever a
+    /// process's descriptor 0, 1 or 2 is.
+    rdev: DevNum,
 }
 
 impl DevNode {
@@ -217,6 +223,7 @@ impl DevNode {
             path,
             entry_type: EntryType::File,
             mode,
+            rdev: DevNum::NONE,
         }
     }
 
@@ -226,6 +233,7 @@ impl DevNode {
             path,
             entry_type: EntryType::Directory,
             mode: 0o755,
+            rdev: DevNum::NONE,
         }
     }
 
@@ -245,11 +253,12 @@ impl DevNode {
     /// Unix permissions worth matching — `/dev/null` is `crw-rw-rw-` and
     /// `/dev/console` is `crw-------`, where [`Self::chr`]'s nodes are
     /// uniformly `0o660`.
-    const fn chr_served(path: &'static str, mode: u16) -> Self {
+    const fn chr_served(path: &'static str, mode: u16, rdev: DevNum) -> Self {
         Self {
             path,
             entry_type: EntryType::CharDevice,
             mode,
+            rdev,
         }
     }
 
@@ -261,11 +270,12 @@ impl DevNode {
     ///
     /// See [`Self::chr_served`] for the nodes that are character devices *and*
     /// served from here.
-    const fn chr(path: &'static str) -> Self {
+    const fn chr(path: &'static str, rdev: DevNum) -> Self {
         Self {
             path,
             entry_type: EntryType::CharDevice,
             mode: 0o660,
+            rdev,
         }
     }
 
@@ -307,20 +317,22 @@ const DEV_NODES: &[DevNode] = &[
     // That failure is quiet: the node behaves correctly when *used*, so only
     // code that asks what it *is* gets a wrong answer, and such code usually
     // responds by silently choosing a different strategy rather than erroring.
-    DevNode::chr_served("null", 0o666),
-    DevNode::chr_served("zero", 0o666),
-    DevNode::chr_served("full", 0o666),
-    DevNode::chr_served("random", 0o666),
-    DevNode::chr_served("urandom", 0o666),
-    DevNode::chr_served("console", 0o600),
-    DevNode::chr_served("tty", 0o666),
+    DevNode::chr_served("null", 0o666, DevNum::new(MEM_MAJOR, 3)),
+    DevNode::chr_served("zero", 0o666, DevNum::new(MEM_MAJOR, 5)),
+    DevNode::chr_served("full", 0o666, DevNum::new(MEM_MAJOR, 7)),
+    DevNode::chr_served("random", 0o666, DevNum::new(MEM_MAJOR, 8)),
+    DevNode::chr_served("urandom", 0o666, DevNum::new(MEM_MAJOR, 9)),
+    // The console's number is the one a session on it reports as its
+    // terminal (`tty::linux_dev`), which is what `w` compares.
+    DevNode::chr_served("console", 0o600, crate::tty::linux_dev(crate::tty::CONSOLE)),
+    DevNode::chr_served("tty", 0o666, DevNum::new(TTYAUX_MAJOR, 0)),
     // Linux makes these three symlinks to /proc/self/fd/N. We have no such
     // link, and of the two types actually available here `chr` is the closer
     // answer: what they resolve to is always a character device.
-    DevNode::chr_served("stdin", 0o666),
-    DevNode::chr_served("stdout", 0o666),
-    DevNode::chr_served("stderr", 0o666),
-    DevNode::chr_served("kmsg", 0o666),
+    DevNode::chr_served("stdin", 0o666, DevNum::NONE),
+    DevNode::chr_served("stdout", 0o666, DevNum::NONE),
+    DevNode::chr_served("stderr", 0o666, DevNum::NONE),
+    DevNode::chr_served("kmsg", 0o666, DevNum::new(MEM_MAJOR, 11)),
     // The one node here that genuinely is a regular file: `uptime` is text,
     // and nothing about it is device-like.  Read-only -- `write_file` refuses
     // it with NotSupported, so 0o444 is what the mode bits should have said
@@ -331,15 +343,15 @@ const DEV_NODES: &[DevNode] = &[
     DevNode::dir("dri"),
     DevNode::dir("snd"),
     // Input devices — `evdev_ioctl` / `evdev_read` in the syscall layer.
-    DevNode::chr("input/event0"),
-    DevNode::chr("input/event1"),
+    DevNode::chr("input/event0", DevNum::new(INPUT_MAJOR, 64)),
+    DevNode::chr("input/event1", DevNum::new(INPUT_MAJOR, 65)),
     // DRM card and render node.
-    DevNode::chr("dri/card0"),
-    DevNode::chr("dri/renderD128"),
-    // ALSA control and PCM substreams.
-    DevNode::chr("snd/controlC0"),
-    DevNode::chr("snd/pcmC0D0p"),
-    DevNode::chr("snd/pcmC0D0c"),
+    DevNode::chr("dri/card0", DevNum::new(DRM_MAJOR, 0)),
+    DevNode::chr("dri/renderD128", DevNum::new(DRM_MAJOR, 128)),
+    // ALSA control and PCM substreams, at their static minors.
+    DevNode::chr("snd/controlC0", DevNum::new(ALSA_MAJOR, 0)),
+    DevNode::chr("snd/pcmC0D0p", DevNum::new(ALSA_MAJOR, 16)),
+    DevNode::chr("snd/pcmC0D0c", DevNum::new(ALSA_MAJOR, 24)),
 ];
 
 /// Look up a node by its devfs-relative path.
@@ -994,6 +1006,7 @@ impl FileSystem for DevFs {
                 nlinks: 1,
                 // In 512-byte units, matching `st_blocks` everywhere else.
                 blocks: size / 512,
+                rdev: crate::fs::devnum::for_block(rel),
                 ..FileMeta::minimal(EntryType::BlockDevice, size)
             });
         }
@@ -1012,6 +1025,7 @@ impl FileSystem for DevFs {
             // other node is a single unlinked-from-nowhere device: one link.
             nlinks: 1,
             blocks: 0,
+            rdev: node.rdev,
             ..FileMeta::minimal(node.entry_type, 0)
         })
     }
@@ -1329,6 +1343,54 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
     }
+    // Device numbers: Linux's, as `stat` reports them for the same nodes
+    // (`fs::devnum`). The console's must equal what a session on it reports
+    // as its terminal (`tty::linux_dev`), which is what `w` compares.
+    let numbered: [(&str, DevNum); 7] = [
+        ("/null", DevNum::new(1, 3)),
+        ("/urandom", DevNum::new(1, 9)),
+        ("/console", crate::tty::linux_dev(crate::tty::CONSOLE)),
+        ("/tty", DevNum::new(5, 0)),
+        ("/input/event1", DevNum::new(13, 65)),
+        ("/dri/renderD128", DevNum::new(226, 128)),
+        ("/stdin", DevNum::NONE),
+    ];
+    for (name, want) in numbered {
+        let meta = fs.metadata(Path::new(name))?;
+        if meta.rdev != want {
+            serial_println!(
+                "[devfs]   FAIL: {} has device number {}:{}, expected {}:{}",
+                name,
+                meta.rdev.major,
+                meta.rdev.minor,
+                want.major,
+                want.minor
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    if crate::tty::linux_dev(crate::tty::CONSOLE) != DevNum::new(5, 1) {
+        serial_println!("[devfs]   FAIL: the console is not 5:1");
+        return Err(KernelError::InternalError);
+    }
+    // Every registered disk carries the number its name gives it.
+    for dev in crate::blkdev::list_devices() {
+        if find_node(&dev.name).is_some() {
+            continue; // shadowed by a fixed node, as find_block arranges
+        }
+        let meta = fs.metadata(Path::new(&alloc::format!("/{}", dev.name)))?;
+        if meta.rdev != crate::fs::devnum::for_block(&dev.name) {
+            serial_println!(
+                "[devfs]   FAIL: /{} has device number {}:{}, its name gives {:?}",
+                dev.name,
+                meta.rdev.major,
+                meta.rdev.minor,
+                crate::fs::devnum::for_block(&dev.name)
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    serial_println!("[devfs]   device numbers: fixed nodes and disks as Linux numbers them: OK");
     // The delegation must not have widened `read_file` past the root nodes.
     // These two refusals are why the guard tests `parent().is_empty()` rather
     // than simply `CharDevice`, and each fails differently if lost: a

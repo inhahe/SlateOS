@@ -1785,6 +1785,11 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug("ZFS", selftest::Severity::Diagnostic, || {
                 fs::zfs::self_test()
             });
+            // Device numbers: Linux's numbering for block names and the
+            // 32-bit encoding `stat` and `/proc` carry.
+            selftest::dispatch_debug("DevNum", selftest::Severity::Diagnostic, || {
+                fs::devnum::self_test()
+            });
             // devfs self-test (validates device file operations).
             selftest::dispatch_debug("DevFs", selftest::Severity::Diagnostic, || {
                 fs::devfs::self_test()

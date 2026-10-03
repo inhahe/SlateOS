@@ -1,12 +1,11 @@
 ## B-COREUTILS-A-CLOSED-STANDARD-INPUT-READS-AS-EMPTY (lane B, 2026-10-03)
 
-**Status:** OPEN (lane B). Fixed so far in `sed`, `tac`, `shuf`, and the
-`-i`/`-ok` prompts of `rm`, `cp`, `mv`, `ln` and `find`.
+**Status:** OPEN (lane B). Fixed so far in `sed`, `tac`, `shuf`, `wc`, and
+the `-i`/`-ok` prompts of `rm`, `cp`, `mv`, `ln` and `find`.
 
 **In short:** when a program is started with its standard input closed
 (`prog <&-`) and then reads it, GNU's tools report it as an error, for
-example `wc: 'standard input': read error: Bad file descriptor` with
-status 1. Many of ours instead behave as if the input were empty, with no
+example `wc: 'standard input': Bad file descriptor` with status 1. Many of ours instead behave as if the input were empty, with no
 message and status 0. A script that accidentally closes stdin gets a quiet
 wrong answer (`wc` says `0 0 0`) instead of an error.
 
@@ -41,7 +40,7 @@ temporary file with a plain open, which then took descriptor 0 and was read
 back as the input. Upstream's tools use gnulib's `*_safer` openers, which
 are `stdfd::fd_safer` here.
 
-### `wc`, measured (the next one to do)
+### `wc` (fixed 2026-10-03, boot confirmation pending)
 
 GNU coreutils 9.4, standard input closed:
 
@@ -53,15 +52,22 @@ GNU coreutils 9.4, standard input closed:
 | `wc f -` | `4 4 8 f`, `wc: -: Bad file descriptor`, `0 0 0 -`, `4 4 8 total`, `wc: -: Bad file descriptor` |
 
 So three things: the read error names the input (`'standard input'`
-unnamed, `-` as an operand); the counts line is **still printed**, as zeros;
-and the `close (STDIN_FILENO)` at the end fails too and says `-`. Replacing
-`read_stdin`'s `io::stdin().read_to_end` with a `stdfd::read(0, ..)` loop is
-not enough: tried on 2026-10-03, it got the status right but printed one
-`wc: -: ...` and no counts, because the callers of `read_stdin` (around
-`wc.rs` lines 818, 824 and 913) treat a read failure as "no counts for this
-input". They need upstream's shape (report, count what was read, carry on),
-and `main` needs the final close. `wc-diff.sh` (125 cases) passed with the
-partial change, so it has no `<&-` case yet; add these rows to it.
+unnamed, `-` as an operand); the counts line is **still printed**, with
+whatever was read; and the `close (STDIN_FILENO)` at the end fails too and
+says `-`. The same shape applies to a standard input that is open but cannot
+be read: `wc < dir` was `wc: -: Is a directory` and no row, where GNU says
+`wc: 'standard input': Is a directory` and prints `0 0 0`.
+
+Reading descriptor 0 directly was not enough on its own: `wc.rs` treated a
+read failure as "no row for this input". It now follows upstream's
+`wc_file`/`wc` split. An input that could not be opened has no row. One that
+opened is counted as far as it was read, with the read error reported before
+its row and a failed `close` after it. Descriptor 0 is closed last, after
+the total. A `--files0-from` list that cannot be read follows upstream's two
+paths as well. A list read up front fails fatally, with no reason. A streamed
+one reports `-: read error: …` after the rows of the names it did read, and
+carries on. `wc-diff.sh` gained 24 cases for all of this (`run_closed`,
+`run_from`); 19 of them failed on the old binary, and all 149 cases pass.
 
 ### Where
 
@@ -69,7 +75,7 @@ These programs contain `io::stdin()` or `stdin().lock()` (some only for a
 tty check or in a comment, so each needs looking at):
 `awk bc cat comm csplit cut date diff dircolors du ed expand factor find fold
 grep head join more nl numfmt od paste patch sed sh sort split strings tail
-tar tee test tr tsort unexpand uniq wc xargs`, and in the library
+tar tee test tr tsort unexpand uniq xargs`, and in the library
 `basenc.rs`, `digest.rs`, `filekind.rs`. An earlier `<&-` measurement found
 about 16 of them diverging from GNU. The measurement is simple to repeat: in
 WSL, run each command line with `<&-` against our binary and the reference,

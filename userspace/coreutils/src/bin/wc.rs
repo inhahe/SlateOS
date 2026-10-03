@@ -185,6 +185,13 @@ struct Inputs {
     /// The `--files0-from` source as it was written, which names the list in
     /// the zero-length-name diagnostic.
     label: Option<Vec<u8>>,
+    /// The read error that ended a *streamed* `--files0-from` list early,
+    /// ready to print: upstream's `AI_ERR_READ`, `wc: -: read error: Bad file
+    /// descriptor`. Not fatal: upstream has already counted the names it read
+    /// before the error, and reports it after their rows and before the total.
+    /// (A list read up front fails before anything is counted, and fatally --
+    /// see [`read_files0`].)
+    list_error: Option<String>,
 }
 
 /// The funnel. A diagnostic that could not be written turns the earned
@@ -721,6 +728,7 @@ fn write_row(
 
 fn run(options: &Options, source: &Source, out: &mut Stream) -> ExitCode {
     let mut failed = false;
+    let mut read_stdin = false;
 
     let inputs = match resolve(source) {
         Ok(inputs) => inputs,
@@ -753,24 +761,43 @@ fn run(options: &Options, source: &Source, out: &mut Stream) -> ExitCode {
             failed = true;
             continue;
         }
-        let c = match read_input(name.as_deref()) {
-            Ok(data) => count(&data),
-            Err(message) => {
+        // `wc_file`'s `have_read_stdin`, for the close at the end.
+        if matches!(name.as_deref(), None | Some(b"-")) {
+            read_stdin = true;
+        }
+        let (c, close_error) = match read_input(name.as_deref()) {
+            Input::Read {
+                data,
+                error,
+                close_error,
+            } => {
+                if let Some(message) = error {
+                    diag!("wc: {message}");
+                    failed = true;
+                }
+                (count(&data), close_error)
+            }
+            Input::Unopened(message) => {
                 diag!("wc: {message}");
                 failed = true;
-                // Upstream still prints a row for an input it could name but
-                // not read — a directory reads as zero counts.
-                if message.zero_row {
-                    Counts::default()
-                } else {
-                    continue;
-                }
+                continue;
             }
         };
         total.add(&c);
         if show_each {
             write_row(out, &c, options, width, name.as_deref());
         }
+        if let Some(message) = close_error {
+            diag!("wc: {message}");
+            failed = true;
+        }
+    }
+
+    // A streamed `--files0-from` list that failed part way: after the rows of
+    // the names read before the failure, and before the total.
+    if let Some(message) = &inputs.list_error {
+        diag!("wc: {message}");
+        failed = true;
     }
 
     if show_total {
@@ -780,6 +807,15 @@ fn run(options: &Options, source: &Source, out: &mut Stream) -> ExitCode {
             Some(b"total")
         };
         write_row(out, &total, options, width, label);
+    }
+
+    // Upstream's last act: `if (have_read_stdin && close (STDIN_FILENO) != 0)
+    // error (EXIT_FAILURE, errno, "-")`. With standard input closed from the
+    // start this is the second `Bad file descriptor` -- measured, `wc <&-`
+    // prints its row and then this.
+    if read_stdin && let Err(e) = stdfd::close_descriptor(0) {
+        diag!("wc: -: {}", strerror(&e));
+        failed = true;
     }
 
     // No flush here: the caller's `close_stdout` is the one that both drains
@@ -792,63 +828,108 @@ fn run(options: &Options, source: &Source, out: &mut Stream) -> ExitCode {
     }
 }
 
-/// A failure to read one input: what to print, and whether upstream still
-/// prints a row of zeros for it.
-struct ReadFailure {
-    message: String,
-    zero_row: bool,
+/// What became of one input -- upstream's `wc_file` and `wc`.
+enum Input {
+    /// Opened, and read to its end or to the error that stopped the reading.
+    /// Upstream counts what it read and prints the row either way, so a
+    /// directory, which opens and then fails its first read, is a row of
+    /// zeros after `wc: d: Is a directory`.
+    Read {
+        data: Vec<u8>,
+        /// The read error's diagnostic, printed before the row.
+        error: Option<String>,
+        /// A failed `close`'s diagnostic, printed after the row: `wc_file`
+        /// closes the file only once `wc` has printed it.
+        close_error: Option<String>,
+    },
+    /// Not opened: the diagnostic, and no row.
+    Unopened(String),
 }
 
-impl std::fmt::Display for ReadFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
+/// Read descriptor 0 to its end, appending to `data`; what was read before
+/// an error stays there, as it does in upstream's buffer.
+///
+/// Descriptor 0 itself, not `io::stdin()`: the runtime's standard input
+/// answers `EBADF` -- a descriptor that was closed when the program started
+/// -- with end of input, so `wc <&-` counted an empty file and exited 0 where
+/// upstream's `read` fails. See `known-issues/`
+/// `B-COREUTILS-A-CLOSED-STANDARD-INPUT-READS-AS-EMPTY`.
+///
+/// # Errors
+///
+/// The `read(2)` that failed.
+fn read_fd0_to_end(data: &mut Vec<u8>) -> io::Result<()> {
+    let mut chunk = vec![0u8; 64 * 1024];
+    loop {
+        match stdfd::read(0, &mut chunk) {
+            Ok(0) => return Ok(()),
+            Ok(n) => data.extend_from_slice(chunk.get(..n).unwrap_or_default()),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
     }
-}
-
-fn read_stdin() -> io::Result<Vec<u8>> {
-    let mut data = Vec::new();
-    io::stdin().read_to_end(&mut data)?;
-    Ok(data)
 }
 
 /// The bytes of one input: standard input for the nameless one and for `-`,
 /// the named file otherwise.
-fn read_input(name: Option<&[u8]>) -> Result<Vec<u8>, ReadFailure> {
-    let Some(name) = name else {
-        return read_stdin().map_err(|e| ReadFailure {
-            message: format!("-: {}", strerror(&e)),
-            zero_row: false,
-        });
-    };
-    if name == b"-" {
-        return read_stdin().map_err(|e| ReadFailure {
-            message: format!("-: {}", strerror(&e)),
-            zero_row: false,
-        });
+fn read_input(name: Option<&[u8]>) -> Input {
+    match name {
+        // Upstream's `file = file_x ? file_x : _("standard input")`, quoted by
+        // `quotef`: the nameless input is `'standard input'` in a diagnostic,
+        // and `-` stays `-`. Measured: `wc < dir` says
+        // `wc: 'standard input': Is a directory`, `wc - < dir` says `wc: -: …`.
+        None => read_stdin_input(b"standard input"),
+        Some(b"-") => read_stdin_input(b"-"),
+        Some(name) => read_file_input(name),
     }
+}
+
+fn read_stdin_input(label: &[u8]) -> Input {
+    let mut data = Vec::new();
+    let error = read_fd0_to_end(&mut data)
+        .err()
+        .map(|e| format!("{}: {}", quotef(label), strerror(&e)));
+    // Standard input is closed once, at the very end -- see [`run`].
+    Input::Read {
+        data,
+        error,
+        close_error: None,
+    }
+}
+
+fn read_file_input(name: &[u8]) -> Input {
     let path = os_from_bytes(name);
     // Checked before opening rather than after, because a directory is not
     // openable on every host this builds for, while upstream's diagnostic —
     // and its row of zeros — is the same everywhere.
-    match std::fs::metadata(&path) {
-        Ok(m) if m.is_dir() => {
-            return Err(ReadFailure {
-                message: format!("{}: Is a directory", quotef_os(&path)),
-                zero_row: true,
-            });
-        }
-        _ => {}
+    if let Ok(m) = std::fs::metadata(&path)
+        && m.is_dir()
+    {
+        return Input::Read {
+            data: Vec::new(),
+            error: Some(format!("{}: Is a directory", quotef_os(&path))),
+            close_error: None,
+        };
     }
-    let mut file = File::open(&path).map_err(|e| ReadFailure {
-        message: format!("{}: {}", quotef_os(&path), strerror(&e)),
-        zero_row: false,
-    })?;
+    let mut file = match File::open(&path) {
+        Ok(file) => file,
+        Err(e) => return Input::Unopened(format!("{}: {}", quotef_os(&path), strerror(&e))),
+    };
     let mut data = Vec::new();
-    file.read_to_end(&mut data).map_err(|e| ReadFailure {
-        message: format!("{}: {}", quotef_os(&path), strerror(&e)),
-        zero_row: false,
-    })?;
-    Ok(data)
+    // `read_to_end` keeps what it read before an error, which is what is
+    // counted: upstream prints the row for a file whose read failed part way.
+    let error = file
+        .read_to_end(&mut data)
+        .err()
+        .map(|e| format!("{}: {}", quotef_os(&path), strerror(&e)));
+    let close_error = stdfd::close(file)
+        .err()
+        .map(|e| format!("{}: {}", quotef_os(&path), strerror(&e)));
+    Input::Read {
+        data,
+        error,
+        close_error,
+    }
 }
 
 /// Turn the command line's idea of where the inputs come from into the list
@@ -862,6 +943,7 @@ fn resolve(source: &Source) -> Result<Inputs, getopt::Error> {
             names: vec![None],
             nfiles: 1,
             label: None,
+            list_error: None,
         }),
         Source::Operands(files) => {
             let names: Vec<Option<Vec<u8>>> = files.iter().map(|f| Some(arg_bytes(f))).collect();
@@ -869,6 +951,7 @@ fn resolve(source: &Source) -> Result<Inputs, getopt::Error> {
                 nfiles: names.len(),
                 names,
                 label: None,
+                list_error: None,
             })
         }
         Source::Files0From(from) => read_files0(from),
@@ -909,22 +992,39 @@ fn read_files0(from: &OsString) -> Result<Inputs, getopt::Error> {
     // straight in every locale — not with `quote()`, whose marks follow §351
     // and are curly. Measured, GNU wc 9.4, `LC_ALL=C.UTF-8`:
     // `wc: cannot open 'nosuch' for reading: No such file or directory`.
-    let data = if from_stdin {
-        read_stdin().map_err(|e| {
-            WC.usage(format!(
-                "cannot read file names from {}: {}",
-                quoteaf(b"-"),
-                strerror(&e)
-            ))
-        })?
+    let mut data = Vec::new();
+    let read = if from_stdin {
+        read_fd0_to_end(&mut data)
     } else {
-        std::fs::read(from).map_err(|e| {
+        let mut file = File::open(from).map_err(|e| {
             WC.usage(format!(
                 "cannot open {} for reading: {}",
                 quoteaf(&source_label),
                 strerror(&e)
             ))
-        })?
+        })?;
+        file.read_to_end(&mut data).map(drop)
+    };
+    // How a read that fails is reported depends on how upstream was reading.
+    // A list read up front fails as a whole, before anything is counted:
+    // `readtokens0` failing is `error (EXIT_FAILURE, 0, ...)`, so there is no
+    // reason after the message. A streamed list has been counted up to the
+    // error, which is `AI_ERR_READ`'s `%s: read error` -- measured:
+    // `wc --files0-from=- <&-` is `wc: -: read error: Bad file descriptor`,
+    // and a directory as the list says `Is a directory` the same way.
+    let list_error = match read {
+        Ok(()) => None,
+        Err(_) if sized => {
+            return Err(WC.usage(format!(
+                "cannot read file names from {}",
+                quoteaf(&source_label)
+            )));
+        }
+        Err(e) => Some(format!(
+            "{}: read error: {}",
+            quotef(&source_label),
+            strerror(&e)
+        )),
     };
 
     // A trailing NUL terminates the last name rather than starting an empty
@@ -939,6 +1039,7 @@ fn read_files0(from: &OsString) -> Result<Inputs, getopt::Error> {
         nfiles: if sized { names.len() } else { 0 },
         names,
         label: Some(source_label),
+        list_error,
     })
 }
 
@@ -1241,6 +1342,7 @@ mod tests {
             nfiles: names.len(),
             names,
             label: None,
+            list_error: None,
         }
     }
 
@@ -1282,6 +1384,7 @@ mod tests {
             names: vec![Some(b"a".to_vec()), Some(b"b".to_vec())],
             nfiles: 0,
             label: Some(b"-".to_vec()),
+            list_error: None,
         };
         assert_eq!(number_width(&streamed, &o), 1);
 

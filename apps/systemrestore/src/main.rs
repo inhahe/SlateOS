@@ -6604,7 +6604,10 @@ working filter from a broken one"
         // So does the form, which types what was typed.
         ui.handle_event(&ctrl(Key::N));
         assert_eq!(ui.dialog, DialogKind::CreateSnapshot, "control: Ctrl+N");
+        // A letter in the name, so a Backspace would have something to take.
+        ui.handle_event(&types('k'));
         let typed_before = (ui.form_name.clone(), ui.form_field);
+        assert_eq!(typed_before.0, "k", "control: the form types");
         for m in [Modifiers::alt(), Modifiers::super_key()] {
             ui.handle_event(&chord(Key::X, "x", m));
             ui.handle_event(&chord(Key::Tab, "", m));

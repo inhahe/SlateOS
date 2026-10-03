@@ -688,6 +688,18 @@ MUTATIONS = [
         "                c.chrome.text\n            };",
         ["every_text_reads_on_what_is_under_it_in_either_theme"],
     ),
+    (
+        'a chord raises the list of keys',
+        '        if plain && (ev.key == Key::F1 || (ev.key == Key::Slash && ev.modifiers.shift)) {',
+        '        if ev.key == Key::F1 || (ev.key == Key::Slash && ev.modifiers.shift) {',
+        ['a_chord_neither_raises_nor_dismisses_the_list_of_keys'],
+    ),
+    (
+        'a chorded Escape puts the list of keys away',
+        '        if plain && self.show_help && ev.key == Key::Escape {',
+        '        if self.show_help && ev.key == Key::Escape {',
+        ['a_chord_neither_raises_nor_dismisses_the_list_of_keys'],
+    ),
 ]
 
 if __name__ == "__main__":

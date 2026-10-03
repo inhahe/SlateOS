@@ -11,6 +11,8 @@ guitk = { path = "../../gui/toolkit" }
 # seeded word from the system, built a grid and an on-screen keyboard, and
 # dropped the lot, so no puzzle ever reached a screen and no key ever arrived.
 oswindow = { path = "../../gui/window" }
+# `is_plain`: the list of keys answers F1 and Escape with nothing else held.
+textline = { path = "../textline" }
 
 [dev-dependencies]
 # `palette_check`: the window is drawn from the palette.

@@ -4563,6 +4563,7 @@ dependencies = [
  "gamechrome",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]

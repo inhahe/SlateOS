@@ -1197,14 +1197,18 @@ impl Wordle {
         // order is the whole reason `?` works: `?` is Shift and the slash key,
         // so a bail that drops every modified key would drop it, and the list
         // would advertise a key of its own that did nothing.
-        if ev.key == Key::F1 || (ev.key == Key::Slash && ev.modifiers.shift) {
+        //
+        // Plain, though -- nothing held but Shift: Alt+F1 and Alt+Escape are
+        // the window's or the desktop's, and raised and put away the list.
+        let plain = textline::is_plain(ev.modifiers);
+        if plain && (ev.key == Key::F1 || (ev.key == Key::Slash && ev.modifiers.shift)) {
             self.show_help = !self.show_help;
             return EventResult::Consumed;
         }
         // Escape closes the card before it deals a new word. A reader who
         // opened the list and wants out should not find they have thrown away
         // the finished board behind it.
-        if self.show_help && ev.key == Key::Escape {
+        if plain && self.show_help && ev.key == Key::Escape {
             self.show_help = false;
             return EventResult::Consumed;
         }
@@ -3256,6 +3260,29 @@ mod tests {
             let mut g = game();
             assert_eq!(probe::key(&mut g, &ev), EventResult::Ignored);
             assert_eq!(typed(&g), "", "{:?} typed a letter", ev.modifiers);
+        }
+    }
+
+    /// **The list of keys answers F1 and Escape plain**: Alt+F1 and
+    /// Alt+Escape, the window's or the desktop's, raised it and put it away.
+    #[test]
+    fn a_chord_neither_raises_nor_dismisses_the_list_of_keys() {
+        let chord = |k: Key, modifiers: Modifiers| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        };
+        let mut g = game();
+        for m in [Modifiers::alt(), Modifiers::super_key(), Modifiers::ctrl()] {
+            assert_eq!(probe::key(&mut g, &chord(Key::F1, m)), EventResult::Ignored);
+            assert!(!g.show_help, "{m:?}+F1 raised the list");
+        }
+        probe::key(&mut g, &probe::press(Key::F1));
+        assert!(g.show_help, "control: F1 raises it");
+        for m in [Modifiers::alt(), Modifiers::super_key(), Modifiers::ctrl()] {
+            probe::key(&mut g, &chord(Key::Escape, m));
+            assert!(g.show_help, "{m:?}+Escape put it away");
         }
     }
 

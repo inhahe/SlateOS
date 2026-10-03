@@ -8292,9 +8292,11 @@ fn post_signal(
 
     match signal::classify_post_info(target, sig, info) {
         signal::PostDecision::Deliver | signal::PostDecision::Drop => {}
-        signal::PostDecision::Terminate(code) => {
-            // No userspace handler (or SIGKILL): terminate like kill().
-            pcb::set_exit_code(target, code)?;
+        signal::PostDecision::Terminate(fatal) => {
+            // No userspace handler (or SIGKILL): terminate, recorded as a
+            // death by the signal (never as a bare exit code: 128 to 255 is
+            // an exit too).
+            pcb::set_killed_by_signal(target, u8::try_from(fatal).unwrap_or(u8::MAX))?;
             thread::kill_process_threads(target);
             if info.code == signal::si_code::SI_KERNEL {
                 serial_println!(
@@ -9428,6 +9430,42 @@ pub fn sys_signal_stop_self(args: &super::dispatch::SyscallArgs) -> super::dispa
     SyscallResult::ok(0)
 }
 
+/// `SYS_SIGNAL_EXIT_SELF` (1136) — end the calling process as killed by
+/// `sig`: what a signal's default "terminate" action does, carried out for a
+/// process whose own dispatcher made that decision (libc's
+/// `apply_default_action`, `abort`). The parent's `wait` then reports
+/// `WIFSIGNALED` with `WTERMSIG == sig`, which `_exit (128 + sig)` cannot
+/// say -- an exit of 128 to 255 is an exit
+/// (requests/b-ad-an-exit-status-of-128-to-255-is-reported-as-a-signal-death.md).
+///
+/// Only a signal whose default action terminates may be named: anything else
+/// would record a death the parent's `wait` could not have seen on Linux.
+/// Self-only, so it needs no authority, like `SYS_SIGNAL_STOP_SELF`. Does
+/// not return.
+pub fn sys_signal_exit_self(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    use crate::proc::signal::{self, DefaultAction};
+
+    let sig = match u32::try_from(args.arg0) {
+        Ok(s)
+            if signal::is_valid_signal(s)
+                && signal::default_action(s) == DefaultAction::Terminate =>
+        {
+            s
+        }
+        _ => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+    let task_id = sched::current_task_id();
+    let pid = match caller_process_or_err() {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    terminate_current_process_for_signal(pid, task_id, sig);
+    // `terminate_current_process_for_signal` ends this thread with the
+    // process; reaching here would mean `task_exit` returned.
+    SyscallResult::err(KernelError::InternalError)
+}
+
 /// `SYS_SIGNAL_RETURN` — resume from a signal handler (sigreturn).
 ///
 /// `arg0`: pointer to the `SignalContext` on the user stack.
@@ -9501,10 +9539,11 @@ fn terminate_current_process_for_signal(
 ) {
     use crate::proc::{pcb, thread};
 
-    // 128 + sig is the conventional wait-status for "terminated by signal".
-    #[allow(clippy::cast_possible_wrap)]
-    let exit_code = 128i32.wrapping_add(sig as i32);
-    let _ = pcb::set_exit_code(pid, exit_code);
+    // A death by the signal, which the parent's `wait` reports as
+    // `WIFSIGNALED` -- not an exit code of 128 + sig, which reads as an exit.
+    // The process is ours and alive (we are running in it), so the record
+    // cannot be missing.
+    let _ = pcb::set_killed_by_signal(pid, u8::try_from(sig).unwrap_or(u8::MAX));
 
     // Tear down sibling threads first. `kill_thread` refuses the *current*
     // task (it must self-terminate via `task_exit`), so we only kill the

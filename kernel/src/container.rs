@@ -4603,11 +4603,12 @@ pub fn kill(id: ContainerId) -> KernelResult<usize> {
     let name = info(id).map_or(String::new(), |ci| ci.name);
     let mut killed = 0usize;
     for pid in process_ids {
-        // Record a SIGKILL-style exit code before the process zombifies so
-        // notify_init_exit reports "Exited (137)". Ignore the error: a process
-        // that already vanished simply has no exit code to set, and the kill
-        // below will no-op for it.
-        let _ = crate::proc::pcb::set_exit_code(pid, 137);
+        // Record a death by SIGKILL before the process zombifies: its exit
+        // code reads 137, so notify_init_exit reports "Exited (137)" as
+        // Docker does, and a parent's wait sees the kill. Ignore the error: a
+        // process that already vanished simply has no record to set, and the
+        // kill below will no-op for it.
+        let _ = crate::proc::pcb::set_killed_by_signal(pid, 9);
         if crate::proc::thread::kill_process_threads(pid) > 0 {
             killed = killed.saturating_add(1);
         }

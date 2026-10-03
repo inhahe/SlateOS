@@ -1325,8 +1325,10 @@ pub enum PostDecision {
     /// the target's next return to userspace.
     Deliver,
     /// The target has no trampoline and the signal's default action is
-    /// fatal: the caller must terminate the process with this exit code.
-    Terminate(i32),
+    /// fatal: the caller must terminate the process as killed by this
+    /// signal (`pcb::set_killed_by_signal`), which its parent's `wait` then
+    /// reports as `WIFSIGNALED`.
+    Terminate(u32),
     /// The signal was dropped (ignored), or kept pending for later (a stop
     /// signal that is currently blocked on a process with no handler — it
     /// will take effect at the syscall-return checkpoint once unblocked).
@@ -1356,7 +1358,7 @@ pub enum PostDecision {
 /// * If the process has a trampoline registered, the signal is marked
 ///   pending (`Deliver`).
 /// * Otherwise the default action decides: terminating signals →
-///   `Terminate(128 + sig)`, or kept pending if blocked; everything else →
+///   `Terminate(sig)`, or kept pending if blocked; everything else →
 ///   `Drop`.
 ///
 /// The caller is responsible for the actual termination (the kernel's
@@ -1371,12 +1373,9 @@ pub fn classify_post(pid: ProcessId, sig: u32) -> PostDecision {
 /// this sets carries the supplied `info`.
 #[must_use]
 pub fn classify_post_info(pid: ProcessId, sig: u32, info: SigInfo) -> PostDecision {
-    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
-    let term_code = 128i32.wrapping_add(sig as i32);
-
     // SIGKILL is unconditionally fatal and never delivered to a handler.
     if sig == SIGKILL {
-        return PostDecision::Terminate(term_code);
+        return PostDecision::Terminate(sig);
     }
 
     let blocked_now = blocked(pid) & signal_bit(sig).unwrap_or(0) != 0;
@@ -1435,7 +1434,7 @@ pub fn classify_post_info(pid: ProcessId, sig: u32, info: SigInfo) -> PostDecisi
                 set_pending_info(pid, sig, info);
                 PostDecision::Drop
             } else {
-                PostDecision::Terminate(term_code)
+                PostDecision::Terminate(sig)
             }
         }
         DefaultAction::Stop => {
@@ -1719,7 +1718,7 @@ fn test_ignored_set() -> KernelResult<()> {
 
         // A blocked fatal signal on a process with no trampoline waits.
         check(
-            classify_post(q, SIGTERM) == PostDecision::Terminate(128 + 15),
+            classify_post(q, SIGTERM) == PostDecision::Terminate(SIGTERM),
             "unblocked SIGTERM with no trampoline is fatal",
         )?;
         set_blocked(q, SIGTERM_BIT);
@@ -2091,14 +2090,11 @@ fn test_extended_frame() -> KernelResult<()> {
 
     // SIGCHLD carries how the child ended, as wait reports it.
     use crate::proc::pcb::{CrashInfo, ExitInfo, JobControlEvent};
-    let exited = ExitInfo {
-        exit_code: 3,
-        crash: None,
-    };
-    let killed = ExitInfo {
-        exit_code: 128 + 9,
-        crash: None,
-    };
+    let exited = ExitInfo::exited(3);
+    let killed = ExitInfo::killed(9);
+    // An exit with a status a signal death's code would read as is still
+    // an exit (requests/b-ad-an-exit-status-of-128-to-255-...).
+    let exited_137 = ExitInfo::exited(137);
     let crashed = ExitInfo {
         exit_code: crate::proc::pcb::crash_exit_code(8),
         crash: Some(CrashInfo {
@@ -2107,6 +2103,7 @@ fn test_extended_frame() -> KernelResult<()> {
             aux: 0,
             thread_id: 0,
         }),
+        term_signal: None,
     };
     check(
         exited.sigchld_code_and_status() == (si_code::CLD_EXITED, 3),
@@ -2115,6 +2112,10 @@ fn test_extended_frame() -> KernelResult<()> {
     check(
         killed.sigchld_code_and_status() == (si_code::CLD_KILLED, 9),
         "killed by 9 -> CLD_KILLED, 9",
+    )?;
+    check(
+        exited_137.sigchld_code_and_status() == (si_code::CLD_EXITED, 137),
+        "exit 137 -> CLD_EXITED, 137, not a kill",
     )?;
     check(
         crashed.sigchld_code_and_status() == (si_code::CLD_KILLED, 11),
@@ -2257,11 +2258,11 @@ fn test_blocked_masking() -> KernelResult<()> {
 fn test_classify_post() -> KernelResult<()> {
     let p = TEST_PID_BASE + 4;
     check(
-        classify_post(p, SIGKILL) == PostDecision::Terminate(128 + 9),
+        classify_post(p, SIGKILL) == PostDecision::Terminate(SIGKILL),
         "no-tramp SIGKILL terminate",
     )?;
     check(
-        classify_post(p, 15) == PostDecision::Terminate(128 + 15),
+        classify_post(p, 15) == PostDecision::Terminate(15),
         "no-tramp SIGTERM terminate",
     )?;
     check(
@@ -2278,7 +2279,7 @@ fn test_classify_post() -> KernelResult<()> {
         "SIGTERM pending after deliver",
     )?;
     check(
-        classify_post(p, SIGKILL) == PostDecision::Terminate(128 + 9),
+        classify_post(p, SIGKILL) == PostDecision::Terminate(SIGKILL),
         "SIGKILL terminate even with tramp",
     )?;
     remove(p);

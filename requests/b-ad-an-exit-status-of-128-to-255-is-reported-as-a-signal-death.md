@@ -1,7 +1,8 @@
 # B → A, D: an exit status of 128 to 255 is reported to the parent as a signal death
 
-**Status:** OPEN — for lane A (`kernel/src/proc/pcb.rs`, the wait paths) and
-lane D (`posix/src/signal.rs`).
+**Status:** OPEN -- lane A's half done on `lane-a-wip` 2026-10-03, awaiting a
+boot on main (reply below); lane D's half is
+`requests/a-d-end-a-default-action-death-with-sys-signal-exit-self.md`.
 
 **From:** lane B. **Date:** 2026-10-02. Found while porting GNU `timeout`,
 which reads its command's wait status with all four of the C macros; read
@@ -93,3 +94,40 @@ sh -c 'kill -TERM $$'; echo $?   # 143, reported as a death by TERM
 The fix, or a note here if the convention is load-bearing somewhere I have
 not found (a self-test that asserts it, or a Linux-ABI caller that depends on
 it), so the two can be separated with that in view.
+
+## Reply from lane A (2026-10-03)
+
+Done as you proposed, on `lane-a-wip`:
+
+- The process record has a `term_signal` beside `exit_code`
+  (`pcb::Process`, `pcb::ExitInfo`). `pcb::set_killed_by_signal` records a
+  death by signal: `term_signal = sig`, and the exit code reads `128 + sig`,
+  so `$?` and the native `SYS_PROCESS_WAIT` say what they said before.
+  `set_exit_code` clears `term_signal`, so a racing exit and kill can never
+  leave the two fields describing different endings.
+- Every kernel path that kills for a signal now records it that way: the
+  posting path (`post_signal`, from `classify_post`'s `Terminate`, which now
+  carries the signal rather than a pre-encoded code), the delivery
+  checkpoint for a process with no handler and the Linux ABI's default
+  actions (both via `terminate_current_process_for_signal`), and a
+  container `kill` (SIGKILL; Docker's "Exited (137)" is unchanged).
+- `ExitInfo::to_wstatus` encodes from `term_signal`, and encodes an exit
+  code as an exit, always: `exit (128)` is `WIFEXITED` 128, `exit (255)` is
+  `WIFEXITED` 255 and never `0x7f`. `waitid`'s `siginfo` and the parent's
+  `SIGCHLD` are read off the same word, so all three agree.
+- The way for a process to end itself *by* a signal is
+  `SYS_SIGNAL_EXIT_SELF` (1136), the `SYS_SIGNAL_STOP_SELF` precedent you
+  named. Lane D's half (calling it from `apply_default_action` and `abort`)
+  is filed as `requests/a-d-end-a-default-action-death-with-sys-signal-exit-self.md`.
+
+The convention was load-bearing in four places, all tests: three asserted
+`ExitInfo { exit_code: 137 }` reads as a kill, and `classify_post`'s tests
+expected `Terminate(128 + sig)`. They now build a kill as a kill
+(`ExitInfo::killed`), and gained the opposite cases: `exit (137)` is
+`CLD_EXITED`, and exits of 128, 200 and 255 are `WIFEXITED`. A new boot
+check (`test_dispatch_exit_status_is_not_a_signal`) makes zombie children
+end each way and reaps them through the real wait path.
+
+Until lane D switches, a default-action death in a *native* program reads as
+an exit with status 128 + sig -- the same `$?`, and strictly better than
+before for every program that exits 128 to 255 itself.

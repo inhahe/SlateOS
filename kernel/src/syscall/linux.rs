@@ -46981,13 +46981,16 @@ fn test_waitid_scan() -> crate::error::KernelResult<()> {
     drop_group();
 
     // --- pure encoder branches ---
-    // Killed by signal: exit_code = 128 + 9 (SIGKILL) → CLD_KILLED, sig 9.
-    let killed = crate::proc::pcb::ExitInfo {
-        exit_code: 137,
-        crash: None,
-    };
+    // Killed by signal 9 (SIGKILL) → CLD_KILLED, sig 9.
+    let killed = crate::proc::pcb::ExitInfo::killed(9);
     if waitid_si_from_exit(&killed) != (CLD_KILLED, 9) {
         serial_println!("[syscall/linux]   FAIL: waitid_si_from_exit kill branch");
+        return Err(KernelError::InternalError);
+    }
+    // An exit with status 137 -- what a SIGKILL death's code reads as -- is
+    // still an exit: CLD_EXITED, 137.
+    if waitid_si_from_exit(&crate::proc::pcb::ExitInfo::exited(137)) != (CLD_EXITED, 137) {
+        serial_println!("[syscall/linux]   FAIL: waitid_si_from_exit called exit(137) a kill");
         return Err(KernelError::InternalError);
     }
     // A crash is killed by SIGSEGV with no core file, and waitid says what
@@ -47001,6 +47004,7 @@ fn test_waitid_scan() -> crate::error::KernelResult<()> {
             aux: 0,
             thread_id: 0,
         }),
+        term_signal: None,
     };
     if waitid_si_from_exit(&crashed) != (CLD_KILLED, 11) || encode_linux_wstatus(&crashed) != 11 {
         serial_println!(
@@ -49970,10 +49974,11 @@ fn sys_prlimit64(args: &SyscallArgs) -> SyscallResult {
 ///
 /// `wstatus`: optional `*mut i32` receiving the encoded status.  Per
 /// glibc's `<sys/wait.h>` macros:
-///   - normal exit with code C (0..=127): `status = (C & 0xff) << 8`
-///     → `WIFEXITED(status)` is true, `WEXITSTATUS(status)` == C.
-///   - killed by signal N (our convention: native exit codes 128..=255
-///     are signal kills with `N = exit_code - 128`):
+///   - normal exit with code C (any, 128..=255 included):
+///     `status = (C & 0xff) << 8` → `WIFEXITED(status)` is true,
+///     `WEXITSTATUS(status)` == C.
+///   - killed by signal N (recorded as such, `pcb::set_killed_by_signal`;
+///     never inferred from the exit code, since 2026-10-03):
 ///     `status = N & 0x7f` → `WIFSIGNALED(status)` is true,
 ///     `WTERMSIG(status)` == N.
 ///   - crashed (hardware fault): we synthesise `SIGSEGV` (11) since
@@ -59918,10 +59923,7 @@ fn self_test_wstatus_encoding() -> crate::error::KernelResult<()> {
     {
         use crate::proc::pcb::ExitInfo;
         // Normal exit with code 42 — WIFEXITED + WEXITSTATUS==42.
-        let s = encode_linux_wstatus(&ExitInfo {
-            exit_code: 42,
-            crash: None,
-        });
+        let s = encode_linux_wstatus(&ExitInfo::exited(42));
         if (s & 0x7f) != 0 {
             serial_println!(
                 "[syscall/linux]   FAIL: wstatus normal exit not WIFEXITED ({})",
@@ -59936,11 +59938,22 @@ fn self_test_wstatus_encoding() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // Killed by SIGTERM (15) — kernel exit_code convention 128+sig.
-        let s = encode_linux_wstatus(&ExitInfo {
-            exit_code: 128 + 15,
-            crash: None,
-        });
+        // Exits of 128, 200 and 255 are exits, not deaths or stops: until
+        // 2026-10-03 the first read as success (signal 0), the last as a
+        // stop (low byte 0x7f).
+        for code in [128, 200, 255] {
+            let s = encode_linux_wstatus(&ExitInfo::exited(code));
+            if (s & 0x7f) != 0 || ((s >> 8) & 0xff) != code {
+                serial_println!(
+                    "[syscall/linux]   FAIL: wstatus exit({}) is not WIFEXITED with that status ({})",
+                    code,
+                    s
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // Killed by SIGTERM (15).
+        let s = encode_linux_wstatus(&ExitInfo::killed(15));
         let low7 = s & 0x7f;
         if low7 != 15 {
             serial_println!(
@@ -59967,6 +59980,7 @@ fn self_test_wstatus_encoding() -> crate::error::KernelResult<()> {
         let s = encode_linux_wstatus(&ExitInfo {
             exit_code: -14,
             crash: Some(crash),
+            term_signal: None,
         });
         if (s & 0x7f) != 11 {
             serial_println!("[syscall/linux]   FAIL: wstatus crash != SIGSEGV ({})", s);

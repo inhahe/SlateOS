@@ -435,8 +435,16 @@ pub struct Process {
     pub exited_leader: Option<crate::sched::TaskInfo>,
     /// Per-process capability table.
     pub cap_table: CapTable,
-    /// Exit code (set when all threads have exited).
+    /// Exit code (set when all threads have exited). For a death by signal
+    /// it reads as a shell's `$?` would, `128 + sig`; whether it *was* a
+    /// signal death is [`Self::term_signal`]'s to say, never this range's --
+    /// a program may exit with 128 to 255 itself.
     pub exit_code: Option<i32>,
+    /// The signal that ended the process, when one did: what a parent's
+    /// `wait` reports as `WIFSIGNALED`/`WTERMSIG`. Set with the exit code by
+    /// [`set_killed_by_signal`]; an explicit exit ([`set_exit_code`]) clears
+    /// it, so the two always describe the same ending.
+    pub term_signal: Option<u8>,
     /// Process credentials (uid, gid, supplementary groups).
     pub credentials: ProcessCredentials,
     /// PML4 physical address for this process's address space.
@@ -1415,6 +1423,7 @@ impl Process {
             exited_leader: None,
             cap_table: CapTable::new(),
             exit_code: None,
+            term_signal: None,
             credentials: ProcessCredentials::root(),
             pml4_phys: 0, // Kernel address space for now.
             wait_task: None,
@@ -1883,6 +1892,7 @@ pub fn fork_create(
         exited_leader: None,
         cap_table,
         exit_code: None,
+        term_signal: None,
         credentials,
         pml4_phys: child_pml4,
         wait_task: None,
@@ -4714,6 +4724,27 @@ pub fn set_exit_code(pid: ProcessId, code: i32) -> KernelResult<()> {
     let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
 
     proc.exit_code = Some(code);
+    // An exit status replaces any earlier death by signal: the last word on
+    // how the process ended is both fields' together.
+    proc.term_signal = None;
+    Ok(())
+}
+
+/// Record that `pid` is ending because of signal `sig`: its parent's `wait`
+/// will report `WIFSIGNALED` with `WTERMSIG == sig`, and its exit code reads
+/// `128 + sig`, the status a shell shows for such a death. Every kernel path
+/// that kills a process for a signal records the death through this, never
+/// as a bare exit code -- an exit code of 128 to 255 is an exit
+/// (requests/b-ad-an-exit-status-of-128-to-255-is-reported-as-a-signal-death.md).
+///
+/// # Errors
+///
+/// `NoSuchProcess` if `pid` is not in the process table.
+pub fn set_killed_by_signal(pid: ProcessId, sig: u8) -> KernelResult<()> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    proc.exit_code = Some(128i32.saturating_add(i32::from(sig)));
+    proc.term_signal = Some(sig);
     Ok(())
 }
 
@@ -4988,24 +5019,53 @@ pub fn get_crash_info(pid: ProcessId) -> Option<CrashInfo> {
 #[derive(Debug, Clone)]
 pub struct ExitInfo {
     /// Process exit code.  Normal exit: >= 0.  Crash: < 0 (negated
-    /// exception code).
+    /// exception code).  Death by signal: `128 + sig`, as a shell shows it
+    /// -- but see [`Self::term_signal`], which alone says it was one.
     pub exit_code: i32,
     /// Crash details (exception code, faulting address, etc.).
     /// `None` for normal exits.
     pub crash: Option<CrashInfo>,
+    /// The signal that ended the process, if a signal did
+    /// ([`set_killed_by_signal`]).
+    pub term_signal: Option<u8>,
 }
 
 impl ExitInfo {
+    /// A normal exit with status `code`.
+    #[must_use]
+    pub const fn exited(code: i32) -> Self {
+        Self {
+            exit_code: code,
+            crash: None,
+            term_signal: None,
+        }
+    }
+
+    /// A death by signal `sig`, recorded as [`set_killed_by_signal`] does.
+    #[must_use]
+    pub const fn killed(sig: u8) -> Self {
+        Self {
+            // 128 + a u8 is at most 383, and the widening cast is exact.
+            exit_code: 128i32.saturating_add(sig as i32),
+            crash: None,
+            term_signal: Some(sig),
+        }
+    }
+
     /// Encode this termination as a POSIX `wstatus` word.
     ///
     /// * Crashed → `11` (SIGSEGV in the low 7 bits, so `WIFSIGNALED`).
     ///   This is "good enough" for the common case; a future refinement
     ///   could map exception codes (`DivideError` → SIGFPE, `InvalidOpcode`
     ///   → SIGILL, …) by consulting [`CrashInfo::exception_code`].
-    /// * Killed by signal → `(exit_code - 128) & 0x7f`, since the kernel
-    ///   convention for a signal death is `exit_code = 128 + sig`.
-    /// * Normal exit → `(exit_code & 0xff) << 8`, so `WIFEXITED` /
-    ///   `WEXITSTATUS`.
+    /// * Killed by signal ([`Self::term_signal`]) → the signal in the low 7
+    ///   bits, so `WIFSIGNALED` / `WTERMSIG`. No core bit: SlateOS writes no
+    ///   core files.
+    /// * Anything else is an exit → `(exit_code & 0xff) << 8`, so
+    ///   `WIFEXITED` / `WEXITSTATUS` -- *including* 128 to 255, which until
+    ///   2026-10-03 was read as a signal death: `exit(128)` reported a
+    ///   success, `exit(255)` a stop
+    ///   (requests/b-ad-an-exit-status-of-128-to-255-is-reported-as-a-signal-death.md).
     ///
     /// Lives here, next to [`JobControlEvent::to_wstatus`], because both
     /// ABIs must encode the same termination identically — see that
@@ -5015,20 +5075,14 @@ impl ExitInfo {
         if self.crash.is_some() {
             return 11; // SIGSEGV, low 7 bits of wstatus, WIFSIGNALED true.
         }
-        let code = self.exit_code;
-        if (128..=255).contains(&code) {
-            // The range check above is the proof: `code >= 128`, so the
-            // subtraction cannot underflow.
-            #[allow(clippy::arithmetic_side_effects)]
-            let sig = code - 128;
-            sig & 0x7f
-        } else {
-            #[allow(clippy::cast_sign_loss)]
-            let lo = (code as u32) & 0xff;
-            #[allow(clippy::cast_possible_wrap)]
-            let s = (lo << 8) as i32;
-            s
+        if let Some(sig) = self.term_signal {
+            return i32::from(sig & 0x7f);
         }
+        #[allow(clippy::cast_sign_loss)]
+        let lo = (self.exit_code as u32) & 0xff;
+        #[allow(clippy::cast_possible_wrap)]
+        let s = (lo << 8) as i32;
+        s
     }
 
     /// This termination as `siginfo_t`'s `si_code` and `si_status`, which
@@ -5054,6 +5108,27 @@ impl ExitInfo {
             (si_code::CLD_KILLED, termsig)
         }
     }
+}
+
+impl Process {
+    /// How this process ended, as a parent's `wait` reports it: the one
+    /// place an [`ExitInfo`] is made from a process, so the exit code, the
+    /// crash and the signal travel together.
+    fn exit_info(&self) -> ExitInfo {
+        ExitInfo {
+            exit_code: self.exit_code.unwrap_or(0),
+            crash: self.crash_info,
+            term_signal: self.term_signal,
+        }
+    }
+}
+
+/// How process `pid` ended, if it has: its exit code, crash and terminating
+/// signal together (`None` for no such process). For reports made while the
+/// process is still in the table, such as the parent's `SIGCHLD`.
+#[must_use]
+pub fn exit_info(pid: ProcessId) -> Option<ExitInfo> {
+    PROCESS_TABLE.lock().get(&pid).map(Process::exit_info)
 }
 
 /// Try to reap (wait for) a zombie child process.
@@ -5092,8 +5167,7 @@ pub fn try_reap(parent_pid: ProcessId, child_pid: ProcessId) -> KernelResult<Opt
             return Ok(None); // Still running.
         }
 
-        let exit_code = proc.exit_code.unwrap_or(0);
-        let crash = proc.crash_info;
+        let info = proc.exit_info();
 
         // Capture the child's CPU time to credit the parent's children-time
         // accumulator (POSIX cutime/cstime).  The child is a zombie, so all
@@ -5123,7 +5197,7 @@ pub fn try_reap(parent_pid: ProcessId, child_pid: ProcessId) -> KernelResult<Opt
             parent.child_nivcsw = parent.child_nivcsw.saturating_add(child_niv);
         }
 
-        (ExitInfo { exit_code, crash }, removed)
+        (info, removed)
     };
     // PROCESS_TABLE lock dropped here.
 
@@ -5227,11 +5301,7 @@ pub fn peek_exit(
     if proc.state != ProcessState::Zombie {
         return Ok(None);
     }
-    let info = ExitInfo {
-        exit_code: proc.exit_code.unwrap_or(0),
-        crash: proc.crash_info,
-    };
-    Ok(Some((info, proc.credentials.uid)))
+    Ok(Some((proc.exit_info(), proc.credentials.uid)))
 }
 
 /// Whether a `wait` may see `proc` at all: anything but a zombie its parent
@@ -5284,11 +5354,7 @@ fn peek_exit_matching(
         {
             has_child = true;
             if proc.state == ProcessState::Zombie {
-                let info = ExitInfo {
-                    exit_code: proc.exit_code.unwrap_or(0),
-                    crash: proc.crash_info,
-                };
-                return Ok(Some((proc.pid, info, proc.credentials.uid)));
+                return Ok(Some((proc.pid, proc.exit_info(), proc.credentials.uid)));
             }
         }
     }

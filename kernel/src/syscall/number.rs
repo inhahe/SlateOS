@@ -6553,6 +6553,16 @@ pub const SYS_UDP_GET_OPTION: u64 = 1134;
 /// addresses or a unicast one. See `net::mcast_filter`.
 pub const SYS_NET_RAW_MCAST: u64 = 1135;
 
+/// `SYS_SIGNAL_EXIT_SELF(sig)` -- end the calling process as killed by
+/// `sig`, which must be a signal whose default action terminates. The
+/// parent's `wait` reports `WIFSIGNALED` with `WTERMSIG == sig`, which an
+/// exit status cannot: 128 to 255 is an exit. For a process whose own
+/// dispatcher decided a signal's default action applies (libc's
+/// `apply_default_action`, `abort`). Self-only, so no capability, like
+/// [`SYS_SIGNAL_STOP_SELF`]. Does not return; `InvalidArgument` for a
+/// signal that is not fatal by default.
+pub const SYS_SIGNAL_EXIT_SELF: u64 = 1136;
+
 /// Bytes [`SYS_UNIX_NAME`] writes: kind, length, 108 bytes of name.
 pub const UNIX_ADDR_LEN: usize = 116;
 /// Bytes [`SYS_UNIX_RECV`] writes at `info_ptr`.

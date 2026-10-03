@@ -91,22 +91,22 @@ use super::number::{
     SYS_SERVICE_ACCEPT_TIMEOUT, SYS_SERVICE_CONNECT, SYS_SERVICE_REGISTER, SYS_SERVICE_TRY_ACCEPT,
     SYS_SERVICE_UNREGISTER, SYS_SET_EXCEPTION_HANDLER, SYS_SET_FS_BASE, SYS_SHM_CLOSE,
     SYS_SHM_CREATE, SYS_SHM_MAP, SYS_SHM_MAP_AT, SYS_SHM_SIZE, SYS_SHM_UNMAP, SYS_SIGNAL_ALTSTACK,
-    SYS_SIGNAL_GET_IGNORED, SYS_SIGNAL_MASK, SYS_SIGNAL_PENDING, SYS_SIGNAL_QUEUE,
-    SYS_SIGNAL_REGISTER, SYS_SIGNAL_SEND, SYS_SIGNAL_SET_IGNORED, SYS_SIGNAL_STOP_SELF,
-    SYS_SIGNAL_TGKILL, SYS_SLEEP, SYS_SOCKETPAIR_CLOSE, SYS_SOCKETPAIR_CREATE, SYS_SOCKETPAIR_POLL,
-    SYS_SOCKETPAIR_READABLE_BYTES, SYS_SOCKETPAIR_RECV, SYS_SOCKETPAIR_RECV_TIMEOUT,
-    SYS_SOCKETPAIR_SEND, SYS_SOCKETPAIR_SEND_TIMEOUT, SYS_SOCKETPAIR_SHUTDOWN,
-    SYS_SOCKETPAIR_TRY_RECV, SYS_SOCKETPAIR_TRY_SEND, SYS_SYSCTL_GET, SYS_SYSCTL_SET,
-    SYS_SYSTEM_SET_PROFILE, SYS_TASK_ID, SYS_TCP_ABORT, SYS_TCP_ACCEPT, SYS_TCP_BIND,
-    SYS_TCP_CLOSE, SYS_TCP_CLOSE_LISTENER, SYS_TCP_CONNECT, SYS_TCP_INFO, SYS_TCP_LAST_ERROR,
-    SYS_TCP_LIST, SYS_TCP_LISTENER_LIST, SYS_TCP_LISTENER_READY, SYS_TCP_LOCAL_PORT,
-    SYS_TCP_PEER_ADDR, SYS_TCP_POLL_STATUS, SYS_TCP_RECV, SYS_TCP_SEND, SYS_TCP_SET_KEEPALIVE,
-    SYS_TCP_SET_KEEPALIVE_PARAMS, SYS_TCP_SET_NODELAY, SYS_TCP_SHUTDOWN, SYS_THREAD_CREATE,
-    SYS_THREAD_EXIT, SYS_THREAD_JOIN, SYS_THREAD_JOIN_TIMEOUT, SYS_THREAD_RESUME,
-    SYS_THREAD_SET_PRIORITY, SYS_THREAD_SUSPEND, SYS_TIMER_CANCEL, SYS_TIMER_CREATE,
-    SYS_TTY_ACQUIRE_CTTY, SYS_TTY_FLUSH, SYS_TTY_GET_PGRP, SYS_TTY_GET_TERMIOS, SYS_TTY_READ,
-    SYS_TTY_RELEASE_CTTY, SYS_TTY_SET_PGRP, SYS_TTY_SET_TERMIOS, SYS_UDP_BIND, SYS_UDP_CLOSE,
-    SYS_UDP_CONNECT, SYS_UDP_GET_OPTION, SYS_UDP_LOCAL_PORT, SYS_UDP_MCAST_JOIN,
+    SYS_SIGNAL_EXIT_SELF, SYS_SIGNAL_GET_IGNORED, SYS_SIGNAL_MASK, SYS_SIGNAL_PENDING,
+    SYS_SIGNAL_QUEUE, SYS_SIGNAL_REGISTER, SYS_SIGNAL_SEND, SYS_SIGNAL_SET_IGNORED,
+    SYS_SIGNAL_STOP_SELF, SYS_SIGNAL_TGKILL, SYS_SLEEP, SYS_SOCKETPAIR_CLOSE,
+    SYS_SOCKETPAIR_CREATE, SYS_SOCKETPAIR_POLL, SYS_SOCKETPAIR_READABLE_BYTES, SYS_SOCKETPAIR_RECV,
+    SYS_SOCKETPAIR_RECV_TIMEOUT, SYS_SOCKETPAIR_SEND, SYS_SOCKETPAIR_SEND_TIMEOUT,
+    SYS_SOCKETPAIR_SHUTDOWN, SYS_SOCKETPAIR_TRY_RECV, SYS_SOCKETPAIR_TRY_SEND, SYS_SYSCTL_GET,
+    SYS_SYSCTL_SET, SYS_SYSTEM_SET_PROFILE, SYS_TASK_ID, SYS_TCP_ABORT, SYS_TCP_ACCEPT,
+    SYS_TCP_BIND, SYS_TCP_CLOSE, SYS_TCP_CLOSE_LISTENER, SYS_TCP_CONNECT, SYS_TCP_INFO,
+    SYS_TCP_LAST_ERROR, SYS_TCP_LIST, SYS_TCP_LISTENER_LIST, SYS_TCP_LISTENER_READY,
+    SYS_TCP_LOCAL_PORT, SYS_TCP_PEER_ADDR, SYS_TCP_POLL_STATUS, SYS_TCP_RECV, SYS_TCP_SEND,
+    SYS_TCP_SET_KEEPALIVE, SYS_TCP_SET_KEEPALIVE_PARAMS, SYS_TCP_SET_NODELAY, SYS_TCP_SHUTDOWN,
+    SYS_THREAD_CREATE, SYS_THREAD_EXIT, SYS_THREAD_JOIN, SYS_THREAD_JOIN_TIMEOUT,
+    SYS_THREAD_RESUME, SYS_THREAD_SET_PRIORITY, SYS_THREAD_SUSPEND, SYS_TIMER_CANCEL,
+    SYS_TIMER_CREATE, SYS_TTY_ACQUIRE_CTTY, SYS_TTY_FLUSH, SYS_TTY_GET_PGRP, SYS_TTY_GET_TERMIOS,
+    SYS_TTY_READ, SYS_TTY_RELEASE_CTTY, SYS_TTY_SET_PGRP, SYS_TTY_SET_TERMIOS, SYS_UDP_BIND,
+    SYS_UDP_CLOSE, SYS_UDP_CONNECT, SYS_UDP_GET_OPTION, SYS_UDP_LOCAL_PORT, SYS_UDP_MCAST_JOIN,
     SYS_UDP_MCAST_JOIN6, SYS_UDP_MCAST_LEAVE, SYS_UDP_MCAST_LEAVE6, SYS_UDP_RECV, SYS_UDP_RECV6,
     SYS_UDP_RX_FRONT_BYTES, SYS_UDP_RX_READY, SYS_UDP_SEND, SYS_UDP_SEND6, SYS_UDP_SET_OPTION,
     SYS_WAIT_MULTIPLE, SYS_YIELD,
@@ -765,6 +765,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_NET_RAW_RX as usize] = Some(handlers::sys_net_raw_rx);
     handlers[SYS_NET_RAW_CLOSE as usize] = Some(handlers::sys_net_raw_close);
     handlers[SYS_NET_RAW_MCAST as usize] = Some(handlers::sys_net_raw_mcast);
+    handlers[SYS_SIGNAL_EXIT_SELF as usize] = Some(handlers::sys_signal_exit_self);
     handlers[SYS_ARP_TABLE as usize] = Some(handlers::sys_arp_table);
     handlers[SYS_DNS_CACHE_STATS as usize] = Some(handlers::sys_dns_cache_stats);
     handlers[SYS_TCP_POLL_STATUS as usize] = Some(handlers::sys_tcp_poll_status);
@@ -1096,6 +1097,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_native_socket_possession()?;
     test_dispatch_udp_v6_and_options()?;
     test_dispatch_raw_mcast()?;
+    test_dispatch_exit_status_is_not_a_signal()?;
     test_dispatch_tioc_and_watch_records()?;
     test_cpu_current()?;
     test_dispatch_shared_anonymous_memory()?;
@@ -3699,6 +3701,112 @@ fn test_dispatch_udp_v6_and_options() -> KernelResult<()> {
         "[syscall]   SYS_UDP_SEND6/RECV6/MCAST_JOIN6/SET_OPTION/GET_OPTION (1129-1134): a \
          group joined from user memory, hop limit 0, the datagram looped back with its \
          source: OK"
+    );
+    Ok(())
+}
+
+/// A child's ending as its parent's `wait` reports it, through the real wait
+/// path (`syscall::wait::scan_once`, which both ABIs' waits use), for zombie
+/// records made the ways the kernel makes them:
+///
+/// - `exit(128)` and `exit(255)` are exits with those statuses -- until
+///   2026-10-03 the first read as a success (signal "0") and the second as
+///   a stop (low byte `0x7f`), since the encoder took 128 to 255 for a
+///   signal death (requests/b-ad-an-exit-status-of-128-to-255-is-reported-
+///   as-a-signal-death.md);
+/// - a recorded death by `SIGTERM` is `WIFSIGNALED` with `WTERMSIG` 15;
+/// - an exit recorded after a kill replaces it, so the two fields never
+///   disagree.
+///
+/// And `SYS_SIGNAL_EXIT_SELF` (1136) refuses a signal whose default action
+/// does not terminate -- checked before it looks for a caller, so this kernel
+/// task survives asking.
+fn test_dispatch_exit_status_is_not_a_signal() -> KernelResult<()> {
+    use crate::proc::pcb;
+    use crate::syscall::wait::{WaitClasses, WaitRequest, WaitTarget, scan_once};
+
+    type Ending = fn(u64) -> KernelResult<()>;
+    const CASES: [(&str, Ending, i32); 5] = [
+        ("exit 128", |p| pcb::set_exit_code(p, 128), 128 << 8),
+        ("exit 255", |p| pcb::set_exit_code(p, 255), 255 << 8),
+        ("exit 0", |p| pcb::set_exit_code(p, 0), 0),
+        (
+            "killed by SIGTERM",
+            |p| pcb::set_killed_by_signal(p, 15),
+            15,
+        ),
+        (
+            "killed by SIGKILL, then exit 3",
+            |p| {
+                pcb::set_killed_by_signal(p, 9)?;
+                pcb::set_exit_code(p, 3)
+            },
+            3 << 8,
+        ),
+    ];
+
+    fn fail(msg: &str, pid: u64) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: exit status: {}", msg);
+        pcb::destroy(pid);
+        Err(KernelError::InternalError)
+    }
+
+    for (tid, (what, end, want)) in (9980u64..).zip(CASES) {
+        let pid = pcb::create("exit-status", 0);
+        if pcb::set_running(pid).is_err() || pcb::add_thread(pid, tid).is_err() {
+            return fail("could not start a child", pid);
+        }
+        if end(pid).is_err() {
+            return fail("could not record the ending", pid);
+        }
+        match pcb::remove_thread(pid, tid, pcb::ThreadExitAccounting::default()) {
+            Ok((true, _, _)) => {}
+            _ => return fail("the child did not become a zombie", pid),
+        }
+        let req = WaitRequest {
+            target: WaitTarget::Pid(pid),
+            classes: WaitClasses {
+                exited: true,
+                stopped: false,
+                continued: false,
+            },
+            nohang: true,
+            nowait: false,
+        };
+        // A reap: the record is gone once this answers.
+        let got = scan_once(0, req).map(|found| found.map(|f| f.to_wstatus()));
+        if got != Ok(Some(want)) {
+            serial_println!(
+                "[syscall]     {}: the parent read {:?}, want wstatus {:#x}",
+                what,
+                got,
+                want
+            );
+            return fail(what, pid);
+        }
+    }
+
+    let refused = i64::from(KernelError::InvalidArgument.code());
+    for sig in [0u64, 17, 18, 19, 65] {
+        let args = SyscallArgs {
+            arg0: sig,
+            arg1: 0,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch(SYS_SIGNAL_EXIT_SELF, &args).value != refused {
+            serial_println!(
+                "[syscall]   FAIL: SYS_SIGNAL_EXIT_SELF took signal {}, which is not fatal by default",
+                sig
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    serial_println!(
+        "[syscall]   exit 128/255 reported as exits, a SIGTERM death as WIFSIGNALED 15, an exit \
+         after a kill replacing it, SYS_SIGNAL_EXIT_SELF (1136) refusing non-fatal signals: OK"
     );
     Ok(())
 }
@@ -6764,10 +6872,7 @@ fn test_dispatch_wait_info_layout() -> KernelResult<()> {
             nivcsw: 104,
         },
         // exit_code 66 → wstatus (66 << 8) = 0x4200, per `ExitInfo::to_wstatus`.
-        event: ChildEvent::Exited(ExitInfo {
-            exit_code: 66,
-            crash: None,
-        }),
+        event: ChildEvent::Exited(ExitInfo::exited(66)),
     };
     let img = wait_info_image(&found);
 
@@ -6879,10 +6984,7 @@ fn test_dispatch_rusage_info_layout() -> KernelResult<()> {
         pid: 1,
         uid: 0,
         usage,
-        event: crate::syscall::wait::ChildEvent::Exited(crate::proc::pcb::ExitInfo {
-            exit_code: 0,
-            crash: None,
-        }),
+        event: crate::syscall::wait::ChildEvent::Exited(crate::proc::pcb::ExitInfo::exited(0)),
     });
     for off in (0..48).step_by(8) {
         if rd64(&img, off) != rd64(&wi, off.saturating_add(24)) {

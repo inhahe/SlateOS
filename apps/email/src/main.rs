@@ -5699,7 +5699,12 @@ mod tests {
         app.handle_event(&typed(Key::Escape, "", Modifiers::alt()));
         app.handle_event(&typed(Key::Escape, "", Modifiers::ctrl()));
         app.handle_event(&typed(Key::Tab, "", Modifiers::ctrl()));
-        assert!(app.compose.is_some(), "a chorded Escape closed the message");
+        // The message holds unsaved text, so a first Escape would only ask:
+        // the question is what shows a chorded one was taken.
+        assert!(
+            app.compose.as_ref().is_some_and(|c| !c.confirm_close),
+            "a chorded Escape closed the message or asked to"
+        );
         assert_eq!(
             app.compose.as_ref().map(|c| c.field),
             Some(ComposeField::Body),

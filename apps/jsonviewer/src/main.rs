@@ -2613,7 +2613,7 @@ impl App {
         use guitk::event::Key;
 
         let (key, modifiers) = (ev.key, ev.modifiers);
-        let text = ev.text.chars().next();
+        let text = ev.typed().next();
         let editing_source = self.source_is_open();
 
         // The shortcut list, before anything else -- but **not** while the
@@ -2626,7 +2626,12 @@ impl App {
         // `typed()`, so a search for either found nothing. The keystroke does
         // become text; it just arrives by a road the search did not cover.
         let typing = self.search_visible || self.editing_path.is_some() || editing_source;
-        if !typing {
+        // Every key but a Ctrl chord and what is typed is taken plain: a
+        // chord with Alt or the Windows key is the window's or the desktop's
+        // and arrives carrying its key -- Alt+5 opened the diff view and
+        // Alt+Enter started editing the text.
+        let plain = textline::is_plain(modifiers);
+        if !typing && plain {
             if key == Key::F1 || (key == Key::Slash && modifiers.shift) {
                 self.show_help = !self.show_help;
                 return;
@@ -2637,8 +2642,9 @@ impl App {
             }
         }
 
-        // Global shortcuts
-        if modifiers.ctrl {
+        // Global shortcuts: Ctrl chords, not Ctrl held -- AltGr arrives as
+        // Ctrl+Alt and types, and AltGr+E, a Polish `ę`, turned editing on.
+        if textline::is_ctrl_chord(modifiers) {
             match key {
                 Key::O => {
                     self.open_file_dialog();
@@ -2718,8 +2724,20 @@ impl App {
         // An edit in progress takes every printable key, for the same reason
         // the search bar below does: while a value is being typed over, "5" is
         // the character five and not the shortcut for the diff view.
+        // What it types is what a key typed -- AltGr's among it -- and not a
+        // command's letter, which a chord carries: Ctrl+X typed an `x` into
+        // the value. Its own keys are plain.
         if self.editing_path.is_some() {
             match key {
+                _ if textline::types_into_field(ev) => {
+                    if let Some(ch) = text
+                        && self.edit_buffer.len() < MAX_SEARCH_LEN
+                    {
+                        self.edit_buffer.push(ch);
+                    }
+                    return;
+                }
+                _ if !plain => return,
                 Key::Escape => {
                     self.cancel_edit();
                     return;
@@ -2732,20 +2750,23 @@ impl App {
                     self.edit_buffer.pop();
                     return;
                 }
-                _ => {
-                    if let Some(ch) = text
-                        && self.edit_buffer.len() < MAX_SEARCH_LEN
-                    {
-                        self.edit_buffer.push(ch);
-                    }
-                    return;
-                }
+                _ => return,
             }
         }
 
-        // Search bar handling
+        // Search bar handling, as the value's edit.
         if self.search_visible {
             match key {
+                _ if textline::types_into_field(ev) => {
+                    if let Some(ch) = text
+                        && self.search_query.len() < MAX_SEARCH_LEN
+                    {
+                        self.search_query.push(ch);
+                        self.perform_search();
+                    }
+                    return;
+                }
+                _ if !plain => return,
                 Key::Escape => {
                     self.search_visible = false;
                     return;
@@ -2763,16 +2784,11 @@ impl App {
                     self.perform_search();
                     return;
                 }
-                _ => {
-                    if let Some(ch) = text
-                        && self.search_query.len() < MAX_SEARCH_LEN
-                    {
-                        self.search_query.push(ch);
-                        self.perform_search();
-                    }
-                    return;
-                }
+                _ => return,
             }
+        }
+        if !plain {
+            return;
         }
 
         // Enter edits the text itself: in the raw view, and in a tree with
@@ -2806,11 +2822,11 @@ impl App {
                         }
                         Key::PageDown => doc.raw_scroll += 10.0 * LINE_HEIGHT,
                         Key::Home => doc.raw_scroll = 0.0,
-                        Key::I if !modifiers.ctrl => {
+                        Key::I => {
                             doc.indent = doc.indent.cycle();
                             doc.invalidate_caches();
                         }
-                        Key::M if !modifiers.ctrl => {
+                        Key::M => {
                             doc.minified = !doc.minified;
                             doc.invalidate_caches();
                         }
@@ -2837,11 +2853,11 @@ impl App {
         // Mode switching with number keys (separate borrow scope)
         if let Some(doc) = self.documents.get_mut(self.active_tab) {
             match key {
-                Key::Num1 if !modifiers.ctrl => doc.view_mode = ViewMode::Tree,
-                Key::Num2 if !modifiers.ctrl => doc.view_mode = ViewMode::Raw,
-                Key::Num3 if !modifiers.ctrl => doc.view_mode = ViewMode::Yaml,
-                Key::Num4 if !modifiers.ctrl => doc.view_mode = ViewMode::Stats,
-                Key::Num5 if !modifiers.ctrl => doc.view_mode = ViewMode::Diff,
+                Key::Num1 => doc.view_mode = ViewMode::Tree,
+                Key::Num2 => doc.view_mode = ViewMode::Raw,
+                Key::Num3 => doc.view_mode = ViewMode::Yaml,
+                Key::Num4 => doc.view_mode = ViewMode::Stats,
+                Key::Num5 => doc.view_mode = ViewMode::Diff,
                 _ => {}
             }
         }
@@ -2851,7 +2867,7 @@ impl App {
         // `render_diff_view` were written and tested, and the *one* thing
         // missing was anything that filled `diff_source`. The view drew
         // "0 difference(s)" for every document, always.
-        if matches!(key, Key::Num5) && !modifiers.ctrl {
+        if matches!(key, Key::Num5) {
             self.prepare_diff_against_next_tab();
         }
     }
@@ -3093,12 +3109,15 @@ impl App {
         let Some(source) = doc.source.as_mut() else {
             return;
         };
-        if ev.key == Key::Escape {
+        // The editor's own keys are plain: Alt+Escape closed it. The rest go
+        // to the field, which knows a command from typing.
+        let plain = textline::is_plain(ev.modifiers);
+        if ev.key == Key::Escape && plain {
             doc.source = None;
             return;
         }
         let before = source.area.clone();
-        let edited = if ev.key == Key::Tab && !ev.modifiers.ctrl && !ev.modifiers.shift {
+        let edited = if ev.key == Key::Tab && plain && !ev.modifiers.shift {
             let step = IndentStyle::detect(source.area.text())
                 .unwrap_or(IndentStyle::Spaces2)
                 .indent_str();
@@ -7510,6 +7529,95 @@ mod tests {
             doc.reparse();
         }
         app
+    }
+
+    /// **A chord is neither a viewer key nor typing, and AltGr types**:
+    /// Alt+5 opened the diff view and Alt+M minified the raw view, each
+    /// chord carrying its key; AltGr+E -- Ctrl+Alt, a Polish `ę` -- turned
+    /// editing on as Ctrl+E does; Ctrl+X typed an `x` into a value being
+    /// edited and Alt+X one into the search; and Alt+Escape closed the
+    /// search. Ctrl+E still turns editing on.
+    #[test]
+    fn a_chord_is_neither_a_viewer_key_nor_typing() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let key = |k: Key, text: &str, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: text.to_owned(),
+            })
+        };
+        let mut app = app_with_sample();
+        let mode = app.documents[0].view_mode;
+        for (k, text, m) in [
+            (Key::Num5, "5", Modifiers::alt()),
+            (Key::Num2, "2", Modifiers::super_key()),
+            (Key::E, "", altgr),
+            (Key::Down, "", Modifiers::alt()),
+            (Key::F1, "", Modifiers::alt()),
+            (Key::Enter, "", Modifiers::super_key()),
+        ] {
+            app.handle_event(&key(k, text, m));
+        }
+        assert_eq!(app.documents[0].view_mode, mode, "a chord changed the view");
+        assert!(!app.edit_mode, "AltGr+E turned editing on");
+        assert!(!app.show_help, "a chord raised the keys");
+        assert!(app.documents[0].source.is_none(), "a chord opened the text");
+
+        // The raw view's letters are plain too.
+        app.documents[0].view_mode = ViewMode::Raw;
+        let minified = app.documents[0].minified;
+        app.handle_event(&key(Key::M, "m", Modifiers::alt()));
+        assert_eq!(app.documents[0].minified, minified, "Alt+M minified");
+        // Enter opens the text in the raw view; Alt+Escape does not close it.
+        app.handle_event(&key(Key::Enter, "", Modifiers::NONE));
+        assert!(
+            app.documents[0].source.is_some(),
+            "control: Enter opens the text"
+        );
+        app.handle_event(&key(Key::Escape, "", Modifiers::alt()));
+        assert!(
+            app.documents[0].source.is_some(),
+            "Alt+Escape closed the text"
+        );
+        app.handle_event(&key(Key::Escape, "", Modifiers::NONE));
+        assert!(
+            app.documents[0].source.is_none(),
+            "control: Escape closes it"
+        );
+        app.documents[0].view_mode = mode;
+
+        // A value being edited types what a key typed.
+        app.handle_event(&key(Key::E, "e", Modifiers::ctrl()));
+        assert!(app.edit_mode, "Ctrl+E no longer turns editing on");
+        app.editing_path = Some(vec![PathSegment::Key("a".to_owned())]);
+        app.edit_buffer.clear();
+        app.handle_event(&key(Key::X, "x", Modifiers::ctrl()));
+        app.handle_event(&key(Key::X, "x", Modifiers::alt()));
+        app.handle_event(&key(Key::E, "ę", altgr));
+        app.handle_event(&key(Key::Escape, "", Modifiers::alt()));
+        assert_eq!(
+            app.edit_buffer, "ę",
+            "the value typed a command or lost AltGr's ę"
+        );
+        assert!(app.editing_path.is_some(), "Alt+Escape ended the edit");
+        app.editing_path = None;
+
+        // So does the search, and its own keys are plain.
+        app.handle_event(&key(Key::F, "f", Modifiers::ctrl()));
+        assert!(app.search_visible, "control: Ctrl+F searches");
+        app.handle_event(&key(Key::X, "x", Modifiers::super_key()));
+        app.handle_event(&key(Key::S, "ś", altgr));
+        app.handle_event(&key(Key::Escape, "", Modifiers::alt()));
+        assert_eq!(
+            app.search_query, "ś",
+            "the search typed a command or lost AltGr's ś"
+        );
+        assert!(app.search_visible, "Alt+Escape closed the search");
     }
 
     #[test]

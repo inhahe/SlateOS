@@ -4118,9 +4118,15 @@ impl PdfViewerApp {
             return self.handle_print_key(event);
         }
 
+        // Every key but Ctrl+O and what is typed is taken plain: a chord with
+        // Alt or the Windows key is the window's or the desktop's and arrives
+        // carrying its key -- Alt+D turned the reading mode on and Alt+Space
+        // turned the page.
+        let plain = textline::is_plain(event.modifiers);
+
         // Escape closes the shortcut list before anything else, because it is
         // drawn over everything else: Escape closes the topmost thing.
-        if event.key == Key::Escape && self.show_help {
+        if event.key == Key::Escape && plain && self.show_help {
             self.show_help = false;
             return true;
         }
@@ -4128,7 +4134,7 @@ impl PdfViewerApp {
         // Escape closes the search bar from anywhere, focused or not, because
         // the whole point of Escape on an overlay is that you do not have to
         // find it first.
-        if event.key == Key::Escape && self.search.active {
+        if event.key == Key::Escape && plain && self.search.active {
             self.search.clear();
             self.search_focused = false;
             return true;
@@ -4138,11 +4144,16 @@ impl PdfViewerApp {
             return self.handle_search_key(event);
         }
 
+        // A Ctrl chord, not Ctrl held: AltGr+O is a Polish `ó`.
+        if event.key == Key::O && textline::is_ctrl_chord(event.modifiers) {
+            self.picker.open_to_read();
+            return true;
+        }
+        if !plain {
+            return false;
+        }
+
         match event.key {
-            Key::O if event.modifiers.ctrl => {
-                self.picker.open_to_read();
-                true
-            }
             Key::Right | Key::Down | Key::PageDown | Key::Space => {
                 self.step_page(true);
                 true
@@ -4214,6 +4225,17 @@ impl PdfViewerApp {
     /// press Print, and get every page -- the exact failure this dialog was
     /// built to remove, reintroduced one control along.
     fn handle_print_key(&mut self, event: &KeyEvent) -> bool {
+        // What a key typed -- AltGr's among it, and not a command's letter,
+        // which a chord carries: Ctrl+P typed a `p` into the range. The
+        // dialog's own keys are plain: Alt+Enter printed.
+        if textline::types_into_field(event) {
+            self.print_dialog.range_text.extend(event.typed());
+            self.print_dialog.choice = RangeChoice::Custom;
+            return true;
+        }
+        if !textline::is_plain(event.modifiers) {
+            return false;
+        }
         match event.key {
             Key::Escape => {
                 self.print_dialog.open = false;
@@ -4228,19 +4250,24 @@ impl PdfViewerApp {
                 self.print_dialog.choice = RangeChoice::Custom;
                 true
             }
-            _ => {
-                let typed: String = event.typed().collect();
-                if typed.is_empty() {
-                    return false;
-                }
-                self.print_dialog.range_text.push_str(&typed);
-                self.print_dialog.choice = RangeChoice::Custom;
-                true
-            }
+            _ => false,
         }
     }
 
     fn handle_search_key(&mut self, event: &KeyEvent) -> bool {
+        // `typed()` rather than `single_char()`: a compose sequence or an IME
+        // commit hands over several characters in one event, and taking only
+        // the first silently drops the rest. It also drops control
+        // characters, which is what keeps Tab and Enter from being typed into
+        // the box. And typed, not a command's letter -- Alt+X typed an `x`.
+        if textline::types_into_field(event) {
+            self.search.query.extend(event.typed());
+            self.refresh_search();
+            return true;
+        }
+        if !textline::is_plain(event.modifiers) {
+            return false;
+        }
         match event.key {
             Key::Enter => {
                 self.search.next_match();
@@ -4257,20 +4284,7 @@ impl PdfViewerApp {
                 self.refresh_search();
                 true
             }
-            _ => {
-                // `typed()` rather than `single_char()`: a compose sequence or
-                // an IME commit hands over several characters in one event, and
-                // taking only the first silently drops the rest. It also drops
-                // control characters, which is what keeps Tab and Enter from
-                // being typed into the box.
-                let typed: String = event.typed().collect();
-                if typed.is_empty() {
-                    return false;
-                }
-                self.search.query.push_str(&typed);
-                self.refresh_search();
-                true
-            }
+            _ => false,
         }
     }
 
@@ -4408,7 +4422,9 @@ impl App for PdfViewerApp {
             return Response::Exit;
         }
         if let Event::Key(key) = event {
-            if key.pressed && key.modifiers.ctrl {
+            // Ctrl chords, not Ctrl held: AltGr arrives as Ctrl+Alt and
+            // types, and AltGr+Q -- a German `@` -- closed the window.
+            if key.pressed && textline::is_ctrl_chord(key.modifiers) {
                 match key.key {
                     Key::Q => return Response::Exit,
                     // Ctrl+F is the find shortcut everywhere else, and going
@@ -6588,6 +6604,78 @@ mod tests {
     #[allow(clippy::unnecessary_wraps)]
     fn accepts(_doc: &PdfDocument, _pages: &[usize]) -> bool {
         true
+    }
+
+    /// **A chord is neither a viewer key nor typing, and AltGr is not Ctrl**:
+    /// Alt+D turned the reading mode over and Alt+Space turned the page, each
+    /// chord carrying its key; Ctrl+P typed a `p` into the print range and
+    /// Alt+X an `x` into the search; and AltGr+Q -- a German `@` -- closed
+    /// the window as Ctrl+Q does.
+    #[test]
+    fn a_chord_is_neither_a_viewer_key_nor_typing() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let key = |k: Key, text: &str, modifiers: Modifiers| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        };
+        let mut app = wired();
+        let (dark, page) = (app.dark_mode, app.active_tab().map(|t| t.current_page));
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for k in [Key::D, Key::Space, Key::Right, Key::End, Key::F1, Key::O] {
+                assert!(!app.handle_key(&key(k, "", m)), "{m:?} {k:?} was taken");
+            }
+        }
+        assert_eq!(app.dark_mode, dark, "a chord turned the reading mode over");
+        assert_eq!(
+            app.active_tab().map(|t| t.current_page),
+            page,
+            "a chord turned the page"
+        );
+        assert!(!app.show_help, "a chord raised the keys");
+        assert!(!app.picker.is_open(), "AltGr+O opened a file");
+        assert_ne!(
+            app.on_event(&Event::Key(key(Key::Q, "@", altgr))),
+            Response::Exit,
+            "AltGr+Q closed the window"
+        );
+        // The list of keys goes on a plain Escape only.
+        app.handle_key(&key(Key::F1, "", Modifiers::NONE));
+        app.handle_key(&key(Key::Escape, "", Modifiers::alt()));
+        assert!(app.show_help, "Alt+Escape put the list of keys away");
+        app.handle_key(&key(Key::Escape, "", Modifiers::NONE));
+
+        // The print dialog's range types what a key typed.
+        app.print_dialog.open = true;
+        app.print_dialog.range_text.clear();
+        app.handle_key(&key(Key::P, "p", Modifiers::ctrl()));
+        app.handle_key(&key(Key::X, "x", Modifiers::alt()));
+        app.handle_key(&key(Key::Num2, "2", Modifiers::NONE));
+        app.handle_key(&key(Key::Enter, "", Modifiers::alt()));
+        assert_eq!(
+            app.print_dialog.range_text, "2",
+            "the range typed a command's letter"
+        );
+        assert!(app.print_dialog.open, "Alt+Enter printed");
+        app.print_dialog.open = false;
+
+        // So does the search.
+        app.search.active = true;
+        app.search_focused = true;
+        app.handle_key(&key(Key::X, "x", Modifiers::alt()));
+        app.handle_key(&key(Key::S, "ś", altgr));
+        app.handle_key(&key(Key::Escape, "", Modifiers::alt()));
+        app.handle_key(&key(Key::Backspace, "", Modifiers::alt()));
+        assert_eq!(
+            app.search.query, "ś",
+            "the search typed a command or lost AltGr's ś"
+        );
+        assert!(app.search.active, "Alt+Escape closed the search");
     }
 
     #[test]

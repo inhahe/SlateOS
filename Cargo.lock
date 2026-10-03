@@ -2843,6 +2843,7 @@ dependencies = [
  "pathtext",
  "printjob",
  "safeio",
+ "textline",
 ]
 
 [[package]]

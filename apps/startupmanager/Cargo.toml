@@ -12,6 +12,9 @@ guitk = { path = "../../gui/toolkit" }
 # drawn and not one of them handled a click: a program made entirely of
 # pictures of controls.
 oswindow = { path = "../../gui/window" }
+# Whether a key is plain, a Ctrl chord or typing: a key held with Alt or the
+# Windows key is not the manager's, and AltGr types.
+textline = { path = "../textline" }
 
 [lints]
 workspace = true

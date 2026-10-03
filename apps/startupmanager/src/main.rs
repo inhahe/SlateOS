@@ -1964,13 +1964,18 @@ impl StartupUI {
     }
 
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
-        if key.key == Key::F1 {
+        // A key on its own is taken plain, nothing held but Shift: a chord
+        // with Alt or the Windows key is the window's or the desktop's and
+        // arrives carrying its key -- Alt+Enter, under "remove?", removed the
+        // entry, and Alt+Delete asked.
+        let plain = textline::is_plain(key.modifiers);
+        if key.key == Key::F1 && plain {
             self.show_help = !self.show_help;
             return EventResult::Consumed;
         }
         if self.show_help {
             // Modal: Delete removes a startup entry.
-            if matches!(key.key, Key::Escape | Key::Enter) {
+            if plain && matches!(key.key, Key::Escape | Key::Enter) {
                 self.show_help = false;
             }
             return EventResult::Consumed;
@@ -1980,11 +1985,11 @@ impl StartupUI {
         }
         if matches!(self.dialog, DialogState::ConfirmDelete(_)) {
             return match key.key {
-                Key::Escape => {
+                Key::Escape if plain => {
                     self.close_dialog();
                     EventResult::Consumed
                 }
-                Key::Enter => {
+                Key::Enter if plain => {
                     self.confirm_delete();
                     EventResult::Consumed
                 }
@@ -1994,13 +1999,21 @@ impl StartupUI {
         self.handle_table_key(key)
     }
 
+    /// Keys while the add or edit dialog is up: it has every key.
+    ///
+    /// Its own keys are plain -- Alt+Enter saved it and Alt+Tab, the
+    /// desktop's window switcher, moved between its fields -- and it types
+    /// what was typed: the letter a command carries is not text, and AltGr's
+    /// is, where AltGr typed nothing and the Windows key's chords typed their
+    /// letter. Backspace is refused only to Alt and the Windows key.
     fn handle_add_edit_key(&mut self, key: &KeyEvent) -> EventResult {
+        let plain = textline::is_plain(key.modifiers);
         match key.key {
-            Key::Escape => {
+            Key::Escape if plain => {
                 self.close_dialog();
                 return EventResult::Consumed;
             }
-            Key::Enter => {
+            Key::Enter if plain => {
                 self.save_dialog();
                 return EventResult::Consumed;
             }
@@ -2011,15 +2024,15 @@ impl StartupUI {
             return EventResult::Ignored;
         };
         match key.key {
-            Key::Tab if key.modifiers.shift => dlg.focus_prev(),
-            Key::Tab | Key::Down => dlg.focus_next(),
-            Key::Up => dlg.focus_prev(),
-            Key::Backspace => {
+            Key::Tab if plain && key.modifiers.shift => dlg.focus_prev(),
+            Key::Tab | Key::Down if plain => dlg.focus_next(),
+            Key::Up if plain => dlg.focus_prev(),
+            Key::Backspace if !textline::is_alt_or_windows_chord(key.modifiers) => {
                 dlg.focused_text_mut().pop();
             }
             _ => {
-                if !key.text.is_empty() && !key.modifiers.ctrl && !key.modifiers.alt {
-                    dlg.focused_text_mut().push_str(&key.text);
+                if textline::types_into_field(key) {
+                    dlg.focused_text_mut().extend(key.typed());
                 }
             }
         }
@@ -2027,7 +2040,8 @@ impl StartupUI {
     }
 
     fn handle_table_key(&mut self, key: &KeyEvent) -> EventResult {
-        if key.modifiers.ctrl {
+        // A Ctrl chord, not Ctrl held: AltGr arrives as Ctrl+Alt and types.
+        if textline::is_ctrl_chord(key.modifiers) {
             return match key.key {
                 Key::N => {
                     self.run(ToolbarAction::Add);
@@ -2039,6 +2053,28 @@ impl StartupUI {
                 }
                 _ => EventResult::Ignored,
             };
+        }
+        // The search types what was typed, AltGr's letters among it -- it
+        // refused them, and took the letter a Windows-key chord carries.
+        if self.search_focused && textline::types_into_field(key) {
+            self.search_query.extend(key.typed());
+            self.scroll_offset = 0;
+            self.clamp_scroll();
+            return EventResult::Consumed;
+        }
+        // Every other key is taken plain, nothing held but Shift; but
+        // Backspace in the search is refused only to Alt and the Windows key.
+        if self.search_focused
+            && key.key == Key::Backspace
+            && !textline::is_alt_or_windows_chord(key.modifiers)
+        {
+            self.search_query.pop();
+            self.scroll_offset = 0;
+            self.clamp_scroll();
+            return EventResult::Consumed;
+        }
+        if !textline::is_plain(key.modifiers) {
+            return EventResult::Ignored;
         }
 
         match key.key {
@@ -2081,18 +2117,6 @@ impl StartupUI {
             }
             Key::F5 => {
                 self.run(ToolbarAction::Refresh);
-                EventResult::Consumed
-            }
-            Key::Backspace if self.search_focused => {
-                self.search_query.pop();
-                self.scroll_offset = 0;
-                self.clamp_scroll();
-                EventResult::Consumed
-            }
-            _ if self.search_focused && !key.text.is_empty() && !key.modifiers.alt => {
-                self.search_query.push_str(&key.text);
-                self.scroll_offset = 0;
-                self.clamp_scroll();
                 EventResult::Consumed
             }
             _ => EventResult::Ignored,
@@ -3081,11 +3105,13 @@ impl App for StartupUI {
 
     fn on_event(&mut self, event: &Event) -> Response {
         // Ctrl+Q closes the window. Escape does not: here it backs out of a
-        // dialog, a filter or a selection, which is what the key is for.
+        // dialog, a filter or a selection, which is what the key is for. A
+        // Ctrl chord, not Ctrl held: AltGr+Q, a German `@`, arrives as
+        // Ctrl+Alt+Q, and closed the window mid-word.
         if let Event::Key(key) = event
             && key.pressed
             && key.key == Key::Q
-            && key.modifiers.ctrl
+            && textline::is_ctrl_chord(key.modifiers)
         {
             return Response::Exit;
         }
@@ -3264,6 +3290,149 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **A chord is neither a manager key nor typing, AltGr types, and
+    /// AltGr+Q is not Ctrl+Q**: each chord with Alt or the Windows key is the
+    /// window's or the desktop's and arrives carrying its key -- Alt+Delete
+    /// asked to remove an entry and Alt+Enter then removed it, Alt+Tab walked
+    /// the dialog's fields and Alt+Enter saved it, and Windows+X typed an `x`
+    /// into the search; AltGr typed nothing into the dialog or the search,
+    /// and AltGr+Q, a German `@`, closed the window as Ctrl+Q does.
+    ///
+    /// Each key is asserted as it is pressed.
+    #[test]
+    fn a_chord_is_neither_a_manager_key_nor_typing_and_altgr_types() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let chord = |k: Key, text: &str, modifiers: Modifiers| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        };
+        let mut ui = StartupUI::new();
+        for name in ["alpha", "beta", "gamma"] {
+            ui.manager.add_entry(
+                name,
+                "/bin/x",
+                "",
+                StartupType::Login,
+                StartupImpact::Low,
+                "",
+                "",
+                0,
+            );
+        }
+        ui.handle_key(&chord(Key::Down, "", Modifiers::NONE));
+        assert!(ui.selected_id.is_some(), "control: a selection");
+        let state = |ui: &StartupUI| {
+            (
+                (ui.manager.entry_count(), ui.selected_id, ui.show_help),
+                (
+                    matches!(ui.dialog, DialogState::Closed),
+                    ui.search_focused,
+                    ui.search_query.clone(),
+                    ui.status.clone(),
+                ),
+            )
+        };
+        let before = state(&ui);
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for k in [
+                Key::Delete,
+                Key::Enter,
+                Key::Down,
+                Key::End,
+                Key::F5,
+                Key::F1,
+                Key::Escape,
+                Key::N,
+                Key::F,
+            ] {
+                assert_eq!(
+                    ui.handle_key(&chord(k, "", m)),
+                    EventResult::Ignored,
+                    "{m:?} {k:?} was taken"
+                );
+                assert_eq!(state(&ui), before, "{m:?} {k:?} changed the manager");
+            }
+        }
+        assert!(
+            !matches!(
+                ui.on_event(&Event::Key(chord(Key::Q, "@", altgr))),
+                Response::Exit
+            ),
+            "AltGr+Q closed the window"
+        );
+
+        // The list of keys goes on a plain Escape or Enter only.
+        ui.handle_key(&chord(Key::F1, "", Modifiers::NONE));
+        assert!(ui.show_help, "control: F1 raises the list");
+        ui.handle_key(&chord(Key::Escape, "", Modifiers::alt()));
+        ui.handle_key(&chord(Key::Enter, "", Modifiers::super_key()));
+        assert!(ui.show_help, "a chorded Escape or Enter put the list away");
+        ui.handle_key(&chord(Key::Escape, "", Modifiers::NONE));
+
+        // The question before a removal answers plain keys only.
+        ui.handle_key(&chord(Key::Delete, "", Modifiers::NONE));
+        assert!(
+            matches!(ui.dialog, DialogState::ConfirmDelete(_)),
+            "control: Delete asks"
+        );
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            ui.handle_key(&chord(Key::Enter, "", m));
+            assert_eq!(ui.manager.entry_count(), 3, "{m:?} Enter removed it");
+            ui.handle_key(&chord(Key::Escape, "", m));
+            assert!(
+                matches!(ui.dialog, DialogState::ConfirmDelete(_)),
+                "{m:?} Escape answered"
+            );
+        }
+        ui.handle_key(&chord(Key::Escape, "", Modifiers::NONE));
+
+        // The search types what was typed, AltGr's letters among it.
+        ui.handle_key(&chord(Key::F, "f", Modifiers::ctrl()));
+        assert!(ui.search_focused, "control: Ctrl+F reaches the search");
+        ui.handle_key(&chord(Key::X, "x", Modifiers::super_key()));
+        ui.handle_key(&chord(Key::X, "x", Modifiers::alt()));
+        ui.handle_key(&chord(Key::A, "ą", altgr));
+        ui.handle_key(&chord(Key::Backspace, "", Modifiers::alt()));
+        assert_eq!(
+            ui.search_query, "ą",
+            "the search typed a command's letter, or lost AltGr's"
+        );
+        ui.handle_key(&chord(Key::Escape, "", Modifiers::NONE));
+        ui.search_query.clear();
+
+        // The dialog's own keys are plain, and it types what was typed.
+        ui.handle_key(&chord(Key::N, "n", Modifiers::ctrl()));
+        let dialog = |ui: &StartupUI| match &ui.dialog {
+            DialogState::AddEdit(d) => Some((d.focused_field, d.name.clone())),
+            _ => None,
+        };
+        assert_eq!(dialog(&ui), Some((0, String::new())), "control: Ctrl+N");
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for k in [Key::Tab, Key::Down, Key::Up, Key::Enter, Key::Escape] {
+                ui.handle_key(&chord(k, "", m));
+                assert_eq!(
+                    dialog(&ui),
+                    Some((0, String::new())),
+                    "{m:?} {k:?} moved, saved or closed"
+                );
+            }
+        }
+        ui.handle_key(&chord(Key::X, "x", Modifiers::alt()));
+        ui.handle_key(&chord(Key::X, "x", Modifiers::super_key()));
+        ui.handle_key(&chord(Key::S, "ś", altgr));
+        ui.handle_key(&chord(Key::Backspace, "", Modifiers::super_key()));
+        assert_eq!(
+            dialog(&ui),
+            Some((0, String::from("ś"))),
+            "the dialog typed a command's letter, or lost AltGr's"
+        );
     }
 
     // -- StartupType tests --------------------------------------------------

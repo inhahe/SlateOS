@@ -67,11 +67,11 @@ use super::number::{
     SYS_NET_RAW_MCAST, SYS_NET_RAW_OPEN, SYS_NET_RAW_RX, SYS_NET_RAW_TX, SYS_NET_ROUTE_ADD,
     SYS_NET_ROUTE_DEL, SYS_NET_ROUTE_LIST, SYS_NET_STAT, SYS_NOTIFY_READY, SYS_NS_ATTACH,
     SYS_NS_BIND, SYS_NS_CREATE, SYS_NS_HIDE, SYS_NS_QUERY, SYS_NS_UNBIND, SYS_PHYS_PAGES_AVAIL,
-    SYS_PHYS_PAGES_TOTAL, SYS_PIPE_CLOSE, SYS_PIPE_CREATE, SYS_PIPE_PEEK, SYS_PIPE_POLL,
-    SYS_PIPE_READ, SYS_PIPE_READ_TIMEOUT, SYS_PIPE_READABLE_BYTES, SYS_PIPE_TRY_READ,
-    SYS_PIPE_TRY_WRITE, SYS_PIPE_WAIT_READABLE, SYS_PIPE_WRITE, SYS_PIPE_WRITE_TIMEOUT,
-    SYS_PORT_READ, SYS_PORT_WRITE, SYS_PROCESS_CHROOT, SYS_PROCESS_COUNT, SYS_PROCESS_CRASH_INFO,
-    SYS_PROCESS_GET_ARGS, SYS_PROCESS_GET_CREDENTIALS, SYS_PROCESS_GET_CWD,
+    SYS_PHYS_PAGES_TOTAL, SYS_PIDFD_CLOSE, SYS_PIDFD_OPEN, SYS_PIPE_CLOSE, SYS_PIPE_CREATE,
+    SYS_PIPE_PEEK, SYS_PIPE_POLL, SYS_PIPE_READ, SYS_PIPE_READ_TIMEOUT, SYS_PIPE_READABLE_BYTES,
+    SYS_PIPE_TRY_READ, SYS_PIPE_TRY_WRITE, SYS_PIPE_WAIT_READABLE, SYS_PIPE_WRITE,
+    SYS_PIPE_WRITE_TIMEOUT, SYS_PORT_READ, SYS_PORT_WRITE, SYS_PROCESS_CHROOT, SYS_PROCESS_COUNT,
+    SYS_PROCESS_CRASH_INFO, SYS_PROCESS_GET_ARGS, SYS_PROCESS_GET_CREDENTIALS, SYS_PROCESS_GET_CWD,
     SYS_PROCESS_GET_INITIAL_FDS, SYS_PROCESS_GET_NICE, SYS_PROCESS_GET_PGID, SYS_PROCESS_GET_PHDR,
     SYS_PROCESS_GET_PRIORITY, SYS_PROCESS_GET_RUSAGE, SYS_PROCESS_GET_SID, SYS_PROCESS_ID,
     SYS_PROCESS_IS_READY, SYS_PROCESS_KILL, SYS_PROCESS_PARENT_ID, SYS_PROCESS_SET_CREDENTIALS,
@@ -766,6 +766,8 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_NET_RAW_CLOSE as usize] = Some(handlers::sys_net_raw_close);
     handlers[SYS_NET_RAW_MCAST as usize] = Some(handlers::sys_net_raw_mcast);
     handlers[SYS_SIGNAL_EXIT_SELF as usize] = Some(handlers::sys_signal_exit_self);
+    handlers[SYS_PIDFD_OPEN as usize] = Some(handlers::sys_pidfd_open);
+    handlers[SYS_PIDFD_CLOSE as usize] = Some(handlers::sys_pidfd_close);
     handlers[SYS_ARP_TABLE as usize] = Some(handlers::sys_arp_table);
     handlers[SYS_DNS_CACHE_STATS as usize] = Some(handlers::sys_dns_cache_stats);
     handlers[SYS_TCP_POLL_STATUS as usize] = Some(handlers::sys_tcp_poll_status);
@@ -1098,6 +1100,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_udp_v6_and_options()?;
     test_dispatch_raw_mcast()?;
     test_dispatch_exit_status_is_not_a_signal()?;
+    test_dispatch_pidfd()?;
     test_dispatch_tioc_and_watch_records()?;
     test_cpu_current()?;
     test_dispatch_shared_anonymous_memory()?;
@@ -3701,6 +3704,123 @@ fn test_dispatch_udp_v6_and_options() -> KernelResult<()> {
         "[syscall]   SYS_UDP_SEND6/RECV6/MCAST_JOIN6/SET_OPTION/GET_OPTION (1129-1134): a \
          group joined from user memory, hop limit 0, the datagram looped back with its \
          source: OK"
+    );
+    Ok(())
+}
+
+/// `SYS_PIDFD_OPEN`/`SYS_PIDFD_CLOSE` (1137/1138) and the `Process` kind of
+/// `SYS_WAIT_MULTIPLE`, through the syscall layer with the wait set in the
+/// watcher's own memory: refusals (pid 0, flags, no such process); a live
+/// child's pidfd not ready; a pid the watcher does not hold `POLLNVAL`; the
+/// child a zombie -- not yet reaped -- and the pidfd `POLLIN`, as Linux's
+/// is at exit; still `POLLIN` once reaped; closed, then not held.
+fn test_dispatch_pidfd() -> KernelResult<()> {
+    use super::linux::poll_bits::{POLLIN, POLLNVAL};
+    use super::number::{MAP_READ, MAP_WRITE};
+    use crate::mm::user::{copy_from_user_as, copy_to_user_as};
+    use crate::proc::pcb::{self, ProcessId};
+    use crate::proc::thread::{self_test_as_process, self_test_in_process};
+
+    fn fail(msg: &str, pids: &[ProcessId]) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: pidfd: {}", msg);
+        for &p in pids {
+            pcb::destroy(p);
+        }
+        Err(KernelError::InternalError)
+    }
+    let args = |arg0: u64, arg1: u64, arg2: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let code = |e: KernelError| i64::from(e.code());
+
+    let watcher = pcb::create("pidfd-watcher", 0);
+    let child = pcb::create("pidfd-child", 0);
+    let both = [watcher, child];
+    const CHILD_TID: u64 = 9_990;
+    if pcb::set_running(child).is_err() || pcb::add_thread(child, CHILD_TID).is_err() {
+        return fail("could not start the child", &both);
+    }
+    let mapped = self_test_as_process(watcher, || {
+        dispatch(SYS_MMAP, &args(0, 0x4000, MAP_READ | MAP_WRITE)).value
+    });
+    let Ok(page) = u64::try_from(mapped) else {
+        return fail("could not map the watcher's memory", &both);
+    };
+    let Some(pml4) = pcb::get_pml4(watcher).filter(|&p| p != 0) else {
+        return fail("the watcher has no address space", &both);
+    };
+    let call = |nr: u64, a: SyscallArgs| self_test_in_process(watcher, || dispatch(nr, &a).value);
+    // One SYS_WAIT_MULTIPLE item at `page`: handle, kind 6 (Process),
+    // events POLLIN, revents 0, pad. Polls once and reads revents back.
+    let poll = |handle: u64| -> Option<(i64, u16)> {
+        let mut item = [0u8; 24];
+        item[..8].copy_from_slice(&handle.to_ne_bytes());
+        item[8..12].copy_from_slice(&6u32.to_ne_bytes());
+        item[12..16].copy_from_slice(&u32::from(POLLIN).to_ne_bytes());
+        copy_to_user_as(pml4, page, &item).ok()?;
+        let ready = call(SYS_WAIT_MULTIPLE, args(page, 1, 0))?;
+        let mut back = [0u8; 24];
+        copy_from_user_as(pml4, page, &mut back).ok()?;
+        let revents = u32::from_ne_bytes(<[u8; 4]>::try_from(&back[16..20]).ok()?);
+        Some((ready, u16::try_from(revents).unwrap_or(u16::MAX)))
+    };
+
+    let refused = call(SYS_PIDFD_OPEN, args(0, 0, 0)) == Some(code(KernelError::InvalidArgument))
+        && call(SYS_PIDFD_OPEN, args(child, 1, 0)) == Some(code(KernelError::InvalidArgument))
+        && call(SYS_PIDFD_OPEN, args(u64::MAX >> 2, 0, 0))
+            == Some(code(KernelError::NoSuchProcess));
+    if !refused {
+        return fail("pid 0, a flag, or no such process was not refused", &both);
+    }
+    let Some(Ok(h)) = call(SYS_PIDFD_OPEN, args(child, 0, 0)).map(u64::try_from) else {
+        return fail("could not open the child's pidfd", &both);
+    };
+    if h != child {
+        return fail("the handle is not the pid", &both);
+    }
+    if poll(h) != Some((0, 0)) {
+        return fail("a live child's pidfd was ready", &both);
+    }
+    // A pid the watcher holds no handle for: POLLNVAL, not an oracle.
+    if poll(watcher).map(|(_, r)| r & POLLNVAL) != Some(POLLNVAL) {
+        return fail("a pid the watcher does not hold was waited on", &both);
+    }
+    // The child exits; its parent (pid 0) has not reaped it.
+    let zombie = pcb::set_exit_code(child, 0).is_ok()
+        && matches!(
+            pcb::remove_thread(child, CHILD_TID, pcb::ThreadExitAccounting::default()),
+            Ok((true, _, _))
+        );
+    if !zombie {
+        return fail("the child did not become a zombie", &both);
+    }
+    if poll(h) != Some((1, POLLIN)) {
+        serial_println!("[syscall]     zombie child's pidfd polled {:?}", poll(h));
+        return fail("an exited (unreaped) child's pidfd was not POLLIN", &both);
+    }
+    if pcb::try_reap(0, child).ok().flatten().is_none() {
+        return fail("the child could not be reaped", &both);
+    }
+    if poll(h) != Some((1, POLLIN)) {
+        return fail("a reaped child's pidfd was not POLLIN", &[watcher]);
+    }
+    let closed = call(SYS_PIDFD_CLOSE, args(h, 0, 0)) == Some(0)
+        && call(SYS_PIDFD_CLOSE, args(h, 0, 0)) == Some(code(KernelError::InvalidHandle));
+    if !closed {
+        return fail("close, or a second close, answered wrongly", &[watcher]);
+    }
+    if poll(h).map(|(_, r)| r & POLLNVAL) != Some(POLLNVAL) {
+        return fail("a closed pidfd could still be waited on", &[watcher]);
+    }
+    pcb::destroy(watcher);
+    serial_println!(
+        "[syscall]   SYS_PIDFD_OPEN/CLOSE (1137/1138): refusals, a live child not ready, an \
+         exited one POLLIN before and after its reap, a pid not held POLLNVAL: OK"
     );
     Ok(())
 }

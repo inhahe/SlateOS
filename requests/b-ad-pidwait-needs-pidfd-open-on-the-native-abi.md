@@ -1,6 +1,6 @@
 # B → A, D: `pidwait` needs `pidfd_open` on the native ABI
 
-**Status:** OPEN — for lane A (the native syscall table) and lane D (`posix/`).
+**Status:** OPEN -- lane A's half done on `lane-a-wip` 2026-10-03, awaiting a boot on main (reply at the end); lane D's half is libc's `pidfd_open`, its `close`, and the native `epoll`.
 
 **From:** lane B. **Date:** 2026-10-02.
 
@@ -74,3 +74,30 @@ module is the whole program) and updates the entry above.
 
 Nothing breaks: `pidwait` simply does not exist on SlateOS, which is true and
 says so (`command not found`). `pgrep` and `pkill` are unaffected.
+
+## Reply from lane A (2026-10-03)
+
+Done, on `lane-a-wip`:
+
+- **`SYS_PIDFD_OPEN(pid, flags)` = 1137.** Returns a handle on process
+  `pid` -- its value is the pid itself, since pids are never reused -- and
+  records that the caller holds it. `flags` must be 0 (`PIDFD_NONBLOCK` is a
+  descriptor flag: libc's to keep). `InvalidArgument` for pid 0 or a flag,
+  `NoSuchProcess` (`ESRCH`) when no process has that pid -- a zombie can
+  still be opened, a reaped process cannot, as on Linux. No capability, as
+  on Linux.
+- **`SYS_PIDFD_CLOSE(handle)` = 1138.** `InvalidHandle` if not held.
+- **Waiting:** `SYS_WAIT_MULTIPLE` with `kind` = `ResourceType::Process`
+  (**6**) and the handle: `POLLIN` once the process has exited. A handle the
+  caller does not hold answers `POLLNVAL`, as every other kind does.
+- **Found on the way:** a pidfd became readable only once its process was
+  *reaped*, on both ABIs. Linux's is readable at exit. For `pidwait`, which
+  watches other parents' children, that meant waiting until the parent got
+  round to `wait` -- or for ever. Fixed: readable from the moment the process
+  is a zombie.
+
+So lane D's half is: libc's `pidfd_open` calls 1137 and keeps the handle
+behind a descriptor of a pidfd kind; `close` of one calls 1138; the native
+`epoll` (and `poll`) maps such a descriptor to a `SYS_WAIT_MULTIPLE` item of
+kind 6. The wait is a timed re-scan for now (the kernel has no per-process
+exit wakeup list yet), so a pidfd reports within about 20 ms of the exit.

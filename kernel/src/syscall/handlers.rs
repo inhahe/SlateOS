@@ -9469,6 +9469,46 @@ pub fn sys_signal_exit_self(args: &super::dispatch::SyscallArgs) -> super::dispa
     SyscallResult::err(KernelError::InternalError)
 }
 
+/// `SYS_PIDFD_OPEN` (1137) -- a handle on process `arg0` that is ready
+/// (`POLLIN`, `SYS_WAIT_MULTIPLE` kind `ResourceType::Process`) once the
+/// process has exited. See the number's doc.
+pub fn sys_pidfd_open(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    // No flags yet: PIDFD_NONBLOCK is a descriptor flag, the library's.
+    if args.arg1 != 0 || args.arg0 == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let target: pcb::ProcessId = args.arg0;
+    let pid = match caller_process_or_err() {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    // A zombie still exists and may be watched -- it is ready at once; a
+    // reaped (or never-made) process may not.
+    if pcb::state(target).is_none() {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    }
+    let Ok(value) = i64::try_from(target) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    pcb::register_ipc_handle(pid, ResourceType::Process, target);
+    SyscallResult::ok(value)
+}
+
+/// `SYS_PIDFD_CLOSE` (1138) -- give back a handle `SYS_PIDFD_OPEN` made.
+pub fn sys_pidfd_close(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    let pid = match caller_process_or_err() {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if !pcb::owns_ipc_handle(pid, ResourceType::Process, args.arg0) {
+        return SyscallResult::err(KernelError::InvalidHandle);
+    }
+    pcb::deregister_ipc_handle(pid, ResourceType::Process, args.arg0);
+    SyscallResult::ok(0)
+}
+
 /// `SYS_SIGNAL_RETURN` — resume from a signal handler (sigreturn).
 ///
 /// `arg0`: pointer to the `SignalContext` on the user stack.
@@ -19068,6 +19108,8 @@ fn wait_test_for(kind: ResourceType) -> Option<WaitTest> {
         ResourceType::Pty => WaitTest::Pty,
         ResourceType::Channel => WaitTest::Channel,
         ResourceType::Service => WaitTest::Listener,
+        // A pidfd (`SYS_PIDFD_OPEN`): ready once its process has exited.
+        ResourceType::Process => WaitTest::Handle(HandleKind::PidFd),
         _ => return None,
     })
 }

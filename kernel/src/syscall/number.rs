@@ -6563,6 +6563,23 @@ pub const SYS_NET_RAW_MCAST: u64 = 1135;
 /// signal that is not fatal by default.
 pub const SYS_SIGNAL_EXIT_SELF: u64 = 1136;
 
+/// `SYS_PIDFD_OPEN(pid, flags)` -- a handle on process `pid` that becomes
+/// readable once the process has exited: Linux's `pidfd_open` for the native
+/// ABI (requests/b-ad-pidwait-needs-pidfd-open-on-the-native-abi.md). Wait on
+/// it with [`SYS_WAIT_MULTIPLE`], kind `ResourceType::Process` (6): `POLLIN`
+/// from the moment the process is a zombie, whether or not its parent has
+/// reaped it. The handle's value is the pid (pids are never reused);
+/// holding it is what lets the caller wait on it. `flags` must be 0 --
+/// `PIDFD_NONBLOCK` is a descriptor flag, the library's. No capability: as on
+/// Linux, anyone may watch a process end. Pids are the global ones, as every
+/// other call's (`pidns` is not yet wired into the syscalls).
+/// `InvalidArgument` for pid 0 or flags; `NoSuchProcess` for a pid with no
+/// process (one already reaped included).
+pub const SYS_PIDFD_OPEN: u64 = 1137;
+/// `SYS_PIDFD_CLOSE(handle)` -- give back a handle [`SYS_PIDFD_OPEN`] made.
+/// `InvalidHandle` if the caller does not hold it.
+pub const SYS_PIDFD_CLOSE: u64 = 1138;
+
 /// Bytes [`SYS_UNIX_NAME`] writes: kind, length, 108 bytes of name.
 pub const UNIX_ADDR_LEN: usize = 116;
 /// Bytes [`SYS_UNIX_RECV`] writes at `info_ptr`.

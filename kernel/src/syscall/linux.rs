@@ -31396,17 +31396,15 @@ pub(crate) fn revents_for_handle(
             r
         }
         HandleKind::PidFd => {
-            // Linux pidfd signals POLLIN once the target process has
-            // exited (waitable/zombie).  Until then poll returns 0 on
-            // a pidfd.  We approximate "process exists" by consulting
-            // the PCB name table — a None result means the entry has
-            // been reaped (or never existed).  Until per-pid exit
-            // tracking lands, this is the readiness signal we have.
+            // POLLIN once the target has exited -- a zombie, reaped or not --
+            // as Linux's pidfd is (`pidfd_poll`: `exit_state` set). Until
+            // 2026-10-03 only a *reaped* process counted, so a watcher of
+            // another parent's child (`pidwait`) waited until that parent
+            // got round to `wait`, or for ever.
             let target: crate::proc::pcb::ProcessId = raw_handle;
-            if crate::proc::pcb::name(target).is_none() {
-                poll_bits::POLLIN
-            } else {
-                0
+            match crate::proc::pcb::state(target) {
+                None | Some(crate::proc::pcb::ProcessState::Zombie) => poll_bits::POLLIN,
+                Some(_) => 0,
             }
         }
         HandleKind::MemFd => {

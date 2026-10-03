@@ -1192,6 +1192,13 @@ impl WeatherApp {
         if !key.pressed {
             return EventResult::Ignored;
         }
+        // Every binding is on a key, taken plain -- nothing held but Shift. A
+        // chord with Ctrl, Alt or the Windows key is the window's or the
+        // desktop's and arrives carrying its key: Alt+U changed the
+        // temperature unit, and Ctrl+T the clock.
+        if !textline::is_plain(key.modifiers) {
+            return EventResult::Ignored;
+        }
 
         if key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift) {
             self.show_help = !self.show_help;
@@ -3380,6 +3387,62 @@ mod tests {
             assert_ne!(app.settings.pressure_unit, before.pressure_unit);
             app.handle_event(&press(Key::T));
             assert_ne!(app.settings.time_format, before.time_format);
+        });
+    }
+
+    /// **A key held with Ctrl, Alt or the Windows key is not the window's**:
+    /// each such chord is the window's or the desktop's and arrives carrying
+    /// its key -- Alt+U changed the temperature unit, Ctrl+T the clock,
+    /// Windows+2 the view and Alt+Down the location.
+    #[test]
+    fn a_key_held_with_a_modifier_is_not_the_windows() {
+        settingsfile::testing::with_scratch_config("wx_chords", |_| {
+            let altgr = Modifiers {
+                alt: true,
+                ..Modifiers::ctrl()
+            };
+            let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
+            let state = |app: &WeatherApp| {
+                (
+                    app.settings.clone(),
+                    app.active_view,
+                    app.active_location_idx,
+                    app.show_help,
+                    app.hourly_scroll_offset.to_bits(),
+                )
+            };
+            let before = state(&app);
+            for m in [
+                Modifiers::ctrl(),
+                Modifiers::alt(),
+                Modifiers::super_key(),
+                altgr,
+            ] {
+                for k in [
+                    Key::U,
+                    Key::W,
+                    Key::P,
+                    Key::T,
+                    Key::Num2,
+                    Key::Tab,
+                    Key::Down,
+                    Key::Right,
+                    Key::F1,
+                ] {
+                    let chord = Event::Key(KeyEvent {
+                        key: k,
+                        pressed: true,
+                        modifiers: m,
+                        text: String::new(),
+                    });
+                    assert_eq!(
+                        app.handle_event(&chord),
+                        EventResult::Ignored,
+                        "{m:?} {k:?} was taken"
+                    );
+                    assert!(state(&app) == before, "{m:?} {k:?} changed the window");
+                }
+            }
         });
     }
 

@@ -1235,14 +1235,15 @@ impl ScreenshotApp {
     ///
     /// `Some` when the card took the keystroke, `None` to let the view have it.
     fn handle_help_key(&mut self, event: &KeyEvent) -> Option<bool> {
-        if event.key == Key::F1 || (event.key == Key::Slash && event.modifiers.shift) {
+        let plain = textline::is_plain(event.modifiers);
+        if plain && (event.key == Key::F1 || (event.key == Key::Slash && event.modifiers.shift)) {
             self.show_help = !self.show_help;
             return Some(true);
         }
         if self.show_help {
             // Modal. Letting keys through would mean discarding an image the
             // reader cannot see.
-            if matches!(event.key, Key::Escape | Key::Enter | Key::F1) {
+            if plain && matches!(event.key, Key::Escape | Key::Enter) {
                 self.show_help = false;
             }
             return Some(true);
@@ -1251,6 +1252,18 @@ impl ScreenshotApp {
     }
 
     fn handle_key_menu(&mut self, event: &KeyEvent) -> bool {
+        // PrintScreen is read with what is held, as on every desktop -- but
+        // not with the Windows key, whose chord is the desktop's own.
+        if event.key == Key::PrintScreen && event.modifiers.super_key {
+            return false;
+        }
+        // The rest are keys taken plain, nothing held but Shift: a chord with
+        // Ctrl, Alt or the Windows key is the window's or the desktop's and
+        // arrives carrying its key -- Alt+1 took a picture of the screen, and
+        // Alt+Escape closed the window.
+        if event.key != Key::PrintScreen && !textline::is_plain(event.modifiers) {
+            return false;
+        }
         // Global hotkeys for capture modes.
         match event.key {
             Key::PrintScreen => {
@@ -1300,7 +1313,7 @@ impl ScreenshotApp {
     }
 
     fn handle_key_region(&mut self, event: &KeyEvent) -> bool {
-        if event.key == Key::Escape {
+        if event.key == Key::Escape && textline::is_plain(event.modifiers) {
             self.region_selector.cancel();
             self.view = AppView::Menu;
             return true;
@@ -1309,7 +1322,7 @@ impl ScreenshotApp {
     }
 
     fn handle_key_countdown(&mut self, event: &KeyEvent) -> bool {
-        if event.key == Key::Escape {
+        if event.key == Key::Escape && textline::is_plain(event.modifiers) {
             self.countdown_remaining = 0;
             self.view = AppView::Menu;
             return true;
@@ -1318,43 +1331,60 @@ impl ScreenshotApp {
     }
 
     fn handle_key_preview(&mut self, event: &KeyEvent) -> bool {
+        // Ctrl's chords, a Ctrl chord and not Ctrl held: AltGr arrives as
+        // Ctrl+Alt, and AltGr+Z -- a Polish `ż` -- undid an annotation
+        // instead of typing into one.
+        if textline::is_ctrl_chord(event.modifiers) {
+            return match event.key {
+                Key::S => {
+                    self.save_current_notifying();
+                    true
+                }
+                Key::Z => {
+                    self.undo_annotation();
+                    true
+                }
+                _ => false,
+            };
+        }
+        // The other keys are taken plain; anything else held with one is the
+        // window's or the desktop's -- Alt+Escape threw the picture away --
+        // and goes on to the text being typed only if it typed.
+        let plain = textline::is_plain(event.modifiers);
         match event.key {
-            Key::Escape => {
+            Key::Escape if plain => {
                 self.discard_current();
                 true
             }
-            Key::S if event.modifiers.ctrl => {
-                self.save_current_notifying();
-                true
-            }
-            Key::Z if event.modifiers.ctrl => {
-                self.undo_annotation();
-                true
-            }
-            Key::Num1 => {
+            Key::Num1 if plain => {
                 self.annotation_tool = AnnotationTool::Rectangle;
                 true
             }
-            Key::Num2 => {
+            Key::Num2 if plain => {
                 self.annotation_tool = AnnotationTool::Arrow;
                 true
             }
-            Key::Num3 => {
+            Key::Num3 if plain => {
                 self.annotation_tool = AnnotationTool::Text;
                 true
             }
-            Key::Num4 => {
+            Key::Num4 if plain => {
                 self.annotation_tool = AnnotationTool::Highlight;
                 true
             }
             _ => {
-                // Capture text input for text annotation tool.
+                // Capture text input for text annotation tool: what a key
+                // typed, not the letter a command carries -- Alt+X typed an
+                // `x` into the annotation.
                 if self.annotation_tool == AnnotationTool::Text {
-                    if event.types_text() {
+                    if textline::types_into_field(event) {
                         self.annotation_text_input.extend(event.typed());
                         return true;
                     }
-                    if event.key == Key::Backspace && !self.annotation_text_input.is_empty() {
+                    if event.key == Key::Backspace
+                        && !textline::is_alt_or_windows_chord(event.modifiers)
+                        && !self.annotation_text_input.is_empty()
+                    {
                         self.annotation_text_input.pop();
                         return true;
                     }
@@ -2997,6 +3027,119 @@ mod tests {
         app.current_capture = Some(Capture::solid(100, 80, 0xFF0000FF));
         app.view = AppView::Preview;
         app
+    }
+
+    /// **A key held with Alt or the Windows key is not the capture tool's,
+    /// and AltGr+Z is not Ctrl+Z**: each such chord is the window's or the
+    /// desktop's and arrives carrying its key -- Alt+3 began a capture,
+    /// Alt+Escape closed the window and, on a picture, threw it away, and
+    /// Alt+X typed an `x` into an annotation; and AltGr+Z, a Polish `ż`,
+    /// undid an annotation instead of typing.
+    ///
+    /// PrintScreen is the exception, read with Alt, Ctrl or Shift as every
+    /// desktop does -- but not with the Windows key, whose chord it is.
+    #[test]
+    fn a_chord_is_not_a_capture_key_and_altgr_is_not_ctrl() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let chord = |k: Key, text: &str, modifiers: Modifiers| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        };
+
+        // The menu.
+        let mut app = ScreenshotApp::new(800.0, 600.0);
+        for m in [
+            Modifiers::ctrl(),
+            Modifiers::alt(),
+            Modifiers::super_key(),
+            altgr,
+        ] {
+            for k in [Key::Num1, Key::Num3, Key::Num5, Key::Escape, Key::F1] {
+                assert!(!app.handle_key(&chord(k, "", m)), "{m:?} {k:?} was taken");
+                assert_eq!(app.view, AppView::Menu, "{m:?} {k:?} began a capture");
+                assert!(app.notification.is_none(), "{m:?} {k:?} tried one");
+                assert!(app.running, "{m:?} {k:?} closed the window");
+                assert!(!app.show_help, "{m:?} {k:?} raised the list of keys");
+            }
+        }
+        // The list of keys goes on a plain Escape or Enter only.
+        assert!(app.handle_key(&key(Key::F1)), "control: F1 raises the list");
+        app.handle_key(&chord(Key::Escape, "", Modifiers::alt()));
+        app.handle_key(&chord(Key::Enter, "", Modifiers::super_key()));
+        assert!(app.show_help, "a chorded Escape or Enter put the list away");
+        app.handle_key(&key(Key::Escape));
+        assert!(!app.show_help, "control: Escape puts it away");
+        let print = |m: Modifiers| chord(Key::PrintScreen, "", m);
+        assert!(!app.handle_key(&print(Modifiers::super_key())));
+        assert!(
+            app.notification.is_none(),
+            "Windows+PrintScreen tried a capture"
+        );
+        assert!(app.handle_key(&print(Modifiers::ctrl())));
+        assert_eq!(
+            app.view,
+            AppView::RegionSelect,
+            "control: Ctrl+PrintScreen picks a region"
+        );
+        assert!(!app.handle_key(&chord(Key::Escape, "", Modifiers::alt())));
+        assert_eq!(app.view, AppView::RegionSelect, "Alt+Escape cancelled it");
+        assert!(app.handle_key(&key(Key::Escape)));
+
+        // A countdown.
+        app.handle_key(&key(Key::Num5));
+        assert_eq!(app.view, AppView::Countdown, "control: 5 counts down");
+        assert!(!app.handle_key(&chord(Key::Escape, "", Modifiers::alt())));
+        assert_eq!(app.view, AppView::Countdown, "Alt+Escape stopped it");
+        app.handle_key(&key(Key::Escape));
+
+        // A picture, with an annotation on it and a text being typed.
+        let mut app = app_in_preview();
+        app.annotations.push(Annotation::new(
+            AnnotationTool::Rectangle,
+            1.0,
+            1.0,
+            app.annotation_color,
+        ));
+        app.annotation_tool = AnnotationTool::Text;
+        app.handle_key(&chord(Key::A, "a", Modifiers::NONE));
+        // Backspace with AltGr deletes, as Ctrl+Backspace does: only Alt's
+        // and the Windows key's are not the text's.
+        let keys = |m: Modifiers| {
+            let mut keys = vec![Key::Escape, Key::Num1, Key::F1];
+            if m != altgr {
+                keys.push(Key::Backspace);
+            }
+            keys
+        };
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for k in keys(m) {
+                app.handle_key(&chord(k, "", m));
+                assert!(app.current_capture.is_some(), "{m:?} {k:?} threw it away");
+                assert_eq!(app.annotations.len(), 1, "{m:?} {k:?} lost one");
+                assert_eq!(
+                    app.annotation_tool,
+                    AnnotationTool::Text,
+                    "{m:?} {k:?} changed the tool"
+                );
+                assert_eq!(app.annotation_text_input, "a", "{m:?} {k:?} edited");
+                assert!(!app.show_help, "{m:?} {k:?} raised the list of keys");
+            }
+        }
+        app.handle_key(&chord(Key::X, "x", Modifiers::alt()));
+        app.handle_key(&chord(Key::X, "x", Modifiers::super_key()));
+        app.handle_key(&chord(Key::Z, "ż", altgr));
+        assert_eq!(
+            app.annotation_text_input, "aż",
+            "the text typed a command's letter, or lost AltGr's"
+        );
+        assert_eq!(app.annotations.len(), 1, "AltGr+Z undid the annotation");
+        assert!(app.handle_key(&ctrl(Key::Z)));
+        assert!(app.annotations.is_empty(), "control: Ctrl+Z undoes it");
     }
 
     // ---- Saving must not overwrite another capture's file ----

@@ -15,6 +15,9 @@ oswindow = { path = "../../gui/window" }
 safeio = { path = "../safeio" }
 # Captures are written as PNG; they were uncompressed BMP.
 pngwrite = { path = "../pngwrite" }
+# Whether a key is plain, a Ctrl chord or typing: a key held with Alt or the
+# Windows key is not the capture tool's, and AltGr types.
+textline = { path = "../textline" }
 
 # The same crate again with its `audit` counters on, so the tests can prove a
 # save really went through `safeio` and did not quietly regress to

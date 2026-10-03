@@ -47,6 +47,27 @@ says "nothing here decodes video".
   wraps, as libvpx's C does, so a bad file decodes to garbage or an error,
   never a crash.
 
+**Status, 2026-10-03: the decoder is done.** Every picture of all 314
+vectors matches libvpx's MD5 -- every profile, bit depth and subsampling.
+Mutating the loop filter's rounding, the motion compensation's, the motion
+vector search or the probability adaptation each fails most vectors, so the
+test reaches every part. Two places where the port deliberately does not do
+what libvpx's C does:
+
+- **One set of inverse transforms, not two.** libvpx keeps an 8-bit copy of
+  each transform that narrows intermediate values to 16 bits, and a
+  high-bit-depth copy that keeps 32 and outputs zero for inputs past 2^25.
+  On every stream the VP9 specification allows, the two compute the same
+  numbers; they differ only where a stream breaks the specification's range
+  rule, and there libvpx's own SIMD builds differ from its C (they saturate
+  where it wraps). The port keeps one 32-bit copy that wraps: libvpx's
+  result on every valid stream, a deterministic one on any other. A test
+  replays libvpx's C transforms (`tools/idct_reference.c`) on seeded blocks
+  at all three bit depths and matches every hash.
+- **A size limit.** libvpx decodes a frame of any size a header names, which
+  lets a hostile stream ask for gigabytes. The port refuses frames over
+  VP9's level 6.2 (8192 x 4352 samples) unless the caller raises the limit.
+
 **Alternatives.**
 
 | | For | Against |

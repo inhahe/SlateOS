@@ -7,20 +7,11 @@
 //! checked against the shape declared here, so a table that does not fit
 //! fails the generator instead of being cut short.
 
-/// Log2 of a block size's width in 4x4 units: libvpx's `b_width_log2_lookup`.
-pub const B_WIDTH_LOG2: [u8; 13] = [0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4];
-
-/// Log2 of a block size's height in 4x4 units: libvpx's `b_height_log2_lookup`.
-pub const B_HEIGHT_LOG2: [u8; 13] = [0, 1, 0, 1, 2, 1, 2, 3, 2, 3, 4, 3, 4];
-
 /// A block size's width in 4x4 units: libvpx's `num_4x4_blocks_wide_lookup`.
 pub const NUM_4X4_WIDE: [u8; 13] = [1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16, 16];
 
 /// A block size's height in 4x4 units: libvpx's `num_4x4_blocks_high_lookup`.
 pub const NUM_4X4_HIGH: [u8; 13] = [1, 2, 1, 2, 4, 2, 4, 8, 4, 8, 16, 8, 16];
-
-/// Log2 of a block size's width in 8x8 mode-info units: libvpx's `mi_width_log2_lookup`.
-pub const MI_WIDTH_LOG2: [u8; 13] = [0, 0, 0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3];
 
 /// A block size's width in 8x8 units, at least one: libvpx's `num_8x8_blocks_wide_lookup`.
 pub const NUM_8X8_WIDE: [u8; 13] = [1, 1, 1, 1, 1, 2, 2, 2, 4, 4, 4, 8, 8];
@@ -30,9 +21,6 @@ pub const NUM_8X8_HIGH: [u8; 13] = [1, 1, 1, 1, 2, 1, 2, 4, 2, 4, 8, 4, 8];
 
 /// Which of the four y-mode probability sets a block size uses: libvpx's `size_group_lookup`.
 pub const SIZE_GROUP: [u8; 13] = [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 3];
-
-/// Log2 of a block size's area in pixels: libvpx's `num_pels_log2_lookup`.
-pub const NUM_PELS_LOG2: [u8; 13] = [4, 5, 5, 6, 7, 7, 8, 9, 9, 10, 11, 11, 12];
 
 /// The block size a partition type splits a block size into (13 = invalid): libvpx's `subsize_lookup`.
 pub const SUBSIZE: [[u8; 13]; 4] = [
@@ -44,9 +32,6 @@ pub const SUBSIZE: [[u8; 13]; 4] = [
 
 /// The largest transform a block size can use: libvpx's `max_txsize_lookup`.
 pub const MAX_TXSIZE: [u8; 13] = [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 3];
-
-/// The square block size of a transform size: libvpx's `txsize_to_bsize`.
-pub const TXSIZE_TO_BSIZE: [u8; 4] = [0, 3, 6, 9];
 
 /// The largest transform a frame's transform mode allows: libvpx's `tx_mode_to_biggest_tx_size`.
 pub const TX_MODE_TO_BIGGEST_TX_SIZE: [u8; 5] = [0, 1, 2, 3, 3];
@@ -205,9 +190,6 @@ pub const COEFBAND_TRANS_8X8PLUS: [u8; 1024] = [
 
 /// The coefficient band of each scan position of a 4x4 transform: libvpx's `vp9_coefband_trans_4x4`.
 pub const COEFBAND_TRANS_4X4: [u8; 16] = [0, 1, 1, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 5, 5, 5];
-
-/// A token's energy class: what it contributes to its neighbours' contexts: libvpx's `vp9_pt_energy_class`.
-pub const PT_ENERGY_CLASS: [u8; 12] = [0, 1, 2, 3, 3, 4, 4, 5, 5, 5, 5, 5];
 
 /// The probabilities of category 6's extra bits at 12 bits; 10 and 8 bits use its tail: libvpx's `vp9_cat6_prob_high12`.
 pub const CAT6_PROB_HIGH12: [u8; 18] = [

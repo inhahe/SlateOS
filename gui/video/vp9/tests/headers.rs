@@ -18,7 +18,7 @@ mod common;
 
 use std::path::Path;
 
-use vp9::header::{StreamInfo, parse_superframe_index, peek_stream_info};
+use vp9::{StreamInfo, parse_superframe_index, peek_stream_info};
 
 /// The frames a packet carries: those its superframe index lists, or the
 /// packet itself when it has none.

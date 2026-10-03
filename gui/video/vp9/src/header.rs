@@ -20,10 +20,10 @@ use crate::common::{
     ALLOW_32X32, ALTREF_FRAME, BILINEAR, BLOCK_SIZE_GROUPS, CLASS0_SIZE, COEF_BANDS,
     COMP_INTER_CONTEXTS, COMPOUND_REFERENCE, EIGHTTAP, EIGHTTAP_SHARP, EIGHTTAP_SMOOTH,
     GOLDEN_FRAME, INTER_MODE_CONTEXTS, INTRA_INTER_CONTEXTS, INTRA_MODES, InterpFilter, LAST_FRAME,
-    MAX_SEGMENTS, MB_MODE_COUNT, MI_BLOCK_SIZE_LOG2, MV_CLASSES, MV_FP_SIZE, MV_JOINTS,
-    MV_OFFSET_BITS, PARTITION_CONTEXTS, PARTITION_TYPES, PLANE_TYPES, REF_CONTEXTS, REF_TYPES,
-    REFERENCE_MODE_SELECT, RefFrame, ReferenceMode, SEG_LVL_ALT_LF, SEG_LVL_ALT_Q, SEG_LVL_MAX,
-    SINGLE_REFERENCE, SWITCHABLE, SWITCHABLE_FILTER_CONTEXTS, SWITCHABLE_FILTERS, TX_MODE_SELECT,
+    MAX_REF_FRAMES, MAX_SEGMENTS, MB_MODE_COUNT, MI_BLOCK_SIZE_LOG2, MV_CLASSES, MV_FP_SIZE,
+    MV_JOINTS, MV_OFFSET_BITS, PARTITION_CONTEXTS, PARTITION_TYPES, PLANE_TYPES, REF_CONTEXTS,
+    REF_TYPES, REFERENCE_MODE_SELECT, RefFrame, ReferenceMode, SEG_LVL_ALT_LF, SEG_LVL_ALT_Q,
+    SEG_LVL_MAX, SINGLE_REFERENCE, SWITCHABLE, SWITCHABLE_FILTER_CONTEXTS, SWITCHABLE_FILTERS,
     TX_SIZE_CONTEXTS, TxMode, UNCONSTRAINED_NODES, band_coeff_contexts,
 };
 use crate::probs::{FrameContext, diff_update_prob, update_mv_probs};
@@ -833,12 +833,15 @@ pub fn read_intra_inter_probs(fc: &mut FrameContext, r: &mut BoolReader<'_>) {
 /// Whether the frame's references face both ways in time, which compound
 /// prediction needs: libvpx's `vp9_compound_reference_allowed`.
 #[must_use]
-pub fn compound_reference_allowed(sign_bias: &[bool; 4]) -> bool {
+pub fn compound_reference_allowed(sign_bias: &[bool; MAX_REF_FRAMES]) -> bool {
     sign_bias[2] != sign_bias[1] || sign_bias[3] != sign_bias[1]
 }
 
 /// The frame's reference mode: libvpx's `read_frame_reference_mode`.
-pub fn read_frame_reference_mode(sign_bias: &[bool; 4], r: &mut BoolReader<'_>) -> ReferenceMode {
+pub fn read_frame_reference_mode(
+    sign_bias: &[bool; MAX_REF_FRAMES],
+    r: &mut BoolReader<'_>,
+) -> ReferenceMode {
     if compound_reference_allowed(sign_bias) {
         if r.read_bit() == 1 {
             if r.read_bit() == 1 {
@@ -857,7 +860,7 @@ pub fn read_frame_reference_mode(sign_bias: &[bool; 4], r: &mut BoolReader<'_>) 
 /// Which reference every compound block uses, and the two it chooses between:
 /// libvpx's `vp9_setup_compound_reference_mode`.
 #[must_use]
-pub fn compound_references(sign_bias: &[bool; 4]) -> (RefFrame, [RefFrame; 2]) {
+pub fn compound_references(sign_bias: &[bool; MAX_REF_FRAMES]) -> (RefFrame, [RefFrame; 2]) {
     let b = |f: RefFrame| sign_bias.get(f as usize).copied().unwrap_or(false);
     if b(LAST_FRAME) == b(GOLDEN_FRAME) {
         (ALTREF_FRAME, [LAST_FRAME, GOLDEN_FRAME])
@@ -933,12 +936,6 @@ pub fn read_mv_probs(fc: &mut FrameContext, allow_hp: bool, r: &mut BoolReader<'
             update_mv_probs(r, core::slice::from_mut(&mut comp.hp));
         }
     }
-}
-
-/// Whether `mode` lets each block choose its transform size.
-#[must_use]
-pub const fn is_tx_mode_select(mode: TxMode) -> bool {
-    mode == TX_MODE_SELECT
 }
 
 #[cfg(test)]

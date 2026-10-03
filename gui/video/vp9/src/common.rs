@@ -16,10 +16,6 @@
 
 // --- Mode-info units -----------------------------------------------------------
 
-/// log2 of the pixels per mode-info unit: modes are recorded per 8x8.
-pub const MI_SIZE_LOG2: u32 = 3;
-/// Pixels per mode-info unit.
-pub const MI_SIZE: i32 = 8;
 /// log2 of the mode-info units per superblock side (64 = 8 << 3).
 pub const MI_BLOCK_SIZE_LOG2: u32 = 3;
 /// Mode-info units per superblock side.
@@ -35,13 +31,45 @@ pub const BLOCK_4X4: BlockSize = 0;
 pub const BLOCK_4X8: BlockSize = 1;
 pub const BLOCK_8X4: BlockSize = 2;
 pub const BLOCK_8X8: BlockSize = 3;
+#[allow(
+    dead_code,
+    reason = "named for libvpx's numbering; nothing refers to it by name"
+)]
 pub const BLOCK_8X16: BlockSize = 4;
+#[allow(
+    dead_code,
+    reason = "named for libvpx's numbering; nothing refers to it by name"
+)]
 pub const BLOCK_16X8: BlockSize = 5;
+#[allow(
+    dead_code,
+    reason = "named for libvpx's numbering; nothing refers to it by name"
+)]
 pub const BLOCK_16X16: BlockSize = 6;
+#[allow(
+    dead_code,
+    reason = "named for libvpx's numbering; nothing refers to it by name"
+)]
 pub const BLOCK_16X32: BlockSize = 7;
+#[allow(
+    dead_code,
+    reason = "named for libvpx's numbering; nothing refers to it by name"
+)]
 pub const BLOCK_32X16: BlockSize = 8;
+#[allow(
+    dead_code,
+    reason = "named for libvpx's numbering; nothing refers to it by name"
+)]
 pub const BLOCK_32X32: BlockSize = 9;
+#[allow(
+    dead_code,
+    reason = "named for libvpx's numbering; nothing refers to it by name"
+)]
 pub const BLOCK_32X64: BlockSize = 10;
+#[allow(
+    dead_code,
+    reason = "named for libvpx's numbering; nothing refers to it by name"
+)]
 pub const BLOCK_64X32: BlockSize = 11;
 pub const BLOCK_64X64: BlockSize = 12;
 /// How many block sizes there are.
@@ -78,7 +106,15 @@ pub const TX_SIZES: usize = 4;
 /// Which transform sizes a frame allows.
 pub type TxMode = u8;
 pub const ONLY_4X4: TxMode = 0;
+#[allow(
+    dead_code,
+    reason = "named for libvpx's numbering; nothing refers to it by name"
+)]
 pub const ALLOW_8X8: TxMode = 1;
+#[allow(
+    dead_code,
+    reason = "named for libvpx's numbering; nothing refers to it by name"
+)]
 pub const ALLOW_16X16: TxMode = 2;
 pub const ALLOW_32X32: TxMode = 3;
 /// Each block says its own transform size.
@@ -119,12 +155,6 @@ pub const INTRA_MODES: usize = 10;
 pub const INTER_MODES: usize = 4;
 /// How many modes there are in all.
 pub const MB_MODE_COUNT: usize = 14;
-
-/// Whether `mode` is one of the inter modes.
-#[must_use]
-pub const fn is_inter_mode(mode: PredictionMode) -> bool {
-    mode >= NEARESTMV && mode <= NEWMV
-}
 
 /// The transform an intra mode's residual uses: libvpx's
 /// `intra_mode_to_tx_type_lookup`.
@@ -209,8 +239,6 @@ pub const COEFF_CONTEXTS: usize = 6;
 pub const UNCONSTRAINED_NODES: usize = 3;
 /// The node whose probability selects the model's tail.
 pub const PIVOT_NODE: usize = 2;
-/// Coefficient tokens, end of block included.
-pub const ENTROPY_TOKENS: usize = 12;
 /// Contexts a band uses: three for band 0, six for the rest.
 #[must_use]
 pub const fn band_coeff_contexts(band: usize) -> usize {

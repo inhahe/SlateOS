@@ -3627,12 +3627,25 @@ lane C's `guitk`.
   `known-issues.md` TD-C-A-4K-DESKTOP-FRAME-IS-OVER-THE-BUDGET and
   `compositor::tests::bench_fill_floor`.
 
-- `[F]` Video-encoded capture fallback (lines ~4623, ~5060): **VP9**,
+- `[-]` `[F]` Video-encoded capture fallback (lines ~4623, ~5060): **VP9**,
   decided 2026-09-27 (design-decisions.md §1332). A port of libvpx for
   encoding and decoding on the CPU, threaded across every core. Hardware VP9
   (Intel's media driver, AMD's through Mesa, both over VA-API) comes once the
   GPU stack exists. The encoder films buffer-backed windows for the
   compositor's capture stream; the decoder serves SlateOS's remote viewer.
+  How it is built: §1339.
+  - `[x]` The decoder, libvpx v1.17.0's, in safe Rust (`gui/video/vp9`):
+    every picture of all 314 of libvpx's conformance vectors hashes to the
+    MD5 libvpx publishes -- profiles 0 to 3, every subsampling, tiles,
+    segmentation, lossless, compound and scaled-reference prediction,
+    intra-only and show-existing frames. 91 small vectors are committed
+    (`tests/data`); the rest are fetched by `tools/fetch_vectors.py` and run
+    with `--ignored`.
+  - `[ ]` Threads: tile columns and loop-filter rows in parallel, as libvpx
+    does, one per core (§1332).
+  - `[ ]` Speed: a committed benchmark against libvpx, then whatever it says
+    is worth doing -- frame-buffer reuse first, then SIMD in Rust.
+  - `[ ]` The encoder, checked by decoding what it writes.
 
 - `[-]` `[F]` **AVIF pictures**, decided 2026-09-27 (§1333): a HEIF container reader
   and a port of rav1d (dav1d in Rust, BSD) in `gui/imagecodec`, so AVIF opens

@@ -836,6 +836,36 @@ MUTATIONS = [
         "            foreground: palette.terminal.background,",
         ["the_chrome_and_the_sixteen_follow_the_theme"],
     ),
+    (
+        "the Windows key's chords reach the shell",
+        '        if mods.super_key {\n            return Vec::new();\n        }\n',
+        '',
+        ['each_kind_of_chord_sends_what_a_shell_expects'],
+    ),
+    (
+        'AltGr types nothing, and a control character is sent as text',
+        '        if textline::types_into_field(event) {\n            return event.typed().collect::<String>().into_bytes();',
+        '        if !event.text.is_empty() && !mods.ctrl && !mods.alt {\n            return event.text.clone().into_bytes();',
+        ['each_kind_of_chord_sends_what_a_shell_expects'],
+    ),
+    (
+        'Alt and a letter sends nothing',
+        '        if mods.alt && !mods.ctrl && event.types_text() {',
+        '        if mods.alt && !mods.ctrl && event.types_text() && mods.shift && !mods.shift {',
+        ['each_kind_of_chord_sends_what_a_shell_expects'],
+    ),
+    (
+        'Ctrl+Alt sends no ESC',
+        '            return if mods.alt {\n                vec![0x1b, code]',
+        '            return if mods.alt {\n                vec![code]',
+        ['each_kind_of_chord_sends_what_a_shell_expects'],
+    ),
+    (
+        'Alt on an arrow says Alt twice',
+        '        let mut result = if mods.alt && !says_its_modifiers {',
+        '        let mut result = if mods.alt {',
+        ['each_kind_of_chord_sends_what_a_shell_expects'],
+    ),
 ]
 
 if __name__ == "__main__":

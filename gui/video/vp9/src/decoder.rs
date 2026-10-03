@@ -504,6 +504,7 @@ impl Decoder {
                 &decoded,
                 &self.lf.levels(&self.seg),
                 &self.lf.limits(),
+                self.threads,
             );
         }
         let used = offset + first_partition + decoded.end_of_data;

@@ -23,6 +23,11 @@
 //! libvpx's high-bit-depth filters are its 8-bit ones with thresholds and
 //! clamps scaled by `bit depth - 8`, so one generic copy serves both.
 //!
+//! On several threads, superblock rows are filtered as libvpx's
+//! `vp9_loop_filter_frame_mt` does them: a wavefront, each row a superblock
+//! or two behind the row above, which gives the single thread's pixels (see
+//! "Filtering on threads" below).
+//!
 //! Translated into Rust from libvpx v1.17.0's `vp9/common/vp9_loopfilter.c`
 //! and `vpx_dsp/loopfilter.c` (copyright the WebM project authors), used under
 //! libvpx's BSD licence and patent grant (`licenses/libvpx-LICENSE`,
@@ -39,7 +44,9 @@
 
 use crate::block::{Decoded, MiGrid, ModeInfo, uv_tx_size};
 use crate::common::{BLOCK_SIZES, BlockSize, MI_BLOCK_SIZE, TX_4X4, TX_8X8, TX_16X16, TX_32X32};
-use crate::frame::{AnyFrame, FrameBuf, Pixel};
+use std::sync::mpsc::{Receiver, Sender};
+
+use crate::frame::{AnyFrame, FrameBuf, Pixel, Plane};
 use crate::header::{FilterLimits, LevelTable, LimitTable, MODE_LF_LUT};
 use crate::tables;
 
@@ -302,16 +309,18 @@ fn adjust_mask(lfm: &mut Lfm, mi_row: usize, mi_col: usize, mi_rows: usize, mi_c
 // --- Filtering a frame -------------------------------------------------------------------
 
 /// Filter a decoded frame: libvpx's `loop_filter_rows` over every
-/// superblock row.
+/// superblock row -- on up to `threads` threads, libvpx's
+/// `vp9_loop_filter_frame_mt`, when the frame has rows enough to share.
 pub(crate) fn filter_frame(
     frame: &mut AnyFrame,
     decoded: &Decoded,
     levels: &LevelTable,
     limits: &LimitTable,
+    threads: usize,
 ) {
     match frame {
-        AnyFrame::Eight(f) => filter_frame_t(f, &decoded.mi, levels, limits),
-        AnyFrame::High(f) => filter_frame_t(f, &decoded.mi, levels, limits),
+        AnyFrame::Eight(f) => filter_frame_t(f, &decoded.mi, levels, limits, threads),
+        AnyFrame::High(f) => filter_frame_t(f, &decoded.mi, levels, limits, threads),
     }
 }
 
@@ -320,66 +329,405 @@ fn filter_frame_t<P: Pixel>(
     mi: &MiGrid,
     levels: &LevelTable,
     limits: &LimitTable,
+    threads: usize,
 ) {
-    let (mi_rows, mi_cols) = (mi.mi_rows, mi.mi_cols);
-    let sb_cols = mi_cols.div_ceil(8);
-    let sb_rows = mi_rows.div_ceil(8);
-    let mut lfms = vec![Lfm::default(); sb_cols * sb_rows];
-    for b in &mi.blocks {
-        if let Some(lfm) = lfms.get_mut((b.mi_row >> 3) * sb_cols + (b.mi_col >> 3)) {
-            build_mask(lfm, levels, b);
+    let plan = Plan::new(frame, mi, levels, limits);
+    // Two rows a thread at least: fewer, and starting the threads costs more
+    // than they save.
+    let workers = threads.min(plan.sb_rows / 2);
+    if workers > 1 && filter_rows_threaded(frame, &plan, workers).is_some() {
+        return;
+    }
+    let [y, u, v] = &mut frame.planes;
+    let mut rows = [Rows::whole(y), Rows::whole(u), Rows::whole(v)];
+    for sb_row in 0..plan.sb_rows {
+        for sb_col in 0..plan.sb_cols {
+            plan.filter_sb(&mut rows, sb_row, sb_col);
         }
     }
-    let path = match (frame.ss_x, frame.ss_y) {
-        (1, 1) => Path::Ss11,
-        (0, 0) => Path::Ss00,
-        _ => Path::NonSs11,
-    };
-    let bd = frame.bit_depth;
-    let shift = u32::from(bd.clamp(8, 12) - 8);
-    for sb_row in 0..sb_rows {
-        for sb_col in 0..sb_cols {
-            let mi_row = sb_row * 8;
-            let mi_col = sb_col * 8;
-            let lfm = &mut lfms[sb_row * sb_cols + sb_col];
-            adjust_mask(lfm, mi_row, mi_col, mi_rows, mi_cols);
-            let lfm = *lfm;
-            let ctx = Ctx {
-                limits,
-                shift,
-                mi_row,
-                mi_rows,
-            };
-            {
-                let p = &mut frame.planes[0];
-                let origin = mi_row * 8 * p.stride + mi_col * 8;
-                filter_block_plane_ss00(&ctx, &mut p.data, origin, p.stride, &lfm);
+}
+
+/// A plane's rows from `row0` on, `stride` samples apart: the whole plane,
+/// or a thread's copy of a band of superblock rows and the rows above it.
+struct Rows<'b, P> {
+    data: &'b mut [P],
+    row0: usize,
+    stride: usize,
+}
+
+impl<'b, P> Rows<'b, P> {
+    fn whole(p: &'b mut Plane<P>) -> Self {
+        Self {
+            stride: p.stride,
+            data: &mut p.data,
+            row0: 0,
+        }
+    }
+}
+
+/// What filtering any superblock of a frame needs: every superblock's edge
+/// masks, made up front; the blocks, which chroma planes subsampled one way
+/// only are filtered from; and the thresholds.
+struct Plan<'a> {
+    mi: &'a MiGrid,
+    levels: &'a LevelTable,
+    limits: &'a LimitTable,
+    lfms: Vec<Lfm>,
+    sb_rows: usize,
+    sb_cols: usize,
+    path: Path,
+    ss: (usize, usize),
+    /// `bit depth - 8`.
+    shift: u32,
+}
+
+impl<'a> Plan<'a> {
+    fn new<P: Pixel>(
+        frame: &FrameBuf<P>,
+        mi: &'a MiGrid,
+        levels: &'a LevelTable,
+        limits: &'a LimitTable,
+    ) -> Self {
+        let (mi_rows, mi_cols) = (mi.mi_rows, mi.mi_cols);
+        let sb_cols = mi_cols.div_ceil(8);
+        let sb_rows = mi_rows.div_ceil(8);
+        let mut lfms = vec![Lfm::default(); sb_cols * sb_rows];
+        for b in &mi.blocks {
+            if let Some(lfm) = lfms.get_mut((b.mi_row >> 3) * sb_cols + (b.mi_col >> 3)) {
+                build_mask(lfm, levels, b);
             }
-            for plane in 1..3 {
-                let (ss_x, ss_y) = (usize::from(frame.ss_x), usize::from(frame.ss_y));
-                let p = &mut frame.planes[plane];
-                let origin = ((mi_row * 8) >> ss_y) * p.stride + ((mi_col * 8) >> ss_x);
-                match path {
-                    Path::Ss11 => {
-                        filter_block_plane_ss11(&ctx, &mut p.data, origin, p.stride, &lfm);
+        }
+        for (i, lfm) in lfms.iter_mut().enumerate() {
+            let (sb_row, sb_col) = (i / sb_cols.max(1), i % sb_cols.max(1));
+            adjust_mask(lfm, sb_row * 8, sb_col * 8, mi_rows, mi_cols);
+        }
+        let path = match (frame.ss_x, frame.ss_y) {
+            (1, 1) => Path::Ss11,
+            (0, 0) => Path::Ss00,
+            _ => Path::NonSs11,
+        };
+        Self {
+            mi,
+            levels,
+            limits,
+            lfms,
+            sb_rows,
+            sb_cols,
+            path,
+            ss: (usize::from(frame.ss_x), usize::from(frame.ss_y)),
+            shift: u32::from(frame.bit_depth.clamp(8, 12) - 8),
+        }
+    }
+
+    /// Filter superblock (`sb_row`, `sb_col`): Y, then U, then V, each
+    /// plane's vertical edges and then its horizontal ones.
+    fn filter_sb<P: Pixel>(&self, rows: &mut [Rows<'_, P>; 3], sb_row: usize, sb_col: usize) {
+        let Some(lfm) = self.lfms.get(sb_row * self.sb_cols + sb_col) else {
+            return;
+        };
+        let (mi_row, mi_col) = (sb_row * 8, sb_col * 8);
+        let ctx = Ctx {
+            limits: self.limits,
+            shift: self.shift,
+            mi_row,
+            mi_rows: self.mi.mi_rows,
+        };
+        let (ss_x, ss_y) = self.ss;
+        for (plane, r) in rows.iter_mut().enumerate() {
+            let (sx, sy) = if plane == 0 { (0, 0) } else { (ss_x, ss_y) };
+            let Some(y) = ((mi_row * 8) >> sy).checked_sub(r.row0) else {
+                continue;
+            };
+            let origin = y * r.stride + ((mi_col * 8) >> sx);
+            match (plane, self.path) {
+                (0, _) | (_, Path::Ss00) => {
+                    filter_block_plane_ss00(&ctx, r.data, origin, r.stride, lfm);
+                }
+                (_, Path::Ss11) => filter_block_plane_ss11(&ctx, r.data, origin, r.stride, lfm),
+                (_, Path::NonSs11) => filter_block_plane_non420(
+                    &ctx,
+                    r.data,
+                    origin,
+                    r.stride,
+                    self.mi,
+                    self.levels,
+                    mi_col,
+                    frame_ss(ss_x, ss_y),
+                ),
+            }
+        }
+    }
+}
+
+// --- Filtering on threads: libvpx's wavefront ------------------------------------------------
+//
+// Superblock row r's filters reach eight rows up into row r - 1 (its top
+// edges), and row r - 1's reach a superblock's width to the right (the next
+// superblock's left edge). So row r may filter superblock c once row r - 1
+// has finished superblock c + 1 -- libvpx's `lf_sync`, the order a single
+// thread gives, bit for bit.
+//
+// Here each thread takes every `workers`-th row, and filters a private copy
+// of it: the band's own rows, with the band above's last eight rows on top.
+// Those arrive a superblock at a time down a channel from the thread above,
+// as each becomes final: after it has finished the superblock to the right.
+// The thread below filters its top edges into its copy of them. Once every
+// thread is done, the bands are written back, and then the rows above each,
+// which hold the last word on them. Nothing is shared but by message, and the
+// frame is not touched until the end -- so anything going wrong, a thread
+// not starting among them, leaves it to be filtered on one thread instead.
+
+/// How many rows of the band above a band's top edges read: the 16-wide
+/// filter's `p7..p0`.
+const TAIL: usize = 8;
+
+/// A band's last rows under one superblock, final: on its way down to the
+/// thread filtering the band below.
+struct Tail<P> {
+    sb_row: usize,
+    sb_col: usize,
+    plane: usize,
+    rows: Vec<P>,
+}
+
+/// A band of superblock rows as a thread filtered it: per plane, the rows
+/// above it (but for the first band) and then its own.
+struct Band<P> {
+    sb_row: usize,
+    planes: [Vec<P>; 3],
+}
+
+/// Per plane: its stride, a band's height and a superblock's width.
+type Geometry = [(usize, usize, usize); 3];
+
+/// Filter every row of the frame on `workers` threads. `None`, with the
+/// frame untouched, if they could not all run.
+fn filter_rows_threaded<P: Pixel>(
+    frame: &mut FrameBuf<P>,
+    plan: &Plan<'_>,
+    workers: usize,
+) -> Option<()> {
+    let (ss_x, ss_y) = plan.ss;
+    let geometry: Geometry = core::array::from_fn(|plane| {
+        let (sx, sy) = if plane == 0 { (0, 0) } else { (ss_x, ss_y) };
+        (frame.planes[plane].stride, 64 >> sy, 64 >> sx)
+    });
+    let bands: Vec<Band<P>> = {
+        let frame: &FrameBuf<P> = frame;
+        // Worker t sends down channel t to worker t + 1, the next row's.
+        let mut senders = Vec::with_capacity(workers);
+        let mut receivers = Vec::with_capacity(workers);
+        for _ in 0..workers {
+            let (tx, rx) = std::sync::mpsc::channel::<Tail<P>>();
+            senders.push(Some(tx));
+            receivers.push(Some(rx));
+        }
+        // `Err` if a thread could not start; otherwise each thread's bands,
+        // `None` from a thread that lost step.
+        let outcomes: Result<Vec<Option<Vec<Band<P>>>>, ()> = std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(workers);
+            for t in 0..workers {
+                let tx = senders.get_mut(t).and_then(Option::take);
+                let rx = receivers
+                    .get_mut((t + workers - 1) % workers)
+                    .and_then(Option::take);
+                let started = match (tx, rx) {
+                    (Some(tx), Some(rx)) => {
+                        let work =
+                            move || filter_band_rows(frame, plan, geometry, t, workers, &tx, &rx);
+                        std::thread::Builder::new().spawn_scoped(scope, work).ok()
                     }
-                    Path::Ss00 => {
-                        filter_block_plane_ss00(&ctx, &mut p.data, origin, p.stride, &lfm);
+                    _ => None,
+                };
+                let Some(h) = started else {
+                    // A thread that cannot start dropped its channel ends;
+                    // dropping those no thread took too disconnects every
+                    // thread waiting on a row above, so all of them stop.
+                    senders.clear();
+                    receivers.clear();
+                    return Err(());
+                };
+                handles.push(h);
+            }
+            Ok(handles
+                .into_iter()
+                .map(|h| h.join().ok().flatten())
+                .collect())
+        });
+        // A thread that could not start leaves the frame to one thread: the
+        // machine's limits, not a fault.
+        let outcomes = outcomes.ok()?;
+        let mut bands = Vec::with_capacity(plan.sb_rows);
+        for outcome in outcomes {
+            let Some(rows) = outcome else {
+                // The threads' steps depend on the frame's size alone, never
+                // on what it holds, so this is a bug in them: one thread
+                // still gives the right pixels, but tests must hear of it.
+                debug_assert!(false, "the loop filter's threads lost step");
+                return None;
+            };
+            bands.extend(rows);
+        }
+        bands
+    };
+    // Every band whole before the frame is touched: falling back to one
+    // thread must find the frame as it was.
+    let whole = bands.len() == plan.sb_rows
+        && bands.iter().all(|band| {
+            let apron = if band.sb_row > 0 { TAIL } else { 0 };
+            band.planes.iter().zip(&frame.planes).zip(&geometry).all(
+                |((data, plane), &(stride, band_h, _))| {
+                    data.len() == (apron + band_h) * stride
+                        && (band.sb_row + 1) * band_h * stride <= plane.data.len()
+                },
+            )
+        });
+    if !whole {
+        debug_assert!(false, "a loop filter thread's band is the wrong size");
+        return None;
+    }
+    // The bands' own rows, then the rows above each, which the band below
+    // filtered last.
+    for band in &bands {
+        let apron = if band.sb_row > 0 { TAIL } else { 0 };
+        for ((plane, data), &(stride, band_h, _)) in
+            frame.planes.iter_mut().zip(&band.planes).zip(&geometry)
+        {
+            let top = band.sb_row * band_h * stride;
+            let own = data.get(apron * stride..)?;
+            plane
+                .data
+                .get_mut(top..top + own.len())?
+                .copy_from_slice(own);
+        }
+    }
+    for band in bands.iter().filter(|b| b.sb_row > 0) {
+        for ((plane, data), &(stride, band_h, _)) in
+            frame.planes.iter_mut().zip(&band.planes).zip(&geometry)
+        {
+            let top = (band.sb_row * band_h - TAIL) * stride;
+            let above = data.get(..TAIL * stride)?;
+            plane
+                .data
+                .get_mut(top..top + above.len())?
+                .copy_from_slice(above);
+        }
+    }
+    Some(())
+}
+
+/// One thread's share: rows `t`, `t + workers`, ... `None` if the channel
+/// from the thread above broke, or the frame's geometry is not what it should
+/// be.
+fn filter_band_rows<P: Pixel>(
+    frame: &FrameBuf<P>,
+    plan: &Plan<'_>,
+    geometry: Geometry,
+    t: usize,
+    workers: usize,
+    tx: &Sender<Tail<P>>,
+    rx: &Receiver<Tail<P>>,
+) -> Option<Vec<Band<P>>> {
+    let mut out = Vec::new();
+    for sb_row in (t..plan.sb_rows).step_by(workers) {
+        let apron = if sb_row > 0 { TAIL } else { 0 };
+        let mut planes: [Vec<P>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+        for ((copy, plane), &(stride, band_h, _)) in
+            planes.iter_mut().zip(&frame.planes).zip(&geometry)
+        {
+            let top = sb_row * band_h * stride;
+            let own = plane.data.get(top..top + band_h * stride)?;
+            copy.reserve_exact((apron + band_h) * stride);
+            copy.resize(apron * stride, P::default());
+            copy.extend_from_slice(own);
+        }
+        let below = sb_row + 1 < plan.sb_rows;
+        for sb_col in 0..plan.sb_cols {
+            if sb_row > 0 {
+                for (plane, (copy, &(stride, _, sb_w))) in
+                    planes.iter_mut().zip(&geometry).enumerate()
+                {
+                    let tail = rx.recv().ok()?;
+                    if (tail.sb_row, tail.sb_col, tail.plane) != (sb_row - 1, sb_col, plane) {
+                        return None;
                     }
-                    Path::NonSs11 => filter_block_plane_non420(
-                        &ctx,
-                        &mut p.data,
-                        origin,
-                        p.stride,
-                        mi,
-                        levels,
-                        mi_col,
-                        frame_ss(ss_x, ss_y),
-                    ),
+                    for (r, src) in tail.rows.chunks_exact(sb_w).enumerate() {
+                        let at = r * stride + sb_col * sb_w;
+                        copy.get_mut(at..at + sb_w)?.copy_from_slice(src);
+                    }
                 }
             }
+            {
+                let [y, u, v] = &mut planes;
+                let row0 = |plane: usize| {
+                    let band_h = geometry[plane].1;
+                    sb_row * band_h - apron
+                };
+                let mut rows = [
+                    Rows {
+                        data: y,
+                        row0: row0(0),
+                        stride: geometry[0].0,
+                    },
+                    Rows {
+                        data: u,
+                        row0: row0(1),
+                        stride: geometry[1].0,
+                    },
+                    Rows {
+                        data: v,
+                        row0: row0(2),
+                        stride: geometry[2].0,
+                    },
+                ];
+                plan.filter_sb(&mut rows, sb_row, sb_col);
+            }
+            // The superblock to the left is final now: nothing to its right
+            // reaches back past this one's left edge.
+            if below && sb_col > 0 {
+                send_tails(&planes, geometry, apron, sb_row, sb_col - 1, tx)?;
+            }
         }
+        if below {
+            send_tails(
+                &planes,
+                geometry,
+                apron,
+                sb_row,
+                plan.sb_cols.checked_sub(1)?,
+                tx,
+            )?;
+        }
+        out.push(Band { sb_row, planes });
     }
+    Some(out)
+}
+
+/// Send band `sb_row`'s last rows under superblock `sb_col`, every plane,
+/// down to the thread filtering the band below.
+fn send_tails<P: Pixel>(
+    planes: &[Vec<P>; 3],
+    geometry: Geometry,
+    apron: usize,
+    sb_row: usize,
+    sb_col: usize,
+    tx: &Sender<Tail<P>>,
+) -> Option<()> {
+    for (plane, (data, &(stride, band_h, sb_w))) in planes.iter().zip(&geometry).enumerate() {
+        let mut rows = Vec::with_capacity(TAIL * sb_w);
+        for r in apron + band_h - TAIL..apron + band_h {
+            let at = r * stride + sb_col * sb_w;
+            rows.extend_from_slice(data.get(at..at + sb_w)?);
+        }
+        tx.send(Tail {
+            sb_row,
+            sb_col,
+            plane,
+            rows,
+        })
+        .ok()?;
+    }
+    Some(())
 }
 
 fn frame_ss(ss_x: usize, ss_y: usize) -> (u32, u32) {

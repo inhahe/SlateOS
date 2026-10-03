@@ -41,6 +41,28 @@ temporary file with a plain open, which then took descriptor 0 and was read
 back as the input. Upstream's tools use gnulib's `*_safer` openers, which
 are `stdfd::fd_safer` here.
 
+### `wc`, measured (the next one to do)
+
+GNU coreutils 9.4, standard input closed:
+
+| command | GNU output (2>&1), status 1 in every row |
+|---|---|
+| `wc` | `wc: 'standard input': Bad file descriptor`, `0 0 0`, `wc: -: Bad file descriptor` |
+| `wc -l` / `-c` / `-L` | the same, with the one count `0` |
+| `wc -` | `wc: -: Bad file descriptor`, `0 0 0 -`, `wc: -: Bad file descriptor` |
+| `wc f -` | `4 4 8 f`, `wc: -: Bad file descriptor`, `0 0 0 -`, `4 4 8 total`, `wc: -: Bad file descriptor` |
+
+So three things: the read error names the input (`'standard input'`
+unnamed, `-` as an operand); the counts line is **still printed**, as zeros;
+and the `close (STDIN_FILENO)` at the end fails too and says `-`. Replacing
+`read_stdin`'s `io::stdin().read_to_end` with a `stdfd::read(0, ..)` loop is
+not enough: tried on 2026-10-03, it got the status right but printed one
+`wc: -: ...` and no counts, because the callers of `read_stdin` (around
+`wc.rs` lines 818, 824 and 913) treat a read failure as "no counts for this
+input". They need upstream's shape (report, count what was read, carry on),
+and `main` needs the final close. `wc-diff.sh` (125 cases) passed with the
+partial change, so it has no `<&-` case yet; add these rows to it.
+
 ### Where
 
 These programs contain `io::stdin()` or `stdin().lock()` (some only for a

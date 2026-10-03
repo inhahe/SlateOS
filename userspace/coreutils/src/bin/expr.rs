@@ -87,6 +87,7 @@
 //! against real GNU expr rather than MSYS2's.
 
 use coreutils::diag;
+use coreutils::getopt;
 use coreutils::stdfd;
 use std::io::Write as _;
 use std::process::ExitCode;
@@ -165,6 +166,30 @@ Exit status:
 /// failure, which is the only thing this program can fail at afterwards.
 struct Fail(String);
 
+/// gnulib's `parse_long_options`, which GNU's `expr` calls before anything
+/// else: given a single argument, `getopt_long` over `--help` and `--version`
+/// alone, with `opterr` cleared. So an unambiguous prefix acts as the option
+/// -- `expr --he` is the help and `expr --v` the version, measured against
+/// 9.4 -- while anything `getopt` would complain about (`--help=x`, `--x`,
+/// `-h`, and `--=x`, which every option name begins with) is silently left to
+/// be what it otherwise is: an expression of one string, printed back.
+///
+/// Returns the option's name, or `None` for an argument that is not one.
+fn standard_option(arg: &[u8]) -> Option<&'static str> {
+    const TABLE: &[(&str, ())] = &[("help", ()), ("version", ())];
+    let typed = arg.strip_prefix(b"--")?;
+    // `--` alone ends the options; an `=` is an argument neither option
+    // takes, which `getopt` refuses -- quietly, here.
+    if typed.is_empty() || typed.contains(&b'=') {
+        return None;
+    }
+    let name = std::str::from_utf8(typed).ok()?;
+    getopt::Program::new("expr", 2)
+        .resolve_long(name, arg, TABLE)
+        .ok()
+        .map(|(resolved, ())| resolved)
+}
+
 /// The funnel. A diagnostic that could not be written turns the earned
 /// status into `exit_failure`, which is what upstream's `atexit
 /// (close_stdout)` does on every exit path at once. See
@@ -180,13 +205,16 @@ fn run_main() -> ExitCode {
     // as GNU's option parser does: `expr --help = --help` is a comparison of
     // two strings that happen to look like options, and answers 1.
     if let [only] = raw.as_slice() {
-        if only.as_slice() == b"--help" {
-            println!("{HELP}");
-            return ExitCode::SUCCESS;
-        }
-        if only.as_slice() == b"--version" {
-            println!("expr (SlateOS coreutils)");
-            return ExitCode::SUCCESS;
+        match standard_option(only) {
+            Some("help") => {
+                println!("{HELP}");
+                return ExitCode::SUCCESS;
+            }
+            Some("version") => {
+                println!("expr (SlateOS coreutils)");
+                return ExitCode::SUCCESS;
+            }
+            _ => {}
         }
     }
 
@@ -665,6 +693,36 @@ fn index_of(subject: &[u8], set: &[u8]) -> Str {
 )]
 mod tests {
     use super::*;
+
+    /// gnulib's `parse_long_options`: a prefix of `--help` or `--version` is
+    /// that option, and whatever `getopt` would refuse is an operand.
+    #[test]
+    fn a_lone_option_may_be_abbreviated_and_a_refused_one_is_an_operand() {
+        for (arg, want) in [
+            (&b"--help"[..], Some("help")),
+            (b"--he", Some("help")),
+            (b"--h", Some("help")),
+            (b"--version", Some("version")),
+            (b"--ver", Some("version")),
+            (b"--v", Some("version")),
+            (b"--help=x", None),
+            (b"--he=", None),
+            (b"--=x", None),
+            (b"--x", None),
+            (b"--helpx", None),
+            (b"--", None),
+            (b"-h", None),
+            (b"help", None),
+            (b"--h\xff", None),
+        ] {
+            assert_eq!(
+                standard_option(arg),
+                want,
+                "{}",
+                String::from_utf8_lossy(arg)
+            );
+        }
+    }
 
     /// Evaluate a whole command line, as `main` does, and require it to be
     /// fully consumed.

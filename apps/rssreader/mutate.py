@@ -332,6 +332,72 @@ MUTATIONS = [
         "        Some(first) if first.starts_with(\"slateos-feed-marks-never\\t\") => {",
         [ROUND],
     ),
+    (
+        'AltGr is taken for Ctrl in the reader',
+        '        if textline::is_ctrl_chord(key.modifiers) {\n            return match key.key {\n                Key::F => {',
+        '        if key.modifiers.ctrl {\n            return match key.key {\n                Key::F => {',
+        ['a_chord_is_neither_a_reader_key_nor_typing'],
+    ),
+    (
+        "a chord works the reader's keys",
+        '        if !textline::is_plain(key.modifiers) {\n            return EventResult::Ignored;\n        }\n',
+        '',
+        ['a_chord_is_neither_a_reader_key_nor_typing'],
+    ),
+    (
+        'a chord answers a question',
+        '        if !textline::is_plain(key.modifiers) {\n            return EventResult::Consumed;\n        }\n',
+        '',
+        ['a_chord_is_neither_a_reader_key_nor_typing'],
+    ),
+    (
+        'a chorded Escape closes the search',
+        '            Key::Escape if plain => {\n                self.search_active = false;',
+        '            Key::Escape => {\n                self.search_active = false;',
+        ['a_chord_is_neither_a_reader_key_nor_typing'],
+    ),
+    (
+        'a chorded Enter closes the search',
+        '            Key::Enter if plain => {\n                self.search_active = false;',
+        '            Key::Enter => {\n                self.search_active = false;',
+        ['a_chord_is_neither_a_reader_key_nor_typing'],
+    ),
+    (
+        'Alt+Backspace deletes from the search',
+        '            Key::Backspace if !textline::is_alt_or_windows_chord(key.modifiers) => {\n                self.search_query.pop();',
+        '            Key::Backspace => {\n                self.search_query.pop();',
+        ['a_chord_is_neither_a_reader_key_nor_typing'],
+    ),
+    (
+        "the search types a command's letter",
+        '                if !textline::types_into_field(key) {\n                    return EventResult::Ignored;\n                }\n                let typed: String = key.typed().collect();\n                if typed.is_empty() {\n                    return EventResult::Ignored;\n                }\n                self.search_query.push_str(&typed);',
+        '                let typed: String = key.typed().collect();\n                if typed.is_empty() {\n                    return EventResult::Ignored;\n                }\n                self.search_query.push_str(&typed);',
+        ['a_chord_is_neither_a_reader_key_nor_typing'],
+    ),
+    (
+        'a chorded Escape closes the prompt for a name',
+        '            Key::Escape if plain => {\n                self.text_entry = None;',
+        '            Key::Escape => {\n                self.text_entry = None;',
+        ['a_chord_is_neither_a_reader_key_nor_typing'],
+    ),
+    (
+        'a chorded Enter commits the prompt for a name',
+        '            Key::Enter if plain => {\n                self.commit_text_entry();',
+        '            Key::Enter => {\n                self.commit_text_entry();',
+        ['a_chord_is_neither_a_reader_key_nor_typing'],
+    ),
+    (
+        'Alt+Backspace deletes from the prompt for a name',
+        '            Key::Backspace if !textline::is_alt_or_windows_chord(key.modifiers) => {\n                self.text_buffer.pop();',
+        '            Key::Backspace => {\n                self.text_buffer.pop();',
+        ['a_chord_is_neither_a_reader_key_nor_typing'],
+    ),
+    (
+        "the prompt for a name types a command's letter",
+        '                if !textline::types_into_field(key) {\n                    return EventResult::Ignored;\n                }\n                let typed: String = key.typed().collect();\n                if typed.is_empty() {\n                    return EventResult::Ignored;\n                }\n                self.text_buffer.push_str(&typed);',
+        '                let typed: String = key.typed().collect();\n                if typed.is_empty() {\n                    return EventResult::Ignored;\n                }\n                self.text_buffer.push_str(&typed);',
+        ['a_chord_is_neither_a_reader_key_nor_typing'],
+    ),
 ]
 
 if __name__ == "__main__":

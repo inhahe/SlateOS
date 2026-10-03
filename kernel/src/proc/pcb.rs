@@ -423,6 +423,16 @@ pub struct Process {
     /// The process's own id has been given to a thread, its first
     /// ([`claim_leader_id`]). Never cleared: the id stays the leader's.
     pub leader_id_claimed: bool,
+    /// The first thread's last scheduler snapshot, kept when it exits
+    /// ([`record_exited_leader`]), state `Dead`, so that `/proc/<pid>` goes on
+    /// describing it -- name, start time, CPU time -- for as long as the
+    /// process is in this table. Linux keeps the group leader's `task_struct`
+    /// as a zombie until the whole process is reaped, and its `stat`, `status`
+    /// and `comm` answer from it; the scheduler here frees a dead thread's
+    /// task at its next reap pass, whether or not the process has been
+    /// waited for. `None` while the first thread lives, and for a process
+    /// that never had one.
+    pub exited_leader: Option<crate::sched::TaskInfo>,
     /// Per-process capability table.
     pub cap_table: CapTable,
     /// Exit code (set when all threads have exited).
@@ -1402,6 +1412,7 @@ impl Process {
             sid: pid,
             threads: Vec::new(),
             leader_id_claimed: false,
+            exited_leader: None,
             cap_table: CapTable::new(),
             exit_code: None,
             credentials: ProcessCredentials::root(),
@@ -1868,6 +1879,8 @@ pub fn fork_create(
         sid: parent_sid,
         threads: Vec::new(),
         leader_id_claimed: false,
+        // A fork child's first thread is its own, alive.
+        exited_leader: None,
         cap_table,
         exit_code: None,
         credentials,
@@ -8025,6 +8038,40 @@ pub fn state(pid: ProcessId) -> Option<ProcessState> {
 pub fn count() -> usize {
     let table = PROCESS_TABLE.lock();
     table.len()
+}
+
+/// The id of every process in the table, in any state -- one being created,
+/// running, or a zombie not yet waited for: the processes `/proc` lists, as
+/// Linux's lists every thread group until it is reaped.
+#[must_use]
+pub fn pids() -> Vec<ProcessId> {
+    PROCESS_TABLE.lock().keys().copied().collect()
+}
+
+/// Keep `leader`, the snapshot of `pid`'s first thread as it exits, as the
+/// process's [`Process::exited_leader`]. Its state is set to `Dead` and its
+/// wait cleared, which is what the thread is from here on. Nothing if `pid`
+/// is not in the table.
+///
+/// Called by `thread::on_thread_exit` while the thread's task still exists,
+/// before the scheduler can free it.
+pub fn record_exited_leader(pid: ProcessId, mut leader: crate::sched::TaskInfo) {
+    leader.state = crate::sched::task::TaskState::Dead;
+    leader.wait = crate::wchan::Wait::NONE;
+    if let Some(process) = PROCESS_TABLE.lock().get_mut(&pid) {
+        process.exited_leader = Some(leader);
+    }
+}
+
+/// `pid`'s [`Process::exited_leader`]: its first thread's last snapshot once
+/// that thread has exited; `None` while it lives, for a process that never
+/// had one, and for a pid that is not in the table.
+#[must_use]
+pub fn exited_leader(pid: ProcessId) -> Option<crate::sched::TaskInfo> {
+    PROCESS_TABLE
+        .lock()
+        .get(&pid)
+        .and_then(|p| p.exited_leader.clone())
 }
 
 // ---------------------------------------------------------------------------

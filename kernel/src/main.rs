@@ -3619,6 +3619,14 @@ extern "C" fn kernel_main() -> ! {
         proc::spawn::self_test_linux_scm_rights(),
     );
 
+    // A zombie keeps its /proc directory until it is reaped, and reads as one
+    // there from the process's own record once its thread's task is freed.
+    selftest::dispatch_debug(
+        "Zombie /proc directory",
+        selftest::Severity::Diagnostic,
+        proc::spawn::self_test_zombie_keeps_proc_dir(),
+    );
+
     // Ring-3 end-to-end test of chattr's and lsattr's ioctls: the immutable
     // flag set by root and enforced, refused to the file's owner.
     selftest::dispatch_debug(

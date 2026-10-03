@@ -6979,16 +6979,17 @@ impl Vfs {
     }
 
     /// Find the file an xattr call names, and check what Linux checks before
-    /// it reads the attribute's name: that it exists (Linux's `user_path_at`);
-    /// for a change, the namespace's and the mount's writability (Linux's
-    /// `mnt_want_write`); then the capability tags, which deny reaching the
-    /// object at all. `follow`: a trailing link is followed, or is the target
-    /// itself.
+    /// it reads the attribute's name, in Linux's order: that the caller may
+    /// reach it -- the capability tags and ACLs, which deny reaching the object
+    /// at all, as a path walk's search permission does; that it exists
+    /// (`user_path_at`); for a change, the namespace's and the mount's
+    /// writability (`mnt_want_write`). `follow`: a trailing link is followed,
+    /// or is the target itself.
     ///
     /// # Errors
     ///
-    /// The path's (`NotFound` for a file that is not there); then
-    /// `ReadOnlyFilesystem` for a change; a capability tag's.
+    /// The path's; a capability tag's or an ACL's; `NotFound` for a file that
+    /// is not there; then `ReadOnlyFilesystem` for a change.
     pub fn xattr_target(
         path: impl AsRef<Path>,
         follow: bool,
@@ -7000,12 +7001,15 @@ impl Vfs {
         } else {
             Self::resolve_no_follow(path)?
         };
-        // The file is looked up before anything else is decided, as
-        // `user_path_at` does. Until 2026-10-02 nothing here looked it up -- a
-        // missing name resolves to itself -- so a missing file was found only
-        // when the attribute was read, after its name: `getxattr` of an empty
-        // name on a missing path answered ERANGE, where Linux answers ENOENT
-        // (rq42).
+        // Reaching it at all comes first, so a caller kept from it learns
+        // nothing -- not even whether it is there.
+        check_path_access(&resolved, PathAccess::Metadata)?;
+        // Then the file is looked up, before anything about the change or the
+        // attribute is decided, as `user_path_at` does. Until 2026-10-02
+        // nothing here looked it up -- a missing name resolves to itself -- so
+        // a missing file was found only when the attribute was read, after its
+        // name: `getxattr` of an empty name on a missing path answered ERANGE,
+        // where Linux answers ENOENT (rq42).
         {
             let (fs, _id, _opts, relative) = resolve_mount(&resolved)?;
             let mut guard = fs.lock();
@@ -7017,8 +7021,13 @@ impl Vfs {
         }
         if access == xattr_policy::Access::Write {
             crate::ipc::namespace::check_writable(path)?;
+            check_writable(&resolved)?;
         }
-        Self::xattr_target_checked(resolved, follow, access)
+        Ok(XattrTarget {
+            path: resolved,
+            follow,
+            access,
+        })
     }
 
     /// [`xattr_target`](Self::xattr_target) for a host path already
@@ -7026,29 +7035,24 @@ impl Vfs {
     /// caller's namespace was applied when it was opened. The target is the
     /// file the path names.
     ///
+    /// The file is open, so it exists and was reached when it was opened: what
+    /// is left is the mount's writability for a change (Linux's
+    /// `mnt_want_write_file`), then the capability tags and ACLs.
+    ///
     /// # Errors
     ///
-    /// `ReadOnlyFilesystem` for a change; a capability tag's.
+    /// `ReadOnlyFilesystem` for a change; a capability tag's or an ACL's.
     pub fn xattr_target_resolved(
         path: &Path,
         access: xattr_policy::Access,
     ) -> KernelResult<XattrTarget> {
-        Self::xattr_target_checked(path.to_path_buf(), true, access)
-    }
-
-    /// The checks both ways of finding a target end in.
-    fn xattr_target_checked(
-        path: PathBuf,
-        follow: bool,
-        access: xattr_policy::Access,
-    ) -> KernelResult<XattrTarget> {
         if access == xattr_policy::Access::Write {
-            check_writable(&path)?;
+            check_writable(path)?;
         }
-        check_path_access(&path, PathAccess::Metadata)?;
+        check_path_access(path, PathAccess::Metadata)?;
         Ok(XattrTarget {
-            path,
-            follow,
+            path: path.to_path_buf(),
+            follow: true,
             access,
         })
     }

@@ -5985,6 +5985,11 @@ pub fn pi_chain_boost(
 // ---------------------------------------------------------------------------
 
 /// Snapshot of a task's key fields for diagnostic display.
+///
+/// `Clone` because a process keeps its first thread's last snapshot once the
+/// thread is gone (`pcb::record_exited_leader`), for `/proc/<pid>` to go on
+/// describing it as Linux's zombie group leader does.
+#[derive(Clone)]
 pub struct TaskInfo {
     /// Task ID.
     pub id: TaskId,

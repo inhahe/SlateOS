@@ -940,6 +940,18 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
         nivcsw: exit_niv,
     };
 
+    // The first thread -- the one whose id is the process's -- leaves its last
+    // snapshot with the process: the scheduler frees its task at the next reap
+    // pass, but `/proc/<pid>` goes on describing it until the process itself
+    // is reaped, as Linux's zombie group leader does. Taken here for the same
+    // reason as the counters above: SCHED is read before PROCESS_TABLE is
+    // taken, never inside it.
+    if task_id == pid
+        && let Some(leader) = sched::task_info(task_id)
+    {
+        pcb::record_exited_leader(pid, leader);
+    }
+
     // POSIX orphaned-process-group hangup: capture the process groups this
     // process currently *guards* (children in a different group of the same
     // session) BEFORE `remove_thread` reparents them to init. If this exit

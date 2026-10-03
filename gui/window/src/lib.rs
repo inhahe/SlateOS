@@ -3966,6 +3966,7 @@ mod tests {
             WindowInfo {
                 id: 7,
                 pid: 1234,
+                process: None,
                 layer: Layer::Background,
                 title: "Wallpaper".to_owned(),
                 app_id: "wallpaper".to_owned(),
@@ -3989,6 +3990,7 @@ mod tests {
             WindowInfo {
                 id: 9,
                 pid: 5678,
+                process: Some(5678),
                 layer: Layer::Normal,
                 title: "Editor".to_owned(),
                 // Not "editor": the fixture's contract is that no field matches

@@ -3689,8 +3689,9 @@ lane C's `guitk`.
     next click names the window -- title, program, attested pid -- and
     reaches no window; started only by the focused program; Escape, another
     button or `CancelPick` gives up. `oswindow::EventLoop::pick_window`.
-  - `[ ]` The attested pid in the window list, for per-program grouping on
-    the taskbar.
+  - `[x]` The attested pid in the window list (`WindowInfo::process`,
+    window list version 6), for per-program grouping on the taskbar; `pid`
+    stays the per-connection number.
 
 - `[F]` Port FreeRDP (line ~5058)
 

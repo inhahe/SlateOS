@@ -11960,6 +11960,8 @@ impl Compositor {
                 .map(|w| WindowInfo {
                     id: w.id.raw(),
                     pid: w.client_pid,
+                    // The kernel's name for the opener, if it gave one.
+                    process: w.owner_pid,
                     layer: w.layer,
                     title: w.title.clone(),
                     // Passed through exactly as the client sent it, including

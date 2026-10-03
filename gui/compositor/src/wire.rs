@@ -2759,6 +2759,43 @@ mod tests {
         );
     }
 
+    /// The window list names each window's process as the kernel named it --
+    /// shared by two connections of one process, absent over TCP -- beside
+    /// the per-connection number it has always carried.
+    #[test]
+    fn the_window_list_names_the_process_the_kernel_named() {
+        let (mut comp, mut shell) = wired();
+        exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::SubscribeWindowList { subscribe: true }],
+        );
+        let cred = PeerCred {
+            pid: 777,
+            uid: 1000,
+            gid: 1000,
+        };
+        let mut first = ClientLink::new(21);
+        first.attest(Some(cred), Some(false));
+        let mut second = ClientLink::new(22);
+        second.attest(Some(cred), Some(false));
+        let mut remote = ClientLink::new(23);
+        let a = open_in(&mut comp, &mut first, "First", Layer::Normal);
+        let b = open_in(&mut comp, &mut second, "Second", Layer::Normal);
+        let c = open_in(&mut comp, &mut remote, "Remote", Layer::Normal);
+
+        let lists = pump_lists(&mut comp, &mut shell);
+        let list = lists.last().expect("a list");
+        let entry = |id: u64| list.iter().find(|w| w.id == id).expect("listed");
+        assert_eq!((entry(a).pid, entry(a).process), (21, Some(777)));
+        assert_eq!(
+            (entry(b).pid, entry(b).process),
+            (22, Some(777)),
+            "two connections, one process"
+        );
+        assert_eq!((entry(c).pid, entry(c).process), (23, None));
+    }
+
     /// An unchanged tray is not resent.
     #[test]
     fn a_tray_that_has_not_changed_sends_nothing() {

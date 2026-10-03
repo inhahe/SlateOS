@@ -1591,7 +1591,11 @@ impl Match3 {
 
     fn handle_event(&mut self, event: &Event) {
         match event {
-            Event::Key(ke) if ke.pressed => {
+            // Every binding is on the key itself, so a key is the game's only
+            // with nothing but Shift held: a chord with Ctrl, Alt or the
+            // Windows key is the window's or the desktop's and arrives
+            // carrying its key -- Alt+N threw the game in play away.
+            Event::Key(ke) if ke.pressed && textline::is_plain(ke.modifiers) => {
                 self.handle_key(ke.key);
             }
             Event::Mouse(me) => self.handle_mouse(me),
@@ -2863,6 +2867,39 @@ mod tests {
     }
 
     // ── Keyboard event tests ────────────────────────────────────────
+
+    /// **A key held with Ctrl, Alt or the Windows key is not the game's**:
+    /// Alt+N threw the game in play away and Alt+2 switched to the timed
+    /// mode, each chord arriving carrying its key.
+    #[test]
+    fn a_key_held_with_a_modifier_is_not_the_games() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let mut game = Match3::new();
+        game.score = 999;
+        let (mode, cursor) = (game.mode, game.cursor);
+        for held in [
+            Modifiers::ctrl(),
+            Modifiers::alt(),
+            Modifiers::super_key(),
+            altgr,
+        ] {
+            for key in [Key::N, Key::Num2, Key::Right, Key::Enter, Key::H] {
+                game.handle_event(&Event::Key(KeyEvent {
+                    key,
+                    pressed: true,
+                    modifiers: held,
+                    text: String::new(),
+                }));
+            }
+        }
+        assert_eq!(game.score, 999, "a chord started a new game");
+        assert_eq!(game.mode, mode, "a chord switched the mode");
+        assert_eq!(game.cursor, cursor, "a chord moved the cursor");
+        assert!(game.selected.is_none(), "a chord chose a tile");
+    }
 
     #[test]
     fn test_key_n_new_game() {

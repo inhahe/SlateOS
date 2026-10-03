@@ -156,6 +156,12 @@ MUTATIONS = [
         "        self.frame(width, height).into_tree()",
         ["a_click_is_read_against_the_size_the_window_was_drawn_at"],
     ),
+    (
+        "a key held with a modifier is the game's",
+        '            Event::Key(ke) if ke.pressed && textline::is_plain(ke.modifiers) => {',
+        '            Event::Key(ke) if ke.pressed => {',
+        ['a_key_held_with_a_modifier_is_not_the_games'],
+    ),
 ]
 
 if __name__ == "__main__":

@@ -290,21 +290,40 @@ pub fn looks_like_lzma(data: &[u8]) -> bool {
 /// above 4), [`Error::TrailingData`] for bytes after the stream, and the rest
 /// of [`Error`] for corrupt data.
 pub fn lzma1(props: [u8; 5], data: &[u8], size: Option<u64>, limit: usize) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    lzma1_into(props, data, size, &mut out, limit)?;
+    Ok(out)
+}
+
+/// As [`lzma1`], appending to `out` -- which, when the stream turns out to be
+/// damaged, keeps what was decoded before the damage was found, as a
+/// streaming decoder would have written it.
+///
+/// # Errors
+///
+/// As [`lzma1`].
+pub fn lzma1_into(
+    props: [u8; 5],
+    data: &[u8],
+    size: Option<u64>,
+    out: &mut Vec<u8>,
+    limit: usize,
+) -> Result<()> {
     let [p, d0, d1, d2, d3] = props;
     let props = lzma::Props::from_byte(p).ok_or(Error::Unsupported)?;
     let size = size.map(|s| usize::try_from(s).unwrap_or(usize::MAX));
-    let mut out = Vec::new();
     let mut rc = lzma::Rc::new(data, 0)?;
     let mut decoder = lzma::Decoder::new(props);
     let dict = lzma::Dict {
-        start: 0,
+        start: out.len(),
         window: lzma::Dict::window_for(u32::from_le_bytes([d0, d1, d2, d3])),
     };
-    decoder.decode(&mut rc, &mut out, dict, size, limit)?;
+    let limit = limit.saturating_add(out.len());
+    decoder.decode(&mut rc, out, dict, size, limit)?;
     if rc.pos != data.len() {
         return Err(Error::TrailingData);
     }
-    Ok(out)
+    Ok(())
 }
 
 /// Decodes a raw LZMA2 stream as 7-Zip stores one: `prop` is the coder's one
@@ -317,13 +336,25 @@ pub fn lzma1(props: [u8; 5], data: &[u8], size: Option<u64>, limit: usize) -> Re
 /// [`Error::TrailingData`] for bytes after the end marker, and the rest of
 /// [`Error`] for corrupt data.
 pub fn lzma2(prop: u8, data: &[u8], limit: usize) -> Result<Vec<u8>> {
-    let dict_size = lzma2::dict_size_from_prop(prop).ok_or(Error::Unsupported)?;
     let mut out = Vec::new();
-    let end = lzma2::decode(data, 0, &mut out, dict_size, limit)?;
+    lzma2_into(prop, data, &mut out, limit)?;
+    Ok(out)
+}
+
+/// As [`lzma2`], appending to `out`, which keeps what was decoded before any
+/// damage was found.
+///
+/// # Errors
+///
+/// As [`lzma2`].
+pub fn lzma2_into(prop: u8, data: &[u8], out: &mut Vec<u8>, limit: usize) -> Result<()> {
+    let dict_size = lzma2::dict_size_from_prop(prop).ok_or(Error::Unsupported)?;
+    let limit = limit.saturating_add(out.len());
+    let end = lzma2::decode(data, 0, out, dict_size, limit)?;
     if end != data.len() {
         return Err(Error::TrailingData);
     }
-    Ok(out)
+    Ok(())
 }
 
 /// Undoes a branch converter over `data`, whose first byte is at position

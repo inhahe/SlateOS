@@ -29,6 +29,7 @@ pub mod accounting;
 pub mod alloc_checkpoint;
 pub mod alloc_lat;
 pub mod alloc_trace;
+pub mod as_lock;
 pub mod compact;
 pub mod compress;
 pub mod cow;

@@ -7541,6 +7541,12 @@ extern "C" fn kernel_main() -> ! {
         mm::dma::self_test()
     });
 
+    // The address-space page-table locks the copy-on-write break, swap-in
+    // and demand paging install under (mm::as_lock).
+    selftest::dispatch_debug("Address-space locks", selftest::Severity::Integrity, || {
+        mm::as_lock::self_test()
+    });
+
     // Step 22e: Copy-on-Write self-test.
     // Verifies refcount API and COW PTE flag manipulation.
     selftest::dispatch_debug("Cow", selftest::Severity::Integrity, || {

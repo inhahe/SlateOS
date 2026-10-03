@@ -3676,10 +3676,14 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
                 // every part came back writable and non-executable, whatever
                 // it had been; and the swap entry was never found at all.)
                 // SAFETY: pml4 is valid, PTE contains a swap entry.
-                if let Ok(flags) = unsafe { mm::swap::swap_in_page(pml4, virt) } {
+                if let Ok(swapped) = unsafe { mm::swap::swap_in_page(pml4, virt) } {
                     // Re-register the restored page as reclaimable so it
-                    // can be swapped out again if memory pressure returns.
-                    mm::swap::register_reclaimable(pml4, virt.as_u64(), flags);
+                    // can be swapped out again if memory pressure returns
+                    // -- unless another CPU brought it back first, which
+                    // registered it.
+                    if let Some(flags) = swapped {
+                        mm::swap::register_reclaimable(pml4, virt.as_u64(), flags);
+                    }
                     mm::fault::record_swap_in();
                     mm::fault::record_user_resolved();
                     // Major fault: resolution required I/O (swap-in).
@@ -3696,12 +3700,16 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
         let task_id = sched::current_task_id();
         let pid = crate::proc::thread::owner_process(task_id).unwrap_or(0);
         if pid != 0 {
-            // Not waiting for the process table here (interrupts are off in
-            // this handler): a busy table returns to the access, which faults
-            // again with interrupts having come and gone in between. Until
+            // Waiting for the process table (and the address space's
+            // page-table lock) is safe here: this is a fault from user mode,
+            // which runs with interrupts on, and the handler turned them back
+            // on above, so a holder waiting for a TLB shootdown on this CPU
+            // is answered, and this CPU holds no kernel lock. Until
             // 2026-10-03 a busy table was taken as an unresolvable fault, and
             // the process was sent SIGSEGV for a page it had every right to.
-            match crate::proc::pcb::resolve_fault(pid, cr2, error, false) {
+            // `Busy` -- the table held by this very task -- cannot happen for
+            // a user-mode fault; it would retry the access.
+            match crate::proc::pcb::resolve_fault(pid, cr2, error, true) {
                 crate::proc::pcb::FaultOutcome::Resolved => {
                     mm::fault::record_user_resolved();
                     // Minor fault: demand-zero / CoW resolved without I/O.

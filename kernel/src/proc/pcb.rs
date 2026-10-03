@@ -6157,7 +6157,16 @@ fn resolve_subpaged_fault(
             // `free_frame` uncharges the cgroup via `FRAME_CGROUP`.
             let _ = unsafe { frame::free_frame(phys_frame) };
         }
-        return false;
+        // Every covered subpage present means another CPU's fault on this
+        // frame populated them first: resolved, and the access runs again.
+        // Until 2026-10-03 this was a failure, and the second of two threads
+        // touching the frame at once was sent SIGSEGV.
+        let covered_present = subpages.iter().enumerate().all(|(i, fill)| {
+            #[allow(clippy::arithmetic_side_effects)]
+            let sub_va = frame_base + (i as u64) * (HW_PAGE_SIZE as u64);
+            fill.is_none() || page_table::translate(pml4_phys, VirtAddr::new(sub_va)).is_some()
+        });
+        return covered_present && subpages.iter().any(Option::is_some);
     }
 
     // Flush the whole frame's TLB entries (cross-CPU shootdown).
@@ -6210,11 +6219,13 @@ pub enum FaultOutcome {
 /// - `wait`: wait for the table, unless the calling task holds it
 ///   already (a kernel path that faulted under it), in which case
 ///   waiting could never end and the fault is `Busy`. For callers in
-///   thread context ([`try_resolve_fault`]).
-/// - not `wait`: `Busy` at once. For the #PF handler on a fault from user
-///   mode, which returns and lets the access fault again: interrupts
-///   come back between the attempts, so a holder that is itself waiting
-///   on this CPU (a TLB shootdown, say) is never waited on with them off.
+///   thread context ([`try_resolve_fault`]) and for the #PF handler on a
+///   user-mode fault, which runs with interrupts on.
+/// - not `wait`: `Busy` at once, for a caller with interrupts off, which
+///   must not wait for a holder that may be waiting for a TLB shootdown
+///   on it; it retries the access instead. The copy-on-write break and
+///   swap-in under it still wait for the address space's page-table lock
+///   (`mm::as_lock`), so such a caller must not reach them.
 pub fn resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64, wait: bool) -> FaultOutcome {
     let mut busy = false;
     if resolve_fault_inner(pid, fault_addr, error_code, wait, &mut busy) {
@@ -6363,10 +6374,12 @@ fn resolve_fault_inner(
         // SAFETY: as above; a part of the frame holds a swap entry.
         return match unsafe { crate::mm::swap::swap_in_page(pml4_phys, VirtAddr::new(frame_base)) }
         {
-            Ok(kept) => {
+            Ok(Some(kept)) => {
                 crate::mm::swap::register_reclaimable(pml4_phys, frame_base, kept);
                 true
             }
+            // Another CPU brought it back first, and registered it.
+            Ok(None) => true,
             Err(_) => false,
         };
     }
@@ -6550,13 +6563,35 @@ fn resolve_fault_inner(
     // Map the frame.
     // SAFETY: pml4_phys is the process's valid PML4, phys_frame is
     // freshly allocated, virt is within a VMA that permits this mapping.
-    let map_result = unsafe { page_table::map_frame(pml4_phys, virt, phys_frame, flags) };
+    //
+    // Under the address space's page-table lock (`mm::as_lock`): `map_frame`
+    // checks each entry is absent and then writes it, and two CPUs
+    // demand-paging the same page could otherwise both see it absent and
+    // both write, leaking one frame and losing what was written to it. The
+    // allocation and the file read above stay outside: they may block.
+    let map_result = {
+        let _held = crate::mm::as_lock::lock(pml4_phys);
+        // SAFETY: as above.
+        unsafe { page_table::map_frame(pml4_phys, virt, phys_frame, flags) }
+    };
 
-    if map_result.is_err() {
-        // Map failed — free the frame.
-        // SAFETY: phys_frame was just allocated and not exposed.
-        let _ = unsafe { frame::free_frame(phys_frame) };
-        return false;
+    match map_result {
+        Ok(()) => {}
+        Err(KernelError::AlreadyExists) => {
+            // Another CPU's fault populated the page first: this frame is not
+            // needed, and the access runs again on that one. Until 2026-10-03
+            // this was a failure, and the second of two threads touching a
+            // fresh page at once was sent SIGSEGV.
+            // SAFETY: phys_frame was just allocated and not exposed.
+            let _ = unsafe { frame::free_frame(phys_frame) };
+            return true;
+        }
+        Err(_) => {
+            // Map failed — free the frame.
+            // SAFETY: phys_frame was just allocated and not exposed.
+            let _ = unsafe { frame::free_frame(phys_frame) };
+            return false;
+        }
     }
 
     // Flush TLB so the CPU sees the new mapping.
@@ -6654,14 +6689,29 @@ fn resolve_file_cached(
     };
 
     let virt = VirtAddr::new(frame_base);
-    // SAFETY: `pml4_phys` is the faulting process's valid PML4, `phys_frame`
-    // is a live cache frame holding our caller reference, and `virt` lies in
-    // a VMA that permits this (read-only) mapping.
-    let map_result = unsafe { page_table::map_frame(pml4_phys, virt, phys_frame, map_flags) };
-    if map_result.is_err() {
-        // Mapping failed — drop our caller reference on the cache frame.
-        crate::mm::page_cache::release(phys_frame);
-        return false;
+    // Under the address space's page-table lock, as the anonymous demand
+    // path installs (`mm::as_lock`): two CPUs mapping the same page must not
+    // both see it absent and both write.
+    let map_result = {
+        let _held = crate::mm::as_lock::lock(pml4_phys);
+        // SAFETY: `pml4_phys` is the faulting process's valid PML4,
+        // `phys_frame` is a live cache frame holding our caller reference,
+        // and `virt` lies in a VMA that permits this (read-only) mapping.
+        unsafe { page_table::map_frame(pml4_phys, virt, phys_frame, map_flags) }
+    };
+    match map_result {
+        Ok(()) => {}
+        Err(KernelError::AlreadyExists) => {
+            // Another CPU's fault mapped the page first; this reference is
+            // not needed, and the access runs again.
+            crate::mm::page_cache::release(phys_frame);
+            return true;
+        }
+        Err(_) => {
+            // Mapping failed — drop our caller reference on the cache frame.
+            crate::mm::page_cache::release(phys_frame);
+            return false;
+        }
     }
 
     // Flush the TLB so the CPU observes the new mapping.

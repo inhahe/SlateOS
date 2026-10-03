@@ -1035,6 +1035,10 @@ pub fn try_reclaim(target: usize) -> usize {
                     crate::sched::yield_now();
                 }
             }
+            // In use right now (its address space's page-table lock was held,
+            // or its entries changed after they were read): not a failure,
+            // just not this time. It stays on the list.
+            Err(KernelError::WouldBlock) => {}
             Err(KernelError::NotSupported) => {
                 // A frame of a kind that is not swapped (shared memory, or a
                 // group split across frames by a partial copy-on-write break:
@@ -1480,7 +1484,25 @@ pub unsafe fn swap_out_page(pml4_phys: u64, virt: VirtAddr) -> KernelResult<Swap
     // Drop SWAP lock before page table manipulation (lock ordering).
 
     // Step 4: each part becomes a swap entry for the slot, keeping its own
-    // flags. The table exists (step 1 read it), so no exchange fails.
+    // flags -- under the address space's page-table lock, without waiting
+    // for it (reclaim can run on an allocation failure, with interrupts
+    // off), and only if the parts are still what step 1 read. Otherwise
+    // the page is in use: the slot goes back, and reclaim picks another.
+    let Some(held) = super::as_lock::try_lock(pml4_phys) else {
+        SWAP.lock()
+            .release_parts(swap_entry.slot(), HW_PAGES_PER_FRAME as u8);
+        return Err(KernelError::WouldBlock);
+    };
+    if page_table::read_frame_ptes(pml4_phys, virt).is_none_or(|now| {
+        now.iter()
+            .zip(parts.iter())
+            .any(|(a, b)| a.raw() != b.raw())
+    }) {
+        drop(held);
+        SWAP.lock()
+            .release_parts(swap_entry.slot(), HW_PAGES_PER_FRAME as u8);
+        return Err(KernelError::WouldBlock);
+    }
     for (i, part) in parts.iter().enumerate() {
         let kept = if part.is_present() {
             part.flags()
@@ -1495,6 +1517,7 @@ pub unsafe fn swap_out_page(pml4_phys: u64, virt: VirtAddr) -> KernelResult<Swap
         }
     }
     super::accounting::uncharge(pml4_phys, 1);
+    drop(held);
 
     // Remove reverse mapping -- this frame is no longer mapped at this virt.
     super::rmap::remove(frame_base, pml4_phys, virt.as_u64());
@@ -1531,24 +1554,37 @@ pub unsafe fn swap_out_page(pml4_phys: u64, virt: VirtAddr) -> KernelResult<Swap
 /// Swap in a page: restore a previously swapped-out frame to physical
 /// memory, each 4 KiB part as it was.
 ///
+/// In two halves, like a copy-on-write break (`mm::cow`): [`prepare_swap_in`]
+/// reads the frame's entries and the slot's data into a new frame, unlocked,
+/// since the read can be a disk's; [`install_swap_in`] maps it under the
+/// address space's page-table lock ([`super::as_lock`]), only over entries
+/// that still name the slot. Two CPUs swapping the same frame in -- two
+/// threads touching it at once -- install once: the second finds the frame
+/// back, frees its copy, and the access runs again. Until 2026-10-03 the
+/// second cleared the first's mapping and mapped its own.
+///
 /// 1. Reads the frame's four entries, finds the swap entry they name, and
 ///    for each part still naming it the flags it kept
 ///    ([`SwapEntry::kept_flags`]).
-/// 2. Reads the data from the swap backend.
-/// 3. Allocates a new physical frame and copies the data into it (via HHDM).
-/// 4. Clears the parts naming the slot and maps the frame part by part with
-///    their kept flags (`page_table::map_frame_subpages`); a part with none
-///    -- one that was not mapped -- stays unmapped. If the mapping fails the
-///    entries are put back and the data stays in its slot.
-/// 5. Gives the slot back for the entries that went (it is freed with the
+/// 2. Reads the data from the swap backend into a new frame (via HHDM).
+/// 3. Under the lock: re-reads the entries; clears the parts naming the slot
+///    and maps the frame part by part with their kept flags
+///    (`page_table::map_frame_subpages`) -- a part with none, one that was
+///    not mapped, stays unmapped. If the mapping fails the entries are put
+///    back and the data stays in its slot.
+/// 4. Gives the slot back for the entries that went (it is freed with the
 ///    last), and flushes the TLB.
 ///
 /// Returns the flags of the first part mapped, for the reclaim list
-/// ([`register_reclaimable`]).
+/// ([`register_reclaimable`]); `None` when another CPU brought the frame
+/// back first, which has registered it.
 ///
 /// Until 2026-10-03 the entry was looked up with `read_leaf_pte`, which
 /// answers present entries only, so swap-in never found it and failed every
 /// time: a swapped-out page came back as a demand-paged page of zeros.
+///
+/// Waits for the address-space lock: for thread context, or the #PF handler
+/// with interrupts on.
 ///
 /// # Errors
 ///
@@ -1559,23 +1595,107 @@ pub unsafe fn swap_out_page(pml4_phys: u64, virt: VirtAddr) -> KernelResult<Swap
 /// # Safety
 ///
 /// - `pml4_phys` must be a valid PML4 table and `virt` frame-aligned.
-pub unsafe fn swap_in_page(pml4_phys: u64, virt: VirtAddr) -> KernelResult<PageFlags> {
-    use super::page_table::HW_PAGES_PER_FRAME;
+pub unsafe fn swap_in_page(pml4_phys: u64, virt: VirtAddr) -> KernelResult<Option<PageFlags>> {
+    // SAFETY: the caller's contract.
+    let prepared = unsafe { prepare_swap_in(pml4_phys, virt)? };
+    let _held = super::as_lock::lock(pml4_phys);
+    // SAFETY: the caller's contract; the lock is held.
+    unsafe { install_swap_in(pml4_phys, virt, prepared) }
+}
 
+/// What the slow half of a swap-in found and made ([`prepare_swap_in`]).
+pub(crate) struct SwapInPrep {
+    /// The entry the frame's parts name.
+    entry: SwapEntry,
+    /// The data, in a new frame not yet mapped.
+    frame: frame::PhysFrame,
+}
+
+/// The slow half of [`swap_in_page`], with no lock: find the swap entry the
+/// frame's parts name, and read its slot into a new frame.
+///
+/// # Errors
+///
+/// As [`swap_in_page`].
+///
+/// # Safety
+///
+/// As [`swap_in_page`].
+pub(crate) unsafe fn prepare_swap_in(pml4_phys: u64, virt: VirtAddr) -> KernelResult<SwapInPrep> {
     if !virt.is_frame_aligned() {
         return Err(KernelError::BadAlignment);
     }
-
-    // Step 1: the parts naming the frame's slot, and what each kept.
     let parts = page_table::read_frame_ptes(pml4_phys, virt).ok_or(KernelError::InvalidAddress)?;
-    let swap_entry = parts
+    let entry = parts
         .iter()
         .find_map(|part| SwapEntry::from_pte_raw(part.raw()))
         .ok_or(KernelError::InvalidArgument)?;
+
+    // Read the data from the swap backend.
+    // Multi-device: find_device() locates which backend owns this slot.
+    let mut page_data = vec![0u8; FRAME_SIZE];
+    {
+        let state = SWAP.lock();
+        if !state.initialized {
+            return Err(KernelError::NotSupported);
+        }
+        state.read_slot(entry.slot(), &mut page_data)?;
+    }
+    // Drop SWAP lock before frame allocation (lock ordering).
+
+    // A new frame, holding the data. (The HHDM first: a frame allocated
+    // before an early return would leak.)
+    let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
+    let new_frame = frame::alloc_frame()?;
+    let frame_virt = new_frame.addr().wrapping_add(hhdm);
+    // SAFETY: new_frame is freshly allocated and mapped via HHDM.
+    unsafe {
+        core::ptr::copy_nonoverlapping(page_data.as_ptr(), frame_virt as *mut u8, FRAME_SIZE);
+    }
+    Ok(SwapInPrep {
+        entry,
+        frame: new_frame,
+    })
+}
+
+/// The install half of [`swap_in_page`]: map the prepared frame over the
+/// parts that still name its slot, each with the flags its entry kept.
+/// `Ok(None)`, freeing the prepared frame, when no part names the slot any
+/// more: another CPU brought the frame back first (or it was unmapped).
+///
+/// # Errors
+///
+/// `InvalidAddress` when only parts that were never mapped still name the
+/// slot (their entries are given up with it); `map_frame_subpages`' own.
+///
+/// # Safety
+///
+/// As [`swap_in_page`], and the caller holds the address space's
+/// page-table lock ([`super::as_lock`]).
+pub(crate) unsafe fn install_swap_in(
+    pml4_phys: u64,
+    virt: VirtAddr,
+    prep: SwapInPrep,
+) -> KernelResult<Option<PageFlags>> {
+    use super::page_table::HW_PAGES_PER_FRAME;
+
+    let SwapInPrep {
+        entry,
+        frame: new_frame,
+    } = prep;
+    let discard = |result| {
+        // SAFETY: prepared by prepare_swap_in and never mapped.
+        let _ = unsafe { frame::free_frame(new_frame) };
+        result
+    };
+    let Some(parts) = page_table::read_frame_ptes(pml4_phys, virt) else {
+        return discard(Err(KernelError::InvalidAddress));
+    };
+    // The parts naming the slot now, and what each kept.
     let mut restore = [PageFlags::empty(); HW_PAGES_PER_FRAME];
     let mut held = [false; HW_PAGES_PER_FRAME];
     for (i, part) in parts.iter().enumerate() {
-        if SwapEntry::from_pte_raw(part.raw()) == Some(swap_entry) {
+        if SwapEntry::from_pte_raw(part.raw()) == Some(entry) {
             if let (Some(h), Some(r)) = (held.get_mut(i), restore.get_mut(i)) {
                 *h = true;
                 *r = SwapEntry::kept_flags(part.raw());
@@ -1583,6 +1703,10 @@ pub unsafe fn swap_in_page(pml4_phys: u64, virt: VirtAddr) -> KernelResult<PageF
         }
     }
     let held_count = held.iter().filter(|&&h| h).count() as u8;
+    if held_count == 0 {
+        // Another CPU brought the frame back first, or it was unmapped.
+        return discard(Ok(None));
+    }
     let Some(representative) = restore
         .iter()
         .copied()
@@ -1593,45 +1717,24 @@ pub unsafe fn swap_in_page(pml4_phys: u64, virt: VirtAddr) -> KernelResult<PageF
         for (i, &h) in held.iter().enumerate() {
             if h {
                 // SAFETY: pml4_phys is valid; the table exists (read above).
-                unsafe {
-                    page_table::exchange_frame_pte(pml4_phys, virt, i, PageTableEntry::EMPTY)?;
-                }
+                let _ = unsafe {
+                    page_table::exchange_frame_pte(pml4_phys, virt, i, PageTableEntry::EMPTY)
+                };
             }
         }
-        SWAP.lock().release_parts(swap_entry.slot(), held_count);
-        return Err(KernelError::InvalidAddress);
+        SWAP.lock().release_parts(entry.slot(), held_count);
+        return discard(Err(KernelError::InvalidAddress));
     };
 
-    // Step 2: read the data from the swap backend.
-    // Multi-device: find_device() locates which backend owns this slot.
-    let mut page_data = vec![0u8; FRAME_SIZE];
-    {
-        let state = SWAP.lock();
-        if !state.initialized {
-            return Err(KernelError::NotSupported);
-        }
-        state.read_slot(swap_entry.slot(), &mut page_data)?;
-    }
-    // Drop SWAP lock before frame allocation (lock ordering).
-
-    // Step 3: a new frame, holding the data. (The HHDM first: a frame
-    // allocated before an early return would leak.)
-    let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
-    let new_frame = frame::alloc_frame()?;
-    let frame_virt = new_frame.addr().wrapping_add(hhdm);
-    // SAFETY: new_frame is freshly allocated and mapped via HHDM.
-    unsafe {
-        core::ptr::copy_nonoverlapping(page_data.as_ptr(), frame_virt as *mut u8, FRAME_SIZE);
-    }
-
-    // Step 4: the parts naming the slot give it up, and the frame is mapped
-    // part by part with what each kept.
+    // The parts naming the slot give it up, and the frame is mapped part by
+    // part with what each kept. The table exists (read above), so no
+    // exchange fails.
     for (i, &h) in held.iter().enumerate() {
         if h {
-            // SAFETY: pml4_phys is valid; the table exists (read above).
-            unsafe {
-                page_table::exchange_frame_pte(pml4_phys, virt, i, PageTableEntry::EMPTY)?;
-            }
+            // SAFETY: pml4_phys is valid; the table exists.
+            let _ = unsafe {
+                page_table::exchange_frame_pte(pml4_phys, virt, i, PageTableEntry::EMPTY)
+            };
         }
     }
     // SAFETY: pml4_phys is valid, virt frame-aligned, new_frame valid and
@@ -1644,35 +1747,33 @@ pub unsafe fn swap_in_page(pml4_phys: u64, virt: VirtAddr) -> KernelResult<PageF
                 let _ = unsafe { page_table::exchange_frame_pte(pml4_phys, virt, i, *part) };
             }
         }
-        // SAFETY: allocated above and never mapped.
-        let _ = unsafe { frame::free_frame(new_frame) };
-        return Err(e);
+        return discard(Err(e));
     }
 
     // Register reverse mapping -- this frame is now mapped at this virt.
     super::rmap::add(new_frame.addr(), pml4_phys, virt.as_u64());
 
-    // Step 5: the entries that went give the slot back; flush the TLB.
-    SWAP.lock().release_parts(swap_entry.slot(), held_count);
+    // The entries that went give the slot back; flush the TLB.
+    SWAP.lock().release_parts(entry.slot(), held_count);
     // SAFETY: invlpg is always safe.
     unsafe {
         page_table::flush_frame(virt);
     }
 
     serial_println!(
-        "[swap] Swapped in: virt={:#x} ← slot={}",
+        "[swap] Swapped in: virt={:#x} \u{2190} slot={}",
         virt.as_u64(),
-        swap_entry.slot()
+        entry.slot()
     );
 
     crate::ktrace::record(
         crate::ktrace::Category::Mm,
         crate::ktrace::event::SWAP_IN,
         virt.as_u64(),
-        swap_entry.slot() as u64,
+        entry.slot() as u64,
     );
 
-    Ok(representative)
+    Ok(Some(representative))
 }
 
 /// Whether any 4 KiB part of the 16 KiB frame holding `virt` is a swap
@@ -2126,8 +2227,81 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // after the disk device is registered.
 
     test_round_trip_keeps_each_part()?;
+    test_swap_in_twice()?;
 
     serial_println!("[swap] Self-test PASSED");
+    Ok(())
+}
+
+/// Two CPUs swapping the same frame in -- two threads touching it at once:
+/// both read the slot into a frame of their own, the first installs, the
+/// second finds the frame back (`None`) and frees its copy. The slot is
+/// given back once, and the page holds its data. Driven as the halves
+/// interleave on two CPUs: prepare, prepare, install, install. Until
+/// 2026-10-03 the second cleared the first's mapping and mapped its own.
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+fn test_swap_in_twice() -> KernelResult<()> {
+    fn fail(what: &str) -> KernelResult<()> {
+        serial_println!("[swap]   FAIL: swap-in twice: {}", what);
+        Err(KernelError::InternalError)
+    }
+
+    let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
+    let pml4 = page_table::alloc_pml4()?;
+    let virt = VirtAddr::new(0x0000_0042_0000_0000);
+    let pattern = |i: usize| (i % 239) as u8;
+    let frame = frame::alloc_frame()?;
+    for i in 0..FRAME_SIZE {
+        // SAFETY: a freshly allocated frame, through the HHDM, in bounds.
+        unsafe { ((frame.addr() + hhdm) as *mut u8).add(i).write(pattern(i)) };
+    }
+    let flags = PageFlags::PRESENT
+        | PageFlags::WRITABLE
+        | PageFlags::USER_ACCESSIBLE
+        | PageFlags::NO_EXECUTE;
+    // SAFETY: this test's address space and a fresh frame.
+    unsafe { page_table::map_frame(pml4, virt, frame, flags)? };
+    let used_before = used_slots();
+    // SAFETY: as above; the frame is mapped.
+    unsafe { swap_out_page(pml4, virt)? };
+
+    // SAFETY: as above; the parts hold swap entries.
+    let first = unsafe { prepare_swap_in(pml4, virt)? };
+    // SAFETY: as above.
+    let second = unsafe { prepare_swap_in(pml4, virt)? };
+    let a = {
+        let _held = super::as_lock::lock(pml4);
+        // SAFETY: as above, with the lock held.
+        unsafe { install_swap_in(pml4, virt, first)? }
+    };
+    let b = {
+        let _held = super::as_lock::lock(pml4);
+        // SAFETY: as above, with the lock held.
+        unsafe { install_swap_in(pml4, virt, second)? }
+    };
+    let slot_back_once = used_slots() == used_before;
+    let data_ok = page_table::translate(pml4, virt).is_some_and(|phys| {
+        (0..FRAME_SIZE).all(|i| {
+            // SAFETY: the mapped frame, through the HHDM, in bounds.
+            unsafe { ((phys + hhdm) as *const u8).add(i).read() == pattern(i) }
+        })
+    });
+    // SAFETY: never loaded in any CR3; nothing else uses it.
+    unsafe { page_table::destroy_user_address_space(pml4) };
+
+    let checks = [
+        ("the first install mapped the frame", a.is_some()),
+        ("the second install found it back", b.is_none()),
+        ("the slot was given back once", slot_back_once),
+        ("the page holds its data", data_ok),
+    ];
+    if let Some((what, _)) = checks.iter().find(|(_, ok)| !ok) {
+        return fail(what);
+    }
+    serial_println!(
+        "[swap]   swap-in twice: the first install maps the frame, the second finds it back \
+         and frees its copy, and the slot goes back once: OK"
+    );
     Ok(())
 }
 
@@ -2195,7 +2369,7 @@ fn test_round_trip_keeps_each_part() -> KernelResult<()> {
 
     // In: each part back as it was, the gap unmapped, the data intact.
     // SAFETY: as above; the frame's parts hold swap entries.
-    let representative = unsafe { swap_in_page(pml4, virt)? };
+    let representative = unsafe { swap_in_page(pml4, virt)? }.unwrap_or(PageFlags::empty());
     let back = page_table::read_frame_ptes(pml4, virt).ok_or(KernelError::InternalError)?;
     let in_ok = back.iter().zip(parts).all(|(pte, want)| {
         if want.contains(PageFlags::PRESENT) {

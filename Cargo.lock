@@ -2743,6 +2743,7 @@ dependencies = [
  "safeio",
  "scratchdir",
  "statehistory",
+ "textline",
  "unsaved",
 ]
 
@@ -4525,6 +4526,7 @@ dependencies = [
  "oswindow",
  "pathtext",
  "safeio",
+ "textline",
  "unsaved",
  "yamldoc",
 ]

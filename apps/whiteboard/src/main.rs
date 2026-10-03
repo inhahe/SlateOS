@@ -2704,9 +2704,11 @@ impl WhiteboardApp {
             return true;
         }
 
-        // Ctrl without Alt: Ctrl+Alt is AltGr, which types a letter on
-        // several layouts -- AltGr+Z is Polish's ż, which undid.
-        if event.modifiers.ctrl && !event.modifiers.alt {
+        // A Ctrl chord: Ctrl without Alt, since Ctrl+Alt is AltGr, which types
+        // a letter on several layouts -- AltGr+Z is Polish's ż, which undid --
+        // and without the Windows key, whose chords are the desktop's:
+        // Ctrl+Windows+Z undid too.
+        if textline::is_ctrl_chord(event.modifiers) {
             return match event.key {
                 Key::Z => {
                     if event.modifiers.shift {
@@ -2756,7 +2758,7 @@ impl WhiteboardApp {
         // desktop's. They reached the tools -- a chord carries its letter as
         // text, so Alt+R chose the rectangle -- and the arrows nudged.
         // AltGr, which arrives as Ctrl+Alt, goes on: what it types is typed.
-        if (event.modifiers.alt && !event.modifiers.ctrl) || event.modifiers.super_key {
+        if textline::is_alt_or_windows_chord(event.modifiers) {
             return false;
         }
 
@@ -5545,6 +5547,18 @@ mod tests {
             text: "\u{17c}".to_string(),
         });
         assert_eq!(app.current_page().shapes.len(), 1, "AltGr+Z undid");
+        // Nor does Ctrl with the Windows key, a chord of the desktop's.
+        app.handle_key(&KeyEvent {
+            key: Key::Z,
+            pressed: true,
+            modifiers: guitk::event::Modifiers {
+                ctrl: true,
+                super_key: true,
+                ..guitk::event::Modifiers::NONE
+            },
+            text: String::new(),
+        });
+        assert_eq!(app.current_page().shapes.len(), 1, "Ctrl+Windows+Z undid");
     }
 
     #[test]

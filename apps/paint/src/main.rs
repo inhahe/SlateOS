@@ -2001,11 +2001,15 @@ impl PaintApp {
         // none. Escape closes it before `SpecialKey::Escape` reaches the
         // canvas, so a reader who opened the list and wants out does not also
         // drop their selection or their half-built polygon.
-        if key.key == Key::F1 {
+        //
+        // Both plain, nothing held but Shift: Alt+F1 and Alt+Escape are the
+        // window's or the desktop's, and raised and put away the list.
+        let plain = textline::is_plain(key.modifiers);
+        if key.key == Key::F1 && plain {
             self.show_help = !self.show_help;
             return true;
         }
-        if self.show_help && key.key == Key::Escape {
+        if plain && self.show_help && key.key == Key::Escape {
             self.show_help = false;
             return true;
         }
@@ -2028,8 +2032,7 @@ impl PaintApp {
         // desktop's, and Alt+B chose the pencil. AltGr -- which arrives as
         // Ctrl+Alt -- goes on: it types characters, and a character it types
         // is that character.
-        let alt_chord = key.modifiers.alt && !key.modifiers.ctrl;
-        if alt_chord || key.modifiers.super_key {
+        if textline::is_alt_or_windows_chord(key.modifiers) {
             return false;
         }
         let altgr = key.modifiers.ctrl && key.modifiers.alt;
@@ -2096,11 +2099,11 @@ impl PaintApp {
         let Some(ch) = typed.or(from_key.filter(|_| !altgr)) else {
             return false;
         };
-        // Ctrl without Alt: Ctrl+Alt is AltGr, and what it types is not a
-        // chord.
+        // A Ctrl chord: Ctrl without Alt, since Ctrl+Alt is AltGr, and what
+        // it types is not a chord.
         self.handle_key_press(
             ch,
-            key.modifiers.ctrl && !key.modifiers.alt,
+            textline::is_ctrl_chord(key.modifiers),
             key.modifiers.shift,
         )
     }
@@ -6302,6 +6305,15 @@ mod tests {
 
         assert!(app.handle_key(&held(Key::E, "e", false, false, false)));
         assert_eq!(app.current_tool, Tool::Eraser, "plain E is not the eraser");
+
+        // The list of keys answers F1 and Escape plain: Alt+F1 and
+        // Alt+Escape are the window's.
+        assert!(!app.handle_key(&held(Key::F1, "", false, true, false)));
+        assert!(!app.show_help, "Alt+F1 raised the list of keys");
+        assert!(app.handle_key(&held(Key::F1, "", false, false, false)));
+        assert!(app.show_help, "control: F1 raises it");
+        app.handle_key(&held(Key::Escape, "", false, true, false));
+        assert!(app.show_help, "Alt+Escape put it away");
     }
 
     /// **Alt+Z held with the Windows key is the desktop's**, not a journey.

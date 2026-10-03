@@ -171,7 +171,7 @@ MUTATIONS = [
     ),
     (
         "AltGr is taken for Ctrl",
-        "            key.modifiers.ctrl && !key.modifiers.alt,\n",
+        "            textline::is_ctrl_chord(key.modifiers),\n",
         "            key.modifiers.ctrl,\n",
         [ALTGR],
     ),
@@ -410,20 +410,32 @@ MUTATIONS = [
     ),
     (
         'a key held with Alt is a tool',
-        '        let alt_chord = key.modifiers.alt && !key.modifiers.ctrl;',
-        '        let alt_chord = false;',
+        '        if textline::is_alt_or_windows_chord(key.modifiers) {',
+        '        if key.modifiers.super_key {',
         ['a_key_held_with_alt_or_the_windows_key_is_not_a_tool'],
     ),
     (
         'a key held with the Windows key is a tool',
-        '        if alt_chord || key.modifiers.super_key {',
-        '        if alt_chord {',
+        '        if textline::is_alt_or_windows_chord(key.modifiers) {',
+        '        if key.modifiers.alt && !key.modifiers.ctrl {',
         ['a_key_held_with_alt_or_the_windows_key_is_not_a_tool'],
     ),
     (
         'AltGr typing nothing is the letter under it',
         'typed.or(from_key.filter(|_| !altgr))',
         'typed.or(from_key)',
+        ['a_key_held_with_alt_or_the_windows_key_is_not_a_tool'],
+    ),
+    (
+        'a chord raises the list of keys',
+        '        if key.key == Key::F1 && plain {',
+        '        if key.key == Key::F1 {',
+        ['a_key_held_with_alt_or_the_windows_key_is_not_a_tool'],
+    ),
+    (
+        'a chorded Escape puts the list of keys away',
+        '        if plain && self.show_help && key.key == Key::Escape {',
+        '        if self.show_help && key.key == Key::Escape {',
         ['a_key_held_with_alt_or_the_windows_key_is_not_a_tool'],
     ),
 ]

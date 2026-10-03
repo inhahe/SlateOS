@@ -1101,10 +1101,8 @@ impl Pgrep {
         {
             return Ok(false);
         }
-        if o.require_handler && !self.catches(&p.sigcatch, o.signal) {
-            return Ok(false);
-        }
-        Ok(true)
+        // The last test: a handler for the signal, when one is required.
+        Ok(!o.require_handler || self.catches(&p.sigcatch, o.signal))
     }
 
     /// `select_procs`: the processes that match, in the order `/proc` lists

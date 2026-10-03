@@ -9,6 +9,30 @@
 //! is nothing to resume, so every `GET_BITS` here is a call that answers
 //! [`Error::UnexpectedEnd`] instead. Every check libbzip2 makes is made here,
 //! at the same point, so a stream fails here exactly when it fails there.
+//!
+//! # 7-Zip's reading
+//!
+//! 7-Zip has a decoder of its own, and the 7z reader must accept what it
+//! accepts. Its rules are kept here as a second [`Reader`] and are 7-Zip
+//! 26.00's (`CPP/7zip/Compress/BZip2Decoder.cpp` and `HuffmanDecoder.h`,
+//! read for these rules; that code is LGPL and none of it is used). Where it
+//! parts from libbzip2:
+//!
+//! - **A coding table must be a prefix code that fits.** Its lengths are
+//!   built into a table only if their Kraft sum (the sum of 2^-length) is at
+//!   most 1. libbzip2 builds whatever it is given, so an over-full table it
+//!   never uses -- or one whose surplus codes no symbol hits -- decodes
+//!   there. A table short of 1 is allowed, as lbzip2 writes one.
+//! - **A block may end in four equal bytes with no count after them.** The
+//!   four are written out, where libbzip2 calls the block corrupt.
+//! - **Only the first stream is read.** What follows it is the caller's
+//!   business: the 7z handler calls it data after the end.
+//!
+//! Two of 7-Zip's checks come earlier than libbzip2's -- a start pointer at
+//! or past the block size fails as it is read, and a zero run as soon as it
+//! outgrows the block -- and are not mirrored: the same streams fail either
+//! way, with nothing of the block written, and 7-Zip reports every failure
+//! alike, so only the error named here could differ.
 
 use alloc::vec::Vec;
 
@@ -30,6 +54,18 @@ const RUNB: u16 = 1;
 /// `N` in the zero-run decoding may not reach this: a run that long could
 /// not fit any block, and libbzip2 stops it before its `es` could overflow.
 const MAX_RUN_WEIGHT: u32 = 2 * 1024 * 1024;
+/// The longest code a table may have, in bits.
+const MAX_CODE_BITS: u32 = 20;
+
+/// Whose reading of a stream to follow, where the two part (see the
+/// module's "7-Zip's reading").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Reader {
+    /// libbzip2 1.0.8, as `bzip2 -d` drives it.
+    Bzip2,
+    /// 7-Zip 26.00's decoder, as its 7z handler drives it.
+    SevenZip,
+}
 
 /// `BZ_UPDATE_CRC`. The index is the top byte of `crc` XOR a byte, so it is
 /// below 256 and the table has 256 entries.
@@ -206,11 +242,36 @@ pub(crate) fn decompress(data: &[u8], limit: usize) -> Result<Vec<u8>> {
                 break;
             }
         }
-        let used = decode_stream(rest, &mut out, &mut tt, limit)?;
+        let used = decode_stream(rest, &mut out, &mut tt, limit, Reader::Bzip2)?;
         rest = rest.get(used..).unwrap_or_default();
         first = false;
     }
     Ok(out)
+}
+
+/// Decodes the stream at the start of `data` onto `out` as 7-Zip's decoder
+/// does, keeping what was decoded before an error; returns the bytes of
+/// `data` the stream took up.
+pub(crate) fn decompress_as_7zip(data: &[u8], out: &mut Vec<u8>, limit: usize) -> Result<usize> {
+    let mut tt = Vec::new();
+    decode_stream(data, out, &mut tt, limit, Reader::SevenZip)
+}
+
+/// Whether code lengths, each from 1 to [`MAX_CODE_BITS`], can be a prefix
+/// code: whether their Kraft sum -- the sum of 2^-length -- is at most 1.
+/// (A sum below 1 leaves codes no symbol has; one above 1 has symbols
+/// sharing codes.)
+fn fits_prefix_code(lengths: &[u8]) -> bool {
+    // In units of 2^-20: at most 258 lengths of 2^19 each, far from
+    // overflowing.
+    let sum = lengths.iter().fold(0u32, |sum, &len| {
+        let share = MAX_CODE_BITS
+            .checked_sub(u32::from(len))
+            .and_then(|shift| 1u32.checked_shl(shift))
+            .unwrap_or(0);
+        sum.saturating_add(share)
+    });
+    sum <= 1 << MAX_CODE_BITS
 }
 
 /// Whether `data` could be the start of a stream: whether libbzip2 would get
@@ -229,7 +290,13 @@ fn could_begin_stream(data: &[u8]) -> bool {
 
 /// Decodes one stream from the start of `data` onto `out`, returning the
 /// bytes of `data` it took up (the last one possibly padding).
-fn decode_stream(data: &[u8], out: &mut Vec<u8>, tt: &mut Vec<u32>, limit: usize) -> Result<usize> {
+fn decode_stream(
+    data: &[u8],
+    out: &mut Vec<u8>,
+    tt: &mut Vec<u32>,
+    limit: usize,
+    reader: Reader,
+) -> Result<usize> {
     let mut r = BitReader::new(data);
 
     for magic in [b'B', b'Z', b'h'] {
@@ -267,7 +334,7 @@ fn decode_stream(data: &[u8], out: &mut Vec<u8>, tt: &mut Vec<u32>, limit: usize
                         return Err(Error::BadBlockMagic);
                     }
                 }
-                let block_crc = decode_block(&mut r, block_size_100k, tt, out, limit)?;
+                let block_crc = decode_block(&mut r, block_size_100k, tt, out, limit, reader)?;
                 combined_crc = combined_crc.rotate_left(1) ^ block_crc;
             }
             _ => return Err(Error::BadBlockMagic),
@@ -285,12 +352,14 @@ fn decode_block(
     tt: &mut Vec<u32>,
     out: &mut Vec<u8>,
     limit: usize,
+    reader: Reader,
 ) -> Result<u32> {
     let stored_crc = r.u32()?;
     let randomised = r.bit()?;
     let orig_ptr = r.bits(24)?;
     // The first check libbzip2 makes, before it knows the block's length.
-    if orig_ptr > 10u32.wrapping_add(100_000u32.wrapping_mul(block_size_100k)) {
+    let block_max = 100_000u32.wrapping_mul(block_size_100k);
+    if orig_ptr > 10u32.wrapping_add(block_max) {
         return Err(Error::BadOrigPtr);
     }
 
@@ -370,15 +439,19 @@ fn decode_block(
             }
             *slot = u8::try_from(curr).unwrap_or(0);
         }
-        tables.push(DecodeTable::new(
-            lengths.get(..alpha_size).unwrap_or_default(),
-        ));
+        let table = lengths.get(..alpha_size).unwrap_or_default();
+        // 7-Zip builds each table as its lengths are read, and refuses one
+        // that is not a prefix code.
+        if reader == Reader::SevenZip && !fits_prefix_code(table) {
+            return Err(Error::InvalidTables);
+        }
+        tables.push(DecodeTable::new(table));
     }
 
     // The symbols: move-to-front positions, with runs of position 0 coded in
     // bijective base 2 by RUNA and RUNB.
     let eob = u16::try_from(n_in_use.wrapping_add(1)).unwrap_or(u16::MAX);
-    let nblock_max = usize::try_from(100_000u32.wrapping_mul(block_size_100k)).unwrap_or(0);
+    let nblock_max = usize::try_from(block_max).unwrap_or(0);
     let mut coder = Coder {
         selectors: &selectors,
         tables: &tables,
@@ -501,7 +574,10 @@ fn decode_block(
 
     let mut crc = 0xffff_ffffu32;
     let mut emit = |byte: u8, count: usize| -> Result<()> {
-        if count > limit.saturating_sub(out.len()) {
+        let room = limit.saturating_sub(out.len());
+        if count > room {
+            // As far as the limit, for a caller that keeps what came out.
+            out.resize(out.len().wrapping_add(room), byte);
             return Err(Error::OutputTooLarge);
         }
         for _ in 0..count {
@@ -528,7 +604,12 @@ fn decode_block(
         }
         if run == 4 {
             // Four equal bytes and the block over: the count byte is missing.
+            // libbzip2 calls that corrupt; 7-Zip writes the four and is done.
             if used >= nblock {
+                if reader == Reader::SevenZip {
+                    emit(k0, 4)?;
+                    break;
+                }
                 return Err(Error::InvalidRun);
             }
             let extra = fetch()?;
@@ -648,6 +729,48 @@ mod tests {
             decompress(&wrong, 100),
             Err(Error::StreamCrcMismatch { .. } | Error::BlockCrcMismatch { .. })
         ));
+    }
+
+    /// Exactly 1 fits, and under it; the least amount over does not.
+    #[test]
+    fn a_prefix_code_fits_when_its_kraft_sum_is_at_most_one() {
+        assert!(fits_prefix_code(&[1, 2, 3, 3]));
+        assert!(fits_prefix_code(&[2, 2, 2, 3]));
+        assert!(!fits_prefix_code(&[1, 2, 2, 3]));
+        assert!(!fits_prefix_code(&[1, 1, 1]));
+        // 1/2 + 1/4 + ... + 2^-19 + 2 x 2^-20 is exactly 1; with one more
+        // code of 20 bits it is 1 + 2^-20.
+        let mut exact: Vec<u8> = (1..=20).collect();
+        exact.push(20);
+        assert!(fits_prefix_code(&exact));
+        exact.push(20);
+        assert!(!fits_prefix_code(&exact));
+        assert!(!fits_prefix_code(&[1, 1, 20]));
+    }
+
+    /// 7-Zip reads the first stream only, and says how far it went; what
+    /// follows is left alone, a stream or not.
+    #[test]
+    fn seven_zip_reads_one_stream() {
+        let a = crate::compress(b"first ", crate::Level::FASTEST);
+        let b = crate::compress(b"second", crate::Level::BEST);
+        for tail in [&b[..], b"BZ", b"\0\0\0", b""] {
+            let mut data = a.clone();
+            data.extend_from_slice(tail);
+            let mut out = b"kept ".to_vec();
+            assert_eq!(decompress_as_7zip(&data, &mut out, 100), Ok(a.len()));
+            assert_eq!(out, b"kept first ");
+        }
+        // The limit counts what `out` held already.
+        let mut out = b"kept ".to_vec();
+        assert_eq!(decompress_as_7zip(&a, &mut out, 8), Err(Error::OutputTooLarge));
+        assert_eq!(out, b"kept fir");
+        // A stream cut short is cut short.
+        let mut out = Vec::new();
+        assert_eq!(
+            decompress_as_7zip(&a[..a.len() - 1], &mut out, 100),
+            Err(Error::UnexpectedEnd)
+        );
     }
 
     #[test]

@@ -1299,7 +1299,11 @@ mod tests {
                 e.literal(b);
             }
             e.far_match(distance);
-            let input = e.finish();
+            let mut input = e.finish();
+            // Input enough past the match that it is decoded in the same
+            // call as the bytes before it -- the call that would cross the
+            // dictionary's size -- rather than alone near the input's end.
+            input.extend_from_slice(&[0; 2 * REQUIRED_INPUT_MAX]);
             let (out, step) = decode(props, &input, n + 2, Finish::End);
             assert_eq!(out[..n], literals[..], "{distance}");
             if sound {

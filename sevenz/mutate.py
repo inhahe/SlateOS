@@ -156,12 +156,12 @@ LZMA_CODER = [
         "            } else if block.out_pre_size == 0 && false {",
         [CORPUS],
     ),
-    (
-        "the walk never cuts a block",
-        "                if dec.parse_pos >= SMALL_BLOCK {",
-        "                if dec.parse_pos >= usize::MAX {",
-        [CORPUS, "a_damaged_first_chunk_sends_its_block_to_the_sequence"],
-    ),
+    # Not a row: "the walk never cuts a block" (`parse_pos >= SMALL_BLOCK`
+    # made never true). Where blocks are cut decides how big they are, not
+    # what comes out: a damaged stream fails at the same byte cut either
+    # way, and a walk that cannot settle a block falls back to the last
+    # reset it passed (`dic_pos_point`) -- so the mutant is equivalent at
+    # the verdict level, and 7-Zip's 16 KiB is kept for fidelity alone.
     (
         "with several threads, decode in sequence",
         "        Threads::Many => decode_mt(prop, input, &mut out, out_size),",

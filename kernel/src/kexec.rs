@@ -1409,6 +1409,294 @@ pub fn patch_requests(
 }
 
 // ---------------------------------------------------------------------------
+// Orchestration: preparing the whole handoff
+// ---------------------------------------------------------------------------
+
+/// The top of the physical memory the kernel manages (usable, bootloader- and
+/// ACPI-reclaimable), to size the handoff's direct map. Reserved and MMIO
+/// regions above it the new kernel maps on demand, as it does from boot.
+#[must_use]
+pub fn top_of_managed_ram(memory_map: &[&MemmapEntry]) -> u64 {
+    let mut top = 0u64;
+    for e in memory_map {
+        if matches!(
+            e.type_,
+            memmap_type::USABLE
+                | memmap_type::BOOTLOADER_RECLAIMABLE
+                | memmap_type::ACPI_RECLAIMABLE
+        ) {
+            top = top.max(e.base.saturating_add(e.length));
+        }
+    }
+    top
+}
+
+/// The physical range a single frame occupies.
+fn frame_range(f: PhysFrame) -> PhysRange {
+    PhysRange {
+        start: f.addr(),
+        end: f.addr().saturating_add(FRAME_U64),
+    }
+}
+
+/// A handoff prepared but not yet executed: the page tables, the staged image,
+/// and the Limine responses. Dropping it leaks its frames; call
+/// [`PreparedHandoff::free`] to abandon one (a later change executes it).
+pub struct PreparedHandoff {
+    /// The new kernel's entry point (virtual).
+    pub entry: u64,
+    /// Physical base the image is placed at (its reported `physical_base`).
+    pub dest_base: u64,
+    /// The handoff page tables (the PML4 for `CR3`, and the table frames).
+    tables: HandoffTables,
+    /// The staged image: source frames and the trampoline's copy list.
+    staged: StagedImage,
+    /// The response arena frame(s).
+    arena_frames: alloc::vec::Vec<PhysFrame>,
+}
+
+impl PreparedHandoff {
+    /// Physical address of the PML4 the trampoline loads into `CR3`.
+    #[must_use]
+    pub fn pml4_phys(&self) -> u64 {
+        self.tables.pml4_phys
+    }
+
+    /// The source-to-destination copies the trampoline replays.
+    #[must_use]
+    pub fn copy_ops(&self) -> &[CopyOp] {
+        &self.staged.copy_ops
+    }
+
+    /// Free every frame this handoff owns, abandoning it before any jump.
+    ///
+    /// # Safety
+    ///
+    /// No CPU may be using these tables, and nothing may be reading these frames.
+    pub unsafe fn free(self) {
+        // SAFETY: caller's contract that nothing uses these.
+        unsafe {
+            self.tables.free();
+            self.staged.free();
+        }
+        for f in self.arena_frames {
+            // SAFETY: arena frames came from this module; a free error on the
+            // abandon path is not actionable.
+            let _ = unsafe { frame::free_frame(f) };
+        }
+    }
+}
+
+/// Build the Limine responses into the arena frame and return their pointers.
+///
+/// The memory-map response carries the adjusted map: the destination as
+/// `EXECUTABLE_AND_MODULES`, and the page-table and arena frames as
+/// `BOOTLOADER_RECLAIMABLE` (the regions the new kernel keeps). Framebuffer and
+/// kernel-file responses are not built (see [`prepare_handoff`]).
+#[allow(clippy::too_many_arguments)] // the response inputs, gathered once
+fn build_all_responses(
+    arena_phys: u64,
+    hhdm: u64,
+    dest_base: u64,
+    parsed: &ParsedKernel,
+    memory_map: &[&MemmapEntry],
+    tables: &HandoffTables,
+    arena_all_frames: &[PhysFrame],
+    rsdp_address: Option<u64>,
+) -> KernelResult<ResponseAddrs> {
+    let span = parsed.image_span().ok_or(KernelError::InvalidArgument)?;
+    let dest_end = dest_base
+        .checked_add(align_up(span, FRAME_U64).ok_or(KernelError::InvalidArgument)?)
+        .ok_or(KernelError::InvalidArgument)?;
+
+    // Overlays: the destination is the new image; the page tables and the arena
+    // must survive into the new kernel, so they are bootloader-reclaimable.
+    let mut overlays: alloc::vec::Vec<(PhysRange, u64)> = alloc::vec::Vec::new();
+    overlays.push((
+        PhysRange {
+            start: dest_base,
+            end: dest_end,
+        },
+        memmap_type::EXECUTABLE_AND_MODULES,
+    ));
+    for f in &tables.frames {
+        overlays.push((frame_range(*f), memmap_type::BOOTLOADER_RECLAIMABLE));
+    }
+    for f in arena_all_frames {
+        overlays.push((frame_range(*f), memmap_type::BOOTLOADER_RECLAIMABLE));
+    }
+    let adjusted = adjust_memory_map(memory_map, &overlays);
+
+    // The arena is the HHDM view of the arena frame.
+    let arena_virt = arena_phys
+        .checked_add(hhdm)
+        .ok_or(KernelError::InvalidArgument)?;
+    // SAFETY: `arena_virt` is the HHDM view of a frame this module just allocated
+    // and owns exclusively; it is mapped and `FRAME_SIZE` bytes long, and the
+    // borrow lasts only for this function.
+    let buf = unsafe { core::slice::from_raw_parts_mut(arena_virt as *mut u8, FRAME_SIZE) };
+    let mut arena = HandoffArena::new(buf, arena_phys, hhdm);
+
+    let hhdm_ptr = build_hhdm_response(&mut arena, hhdm).ok_or(KernelError::OutOfMemory)?;
+    let mm_ptr = build_memmap_response(&mut arena, &adjusted).ok_or(KernelError::OutOfMemory)?;
+    let ea_ptr = build_executable_address_response(&mut arena, dest_base, parsed.min_vaddr)
+        .ok_or(KernelError::OutOfMemory)?;
+    let rsdp_ptr = match rsdp_address {
+        Some(addr) => Some(build_rsdp_response(&mut arena, addr).ok_or(KernelError::OutOfMemory)?),
+        None => None,
+    };
+
+    Ok(ResponseAddrs {
+        memmap: Some(mm_ptr),
+        hhdm: Some(hhdm_ptr),
+        framebuffer: None,
+        rsdp: rsdp_ptr,
+        executable_address: Some(ea_ptr),
+        kernel_file: None,
+    })
+}
+
+/// Prepare a complete handoff for `image`: parse it, choose a high destination,
+/// build the page tables, build the Limine responses, patch them into a copy of
+/// the image, and stage that copy. The result holds everything the trampoline
+/// needs; nothing is quiesced and no jump is made.
+///
+/// `rsdp_address` is the running kernel's RSDP (physical under base revision 3),
+/// passed through so the new kernel finds ACPI. Framebuffer and kernel-file
+/// responses are not built: the new kernel treats their absence as "not
+/// provided" and boots serial-only, without a command line or symbols --
+/// acceptable for a restart (todo.txt notes completing them).
+///
+/// On any failure every frame allocated so far is freed.
+///
+/// # Errors
+///
+/// Propagates parse/plan/build/stage failures; [`KernelError::OutOfMemory`] if
+/// the arena cannot be allocated or overflows; [`KernelError::InvalidArgument`]
+/// if a handoff frame collides with the destination (the rare case
+/// [`plan_destination_high`] is designed to avoid).
+pub fn prepare_handoff(
+    image: &[u8],
+    memory_map: &[&MemmapEntry],
+    hhdm: u64,
+    max_phys: u64,
+    rsdp_address: Option<u64>,
+) -> KernelResult<PreparedHandoff> {
+    let parsed = parse_kernel_elf(image).map_err(KexecError::as_kernel_error)?;
+    let span = parsed.image_span().ok_or(KernelError::InvalidArgument)?;
+    let dest_base =
+        plan_destination_high(memory_map, span).map_err(KexecError::as_kernel_error)?;
+
+    let tables = build_handoff_tables(&parsed, dest_base, hhdm, max_phys)?;
+
+    match prepare_after_tables(
+        image,
+        &parsed,
+        memory_map,
+        hhdm,
+        dest_base,
+        span,
+        rsdp_address,
+        &tables,
+    ) {
+        Ok((staged, arena_frames)) => Ok(PreparedHandoff {
+            entry: parsed.entry,
+            dest_base,
+            tables,
+            staged,
+            arena_frames,
+        }),
+        Err(e) => {
+            // SAFETY: the tables are installed nowhere (no CPU uses them).
+            unsafe { tables.free() };
+            Err(e)
+        }
+    }
+}
+
+/// The part of [`prepare_handoff`] after the page tables are built: the arena,
+/// responses, request patching, staging, and the destination-collision check.
+/// Frees the arena and staging on its own errors; the caller frees the tables.
+#[allow(clippy::too_many_arguments)] // the orchestration's inputs, threaded once
+fn prepare_after_tables(
+    image: &[u8],
+    parsed: &ParsedKernel,
+    memory_map: &[&MemmapEntry],
+    hhdm: u64,
+    dest_base: u64,
+    span: u64,
+    rsdp_address: Option<u64>,
+    tables: &HandoffTables,
+) -> KernelResult<(StagedImage, alloc::vec::Vec<PhysFrame>)> {
+    let arena_frame = frame::alloc_frame_zeroed()?;
+    let arena_frames = alloc::vec![arena_frame];
+
+    // Build the responses, then patch them into a copy of the image and stage it.
+    // On any error, free the arena frame (and staging if it was built).
+    let responses = match build_all_responses(
+        arena_frame.addr(),
+        hhdm,
+        dest_base,
+        parsed,
+        memory_map,
+        tables,
+        &arena_frames,
+        rsdp_address,
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            free_frames(&arena_frames);
+            return Err(e);
+        }
+    };
+
+    let mut patched = image.to_vec();
+    let sites = find_request_sites(&patched);
+    if let Err(e) = patch_requests(&mut patched, &sites, &responses) {
+        free_frames(&arena_frames);
+        return Err(e);
+    }
+
+    let staged = match stage_image(&patched, parsed, dest_base, hhdm) {
+        Ok(s) => s,
+        Err(e) => {
+            free_frames(&arena_frames);
+            return Err(e);
+        }
+    };
+
+    // The destination must not overlap any handoff frame, or the trampoline's
+    // copy into it would clobber a structure the new kernel still needs.
+    let dest = PhysRange {
+        start: dest_base,
+        end: dest_base.saturating_add(span),
+    };
+    let collides = tables
+        .frames
+        .iter()
+        .chain(staged.source_frames.iter())
+        .chain(arena_frames.iter())
+        .any(|f| frame_range(*f).overlaps(dest));
+    if collides {
+        // SAFETY: nothing uses the staged frames; freeing on this error is safe.
+        unsafe { staged.free() };
+        free_frames(&arena_frames);
+        return Err(KernelError::InvalidArgument);
+    }
+
+    Ok((staged, arena_frames))
+}
+
+/// Free a set of frames, ignoring errors (used only on handoff error paths).
+fn free_frames(frames: &[PhysFrame]) {
+    for &f in frames {
+        // SAFETY: these frames came from this module and are used by nothing on
+        // the error path; a free error is not actionable.
+        let _ = unsafe { frame::free_frame(f) };
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 
@@ -1858,6 +2146,32 @@ pub fn self_test() -> KernelResult<()> {
             Some(0),
             "RSDP request left untouched (no response built)"
         );
+    }
+
+    // ---- the whole handoff, prepared end to end (integration) ----
+    // Against the real memory map and HHDM, prepare a complete handoff for the
+    // fabricated image -- parse, plan, page tables, responses, patch, stage,
+    // collision check -- then free it. Validates the orchestration without a jump.
+    if let Some(real_hhdm) = crate::mm::page_table::hhdm() {
+        let fw = crate::boot::memory_map();
+        let max_phys = top_of_managed_ram(fw);
+        if !fw.is_empty() && max_phys > 0 {
+            let img = build_test_elf();
+            match prepare_handoff(&img, fw, real_hhdm, max_phys, Some(0x000f_e000)) {
+                Ok(prep) => {
+                    selftest::check!(!prep.copy_ops().is_empty(), "prepared handoff has copy ops");
+                    selftest::check_eq!(prep.entry, TEST_ENTRY, "prepared handoff entry point");
+                    selftest::check!(prep.pml4_phys() != 0, "prepared handoff has a PML4");
+                    selftest::check!(prep.dest_base != 0, "prepared handoff has a destination");
+                    // SAFETY: this handoff was never installed in CR3 or jumped to.
+                    unsafe { prep.free() };
+                }
+                Err(e) => {
+                    crate::serial_println!("  FAIL: prepare_handoff: {:?}", e);
+                    return Err(KernelError::InternalError);
+                }
+            }
+        }
     }
 
     Ok(())

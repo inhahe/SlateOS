@@ -284,6 +284,22 @@ pub fn parse_boot_info() -> Option<BootInfo> {
     })
 }
 
+/// The bootloader's physical memory map, without the logging [`parse_boot_info`]
+/// does — the same slice it returns in `BootInfo::memory_map`.
+///
+/// The entries live for the whole kernel lifetime (Limine's responses are in
+/// bootloader-reclaimable memory, which SlateOS never reclaims), so this is a
+/// `'static` slice and remains valid at any later point — which is what
+/// `kexec` needs when it recreates the handoff. Returns an empty slice if the
+/// bootloader did not answer the memory-map request.
+#[must_use]
+pub fn memory_map() -> &'static [&'static MemmapEntry] {
+    match MEMORY_MAP_REQUEST.response() {
+        Some(r) => r.entries(),
+        None => &[],
+    }
+}
+
 /// Get the kernel file's virtual address and size.
 ///
 /// Returns `Some((address, size))` where `address` is a pointer to

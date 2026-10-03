@@ -571,6 +571,156 @@ pub fn find_request_sites(image: &[u8]) -> RequestSites {
 }
 
 // ---------------------------------------------------------------------------
+// Limine response building
+// ---------------------------------------------------------------------------
+
+/// A bump allocator over the handoff's staging memory.
+///
+/// The responses the new kernel reads must live at known physical addresses so
+/// their cross-references (the memory map's entry-pointer array, say) can be
+/// written as the HHDM virtual addresses the new kernel will dereference — the
+/// same HHDM offset the running kernel uses. The arena owns a byte buffer that
+/// *is* a physical frame run (its first byte at `phys_base`), hands out aligned
+/// sub-ranges, and reports each one's HHDM pointer so a later field can point at
+/// it.
+///
+/// It is written to be testable off a real frame: a self-test backs it with an
+/// ordinary `Vec` and a fabricated `phys_base`, and checks the bytes and
+/// pointers without performing a handoff.
+pub struct HandoffArena<'a> {
+    /// The staging bytes — in a real handoff, the HHDM view of a frame run.
+    buf: &'a mut [u8],
+    /// The physical address of `buf[0]`.
+    phys_base: u64,
+    /// The HHDM offset the new kernel will use (equal to the running kernel's).
+    hhdm: u64,
+    /// Bytes handed out so far.
+    used: usize,
+}
+
+impl<'a> HandoffArena<'a> {
+    /// Create an arena over `buf`, whose first byte is at physical `phys_base`,
+    /// for a kernel that maps physical memory at `hhdm`.
+    #[must_use]
+    pub fn new(buf: &'a mut [u8], phys_base: u64, hhdm: u64) -> Self {
+        Self {
+            buf,
+            phys_base,
+            hhdm,
+            used: 0,
+        }
+    }
+
+    /// Bytes used so far — how much of the staging run the handoff needs.
+    #[must_use]
+    pub fn used(&self) -> usize {
+        self.used
+    }
+
+    /// Reserve `size` bytes aligned to `align` (a power of two), zeroed.
+    ///
+    /// Returns the sub-range's offset within the buffer and its HHDM pointer, or
+    /// `None` if the arena is full or an address computation overflows.
+    fn reserve(&mut self, size: usize, align: usize) -> Option<(usize, u64)> {
+        let start = self.used.checked_next_multiple_of(align)?;
+        let end = start.checked_add(size)?;
+        let slot = self.buf.get_mut(start..end)?;
+        slot.fill(0);
+        self.used = end;
+        let ptr = self
+            .phys_base
+            .checked_add(u64::try_from(start).ok()?)?
+            .checked_add(self.hhdm)?;
+        Some((start, ptr))
+    }
+
+    /// Write `bytes` at `off`, or `None` if it would run past the buffer.
+    fn put(&mut self, off: usize, bytes: &[u8]) -> Option<()> {
+        let end = off.checked_add(bytes.len())?;
+        self.buf.get_mut(off..end)?.copy_from_slice(bytes);
+        Some(())
+    }
+}
+
+/// Build a two-`u64` response (`revision = 0`, then `value`) — the shape of the
+/// HHDM and RSDP responses. Returns the response's HHDM pointer.
+fn build_pair_response(arena: &mut HandoffArena<'_>, value: u64) -> Option<u64> {
+    let (off, ptr) = arena.reserve(16, 8)?;
+    arena.put(off, &0u64.to_le_bytes())?;
+    arena.put(off.checked_add(8)?, &value.to_le_bytes())?;
+    Some(ptr)
+}
+
+/// Build the HHDM response (`revision`, `offset`). Returns its HHDM pointer.
+pub fn build_hhdm_response(arena: &mut HandoffArena<'_>, hhdm_offset: u64) -> Option<u64> {
+    build_pair_response(arena, hhdm_offset)
+}
+
+/// Build the RSDP response (`revision`, `address`). Returns its HHDM pointer.
+///
+/// `address` is physical under base revision 3, which is what the running kernel
+/// holds and passes straight through.
+pub fn build_rsdp_response(arena: &mut HandoffArena<'_>, rsdp_address: u64) -> Option<u64> {
+    build_pair_response(arena, rsdp_address)
+}
+
+/// Build the executable-address response (`revision`, `physical_base`,
+/// `virtual_base`). Returns its HHDM pointer.
+///
+/// `physical_base` is where the handoff places the new image (the contiguous
+/// destination), `virtual_base` its lowest linked address, so the new kernel's
+/// own virtual-to-physical (`v - virtual_base + physical_base`) is correct.
+pub fn build_executable_address_response(
+    arena: &mut HandoffArena<'_>,
+    physical_base: u64,
+    virtual_base: u64,
+) -> Option<u64> {
+    let (off, ptr) = arena.reserve(24, 8)?;
+    arena.put(off, &0u64.to_le_bytes())?;
+    arena.put(off.checked_add(8)?, &physical_base.to_le_bytes())?;
+    arena.put(off.checked_add(16)?, &virtual_base.to_le_bytes())?;
+    Some(ptr)
+}
+
+/// Build the memory-map response: the entries, an array of pointers to them, and
+/// the response pointing at that array — the three-level shape the kernel reads
+/// (`MemmapResponse` → `entries_ptr` → each `MemmapEntry`). Returns the
+/// response's HHDM pointer.
+///
+/// `entries` is the adjusted map the new kernel should see: the firmware's, with
+/// the new image marked executable-and-modules and the handoff regions
+/// bootloader-reclaimable. Each tuple is `(base, length, type)`.
+pub fn build_memmap_response(
+    arena: &mut HandoffArena<'_>,
+    entries: &[(u64, u64, u64)],
+) -> Option<u64> {
+    // The entries themselves, remembering each one's HHDM pointer.
+    let mut entry_ptrs: alloc::vec::Vec<u64> = alloc::vec::Vec::with_capacity(entries.len());
+    for &(base, length, type_) in entries {
+        let (off, ptr) = arena.reserve(24, 8)?;
+        arena.put(off, &base.to_le_bytes())?;
+        arena.put(off.checked_add(8)?, &length.to_le_bytes())?;
+        arena.put(off.checked_add(16)?, &type_.to_le_bytes())?;
+        entry_ptrs.push(ptr);
+    }
+
+    // The array of pointers to the entries.
+    let ptr_array_bytes = entry_ptrs.len().checked_mul(8)?;
+    let (array_off, array_ptr) = arena.reserve(ptr_array_bytes, 8)?;
+    for (i, ep) in entry_ptrs.iter().enumerate() {
+        let at = array_off.checked_add(i.checked_mul(8)?)?;
+        arena.put(at, &ep.to_le_bytes())?;
+    }
+
+    // The response: revision, entry_count, entries_ptr.
+    let (off, ptr) = arena.reserve(24, 8)?;
+    arena.put(off, &0u64.to_le_bytes())?;
+    arena.put(off.checked_add(8)?, &u64::try_from(entries.len()).ok()?.to_le_bytes())?;
+    arena.put(off.checked_add(16)?, &array_ptr.to_le_bytes())?;
+    Some(ptr)
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 
@@ -729,6 +879,82 @@ pub fn self_test() -> KernelResult<()> {
     selftest::check!(
         find_request_sites(&build_request_image_with_stray_after_end()).memmap.is_none(),
         "a request past the end marker is out of the window"
+    );
+
+    // ---- Limine response building ----
+    const FAKE_PHYS: u64 = 0x0020_0000;
+    const FAKE_HHDM: u64 = 0xffff_8000_0000_0000;
+    // Round-trip an HHDM pointer the builders return back to its buffer offset.
+    let to_off = |ptr: u64| -> usize {
+        usize::try_from(ptr.wrapping_sub(FAKE_HHDM).wrapping_sub(FAKE_PHYS)).unwrap_or(usize::MAX)
+    };
+    let entries = [(0u64, 0x1000u64, 0u64), (0x1000u64, 0x2000u64, 5u64)];
+
+    let mut staging = alloc::vec![0u8; 1024];
+    // Build every response into the arena, then drop it so the buffer can be
+    // read back: the arena holds `staging` mutably for as long as it lives.
+    let (hhdm_ptr, mm_ptr, rsdp_ptr, ea_ptr, used) = {
+        let mut arena = HandoffArena::new(&mut staging, FAKE_PHYS, FAKE_HHDM);
+        let hhdm = build_hhdm_response(&mut arena, FAKE_HHDM).ok_or(KernelError::InternalError)?;
+        let mm = build_memmap_response(&mut arena, &entries).ok_or(KernelError::InternalError)?;
+        let rsdp = build_rsdp_response(&mut arena, 0x000f_e000).ok_or(KernelError::InternalError)?;
+        let ea = build_executable_address_response(&mut arena, 0x0100_0000, 0xffff_ffff_8000_0000)
+            .ok_or(KernelError::InternalError)?;
+        (hhdm, mm, rsdp, ea, arena.used())
+    };
+    selftest::check!(used <= 1024, "staging stays within the arena");
+
+    // HHDM response: revision 0 then the offset.
+    let hhdm_off = to_off(hhdm_ptr);
+    selftest::check_eq!(le_u64(&staging, hhdm_off), Some(0), "HHDM response revision");
+    selftest::check_eq!(
+        le_u64(&staging, hhdm_off.saturating_add(8)),
+        Some(FAKE_HHDM),
+        "HHDM response offset"
+    );
+
+    // Memmap response: two entries reachable through the pointer array.
+    let mm_off = to_off(mm_ptr);
+    selftest::check_eq!(le_u64(&staging, mm_off), Some(0), "memmap response revision");
+    selftest::check_eq!(
+        le_u64(&staging, mm_off.saturating_add(8)),
+        Some(2),
+        "memmap response entry_count"
+    );
+    // entries_ptr -> the pointer array; pointer[1] -> the second entry; whose
+    // (base, length, type) round-trips.
+    let array_ptr = le_u64(&staging, mm_off.saturating_add(16)).ok_or(KernelError::InternalError)?;
+    let entry1_ptr = le_u64(&staging, to_off(array_ptr).saturating_add(8))
+        .ok_or(KernelError::InternalError)?;
+    let entry1_off = to_off(entry1_ptr);
+    selftest::check_eq!(le_u64(&staging, entry1_off), Some(0x1000), "entry 1 base");
+    selftest::check_eq!(
+        le_u64(&staging, entry1_off.saturating_add(8)),
+        Some(0x2000),
+        "entry 1 length"
+    );
+    selftest::check_eq!(
+        le_u64(&staging, entry1_off.saturating_add(16)),
+        Some(5),
+        "entry 1 type"
+    );
+
+    // RSDP (revision, address) and executable-address (revision, phys, virt).
+    selftest::check_eq!(
+        le_u64(&staging, to_off(rsdp_ptr).saturating_add(8)),
+        Some(0x000f_e000),
+        "RSDP response address"
+    );
+    let ea_off = to_off(ea_ptr);
+    selftest::check_eq!(
+        le_u64(&staging, ea_off.saturating_add(8)),
+        Some(0x0100_0000),
+        "executable-address physical_base"
+    );
+    selftest::check_eq!(
+        le_u64(&staging, ea_off.saturating_add(16)),
+        Some(0xffff_ffff_8000_0000),
+        "executable-address virtual_base"
     );
 
     Ok(())

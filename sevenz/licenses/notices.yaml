@@ -1,10 +1,12 @@
 # Third-party code in this crate, for the image's notices (design-decisions 1433).
 #
 # src/ is a port of 7-Zip's 7z reader (CPP/7zip/Archive/7z/7zIn.cpp,
-# 7zDecode.cpp, Archive/Common/CoderMixer2.cpp) and codecs (C/Bcj2.c,
-# C/Ppmd7.c, C/Ppmd7Dec.c, CPP/7zip/Crypto/7zAes.cpp, C/Aes.c) from the
-# LZMA SDK 26.00, which Igor Pavlov placed in the public domain (PPMd var.H
-# by Dmitry Shkarin, also public domain).
+# 7zDecode.cpp, Archive/Common/CoderMixer2.cpp) and codecs (C/LzmaDec.c,
+# C/Lzma2Dec.c, C/Lzma2DecMt.c, C/MtDec.c, CPP/7zip/Compress/LzmaDecoder.cpp,
+# Lzma2Decoder.cpp; to come: C/Bcj2.c, C/Ppmd7.c, C/Ppmd7Dec.c,
+# CPP/7zip/Crypto/7zAes.cpp, C/Aes.c) from the LZMA SDK 26.00, which Igor
+# Pavlov placed in the public domain (PPMd var.H by Dmitry Shkarin, also
+# public domain).
 lzma-sdk:
   version: "26.00"
   licence: LicenseRef-Public-Domain

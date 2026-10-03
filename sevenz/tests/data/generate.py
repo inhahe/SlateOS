@@ -17,11 +17,24 @@ What it writes, beside itself:
   option the reader is to handle, and `made.txt`: how each was made and what
   `7z t` said.
 - `mutations.txt`: every byte of a few small archives XORed with 01, 80 and
-  FF, and `7z t`'s verdict on each: OK, or the errors it reported.
+  FF, and chosen bytes of two LZMA2 archives of several chunks -- every bit
+  of every chunk header, and data bytes at each chunk's start, middle and
+  end -- with `7z t`'s verdict on each: OK, or the errors it reported.
+- `mutations-mmt-off.txt`: the same, tested by 7-Zip with one thread
+  (`-mmt=off`). Its LZMA2 decoder works differently with several threads,
+  and on some damaged streams the two give back different amounts of data.
+
+7-Zip 26.00 sometimes crashes -- an access violation -- testing a damaged
+LZMA2 archive of several dictionary-reset blocks with several threads; on the
+worst of the mutants here about one run in twelve dies and the rest agree. A
+crash is not a verdict, so a run that crashes is run again, and the crashes
+are counted in the summary. (A verdict of `CRASH` would mean every attempt
+died.)
 """
 
 from __future__ import annotations
 
+import os
 import pathlib
 import shutil
 import subprocess
@@ -118,27 +131,129 @@ SMALL = {
 }
 
 
+# Mutated at chosen bytes: archives too big to mutate whole, whose LZMA2
+# chunk structure is the point. One block of two LZMA chunks under one
+# dictionary; and nine blocks of one chunk each, each its own dictionary
+# (`c=64k`: a 64 KiB block size), which 7-Zip's threads decode apart.
+TARGETED = {
+    "chunks-lzma2": ["-m0=LZMA2", "-mx=5"],
+    "blocks-lzma2": ["-m0=LZMA2:d=64k:c=64k"],
+}
+CHUNKY_TREE = [
+    ("a.txt", text(240_000, 21)),
+    ("b.bin", random_bytes(30_000, 22)),
+    ("c.txt", text(240_000, 23)),
+]
+# Every bit of a chunk header, and FF; 01, 80 and FF elsewhere.
+HEADER_XORS = (0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0xFF)
+XORS = (0x01, 0x80, 0xFF)
+
+
+def lzma2_chunks(data: bytes, start: int) -> list[tuple[int, int, int]]:
+    """The chunks of the LZMA2 stream at `start`, as (offset, header
+    length, data length), the end marker last as (offset, 1, 0)."""
+    out = []
+    i = start
+    while True:
+        c = data[i]
+        if c == 0:
+            out.append((i, 1, 0))
+            return out
+        unpack = (data[i + 1] << 8 | data[i + 2]) + 1
+        if c & 0x80:
+            pack = (data[i + 3] << 8 | data[i + 4]) + 1
+            header = 6 if c >= 0xC0 else 5
+            out.append((i, header, pack))
+            i += header + pack
+        else:
+            out.append((i, 3, unpack))
+            i += 3 + unpack
+
+
+def targeted(data: bytes) -> list[tuple[int, int]]:
+    """The (position, xor) pairs a TARGETED archive is mutated at: its one
+    folder's LZMA2 stream starts right after the start header."""
+    out = []
+    for at, header, size in lzma2_chunks(data, 32):
+        for pos in range(at, at + header):
+            out.extend((pos, x) for x in HEADER_XORS)
+        if size:
+            first = at + header
+            for pos in sorted({first, first + 1, first + size // 2, first + size - 2, first + size - 1}):
+                out.extend((pos, x) for x in XORS)
+    return out
+
+
 def sevenzip(*args: str, cwd: pathlib.Path | None = None) -> subprocess.CompletedProcess:
     return subprocess.run([str(SEVENZIP), *args], capture_output=True, cwd=cwd)
 
 
-def verdict(archive: pathlib.Path) -> str:
-    """`7z t`'s verdict: `OK`, or `ERR` and the errors it reported, sorted,
-    with the file names left out."""
-    r = sevenzip("t", "-bso1", "-bse1", "-bsp0", "-psecret", str(archive))
-    out = r.stdout.decode("utf-8", "replace") + r.stderr.decode("utf-8", "replace")
-    if r.returncode == 0:
+# 7-Zip's own exit codes: OK, warning, fatal error, command line error, out
+# of memory, stopped by the user. Anything else is a crash.
+SEVENZIP_EXIT_CODES = (0, 1, 2, 7, 8, 255)
+CRASH_RETRIES = 40
+# Every crash seen, for the summary.
+CRASHES: list[str] = []
+
+
+def kind(text: str) -> str:
+    """A 7-Zip message as one token: `Data Error` -> `Data_Error`."""
+    return text.strip().replace(" ", "_")
+
+
+def verdict(archive: pathlib.Path, one_thread: bool = False) -> str:
+    """`7z t`'s verdict -- with `-mmt=off` if `one_thread` -- as one line:
+
+    - `OK`: opened, every item tested good, nothing to say;
+    - `OPENFAIL kinds`: not opened, with the reasons 7-Zip gave (its `ERRORS:`
+      list after `Open ERROR`, e.g. `Is_not_archive`, `Headers_Error`,
+      `Unexpected_end_of_archive`);
+    - `OPEN errors=kinds warnings=kinds items=path:kind|...`: opened, with
+      what it reported about the archive and, item by item, what failed --
+      `#N` for a failure belonging to no file (a folder that failed after
+      its last file).
+    """
+    threads = ["-mmt=off"] if one_thread else []
+    args = ["t", *threads, "-bso1", "-bse1", "-bsp0", "-sccUTF-8", "-psecret", str(archive)]
+    # 7-Zip 26.00 itself sometimes dies -- an access violation, exit
+    # 0xC0000005 -- testing a damaged LZMA2 archive of several blocks with
+    # several threads: about one run in twelve on the worst mutants here,
+    # the others agreeing. A crash is no verdict; run it again.
+    for _ in range(CRASH_RETRIES):
+        r = sevenzip(*args)
+        if r.returncode in SEVENZIP_EXIT_CODES:
+            break
+        CRASHES.append(f"{archive.name}: exit {r.returncode:#x}")
+    else:
+        return "CRASH"
+    lines = (r.stdout.decode("utf-8", "replace") + r.stderr.decode("utf-8", "replace")).splitlines()
+    open_failed = any(line.startswith("Open ERROR") for line in lines)
+    errors, warnings, items = [], [], []
+    section = None
+    for line in lines:
+        s = line.strip()
+        if s in ("ERRORS:", "WARNINGS:"):
+            section = s
+            continue
+        if not s:
+            section = None
+            continue
+        if section == "ERRORS:":
+            errors.append(kind(s))
+        elif section == "WARNINGS:":
+            warnings.append(kind(s))
+        elif s.startswith("ERROR: ") and " : " in s:
+            what, item = s[len("ERROR: "):].rsplit(" : ", 1)
+            items.append(f"{item.replace(chr(92), '/')}:{kind(what)}")
+    if open_failed:
+        return "OPENFAIL " + (",".join(sorted(set(errors))) or "-")
+    if r.returncode == 0 and not errors and not warnings and not items:
         return "OK"
-    kinds = set()
-    for line in out.splitlines():
-        line = line.strip()
-        for key in ("Headers Error", "Data Error", "CRC Failed", "Unsupported Method",
-                    "Unexpected end of archive", "Can not open the file as archive",
-                    "Is not archive", "Wrong password", "There are data after the end of archive",
-                    "There are some data after the end of the payload data"):
-            if key.lower() in line.lower():
-                kinds.add(key.replace(" ", "_"))
-    return "ERR " + (",".join(sorted(kinds)) or f"exit{r.returncode}")
+    return (
+        f"OPEN errors={','.join(sorted(set(errors))) or '-'}"
+        f" warnings={','.join(sorted(set(warnings))) or '-'}"
+        f" items={'|'.join(items) or '-'}"
+    )
 
 
 def fnv(data: bytes) -> int:
@@ -146,6 +261,11 @@ def fnv(data: bytes) -> int:
     for b in data:
         h = ((h ^ b) * 0x100000001B3) & MASK64
     return h
+
+
+# Every input's time, so that 7-Zip, which records them, writes the same
+# archive every run: 2026-01-01 00:00:00 UTC.
+FIXED_TIME = 1767225600
 
 
 def write_tree(root: pathlib.Path, tree) -> None:
@@ -158,6 +278,9 @@ def write_tree(root: pathlib.Path, tree) -> None:
         else:
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_bytes(data)
+    # Folders last, as writing into one changes its time.
+    for p in sorted(root.rglob("*"), key=lambda q: len(q.parts), reverse=True):
+        os.utime(p, (FIXED_TIME, FIXED_TIME))
 
 
 def make(name: str, args: list[str], src: pathlib.Path, out_dir: pathlib.Path) -> pathlib.Path:
@@ -201,23 +324,45 @@ def main() -> None:
         archive = make(name, SMALL[name], small_src, made)
         lines.append(f"{archive.name} {verdict(archive)} -- {' '.join(SMALL[name])}")
     shutil.rmtree(small_src)
+    chunky_src = HERE / "chunky-input"
+    write_tree(chunky_src, CHUNKY_TREE)
+    for name, args in TARGETED.items():
+        archive = make(name, args, chunky_src, made)
+        lines.append(f"{archive.name} {verdict(archive)} -- {' '.join(args)}")
+    shutil.rmtree(chunky_src)
     shutil.rmtree(src)
     (HERE / "made.txt").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
 
-    out = ["# == archive, then: position xor verdict -- 7z t's"]
+    header = "# == archive, then: position xor verdict -- 7z t's"
+    out = {False: [header], True: [header + " -mmt=off"]}
     tmp = HERE / "mutant.7z"
+    plan = []
     for name in MUTATED:
         data = (made / f"{name}.7z").read_bytes()
-        out.append(f"== {name}.7z")
-        for pos in range(len(data)):
-            for x in (0x01, 0x80, 0xFF):
-                bad = bytearray(data)
-                bad[pos] ^= x
-                tmp.write_bytes(bytes(bad))
-                out.append(f"{pos} {x:02x} {verdict(tmp)}")
+        plan.append((name, data, [(pos, x) for pos in range(len(data)) for x in XORS]))
+    for name in TARGETED:
+        data = (made / f"{name}.7z").read_bytes()
+        plan.append((name, data, targeted(data)))
+    for name, data, cases in plan:
+        for one_thread in (False, True):
+            out[one_thread].append(f"== {name}.7z")
+        for pos, x in cases:
+            bad = bytearray(data)
+            bad[pos] ^= x
+            tmp.write_bytes(bytes(bad))
+            for one_thread in (False, True):
+                out[one_thread].append(f"{pos} {x:02x} {verdict(tmp, one_thread)}")
     tmp.unlink()
-    (HERE / "mutations.txt").write_text("\n".join(out) + "\n", encoding="utf-8", newline="\n")
-    print(f"{len(MADE)} made, {len(out)} mutation lines")
+    (HERE / "mutations.txt").write_text("\n".join(out[False]) + "\n", encoding="utf-8", newline="\n")
+    (HERE / "mutations-mmt-off.txt").write_text(
+        "\n".join(out[True]) + "\n", encoding="utf-8", newline="\n"
+    )
+    differ = sum(a != b for a, b in zip(out[False][1:], out[True][1:]))
+    print(f"{len(MADE)} made, {len(out[False])} mutation lines, {differ} differ with one thread")
+    if CRASHES:
+        print(f"7-Zip crashed {len(CRASHES)} time(s), each run again:")
+        for c in sorted(set(CRASHES)):
+            print(f"  {c} x{CRASHES.count(c)}")
 
 
 if __name__ == "__main__":

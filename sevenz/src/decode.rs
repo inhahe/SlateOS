@@ -7,10 +7,17 @@
 //! the streams between threads; with the whole archive at hand, each coder's
 //! inputs are decoded first and handed to it whole, which is the same
 //! computation in another order.
+//!
+//! Damage stops a coder part-way, and what it wrote before then still
+//! counts: 7-Zip extracts the files of a damaged solid folder that lie
+//! before the damage. So a coder's result is its output so far and, if it
+//! stopped short, why ([`Decoded`]); the files are judged against that
+//! (`Archive::read_folder`).
 
 use alloc::vec::Vec;
 
 use crate::header::{Folder, Folders, Unpacker};
+use crate::lzma_coder::{self, Threads};
 use crate::{Error, Result};
 
 /// The method IDs (`7zHeader.h`).
@@ -36,6 +43,17 @@ pub(crate) mod method {
 /// `IsDecodingSupported`: at most 32 coders.
 const DECODE_CODERS_MAX: usize = 32;
 
+/// A coder's or a folder's output, and why it stopped short if it did.
+#[derive(Debug, Default)]
+pub(crate) struct Decoded {
+    pub(crate) out: Vec<u8>,
+    pub(crate) error: Option<Error>,
+    /// Some coder finished before its input did (7-Zip's
+    /// `dataAfterEnd_Error`: "There are some data after the end of the
+    /// payload data").
+    pub(crate) after_end: bool,
+}
+
 /// The archive as [`Unpacker`] needs it, to decode packed header streams.
 pub(crate) struct ArchiveUnpacker<'a> {
     pub(crate) data: &'a [u8],
@@ -44,7 +62,13 @@ pub(crate) struct ArchiveUnpacker<'a> {
 impl Unpacker for ArchiveUnpacker<'_> {
     fn unpack(&self, folders: &Folders, index: usize, base: u64) -> Result<(Vec<u8>, bool)> {
         let size = usize::try_from(folders.unpack_size(index)).map_err(|_| Error::Unsupported)?;
-        decode_folder(self.data, folders, index, base, size)
+        // 7-Zip decodes a packed header with one thread (`7zIn.cpp` passes
+        // `mtMode = false`).
+        let d = decode_folder(self.data, folders, index, base, size, Threads::One)?;
+        match d.error {
+            Some(e) => Err(e),
+            None => Ok((d.out, d.after_end)),
+        }
     }
 }
 
@@ -104,22 +128,24 @@ fn reach(folder: &Folder, coder_to_stream: &[u32], coder: usize, used: &mut [boo
 }
 
 /// Decodes folder `index` of `folders`, whose packed streams start at
-/// `start` in `data`, refusing an output above `limit`. Returns the output
-/// and whether some coder finished before its input did.
+/// `start` in `data`, refusing an output above `limit`, LZMA2 as 7-Zip with
+/// `threads` decodes it. A folder no coder of which could start -- an
+/// unsupported method or graph -- is an `Err`; damage found while decoding
+/// is in the [`Decoded`].
 pub(crate) fn decode_folder(
     data: &[u8],
     folders: &Folders,
     index: usize,
     start: u64,
     limit: usize,
-) -> Result<(Vec<u8>, bool)> {
+    threads: Threads,
+) -> Result<Decoded> {
     let folder = folders.folders.get(index).ok_or(Error::Header)?;
     if folder.coders.len() > DECODE_CODERS_MAX {
         return Err(Error::Unsupported);
     }
     let coder_to_stream = check_graph(folder)?;
-    let size = folders.unpack_size(index);
-    if size > limit as u64 {
+    if folders.unpack_size(index) > limit as u64 {
         return Err(Error::OutputTooLarge);
     }
     let ctx = Ctx {
@@ -130,10 +156,9 @@ pub(crate) fn decode_folder(
         coder_to_stream: &coder_to_stream,
         start,
         limit,
+        threads,
     };
-    let mut after_end = false;
-    let out = ctx.coder(folder.unpack_coder as usize, &mut after_end)?;
-    Ok((out, after_end))
+    ctx.coder(folder.unpack_coder as usize)
 }
 
 /// What decoding one folder needs.
@@ -145,12 +170,13 @@ struct Ctx<'a> {
     coder_to_stream: &'a [u32],
     start: u64,
     limit: usize,
+    threads: Threads,
 }
 
 impl Ctx<'_> {
     /// A coder's input stream `s`: a packed stream, or another coder's
     /// output.
-    fn input(&self, s: u32, after_end: &mut bool) -> Result<Vec<u8>> {
+    fn input(&self, s: u32) -> Result<Decoded> {
         if let Some(j) = self.folder.pack_streams.iter().position(|&p| p == s) {
             let (offset, size) = self.folders.pack_stream(self.index, j);
             let begin = self.start.checked_add(offset).ok_or(Error::Header)?;
@@ -159,11 +185,11 @@ impl Ctx<'_> {
                 usize::try_from(begin).map_err(|_| Error::UnexpectedEnd)?,
                 usize::try_from(end).map_err(|_| Error::UnexpectedEnd)?,
             );
-            return Ok(self
-                .data
-                .get(begin..end)
-                .ok_or(Error::UnexpectedEnd)?
-                .to_vec());
+            let bytes = self.data.get(begin..end).ok_or(Error::UnexpectedEnd)?;
+            return Ok(Decoded {
+                out: bytes.to_vec(),
+                ..Decoded::default()
+            });
         }
         let bond = self
             .folder
@@ -171,43 +197,59 @@ impl Ctx<'_> {
             .iter()
             .find(|b| b.pack_index == s)
             .ok_or(Error::Unsupported)?;
-        self.coder(bond.unpack_index as usize, after_end)
+        self.coder(bond.unpack_index as usize)
     }
 
-    /// Coder `c`'s output, its inputs decoded first.
-    fn coder(&self, c: usize, after_end: &mut bool) -> Result<Vec<u8>> {
+    /// Coder `c`'s output, its inputs decoded first. An input that stopped
+    /// short is decoded as far as it goes, and its error is the coder's.
+    fn coder(&self, c: usize) -> Result<Decoded> {
         let coder = self.folder.coders.get(c).ok_or(Error::Header)?;
         let first = self.coder_to_stream.get(c).copied().unwrap_or(0);
         let mut inputs = Vec::with_capacity(coder.num_streams as usize);
+        let mut upstream = None;
+        let mut after_end = false;
         for i in 0..coder.num_streams {
-            inputs.push(self.input(first.saturating_add(i), after_end)?);
+            let d = self.input(first.saturating_add(i))?;
+            upstream = upstream.or(d.error);
+            after_end |= d.after_end;
+            inputs.push(d.out);
         }
         let size = self.folders.coder_unpack_size(self.index, c);
         if size > self.limit as u64 {
             return Err(Error::OutputTooLarge);
         }
         let size = size as usize;
-        let out = run(coder.method, &coder.props, &mut inputs, size, after_end)?;
-        if out.len() != size {
-            return Err(Error::Data);
+        let mut d = run(coder.method, &coder.props, &mut inputs, size, self.threads)?;
+        d.after_end |= after_end;
+        if d.error.is_none() {
+            d.error = upstream;
         }
-        Ok(out)
+        if d.error.is_none() && d.out.len() != size {
+            d.error = Some(Error::Data);
+        }
+        Ok(d)
     }
 }
 
-/// Runs one coder over its inputs, to an output of `size` bytes.
+/// Runs one coder over its inputs, to an output of `size` bytes. A method
+/// or properties it cannot use is an `Err`; damage is in the [`Decoded`].
 fn run(
     method: u64,
     props: &[u8],
     inputs: &mut [Vec<u8>],
     size: usize,
-    after_end: &mut bool,
-) -> Result<Vec<u8>> {
+    threads: Threads,
+) -> Result<Decoded> {
     let simple = |inputs: &mut [Vec<u8>]| -> Result<Vec<u8>> {
         match inputs {
             [one] => Ok(core::mem::take(one)),
             _ => Err(Error::Unsupported),
         }
+    };
+    let done = |out: Vec<u8>, error: Option<Error>| Decoded {
+        out,
+        error,
+        after_end: false,
     };
     match method {
         method::COPY => {
@@ -215,34 +257,56 @@ fn run(
                 return Err(Error::Unsupported);
             }
             let mut data = simple(inputs)?;
-            if data.len() < size {
-                return Err(Error::Data);
-            }
+            let mut d = done(Vec::new(), None);
             if data.len() > size {
-                *after_end = true;
+                d.after_end = true;
                 data.truncate(size);
+            } else if data.len() < size {
+                d.error = Some(Error::Data);
             }
-            Ok(data)
+            d.out = data;
+            Ok(d)
         }
+        // 7-Zip's own decoders, which part from liblzma's on damaged data
+        // (`lzma_dec.rs`).
         method::LZMA => {
-            let p: [u8; 5] = props.try_into().map_err(|_| Error::Unsupported)?;
             let data = simple(inputs)?;
-            xz::lzma1(p, &data, Some(size as u64), size).map_err(codec)
+            let c = lzma_coder::lzma(props, &data, size).ok_or(Error::Unsupported)?;
+            Ok(done(c.out, (!c.ok).then_some(Error::Data)))
         }
         method::LZMA2 => {
-            let &[p] = props else {
-                return Err(Error::Unsupported);
-            };
             let data = simple(inputs)?;
-            xz::lzma2(p, &data, size).map_err(codec)
+            let c = lzma_coder::lzma2(props, &data, size, threads).ok_or(Error::Unsupported)?;
+            Ok(done(c.out, (!c.ok).then_some(Error::Data)))
         }
         method::BZIP2 => {
             let data = simple(inputs)?;
-            bzip2::decompress_limited(&data, size).map_err(|_| Error::Data)
+            Ok(match bzip2::decompress_limited(&data, size) {
+                Ok(out) => done(out, None),
+                Err(_) => done(Vec::new(), Some(Error::Data)),
+            })
         }
         method::DEFLATE => {
             let data = simple(inputs)?;
-            deflate::inflate_limited(&data, size).map_err(|_| Error::Data)
+            let mut stream = deflate::inflate_stream(&data, size);
+            let mut out = alloc::vec![0u8; size];
+            let mut n = 0usize;
+            let mut error = None;
+            while n < size {
+                let Some(rest) = out.get_mut(n..) else {
+                    break;
+                };
+                match stream.read(rest) {
+                    Ok(0) => break,
+                    Ok(k) => n = n.saturating_add(k),
+                    Err(_) => {
+                        error = Some(Error::Data);
+                        break;
+                    }
+                }
+            }
+            out.truncate(n);
+            Ok(done(out, error))
         }
         method::DELTA => {
             let &[p] = props else {
@@ -250,7 +314,7 @@ fn run(
             };
             let mut data = simple(inputs)?;
             xz::delta_decode(u32::from(p).saturating_add(1), &mut data);
-            Ok(data)
+            Ok(done(data, None))
         }
         method::BCJ | method::PPC | method::IA64 | method::ARM | method::ARMT | method::SPARC => {
             let arch = match method {
@@ -268,21 +332,12 @@ fn run(
             };
             let mut data = simple(inputs)?;
             xz::bcj_decode(arch, start, &mut data);
-            Ok(data)
+            Ok(done(data, None))
         }
         // Ported next; until then, refused as 7-Zip refuses a method it
         // lacks.
         method::PPMD | method::BCJ2 | method::DEFLATE64 => Err(Error::Unsupported),
         method::AES => Err(Error::PasswordRequired),
         _ => Err(Error::Unsupported),
-    }
-}
-
-/// An `xz` codec error as 7-Zip reports it.
-fn codec(e: xz::Error) -> Error {
-    match e {
-        xz::Error::Unsupported => Error::Unsupported,
-        xz::Error::OutputTooLarge => Error::OutputTooLarge,
-        _ => Error::Data,
     }
 }

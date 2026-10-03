@@ -3154,9 +3154,17 @@ word; text inside them that says "lane C" is history.
   match finder, the fast and normal choosers, every preset and extreme
   preset, `.xz`, `.lzma` and raw -- held to `xz` 5.2.5's bytes for 136
   settings and inputs -- and the archive manager writes TAR.XZ through it.
-  **Next:** `sevenz/` (7z: LZMA, LZMA2,
-  BZip2, Deflate, BCJ, Delta; names kept as UTF-16 units), then the
-  archive manager opens 7z.
+  **In progress:** `sevenz/` (7z, a port of 7-Zip 26.00's own reader; names
+  kept as UTF-16 units). Reads archives 7-Zip made with LZMA, LZMA2, BZip2,
+  Deflate, Copy, BCJ, ARM and Delta. LZMA and LZMA2 are decoded by 7-Zip's
+  own decoders, ported (`LzmaDec.c`, `Lzma2Dec.c` and the multi-threaded
+  driver, decision 1230), because liblzma's part from them on damaged data:
+  every one-byte corruption of three small archives, and the chunk headers
+  and edges of two multi-chunk LZMA2 archives (4,289 mutants), get 7-Zip's
+  own verdict, file by file, as 7-Zip with several threads and with one
+  gives it. **Next:** PPMd, BCJ2, ARM64/RISC-V, AES and Deflate64; 7-Zip's
+  verdicts for damaged BZip2, Deflate and filter chains; then the archive
+  manager opens 7z.
 
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;
 bug-hunt sweeps over it are standing work between features (this was lane

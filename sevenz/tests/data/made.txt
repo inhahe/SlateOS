@@ -19,3 +19,5 @@ encrypted-headers.7z OK -- -m0=LZMA2 -psecret -mhe=on
 small-lzma2.7z OK -- -m0=LZMA2 -mx=5
 small-headers-plain.7z OK -- -m0=LZMA -mhc=off
 small-copy.7z OK -- -m0=Copy -mhc=off
+chunks-lzma2.7z OK -- -m0=LZMA2 -mx=5
+blocks-lzma2.7z OK -- -m0=LZMA2:d=64k:c=64k

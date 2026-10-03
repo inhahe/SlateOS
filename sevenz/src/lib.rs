@@ -2,9 +2,16 @@
 //!
 //! A port of 7-Zip's own 7z reader (`CPP/7zip/Archive/7z/7zIn.cpp`,
 //! `7zDecode.cpp`) from the LZMA SDK 26.00, which Igor Pavlov placed in the
-//! public domain, with its codecs: LZMA and LZMA2 and the branch converters
-//! through the workspace's `xz`, BZip2 through `bzip2`, Deflate through
-//! `deflate`, and BCJ2, PPMd and 7z's AES ported here from the same SDK.
+//! public domain, with its codecs: LZMA and LZMA2 by 7-Zip's own decoders,
+//! ported here (`lzma_dec`, `lzma2_dec`, `lzma_coder`: on damaged data they
+//! part from liblzma's, and a 7z reader must fail where 7-Zip fails); the
+//! branch converters through the workspace's `xz`, BZip2 through `bzip2`,
+//! Deflate through `deflate`; and BCJ2, PPMd and 7z's AES to be ported here
+//! from the same SDK.
+//!
+//! LZMA2 is decoded as 7-Zip with several threads decodes it, unless
+//! [`Archive::set_threads`] says otherwise ([`Threads`]); the two differ only
+//! on some damaged archives.
 //!
 //! The whole archive is in memory (`&[u8]`), as the archive manager holds
 //! it; a folder -- a solid block of several files -- is decoded whole when
@@ -29,11 +36,15 @@ extern crate alloc;
 
 mod decode;
 mod header;
+mod lzma2_dec;
+mod lzma_coder;
+mod lzma_dec;
 
 use alloc::vec::Vec;
 
 pub use header::Warnings;
 use header::{Database, HEADER_SIZE, SIGNATURE};
+pub use lzma_coder::Threads;
 
 /// Everything that can go wrong reading a 7z archive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +136,7 @@ pub struct Archive<'a> {
     data: &'a [u8],
     db: Database,
     recovered: bool,
+    threads: Threads,
 }
 
 /// What an archive is, without its bytes.
@@ -203,6 +215,7 @@ impl<'a> Archive<'a> {
                 data,
                 db: Database::default(),
                 recovered,
+                threads: Threads::default(),
             });
         }
         let available = (data.len() as u64).saturating_sub(after_header);
@@ -223,7 +236,15 @@ impl<'a> Archive<'a> {
             data,
             db,
             recovered,
+            threads: Threads::default(),
         })
+    }
+
+    /// Which 7-Zip to decode LZMA2 as: by default 7-Zip as it runs on a
+    /// machine with several hardware threads. The two differ only on some
+    /// damaged archives, in how much of a damaged folder they give back.
+    pub fn set_threads(&mut self, threads: Threads) {
+        self.threads = threads;
     }
 
     /// How many files and directories the archive lists.
@@ -275,67 +296,131 @@ impl<'a> Archive<'a> {
         self.db.folders.num_unpack_streams.iter().any(|&n| n > 1)
     }
 
-    /// Decodes folder `index` whole, refusing more than `limit` bytes.
-    fn folder(&self, index: usize, limit: usize) -> Result<Vec<u8>> {
-        let (out, _) = decode::decode_folder(
-            self.data,
-            &self.db.folders,
-            index,
-            self.db.data_start,
-            limit,
-        )?;
-        if let Some(crc) = self.db.folders.folder_crcs.get(index).copied().flatten() {
-            if crc32::crc32(&out) != crc {
-                return Err(Error::Crc);
-            }
-        }
-        Ok(out)
+    /// How many folders -- solid blocks -- the archive has.
+    #[must_use]
+    pub fn num_folders(&self) -> usize {
+        self.db.folders.folders.len()
     }
 
-    /// The data of entry `index`, refusing to decode more than `limit`
-    /// bytes (the whole folder it is in counts, as it must be decoded).
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Data`], [`Error::Crc`] or [`Error::Unsupported`] as 7-Zip
-    /// fails to extract the file, and [`Error::OutputTooLarge`] at the cap.
-    pub fn read(&self, index: usize, limit: usize) -> Result<Vec<u8>> {
-        let file = self.db.files.get(index).ok_or(Error::Header)?;
+    /// The folder entry `index`'s data is in, if it has data.
+    #[must_use]
+    pub fn folder_of(&self, index: usize) -> Option<usize> {
+        let file = self.db.files.get(index)?;
         if !file.has_stream {
-            return Ok(Vec::new());
+            return None;
         }
-        let folder = self
-            .db
+        self.db
             .file_folder
             .get(index)
             .copied()
             .flatten()
-            .ok_or(Error::Header)? as usize;
-        let first = self.db.folder_start_file.get(folder).copied().unwrap_or(0) as usize;
-        let out = self.folder(folder, limit)?;
-        // The file's data starts after the data of the files before it in
-        // its folder.
-        let offset: u64 = self
-            .db
-            .files
-            .get(first..index)
-            .ok_or(Error::Header)?
-            .iter()
-            .filter(|f| f.has_stream)
-            .map(|f| f.size)
-            .sum();
-        let start = usize::try_from(offset).map_err(|_| Error::Header)?;
-        let end = start
-            .checked_add(usize::try_from(file.size).map_err(|_| Error::Header)?)
-            .ok_or(Error::Header)?;
-        let data = out.get(start..end).ok_or(Error::Header)?.to_vec();
-        if let Some(crc) = file.crc {
-            if crc32::crc32(&data) != crc {
-                return Err(Error::Crc);
-            }
-        }
-        Ok(data)
+            .map(|f| f as usize)
     }
+
+    /// Decodes folder `folder` -- once, however many files it holds -- and
+    /// gives each of its files what 7-Zip's extraction gives it: the file's
+    /// data, [`Error::Crc`] when its bytes came out but not as its CRC says,
+    /// or the decoder's error for a file the damage was in or after. A folder
+    /// that failed only after its last file came out is reported in
+    /// [`FolderResult::error_after_files`], as 7-Zip reports it apart from
+    /// the files. `limit` caps the folder's whole output.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Unsupported`] or [`Error::PasswordRequired`] when the folder's
+    /// coders cannot be run at all, and [`Error::OutputTooLarge`] at the cap.
+    pub fn read_folder(&self, folder: usize, limit: usize) -> Result<FolderResult> {
+        let decoded = decode::decode_folder(
+            self.data,
+            &self.db.folders,
+            folder,
+            self.db.data_start,
+            limit,
+            self.threads,
+        )?;
+        let first = self.db.folder_start_file.get(folder).copied().unwrap_or(0) as usize;
+        let mut remaining = self
+            .db
+            .folders
+            .num_unpack_streams
+            .get(folder)
+            .copied()
+            .unwrap_or(0);
+        let mut files = Vec::new();
+        let mut offset = 0usize;
+        let mut all_out = true;
+        let mut index = first;
+        while remaining > 0 {
+            let Some(file) = self.db.files.get(index) else {
+                break;
+            };
+            if file.has_stream {
+                // Inside the loop, `remaining` is at least 1.
+                remaining = remaining.saturating_sub(1);
+                let size = usize::try_from(file.size).unwrap_or(usize::MAX);
+                let end = offset.saturating_add(size);
+                let result = match decoded.out.get(offset..end) {
+                    Some(bytes) => {
+                        if file.crc.is_some_and(|crc| crc32::crc32(bytes) != crc) {
+                            Err(Error::Crc)
+                        } else {
+                            Ok(bytes.to_vec())
+                        }
+                    }
+                    None => {
+                        all_out = false;
+                        Err(decoded.error.unwrap_or(Error::Data))
+                    }
+                };
+                files.push((index, result));
+                offset = end;
+            }
+            // Below the file count, which `get` just checked.
+            index = index.saturating_add(1);
+        }
+        let error_after_files = if all_out { decoded.error } else { None };
+        Ok(FolderResult {
+            files,
+            error_after_files,
+            data_after_end: decoded.after_end,
+        })
+    }
+
+    /// The data of entry `index`, as [`Archive::read_folder`] gives it,
+    /// refusing to decode more than `limit` bytes (its whole folder counts).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Data`], [`Error::Crc`], [`Error::Unsupported`] or
+    /// [`Error::PasswordRequired`] as 7-Zip fails to extract the file, and
+    /// [`Error::OutputTooLarge`] at the cap.
+    pub fn read(&self, index: usize, limit: usize) -> Result<Vec<u8>> {
+        if self.db.files.get(index).ok_or(Error::Header)?.has_stream {
+            let folder = self.folder_of(index).ok_or(Error::Header)?;
+            let result = self.read_folder(folder, limit)?;
+            for (i, r) in result.files {
+                if i == index {
+                    return r;
+                }
+            }
+            return Err(Error::Header);
+        }
+        Ok(Vec::new())
+    }
+}
+
+/// What decoding one folder gave its files (`Archive::read_folder`).
+#[derive(Debug)]
+pub struct FolderResult {
+    /// Each file with data in the folder, in order: its entry index and its
+    /// data or why there is none.
+    pub files: Vec<(usize, Result<Vec<u8>>)>,
+    /// The folder's decoder failed after every file's data had come out --
+    /// 7-Zip's error on no file ("#0").
+    pub error_after_files: Option<Error>,
+    /// A coder finished before its input did (7-Zip: "There are some data
+    /// after the end of the payload data").
+    pub data_after_end: bool,
 }
 
 impl<'a> Entry<'a> {

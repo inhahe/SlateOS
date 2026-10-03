@@ -18,7 +18,7 @@ use alloc::vec::Vec;
 
 use crate::header::{Folder, Folders, Unpacker};
 use crate::lzma_coder::{self, Threads};
-use crate::{Error, Result};
+use crate::{Error, Result, bcj2, ppmd7};
 
 /// The method IDs (`7zHeader.h`).
 pub(crate) mod method {
@@ -219,7 +219,14 @@ impl Ctx<'_> {
             return Err(Error::OutputTooLarge);
         }
         let size = size as usize;
-        let mut d = run(coder.method, &coder.props, &mut inputs, size, self.threads)?;
+        let mut d = run(
+            coder.method,
+            &coder.props,
+            &mut inputs,
+            size,
+            self.threads,
+            self.limit,
+        )?;
         d.after_end |= after_end;
         if d.error.is_none() {
             d.error = upstream;
@@ -231,14 +238,16 @@ impl Ctx<'_> {
     }
 }
 
-/// Runs one coder over its inputs, to an output of `size` bytes. A method
-/// or properties it cannot use is an `Err`; damage is in the [`Decoded`].
+/// Runs one coder over its inputs, to an output of `size` bytes, with at
+/// most `limit` bytes of model memory. A method or properties it cannot use
+/// is an `Err`; damage is in the [`Decoded`].
 fn run(
     method: u64,
     props: &[u8],
     inputs: &mut [Vec<u8>],
     size: usize,
     threads: Threads,
+    limit: usize,
 ) -> Result<Decoded> {
     let simple = |inputs: &mut [Vec<u8>]| -> Result<Vec<u8>> {
         match inputs {
@@ -277,6 +286,24 @@ fn run(
         method::LZMA2 => {
             let data = simple(inputs)?;
             let c = lzma_coder::lzma2(props, &data, size, threads).ok_or(Error::Unsupported)?;
+            Ok(done(c.out, (!c.ok).then_some(Error::Data)))
+        }
+        method::PPMD => {
+            let data = simple(inputs)?;
+            match ppmd7::decode(props, &data, size, limit) {
+                Ok(c) => Ok(done(c.out, (!c.ok).then_some(Error::Data))),
+                Err(ppmd7::Refused::Unsupported) => Err(Error::Unsupported),
+                Err(ppmd7::Refused::TooLarge) => Err(Error::OutputTooLarge),
+            }
+        }
+        method::BCJ2 => {
+            if !props.is_empty() {
+                return Err(Error::Unsupported);
+            }
+            let [main, call, jump, rc] = inputs else {
+                return Err(Error::Unsupported);
+            };
+            let c = bcj2::decode([main, call, jump, rc], size);
             Ok(done(c.out, (!c.ok).then_some(Error::Data)))
         }
         method::BZIP2 => {
@@ -336,7 +363,7 @@ fn run(
         }
         // Ported next; until then, refused as 7-Zip refuses a method it
         // lacks.
-        method::PPMD | method::BCJ2 | method::DEFLATE64 => Err(Error::Unsupported),
+        method::DEFLATE64 => Err(Error::Unsupported),
         method::AES => Err(Error::PasswordRequired),
         _ => Err(Error::Unsupported),
     }

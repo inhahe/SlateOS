@@ -34,11 +34,13 @@
 
 extern crate alloc;
 
+mod bcj2;
 mod decode;
 mod header;
 mod lzma2_dec;
 mod lzma_coder;
 mod lzma_dec;
+mod ppmd7;
 
 use alloc::vec::Vec;
 

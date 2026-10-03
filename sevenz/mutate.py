@@ -170,12 +170,115 @@ LZMA_CODER = [
     ),
 ]
 
+# PPMd: the model must be 7-Zip's to the byte, so most breakage shows as a
+# 7-Zip archive that no longer decodes -- above all the one whose 64 KiB
+# model restarts several times, where the allocator's choices decide when.
+PPMD_RESTARTS = "the_small_model_restarts_and_still_decodes"
+PPMD_RC = "the_range_coder_must_start_with_a_zero_and_end_finished"
+PPMD7 = [
+    (
+        "a PPMd range coder may start with any byte",
+        "        if self.read_byte() != 0 {",
+        "        if self.read_byte() != 0 && false {",
+        [PPMD_RC, CORPUS],
+    ),
+    (
+        "a PPMd stream may end with the range coder unfinished",
+        "Symbol::Byte(_) => out.len() == out_size && ppmd.code == 0,",
+        "Symbol::Byte(_) => out.len() == out_size,",
+        [PPMD_RC, CORPUS],
+    ),
+    (
+        "a PPMd stream need not use its packed bytes up",
+        "let ok = ok && ppmd.pos == input.len();",
+        "let ok = ok;",
+        [PPMD_RC, CORPUS],
+    ),
+    (
+        "reading past a PPMd stream's end is not damage",
+        "    if ppmd.extra {\n        // CHECK_EXTRA_ERROR",
+        "    if false {\n        // CHECK_EXTRA_ERROR",
+        [PPMD_RC, CORPUS],
+    ),
+    (
+        "free blocks are never glued together",
+        "if self.rd16(node2) != 0 || nu >= 0x10000 || self.broken {",
+        "if true {",
+        [MADE, PPMD_RESTARTS],
+    ),
+    (
+        "a split block's odd remainder is lost",
+        "        let mut i = self.u2i(nu);\n        if self.i2u(i) != nu {",
+        "        let mut i = self.u2i(nu);\n        if false {",
+        [MADE, PPMD_RESTARTS],
+    ),
+    (
+        "the model keeps going when its text reaches the units",
+        "        if self.text >= self.units_start {",
+        "        if self.text >= self.units_start && false {",
+        [MADE, PPMD_RESTARTS],
+    ),
+    (
+        "rescaling keeps the symbols it halved to nothing",
+        "        if self.freq(s) == 0 {",
+        "        if false {",
+        [MADE, PPMD_RESTARTS],
+    ),
+    (
+        "a binary context's probability does not learn from a hit",
+        "*prob = low16(pr + (1 << INT_BITS));",
+        "*prob = low16(pr);",
+        [MADE, PPMD_RESTARTS],
+    ),
+    (
+        "the escape estimator ignores how many symbols were masked",
+        "            + 4 * u32::from(num_masked > non_masked)\n",
+        "\n",
+        [MADE, PPMD_RESTARTS],
+    ),
+    (
+        "an escape estimator never speeds up",
+        "                if u32::from(see.shift) < PERIOD_BITS {",
+        "                if false {",
+        [MADE, PPMD_RESTARTS],
+    ),
+]
+
+BCJ2 = [
+    (
+        "a BCJ2 target is not relative to where it is",
+        "v = self.be32(cj).wrapping_sub(ip);",
+        "v = self.be32(cj);",
+        [MADE],
+    ),
+    (
+        "a BCJ2 stream may end with its range coder unfinished",
+        "        && dec.code == 0\n",
+        "\n",
+        [CORPUS],
+    ),
+    (
+        "bytes left over of a CALL or JUMP word are not damage",
+        "            if extra.get(state).copied().unwrap_or(0) != 0 {\n                crit_ok = false;",
+        "            if extra.get(state).copied().unwrap_or(0) != 0 && false {\n                crit_ok = false;",
+        [CORPUS],
+    ),
+    (
+        "E8 is not a candidate opcode",
+        "                if ((b + (0x100 - 0xE8)) & 0xFE) == 0",
+        "                if ((b + (0x100 - 0xE8)) & 0xFE) == 1",
+        [MADE],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:]
     tables = [
         (SRC / "lzma_dec.rs", LZMA_DEC),
         (SRC / "lzma2_dec.rs", LZMA2_DEC),
         (SRC / "lzma_coder.rs", LZMA_CODER),
+        (SRC / "ppmd7.rs", PPMD7),
+        (SRC / "bcj2.rs", BCJ2),
     ]
     names = [name for _, rows in tables for name, *_ in rows]
     unmatched = [o for o in only if not any(o in n for n in names)]

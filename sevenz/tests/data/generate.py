@@ -111,6 +111,10 @@ MADE = [
     ("deflate", ["-m0=Deflate"]),
     ("copy", ["-m0=Copy"]),
     ("ppmd", ["-m0=PPMd"]),
+    # 64 KiB of model for about 105 KB of input: the model fills and starts
+    # again several times, which is where an allocator that is not exactly
+    # 7-Zip's would show.
+    ("ppmd-small-mem", ["-m0=PPMd:mem=64k:o=32"]),
     ("bcj-lzma2", ["-mf=BCJ", "-m0=LZMA2"]),
     ("bcj2", ["-mf=BCJ2", "-m0=LZMA"]),
     ("delta", ["-mf=Delta:4", "-m0=LZMA2"]),
@@ -123,12 +127,15 @@ MADE = [
 ]
 
 # Mutated whole: small archives with something in every part of the format.
-MUTATED = ["small-lzma2", "small-headers-plain", "small-copy"]
+MUTATED = ["small-lzma2", "small-headers-plain", "small-copy", "small-ppmd"]
 SMALL = {
     "small-lzma2": ["-m0=LZMA2", "-mx=5"],
     "small-headers-plain": ["-m0=LZMA", "-mhc=off"],
     "small-copy": ["-m0=Copy", "-mhc=off"],
+    "small-ppmd": ["-m0=PPMd", "-mhc=off"],
 }
+# The tree they are made of.
+SMALL_TREE = [("a.txt", text(300, 6)), ("dir", None), ("b.bin", random_bytes(40, 7)), ("e.txt", b"")]
 
 
 # Mutated at chosen bytes: archives too big to mutate whole, whose LZMA2
@@ -319,7 +326,7 @@ def main() -> None:
         lines.append(f"{archive.name} {verdict(archive)} -- {' '.join(args)}")
 
     small_src = HERE / "small-input"
-    write_tree(small_src, [("a.txt", text(300, 6)), ("dir", None), ("b.bin", random_bytes(40, 7)), ("e.txt", b"")])
+    write_tree(small_src, SMALL_TREE)
     for name in MUTATED:
         archive = make(name, SMALL[name], small_src, made)
         lines.append(f"{archive.name} {verdict(archive)} -- {' '.join(SMALL[name])}")

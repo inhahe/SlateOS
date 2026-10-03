@@ -7,6 +7,7 @@ bzip2.7z OK -- -m0=BZip2
 deflate.7z OK -- -m0=Deflate
 copy.7z OK -- -m0=Copy
 ppmd.7z OK -- -m0=PPMd
+ppmd-small-mem.7z OK -- -m0=PPMd:mem=64k:o=32
 bcj-lzma2.7z OK -- -mf=BCJ -m0=LZMA2
 bcj2.7z OK -- -mf=BCJ2 -m0=LZMA
 delta.7z OK -- -mf=Delta:4 -m0=LZMA2
@@ -19,5 +20,6 @@ encrypted-headers.7z OK -- -m0=LZMA2 -psecret -mhe=on
 small-lzma2.7z OK -- -m0=LZMA2 -mx=5
 small-headers-plain.7z OK -- -m0=LZMA -mhc=off
 small-copy.7z OK -- -m0=Copy -mhc=off
+small-ppmd.7z OK -- -m0=PPMd -mhc=off
 chunks-lzma2.7z OK -- -m0=LZMA2 -mx=5
 blocks-lzma2.7z OK -- -m0=LZMA2:d=64k:c=64k

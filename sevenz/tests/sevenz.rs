@@ -119,16 +119,10 @@ fn archives_7zip_made_are_read() {
         assert_eq!(archive.warnings(), sevenz::Warnings::default(), "{name}");
         read_ok.push(name);
     }
-    // What this reader does not yet decode: PPMd, BCJ2, ARM64 and AES.
+    // What this reader does not yet decode: ARM64 and AES.
     assert_eq!(
         skipped,
-        [
-            "ppmd.7z",
-            "bcj2.7z",
-            "arm64.7z",
-            "encrypted.7z",
-            "encrypted-headers.7z"
-        ],
+        ["arm64.7z", "encrypted.7z", "encrypted-headers.7z"],
         "read: {read_ok:?}"
     );
 }

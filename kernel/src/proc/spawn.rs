@@ -22823,9 +22823,12 @@ pub fn self_test_native_device_door() -> KernelResult<()> {
 pub fn self_test_linux_unix_sockets() -> KernelResult<()> {
     /// The program's success exit.
     const OK_EXIT: i32 = 0x5D;
-    /// The program never blocks for long -- every wait it makes has its
-    /// answer already queued -- so this only bounds a broken run.
-    const MAX_YIELDS: usize = 1024;
+    /// How long the program may take. It waits once on purpose: 50 ms for
+    /// `SO_RCVTIMEO` to run out (0xFC). A count of yields measured nothing
+    /// there -- a yield returns at once when nothing else is runnable, and
+    /// 1024 of them passed inside those 50 ms and failed the rung mid-wait
+    /// (rq43) -- so this is a time, which only a broken run reaches.
+    const DEADLINE_NS: u64 = 5_000_000_000;
     /// The path the program binds and then unlinks.
     const NODE: &str = "/tmp/slt.sock";
 
@@ -22861,7 +22864,8 @@ pub fn self_test_linux_unix_sockets() -> KernelResult<()> {
             return Err(e);
         }
     };
-    for _ in 0..MAX_YIELDS {
+    let started = crate::hrtimer::now_ns();
+    while crate::hrtimer::now_ns().saturating_sub(started) < DEADLINE_NS {
         crate::sched::yield_now();
         if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
             break;
@@ -22876,8 +22880,8 @@ pub fn self_test_linux_unix_sockets() -> KernelResult<()> {
 
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
-            "[spawn]   FAIL: Unix-domain sockets (ring 3) -- not a zombie after {} yields, got {:?}; {}",
-            MAX_YIELDS,
+            "[spawn]   FAIL: Unix-domain sockets (ring 3) -- not a zombie after {} s, got {:?}; {}",
+            DEADLINE_NS / 1_000_000_000,
             state,
             unfinished
         );

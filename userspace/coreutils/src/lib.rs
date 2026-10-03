@@ -482,15 +482,19 @@
 //! - [`parse_datetime`] — gnulib's `parse-datetime`, the date language of
 //!   `date -d`, `touch -d` and `find -newermt`: upstream's Bison tables and
 //!   actions, not a reimplementation of the forms they accept.
+//! - [`pgrep`] — procps-ng's `pgrep`, `pkill` and `pidwait`, which upstream
+//!   builds from one source and which decide what they are by the name they
+//!   are started under; `bin/pgrep.rs` and `bin/pkill.rs` both run it.
 //! - [`posixtm`] — gnulib's `posixtm`, the `[[CC]YY]MMDDhhmm[.ss]` stamps
 //!   of `touch -t` and the obsolete `touch MMDDhhmm[YY]` operand.
 //! - [`posixver`] — gnulib's `posix2_version`, the POSIX edition
 //!   `_POSIX2_VERSION` names, for `sort`, `tail`, `touch` and `uniq`.
 //! - [`procps`] — procps-ng's library: the status line `uptime` and `w` both
 //!   print (`procps_uptime_sprint`), the `/proc` numbers under it,
-//!   `readproc.c`'s reading of each process -- the table `w` searches and
-//!   `ps` lists -- with the terminal namer, the name cache and `escape.c`'s
-//!   escaping of what they show.
+//!   `readproc.c`'s reading of each process -- the table `w` searches,
+//!   `ps` lists and `pgrep` matches -- with the terminal namer, the name
+//!   cache, the namespaces, procps' signal names and `escape.c`'s escaping
+//!   of what they show.
 //! - [`randint`] — gnulib's `randread` and `randint`, for `shred`.
 //! - [`remove`] — what `rm` and `mv` must agree on about deleting a tree.
 //! - [`setfields`] — the `cut`-style LIST of fields, for `cut` and `numfmt
@@ -542,6 +546,7 @@ pub mod mkdirp;
 pub mod overwrite;
 pub mod parse_datetime;
 pub mod pathname;
+pub mod pgrep;
 pub mod posixtm;
 pub mod posixver;
 pub mod procps;

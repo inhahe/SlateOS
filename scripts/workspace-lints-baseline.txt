@@ -113,7 +113,6 @@ userspace/nsenter  # bare deny(clippy::all)
 userspace/nslookup
 userspace/oils  # bare deny(clippy::all)
 userspace/passwd
-userspace/pgrep
 userspace/ping
 userspace/pkg
 userspace/pstree  # bare deny(clippy::all)

@@ -2801,15 +2801,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pgrep"
-version = "0.1.0"
-dependencies = [
- "killconv",
- "procinfo",
- "quoting",
-]
-
-[[package]]
 name = "phc"
 version = "0.6.1"
 dependencies = [

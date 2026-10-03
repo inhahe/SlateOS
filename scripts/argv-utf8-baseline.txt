@@ -96,7 +96,6 @@ userspace/nsenter/src/main.rs:argv-as-string
 userspace/nslookup/src/main.rs:argv-as-string
 userspace/ntpd/src/main.rs:argv-as-string
 userspace/objdump/src/main.rs:argv-as-string
-userspace/pgrep/src/main.rs:argv-as-string
 userspace/ping/src/main.rs:argv-as-string
 userspace/pkg/src/main.rs:argv-as-string
 userspace/polkit/src/main.rs:argv-as-string

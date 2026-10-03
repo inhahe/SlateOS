@@ -543,45 +543,8 @@ pub struct ItemCtx {
     pub root: std::path::PathBuf,
 }
 
-/// gcc's x86-64 `double` to `long`: `cvttsd2si`, whose answer outside the
-/// range (and for NaN) is `LONG_MIN`.
-#[must_use]
-pub fn cvt_i64(x: f64) -> i64 {
-    // Truncation toward zero, in range by the test above it.
-    #[allow(clippy::cast_possible_truncation)]
-    if x.is_nan() || x >= 9_223_372_036_854_775_808.0 || x < -9_223_372_036_854_775_808.0 {
-        i64::MIN
-    } else {
-        x as i64
-    }
-}
-
-/// gcc's x86-64 `double` to `unsigned long`: `cvttsd2si` below 2^63, and
-/// above it the same on `x - 2^63` with the top bit put back.
-#[must_use]
-pub fn cvt_u64(x: f64) -> u64 {
-    const TWO63: f64 = 9_223_372_036_854_775_808.0;
-    let bits = |v: i64| u64::from_le_bytes(v.to_le_bytes());
-    if x < TWO63 {
-        bits(cvt_i64(x))
-    } else {
-        bits(cvt_i64(x - TWO63)) ^ 0x8000_0000_0000_0000
-    }
-}
-
-/// `double` to `unsigned int`: the low 32 bits of the 64-bit conversion.
-#[must_use]
-pub fn cvt_u32(x: f64) -> u32 {
-    let b = cvt_i64(x).to_le_bytes();
-    u32::from_le_bytes([b[0], b[1], b[2], b[3]])
-}
-
-/// `u64` as C converts it to `double`: to nearest.
-#[must_use]
-#[allow(clippy::cast_precision_loss)]
-pub fn dbl(v: u64) -> f64 {
-    v as f64
-}
+// C's `double` conversions, shared with `pgrep` in the library.
+pub use coreutils::procps::cvt::{cvt_u32, cvt_u64, dbl};
 
 /// `STR_set`: the field, or `[ duplicate SUPGIDS ]` (the item's name)
 /// where it is NULL.
@@ -1111,15 +1074,5 @@ mod tests {
         // INT_MIN - 1 wraps to INT_MAX: upstream sorts INT_MIN *after* 1.
         assert!(compare(Kind::SInt, &Val::SInt(i32::MIN), &Val::SInt(1), ASCEND) > 0);
         assert!(compare(Kind::SInt, &Val::SInt(-1), &Val::SInt(1), ASCEND) < 0);
-    }
-
-    #[test]
-    fn conversions_as_gcc_emits_them() {
-        assert_eq!(cvt_u64(1.9), 1);
-        assert_eq!(cvt_u64(-1.5), u64::MAX);
-        assert_eq!(cvt_u64(1.0e19), 10_000_000_000_000_000_000);
-        assert_eq!(cvt_u64(f64::NAN), 0);
-        assert_eq!(cvt_u32(4_294_967_297.0), 1);
-        assert_eq!(cvt_i64(f64::NAN), i64::MIN);
     }
 }

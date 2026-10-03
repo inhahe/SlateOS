@@ -3674,6 +3674,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]
@@ -3765,6 +3766,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]

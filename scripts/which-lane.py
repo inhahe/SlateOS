@@ -224,6 +224,7 @@ OWNERSHIP: tuple[tuple[str, str], ...] = (
     # lane E does the crates, lane A the kernel shim).  Root leaf crates, like
     # `deflate`, whose first users are the archive manager and the kernel.
     ("bzip2/", "E"),
+    ("xz/", "E"),
     # --- F: graphics stack ------------------------------------------------
     ("gui/compositor/", "F"),
     ("gui/window/", "F"),
@@ -622,6 +623,7 @@ def _self_test() -> int:
         ("apps/chess/src/main.rs", "E"),
         ("randrange/src/lib.rs", "E"),
         ("bzip2/src/lib.rs", "E"),
+        ("xz/src/lib.rs", "E"),
         ("gui/compositor/src/lib.rs", "F"),
         ("gui/compositor", "F"),
         ("gui/window/src/lib.rs", "F"),

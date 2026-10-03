@@ -213,6 +213,12 @@ members = [
     # first of several concatenated streams. Its compressor writes libbzip2's
     # exact bytes, which its fixtures check. no_std + alloc, no dependencies.
     "bzip2",
+    # The .xz and .lzma formats and raw LZMA/LZMA2, ported from liblzma 5.2.5
+    # out of kernel/src/fs/xz.rs's place for the same request as `bzip2`: the
+    # kernel's copy read no filters, no SHA-256 and no .lzma. Its decoder
+    # accepts what `xz -d` accepts, held to liblzma's own test files and its
+    # verdicts. no_std + alloc.
+    "xz",
     # ZIP (APPNOTE 6.3.x) with Zip64, promoted out of `kernel/src/fs/zip.rs`
     # at lane C's request (`requests/c-a-zip-is-trapped-in-the-kernel-binary.md`)
     # -- the third time this same pattern has come up.

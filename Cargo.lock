@@ -4619,6 +4619,14 @@ name = "xxhash64"
 version = "0.1.0"
 
 [[package]]
+name = "xz"
+version = "0.1.0"
+dependencies = [
+ "crc32",
+ "sha2",
+]
+
+[[package]]
 name = "yacc"
 version = "0.1.0"
 dependencies = [

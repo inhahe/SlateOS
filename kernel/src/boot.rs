@@ -300,6 +300,14 @@ pub fn memory_map() -> &'static [&'static MemmapEntry] {
     }
 }
 
+/// The RSDP address the bootloader reported, physical under base revision 3, or
+/// `None` if it answered no RSDP request. `kexec` passes it through to the new
+/// kernel so it finds ACPI without re-scanning.
+#[must_use]
+pub fn rsdp_address() -> Option<u64> {
+    RSDP_REQUEST.response().map(|r| r.address)
+}
+
 /// Get the kernel file's virtual address and size.
 ///
 /// Returns `Some((address, size))` where `address` is a pointer to

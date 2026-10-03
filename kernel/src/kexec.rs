@@ -1928,7 +1928,7 @@ impl PreparedHandoff {
     // The arithmetic is over small offsets within one freshly-allocated region
     // and the casts are usize<->u64 on a 64-bit target; both are checked by the
     // layout and the final `region_size >= needed` guard.
-    #[allow(dead_code, clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
     pub unsafe fn execute(self) -> KernelError {
         let Some(hhdm) = crate::mm::page_table::hhdm() else {
             // SAFETY: nothing has been quiesced; free the prepared handoff.
@@ -2063,6 +2063,42 @@ impl PreparedHandoff {
             );
         }
     }
+}
+
+/// Reload the running kernel into itself: the boot-test kexec mode's trigger.
+///
+/// Gathers the running kernel's own ELF (the file Limine loaded) and boot facts,
+/// prepares a handoff, and executes it. On success it does not return (the second
+/// kernel boots); on any pre-jump failure it returns the [`KernelError`]. The
+/// second kernel has no command line (the handoff does not build a kernel-file
+/// response), so it does not re-trigger -- the self-reload happens exactly once.
+///
+/// Called only from the boot path under the `kexec.selftest=1` command line, to
+/// validate the trampoline (the one part no self-test can exercise). Not reached
+/// on an ordinary boot.
+///
+/// # Safety
+///
+/// Only the bootstrap CPU may call this, and the caller is committing to the
+/// restart: on success the old kernel ceases to exist.
+pub unsafe fn reload_self() -> KernelError {
+    let Some((addr, size)) = crate::boot::kernel_file_address() else {
+        return KernelError::NotSupported;
+    };
+    // SAFETY: Limine keeps the kernel file mapped, live for the kernel's lifetime.
+    let image = unsafe { core::slice::from_raw_parts(addr as *const u8, size) };
+    let Some(hhdm) = crate::mm::page_table::hhdm() else {
+        return KernelError::NotSupported;
+    };
+    let memory_map = crate::boot::memory_map();
+    let max_phys = top_of_managed_ram(memory_map);
+    let rsdp = crate::boot::rsdp_address();
+    let prepared = match prepare_handoff(image, memory_map, hhdm, max_phys, rsdp) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    // SAFETY: the bootstrap CPU is committing to the restart (caller's contract).
+    unsafe { prepared.execute() }
 }
 
 // ---------------------------------------------------------------------------

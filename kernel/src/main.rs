@@ -8856,6 +8856,26 @@ extern "C" fn kernel_main() -> ! {
                 );
             }
 
+            // Boot-test kexec mode: if asked, reload the running kernel into
+            // itself here, after every self-test, to validate the kexec
+            // trampoline — the one path no self-test can exercise, because it
+            // ends the running kernel (design-decisions §1536; todo.txt kexec 5c).
+            // The second kernel has no command line (the handoff builds no
+            // kernel-file response), so it does not re-trigger: it boots on to
+            // BOOT_OK, which the harness sees AFTER this marker to confirm the
+            // jump worked. A pre-jump failure falls through to BOOT_OK with the
+            // error on serial rather than hanging. Absent the flag — every
+            // ordinary boot — this does nothing.
+            if boot::kernel_cmdline()
+                .is_some_and(|c| c.split_ascii_whitespace().any(|w| w == "kexec.selftest=1"))
+            {
+                serial_println!("=== KEXEC-SELFTEST: reloading the kernel into itself now ===");
+                // SAFETY: the bootstrap CPU, at the end of boot, committing to the
+                // restart; on success this never returns.
+                let e = unsafe { kexec::reload_self() };
+                serial_println!("=== KEXEC-SELFTEST: reload did not happen: {:?} ===", e);
+            }
+
             // Boot success marker — the boot test script greps for this.
             // Printed synchronously so it appears within seconds of power-on,
             // regardless of how long deferred benchmarks take.

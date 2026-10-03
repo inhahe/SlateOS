@@ -84,8 +84,8 @@ MUTATIONS = [
     ),
     (
         "only the Y key means yes",
-        "                .map_or(key.key == Key::Y, |c| c.eq_ignore_ascii_case(&'y'));",
-        "                .map_or(key.key == Key::Y, |_| key.key == Key::Y);",
+        "                key.single_char().map_or(key.key == Key::Y, typed_y)",
+        "                key.single_char().map_or(key.key == Key::Y, |_| key.key == Key::Y)",
         ["deleting_asks_first_and_only_y_deletes"],
     ),
     (
@@ -198,8 +198,8 @@ MUTATIONS = [
     ),
     (
         "the list of keys lets keys through",
-        "        if self.show_help {\n            if matches!(key.key, Key::Escape | Key::Enter) {",
-        "        if false {\n            if matches!(key.key, Key::Escape | Key::Enter) {",
+        "        if self.show_help {\n            if plain && matches!(key.key, Key::Escape | Key::Enter) {",
+        "        if false {\n            if plain && matches!(key.key, Key::Escape | Key::Enter) {",
         ["the_list_of_keys_is_modal"],
     ),
     # -- what is kept ----------------------------------------------------------------------------------------------------
@@ -265,6 +265,36 @@ MUTATIONS = [
         "                y: notice_y + i as f32 * 15.0,",
         "                y: 1.0 + i as f32 * 11.0,",
         ["the_notice_is_drawn_below_the_header"],
+    ),
+    (
+        "a chord works an editor's own keys",
+        '        let plain = textline::is_plain(key.modifiers);\n        match key.key {\n            Key::Tab if plain => {',
+        '        let plain = true;\n        match key.key {\n            Key::Tab if plain => {',
+        ['a_chord_is_neither_a_flashcards_key_nor_typing'],
+    ),
+    (
+        'a chord raises the keys',
+        '        if key.key == Key::F1 && plain {',
+        '        if key.key == Key::F1 {',
+        ['a_chord_is_neither_a_flashcards_key_nor_typing'],
+    ),
+    (
+        'a chorded Y answers the delete question',
+        '                textline::types_into_field(key) && key.single_char().is_some_and(typed_y)',
+        '                key.single_char().is_some_and(typed_y)',
+        ['a_chord_is_neither_a_flashcards_key_nor_typing'],
+    ),
+    (
+        'AltGr is taken for Ctrl',
+        '        if textline::is_ctrl_chord(key.modifiers) {\n            return match key.key {\n                Key::S => {',
+        '        if key.modifiers.ctrl {\n            return match key.key {\n                Key::S => {',
+        ['a_chord_is_neither_a_flashcards_key_nor_typing'],
+    ),
+    (
+        "Alt's and the Windows key's chords work the shortcuts",
+        '        if !plain && !textline::types_into_field(key) {',
+        '        if false {',
+        ['a_chord_is_neither_a_flashcards_key_nor_typing'],
     ),
 ]
 

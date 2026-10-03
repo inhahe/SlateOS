@@ -122,8 +122,8 @@ MUTATIONS = [
     ),
     (
         "Right moves nothing",
-        "                    let step = if shift { 1.0 } else { 0.1 };",
-        "                    let step = if shift { 1.0 } else { 0.0 };",
+        "                let step = if shift { 1.0 } else { 0.1 };",
+        "                let step = if shift { 1.0 } else { 0.0 };",
         ["the_cursor_moves_by_the_keys"],
     ),
     (
@@ -243,6 +243,48 @@ MUTATIONS = [
         "        self.is_open = self.level > 0;",
         "        self.is_open = self.level == 0;",
         ["test_noise_gate_loud_passes"],
+    ),
+    (
+        'a chord raises the list of keys',
+        '        if plain && (key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift)) {',
+        '        if key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift) {',
+        ['a_chord_is_not_a_recorder_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'a chorded Escape puts the list of keys away',
+        '            if plain && matches!(key.key, Key::Escape | Key::Enter) {',
+        '            if matches!(key.key, Key::Escape | Key::Enter) {',
+        ['a_chord_is_not_a_recorder_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'AltGr is taken for Ctrl in the recorder',
+        '        if textline::is_ctrl_chord(key.modifiers) {\n            return self.handle_ctrl_chord(key);',
+        '        if key.modifiers.ctrl {\n            return self.handle_ctrl_chord(key);',
+        ['a_chord_is_not_a_recorder_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        "a chord works the recorder's keys",
+        '        if !plain {\n            return EventResult::Ignored;\n        }\n',
+        '',
+        ['a_chord_is_not_a_recorder_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'a chorded Enter names the marker',
+        '            Key::Enter if plain => self.commit_rename(),',
+        '            Key::Enter => self.commit_rename(),',
+        ['a_chord_is_not_a_recorder_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'a chorded Escape abandons the name',
+        '            Key::Escape if plain => self.rename = None,',
+        '            Key::Escape => self.rename = None,',
+        ['a_chord_is_not_a_recorder_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'Ctrl+Left nudges the cursor instead of going to the marker',
+        '            Key::Left | Key::Right => {\n                let forward = key.key == Key::Right;\n                self.with_open(|o| {\n                    o.to_marker(forward);\n                });',
+        '            Key::Left | Key::Right => {\n                let forward = key.key == Key::Right;\n                self.with_open(|o| o.nudge(if forward { 0.1 } else { -0.1 }));',
+        ['a_chord_is_not_a_recorder_key_and_altgr_is_not_ctrl'],
     ),
 ]
 

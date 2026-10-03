@@ -2621,26 +2621,32 @@ impl SoundRecorderApp {
         if self.rename.is_some() {
             return self.rename_key(key);
         }
-        if key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift) {
+        // Every key but Ctrl's chords is taken plain, nothing held but Shift:
+        // a chord with Alt or the Windows key is the window's or the
+        // desktop's and arrives carrying its key -- Alt+Space started a take
+        // and Alt+Delete removed a marker.
+        let plain = textline::is_plain(key.modifiers);
+        if plain && (key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift)) {
             self.show_help = !self.show_help;
             return EventResult::Consumed;
         }
         if self.show_help {
             // Modal: Space would start a take from behind the card.
-            if matches!(key.key, Key::Escape | Key::Enter) {
+            if plain && matches!(key.key, Key::Escape | Key::Enter) {
                 self.show_help = false;
             }
             return EventResult::Consumed;
         }
-        let ctrl = key.modifiers.ctrl;
+        // A Ctrl chord, not Ctrl held: AltGr arrives as Ctrl+Alt, and AltGr+S
+        // -- a Polish `ś` -- saved the markers.
+        if textline::is_ctrl_chord(key.modifiers) {
+            return self.handle_ctrl_chord(key);
+        }
+        if !plain {
+            return EventResult::Ignored;
+        }
         let shift = key.modifiers.shift;
         match key.key {
-            Key::O if ctrl => self.open_picker(PickerFor::Open),
-            Key::S if ctrl && shift => self.open_picker(PickerFor::SaveKept),
-            Key::S if ctrl => {
-                self.save_markers();
-            }
-            Key::A if ctrl => self.with_open(OpenRecording::keep_all),
             Key::F5 => {
                 self.rescan();
                 self.status_line = String::from("Looked in the folder again");
@@ -2677,14 +2683,8 @@ impl SoundRecorderApp {
             }
             Key::Left | Key::Right => {
                 let forward = key.key == Key::Right;
-                if ctrl {
-                    self.with_open(|o| {
-                        o.to_marker(forward);
-                    });
-                } else {
-                    let step = if shift { 1.0 } else { 0.1 };
-                    self.with_open(|o| o.nudge(if forward { step } else { -step }));
-                }
+                let step = if shift { 1.0 } else { 0.1 };
+                self.with_open(|o| o.nudge(if forward { step } else { -step }));
             }
             Key::Home => self.with_open(|o| o.cursor = 0),
             Key::End => self.with_open(|o| o.cursor = o.info.frames),
@@ -2704,10 +2704,31 @@ impl SoundRecorderApp {
             Key::Space => {
                 self.record_key();
             }
-            Key::S if !ctrl && self.state != RecordingState::Idle => {
+            Key::S if self.state != RecordingState::Idle => {
                 self.stop_take();
             }
             Key::P => self.play(),
+            _ => return EventResult::Ignored,
+        }
+        EventResult::Consumed
+    }
+
+    /// Ctrl's chords: open, save the markers or the kept part, keep it all,
+    /// and step from marker to marker.
+    fn handle_ctrl_chord(&mut self, key: &KeyEvent) -> EventResult {
+        match key.key {
+            Key::O => self.open_picker(PickerFor::Open),
+            Key::S if key.modifiers.shift => self.open_picker(PickerFor::SaveKept),
+            Key::S => {
+                self.save_markers();
+            }
+            Key::A => self.with_open(OpenRecording::keep_all),
+            Key::Left | Key::Right => {
+                let forward = key.key == Key::Right;
+                self.with_open(|o| {
+                    o.to_marker(forward);
+                });
+            }
             _ => return EventResult::Ignored,
         }
         EventResult::Consumed
@@ -2743,10 +2764,14 @@ impl SoundRecorderApp {
 
     /// A key while a marker's name is being written: Enter keeps it, Escape
     /// leaves the old one.
+    ///
+    /// Both plain: Alt+Escape threw the name away. A chord goes on to the
+    /// field, which knows a command from typing.
     fn rename_key(&mut self, key: &KeyEvent) -> EventResult {
+        let plain = textline::is_plain(key.modifiers);
         match key.key {
-            Key::Enter => self.commit_rename(),
-            Key::Escape => self.rename = None,
+            Key::Enter if plain => self.commit_rename(),
+            Key::Escape if plain => self.rename = None,
             _ => {
                 if let Some(input) = self.rename.as_mut()
                     && let Some(copied) =
@@ -4973,6 +4998,109 @@ mod tests {
         app.rescan();
         assert!(app.open_path(&a));
         (dir, app)
+    }
+
+    /// **A key held with Alt or the Windows key is not the recorder's, and
+    /// AltGr+S is not Ctrl+S**: each such chord is the window's or the
+    /// desktop's and arrives carrying its key -- Alt+Space started a take,
+    /// Alt+Delete took a marker away, Alt+M put one down and Alt+[ cut the
+    /// recording; and AltGr+S, a Polish `ś`, saved the markers into the file.
+    ///
+    /// Each key is asserted as it is pressed: the cursor and the panel go
+    /// back and forth.
+    #[test]
+    fn a_chord_is_not_a_recorder_key_and_altgr_is_not_ctrl() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let chord = |k: Key, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: String::new(),
+            })
+        };
+        let (_dir, mut app) = fixture("chords");
+        app.panel = Panel::Recording;
+        // The marker chosen, the cursor past it, and something to save.
+        if let Some(open) = app.open.as_mut() {
+            open.choose_marker(0);
+            open.cursor = 4_000;
+            open.markers_changed = true;
+        }
+        let state = |app: &SoundRecorderApp| {
+            (
+                app.open.as_ref().map(|o| {
+                    (
+                        o.cursor,
+                        o.markers.len(),
+                        o.markers_changed,
+                        o.kept.clone(),
+                        o.chosen_marker,
+                    )
+                }),
+                (app.panel, app.state, app.show_help, app.rename.is_some()),
+                (app.chosen_entry.clone(), app.picker.is_open()),
+                app.status_line.clone(),
+            )
+        };
+        let before = state(&app);
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for k in [
+                Key::Space,
+                Key::Delete,
+                Key::M,
+                Key::LeftBracket,
+                Key::RightBracket,
+                Key::Left,
+                Key::Home,
+                Key::Up,
+                Key::Tab,
+                Key::F2,
+                Key::F5,
+                Key::P,
+                Key::S,
+                Key::O,
+                Key::A,
+                Key::F1,
+            ] {
+                assert_eq!(
+                    app.handle_event(&chord(k, m)),
+                    EventResult::Ignored,
+                    "{m:?} {k:?} was taken"
+                );
+                assert_eq!(state(&app), before, "{m:?} {k:?} changed the recorder");
+            }
+        }
+
+        // The list of keys goes on a plain Escape or Enter only.
+        app.handle_event(&key(Key::F1));
+        assert!(app.show_help, "control: F1 raises the list");
+        app.handle_event(&chord(Key::Escape, Modifiers::alt()));
+        app.handle_event(&chord(Key::Enter, Modifiers::super_key()));
+        assert!(app.show_help, "a chorded Escape or Enter put the list away");
+        app.handle_event(&key(Key::Escape));
+
+        // A marker's name: Enter and Escape plain.
+        app.handle_event(&key(Key::F2));
+        assert!(app.rename.is_some(), "control: F2 names the marker");
+        app.handle_event(&chord(Key::Escape, Modifiers::alt()));
+        app.handle_event(&chord(Key::Enter, Modifiers::super_key()));
+        assert!(app.rename.is_some(), "a chorded Escape or Enter ended it");
+        app.handle_event(&key(Key::Escape));
+        assert!(app.rename.is_none(), "control: Escape ends it");
+
+        // Ctrl's chords still answer, Ctrl+Right among them.
+        let at = app.open.as_ref().map(|o| o.cursor);
+        app.handle_event(&chord(Key::Left, Modifiers::ctrl()));
+        assert_ne!(
+            app.open.as_ref().map(|o| o.cursor),
+            at,
+            "control: Ctrl+Left goes to the marker"
+        );
     }
 
     /// The take model's clock and the free space it cannot measure.

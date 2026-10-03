@@ -59200,3 +59200,64 @@ is already waiting, not whether the setter exists.
   `requests/c-a-the-kernels-app-registry-and-the-first-screen-hint.md` item 3.
   **Then:** nothing to change here -- boot the repair entry with an account
   marked to sign in by itself and confirm the login screen shows.
+
+## Lane A — kexec / power.reload: the load-and-jump mechanism (2026-10-03)
+
+Fulfils `requests/c-ab-a-restart-that-keeps-the-computer-on.md` (lane C's
+"Restart OS -- keep the computer on"; lane B's `powerctl reload` waits on it)
+and is the load-and-jump half of design-decisions §1536 / roadmap §1126. The
+mechanism recreates Limine's handoff so the new kernel boots through its one
+ordinary boot path. All of it lives in `kernel/src/kexec.rs`.
+
+**Done and boot-pending (stages 1-4, each committed, clippy-green, self-tested):**
+- Stage 1 `parse_kernel_elf` + `plan_destination`: bounds-checked PT_LOAD parse;
+  first-fit contiguous destination from USABLE memory avoiding excluded ranges.
+- Stage 2 `find_request_sites`: locate the base-revision tag and the six
+  requests in a loaded image, marker-window-bounded.
+- Stage 3 `HandoffArena` + `build_{hhdm,rsdp,executable_address,memmap}_response`:
+  write the Limine responses with correct HHDM cross-references.
+- Stage 4 `build_handoff_tables` + `translate`: fresh PML4, HHDM direct map
+  (1 GiB/2 MiB huge pages at the running kernel's offset), image at linked
+  addresses (4 KiB, per-segment perms) pointing at the destination; frame
+  tracking + free-on-error.
+
+**Remaining (stage 5), in dependency order:**
+1. **Stage the image** (`stage_image`): allocate source frames (not necessarily
+   contiguous), copy each segment's `filesz` bytes and zero to `memsz`, and
+   build the page list `[(src_phys, dst_phys, len)]` where
+   `dst = dest_base + (vaddr - min_vaddr)`. Testable at boot (allocate, copy,
+   verify bytes + list), independent of stage 4.
+2. **Adjust the memory map** (`adjust_memory_map`): from the firmware map
+   (`parse_boot_info`, still valid -- bootloader-reclaimable is never reclaimed),
+   mark the destination run EXECUTABLE_AND_MODULES, the handoff frames (staging,
+   tables, responses, control page) BOOTLOADER_RECLAIMABLE, and the old kernel's
+   own EXECUTABLE_AND_MODULES + old bootloader-reclaimable USABLE. Pure/testable;
+   fiddly range-overlay over the sorted map.
+3. **Patch the requests**: write each response's HHDM pointer into the request's
+   `response` field (`+REQUEST_RESPONSE_OFFSET`) in the staged image, and set the
+   base-revision tag's revision word (`+BASE_REVISION_WORD_OFFSET`) to 0.
+4. **Quiesce** (integration-only, cannot self-test -- would break the running
+   kernel): interrupts off; mask every IOAPIC redirection entry; stop the LAPIC
+   timer (`apic::stop_timer`); clear PCI Bus Master Enable on every function
+   (`pci::scan_bus0` + clear bit 2 of the command word); IOMMU translation off
+   (SlateOS does not enable it today, so likely a no-op -- confirm); send INIT to
+   every other CPU (`apic::send_init_ipi` for each `smp::cpu_apic_id`).
+5. **Trampoline + jump** (integration-only): a position-independent blob copied
+   into a control page (a frame outside dest/sources/tables/page-list), run via
+   its HHDM address (valid in both tables). It copies the page list
+   (src -> dst), loads a minimal GDT + empty IDT, sets CR0=0x8001_0011,
+   CR4 PAE[+LA57], EFER LME+NXE, IA32_PAT=0x0000_0105_0007_0406, zeroes GPRs,
+   sets a 16-byte-aligned stack with a 0 return address, DF+IF clear, loads CR3
+   = `HandoffTables.pml4_phys`, and jumps to `parsed.entry`. (Exact Limine
+   parity: see §1536 and the web-fetched Limine 8.7 handoff in this session.)
+6. **Syscall + capability**: `SYS_POWER_RELOAD` taking `(image_ptr, image_len)`
+   in the caller's address space (caller chooses the image, per the request),
+   gated by a new `power.reload` capability -- NOT implied by `power.reboot`.
+   Dispatch self-test like other syscalls. Lane B's `powerctl reload` calls it.
+
+**Validation gap:** stages 4's page-table build and all of stage 5's quiesce/jump
+can only be exercised by an actual kexec. A boot-test "kexec mode" is needed:
+boot, invoke power.reload into a freshly-staged copy of the same kernel, and
+confirm the second kernel reaches BOOT_OK (a serial marker that says "started by
+kexec"). Until that harness exists, stage 5's quiesce/jump are unverified -- do
+not wire `powerctl reload` to it on `main` until the kexec-mode boot passes.

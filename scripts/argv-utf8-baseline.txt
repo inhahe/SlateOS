@@ -115,7 +115,6 @@ userspace/ss/src/main.rs:argv-as-string
 userspace/ssh-keygen/src/lib.rs:argv-as-string
 userspace/ssh/src/lib.rs:argv-as-string
 userspace/strace/src/main.rs:argv-as-string
-userspace/stty/src/main.rs:argv-as-string
 userspace/sysctl/src/main.rs:argv-as-string
 userspace/sysinfo/src/main.rs:argv-as-string
 userspace/syslogd/src/main.rs:argv-as-string

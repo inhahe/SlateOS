@@ -4903,14 +4903,16 @@ _Port ext4 first. Don't write a custom filesystem._
   whose `argv[0]` branch agreed on none of `scripts/w-diff.sh`'s 144 cases to the port's 144: real
   sessions on fixture ptys, `procps_uptime_sprint` shared with `uptime` as `coreutils::procps`, and the
   process table read through `readproc`'s rules, which on SlateOS still wants the kernel to name each
-  process's terminal, `requests/b-ad-proc-stat-reports-no-controlling-terminal.md`);
+  process's terminal, `requests/b-ad-proc-stat-reports-no-controlling-terminal.md`); `stty`
+  (2026-10-02, replacing `userspace/stty`, written from the manual, which agreed with GNU on 110
+  of `scripts/stty-diff.sh`'s 312 cases to the port's 312: its tables as glibc's Linux headers
+  resolve them, the terminal through the new `libcall::termios` -- so the speeds are the C
+  library's, shared field and all -- and upstream's two passes over argv, `getopt` in
+  return-in-order mode restarted after every setting, quirks included);
   and `nproc`,
   re-ported because the standalone crate that had it was not GNU's and is retired. The multi-personality crates that answered some of these
   names in part lost those branches (§1005: `getopt` printenv/sync/cksum, `pv` truncate and shred, `nproc` arch/pathchk/users, `shuf` numfmt and factor, `base64` base32, `finger` pinky).
-  **Next:** one 9.4 program exists here only as a standalone crate that was not ported from it,
-  and it is not on the image: `stty`. It comes into coreutils from the 9.4 source with a harness,
-  as `install`, `timeout`, `chroot` and `who` did, and its crate is retired. Beyond that,
-  **nothing of GNU 9.4 is missing** that has something here to act on. Not ported, for want of what they act on: `chcon`/`runcon` (SELinux contexts) and `stdbuf` (works by
+  With `stty`, **nothing of GNU 9.4 is missing** that has something here to act on. Not ported, for want of what they act on: `chcon`/`runcon` (SELinux contexts) and `stdbuf` (works by
   `LD_PRELOAD` into a dynamically linked program). `[` is `test` under another name and needs only the image alias. None
   ships until lane D lists it: `requests/b-d-new-coreutils-programs-for-the-rootfs-manifest.md`.
 - [-] `[B]` System administration utilities — Rust userspace binaries: -- 150 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `locale`, `mesg`, `dbus`, `perf`, `capsh`, `resolvectl`, `socat`, `parted`, `getfattr`, `auditctl`, `grub-install`, `upower`, `mkinitramfs`, `plymouth`, `udisksctl`, `numactl`, `btrfs`, `flatpak`, `firejail`, `apparmor`, `selinux`, `snapper`, `tuned`, `cpupower`, `thermald`, `fwupdmgr`, `podman`, `resolvectl`, `mcelog`, `rasdaemon`, `kexec`, `nvme`, `tpm2`, `avahi-daemon`, `cups`, `powertop`, `tlp`, `fscrypt`, `pipewire`, `xz`, `zstd`, `bzip2`, `lz4`, `age`, `openssl`, `certbot`, `gpg`, `borg`, `restic`, `rclone`, `git`, `sqlite3`, `cmake`, `meson`, `ninja`, `python3`, `node`, `docker`, `ffmpeg`, `valgrind`, `pkgconf`, `sensors`, `tmux`, `ruby`, `java`, `go`, `rustup`, `terraform`, `ansible`, `kubectl`, `gradle`, `maven`, `helm`, `prometheus`, `memcached`, `elasticsearch`, `consul`, `vault`, `etcd`, `minio`, `nginx`, `haproxy`, `traefik`, `caddy`, `envoy`, `openvpn`, `pgbouncer`, `neo4j`, `cassandra`, `iperf3`, `squid`, `postfix`, `dovecot`, `unbound`, `gitea`, `keycloak`, `mattermost`, `nextcloud`, `jellyfin`, `syncthing`, `borgmatic`, `pandoc`, `tesseract`, `exiftool`, `doxygen`, `ccache`, `distcc`, `sccache`, `mold`, `loki`, `tempo`, `jaeger`, `vegeta`, `k6`, `wrk`, `ab`, `cfssl`, `hashcat`, `john`, `lynis`, `trivy`, `cosign`, `buildah`, `cni-plugins`, `flux`, `argocd`, `pulumi`, `packer`, `mpv`, `sox`, `cmus`, `ncmpcpp`, `remmina`, `xrdp`, `borg`, `duplicity`, `timeshift`, `snapper2`, `lua`, `perl`, `php`, `julia`, `deno`, `bun`, `zig`, `micro`, `lazygit`, `lazydocker`, `bat`, `eza`.
@@ -5003,7 +5005,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] zip/unzip: ZIP archive create/extract (DEFLATE, CRC32, argv[0] mode, recursive, levels 0-9)
   - [x] readelf: ELF binary inspector (header/sections/segments/symbols/relocs/dynamic/notes, ELF32+ELF64)
   - [x] ldd: shared library dependency lister (DT_NEEDED, recursive resolution, RPATH/RUNPATH/LD_LIBRARY_PATH)
-  - [x] stty: terminal settings (termios ioctls, all flag categories, baud rates, raw/cooked/sane, control chars)
+  - [x] stty: GNU coreutils 9.4's, a coreutils program since 2026-10-02 (see the coreutils item; `scripts/stty-diff.sh`, 312 cases)
   - [x] nmap: network port scanner (TCP connect, ping scan, service version, OS detect, CIDR, timing T0-T5)
   - [x] sftp: SFTP file transfer client (protocol v3, interactive+batch, get/put/mget/mput, glob, progress)
   - [x] jq: JSON processor (full parser, filter engine with dot/pipe/index/select/map/sort_by/group_by, arithmetic/comparison/boolean ops, if-then-else, @base64/@html/@uri/@csv/@tsv, object/array construction, recursive descent)

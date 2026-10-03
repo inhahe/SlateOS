@@ -701,9 +701,10 @@ impl Program {
     /// it takes none. Copy it rather than deriving it: it must list options the
     /// utility does **not** implement, or their values are left behind as
     /// operands (see the module docs). A leading `+` is honoured and means
-    /// "stop at the first operand", as in `nice` and `env`; the other two
-    /// leading markers glibc understands, `-` and `:`, have no coreutils caller
-    /// and are not implemented — a table using one would see it read as an
+    /// "stop at the first operand", as in `nice` and `env`, and a leading `-`
+    /// is glibc's return-in-order, which every walk here already is and which
+    /// `pr` and `stty` name. The third marker glibc understands, `:`, has no
+    /// caller and is not implemented: a table using it would see it read as an
     /// option letter.
     ///
     /// `longs` is the same table [`resolve_long`](Self::resolve_long) takes,

@@ -408,6 +408,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/straddle-check.py` | Report which loops in a kernel binary straddle a 4 KiB guest page. |
 | `scripts/strftime-diff.sh` | strftime-diff.sh — both of GNU's time formatters, ours against theirs. |
 | `scripts/strings-diff.sh` | Differential test: our `strings` against GNU binutils `strings`. |
+| `scripts/stty-diff.sh` | Differential test: our `stty` against GNU coreutils 9.4's. |
 | `scripts/suite_pool.py` | Run a tooling suite's independent cases a few at a time, with one-at-a-time output. |
 | `scripts/sum-diff.sh` | sum-diff.sh — compare our `sum` against GNU's, inside WSL. |
 | `scripts/swapon-diff.sh` | Differential test: our `swapon` and `swapoff` against util-linux 2.39.3's. |
@@ -502,4 +503,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_492 scripts._
+_493 scripts._

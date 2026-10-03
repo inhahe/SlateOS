@@ -70,6 +70,7 @@ pub mod netdb;
 pub mod process;
 pub mod pty;
 pub mod signal;
+pub mod termios;
 pub mod utmp;
 
 // ---------------------------------------------------------------------------

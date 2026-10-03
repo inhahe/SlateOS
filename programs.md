@@ -250,7 +250,7 @@ two disagree.
 | `stat` | Display file or filesystem status. | yes | `coreutils` |  |
 | `strace` | Syscall Trace Utility |  |  |  |
 | `strings` | Print the printable character sequences in a file. | yes | `coreutils` |  |
-| `stty` | Terminal Settings Utility |  |  |  |
+| `stty` | Change and print terminal line settings. |  | `coreutils` |  |
 | `su` | User Switching Utility (`su`) |  |  |  |
 | `sudo` | Privileged Command Execution Utility |  |  | `sudoedit` *(not installed)* |
 | `sum` | Checksum and count the blocks in a file. |  | `coreutils` |  |

@@ -248,9 +248,9 @@ struct Winsize {
 // Terminal size goes through the posix libc `ioctl()` symbol, never a
 // hand-rolled `syscall`: the native Slate OS ABI has no SYS_IOCTL, and syscall
 // number 16 is SYS_CLOCK_ADJTIME — so a raw `ioctl` would step the system clock
-// with the Winsize pointer reinterpreted as a signed nanosecond delta.  See the
-// same note in `userspace/stty/src/main.rs`, and `htop`, which route the same
-// way.  `cfg(unix)` rather than `cfg(target_vendor = "slateos")` because
+// with the Winsize pointer reinterpreted as a signed nanosecond delta.
+// `libcall::pty::window_size`, which coreutils' `stty` uses, and `htop` route
+// the same way.  `cfg(unix)` rather than `cfg(target_vendor = "slateos")` because
 // TIOCGWINSZ means the same thing on a Linux development host, so the query is
 // correct there too.
 #[cfg(unix)]

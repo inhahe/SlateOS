@@ -35,6 +35,7 @@ pub mod icmpv6;
 pub mod igmp;
 pub mod ipv4;
 pub mod ipv6;
+pub mod mcast;
 pub mod mld;
 pub mod siphash;
 pub mod tcp;

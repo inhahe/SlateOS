@@ -729,19 +729,40 @@ fn finish_u8(acc: u16) -> u8 {
     ((acc >> 7) as i16 - (SUM_OFFSET >> 7) as i16).clamp(0, 255) as u8
 }
 
+/// A kernel's taps, each repeated across eight lanes: made once per block,
+/// so the rows do not each broadcast them again.
+type Taps = [[u16; 8]; SUBPEL_TAPS];
+
+fn splat(k: &[i16; 8]) -> Taps {
+    core::array::from_fn(|t| [k[t] as u16; 8])
+}
+
+/// Add `tap` times `src` into `acc`, lane by lane, eight lanes at a time
+/// (fewer, for a block four wide).
+#[inline(always)]
+fn mac_u8(acc: &mut [u16], src: &[u8], tap: &[u16; 8]) {
+    for (a8, s8) in acc.chunks_mut(8).zip(src.chunks(8)) {
+        for ((a, &p), &k) in a8.iter_mut().zip(s8).zip(tap) {
+            *a = a.wrapping_add(u16::from(p).wrapping_mul(k));
+        }
+    }
+}
+
 /// One row of the horizontal filter at one phase, `W` outputs: output `j`
 /// from `src[j..j + 8]`, so `src` starts three samples left of the first
 /// output. A short `src`, which the geometry never gives, reads as zeros.
+///
+/// Each tap is bounds-checked on its own. That is not caution: with a single
+/// check for all eight, the compiler sees each output as a dot product of
+/// eight contiguous samples with the eight taps and vectorises *that* -- a
+/// sum across lanes per output, several times the work -- where a check per
+/// tap leaves it one multiply-add per tap across the outputs.
 #[inline(always)]
-fn h_row_u8<const W: usize>(src: &[u8], k: &[i16; 8]) -> [u16; W] {
+fn h_row_u8<const W: usize>(src: &[u8], taps: &Taps) -> [u16; W] {
     let mut acc = [(SUM_OFFSET + ROUND) as u16; W];
-    let Some(src) = src.get(..W + SUBPEL_TAPS - 1) else {
-        return acc;
-    };
-    for (t, &tap) in k.iter().enumerate() {
-        let tap = tap as u16;
-        for (a, &p) in acc.iter_mut().zip(&src[t..t + W]) {
-            *a = a.wrapping_add(u16::from(p).wrapping_mul(tap));
+    for (t, tap) in taps.iter().enumerate() {
+        if let Some(s) = src.get(t..t + W) {
+            mac_u8(&mut acc, s, tap);
         }
     }
     acc
@@ -750,15 +771,11 @@ fn h_row_u8<const W: usize>(src: &[u8], k: &[i16; 8]) -> [u16; W] {
 /// One row of the vertical filter at one phase, `W` outputs, from the eight
 /// rows it reads. A short row reads as zeros.
 #[inline(always)]
-fn v_row_u8<const W: usize>(rows: &[&[u8]; SUBPEL_TAPS], k: &[i16; 8]) -> [u16; W] {
+fn v_row_u8<const W: usize>(rows: &[&[u8]; SUBPEL_TAPS], taps: &Taps) -> [u16; W] {
     let mut acc = [(SUM_OFFSET + ROUND) as u16; W];
-    for (row, &tap) in rows.iter().zip(k) {
-        let Some(row) = row.get(..W) else {
-            continue;
-        };
-        let tap = tap as u16;
-        for (a, &p) in acc.iter_mut().zip(row) {
-            *a = a.wrapping_add(u16::from(p).wrapping_mul(tap));
+    for (row, tap) in rows.iter().zip(taps) {
+        if let Some(s) = row.get(..W) {
+            mac_u8(&mut acc, s, tap);
         }
     }
     acc
@@ -766,6 +783,8 @@ fn v_row_u8<const W: usize>(rows: &[&[u8]; SUBPEL_TAPS], k: &[i16; 8]) -> [u16; 
 
 /// Write a row of filter results to `dst`, or average them into it
 /// (libvpx's `vpx_convolve_avg`: `ROUND_POWER_OF_TWO(dst + pred, 1)`).
+/// Written straight into `dst`, the clip vectorises to a shift, a saturating
+/// subtraction, a minimum and a pack.
 #[inline(always)]
 fn put_u8<const W: usize>(dst: &mut [u8], acc: &[u16; W], avg: bool) {
     let Some(dst) = dst.get_mut(..W) else {
@@ -797,8 +816,8 @@ fn convolve_u8<const W: usize>(
     h: usize,
     avg: bool,
 ) {
-    let kx = &f.kernel[(f.x0_q4 & SUBPEL_MASK) as usize];
-    let ky = &f.kernel[(f.y0_q4 & SUBPEL_MASK) as usize];
+    let kx = &splat(&f.kernel[(f.x0_q4 & SUBPEL_MASK) as usize]);
+    let ky = &splat(&f.kernel[(f.y0_q4 & SUBPEL_MASK) as usize]);
     match (f.x0_q4 != 0, f.y0_q4 != 0) {
         (false, false) => {
             // vpx_convolve_copy, or vpx_convolve_avg.

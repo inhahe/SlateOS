@@ -1,5 +1,16 @@
 ## B-COREUTILS-STAT-F-FSID-HALVES-ARE-SWAPPED (lane B, 2026-09-11)
 
+**Status:** FIXED 2026-09-14 (lane B, `2a4d423cf`), found closed 2026-10-03.
+`stat` calls `statfs`, as GNU's does on Linux, and builds `%i` as GNU does
+from the two words -- `val[0]` high, `val[1]` low -- so the halves are no
+longer swapped; and `statfs`'s `f_type` gives `%t` and `%T` the magic and
+the name too, so the paragraph below calling them "not defects" no longer
+describes the program. `scripts/stat-diff.sh` runs `-f -c %i`, `%t` and
+`%T` as ordinary cases. The commit has been on `main`, and through its boot
+tests, since 2026-09-14; the entry was simply never closed.
+
+*The entry as filed:*
+
 `stat -f -c %i` prints the filesystem id with its two 32-bit halves exchanged
 relative to GNU:
 

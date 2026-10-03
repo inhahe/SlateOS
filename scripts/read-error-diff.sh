@@ -43,8 +43,9 @@ DIFF_PROG='read-error'
 DIFF_GNU_SOURCE=9.4
 DIFF_NO_REF=1
 DIFF_NEED="timeout"
-DIFF_BINS="b2sum cksum cut expand fold md5sum nl paste sha1sum sha256sum sha512sum
-           sum unexpand wc"
+DIFF_BINS="b2sum base32 base64 cat cksum cut dircolors expand factor fold head join
+           md5sum nl numfmt od paste sha1sum sha256sum sha512sum sum tee tr tsort
+           unexpand uniq wc"
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
@@ -165,6 +166,35 @@ sweep cksum     f -
 sweep sum
 sweep sum       -s
 sweep sum       f -
+# `cat` finds a closed standard input with `fstat`, before any read, and says
+# `closing standard input` at the end; `head` names it `'standard input'`.
+sweep cat
+sweep cat       -
+sweep cat       f -
+sweep cat       -n -
+sweep head
+sweep head      -c 3
+sweep head      -n 1 -
+sweep head      f -
+# A read error that ends the run: no close is reached.
+sweep join      - f
+sweep join      f -
+sweep tsort
+sweep numfmt
+sweep factor
+sweep base64
+sweep base64    -d
+sweep base32
+sweep tr        a b
+sweep tr        -d a
+# A read error reported, then the input closed and that reported too.
+sweep dircolors -
+sweep uniq
+sweep uniq      -c -
+sweep tee
+sweep od
+sweep od        -c -
+sweep od        f -
 
 # --- a file named on the command line is not standard input ------------------
 # Neither shape may change anything here: standard input is never read, so it
@@ -174,6 +204,10 @@ sweep nl        f
 sweep wc        f
 sweep md5sum    f
 sweep sum       f
+sweep cat       f
+sweep head      f
+sweep od        f
+sweep uniq      f
 
 printf '\n'
 [ -n "$DIFF_SKIPPED" ] && printf 'not compared (no reference or no build):%s\n' "$DIFF_SKIPPED"

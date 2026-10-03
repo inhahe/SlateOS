@@ -1,9 +1,8 @@
 ## B-COREUTILS-A-CLOSED-STANDARD-INPUT-READS-AS-EMPTY (lane B, 2026-10-03)
 
-**Status:** OPEN (lane B). Fixed so far in `sed`, `tac`, `shuf`, `wc`, `cut`,
-`expand`, `fold`, `nl`, `paste`, `unexpand`, the digests, and the `-i`/`-ok` prompts of
-`rm`, `cp`, `mv`, `ln` and `find`. The rest are listed, with GNU's wording,
-under "Where, measured".
+**Status:** OPEN (lane B). Fixed in 26 programs so far and in the `-i`/`-ok`
+prompts of `rm`, `cp`, `mv`, `ln` and `find`; "Where, measured" lists them,
+and the rest with GNU's wording.
 
 **In short:** when a program is started with its standard input closed
 (`prog <&-`) and then reads it, GNU's tools report it as an error, for
@@ -75,9 +74,25 @@ carries on. `wc-diff.sh` gained 24 cases for all of this (`run_closed`,
 
 `scripts/read-error-diff.sh` is the regression net: every converted program,
 with standard input closed and with a directory as standard input, against a
-built coreutils 9.4. Converted so far: `cut expand fold nl paste unexpand wc`
-and the digests (`md5sum sha*sum b2sum cksum sum`); also `sed`, `tac`, `shuf`
-and the prompts, which their own harnesses cover.
+built coreutils 9.4. Converted so far: `base32 base64 cat cut dircolors expand
+factor fold head join nl numfmt od paste tee tr tsort unexpand uniq wc` and
+the digests (`md5sum sha*sum b2sum cksum sum`); also `sed`, `tac`, `shuf` and
+the prompts, which their own harnesses cover.
+
+Three lessons from converting them, each of which bit more than once:
+
+* **Descriptor 1 has the same trap.** `io::stdout()` answers a write's
+  `EBADF` with success, so once the guard keeps a closed descriptor 1 closed,
+  a program writing through it exits 0 on `>&-`. `stdfd::RawStdout` (or a
+  `Stream`) is the writer for a program that reports its own write errors.
+* **A file opened while descriptor 0 is closed becomes descriptor 0.** GNU's
+  `join` and `comm` include gnulib's `stdio--.h`, whose `fopen` never returns
+  0, 1 or 2; without the same (`stdfd::fd_safer`), `join f - <&-` read `f`
+  twice. `paste` uses a plain `fopen` and says `standard input is closed`.
+* **`freopen` leaves `EBADF` behind.** A program that `freopen`s a named
+  input onto `stdin` (`uniq`, `shuf`) reports a failed open with the errno of
+  glibc's close of the old descriptor: `uniq nosuch <&-` is
+  `uniq: nosuch: Bad file descriptor`.
 
 A sweep of 49 command lines on 2026-10-03 found the rest. Each needs
 `stdfd::RawStdin` (or `stdio::StdioReader`), the guard if it lacks one, and
@@ -86,19 +101,10 @@ noted:
 
 | program | GNU (each line a separate message, then status) |
 |---|---|
-| `cat` | `cat: -: Bad file descriptor`, `cat: closing standard input: Bad file descriptor`, 1 |
-| `head` | `head: error reading 'standard input': Bad file descriptor`, `head: -: Bad file descriptor`, 1 |
 | `tail` | `tail: cannot fstat 'standard input': Bad file descriptor`, `tail: -: Bad file descriptor`, 1 |
 | `sort` | `sort: stat failed: -: Bad file descriptor`, 2 |
-| `uniq` | `uniq: error reading '-': Bad file descriptor`, 1 |
-| `tr`, `base64`, `base32`, `join` | `PROG: read error: Bad file descriptor`, 1 |
-| `tee` | `tee: read error: Bad file descriptor`, `tee: standard input: Bad file descriptor`, 1 |
-| `od` | `od: 'standard input': Bad file descriptor`, then `0000000` on stdout, `od: standard input: Bad file descriptor`, 1 |
-| `tsort` | `tsort: -: read error: Bad file descriptor`, 1 |
-| `dircolors -` | `dircolors: -: read error: Bad file descriptor`, `dircolors: -: Bad file descriptor`, 1 |
 | `du --files0-from=-` | `du: -: read error: Bad file descriptor`, 1 |
 | `date -f -` | `date: 'standard input': read error: Bad file descriptor`, 1 (a directory: ours drops the quotes) |
-| `numfmt`, `factor` | `PROG: error reading input: Bad file descriptor`, 1 |
 | `grep` | `grep: (standard input): Bad file descriptor`, 2 (a directory: ours says `-:`; with `-c`, GNU still prints `0`) |
 | `comm - f` | `comm: -: Bad file descriptor`, 1 (ours went on comparing) |
 | `cmp - f` | `cmp: -: Bad file descriptor`, 2 |
@@ -109,5 +115,5 @@ noted:
 
 Other files contain `io::stdin()` too, some only for a tty check or in a
 comment: `bc diff ed find more patch sed sh split tar test`, and in the
-library `basenc.rs` and `filekind.rs`. The sweep found no
+library `filekind.rs`. The sweep found no
 divergence for `split`, `pr`, `fmt`, `ptx`, `tac`, `shuf`, `diff`.

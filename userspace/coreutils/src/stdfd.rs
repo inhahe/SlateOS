@@ -745,6 +745,29 @@ impl io::Read for RawStdin {
     }
 }
 
+/// Descriptor 1 as an [`io::Write`]: [`write_some`] on it, and nothing
+/// buffered.
+///
+/// [`RawStdin`]'s other half, for a program that reports its own write errors
+/// as they happen -- upstream's `fwrite (...) != n` checks -- rather than
+/// through a [`Stream`] and [`close_stdout`]. `io::stdout()` will not do for
+/// that: `std` answers a write's `EBADF` with success, so once
+/// [`guard_std_fds!`](crate::guard_std_fds) keeps a closed descriptor 1
+/// closed, `tr a b >&-` would have exited 0 where GNU reports
+/// `write error: Bad file descriptor`. Put a `BufWriter` in front of it.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RawStdout;
+
+impl io::Write for RawStdout {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        crate::stdfd::write_some(1, buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 /// `lseek (fd, delta, SEEK_CUR)` on a descriptor this process does not own:
 /// what stdio does at `exit` to give back what it read ahead of a shared
 /// standard input. See [`crate::stdio::StdioReader`].

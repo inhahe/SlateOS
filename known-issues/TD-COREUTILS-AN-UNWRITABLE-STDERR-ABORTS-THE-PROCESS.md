@@ -198,3 +198,28 @@ pick up; recorded here so they are not lost.
 **How it was found.** Probing `/dev/full` while porting `tty`, after a first
 probe that used `>/dev/full 2>&1` and so pointed the finger at stdout — the
 134 came from stderr all along.
+
+### 2026-10-03 -- where it stands
+
+Measured against each program's reference, the stderr half is now settled
+wherever upstream has a rule, and is absent where upstream has none:
+
+| program | upstream's rule | here |
+|---|---|---|
+| `tar` | its own `main` tail: `close_stdout ()` when the member list is on stdout, else `ferror (stderr)` raises the status to 2 | ported (`conclude`), with `stdopen` |
+| `test` / `[` | `atexit (close_stdout)`, failure status 2 | ported: `close_stdout_with(prog, out, earned, 2)` |
+| `sed` | checks stdout itself (`ck_fflush`, `ck_fclose`), never stderr | no stderr funnel is the faithful answer; its *stdout* layer is not GNU's and is next |
+| `patch` | checks neither at exit | agrees as it stands (measured: `2>/dev/full` statuses equal) |
+| `hostname` (Debian 3.23) | checks neither | agrees as it stands |
+| `more` | util-linux's `close_stdout` | waits on `TD-B-more-HAS-NO-INTERACTIVE-COMMANDS-BEYOND-SPACE-ENTER-AND-q`; ours is not a port yet |
+
+The other half of this is the closed-*descriptor* guard (`guard_std_fds!` and
+`stdfd::restore`), without which Rust's runtime quietly replaces a closed
+descriptor with `/dev/null` before `main` and a program cannot see `>&-` at
+all. Forty-four programs still lack it: `bc chmod chown cmp cp csplit cut date
+df dir du ed env expr find id install kill ln ls mkdir mkfifo mktemp more mv od
+patch readlink realpath rmdir sed shuf stat tac tail tee touch tr uname uniq
+vdir awk hostname sort`. Each wants measuring against its reference before it
+is converted -- `tar`'s answer to a closed stdout (a reason-less `write error`,
+because GNU tar reopens it read-only first) is not `wc`'s -- which is why this
+is done program by program rather than as one edit.

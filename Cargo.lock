@@ -47,14 +47,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "apparmor"
-version = "0.1.0"
-dependencies = [
- "quoting",
- "scratchdir",
-]
-
-[[package]]
 name = "appearance"
 version = "0.1.0"
 dependencies = [
@@ -170,14 +162,6 @@ dependencies = [
 [[package]]
 name = "audiotags"
 version = "0.1.0"
-
-[[package]]
-name = "audit"
-version = "0.1.0"
-dependencies = [
- "optionalfile",
- "quoting",
-]
 
 [[package]]
 name = "authlib"
@@ -448,14 +432,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "capsh"
-version = "0.1.0"
-dependencies = [
- "quoting",
- "usageerror",
-]
-
-[[package]]
 name = "cfg-if"
 version = "1.0.5"
 
@@ -547,17 +523,6 @@ version = "0.1.0"
 dependencies = [
  "posix",
  "quoting",
-]
-
-[[package]]
-name = "chroot"
-version = "0.1.0"
-dependencies = [
- "authlib",
- "pwdb",
- "quoting",
- "scratchdir",
- "userdb",
 ]
 
 [[package]]
@@ -678,10 +643,14 @@ dependencies = [
  "bignum",
  "blake2 0.1.0",
  "charwidth",
+ "cprintf",
+ "embed-manifest",
  "ere",
  "errmsg",
+ "fnmatch",
  "getoptlong",
  "gnubase64",
+ "libcall",
  "localtime",
  "md5",
  "modechange",
@@ -711,15 +680,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "cpufeatures"
-version = "0.3.1"
-
-[[package]]
-name = "cpupower"
+name = "cprintf"
 version = "0.1.0"
 dependencies = [
  "quoting",
 ]
+
+[[package]]
+name = "cpufeatures"
+version = "0.3.1"
 
 [[package]]
 name = "crc32"
@@ -834,13 +803,6 @@ dependencies = [
 [[package]]
 name = "daywindow"
 version = "0.1.0"
-
-[[package]]
-name = "dbus"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
 
 [[package]]
 name = "dbviewer"
@@ -1211,6 +1173,13 @@ version = "0.1.0"
 [[package]]
 name = "file"
 version = "0.1.0"
+dependencies = [
+ "charwidth",
+ "errmsg",
+ "getoptlong",
+ "libmagic",
+ "sysroot-dep",
+]
 
 [[package]]
 name = "fileassoc"
@@ -1316,15 +1285,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "firejail"
-version = "0.1.0"
-dependencies = [
- "authlib",
- "scratchdir",
- "userdb",
-]
-
-[[package]]
 name = "flashcards"
 version = "0.1.0"
 dependencies = [
@@ -1361,11 +1321,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "fmt"
+name = "fnmatch"
 version = "0.1.0"
-dependencies = [
- "quoting",
-]
 
 [[package]]
 name = "fontmanager"
@@ -1432,13 +1389,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fwupd"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "game2048"
 version = "0.1.0"
 dependencies = [
@@ -1460,6 +1410,16 @@ dependencies = [
 [[package]]
 name = "gdb"
 version = "0.1.0"
+
+[[package]]
+name = "getconf"
+version = "0.1.0"
+dependencies = [
+ "errmsg",
+ "libcall",
+ "posix",
+ "sysroot-dep",
+]
 
 [[package]]
 name = "getent"
@@ -1511,14 +1471,6 @@ dependencies = [
  "guitk",
  "oswindow",
  "statehistory",
-]
-
-[[package]]
-name = "grub2"
-version = "0.1.0"
-dependencies = [
- "procinfo",
- "quoting",
 ]
 
 [[package]]
@@ -1633,7 +1585,6 @@ dependencies = [
  "optionalfile",
  "quoting",
  "scratchdir",
- "usageerror",
 ]
 
 [[package]]
@@ -1763,18 +1714,6 @@ dependencies = [
  "keylayout",
  "settingsfile",
  "yamldoc",
-]
-
-[[package]]
-name = "install"
-version = "0.1.0"
-dependencies = [
- "embed-manifest",
- "modechange",
- "optionalfile",
- "pwdb",
- "quoting",
- "userspec",
 ]
 
 [[package]]
@@ -2003,6 +1942,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "libmagic"
+version = "0.1.0"
+dependencies = [
+ "charwidth",
+ "cprintf",
+ "ere",
+ "errmsg",
+ "localtime",
+]
+
+[[package]]
 name = "libservicebus"
 version = "0.1.0"
 dependencies = [
@@ -2025,13 +1975,6 @@ dependencies = [
  "gamechrome",
  "guitk",
  "oswindow",
-]
-
-[[package]]
-name = "locale"
-version = "0.1.0"
-dependencies = [
- "quoting",
 ]
 
 [[package]]
@@ -2063,8 +2006,7 @@ dependencies = [
 name = "lockfile"
 version = "0.1.0"
 dependencies = [
- "quoting",
- "usageerror",
+ "pwdb",
 ]
 
 [[package]]
@@ -2428,14 +2370,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mesg"
-version = "0.1.0"
-dependencies = [
- "authlib",
- "userdb",
-]
-
-[[package]]
 name = "metronome"
 version = "0.1.0"
 dependencies = [
@@ -2485,22 +2419,6 @@ dependencies = [
  "procinfo",
  "quoting",
  "scratchdir",
-]
-
-[[package]]
-name = "mkinitramfs"
-version = "0.1.0"
-dependencies = [
- "deflate",
- "modechange",
- "quoting",
-]
-
-[[package]]
-name = "mktemp"
-version = "0.1.0"
-dependencies = [
- "quoting",
 ]
 
 [[package]]
@@ -2744,13 +2662,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "numactl"
-version = "0.1.0"
-dependencies = [
- "procinfo",
-]
-
-[[package]]
 name = "objdump"
 version = "0.1.0"
 dependencies = [
@@ -2930,23 +2841,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "perf"
-version = "0.1.0"
-dependencies = [
- "procinfo",
- "quoting",
-]
-
-[[package]]
-name = "pgrep"
-version = "0.1.0"
-dependencies = [
- "killconv",
- "procinfo",
- "quoting",
-]
-
-[[package]]
 name = "phc"
 version = "0.6.1"
 dependencies = [
@@ -3011,14 +2905,6 @@ dependencies = [
  "quoting",
  "scratchdir",
  "sha2",
-]
-
-[[package]]
-name = "plymouth"
-version = "0.1.0"
-dependencies = [
- "quoting",
- "scratchdir",
 ]
 
 [[package]]
@@ -3091,9 +2977,11 @@ dependencies = [
 name = "powerctl"
 version = "0.1.0"
 dependencies = [
+ "errmsg",
  "libcall",
  "libservicebus",
  "quoting",
+ "stdfdguard",
  "sysroot-dep",
 ]
 
@@ -3358,13 +3246,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "resolvectl"
-version = "0.1.0"
-dependencies = [
- "usageerror",
-]
-
-[[package]]
 name = "reversi"
 version = "0.1.0"
 dependencies = [
@@ -3515,13 +3396,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "selinux"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "serde_core"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3633,13 +3507,6 @@ dependencies = [
 [[package]]
 name = "shellcmd"
 version = "0.1.0"
-
-[[package]]
-name = "shuf"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
 
 [[package]]
 name = "simon"
@@ -3958,13 +3825,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "stty"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "su"
 version = "0.1.0"
 dependencies = [
@@ -3979,7 +3839,11 @@ name = "sudo"
 version = "0.1.0"
 dependencies = [
  "authlib",
+ "ere",
+ "errmsg",
+ "fnmatch",
  "optionalfile",
+ "posix",
  "quoting",
  "scratchdir",
  "userdb",
@@ -4148,13 +4012,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tac"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "tararchive"
 version = "0.1.0"
 
@@ -4233,13 +4090,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "thermald"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "thumbs"
 version = "0.1.0"
 dependencies = [
@@ -4257,13 +4107,6 @@ dependencies = [
  "gamechrome",
  "guitk",
  "oswindow",
-]
-
-[[package]]
-name = "timeout"
-version = "0.1.0"
-dependencies = [
- "quoting",
 ]
 
 [[package]]
@@ -4361,13 +4204,6 @@ name = "ttyidle"
 version = "0.1.0"
 
 [[package]]
-name = "tuned"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "typenum"
 version = "1.20.1"
 
@@ -4391,14 +4227,6 @@ dependencies = [
  "optionalfile",
  "quoting",
  "scratchdir",
-]
-
-[[package]]
-name = "udisks"
-version = "0.1.0"
-dependencies = [
- "procinfo",
- "quoting",
 ]
 
 [[package]]
@@ -4509,10 +4337,6 @@ version = "0.1.0"
 dependencies = [
  "embed-manifest",
 ]
-
-[[package]]
-name = "upower"
-version = "0.1.0"
 
 [[package]]
 name = "usageerror"
@@ -4681,17 +4505,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "who"
-version = "0.1.0"
-dependencies = [
- "authlib",
- "procinfo",
- "quoting",
- "ttyidle",
- "utmpfile",
-]
-
-[[package]]
 name = "whois"
 version = "0.1.0"
 dependencies = [
@@ -4755,13 +4568,6 @@ name = "wpa"
 version = "0.1.0"
 dependencies = [
  "hmac",
-]
-
-[[package]]
-name = "xattr"
-version = "0.1.0"
-dependencies = [
- "quoting",
 ]
 
 [[package]]

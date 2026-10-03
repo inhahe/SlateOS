@@ -66,7 +66,7 @@ NARROWER = {
         "hook checks only the pushed commits (--head/--changed-only); boot-test "
         "scans every document, so a heading broken by an older commit is caught "
         "at boot and not at push.",
-    "check-design-decisions-bands.py":
+    "check-docs.py":
         "hook judges the pushed revision (--head); boot-test judges the "
         "worktree, which is what the boot itself reads.",
     "check-read-defaults.py":

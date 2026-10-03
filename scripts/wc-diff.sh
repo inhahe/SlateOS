@@ -21,13 +21,14 @@
 # `/mnt/...`.
 #
 # The subject moves with it now, which is what the preamble adds. Nothing here
-# was an expected difference only because of the host — in fact nothing here is
-# an expected difference at all — so the tally is unchanged by the move.
+# was an expected difference only because of the host, so the tally was
+# unchanged by the move.
 #
-# That last fact makes the `OURS=/usr/bin/wc` control the other harnesses use
-# inert here: with no expected difference to flip into an XPASS, pointing
-# `OURS` at GNU only compares GNU with itself. Should this file ever record an
-# xfail, that control becomes worth running again.
+# One expected difference exists since 2026-10-01, and it is a decision rather
+# than a defect: the soft hyphen's width under design-decisions §1042 (the
+# `softhyphen.txt` case). So the `OURS=/usr/bin/wc` control the other
+# harnesses use is worth running here again: pointed at GNU, that case must
+# come out as an XPASS and everything else as agreement.
 #
 # The locale is `C.UTF-8`, which is settled policy rather than a convenience:
 # the SlateOS target has no non-UTF-8 locale (design-decisions.md, "osh's
@@ -200,7 +201,13 @@ run_case -mcL badbyte.txt       # a byte that decodes to nothing is counted by -
 run_case -w badbyte.txt
 run_case -wL nbsp.txt           # U+00A0 separates words and still takes a column
 run_case -wL lsep.txt           # U+2028 has a wcwidth but is not printable
-run_case -wL softhyphen.txt     # U+00AD is printable to glibc, so it is a word char
+# U+00AD is printable to glibc, so it is a word char -- in both wc's, so -w
+# agrees. -L does not, on purpose: design-decisions §1042 gives the soft hyphen
+# no column (Unicode shows it only where a line breaks at it; gnulib's
+# uc_width, which coreutils 9.5 measures with, says the same), where glibc's
+# wcwidth, which Ubuntu's 9.4 asks, gives it one. So -L is 2 here and 3 there.
+run_case -w softhyphen.txt
+xfail_case "§1042: U+00AD takes no column here, one in glibc's wcwidth" -L softhyphen.txt
 run_case -wL zwsp.txt           # U+200B is zero columns
 run_stdin '\xe4\xb8\xad\xe6\x96\x87\n' -L
 run_stdin '\xc3\xa9\n' -mc
@@ -280,6 +287,10 @@ run_case -L --files0-from=list0
 run_case --files0-from=nosuchlist
 run_case --total=always --files0-from=empty0
 run_case --files0-from=dir0
+# The list is named in the empty-name complaint as upstream's `quotef` names it:
+# bare unless it needs quoting, which a space does.
+printf 'plain.txt\0\0w1.txt\0' > 'list0 spaced'
+run_case '--files0-from=list0 spaced'
 # A list on a pipe cannot be read in advance, so the width drops to 1 — the one
 # case where `--files0-from=-` and `--files0-from=FILE` differ in output.
 run_stdin 'plain.txt\x00w1.txt\x00' --files0-from=-

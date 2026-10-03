@@ -47,6 +47,10 @@ IDEMPOTENT = re.compile(
 
 SOURCE = re.compile(r"^(?:\.|source)\s")  # plus a diff-wsl.sh mention; see is_source()
 
+# Sourced before the preamble on purpose; see offenders_in(). A name here is a
+# promise that the file's every run after the first is a no-op.
+PRE_PREAMBLE_SOURCES = ("util-linux-source.sh", "procps-ref.sh")
+
 # See the module docstring. A name here is a promise that its second execution
 # is a no-op, not that it is short.
 BASELINE = {"df-diff.sh"}
@@ -101,12 +105,14 @@ def offenders_in(text):
         # and "inspected nothing" print the same word.
         if SOURCE.match(raw.strip()) and "diff-wsl.sh" in raw:
             return found, True
-        # util-linux-source.sh is written to be sourced BEFORE the preamble
-        # (its own header says so) and to be a no-op on the first pass: it
-        # returns at once unless `uname -s` is Linux, and in WSL it fetches
-        # once and then finds its `.unpacked` marker. Its second run is the
-        # no-op this gate asks for, promised by the file itself.
-        if SOURCE.match(raw.strip()) and "util-linux-source.sh" in raw and in_quote is None:
+        # The files written to be sourced BEFORE the preamble (each one's own
+        # header says so) and to be no-ops on every pass but one: they return
+        # at once unless `uname -s` is Linux, and in WSL they do their work
+        # once and then find a marker -- util-linux-source.sh its `.unpacked`,
+        # procps-ref.sh its `.slateos-built` stamp. Their second run is the
+        # no-op this gate asks for, promised by the files themselves.
+        if (SOURCE.match(raw.strip()) and in_quote is None
+                and any(name in raw for name in PRE_PREAMBLE_SOURCES)):
             continue
         visible, next_quote = unquoted_prefix(raw, in_quote)
         was_in_quote = in_quote is not None
@@ -164,6 +170,14 @@ SELFTEST = [
      ["# upstream's source", 'DIFF_PROG=x', '. "$(dirname "$0")/util-linux-source.sh"',
       '. "$(dirname "$0")/diff-wsl.sh"'],
      0, True),
+    ('sourcing procps-ref.sh first is accepted',
+     ['DIFF_PROG=w', '. "$(dirname "$0")/procps-ref.sh"', 'DIFF_REF=$PROCPS_REF_W',
+      '. "$(dirname "$0")/diff-wsl.sh"'],
+     0, True),
+    ('...but not calling its builder by hand',
+     ['. "$(dirname "$0")/procps-ref.sh"', 'procps_ref_build',
+      '. "$(dirname "$0")/diff-wsl.sh"'],
+     1, True),
 ]
 
 

@@ -38,6 +38,17 @@
 //! library's object file is pulled out of the rlib only if the linker wants a
 //! symbol from it. Expanded in the binary, the entry is unconditional.
 //!
+//! # And `SIGPIPE`, for the same reason
+//!
+//! The runtime also sets `SIGPIPE` to ignored before `main`, so that a write
+//! to a closed pipe returns `EPIPE` instead of killing the program -- and,
+//! again, without recording what it replaced. A program that runs commands
+//! can need the answer: GNU `split --filter` hands its commands `SIGPIPE` at
+//! its default only if that is what *it* was started with
+//! (`default_SIGPIPE`), and leaves it ignored for them if it was started that
+//! way, where Rust's `Command` restores the default in every child. The same
+//! constructor records it, and [`sigpipe_ignored_at_startup`] answers.
+//!
 //! This half of coreutils' `stdfd` moved here on 2026-09-26 so that programs
 //! outside coreutils -- the util-linux ports first -- can have it too;
 //! `coreutils::guard_std_fds!` and `coreutils::stdfd::restore` are this. The
@@ -45,18 +56,29 @@
 //! coreutils: it is gnulib's `close_stdout`, and util-linux's differs.
 //!
 //! Linux only: elsewhere the macro expands to nothing, [`restore`] does
-//! nothing and [`was_closed_at_startup`] is always `false`.
+//! nothing, and [`was_closed_at_startup`] and [`sigpipe_ignored_at_startup`]
+//! are always `false`.
 
 #[cfg(target_os = "linux")]
 mod imp {
-    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
     unsafe extern "C" {
         fn fcntl(fd: i32, cmd: i32, ...) -> i32;
         fn close(fd: i32) -> i32;
+        fn signal(sig: i32, handler: usize) -> usize;
     }
 
     const F_GETFD: i32 = 1;
+    const SIGPIPE: i32 = 13;
+    const SIG_DFL: usize = 0;
+    const SIG_IGN: usize = 1;
+    /// `(void (*)(int)) -1`.
+    const SIG_ERR: usize = usize::MAX;
+
+    /// Whether `SIGPIPE` was ignored when the process started. Written once,
+    /// from the constructor, for the same reason as [`CLOSED_AT_STARTUP`].
+    static SIGPIPE_IGNORED_AT_STARTUP: AtomicBool = AtomicBool::new(false);
 
     /// Bit `n` is set if descriptor `n` was **not open** when the process
     /// started. Written once, from the `.init_array` constructor, because by
@@ -65,7 +87,7 @@ mod imp {
 
     /// The constructor itself. Public only so the macro expansion in a binary
     /// crate can name it; not part of the interface.
-    pub extern "C" fn record_closed_std_fds() {
+    pub extern "C" fn record_startup_state() {
         let mut mask: u8 = 0;
         for fd in 0..3 {
             // SAFETY: `F_GETFD` only reads a descriptor's flags and is defined
@@ -75,6 +97,33 @@ mod imp {
             }
         }
         CLOSED_AT_STARTUP.store(mask, Ordering::Relaxed);
+        record_sigpipe();
+    }
+
+    /// Learn `SIGPIPE`'s disposition by setting it, which is what `signal`
+    /// offers: it answers with the handler it replaced.
+    ///
+    /// At this point that can only be the default or ignored -- a handler does
+    /// not survive `exec` -- and the runtime is about to make it ignored
+    /// anyway, so the probe changes nothing that lasts. The default is put back
+    /// all the same, so that nothing between here and the runtime's own call
+    /// runs with a disposition the process was not given.
+    fn record_sigpipe() {
+        // SAFETY: `signal` with `SIG_IGN` installs no code of ours and touches
+        // no memory of ours; it returns the previous handler or `SIG_ERR`.
+        let old = unsafe { signal(SIGPIPE, SIG_IGN) };
+        if old == SIG_ERR {
+            return;
+        }
+        if old == SIG_DFL {
+            // SAFETY: as above -- restoring the default handler.
+            unsafe { signal(SIGPIPE, SIG_DFL) };
+        }
+        SIGPIPE_IGNORED_AT_STARTUP.store(old == SIG_IGN, Ordering::Relaxed);
+    }
+
+    pub fn sigpipe_ignored_at_startup() -> bool {
+        SIGPIPE_IGNORED_AT_STARTUP.load(Ordering::Relaxed)
     }
 
     pub fn restore() {
@@ -108,14 +157,19 @@ mod imp {
     pub fn was_closed_at_startup(_fd: i32) -> bool {
         false
     }
+
+    pub fn sigpipe_ignored_at_startup() -> bool {
+        false
+    }
 }
 
 #[cfg(target_os = "linux")]
 #[doc(hidden)]
-pub use imp::record_closed_std_fds as __record_closed_std_fds;
+pub use imp::record_startup_state as __record_startup_state;
 
 /// Install the `.init_array` constructor that records which of descriptors 0,
-/// 1 and 2 were closed when the process began.
+/// 1 and 2 were closed when the process began, and whether `SIGPIPE` was
+/// ignored.
 ///
 /// Write this once at module scope in a binary that calls [`restore`]:
 ///
@@ -130,7 +184,7 @@ macro_rules! guard_std_fds {
         #[cfg(target_os = "linux")]
         #[used]
         #[unsafe(link_section = ".init_array")]
-        static __SLATE_RECORD_CLOSED_STD_FDS: extern "C" fn() = $crate::__record_closed_std_fds;
+        static __SLATE_RECORD_STARTUP_STATE: extern "C" fn() = $crate::__record_startup_state;
     };
 }
 
@@ -159,6 +213,15 @@ pub fn was_closed_at_startup(fd: i32) -> bool {
     imp::was_closed_at_startup(fd)
 }
 
+/// Whether `SIGPIPE` was ignored when the process started -- before the
+/// runtime ignored it regardless. See the crate docs for who needs to know.
+///
+/// Always `false` without [`guard_std_fds!`], and off Linux.
+#[must_use]
+pub fn sigpipe_ignored_at_startup() -> bool {
+    imp::sigpipe_ignored_at_startup()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,6 +235,7 @@ mod tests {
         for fd in [-1, 0, 1, 2, 3, 1024] {
             assert!(!was_closed_at_startup(fd), "{fd}");
         }
+        assert!(!sigpipe_ignored_at_startup());
         restore();
         // Standard output is still there to be written to.
         use std::io::Write;

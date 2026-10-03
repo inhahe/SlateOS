@@ -1,7 +1,7 @@
 //! Slate OS Privileged Command Execution Utility
 //!
-//! Multi-personality binary providing `sudo`, `sudoedit`/`visudo`, and
-//! `sudoreplay` functionality. Personality is detected via `argv[0]` basename,
+//! Multi-personality binary providing `sudo`, `sudoedit` and `visudo`.
+//! Personality is detected via `argv[0]` basename,
 //! stripping any path prefix and `.exe` suffix.
 //!
 //! # Personalities
@@ -9,7 +9,6 @@
 //! - **sudo** (default) — execute a command as another user
 //! - **sudoedit** — safely edit files with elevated privileges
 //! - **visudo** — edit the sudoers file with syntax checking
-//! - **sudoreplay** — replay recorded sudo session logs
 //!
 //! # sudo Usage
 //!
@@ -31,14 +30,11 @@
 //! visudo -s              Strict mode (error on warnings)
 //! ```
 //!
-//! # sudoreplay Usage
-//!
-//! ```text
-//! sudoreplay -l          List recorded sessions
-//! sudoreplay -d dir      Replay from specific directory
-//! sudoreplay -s factor   Set speed factor for replay
-//! sudoreplay [session]   Replay a specific session
-//! ```
+//! Until 2026-10-01 it also answered to `sudoreplay`, which replayed the
+//! session recordings in `/var/log/sudo-io` -- and nothing here makes any:
+//! `log_input` and `log_output` are accepted and record nothing (`visudo -c`
+//! says so), so it could only ever report that there were none. It comes
+//! back with session recording (design-decisions 1049).
 
 #![deny(clippy::all)]
 
@@ -52,39 +48,23 @@ use std::io::{self, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
+// The sudoers file -- model, parser, check, editor -- is the package's library,
+// which `visudo` reads too.
+use sudo::{
+    CmndSpec, RunasSpec, SUDOERS_PATH, SudoError, SudoersConfig, parse_sudoers, split_command,
+    strip_negation,
+};
+// sudoedit's half, which is unix's.
+#[cfg(unix)]
+use sudo::{O_NOFOLLOW, editor_command, editor_words};
 
 // ============================================================================
 // Constants
 // ============================================================================
 
-const SUDOERS_PATH: &str = "/etc/sudoers";
 const TIMESTAMP_DIR: &str = "/var/run/sudo/ts";
 const SUDO_LOG_PATH: &str = "/var/log/sudo.log";
-const SUDO_IO_DIR: &str = "/var/log/sudo-io";
-const DEFAULT_TIMEOUT: u64 = 900; // 15 minutes in seconds
-const DEFAULT_EDITOR: &str = "/usr/bin/vi";
 const DEFAULT_PROMPT: &str = "[sudo] password for %u: ";
-
-/// Environment variables preserved by default when env_reset is active.
-const DEFAULT_ENV_KEEP: &[&str] = &[
-    "TERM",
-    "PATH",
-    "HOME",
-    "SHELL",
-    "LOGNAME",
-    "USER",
-    "DISPLAY",
-    "XAUTHORITY",
-    "LANG",
-    "LC_ALL",
-    "LC_COLLATE",
-    "LC_CTYPE",
-    "LC_MESSAGES",
-    "LC_MONETARY",
-    "LC_NUMERIC",
-    "LC_TIME",
-    "TZ",
-];
 
 /// Environment variables that are always removed for security.
 const ENV_BLACKLIST: &[&str] = &[
@@ -117,8 +97,6 @@ const ENV_BLACKLIST: &[&str] = &[
 enum Personality {
     Sudo,
     Sudoedit,
-    Visudo,
-    Sudoreplay,
 }
 
 impl fmt::Display for Personality {
@@ -126,8 +104,6 @@ impl fmt::Display for Personality {
         match self {
             Self::Sudo => write!(f, "sudo"),
             Self::Sudoedit => write!(f, "sudoedit"),
-            Self::Visudo => write!(f, "visudo"),
-            Self::Sudoreplay => write!(f, "sudoreplay"),
         }
     }
 }
@@ -159,1089 +135,7 @@ fn detect_personality<S: AsRef<OsStr>>(argv0: S) -> Personality {
 
     match base {
         b"sudoedit" => Personality::Sudoedit,
-        b"visudo" => Personality::Visudo,
-        b"sudoreplay" => Personality::Sudoreplay,
         _ => Personality::Sudo,
-    }
-}
-
-// ============================================================================
-// Error types
-// ============================================================================
-
-/// Unified error type for sudo operations.
-#[derive(Debug)]
-enum SudoError {
-    _PermissionDenied(String),
-    ParseError(String),
-    IoError(String),
-    InvalidConfig(String),
-    AuthError(String),
-    UsageError(String),
-    TimestampError(String),
-    LockError(String),
-}
-
-impl fmt::Display for SudoError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::_PermissionDenied(msg) => write!(f, "permission denied: {msg}"),
-            Self::ParseError(msg) => write!(f, "parse error: {msg}"),
-            Self::IoError(msg) => write!(f, "I/O error: {msg}"),
-            Self::InvalidConfig(msg) => write!(f, "invalid configuration: {msg}"),
-            Self::AuthError(msg) => write!(f, "authentication error: {msg}"),
-            Self::UsageError(msg) => write!(f, "usage error: {msg}"),
-            Self::TimestampError(msg) => write!(f, "timestamp error: {msg}"),
-            Self::LockError(msg) => write!(f, "lock error: {msg}"),
-        }
-    }
-}
-
-impl From<io::Error> for SudoError {
-    fn from(e: io::Error) -> Self {
-        Self::IoError(e.to_string())
-    }
-}
-
-// ============================================================================
-// Sudoers data model
-// ============================================================================
-
-/// A parsed alias (User_Alias, Host_Alias, Cmnd_Alias, Runas_Alias).
-#[derive(Debug, Clone)]
-struct _Alias {
-    _name: String,
-    _members: Vec<String>,
-}
-
-/// What shape a `Defaults` setting may legally take.
-///
-/// The shape is what makes a misspelling detectable. `Defaults timestamp_timout=5`
-/// is not distinguishable from a valid line by looking at the line alone — only
-/// by knowing that no setting is spelled that way.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DefaultShape {
-    /// A boolean: `name` sets it, `!name` clears it. Never carries a value.
-    Flag,
-    /// Carries exactly one value: `name=value`. `+=` and `-=` are meaningless.
-    Value,
-    /// A whitespace-separated list: `name=v` replaces, `name+=v` adds,
-    /// `name-=v` removes.
-    List,
-}
-
-/// How a `Defaults` setting was written.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DefaultOp {
-    /// `name` (a flag) or `name=value`.
-    Set,
-    /// `!name`.
-    Negate,
-    /// `name+=value`.
-    Add,
-    /// `name-=value`.
-    Remove,
-}
-
-/// One setting within a `Defaults` directive.
-///
-/// The operator is kept rather than folded into the name at parse time. It used
-/// to be folded in by accident: the name was taken as everything before the
-/// first `=`, so `env_keep += "X"` was stored under the name `env_keep +`. Two
-/// consumers compensated by matching three spellings each (`env_keep`,
-/// `env_keep+=`, `env_keep+`) and every other consumer — `get_default`, and so
-/// `timestamp_timeout` and `env_reset` — simply never saw a `+=` line at all.
-/// That is the band-aid shape: a defect in one place paid for in several.
-#[derive(Debug, Clone)]
-struct DefaultSetting {
-    /// The setting name, with no operator attached.
-    name: String,
-    /// How it was written.
-    op: DefaultOp,
-    /// The value; empty for `Flag` settings, whose truth is carried by `op`.
-    value: String,
-}
-
-/// A Defaults directive from the sudoers file.
-#[derive(Debug, Clone)]
-struct DefaultsDirective {
-    /// The scope (empty = global, "user:" prefix, "host:" prefix, etc.)
-    scope: String,
-    /// The settings on this line, in written order.
-    settings: Vec<DefaultSetting>,
-}
-
-/// The `Defaults` settings whose *shape* this implementation knows.
-///
-/// **This list is knowingly incomplete.** Real sudo's catalogue is larger and
-/// grows; a name missing from here is not evidence the name is wrong. That is
-/// exactly why an unlisted name is reported as a *warning* and a listed name
-/// used with the wrong operator is reported as an *error*: the second is a fact
-/// about the grammar, the first is a fact about this table. A `visudo` that
-/// refused to save a correct file because our table was short would be worse
-/// than the silence it replaced — the administrator could not fix it.
-static KNOWN_DEFAULTS: &[(&str, DefaultShape)] = &[
-    // Flags.
-    ("always_set_home", DefaultShape::Flag),
-    ("authenticate", DefaultShape::Flag),
-    ("env_editor", DefaultShape::Flag),
-    ("env_reset", DefaultShape::Flag),
-    ("fqdn", DefaultShape::Flag),
-    ("ignore_dot", DefaultShape::Flag),
-    ("insults", DefaultShape::Flag),
-    ("log_input", DefaultShape::Flag),
-    ("log_output", DefaultShape::Flag),
-    ("mail_always", DefaultShape::Flag),
-    ("mail_badpass", DefaultShape::Flag),
-    ("mail_no_host", DefaultShape::Flag),
-    ("mail_no_perms", DefaultShape::Flag),
-    ("mail_no_user", DefaultShape::Flag),
-    ("noexec", DefaultShape::Flag),
-    ("path_info", DefaultShape::Flag),
-    ("preserve_groups", DefaultShape::Flag),
-    ("pwfeedback", DefaultShape::Flag),
-    ("requiretty", DefaultShape::Flag),
-    ("root_sudo", DefaultShape::Flag),
-    ("rootpw", DefaultShape::Flag),
-    ("runaspw", DefaultShape::Flag),
-    ("set_home", DefaultShape::Flag),
-    ("set_logname", DefaultShape::Flag),
-    ("shell_noargs", DefaultShape::Flag),
-    ("stay_setuid", DefaultShape::Flag),
-    ("targetpw", DefaultShape::Flag),
-    ("tty_tickets", DefaultShape::Flag),
-    ("umask_override", DefaultShape::Flag),
-    ("use_pty", DefaultShape::Flag),
-    ("visiblepw", DefaultShape::Flag),
-    // Single-valued settings.
-    ("badpass_message", DefaultShape::Value),
-    ("editor", DefaultShape::Value),
-    ("iolog_dir", DefaultShape::Value),
-    ("iolog_file", DefaultShape::Value),
-    ("lecture", DefaultShape::Value),
-    ("lecture_file", DefaultShape::Value),
-    ("logfile", DefaultShape::Value),
-    ("loglinelen", DefaultShape::Value),
-    ("mailerpath", DefaultShape::Value),
-    ("mailfrom", DefaultShape::Value),
-    ("mailsub", DefaultShape::Value),
-    ("mailto", DefaultShape::Value),
-    ("passprompt", DefaultShape::Value),
-    ("passwd_timeout", DefaultShape::Value),
-    ("passwd_tries", DefaultShape::Value),
-    ("runas_default", DefaultShape::Value),
-    ("secure_path", DefaultShape::Value),
-    ("syslog", DefaultShape::Value),
-    ("timestamp_timeout", DefaultShape::Value),
-    ("timestampdir", DefaultShape::Value),
-    ("timestampowner", DefaultShape::Value),
-    ("umask", DefaultShape::Value),
-    ("verifypw", DefaultShape::Value),
-    // Lists.
-    ("env_check", DefaultShape::List),
-    ("env_delete", DefaultShape::List),
-    ("env_file", DefaultShape::List),
-    ("env_keep", DefaultShape::List),
-];
-
-/// The settings this implementation actually acts on.
-///
-/// A name in [`KNOWN_DEFAULTS`] but not here parses cleanly and then does
-/// nothing, which is the same silence the shape checks exist to break — so
-/// `visudo` says so rather than letting the administrator believe
-/// `Defaults requiretty` had an effect. Every entry added here must have a
-/// consumer; the test `honoured_defaults_are_all_known` keeps the two lists
-/// from drifting apart, which is the failure this tree keeps rediscovering
-/// whenever two hand-maintained lists have to agree.
-static HONOURED_DEFAULTS: &[&str] = &["env_check", "env_keep", "env_reset", "timestamp_timeout"];
-
-/// Look up a setting's shape, or `None` if the name is not in [`KNOWN_DEFAULTS`].
-fn default_shape(name: &str) -> Option<DefaultShape> {
-    KNOWN_DEFAULTS
-        .iter()
-        .find(|(known, _)| *known == name)
-        .map(|(_, shape)| *shape)
-}
-
-/// Represents who a command may be run as.
-#[derive(Debug, Clone)]
-struct RunasSpec {
-    users: Vec<String>,
-    groups: Vec<String>,
-}
-
-impl Default for RunasSpec {
-    fn default() -> Self {
-        Self {
-            users: vec!["root".to_string()],
-            groups: Vec::new(),
-        }
-    }
-}
-
-/// A single command specification in a privilege entry.
-#[derive(Debug, Clone)]
-struct CmndSpec {
-    /// Whether NOPASSWD is set for this command.
-    nopasswd: bool,
-    /// Whether NOEXEC is set for this command.
-    noexec: bool,
-    /// Whether SETENV is allowed.
-    setenv: bool,
-    /// The command pattern (path or ALL).
-    command: String,
-    /// Optional arguments pattern (empty = any args).
-    args: String,
-}
-
-/// A complete privilege specification line.
-#[derive(Debug, Clone)]
-struct PrivilegeSpec {
-    /// The user or group this applies to (may be an alias name, %group, etc.)
-    users: Vec<String>,
-    /// Hosts this applies on.
-    hosts: Vec<String>,
-    /// Runas specification.
-    runas: RunasSpec,
-    /// Allowed commands.
-    commands: Vec<CmndSpec>,
-}
-
-/// Complete parsed sudoers configuration.
-#[derive(Debug, Clone)]
-struct SudoersConfig {
-    user_aliases: HashMap<String, Vec<String>>,
-    host_aliases: HashMap<String, Vec<String>>,
-    cmnd_aliases: HashMap<String, Vec<String>>,
-    runas_aliases: HashMap<String, Vec<String>>,
-    defaults: Vec<DefaultsDirective>,
-    privileges: Vec<PrivilegeSpec>,
-}
-
-impl SudoersConfig {
-    fn new() -> Self {
-        Self {
-            user_aliases: HashMap::new(),
-            host_aliases: HashMap::new(),
-            cmnd_aliases: HashMap::new(),
-            runas_aliases: HashMap::new(),
-            defaults: Vec::new(),
-            privileges: Vec::new(),
-        }
-    }
-
-    /// Every globally-scoped setting named `key`, in written order.
-    ///
-    /// `'k` is separate from `'a` on purpose: tying the key's lifetime to the
-    /// config's would make everything borrowed from the config live only as
-    /// long as the *name that was looked up*, so `get_default` could not hand
-    /// its result back to a caller holding only the config.
-    fn global_settings<'a, 'k>(
-        &'a self,
-        key: &'k str,
-    ) -> impl Iterator<Item = &'a DefaultSetting> + use<'a, 'k> {
-        self.defaults
-            .iter()
-            .filter(|d| d.scope.is_empty())
-            .flat_map(|d| d.settings.iter())
-            .filter(move |s| s.name == key)
-    }
-
-    /// Get the value of a Defaults setting (global scope).
-    ///
-    /// Later lines win, as in sudo — the last `Defaults` mentioning a setting is
-    /// the one in force. The old implementation returned the *first* match,
-    /// so a file that overrode a setting further down kept the earlier value.
-    fn get_default(&self, key: &str) -> Option<&str> {
-        self.global_settings(key).last().map(|s| match s.op {
-            // A flag's truth is in the operator, not the value; render it so
-            // `is_default_set` and the `timestamp_timeout` parse both see a
-            // string, as they did when everything was a string pair.
-            DefaultOp::Negate => "false",
-            _ if s.value.is_empty() => "true",
-            _ => s.value.as_str(),
-        })
-    }
-
-    /// Check if a Defaults flag is set (boolean setting).
-    fn is_default_set(&self, key: &str) -> bool {
-        self.get_default(key)
-            .is_some_and(|v| v != "false" && v != "0")
-    }
-
-    /// Apply the `=`/`+=`/`-=` sequence for a list setting onto `base`.
-    ///
-    /// `=` replaces the accumulated list, `+=` appends, `-=` removes — the
-    /// operators exist to be applied in order, which is why the parser keeps
-    /// them instead of gluing them onto the name.
-    fn resolve_list(&self, key: &str, base: &[&str]) -> Vec<String> {
-        let mut result: Vec<String> = base.iter().map(|s| (*s).to_string()).collect();
-        for setting in self.global_settings(key) {
-            let words: Vec<&str> = setting
-                .value
-                .split_whitespace()
-                .map(|w| w.trim_matches('"'))
-                .filter(|w| !w.is_empty())
-                .collect();
-            match setting.op {
-                DefaultOp::Set => result = words.iter().map(|w| (*w).to_string()).collect(),
-                DefaultOp::Add => {
-                    for word in words {
-                        if !result.iter().any(|r| r == word) {
-                            result.push(word.to_string());
-                        }
-                    }
-                }
-                DefaultOp::Remove => result.retain(|r| !words.iter().any(|w| r == w)),
-                // `!env_keep` — sudoers' disable operator for a list.
-                DefaultOp::Negate => result.clear(),
-            }
-        }
-        result
-    }
-
-    /// Get env_keep list from Defaults.
-    ///
-    /// The built-in list is the *base* a bare `env_keep=` replaces, matching
-    /// sudo: `Defaults env_keep = "X"` keeps only `X`, while
-    /// `Defaults env_keep += "X"` keeps the built-ins and `X`. The old code
-    /// could not tell those apart — it never saw the `+=` form at all — so it
-    /// treated both as "add", and a file that deliberately narrowed the kept
-    /// environment did not narrow it.
-    fn env_keep_list(&self) -> Vec<String> {
-        self.resolve_list("env_keep", DEFAULT_ENV_KEEP)
-    }
-
-    /// Get env_check list from Defaults.
-    fn env_check_list(&self) -> Vec<String> {
-        self.resolve_list("env_check", &[])
-    }
-
-    /// Get the timestamp_timeout (in seconds).
-    fn timestamp_timeout(&self) -> u64 {
-        self.get_default("timestamp_timeout")
-            .and_then(|v| v.parse::<f64>().ok())
-            .map(|minutes| {
-                if minutes < 0.0 {
-                    // Negative means never expire
-                    u64::MAX
-                } else {
-                    (minutes * 60.0) as u64
-                }
-            })
-            .unwrap_or(DEFAULT_TIMEOUT)
-    }
-}
-
-// ============================================================================
-// Sudoers parser
-// ============================================================================
-
-/// Parse the sudoers file content into a `SudoersConfig`.
-fn parse_sudoers(content: &str) -> Result<SudoersConfig, SudoError> {
-    let mut config = SudoersConfig::new();
-    let mut continued_line = String::new();
-
-    for raw_line in content.lines() {
-        let trimmed = raw_line.trim();
-
-        // Skip comments and empty lines.
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-
-        // Handle line continuation (trailing backslash).
-        if let Some(stripped) = trimmed.strip_suffix('\\') {
-            continued_line.push_str(stripped);
-            continued_line.push(' ');
-            continue;
-        }
-
-        let line = if continued_line.is_empty() {
-            trimmed.to_string()
-        } else {
-            continued_line.push_str(trimmed);
-            let result = continued_line.clone();
-            continued_line.clear();
-            result
-        };
-
-        parse_sudoers_line(&line, &mut config)?;
-    }
-
-    // Handle any remaining continued line.
-    if !continued_line.is_empty() {
-        parse_sudoers_line(continued_line.trim(), &mut config)?;
-    }
-
-    Ok(config)
-}
-
-/// Parse a single (possibly joined) sudoers line.
-fn parse_sudoers_line(line: &str, config: &mut SudoersConfig) -> Result<(), SudoError> {
-    // Alias definitions.
-    if let Some(rest) = line.strip_prefix("User_Alias") {
-        parse_alias(rest.trim(), &mut config.user_aliases)?;
-        return Ok(());
-    }
-    if let Some(rest) = line.strip_prefix("Host_Alias") {
-        parse_alias(rest.trim(), &mut config.host_aliases)?;
-        return Ok(());
-    }
-    if let Some(rest) = line.strip_prefix("Cmnd_Alias") {
-        parse_alias(rest.trim(), &mut config.cmnd_aliases)?;
-        return Ok(());
-    }
-    if let Some(rest) = line.strip_prefix("Runas_Alias") {
-        parse_alias(rest.trim(), &mut config.runas_aliases)?;
-        return Ok(());
-    }
-
-    // Defaults directive.
-    if let Some(rest) = strip_defaults_keyword(line) {
-        parse_defaults(rest, config)?;
-        return Ok(());
-    }
-
-    // #include / #includedir (legacy format — also @include / @includedir).
-    if line.starts_with("#include")
-        || line.starts_with("@include")
-        || line.starts_with("#includedir")
-        || line.starts_with("@includedir")
-    {
-        // In Slate OS, includes are handled at a higher level; skip in parsing.
-        return Ok(());
-    }
-
-    // Otherwise it is a user privilege specification.
-    parse_privilege_spec(line, config)?;
-    Ok(())
-}
-
-/// Parse an alias definition: `NAME = member1, member2, ...`
-fn parse_alias(text: &str, aliases: &mut HashMap<String, Vec<String>>) -> Result<(), SudoError> {
-    // Multiple aliases can be on one line, separated by `:`.
-    for alias_part in text.split(':') {
-        let alias_part = alias_part.trim();
-        // `split_once` rather than `find` plus two slices: it hands back both
-        // sides already past the delimiter, so nothing here depends on `=`
-        // being one byte wide, and there is no index to get wrong.
-        let (name, members_str) = alias_part
-            .split_once('=')
-            .ok_or_else(|| SudoError::ParseError(format!("missing '=' in alias: {alias_part}")))?;
-        let name = name.trim().to_string();
-        let members: Vec<String> = members_str
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-
-        if name.is_empty() {
-            return Err(SudoError::ParseError("empty alias name".to_string()));
-        }
-        if !name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
-            return Err(SudoError::ParseError(format!(
-                "alias name must start with uppercase: {name}"
-            )));
-        }
-        aliases.insert(name, members);
-    }
-    Ok(())
-}
-
-/// Strip the `Defaults` keyword, but only where it really is the keyword.
-///
-/// A bare `strip_prefix("Defaults")` also fires on a line whose first word
-/// merely begins with it — a user named `Defaultsfoo` — and the remainder is
-/// then read as a settings list. That was harmless while no directive was ever
-/// rejected; now that malformed ones are errors, it would make `visudo` refuse
-/// a file that is entirely correct, which is the one failure a validator must
-/// not have. The keyword ends at whitespace, at a scope sigil, or at the end of
-/// the line.
-fn strip_defaults_keyword(line: &str) -> Option<&str> {
-    let rest = line.strip_prefix("Defaults")?;
-    match rest.chars().next() {
-        None => Some(rest),
-        Some(c) if c.is_whitespace() || matches!(c, ':' | '@' | '!' | '>') => Some(rest),
-        Some(_) => None,
-    }
-}
-
-/// Parse a Defaults directive.
-///
-/// Rejects what it can *prove* is wrong — an empty setting name, a name with a
-/// space in it, an unbalanced quote, a negated setting that also carries a
-/// value, a scope with nothing scoped to it, and a known setting used with an
-/// operator its shape forbids. It deliberately does **not** reject a setting
-/// name merely because [`KNOWN_DEFAULTS`] has not heard of it; see that table's
-/// note. `validate_sudoers_line` turns unknown names into warnings, which is
-/// where an incomplete table can be reported without being able to block a save.
-fn parse_defaults(rest: &str, config: &mut SudoersConfig) -> Result<(), SudoError> {
-    // Determine scope: Defaults, Defaults:user, Defaults@host, Defaults!cmnd,
-    // Defaults>runas.
-    //
-    // The sigil counts as a scope only when it is attached to the keyword with
-    // no space, which is sudo's rule and is the only thing separating
-    // `Defaults!/usr/bin/foo bar` (a command-scoped default) from
-    // `Defaults !requiretty` (a negated global flag). `rest` therefore must be
-    // examined before it is trimmed -- trimming first loses the distinction,
-    // and the whole space of negated global flags is then read as scopes.
-    let first = rest.chars().next();
-    let (scope, settings_str) = if first.is_some_and(|c| matches!(c, ':' | '@' | '!' | '>')) {
-        // `split_at` on the first char's own length rather than `[..1]`: the
-        // sigils are ASCII, but that is a fact about the sigils and not
-        // something the slice established.
-        let (scope_char, after) = rest.split_at(first.map_or(0, char::len_utf8));
-        let Some(space_pos) = after.find(char::is_whitespace) else {
-            // A scope and nothing scoped to it. This used to return `Ok(())`,
-            // discarding the line in silence — so `Defaults:alice` on its own
-            // was accepted, did nothing, and looked to its author like it had
-            // restricted something for alice.
-            return Err(SudoError::ParseError(format!(
-                "Defaults{rest}: scope with no settings after it"
-            )));
-        };
-        let (scope_name, settings) = after.split_at(space_pos);
-        if scope_name.trim().is_empty() {
-            return Err(SudoError::ParseError(
-                "empty scope in Defaults directive".to_string(),
-            ));
-        }
-        (
-            format!("{scope_char}{}", scope_name.trim()),
-            settings.trim(),
-        )
-    } else {
-        // Global defaults. Trimmed only here, after the sigil test above has
-        // had its look at the unmodified string.
-        let rest = rest.trim();
-        (String::new(), rest)
-    };
-
-    if settings_str.is_empty() {
-        return Err(SudoError::ParseError(
-            "Defaults directive with no settings".to_string(),
-        ));
-    }
-
-    let mut settings = Vec::new();
-    for part in settings_str.split(',') {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        settings.push(parse_default_setting(part)?);
-    }
-
-    if settings.is_empty() {
-        return Err(SudoError::ParseError(
-            "Defaults directive with no settings".to_string(),
-        ));
-    }
-
-    config.defaults.push(DefaultsDirective { scope, settings });
-    Ok(())
-}
-
-/// Parse one `name` / `!name` / `name=v` / `name+=v` / `name-=v` setting.
-fn parse_default_setting(part: &str) -> Result<DefaultSetting, SudoError> {
-    // The operator lives at the *first* `=`, and a `+` or `-` immediately
-    // before that `=` is part of the operator rather than of the name.
-    //
-    // Scanning the whole string for `+=` or `-=` instead would be wrong twice
-    // over: it would find one inside a quoted value (`passprompt="a-=b"` would
-    // be read as the setting `passprompt="a` removing `b`), and splitting at the
-    // first `=` and calling everything before it the name -- which is what this
-    // used to do -- produced the name `env_keep +`.
-    let (name_raw, op, value_raw) = match part.split_once('=') {
-        Some((lhs, rhs)) => match lhs.trim() {
-            trimmed if trimmed.ends_with('+') => (
-                trimmed.strip_suffix('+').unwrap_or(trimmed),
-                DefaultOp::Add,
-                Some(rhs),
-            ),
-            trimmed if trimmed.ends_with('-') => (
-                trimmed.strip_suffix('-').unwrap_or(trimmed),
-                DefaultOp::Remove,
-                Some(rhs),
-            ),
-            trimmed => (trimmed, DefaultOp::Set, Some(rhs)),
-        },
-        None => match part.strip_prefix('!') {
-            Some(stripped) => (stripped, DefaultOp::Negate, None),
-            None => (part, DefaultOp::Set, None),
-        },
-    };
-
-    let name = name_raw.trim();
-
-    // A leading `!` that survived the split is one of two mistakes, neither of
-    // which can be a typo for anything valid: `!name=value` asserts two
-    // contradictory things about one setting, and `!!name` repeats the
-    // operator. Both are errors rather than a choice between the halves.
-    if let Some(inner) = name.strip_prefix('!') {
-        return Err(SudoError::ParseError(if op == DefaultOp::Negate {
-            format!("repeated '!' in Defaults setting name: {part}")
-        } else {
-            format!(
-                "Defaults setting {} is both negated and given a value",
-                quoteaf_os(inner.trim())
-            )
-        }));
-    }
-
-    if name.is_empty() {
-        return Err(SudoError::ParseError(format!(
-            "empty setting name in Defaults: {part}"
-        )));
-    }
-    // A space inside the name means the line was written as `passwd tries=3` or
-    // a comma was forgotten between two settings. Either way the name cannot
-    // match anything, so storing it would be storing a line that does nothing.
-    if name.contains(char::is_whitespace) {
-        return Err(SudoError::ParseError(format!(
-            "Defaults setting name contains whitespace (missing comma?): {name}"
-        )));
-    }
-
-    let value = match value_raw {
-        None => String::new(),
-        Some(raw) => {
-            let raw = raw.trim();
-            // An odd number of quotes means the value ran off the end of the
-            // line. `trim_matches('"')` used to swallow that: `env_keep = "A B`
-            // became the value `A B` and the file looked fine.
-            if raw.matches('"').count() % 2 != 0 {
-                return Err(SudoError::ParseError(format!(
-                    "unterminated quote in Defaults value for {}",
-                    quoteaf_os(name)
-                )));
-            }
-            raw.trim_matches('"').to_string()
-        }
-    };
-
-    // Shape checks run only for names we actually know the shape of. For an
-    // unknown name there is no ground truth to check against, and inventing one
-    // would reject correct files.
-    if let Some(shape) = default_shape(name) {
-        let bad = match (shape, op) {
-            (DefaultShape::Flag, DefaultOp::Set) if value_raw.is_some() => {
-                Some("is a boolean flag and takes no value")
-            }
-            (DefaultShape::Flag, DefaultOp::Add | DefaultOp::Remove) => {
-                Some("is a boolean flag; '+=' and '-=' do not apply to it")
-            }
-            // `!env_keep` is legal and empties the list — sudoers documents `!`
-            // as the "disable" operator for list settings alongside `=`/`+=`/`-=`.
-            // A single-valued setting has nothing to disable, so `!secure_path`
-            // stays an error.
-            (DefaultShape::Value, DefaultOp::Negate) => {
-                Some("takes a value and cannot be negated with '!'")
-            }
-            (DefaultShape::Value | DefaultShape::List, DefaultOp::Set) if value_raw.is_none() => {
-                Some("requires a value, as in 'name=value'")
-            }
-            (DefaultShape::Value, DefaultOp::Add | DefaultOp::Remove) => {
-                Some("holds a single value; '+=' and '-=' apply only to lists")
-            }
-            _ => None,
-        };
-        if let Some(reason) = bad {
-            return Err(SudoError::ParseError(format!(
-                "Defaults setting {} {reason}",
-                quoteaf_os(name)
-            )));
-        }
-    }
-
-    Ok(DefaultSetting {
-        name: name.to_string(),
-        op,
-        value,
-    })
-}
-
-/// Parse a user privilege specification line.
-///
-/// Format: `user host = (runas) NOPASSWD: command, command, ...`
-fn parse_privilege_spec(line: &str, config: &mut SudoersConfig) -> Result<(), SudoError> {
-    // Split at first `=` that is not inside parentheses.
-    let (left, right) = split_at_eq_outside_parens(line).ok_or_else(|| {
-        SudoError::ParseError(format!("missing '=' in privilege specification: {line}"))
-    })?;
-    let (left, right) = (left.trim(), right.trim());
-
-    // Left side: user(s) host(s) separated by whitespace.
-    // The last whitespace-separated token(s) before `=` are the hosts.
-    // Simple heuristic: split by whitespace, first token is user spec,
-    // remaining are hosts. If there is only one token, host is ALL.
-    let left_parts: Vec<&str> = left.split_whitespace().collect();
-    let Some((user_str, host_parts)) = left_parts.split_first() else {
-        return Err(SudoError::ParseError(
-            "empty left side of privilege spec".to_string(),
-        ));
-    };
-    let (user_strs, host_strs) = if host_parts.is_empty() {
-        (vec![*user_str], vec!["ALL"])
-    } else {
-        (vec![*user_str], host_parts.to_vec())
-    };
-
-    let users: Vec<String> = user_strs.iter().map(|s| (*s).to_string()).collect();
-    let hosts: Vec<String> = host_strs.iter().map(|s| (*s).to_string()).collect();
-
-    // Right side: optional (runas) then tag:command pairs.
-    let (runas, cmnd_str) = parse_runas_prefix(right);
-    let commands = parse_cmnd_list(cmnd_str)?;
-
-    config.privileges.push(PrivilegeSpec {
-        users,
-        hosts,
-        runas,
-        commands,
-    });
-    Ok(())
-}
-
-/// Split at the `=` that is not inside parentheses, returning both sides.
-///
-/// Returns the halves rather than the position, because the position was
-/// only ever useful for producing them and made every caller re-derive the
-/// `+ 1` that steps over the `=`. That step is correct here only because `=`
-/// is one byte; expressed as `strip_prefix` it is correct because it strips
-/// the character it names.
-fn split_at_eq_outside_parens(s: &str) -> Option<(&str, &str)> {
-    let mut depth = 0u32;
-    for (i, c) in s.char_indices() {
-        match c {
-            '(' => depth = depth.saturating_add(1),
-            ')' => depth = depth.saturating_sub(1),
-            '=' if depth == 0 => {
-                let (left, from_eq) = s.split_at(i);
-                return Some((left, from_eq.strip_prefix('=').unwrap_or(from_eq)));
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// Parse the optional `(runas_user:runas_group)` prefix from the right side.
-fn parse_runas_prefix(s: &str) -> (RunasSpec, &str) {
-    let trimmed = s.trim();
-    if !trimmed.starts_with('(') {
-        return (RunasSpec::default(), trimmed);
-    }
-
-    // `(` is known present from the `starts_with` above, and `split_once` takes
-    // the rest apart at `)` without an index that has to step over it.
-    if let Some(after_open) = trimmed.strip_prefix('(')
-        && let Some((inner, rest)) = after_open.split_once(')')
-    {
-        let rest = rest.trim();
-        let (user_part, group_part) = inner.split_once(':').unwrap_or((inner, ""));
-
-        let users: Vec<String> = user_part
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        let groups: Vec<String> = group_part
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-
-        let runas = RunasSpec {
-            users: if users.is_empty() {
-                vec!["root".to_string()]
-            } else {
-                users
-            },
-            groups,
-        };
-        (runas, rest)
-    } else {
-        (RunasSpec::default(), trimmed)
-    }
-}
-
-/// The tags a command list may carry, and what each one sets.
-///
-/// One table rather than a chain of `strip_prefix` arms, so that "is this a
-/// tag?" and "what does it do?" cannot disagree — the check that rejects an
-/// unknown tag below reads the same list the parser applies.
-static CMND_TAGS: &[(&str, CmndTag)] = &[
-    ("NOPASSWD:", CmndTag::NoPasswd(true)),
-    ("PASSWD:", CmndTag::NoPasswd(false)),
-    ("NOEXEC:", CmndTag::NoExec(true)),
-    ("EXEC:", CmndTag::NoExec(false)),
-    ("SETENV:", CmndTag::SetEnv(true)),
-    ("NOSETENV:", CmndTag::SetEnv(false)),
-];
-
-/// The effect of a command-list tag.
-#[derive(Debug, Clone, Copy)]
-enum CmndTag {
-    NoPasswd(bool),
-    NoExec(bool),
-    SetEnv(bool),
-}
-
-/// Parse a comma-separated command list, handling tags like NOPASSWD:, NOEXEC:, etc.
-///
-/// Rejects a tag with no command after it, a tag-shaped token that is not a
-/// tag, and a command list that is empty. All three used to be accepted and
-/// then quietly amount to nothing: an entry with no commands grants nothing,
-/// which is the safe direction but is never what the line's author meant, and
-/// `visudo -c` said the file was fine.
-fn parse_cmnd_list(s: &str) -> Result<Vec<CmndSpec>, SudoError> {
-    let mut commands = Vec::new();
-    let mut nopasswd = false;
-    let mut noexec = false;
-    let mut setenv = false;
-
-    for part in s.split(',') {
-        let mut part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        let had_tag_prefix = CMND_TAGS.iter().any(|(tag, _)| part.starts_with(tag));
-
-        // Process tags (NOPASSWD:, PASSWD:, NOEXEC:, EXEC:, SETENV:, NOSETENV:).
-        while let Some((tag, effect)) = CMND_TAGS.iter().find(|(tag, _)| part.starts_with(tag)) {
-            match *effect {
-                CmndTag::NoPasswd(v) => nopasswd = v,
-                CmndTag::NoExec(v) => noexec = v,
-                CmndTag::SetEnv(v) => setenv = v,
-            }
-            part = part.get(tag.len()..).unwrap_or("").trim();
-        }
-
-        if part.is_empty() {
-            if had_tag_prefix {
-                // `NOPASSWD:` with nothing after it. The tag applies to a
-                // command; with no command it applies to nothing, and the next
-                // entry in the list inherits it by accident.
-                return Err(SudoError::ParseError(
-                    "tag with no command after it in command list".to_string(),
-                ));
-            }
-            continue;
-        }
-
-        // A token shaped like a tag but not in the table is a misspelling —
-        // `NOPASSWORD:` for `NOPASSWD:`, most likely. Accepted, it becomes a
-        // *command named* `NOPASSWORD:`, so the entry grants a program that
-        // does not exist and silently still asks for a password.
-        if let Some(word) = part.split_whitespace().next()
-            && word.ends_with(':')
-            && word
-                .chars()
-                .all(|c| c.is_ascii_uppercase() || c == '_' || c == ':')
-        {
-            return Err(SudoError::ParseError(format!(
-                "unknown tag in command list: {word}"
-            )));
-        }
-
-        // Split command from optional arguments. `split_once` hands back both
-        // halves already past the space, so there is no `space + 1` whose
-        // correctness rests on the separator being one byte wide.
-        let (cmd, args) = part
-            .split_once(' ')
-            .map_or((part, ""), |(cmd, args)| (cmd.trim(), args.trim()));
-
-        commands.push(CmndSpec {
-            nopasswd,
-            noexec,
-            setenv,
-            command: cmd.to_string(),
-            args: args.to_string(),
-        });
-    }
-
-    if commands.is_empty() {
-        return Err(SudoError::ParseError(
-            "privilege specification with no commands".to_string(),
-        ));
-    }
-
-    Ok(commands)
-}
-
-// ============================================================================
-// Sudoers syntax validation (for visudo)
-// ============================================================================
-
-/// Errors found during sudoers syntax validation.
-#[derive(Debug, Clone)]
-struct SyntaxError {
-    line_num: usize,
-    message: String,
-    is_warning: bool,
-}
-
-impl fmt::Display for SyntaxError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let severity = if self.is_warning { "warning" } else { "error" };
-        write!(f, "line {}: {}: {}", self.line_num, severity, self.message)
-    }
-}
-
-/// Validate sudoers file content, returning any syntax errors.
-fn validate_sudoers(content: &str, strict: bool) -> Vec<SyntaxError> {
-    let mut errors = Vec::new();
-    let mut continued_line = String::new();
-    let mut start_line_num = 0usize;
-
-    for (idx, raw_line) in content.lines().enumerate() {
-        let line_num = idx.wrapping_add(1);
-        let trimmed = raw_line.trim();
-
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-
-        if let Some(stripped) = trimmed.strip_suffix('\\') {
-            if continued_line.is_empty() {
-                start_line_num = line_num;
-            }
-            continued_line.push_str(stripped);
-            continued_line.push(' ');
-            continue;
-        }
-
-        let (final_line, final_line_num) = if continued_line.is_empty() {
-            (trimmed.to_string(), line_num)
-        } else {
-            continued_line.push_str(trimmed);
-            let result = continued_line.clone();
-            continued_line.clear();
-            (result, start_line_num)
-        };
-
-        validate_sudoers_line(&final_line, final_line_num, strict, &mut errors);
-    }
-
-    if !continued_line.is_empty() {
-        errors.push(SyntaxError {
-            line_num: start_line_num,
-            message: "unterminated line continuation".to_string(),
-            is_warning: false,
-        });
-    }
-
-    errors
-}
-
-/// Validate a single sudoers line.
-fn validate_sudoers_line(line: &str, line_num: usize, strict: bool, errors: &mut Vec<SyntaxError>) {
-    // Validate alias definitions.
-    for prefix in &["User_Alias", "Host_Alias", "Cmnd_Alias", "Runas_Alias"] {
-        if let Some(rest) = line.strip_prefix(prefix) {
-            let rest = rest.trim();
-            if !rest.contains('=') {
-                errors.push(SyntaxError {
-                    line_num,
-                    message: format!("{prefix} missing '='"),
-                    is_warning: false,
-                });
-                return;
-            }
-            let name_part = rest.split('=').next().unwrap_or("").trim();
-            if name_part.is_empty() {
-                errors.push(SyntaxError {
-                    line_num,
-                    message: format!("{prefix} has empty name"),
-                    is_warning: false,
-                });
-            } else if !name_part
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_uppercase())
-            {
-                errors.push(SyntaxError {
-                    line_num,
-                    message: format!("{prefix} name must start with uppercase letter"),
-                    is_warning: false,
-                });
-            }
-            return;
-        }
-    }
-
-    // Validate Defaults by *running the parser*, rather than by a separate
-    // check that has to agree with it. This branch used to do neither: it
-    // confirmed there was something after `Defaults` and returned, so every
-    // malformed directive reached `visudo -c` and was reported as fine.
-    if let Some(rest) = strip_defaults_keyword(line) {
-        let mut dummy = SudoersConfig::new();
-        if let Err(e) = parse_defaults(rest, &mut dummy) {
-            errors.push(SyntaxError {
-                line_num,
-                message: e.to_string(),
-                is_warning: false,
-            });
-            return;
-        }
-        // Names the parser could not check. Warnings, not errors: an unlisted
-        // name may be a setting real sudo has and `KNOWN_DEFAULTS` does not.
-        // `visudo` must not be able to refuse a correct file over a gap in our
-        // own table — an administrator cannot fix that.
-        for setting in dummy.defaults.iter().flat_map(|d| d.settings.iter()) {
-            if default_shape(&setting.name).is_none() {
-                errors.push(SyntaxError {
-                    line_num,
-                    message: format!("unknown Defaults setting {}", quoteaf_os(&setting.name)),
-                    is_warning: true,
-                });
-            } else if strict && !HONOURED_DEFAULTS.contains(&setting.name.as_str()) {
-                // Reported only under `-s`, and only for names we do recognise,
-                // so it is a statement about this implementation rather than
-                // about the file. Saying nothing would leave the administrator
-                // believing a setting took effect that never runs.
-                errors.push(SyntaxError {
-                    line_num,
-                    message: format!(
-                        "Defaults setting {} is recognised but not yet honoured by this sudo",
-                        quoteaf_os(&setting.name)
-                    ),
-                    is_warning: true,
-                });
-            }
-        }
-        return;
-    }
-
-    // Skip includes.
-    if line.starts_with("#include")
-        || line.starts_with("@include")
-        || line.starts_with("#includedir")
-        || line.starts_with("@includedir")
-    {
-        return;
-    }
-
-    // Privilege spec must have `=`.
-    if split_at_eq_outside_parens(line).is_none() {
-        errors.push(SyntaxError {
-            line_num,
-            message: "unrecognized line (missing '=' in privilege specification)".to_string(),
-            is_warning: false,
-        });
-        return;
-    }
-
-    // Try to parse it and report any errors.
-    let mut dummy = SudoersConfig::new();
-    if let Err(e) = parse_privilege_spec(line, &mut dummy) {
-        errors.push(SyntaxError {
-            line_num,
-            message: e.to_string(),
-            is_warning: false,
-        });
     }
 }
 
@@ -1249,27 +143,108 @@ fn validate_sudoers_line(line: &str, line_num: usize, strict: bool, errors: &mut
 // Authorization checking
 // ============================================================================
 
-/// Check if a user is authorized by the sudoers config to run a specific command.
+/// The command a decision is about, as sudoers sees it: upstream's
+/// `ctx->user.cmnd` and `ctx->user.cmnd_args`.
 ///
-/// `command` is bytes because it is a path the caller is about to `exec`, and a
-/// path here may hold any byte but `/` and NUL. The sudoers file it is matched
-/// against is text, so a command that is not text can match only `ALL` or a
-/// trailing-`*` prefix — which is the right answer, arrived at by comparison
-/// rather than by refusing to look.
+/// `command` is the program as the caller named it -- or the pseudo-command
+/// `sudoedit` -- and bytes, because it is a path the caller is about to `exec`
+/// and a path may hold any byte but `/` and NUL. `args` is every argument after
+/// it joined with single spaces, or `None` when there were none: what a rule's
+/// `""` asks for, and not the same as one argument that is empty.
+#[derive(Debug, Clone, Copy)]
+struct Request<'a> {
+    command: &'a [u8],
+    args: Option<&'a [u8]>,
+}
+
+// Only the tests ask about a command without arguments by name.
+#[cfg(test)]
+impl<'a> Request<'a> {
+    /// A request with no arguments.
+    const fn bare(command: &'a [u8]) -> Self {
+        Request {
+            command,
+            args: None,
+        }
+    }
+}
+
+/// sudo's `user_args`: the arguments joined with single spaces, or `None`
+/// when there are none.
+fn user_args(args: &[OsString]) -> Option<Vec<u8>> {
+    if args.is_empty() {
+        return None;
+    }
+    let mut joined = Vec::new();
+    for (i, arg) in args.iter().enumerate() {
+        if i > 0 {
+            joined.push(b' ');
+        }
+        joined.extend_from_slice(&os_bytes(arg));
+    }
+    Some(joined)
+}
+
+/// What one command spec says about a request: sudoers' `ALLOW`, `DENY` or
+/// `UNSPEC`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    /// The spec names the command, and grants it.
+    Allow,
+    /// The spec names the command, negated: it is refused, whatever an
+    /// earlier rule said.
+    Deny,
+    /// The spec does not name the command; it decides nothing.
+    Unspec,
+}
+
+impl Verdict {
+    /// The verdict under a `!`.
+    const fn negated(self) -> Self {
+        match self {
+            Verdict::Allow => Verdict::Deny,
+            Verdict::Deny => Verdict::Allow,
+            Verdict::Unspec => Verdict::Unspec,
+        }
+    }
+}
+
+/// How deep `Cmnd_Alias`es may name one another before one is taken to name
+/// itself. Upstream refuses a loop when it reads the file; this matches
+/// nothing instead, so a loop that got past the parser grants nothing.
+const MAX_ALIAS_DEPTH: usize = 32;
+
+/// Check whether the sudoers configuration lets `username` run `request` as
+/// `target_user` (and `target_group`) on `hostname`, returning the command
+/// spec that allowed it.
+///
+/// # sudoers' rule, which this follows
+///
+/// Privileges are read from the last to the first, and within one its
+/// commands from the last to the first; **the first command spec that names
+/// the request decides, either way** -- `!/usr/bin/passwd` refuses, and that
+/// refusal stands over any earlier `ALL`. A spec that does not name the
+/// request decides nothing. (`sudoers_lookup` and `cmndlist_matches`.)
+///
+/// Until 2026-10-01 a negated spec was read as "matches every command but this
+/// one": `alice ALL = !/usr/bin/passwd` granted alice every other command, and
+/// `alice ALL = ALL, !/usr/bin/passwd` granted passwd too, because the
+/// negation did not match it and the search went on to `ALL`. And a rule's
+/// arguments were never compared at all -- `alice ALL = /usr/bin/systemctl
+/// restart nginx` let alice run `systemctl` with anything.
 fn check_authorization(
     config: &SudoersConfig,
     username: &str,
     hostname: &str,
     target_user: &str,
     target_group: &str,
-    command: &[u8],
+    request: &Request<'_>,
     user_groups: &[String],
 ) -> Option<CmndSpec> {
     // One secure path for every command spec in this decision, read once from
     // the configuration rather than per match.
     let secure = secure_path_of(config);
     let dirs = path_dirs(&secure);
-    // Iterate privileges in reverse order (last match wins, like real sudo).
     for priv_spec in config.privileges.iter().rev() {
         if !user_matches(
             &priv_spec.users,
@@ -1292,18 +267,85 @@ fn check_authorization(
         }
 
         for cmnd in priv_spec.commands.iter().rev() {
-            if command_matches(
+            match cmnd_matches(
                 &cmnd.command,
                 &cmnd.args,
-                command,
+                request,
                 &config.cmnd_aliases,
                 &dirs,
+                0,
             ) {
-                return Some(cmnd.clone());
+                Verdict::Allow => return Some(cmnd.clone()),
+                Verdict::Deny => return None,
+                Verdict::Unspec => {}
             }
         }
     }
     None
+}
+
+/// What one command spec -- a command, a `Cmnd_Alias`, either maybe negated
+/// -- says about `request`: sudoers' `cmnd_matches`.
+fn cmnd_matches(
+    spec_cmd: &str,
+    spec_args: &str,
+    request: &Request<'_>,
+    aliases: &HashMap<String, Vec<String>>,
+    dirs: &[&str],
+    depth: usize,
+) -> Verdict {
+    let (negated, spec) = strip_negation(spec_cmd);
+    let verdict = if let Some(members) = aliases.get(spec) {
+        // An alias is a list of its own, decided the same way: the last member
+        // that names the request.
+        if depth >= MAX_ALIAS_DEPTH {
+            Verdict::Unspec
+        } else {
+            members
+                .iter()
+                .rev()
+                .map(|member| {
+                    let (cmd, args) = split_command(member);
+                    cmnd_matches(cmd, args, request, aliases, dirs, depth.saturating_add(1))
+                })
+                .find(|v| *v != Verdict::Unspec)
+                .unwrap_or(Verdict::Unspec)
+        }
+    } else if command_matches(spec, spec_args, request, dirs) {
+        Verdict::Allow
+    } else {
+        Verdict::Unspec
+    };
+    if negated { verdict.negated() } else { verdict }
+}
+
+/// Whether the caller's arguments satisfy a spec's: sudoers'
+/// `command_args_match`.
+///
+/// A rule with no arguments allows any; `""` allows none; `^...$` is a POSIX
+/// extended regular expression over the joined arguments; anything else is an
+/// `fnmatch(3)` pattern over them -- with `FNM_PATHNAME` for `sudoedit`, whose
+/// arguments are paths, so a `*` there never crosses a `/`.
+fn args_match(spec_cmd: &str, spec_args: &str, user_args: Option<&[u8]>) -> bool {
+    if spec_args.is_empty() {
+        return true;
+    }
+    if spec_args == "\"\"" {
+        return user_args.is_none();
+    }
+    let args = user_args.unwrap_or_default();
+    if spec_args.len() > 1 && spec_args.starts_with('^') && spec_args.ends_with('$') {
+        // A pattern that does not compile matches nothing, as upstream's
+        // `regex_matches` denies: a rule that cannot be read grants nothing.
+        return ere::Regex::new(spec_args.as_bytes())
+            .is_ok_and(|re| re.is_match(args).unwrap_or(false));
+    }
+    let flags = if spec_cmd == "sudoedit" {
+        fnmatch::Flags::PATHNAME
+    } else {
+        fnmatch::Flags::NONE
+    };
+    fnmatch::fnmatch(spec_args.as_bytes(), args, flags)
 }
 
 /// Check if a username matches a user specification list.
@@ -1406,77 +448,72 @@ fn runas_matches(
     user_ok && group_ok
 }
 
-/// Check if a command matches a command specification.
-fn command_matches(
-    spec_cmd: &str,
-    spec_args: &str,
-    actual_cmd: &[u8],
-    aliases: &HashMap<String, Vec<String>>,
-    // The secure path an unqualified spec resolves against; see
-    // `command_path_matches`.
-    dirs: &[&str],
-) -> bool {
-    if spec_cmd == "ALL" {
+/// Whether one command spec names `request`: sudoers' `command_matches`.
+fn command_matches(spec: &str, spec_args: &str, request: &Request<'_>, dirs: &[&str]) -> bool {
+    // `ALL` names every command, `sudoedit` among them, whatever its
+    // arguments.
+    if spec == "ALL" {
         return true;
     }
-
-    // Check aliases.
-    if let Some(members) = aliases.get(spec_cmd) {
-        for member in members {
-            if member == "ALL" {
-                return true;
-            }
-            // Split member into command and args.
-            let (cmd, args) = member
-                .split_once(' ')
-                .map_or((member.as_str(), ""), |(cmd, args)| (cmd, args.trim()));
-            if command_path_matches(cmd, actual_cmd, dirs) && (args.is_empty() || args == "*") {
-                return true;
-            }
-        }
-        return false;
+    // `sudoedit` is a pseudo-command: it names a request to edit and nothing
+    // else, and its arguments are the files. A rule letting a user RUN
+    // `/etc/motd` does not let them edit it, and a `sudoedit` rule does not
+    // let them run a program called `sudoedit`.
+    if spec == "sudoedit" || request.command == b"sudoedit" {
+        return spec == "sudoedit"
+            && request.command == b"sudoedit"
+            && args_match(spec, spec_args, request.args);
     }
-
-    // Negation.
-    if let Some(negated) = spec_cmd.strip_prefix('!') {
-        return !command_path_matches(negated, actual_cmd, dirs);
-    }
-
-    if !command_path_matches(spec_cmd, actual_cmd, dirs) {
-        return false;
-    }
-
-    // If args spec is empty, allow any args.
-    if spec_args.is_empty() || spec_args == "*" {
-        return true;
-    }
-
-    // Otherwise, we would need to compare the actual args against spec_args.
-    // For simplicity, we match if no args restriction or wildcard.
-    true
+    command_path_matches(spec, request.command, dirs) && args_match(spec, spec_args, request.args)
 }
 
-/// Compare command paths, handling directory wildcards.
-/// One sudoers command spec against one actual command path.
+/// Whether a command spec names the caller's program: the path half of
+/// sudoers' `command_matches`.
 ///
-/// `spec` is text — it came out of `/etc/sudoers`, which this crate reads with
-/// `read_to_string`. `actual` is bytes, for the reason [`check_authorization`]
-/// gives. Every comparison below is therefore between `spec`'s bytes and
-/// `actual`, which decides exactly what the `&str`/`&str` version decided for
-/// every path that *was* text, and answers rather than aborting for the rest.
+/// Both are compared as whole paths, and the caller's is resolved first: on
+/// the secure path when it names no directory, then made canonical, so
+/// `/usr/bin/../../tmp/evil` is `/tmp/evil` before any rule looks at it and a
+/// symlink is the file it points to. Then:
+///
+/// * a spec with a glob character (`*`, `?`, `[`) matches as sudoers'
+///   `fnmatch` with `FNM_PATHNAME` does -- a `*` never crosses a `/`, so
+///   `/usr/bin/*` is the programs in `/usr/bin` and nothing below or beside
+///   it;
+/// * a spec ending in `/` names every program directly in that directory;
+/// * any other spec names one program: the same file, compared canonically
+///   when both exist and by name when either does not, which is upstream's
+///   own fallback.
+///
+/// Until 2026-10-01 a pattern was a prefix test on the path as typed, so
+/// `alice ALL = /usr/bin/*` authorised `sudo /usr/bin/../../tmp/evil`.
+///
+/// `spec` is text -- it came out of `/etc/sudoers`. `actual` is bytes, for the
+/// reason [`Request`] gives, so a program whose path is not text can match
+/// only a pattern or a rule naming the same file.
 fn command_path_matches(spec: &str, actual: &[u8], dirs: &[&str]) -> bool {
-    let spec_bytes = spec.as_bytes();
-    if spec_bytes == actual {
-        return true;
+    let resolved = resolve_for_match(actual, dirs);
+    let canonical = canonical_path(&resolved);
+    if has_glob_meta(spec) {
+        // A program that does not exist cannot run, so matching it by name
+        // grants nothing -- but only a path with no `.`, `..` or empty
+        // component may be matched that way, or the canonical form would be
+        // what decides after all.
+        let subject = canonical
+            .as_deref()
+            .or_else(|| is_clean_absolute(&resolved).then_some(resolved.as_slice()));
+        return subject
+            .is_some_and(|path| fnmatch::fnmatch(spec.as_bytes(), path, fnmatch::Flags::PATHNAME));
     }
-    // Wildcard: `/usr/bin/*` matches any command in `/usr/bin/`.
-    // `strip_suffix` rather than `ends_with` followed by a length subtraction:
-    // it removes the character it names, so the two cannot disagree about how
-    // much to trim.
-    if let Some(dir) = spec.strip_suffix('*')
-        && dir.ends_with('/')
+    if spec.len() > 1
+        && let Some(dir) = spec.strip_suffix('/')
     {
-        return actual.starts_with(dir.as_bytes());
+        // Every program directly in `dir`: the canonical program's parent
+        // is the canonical directory.
+        let want = canonical_path(dir.as_bytes()).unwrap_or_else(|| dir.as_bytes().to_vec());
+        return canonical
+            .as_deref()
+            .and_then(parent_of)
+            .is_some_and(|parent| parent == want);
     }
     // AN UNQUALIFIED SPEC IS RESOLVED, NOT BASENAME-MATCHED.
     //
@@ -1499,9 +536,50 @@ fn command_path_matches(spec: &str, actual: &[u8], dirs: &[&str]) -> bool {
         let Some(spec_full) = first_on_secure_path(spec, dirs) else {
             return false;
         };
-        return resolve_for_match(actual, dirs) == spec_full.as_bytes();
+        return same_program(spec_full.as_bytes(), &resolved, canonical.as_deref());
     }
-    false
+    same_program(spec.as_bytes(), &resolved, canonical.as_deref())
+}
+
+/// Whether a rule's path and the caller's resolved program are the same
+/// program: the same canonical path when both exist, the same name when
+/// either does not.
+fn same_program(spec: &[u8], resolved: &[u8], canonical: Option<&[u8]>) -> bool {
+    match (canonical_path(spec), canonical) {
+        (Some(want), Some(have)) => want == have,
+        _ => spec == resolved,
+    }
+}
+
+/// `path` with every symlink, `.` and `..` resolved, as bytes; `None` when it
+/// does not exist or cannot be resolved.
+fn canonical_path(path: &[u8]) -> Option<Vec<u8>> {
+    let resolved = fs::canonicalize(Path::new(&os_from_bytes(path))).ok()?;
+    Some(os_bytes(resolved.as_os_str()).into_owned())
+}
+
+/// Whether `path` is absolute and has no `.`, `..` or empty component: a path
+/// whose text is already its canonical form, symlinks aside.
+fn is_clean_absolute(path: &[u8]) -> bool {
+    let Some(rest) = path.strip_prefix(b"/") else {
+        return false;
+    };
+    rest.split(|&b| b == b'/')
+        .all(|part| !part.is_empty() && part != b"." && part != b"..")
+}
+
+/// Everything before the last `/` of an absolute path: `/` for `/x`.
+fn parent_of(path: &[u8]) -> Option<&[u8]> {
+    match path.iter().rposition(|&b| b == b'/') {
+        Some(0) => Some(b"/"),
+        Some(i) => path.get(..i),
+        None => None,
+    }
+}
+
+/// Whether a command spec is a pattern: sudoers' `has_meta`.
+fn has_glob_meta(spec: &str) -> bool {
+    spec.contains(['*', '?', '['])
 }
 
 /// The first executable named `command` in `dirs`, or `None`.
@@ -2043,197 +1121,6 @@ fn is_leap_year(year: u64) -> bool {
 }
 
 // ============================================================================
-// Session I/O recording and replay
-// ============================================================================
-
-/// A recorded session entry.
-#[derive(Debug, Clone)]
-struct SessionEntry {
-    /// The session's directory name. An `OsString` because that is what a
-    /// directory name is: the previous `String` was filled from
-    /// `file_name().and_then(|n| n.to_str())`, whose `None` arm `continue`d --
-    /// so a session directory whose name is not valid UTF-8 did not fail to
-    /// replay, it failed to *appear*, and `sudoreplay -l` listed the recording
-    /// as though it had never been made.
-    id: OsString,
-    user: String,
-    target_user: String,
-    command: String,
-    timestamp: u64,
-    _tty: String,
-}
-
-/// List recorded sessions from the I/O log directory.
-fn list_sessions(io_dir: &OsStr) -> Vec<SessionEntry> {
-    let mut sessions = Vec::new();
-    let dir = Path::new(io_dir);
-    if !dir.is_dir() {
-        return sessions;
-    }
-
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return sessions,
-    };
-
-    for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-
-        let Some(session_id) = path.file_name().map(OsStr::to_os_string) else {
-            continue;
-        };
-
-        // Read the log file.
-        let log_path = path.join("log");
-        let log_content = match fs::read_to_string(&log_path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-
-        let mut user = String::new();
-        let mut target_user = String::new();
-        let mut command = String::new();
-        let mut timestamp = 0u64;
-        let mut tty = String::new();
-
-        for line in log_content.lines() {
-            if let Some(val) = line.strip_prefix("user=") {
-                user = val.trim().to_string();
-            } else if let Some(val) = line.strip_prefix("runas_user=") {
-                target_user = val.trim().to_string();
-            } else if let Some(val) = line.strip_prefix("command=") {
-                command = val.trim().to_string();
-            } else if let Some(val) = line.strip_prefix("timestamp=") {
-                timestamp = val.trim().parse().unwrap_or(0);
-            } else if let Some(val) = line.strip_prefix("tty=") {
-                tty = val.trim().to_string();
-            }
-        }
-
-        sessions.push(SessionEntry {
-            id: session_id,
-            user,
-            target_user,
-            command,
-            timestamp,
-            _tty: tty,
-        });
-    }
-
-    sessions.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
-    sessions
-}
-
-/// Replay a recorded session.
-fn replay_session(io_dir: &OsStr, session_id: &OsStr, speed_factor: f64) -> Result<(), SudoError> {
-    let session_dir = Path::new(io_dir).join(session_id);
-    if !session_dir.is_dir() {
-        return Err(SudoError::IoError(format!(
-            "session directory not found: {}",
-            session_dir.display()
-        )));
-    }
-
-    // Read timing file.
-    let timing_path = session_dir.join("timing");
-    let timing_content = fs::read_to_string(&timing_path)
-        .map_err(|e| SudoError::IoError(format!("cannot read timing file: {e}")))?;
-
-    // Read stdout data.
-    let stdout_path = session_dir.join("stdout");
-    let stdout_data = fs::read(&stdout_path)
-        .map_err(|e| SudoError::IoError(format!("cannot read stdout file: {e}")))?;
-
-    // Read log info.
-    let log_path = session_dir.join("log");
-    if let Ok(log_content) = fs::read_to_string(&log_path) {
-        eprintln!("Replaying session {}:", quoteaf_os(session_id));
-        for line in log_content.lines() {
-            eprintln!("  {line}");
-        }
-        eprintln!();
-    }
-
-    // Parse and replay timing entries.
-    // Format: TYPE SECONDS BYTES
-    // TYPE: 1 = stdout, 2 = stderr, 3 = stdin
-    let mut offset = 0usize;
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-
-    for line in timing_content.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        // A slice pattern rather than a length test followed by three indexes:
-        // the guard and the accesses were two statements of one fact, and only
-        // the pattern keeps them from disagreeing.
-        let [stream_text, delay_text, nbytes_text, ..] = parts.as_slice() else {
-            continue;
-        };
-
-        let stream_type: u32 = match stream_text.parse() {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-        let delay_secs: f64 = match delay_text.parse() {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-        let nbytes: usize = match nbytes_text.parse() {
-            Ok(n) => n,
-            Err(_) => continue,
-        };
-
-        // Apply speed factor to delay.
-        let adjusted_delay = delay_secs / speed_factor;
-        if adjusted_delay > 0.001 {
-            // Sleep for the adjusted delay.
-            // On Slate OS, this would use the real sleep syscall.
-            // For now, spin-wait approximation.
-            let target =
-                current_epoch_nanos().saturating_add((adjusted_delay * 1_000_000_000.0) as u64);
-            while current_epoch_nanos() < target {
-                std::hint::spin_loop();
-            }
-        }
-
-        // Only replay stdout (type 1).
-        if stream_type == 1 {
-            let end = offset.saturating_add(nbytes).min(stdout_data.len());
-            // `get` rather than a slice plus a separate `offset <` test: the
-            // range is clamped above, and asking for it returns None instead of
-            // panicking if a timing file ever describes bytes past the log.
-            if let Some(chunk) = stdout_data.get(offset..end) {
-                // Errors ignored: replay is best-effort output to a terminal
-                // that may have gone away, and there is nothing to recover.
-                let _ = out.write_all(chunk);
-                let _ = out.flush();
-            }
-            offset = end;
-        } else {
-            offset = offset.saturating_add(nbytes);
-        }
-    }
-
-    eprintln!("\nReplay finished.");
-    Ok(())
-}
-
-/// Get current time in nanoseconds (approximate).
-fn current_epoch_nanos() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0)
-}
-
-// ============================================================================
 // Prompt and authentication
 // ============================================================================
 
@@ -2579,24 +1466,6 @@ fn current_pwd() -> OsString {
     env::current_dir().map_or_else(|_| OsString::from("unknown"), PathBuf::into_os_string)
 }
 
-/// The editor to launch, in sudo's documented order of preference.
-///
-/// `var_os`, not `var`: an editor setting names a program, and a program path
-/// on this system may hold any byte but `/` and NUL. `var` reports a non-UTF-8
-/// value as `Err(NotUnicode)`, which the `or_else` chain cannot distinguish
-/// from "unset" — so `EDITOR=/opt/\xffed` silently fell through to the *default*
-/// editor. Discarding the user's choice without a word is worse than either
-/// honouring it or refusing it, and honouring it costs nothing.
-///
-/// Shared by `sudoedit` and `visudo`, which had a copy each. Two copies of a
-/// preference order is a way to end up with two preference orders.
-fn editor_command() -> OsString {
-    env::var_os("SUDO_EDITOR")
-        .or_else(|| env::var_os("VISUAL"))
-        .or_else(|| env::var_os("EDITOR"))
-        .unwrap_or_else(|| OsString::from(DEFAULT_EDITOR))
-}
-
 /// The groups `username` belongs to, including the per-user group.
 ///
 /// The previous version compared each line against `name: <user>`, a key no
@@ -2690,40 +1559,6 @@ fn get_user_info(username: &str) -> TargetUser {
         // numbers after the uid.
         ids: record.uid().map(|uid| (uid, record.gid().unwrap_or(uid))),
     }
-}
-
-// ============================================================================
-// File locking for visudo
-// ============================================================================
-
-/// Simple file-based lock.
-fn acquire_lock(path: &Path) -> Result<PathBuf, SudoError> {
-    let lock_path = path.with_extension("lck");
-    if lock_path.exists() {
-        // Check if the lock is stale (older than 5 minutes).
-        if let Ok(meta) = fs::metadata(&lock_path)
-            && let Ok(modified) = meta.modified()
-            && let Ok(elapsed) = modified.elapsed()
-            && elapsed.as_secs() < 300
-        {
-            return Err(SudoError::LockError(format!(
-                "{} is locked by another process",
-                path.display()
-            )));
-        }
-        // Stale lock — remove it.
-    }
-
-    // Create the lock file with our PID.
-    fs::write(&lock_path, format!("{}\n", std::process::id()))
-        .map_err(|e| SudoError::LockError(format!("cannot create lock file: {e}")))?;
-
-    Ok(lock_path)
-}
-
-/// Release a file lock.
-fn release_lock(lock_path: &Path) {
-    let _ = fs::remove_file(lock_path);
 }
 
 // ============================================================================
@@ -2954,152 +1789,6 @@ fn parse_sudo_args(args: &[OsString]) -> Result<SudoOpts, SudoError> {
 }
 
 // ============================================================================
-// Visudo options
-// ============================================================================
-
-/// Parsed command-line options for the visudo personality.
-///
-/// `file` is [`OsString`]: `-f` names a file to open, and an alternate sudoers
-/// path is exactly as free in its bytes as any other path on this OS.
-#[derive(Debug)]
-struct VisudoOpts {
-    check_only: bool,
-    file: OsString,
-    strict: bool,
-}
-
-impl Default for VisudoOpts {
-    fn default() -> Self {
-        Self {
-            check_only: false,
-            file: OsString::from(SUDOERS_PATH),
-            strict: false,
-        }
-    }
-}
-
-/// Parse visudo command-line arguments.
-fn parse_visudo_args(args: &[OsString]) -> Result<VisudoOpts, SudoError> {
-    let mut opts = VisudoOpts::default();
-    // A slice cursor, as in `parse_sudo_args`: `-f` takes its value from a tail
-    // already proved non-empty, so there is no `i + 1` to bounds-check
-    // separately from the `args[i + 1]` that follows it.
-    let mut rest = args;
-
-    while let Some((arg, tail)) = rest.split_first() {
-        rest = tail;
-        // Matching on bytes rather than on `&str`: the three options are ASCII
-        // so the recognised set does not change, and an argument that is not
-        // text now reaches the diagnostic below instead of the panic that used
-        // to happen before this function was ever entered.
-        match &*os_bytes(arg) {
-            b"-c" => opts.check_only = true,
-            b"-s" => opts.strict = true,
-            b"-f" => {
-                let Some((value, after_value)) = rest.split_first() else {
-                    return Err(SudoError::UsageError("-f requires an argument".to_string()));
-                };
-                opts.file = value.clone();
-                rest = after_value;
-            }
-            other if other.starts_with(b"-") => {
-                return Err(SudoError::UsageError(format!(
-                    "unknown option: {}",
-                    quoteaf_os(arg)
-                )));
-            }
-            _ => {
-                return Err(SudoError::UsageError(format!(
-                    "unexpected argument: {}",
-                    quoteaf_os(arg)
-                )));
-            }
-        }
-    }
-
-    Ok(opts)
-}
-
-// ============================================================================
-// Sudoreplay options
-// ============================================================================
-
-/// Parsed command-line options for the sudoreplay personality.
-///
-/// `directory` and `session_id` are [`OsString`] because both are joined into
-/// a path — the session id is a directory name under `directory`, not a label.
-/// `speed_factor` stays an `f64`: it is a number, and a value that does not
-/// parse as one was already an error before any of this.
-#[derive(Debug)]
-struct SudoreplayOpts {
-    list: bool,
-    directory: OsString,
-    speed_factor: f64,
-    session_id: Option<OsString>,
-}
-
-impl Default for SudoreplayOpts {
-    fn default() -> Self {
-        Self {
-            list: false,
-            directory: OsString::from(SUDO_IO_DIR),
-            speed_factor: 1.0,
-            session_id: None,
-        }
-    }
-}
-
-/// Parse sudoreplay command-line arguments.
-fn parse_sudoreplay_args(args: &[OsString]) -> Result<SudoreplayOpts, SudoError> {
-    let mut opts = SudoreplayOpts::default();
-    // A slice cursor, as in `parse_sudo_args` and `parse_visudo_args`.
-    let mut rest = args;
-
-    while let Some((arg, tail)) = rest.split_first() {
-        rest = tail;
-        // On bytes, as in `parse_visudo_args`, and for the same reason.
-        match &*os_bytes(arg) {
-            b"-l" => opts.list = true,
-            b"-d" => {
-                let Some((value, after_value)) = rest.split_first() else {
-                    return Err(SudoError::UsageError("-d requires an argument".to_string()));
-                };
-                opts.directory = value.clone();
-                rest = after_value;
-            }
-            b"-s" => {
-                let Some((value, after_value)) = rest.split_first() else {
-                    return Err(SudoError::UsageError("-s requires an argument".to_string()));
-                };
-                rest = after_value;
-                // A speed factor that is not text is not a number either, so it
-                // takes the same arm as `-s wombat` rather than a second one.
-                opts.speed_factor = value
-                    .to_str()
-                    .and_then(|v| v.parse::<f64>().ok())
-                    .ok_or_else(|| SudoError::UsageError("invalid speed factor".to_string()))?;
-                if opts.speed_factor <= 0.0 {
-                    return Err(SudoError::UsageError(
-                        "speed factor must be positive".to_string(),
-                    ));
-                }
-            }
-            other if other.starts_with(b"-") => {
-                return Err(SudoError::UsageError(format!(
-                    "unknown option: {}",
-                    quoteaf_os(arg)
-                )));
-            }
-            _ => {
-                opts.session_id = Some(arg.clone());
-            }
-        }
-    }
-
-    Ok(opts)
-}
-
-// ============================================================================
 // Usage messages
 // ============================================================================
 
@@ -3112,20 +1801,6 @@ fn print_sudo_usage() {
     eprintln!("       sudo -k               Invalidate timestamp");
     eprintln!("       sudo -K               Remove timestamp entirely");
     eprintln!("       sudo -e file...       Edit files (sudoedit mode)");
-}
-
-fn print_visudo_usage() {
-    eprintln!("usage: visudo [-c] [-f file] [-s]");
-    eprintln!("       -c          Check syntax only");
-    eprintln!("       -f file     Edit alternate sudoers file");
-    eprintln!("       -s          Strict mode (error on warnings)");
-}
-
-fn print_sudoreplay_usage() {
-    eprintln!("usage: sudoreplay [-l] [-d dir] [-s speed_factor] [session_id]");
-    eprintln!("       -l          List recorded sessions");
-    eprintln!("       -d dir      Session I/O directory");
-    eprintln!("       -s factor   Playback speed factor");
 }
 
 // ============================================================================
@@ -3236,48 +1911,42 @@ fn run_sudo(args: &[OsString]) -> i32 {
     // Determine the actual command.
     let target = get_user_info(&opts.target_user);
     let (target_home, target_shell) = (target.home.clone(), target.shell.clone());
-    let effective_command: Vec<OsString> = if opts.command.is_empty() {
-        // -i or -s without command: run the target user's shell.
-        vec![OsString::from(target_shell.clone())]
-    } else {
-        opts.command.clone()
-    };
 
-    // The whole command as one string, for `sh -c` and for the log. Built by
-    // pushing rather than by `join`, because `[OsString]` has no `join` and
-    // because the alternative -- joining the *lossy* forms -- would hand the
-    // shell a different command from the one that was authorised.
-    let command_str = {
-        let mut joined = OsString::new();
-        for (i, part) in effective_command.iter().enumerate() {
-            if i > 0 {
-                joined.push(" ");
-            }
-            joined.push(part);
-        }
-        joined
-    };
-
-    // Bind the program and its arguments in the same step that proves there is
-    // a program, rather than indexing `[0]` at three later points that each
-    // rest on the emptiness argument above still holding. Both branches of the
-    // `if` produce a non-empty vector, so this cannot fire -- but this is the
-    // crate that decides which user runs what, and "cannot fire" is exactly the
-    // reasoning that stops being true when the branches above are edited.
-    let Some((program, program_args)) = effective_command.split_first() else {
+    // What runs, and what sudoers is asked about -- the same thing, as upstream
+    // arranges it. See `invocation`: with `-s` or `-i` it is the shell.
+    let Some((program, program_args)) = invocation(&opts, &target_shell) else {
         eprintln!("sudo: no command to execute");
         print_sudo_usage();
         return 1;
     };
 
+    // The whole command as one string, for the log and the messages: the
+    // program and its arguments as they will run. Built by pushing rather than
+    // by `join`, because `[OsString]` has no `join` and because joining the
+    // *lossy* forms would record a different command from the one authorised.
+    let command_str = {
+        let mut joined = program.clone();
+        for part in &program_args {
+            joined.push(" ");
+            joined.push(part);
+        }
+        joined
+    };
+
     // Check authorization.
+    let program_bytes = os_bytes(&program).into_owned();
+    let joined_args = user_args(&program_args);
+    let request = Request {
+        command: &program_bytes,
+        args: joined_args.as_deref(),
+    };
     let auth_result = check_authorization(
         &config,
         &username,
         &hostname,
         &opts.target_user,
         &opts.target_group,
-        &os_bytes(program),
+        &request,
         &user_groups,
     );
 
@@ -3366,11 +2035,31 @@ fn run_sudo(args: &[OsString]) -> i32 {
         "ALLOWED",
     );
 
-    // Execute the command.
-    // On Slate OS, this would use exec() syscall to replace the process.
-    // For now, we simulate with std::process::Command.
-    let mut cmd = process::Command::new(program);
-    cmd.args(program_args);
+    // Execute the program sudoers authorised: the same resolution
+    // `command_path_matches` judged -- on the secure path when unqualified,
+    // then canonical -- so the file that runs is the file that was allowed,
+    // whatever `PATH` or a symlink says by the time the child starts. A child
+    // process, which `become_user` below turns into the target user between
+    // fork and exec; real sudo also runs the command as a child (it stays to
+    // log and relay signals).
+    let secure = secure_path_of(&config);
+    let dirs = path_dirs(&secure);
+    let resolved = resolve_for_match(&program_bytes, &dirs);
+    let exec_path = os_from_bytes(&canonical_path(&resolved).unwrap_or(resolved));
+    let mut cmd = process::Command::new(&exec_path);
+    // The name the program sees is the one the caller gave -- and for `-i`,
+    // the login form (`-sh`), which is how a shell is told it is a login
+    // shell, as upstream tells it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        if opts.login_shell {
+            cmd.arg0(authlib::identity::login_argv0(&program));
+        } else {
+            cmd.arg0(&program);
+        }
+    }
+    cmd.args(&program_args);
 
     // Set the environment.
     cmd.env_clear();
@@ -3381,28 +2070,6 @@ fn run_sudo(args: &[OsString]) -> i32 {
     if opts.login_shell {
         cmd.current_dir(&target_home);
     }
-
-    // If -i, wrap in shell -l.
-    let mut cmd = if opts.login_shell && !opts.command.is_empty() {
-        let mut shell_cmd = process::Command::new(&target_shell);
-        shell_cmd.arg("-l").arg("-c").arg(&command_str);
-        shell_cmd.env_clear();
-        for (key, val) in &_env {
-            shell_cmd.env(key, val);
-        }
-        shell_cmd.current_dir(&target_home);
-        shell_cmd
-    } else if opts.shell && !opts.command.is_empty() {
-        let mut shell_cmd = process::Command::new(&target_shell);
-        shell_cmd.arg("-c").arg(&command_str);
-        shell_cmd.env_clear();
-        for (key, val) in &_env {
-            shell_cmd.env(key, val);
-        }
-        shell_cmd
-    } else {
-        cmd
-    };
 
     // Become the target user. Until now `sudo` authorised the command against
     // `/etc/sudoers` and then ran it as the caller: the environment named the
@@ -3421,10 +2088,56 @@ fn run_sudo(args: &[OsString]) -> i32 {
     match cmd.status() {
         Ok(status) => status.code().unwrap_or(1),
         Err(e) => {
-            eprintln!("sudo: unable to execute {}: {e}", quoteaf_os(program));
+            eprintln!("sudo: unable to execute {}: {e}", quoteaf_os(&program));
             1
         }
     }
+}
+
+/// The program `sudo` runs and its arguments -- which is also what sudoers is
+/// asked about, as upstream's `parse_args` arranges it.
+///
+/// Without `-s` or `-i` that is the command line as given. With either it is
+/// the shell: alone, `sudo -s` runs it; with a command, it runs as
+/// `SHELL -c CMD`, every byte of the words that is not a letter, a digit, `_`,
+/// `-` or `$` escaped with a backslash, so the shell runs the words as typed
+/// and splits nothing of its own. Until 2026-10-01 the first WORD was
+/// authorised and the unescaped line handed to `sh -c`, so a caller allowed
+/// `ls` could run `sudo -s ls '&& id'`.
+///
+/// `None` when there is nothing to run.
+fn invocation(opts: &SudoOpts, target_shell: &str) -> Option<(OsString, Vec<OsString>)> {
+    if opts.shell || opts.login_shell {
+        let shell = OsString::from(target_shell);
+        if opts.command.is_empty() {
+            return Some((shell, Vec::new()));
+        }
+        return Some((
+            shell,
+            vec![OsString::from("-c"), shell_escaped_command(&opts.command)],
+        ));
+    }
+    let (program, args) = opts.command.split_first()?;
+    Some((program.clone(), args.to_vec()))
+}
+
+/// The words of a command, joined by single spaces, each byte that is not an
+/// ASCII letter or digit, `_`, `-` or `$` preceded by a backslash: what
+/// upstream's `parse_args` hands the shell for `sudo -s CMD`.
+fn shell_escaped_command(words: &[OsString]) -> OsString {
+    let mut out = Vec::new();
+    for (i, word) in words.iter().enumerate() {
+        if i > 0 {
+            out.push(b' ');
+        }
+        for &b in os_bytes(word).iter() {
+            if !(b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'$') {
+                out.push(b'\\');
+            }
+            out.push(b);
+        }
+    }
+    os_from_bytes(&out)
 }
 
 /// Load and parse the sudoers file.
@@ -3455,108 +2168,51 @@ fn run_sudoedit(files: &[OsString]) -> i32 {
         }
     };
 
-    // Check authorization for sudoedit.
-    let auth_result = check_authorization(
+    // Check authorization: the pseudo-command `sudoedit` with the files as
+    // its arguments, as upstream asks it. Until 2026-10-01 a refusal was
+    // followed by asking whether the user might RUN each file -- so a rule
+    // letting a user run `/etc/motd` let them edit it, while a real
+    // `sudoedit /etc/motd` rule counted only if it allowed every file.
+    let files_args = user_args(files);
+    let request = Request {
+        command: b"sudoedit",
+        args: files_args.as_deref(),
+    };
+    if check_authorization(
         &config,
         &username,
         &hostname,
         "root",
         "",
-        b"sudoedit",
+        &request,
         &user_groups,
-    );
-
-    if auth_result.is_none() {
-        // Also check for the specific files.
-        for file in files {
-            let result = check_authorization(
-                &config,
-                &username,
-                &hostname,
-                "root",
-                "",
-                &os_bytes(file),
-                &user_groups,
-            );
-            if result.is_none() {
-                eprintln!(
-                    "sudoedit: {username} is not allowed to edit {} on {hostname}",
-                    quoteaf_os(file)
-                );
-                return 1;
+    )
+    .is_none()
+    {
+        let mut named = OsString::new();
+        for (i, file) in files.iter().enumerate() {
+            if i > 0 {
+                named.push(" ");
             }
+            named.push(file);
         }
-    }
-
-    let editor = editor_command();
-
-    let mut exit_code = 0;
-
-    for file in files {
-        let original_path = Path::new(file);
-
-        // Create a temporary copy. The basename is carried across as an
-        // `OsStr`, not through `to_str().unwrap_or("file")` as it used to be:
-        // that fallback mapped *every* basename which is not valid UTF-8 onto
-        // the single path `/tmp/sudoedit-<pid>-file`, so `sudoedit a\xff b\xff`
-        // gave both files one temp file and copied the second edit back over
-        // the first original. A wrong-file write is the worst outcome an editor
-        // wrapper can have, and it needed only a filename nobody chose to type.
-        let mut temp_name = OsString::from(format!("/tmp/sudoedit-{}-", std::process::id()));
-        temp_name.push(
-            original_path
-                .file_name()
-                .unwrap_or_else(|| OsStr::new("file")),
+        eprintln!(
+            "sudoedit: {username} is not allowed to edit {} on {hostname}",
+            quoteaf_os(&named)
         );
-        let temp_path = PathBuf::from(temp_name);
-
-        // Copy original to temp (if it exists).
-        if original_path.exists() {
-            if let Err(e) = fs::copy(original_path, &temp_path) {
-                eprintln!("sudoedit: cannot copy {} to temp: {e}", quoteaf_os(file));
-                exit_code = 1;
-                continue;
-            }
-        } else {
-            // Create empty temp file.
-            if let Err(e) = fs::write(&temp_path, "") {
-                eprintln!("sudoedit: cannot create temp file: {e}");
-                exit_code = 1;
-                continue;
-            }
-        }
-
-        // Launch editor on the temp file. `.arg(&temp_path)` rather than
-        // `.arg(temp_path.display().to_string())`: `display()` substitutes U+FFFD
-        // for any byte it cannot decode, so the editor was handed a path that
-        // does not exist whenever the original's name was not UTF-8. The path
-        // goes across as the bytes it is.
-        let status = process::Command::new(&editor).arg(&temp_path).status();
-
-        match status {
-            Ok(s) if s.success() => {
-                // Copy edited temp back to original.
-                if let Err(e) = fs::copy(&temp_path, original_path) {
-                    eprintln!("sudoedit: cannot write back to {}: {e}", quoteaf_os(file));
-                    exit_code = 1;
-                }
-            }
-            Ok(s) => {
-                eprintln!(
-                    "sudoedit: editor exited with status {}",
-                    s.code().unwrap_or(-1)
-                );
-                exit_code = 1;
-            }
-            Err(e) => {
-                eprintln!("sudoedit: cannot run editor {}: {e}", quoteaf_os(&editor));
-                exit_code = 1;
-            }
-        }
-
-        // Clean up temp file.
-        let _ = fs::remove_file(&temp_path);
+        return 1;
     }
+
+    // The editor runs as the caller, and the copies are theirs: their uid and
+    // gid are needed before anything is created.
+    let (Some(uid), Some(gid)) = (
+        authlib::identity::caller_uid(),
+        authlib::identity::caller_gid(),
+    ) else {
+        eprintln!("sudoedit: unable to determine the invoking user's uid and gid");
+        return 1;
+    };
+    let exit_code = edit_files(files, Caller { uid, gid });
 
     // Assembled by pushing rather than by `join`, for the same reason as in
     // `run_sudo`: `[OsString]` has no `join`, and joining the lossy forms would
@@ -3581,244 +2237,430 @@ fn run_sudoedit(files: &[OsString]) -> i32 {
     exit_code
 }
 
-/// Main entry point for the `visudo` personality.
-fn run_visudo(args: &[OsString]) -> i32 {
-    let opts = match parse_visudo_args(args) {
-        Ok(o) => o,
-        Err(e) => {
-            eprintln!("visudo: {e}");
-            print_visudo_usage();
-            return 1;
-        }
+/// The user who typed `sudoedit`: who the editor runs as and who owns the
+/// copies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Its fields are read only by the unix half.
+#[cfg_attr(not(unix), allow(dead_code))]
+struct Caller {
+    uid: u32,
+    gid: u32,
+}
+
+#[cfg(unix)]
+/// One file being edited: the original, the copy the editor gets, and the
+/// copy's size and time once it was made -- which is how an edit that changed
+/// nothing is told from one that did.
+struct EditFile {
+    original: PathBuf,
+    temp: PathBuf,
+    before: (u64, Option<SystemTime>),
+}
+
+/// `open(2)`'s `O_NONBLOCK`, so opening a FIFO in a file's place cannot hang.
+#[cfg(unix)]
+const O_NONBLOCK: i32 = 0o4000;
+/// `ELOOP`: what `O_NOFOLLOW` answers for a symlink.
+#[cfg(unix)]
+const ELOOP: i32 = 40;
+
+/// The directories upstream looks in for one the caller can write, in order.
+#[cfg(unix)]
+const EDIT_TMPDIRS: [&str; 3] = ["/var/tmp", "/usr/tmp", "/tmp"];
+
+/// Edit `files` for `caller`: upstream's `sudo_edit`, with the editor run as
+/// the caller on copies the caller owns.
+///
+/// # Why each step is there
+///
+/// An editor run with sudo's privilege is a root shell one `:!sh` away, which
+/// is the whole reason sudoedit exists -- and until 2026-10-01 this ran the
+/// editor with exactly that privilege, on copies at a predictable
+/// `/tmp/sudoedit-<pid>-<name>` that it created by following whatever symlink
+/// was waiting there. Now, as upstream does it:
+///
+/// 1. each original is opened without following a symlink, and refused if
+///    any directory on its path is a symlink or writable by the caller, who
+///    could otherwise swap the file between the copy and the copy-back; it
+///    must be a regular file, and one that does not exist is edited from
+///    empty;
+/// 2. each copy is created exclusively (`O_EXCL`, so nothing already there is
+///    followed or reused) under an unguessable name in the first of
+///    `/var/tmp`, `/usr/tmp`, `/tmp` the caller can write, mode 0600, and
+///    handed to the caller;
+/// 3. one editor runs on all the copies, as the caller;
+/// 4. each copy is reopened without following a symlink and must still be a
+///    regular file, mode 0600, owned by the caller -- else its original is
+///    left alone; a copy whose size and time did not move is reported
+///    unchanged; the rest are written over their originals, and a copy that
+///    cannot be written back is kept and named.
+///
+/// The exit status is the editor's, or 1 when a copy could not be written
+/// back or nothing could be prepared, as upstream's is.
+#[cfg(unix)]
+fn edit_files(files: &[OsString], caller: Caller) -> i32 {
+    let Some(tmpdir) = edit_tmpdir(caller) else {
+        eprintln!("sudoedit: no writable temporary directory found");
+        return 1;
     };
-
-    let file_path = Path::new(&opts.file);
-
-    // Check-only mode.
-    if opts.check_only {
-        let content = match fs::read_to_string(file_path) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("visudo: cannot read {}: {e}", quoteaf_os(&opts.file));
-                return 1;
-            }
-        };
-
-        let errors = validate_sudoers(&content, opts.strict);
-        if errors.is_empty() {
-            println!("{} parsed OK", quoteaf_os(&opts.file));
-            return 0;
+    let mut edits = Vec::new();
+    for file in files {
+        match prepare_edit(Path::new(file), &tmpdir, caller) {
+            Ok(edit) => edits.push(edit),
+            Err(message) => eprintln!("sudoedit: {message}"),
         }
-
-        for err in &errors {
-            eprintln!("visudo: {}: {err}", quoteaf_os(&opts.file));
-        }
-
-        let fatal_count = errors.iter().filter(|e| !e.is_warning).count();
-        if fatal_count > 0 {
-            return 1;
-        }
-        if opts.strict {
-            return 1;
-        }
-        println!("{} parsed with warnings", quoteaf_os(&opts.file));
-        return 0;
     }
-
-    // Editing mode.
-    // Acquire lock.
-    let lock_path = match acquire_lock(file_path) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("visudo: {e}");
-            return 1;
-        }
-    };
-
-    // Read current content. See `starting_buffer` for why a failed read is
-    // not an empty buffer.
-    let original_content = match optionalfile::read_or_empty(file_path) {
-        Ok(text) => text,
-        Err(why) => {
-            eprintln!("visudo: {}: {why}", quoteaf_os(&opts.file));
-            eprintln!(
-                "visudo: refusing to open an editor -- saving would replace \
-                 the file's contents with whatever you typed"
-            );
-            release_lock(&lock_path);
-            return 1;
-        }
-    };
-    // Create temp file.
-    let temp_path = PathBuf::from(format!("/tmp/visudo-{}", std::process::id()));
-    if let Err(e) = fs::write(&temp_path, &original_content) {
-        eprintln!("visudo: cannot create temp file: {e}");
-        release_lock(&lock_path);
+    if edits.is_empty() {
         return 1;
     }
 
-    let editor = editor_command();
-
-    // Edit loop: keep re-editing until valid or user quits.
-    loop {
-        let status = process::Command::new(&editor).arg(&temp_path).status();
-
-        match status {
-            Ok(s) if !s.success() => {
-                eprintln!(
-                    "visudo: editor exited with status {}",
-                    s.code().unwrap_or(-1)
-                );
-                let _ = fs::remove_file(&temp_path);
-                release_lock(&lock_path);
-                return 1;
-            }
-            Err(e) => {
-                eprintln!("visudo: cannot run editor {}: {e}", quoteaf_os(&editor));
-                let _ = fs::remove_file(&temp_path);
-                release_lock(&lock_path);
-                return 1;
-            }
-            _ => {}
+    let words = editor_words(&editor_command());
+    let Some((program, editor_args)) = words.split_first() else {
+        return 1;
+    };
+    let mut cmd = process::Command::new(program);
+    cmd.args(editor_args);
+    cmd.args(edits.iter().map(|edit| edit.temp.as_os_str()));
+    authlib::identity::become_user(&mut cmd, caller.uid, caller.gid);
+    let started = SystemTime::now();
+    let status = cmd.status();
+    let finished = SystemTime::now();
+    let mut ret = match status {
+        Ok(status) => status.code().unwrap_or(1),
+        Err(e) => {
+            eprintln!(
+                "sudoedit: unable to run {}: {}",
+                quoteaf_os(program),
+                errmsg::strerror(&e)
+            );
+            1
         }
+    };
 
-        // Read edited content.
-        let new_content = match fs::read_to_string(&temp_path) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("visudo: cannot read temp file: {e}");
-                release_lock(&lock_path);
-                return 1;
-            }
-        };
-
-        // Validate.
-        let errors = validate_sudoers(&new_content, opts.strict);
-        let fatal_errors: Vec<&SyntaxError> = errors.iter().filter(|e| !e.is_warning).collect();
-
-        if fatal_errors.is_empty() {
-            // Valid — write back.
-            if let Err(e) = fs::write(file_path, &new_content) {
-                eprintln!("visudo: cannot write {}: {e}", quoteaf_os(&opts.file));
-                let _ = fs::remove_file(&temp_path);
-                release_lock(&lock_path);
-                return 1;
-            }
-
-            // Set permissions (sudoers should be 0440).
-            // On Slate OS, this would use chmod syscall.
-
-            let _ = fs::remove_file(&temp_path);
-            release_lock(&lock_path);
-            return 0;
+    // Copied back whatever the editor's status, as upstream does: an editor
+    // that exits non-zero after a save has still saved. Time that did not move
+    // means nobody was in the editor, so an unchanged size and time cannot be
+    // told from an edit -- and is then copied back, as it is upstream.
+    let spent = finished != started;
+    for edit in &edits {
+        if let Err(message) = copy_back(edit, caller, spent) {
+            eprintln!("sudoedit: {message}");
+            ret = 1;
         }
+    }
+    ret
+}
 
-        // Report errors and ask what to do.
-        for err in &fatal_errors {
-            eprintln!("visudo: {}: {err}", quoteaf_os(&opts.file));
+/// sudoedit needs to change who the editor runs as, which a host build cannot.
+#[cfg(not(unix))]
+fn edit_files(_files: &[OsString], _caller: Caller) -> i32 {
+    eprintln!("sudoedit: this build cannot run an editor as another user");
+    1
+}
+
+/// Whether a directory with this mode, owner and group is writable by
+/// `caller`, as upstream's `dir_is_writable` judges it: the caller's own
+/// directory always is, and otherwise it is when others may write, or the
+/// group may and it is the caller's group. The sticky bit does not make
+/// `/tmp` safe to edit in -- the caller can still create there.
+///
+/// Only the caller's primary group is known here: `userdb` keeps
+/// supplementary memberships as names with no name-to-gid resolver (see
+/// `authlib::identity`), so a directory writable through one of those is
+/// missed -- the direction that refuses less, and recorded as such in
+/// known-issues.
+// Called only by the unix half; the host build keeps it for its tests.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn dir_writable_by(mode: u32, owner: u32, group: u32, caller: Caller) -> bool {
+    owner == caller.uid || mode & 0o002 != 0 || (mode & 0o020 != 0 && group == caller.gid)
+}
+
+/// The first of upstream's temporary directories that the caller can write.
+#[cfg(unix)]
+fn edit_tmpdir(caller: Caller) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt as _;
+    EDIT_TMPDIRS.iter().map(PathBuf::from).find(|dir| {
+        fs::metadata(dir).is_ok_and(|meta| {
+            meta.is_dir() && dir_writable_by(meta.mode(), meta.uid(), meta.gid(), caller)
+        })
+    })
+}
+
+/// Every directory from the root (or the current directory) down to the one
+/// holding `original` must be a real directory the caller cannot write:
+/// upstream's `sudoedit_checkdir`, and its refusal of a symlinked directory.
+#[cfg(unix)]
+fn check_path_dirs(original: &Path, caller: Caller) -> Result<(), String> {
+    use std::path::Component;
+
+    let name = quoteaf_os(original.as_os_str());
+    let parent = original.parent().unwrap_or_else(|| Path::new(""));
+    let mut dir = if original.is_absolute() {
+        PathBuf::from("/")
+    } else {
+        PathBuf::from(".")
+    };
+    check_dir(&dir, &name, caller)?;
+    for part in parent.components() {
+        match part {
+            Component::Normal(step) => dir.push(step),
+            Component::ParentDir => dir.push(".."),
+            Component::RootDir | Component::CurDir | Component::Prefix(_) => continue,
         }
-        eprint!("What now? (e)dit again, e(x)it without saving, (Q)uit and save: ");
-        let _ = io::stderr().flush();
+        check_dir(&dir, &name, caller)?;
+    }
+    Ok(())
+}
 
-        let mut response = String::new();
-        if io::stdin().read_line(&mut response).is_err() {
-            let _ = fs::remove_file(&temp_path);
-            release_lock(&lock_path);
-            return 1;
-        }
+/// One step of [`check_path_dirs`]: `dir` must be a directory, not a symlink
+/// to one, and not writable by `caller`. `name` is the file being edited,
+/// which every refusal names, as upstream's do.
+#[cfg(unix)]
+fn check_dir(dir: &Path, name: &str, caller: Caller) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt as _;
+    let meta =
+        fs::symlink_metadata(dir).map_err(|e| format!("{name}: {}", errmsg::strerror(&e)))?;
+    if meta.file_type().is_symlink() {
+        return Err(format!("{name}: editing symbolic links is not permitted"));
+    }
+    if !meta.is_dir() {
+        return Err(format!("{name}: Not a directory"));
+    }
+    if dir_writable_by(meta.mode(), meta.uid(), meta.gid(), caller) {
+        return Err(format!(
+            "{name}: editing files in a writable directory is not permitted"
+        ));
+    }
+    Ok(())
+}
 
-        match response.trim() {
-            "x" | "X" => {
-                let _ = fs::remove_file(&temp_path);
-                release_lock(&lock_path);
-                return 0;
+/// The original, opened for the copy without following a symlink; `None`
+/// when it does not exist yet. Refused unless it is a regular file.
+#[cfg(unix)]
+fn open_original(original: &Path) -> Result<Option<(fs::File, fs::Metadata)>, String> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let name = quoteaf_os(original.as_os_str());
+    match fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW | O_NONBLOCK)
+        .open(original)
+    {
+        Ok(file) => {
+            let meta = file
+                .metadata()
+                .map_err(|e| format!("{name}: {}", errmsg::strerror(&e)))?;
+            if !meta.is_file() {
+                return Err(format!("{name}: not a regular file"));
             }
-            "Q" => {
-                // Save despite errors.
-                if let Err(e) = fs::write(file_path, &new_content) {
-                    eprintln!("visudo: cannot write {}: {e}", quoteaf_os(&opts.file));
-                    let _ = fs::remove_file(&temp_path);
-                    release_lock(&lock_path);
-                    return 1;
-                }
-                let _ = fs::remove_file(&temp_path);
-                release_lock(&lock_path);
-                return 0;
-            }
-            // "e"/"E" -- and anything unrecognised, which sudo also treats as
-            // edit-again rather than as a reason to discard the file -- fall
-            // through to the loop's next iteration. These were two arms both
-            // saying `continue`, which is one behaviour written twice.
-            _ => {}
+            Ok(Some((file, meta)))
         }
+        Err(e) if e.raw_os_error() == Some(ELOOP) => {
+            Err(format!("{name}: editing symbolic links is not permitted"))
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{name}: {}", errmsg::strerror(&e))),
     }
 }
 
-/// Main entry point for the `sudoreplay` personality.
-fn run_sudoreplay(args: &[OsString]) -> i32 {
-    let opts = match parse_sudoreplay_args(args) {
-        Ok(o) => o,
-        Err(e) => {
-            eprintln!("sudoreplay: {e}");
-            print_sudoreplay_usage();
-            return 1;
+/// The name upstream's `sudo_edit_mktemp` gives a copy: the original's base
+/// name with eight random characters before its last `.` -- `motd.conf` is
+/// `motdXXXXXXXX.conf`, `.bashrc` is `XXXXXXXX.bashrc` -- or after a `.` of
+/// their own when there is none, `motd.XXXXXXXX`; so an editor that chooses
+/// its mode by suffix still sees the right one.
+// Called only by the unix half; the host build keeps it for its tests.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn temp_name(base: &[u8], random: &[u8]) -> Vec<u8> {
+    match base.iter().rposition(|&b| b == b'.') {
+        Some(dot) => {
+            let (stem, suffix) = base.split_at(dot);
+            [stem, random, suffix].concat()
         }
+        None => [base, b".", random].concat(),
+    }
+}
+
+#[cfg(unix)]
+/// Eight characters nobody can guess, from the hasher seed the standard
+/// library takes from the operating system's randomness.
+fn random_letters() -> [u8; 8] {
+    use std::hash::{BuildHasher as _, Hasher as _};
+    const ALPHABET: &[u8; 62] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u128(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos()),
+    );
+    let mut bits = hasher.finish();
+    let mut out = [0u8; 8];
+    for slot in &mut out {
+        let index = usize::try_from(bits % 62).unwrap_or(0);
+        *slot = ALPHABET.get(index).copied().unwrap_or(b'X');
+        bits /= 62;
+    }
+    out
+}
+
+/// Copy `original` into a new temporary file the caller owns: steps 1 and 2.
+#[cfg(unix)]
+fn prepare_edit(original: &Path, tmpdir: &Path, caller: Caller) -> Result<EditFile, String> {
+    check_path_dirs(original, caller)?;
+    prepare_edit_unchecked(original, tmpdir, caller)
+}
+
+/// [`prepare_edit`] after its directory check: the original opened, and the
+/// copy made. Separate so the tests can make a copy in a directory of their
+/// own, which the check rightly refuses.
+#[cfg(unix)]
+fn prepare_edit_unchecked(
+    original: &Path,
+    tmpdir: &Path,
+    caller: Caller,
+) -> Result<EditFile, String> {
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
+    let name = quoteaf_os(original.as_os_str());
+    let source = open_original(original)?;
+
+    let base = original
+        .file_name()
+        .map_or_else(|| b"file".to_vec(), |b| os_bytes(b).into_owned());
+    let mut created = None;
+    for _ in 0..100 {
+        let candidate = tmpdir.join(os_from_bytes(&temp_name(&base, &random_letters())));
+        match fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(O_NOFOLLOW)
+            .open(&candidate)
+        {
+            Ok(file) => {
+                created = Some((candidate, file));
+                break;
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(format!("mkstemps: {}", errmsg::strerror(&e))),
+        }
+    }
+    let Some((temp, mut copy)) = created else {
+        return Err("mkstemps: File exists".to_string());
+    };
+    let remove_on_error = |message: String| -> String {
+        // Ignored: the copy is already being abandoned, and a failure to
+        // remove it must not replace the reason it was.
+        let _ = fs::remove_file(&temp);
+        message
     };
 
-    // List mode.
-    if opts.list {
-        let sessions = list_sessions(&opts.directory);
-        if sessions.is_empty() {
-            println!(
-                "No recorded sessions found in {}",
-                quoteaf_os(&opts.directory)
-            );
-            return 0;
+    // Exactly 0600, whatever the umask took away: the copy-back insists on it.
+    copy.set_permissions(fs::Permissions::from_mode(0o600))
+        .map_err(|e| remove_on_error(format!("{name}: {}", errmsg::strerror(&e))))?;
+    if let Some((mut file, meta)) = source {
+        io::copy(&mut file, &mut copy)
+            .map_err(|e| remove_on_error(format!("{name}: {}", errmsg::strerror(&e))))?;
+        // The original's time, so the copy-back can tell an untouched copy.
+        // Ignored on failure, as upstream ignores it: the time only decides
+        // whether to say "unchanged".
+        if let Ok(time) = meta.modified() {
+            let _ = copy.set_modified(time);
         }
+    }
+    std::os::unix::fs::fchown(&copy, Some(caller.uid), Some(caller.gid))
+        .map_err(|e| remove_on_error(format!("{name}: {}", errmsg::strerror(&e))))?;
+    let meta = copy
+        .metadata()
+        .map_err(|e| remove_on_error(format!("{name}: {}", errmsg::strerror(&e))))?;
+    Ok(EditFile {
+        original: original.to_path_buf(),
+        temp,
+        before: (meta.len(), meta.modified().ok()),
+    })
+}
 
-        println!(
-            "{:<12} {:<12} {:<12} {:<20} COMMAND",
-            "SESSION", "USER", "RUNAS", "DATE"
+/// Write one copy back over its original: step 4. `Err` is the message, and
+/// the copy is kept for the user unless it could not be trusted.
+#[cfg(unix)]
+fn copy_back(edit: &EditFile, caller: Caller, spent: bool) -> Result<(), String> {
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+
+    let name = quoteaf_os(edit.original.as_os_str());
+    let temp_shown = quoteaf_os(edit.temp.as_os_str());
+    let unmodified = format!("{name} left unmodified");
+
+    let opened = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW | O_NONBLOCK)
+        .open(&edit.temp);
+    let Ok(mut copy) = opened else {
+        return Err(unmodified);
+    };
+    let Ok(meta) = copy.metadata() else {
+        return Err(unmodified);
+    };
+    // Upstream's `sudo_check_temp_file`, word for word in its warnings.
+    if !meta.is_file() {
+        eprintln!(
+            "sudoedit: {}: not a regular file",
+            quoteaf_os(edit.temp.as_os_str())
         );
-        println!("{}", "-".repeat(76));
-
-        for session in &sessions {
-            let date = format_timestamp(session.timestamp);
-            // `escape_os`, not the raw name: this is a fixed-width table, and
-            // a session directory named with a newline or a tab would otherwise
-            // rewrite the rows below it. A name that is already plain text
-            // comes through `escape_os` unchanged, so the ordinary listing is
-            // exactly as it was.
-            println!(
-                "{:<12} {:<12} {:<12} {:<20} {}",
-                escape_os(&session.id),
-                session.user,
-                session.target_user,
-                date,
-                session.command
-            );
-        }
-
-        return 0;
+        return Err(unmodified);
+    }
+    if meta.mode() & 0o7777 != 0o600 {
+        eprintln!(
+            "sudoedit: {}: bad file mode: 0{:o}",
+            quoteaf_os(edit.temp.as_os_str()),
+            meta.mode() & 0o7777
+        );
+        return Err(unmodified);
+    }
+    if meta.uid() != caller.uid {
+        eprintln!(
+            "sudoedit: {temp_shown} is owned by uid {}, should be {}",
+            meta.uid(),
+            caller.uid
+        );
+        return Err(unmodified);
     }
 
-    // Replay mode.
-    let session_id = match &opts.session_id {
-        Some(id) => id.clone(),
-        None => {
-            eprintln!("sudoreplay: no session specified");
-            print_sudoreplay_usage();
-            return 1;
+    if spent && (meta.len(), meta.modified().ok()) == edit.before {
+        // Ignored: an unchanged copy is litter either way.
+        let _ = fs::remove_file(&edit.temp);
+        eprintln!("sudoedit: {name} unchanged");
+        return Ok(());
+    }
+
+    let kept = format!("contents of edit session left in {temp_shown}");
+    let mut out = match fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .mode(0o644)
+        .custom_flags(O_NOFOLLOW)
+        .open(&edit.original)
+    {
+        Ok(out) => out,
+        Err(e) => {
+            eprintln!(
+                "sudoedit: unable to write to {name}: {}",
+                errmsg::strerror(&e)
+            );
+            return Err(kept);
         }
     };
-
-    match replay_session(&opts.directory, &session_id, opts.speed_factor) {
-        Ok(()) => 0,
-        Err(e) => {
-            eprintln!("sudoreplay: {e}");
-            1
-        }
+    // Over the old contents, then cut at the new length, as upstream's
+    // `sudo_copy_file` does.
+    let written = io::copy(&mut copy, &mut out).and_then(|_| out.set_len(meta.len()));
+    if let Err(e) = written {
+        eprintln!(
+            "sudoedit: unable to write to {name}: {}",
+            errmsg::strerror(&e)
+        );
+        return Err(kept);
     }
+    // Ignored: the edit is home; a copy left behind is only litter.
+    let _ = fs::remove_file(&edit.temp);
+    Ok(())
 }
 
 // ============================================================================
@@ -3853,8 +2695,6 @@ fn main() {
     let exit_code = match personality {
         Personality::Sudo => run_sudo(rest),
         Personality::Sudoedit => run_sudoedit(rest),
-        Personality::Visudo => run_visudo(rest),
-        Personality::Sudoreplay => run_sudoreplay(rest),
     };
 
     process::exit(exit_code);
@@ -3878,6 +2718,10 @@ fn main() {
 mod tests {
     use super::*;
     use scratchdir::ScratchDir;
+    use sudo::{
+        DEFAULT_EDITOR, DEFAULT_TIMEOUT, DefaultOp, HONOURED_DEFAULTS, SyntaxError, default_shape,
+        editor_words, parse_runas_prefix, split_at_eq_outside_parens, validate_sudoers,
+    };
 
     /// The secure path the command-spec tests resolve against. Absolute and
     /// fabricated: nothing here exists on the build host, so a test that
@@ -4324,34 +3168,6 @@ mod tests {
     }
 
     #[test]
-    fn personality_detect_visudo() {
-        assert_eq!(detect_personality("visudo"), Personality::Visudo);
-    }
-
-    #[test]
-    fn personality_detect_visudo_path() {
-        assert_eq!(detect_personality("/usr/sbin/visudo"), Personality::Visudo);
-    }
-
-    #[test]
-    fn personality_detect_visudo_exe() {
-        assert_eq!(detect_personality("visudo.exe"), Personality::Visudo);
-    }
-
-    #[test]
-    fn personality_detect_sudoreplay() {
-        assert_eq!(detect_personality("sudoreplay"), Personality::Sudoreplay);
-    }
-
-    #[test]
-    fn personality_detect_sudoreplay_path() {
-        assert_eq!(
-            detect_personality("/usr/bin/sudoreplay"),
-            Personality::Sudoreplay
-        );
-    }
-
-    #[test]
     fn personality_detect_unknown_defaults_sudo() {
         assert_eq!(detect_personality("foobar"), Personality::Sudo);
     }
@@ -4367,11 +3183,11 @@ mod tests {
         // hold multi-byte characters. The previous scan produced a byte index
         // and sliced the `&str` at it, which is a panic on a boundary that is
         // not a character boundary -- it survived only because it was always
-        // reached via a `/`. `visudo` here is the whole point: this decides
-        // whether the process edits the policy file or grants root.
+        // reached via a `/`. `sudoedit` here is the point: this decides
+        // whether the process edits a file or runs a command as root.
         assert_eq!(
-            detect_personality("/usr/sbin/\u{e9}t\u{e9}/visudo"),
-            Personality::Visudo
+            detect_personality("/usr/sbin/\u{e9}t\u{e9}/sudoedit"),
+            Personality::Sudoedit
         );
         assert_eq!(detect_personality("\u{e9}sudo"), Personality::Sudo);
     }
@@ -4380,8 +3196,6 @@ mod tests {
     fn personality_display() {
         assert_eq!(format!("{}", Personality::Sudo), "sudo");
         assert_eq!(format!("{}", Personality::Sudoedit), "sudoedit");
-        assert_eq!(format!("{}", Personality::Visudo), "visudo");
-        assert_eq!(format!("{}", Personality::Sudoreplay), "sudoreplay");
     }
 
     // -- Sudoers parser tests --
@@ -4838,7 +3652,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            b"/usr/bin/ls",
+            &Request::bare(b"/usr/bin/ls"),
             &["root".to_string()],
         );
         assert!(result.is_some());
@@ -4853,7 +3667,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            b"/usr/bin/ls",
+            &Request::bare(b"/usr/bin/ls"),
             &["alice".to_string()],
         );
         assert!(result.is_none());
@@ -4868,7 +3682,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            b"/usr/bin/apt",
+            &Request::bare(b"/usr/bin/apt"),
             &["alice".to_string()],
         );
         assert!(result.is_some());
@@ -4883,7 +3697,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            b"/usr/bin/rm",
+            &Request::bare(b"/usr/bin/rm"),
             &["alice".to_string()],
         );
         assert!(result.is_none());
@@ -4898,7 +3712,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            b"/usr/bin/ls",
+            &Request::bare(b"/usr/bin/ls"),
             &["alice".to_string(), "wheel".to_string()],
         );
         assert!(result.is_some());
@@ -4913,7 +3727,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            b"/usr/bin/ls",
+            &Request::bare(b"/usr/bin/ls"),
             &["alice".to_string(), "users".to_string()],
         );
         assert!(result.is_none());
@@ -4929,7 +3743,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            b"/usr/bin/ls",
+            &Request::bare(b"/usr/bin/ls"),
             &["alice".to_string()],
         );
         assert!(result.is_some());
@@ -5037,7 +3851,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "db1",
             "root",
             "",
-            b"/usr/bin/ls",
+            &Request::bare(b"/usr/bin/ls"),
             &["alice".to_string()],
         );
         assert!(result.is_none());
@@ -5052,7 +3866,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "web1",
             "root",
             "",
-            b"/usr/bin/ls",
+            &Request::bare(b"/usr/bin/ls"),
             &["alice".to_string()],
         );
         assert!(result.is_some());
@@ -5068,7 +3882,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "web2",
             "root",
             "",
-            b"/usr/bin/ls",
+            &Request::bare(b"/usr/bin/ls"),
             &["alice".to_string()],
         );
         assert!(result.is_some());
@@ -5083,7 +3897,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            b"/usr/bin/ls",
+            &Request::bare(b"/usr/bin/ls"),
             &["alice".to_string()],
         );
         assert!(result.is_none());
@@ -5100,7 +3914,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            b"/sbin/ifconfig",
+            &Request::bare(b"/sbin/ifconfig"),
             &["alice".to_string()],
         );
         assert!(result.is_some());
@@ -5115,7 +3929,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            b"/usr/bin/apt",
+            &Request::bare(b"/usr/bin/apt"),
             &["alice".to_string()],
         );
         assert!(spec.is_some());
@@ -5134,7 +3948,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            b"/usr/bin/ls",
+            &Request::bare(b"/usr/bin/ls"),
             &["alice".to_string()],
         );
         assert!(spec.is_some());
@@ -5150,7 +3964,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            b"/usr/bin/anything",
+            &Request::bare(b"/usr/bin/anything"),
             &["alice".to_string()],
         );
         assert!(result.is_some());
@@ -5165,7 +3979,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            b"/usr/sbin/something",
+            &Request::bare(b"/usr/sbin/something"),
             &["alice".to_string()],
         );
         assert!(result.is_none());
@@ -5175,24 +3989,20 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
 
     #[test]
     fn command_match_exact() {
-        let aliases = HashMap::new();
         assert!(command_matches(
             "/usr/bin/ls",
             "",
-            b"/usr/bin/ls",
-            &aliases,
+            &Request::bare(b"/usr/bin/ls"),
             &SECURE
         ));
     }
 
     #[test]
     fn command_match_all() {
-        let aliases = HashMap::new();
         assert!(command_matches(
             "ALL",
             "",
-            b"/any/command",
-            &aliases,
+            &Request::bare(b"/any/command"),
             &SECURE
         ));
     }
@@ -5965,35 +4775,11 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
         assert!(msg.contains("not valid text"), "unhelpful message: {msg}");
     }
 
-    /// A file to edit is a path, not a name, so `visudo -f` takes it as it came.
-    #[test]
-    fn visudo_takes_the_file_to_edit_as_bytes() {
-        let wanted = not_text("/etc/sudoers.d/", "");
-        let opts = parse_visudo_args(&[OsString::from("-f"), wanted.clone()]).unwrap();
-        assert_eq!(opts.file, wanted);
-    }
-
-    /// Likewise the I/O-log directory and the session id, which are both
-    /// directory names.
-    #[test]
-    fn sudoreplay_takes_the_directory_and_session_as_bytes() {
-        let dir = not_text("/var/log/io", "");
-        let sess = not_text("sess", "");
-        let opts =
-            parse_sudoreplay_args(&[OsString::from("-d"), dir.clone(), sess.clone()]).unwrap();
-        assert_eq!(opts.directory, dir);
-        assert_eq!(opts.session_id, Some(sess));
-    }
-
     /// argv[0] chooses the personality, and it is a path like any other. A
-    /// directory component that is not text must not stop `visudo` being
-    /// `visudo` — the basename is the only part that decides.
+    /// directory component that is not text must not stop `sudoedit` being
+    /// `sudoedit` — the basename is the only part that decides.
     #[test]
     fn the_personality_is_chosen_from_a_basename_that_need_not_be_text() {
-        assert_eq!(
-            detect_personality(not_text("/usr/sbin/", "/visudo")),
-            Personality::Visudo
-        );
         assert_eq!(
             detect_personality(not_text("/opt/", "/sudoedit.exe")),
             Personality::Sudoedit
@@ -6114,108 +4900,6 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
         let opts = parse_sudo_args(&args).unwrap();
         assert_eq!(opts.command, vec!["id", "-u"]);
         assert_eq!(opts.target_user, "root");
-    }
-
-    // -- Visudo option parsing tests --
-
-    #[test]
-    fn parse_visudo_defaults() {
-        let args: Vec<OsString> = vec![];
-        let opts = parse_visudo_args(&args).unwrap();
-        assert!(!opts.check_only);
-        assert_eq!(opts.file, SUDOERS_PATH);
-        assert!(!opts.strict);
-    }
-
-    #[test]
-    fn parse_visudo_check_only() {
-        let args = argv(&["-c"]);
-        let opts = parse_visudo_args(&args).unwrap();
-        assert!(opts.check_only);
-    }
-
-    #[test]
-    fn parse_visudo_alternate_file() {
-        let args = argv(&["-f", "/tmp/sudoers"]);
-        let opts = parse_visudo_args(&args).unwrap();
-        assert_eq!(opts.file, "/tmp/sudoers");
-    }
-
-    #[test]
-    fn parse_visudo_strict() {
-        let args = argv(&["-s"]);
-        let opts = parse_visudo_args(&args).unwrap();
-        assert!(opts.strict);
-    }
-
-    #[test]
-    fn parse_visudo_unknown_flag() {
-        let args = argv(&["-z"]);
-        assert!(parse_visudo_args(&args).is_err());
-    }
-
-    #[test]
-    fn parse_visudo_f_missing_value() {
-        let args = argv(&["-f"]);
-        assert!(parse_visudo_args(&args).is_err());
-    }
-
-    // -- Sudoreplay option parsing tests --
-
-    #[test]
-    fn parse_sudoreplay_defaults() {
-        let args: Vec<OsString> = vec![];
-        let opts = parse_sudoreplay_args(&args).unwrap();
-        assert!(!opts.list);
-        assert_eq!(opts.directory, SUDO_IO_DIR);
-        assert!((opts.speed_factor - 1.0).abs() < f64::EPSILON);
-        assert!(opts.session_id.is_none());
-    }
-
-    #[test]
-    fn parse_sudoreplay_list() {
-        let args = argv(&["-l"]);
-        let opts = parse_sudoreplay_args(&args).unwrap();
-        assert!(opts.list);
-    }
-
-    #[test]
-    fn parse_sudoreplay_directory() {
-        let args = argv(&["-d", "/tmp/logs"]);
-        let opts = parse_sudoreplay_args(&args).unwrap();
-        assert_eq!(opts.directory, "/tmp/logs");
-    }
-
-    #[test]
-    fn parse_sudoreplay_speed() {
-        let args = argv(&["-s", "2.5"]);
-        let opts = parse_sudoreplay_args(&args).unwrap();
-        assert!((opts.speed_factor - 2.5).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn parse_sudoreplay_session_id() {
-        let args = argv(&["abc123"]);
-        let opts = parse_sudoreplay_args(&args).unwrap();
-        assert_eq!(opts.session_id.as_deref(), Some(OsStr::new("abc123")));
-    }
-
-    #[test]
-    fn parse_sudoreplay_negative_speed() {
-        let args = argv(&["-s", "-1"]);
-        assert!(parse_sudoreplay_args(&args).is_err());
-    }
-
-    #[test]
-    fn parse_sudoreplay_zero_speed() {
-        let args = argv(&["-s", "0"]);
-        assert!(parse_sudoreplay_args(&args).is_err());
-    }
-
-    #[test]
-    fn parse_sudoreplay_invalid_speed() {
-        let args = argv(&["-s", "notanumber"]);
-        assert!(parse_sudoreplay_args(&args).is_err());
     }
 
     // -- Validation tests --
@@ -6413,12 +5097,6 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
     fn error_display_timestamp_error() {
         let e = SudoError::TimestampError("expired".to_string());
         assert_eq!(format!("{e}"), "timestamp error: expired");
-    }
-
-    #[test]
-    fn error_display_lock_error() {
-        let e = SudoError::LockError("locked".to_string());
-        assert_eq!(format!("{e}"), "lock error: locked");
     }
 
     #[test]
@@ -6707,5 +5385,509 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
         let args = argv(&["-pEnter:", "ls"]);
         let opts = parse_sudo_args(&args).unwrap();
         assert_eq!(opts.prompt, "Enter:");
+    }
+
+    // -- sudoers' authorization rules (2026-10-01) --
+    //
+    // Each of these failed before that day's fix: arguments were ignored, a
+    // negation granted everything but what it named, a pattern was a prefix
+    // test on the path as typed, sudoedit asked about running the file, and
+    // shell mode authorised the first word of a line handed to `sh -c`.
+
+    /// Shorthand: may alice run `command` with `args` under `sudoers`?
+    fn alice_may(sudoers: &str, command: &[u8], args: Option<&[u8]>) -> bool {
+        let config = parse_sudoers(sudoers).expect("sudoers parses");
+        check_authorization(
+            &config,
+            "alice",
+            "localhost",
+            "root",
+            "",
+            &Request { command, args },
+            &["alice".to_string()],
+        )
+        .is_some()
+    }
+
+    #[test]
+    fn a_rules_arguments_restrict_it() {
+        let rule = "alice ALL = (root) /usr/bin/systemctl restart nginx\n";
+        assert!(alice_may(
+            rule,
+            b"/usr/bin/systemctl",
+            Some(b"restart nginx")
+        ));
+        assert!(!alice_may(rule, b"/usr/bin/systemctl", Some(b"stop nginx")));
+        assert!(!alice_may(
+            rule,
+            b"/usr/bin/systemctl",
+            Some(b"restart nginx sshd")
+        ));
+        assert!(!alice_may(rule, b"/usr/bin/systemctl", None));
+    }
+
+    #[test]
+    fn empty_quotes_allow_no_arguments() {
+        let rule = "alice ALL = (root) /usr/bin/id \"\"\n";
+        assert!(alice_may(rule, b"/usr/bin/id", None));
+        assert!(!alice_may(rule, b"/usr/bin/id", Some(b"-u")));
+    }
+
+    #[test]
+    fn a_rule_without_arguments_allows_any() {
+        let rule = "alice ALL = (root) /usr/bin/id\n";
+        assert!(alice_may(rule, b"/usr/bin/id", None));
+        assert!(alice_may(rule, b"/usr/bin/id", Some(b"-u root")));
+    }
+
+    #[test]
+    fn rule_arguments_are_fnmatch_patterns() {
+        let rule = "alice ALL = (root) /usr/bin/systemctl restart *\n";
+        assert!(alice_may(
+            rule,
+            b"/usr/bin/systemctl",
+            Some(b"restart nginx")
+        ));
+        // Not a sudoedit rule, so no FNM_PATHNAME: `*` crosses a `/` here,
+        // as it does upstream.
+        assert!(alice_may(rule, b"/usr/bin/systemctl", Some(b"restart a/b")));
+        assert!(!alice_may(rule, b"/usr/bin/systemctl", Some(b"stop nginx")));
+    }
+
+    #[test]
+    fn rule_arguments_between_caret_and_dollar_are_a_regex() {
+        let rule = "alice ALL = (root) /usr/bin/systemctl ^restart (nginx|apache2)$\n";
+        assert!(alice_may(
+            rule,
+            b"/usr/bin/systemctl",
+            Some(b"restart nginx")
+        ));
+        assert!(alice_may(
+            rule,
+            b"/usr/bin/systemctl",
+            Some(b"restart apache2")
+        ));
+        assert!(!alice_may(
+            rule,
+            b"/usr/bin/systemctl",
+            Some(b"restart sshd")
+        ));
+        // A pattern that does not compile grants nothing.
+        assert!(!alice_may(
+            "alice ALL = (root) /usr/bin/x ^(unclosed$\n",
+            b"/usr/bin/x",
+            Some(b"(unclosed")
+        ));
+    }
+
+    #[test]
+    fn a_negated_command_is_refused_over_all() {
+        let rule = "alice ALL = (root) ALL, !/usr/bin/passwd\n";
+        assert!(!alice_may(rule, b"/usr/bin/passwd", None));
+        assert!(alice_may(rule, b"/usr/bin/id", None));
+        // White space after the `!` is allowed, as sudoers allows it.
+        let spaced = "alice ALL = (root) ALL, ! /usr/bin/passwd\n";
+        assert!(!alice_may(spaced, b"/usr/bin/passwd", None));
+        assert!(alice_may(spaced, b"/usr/bin/id", None));
+    }
+
+    #[test]
+    fn a_negation_alone_grants_nothing() {
+        let rule = "alice ALL = (root) !/usr/bin/passwd\n";
+        assert!(!alice_may(rule, b"/usr/bin/id", None));
+        assert!(!alice_may(rule, b"/usr/bin/passwd", None));
+    }
+
+    #[test]
+    fn a_negated_alias_refuses_its_members() {
+        let rule = "Cmnd_Alias SHELLS = /bin/sh, /bin/bash\n\
+                    alice ALL = (root) ALL, !SHELLS\n";
+        assert!(!alice_may(rule, b"/bin/sh", None));
+        assert!(!alice_may(rule, b"/bin/bash", None));
+        assert!(alice_may(rule, b"/usr/bin/id", None));
+    }
+
+    /// A later privilege decides over an earlier one, as a later line of
+    /// sudoers does.
+    #[test]
+    fn the_last_rule_that_names_the_command_decides() {
+        let allow_last = "alice ALL = (root) !/usr/bin/passwd\nalice ALL = (root) ALL\n";
+        assert!(alice_may(allow_last, b"/usr/bin/passwd", None));
+        let deny_last = "alice ALL = (root) ALL\nalice ALL = (root) !/usr/bin/passwd\n";
+        assert!(!alice_may(deny_last, b"/usr/bin/passwd", None));
+    }
+
+    #[test]
+    fn sudoedit_is_its_own_command() {
+        let rule = "alice ALL = (root) sudoedit /etc/motd\n";
+        assert!(alice_may(rule, b"sudoedit", Some(b"/etc/motd")));
+        assert!(!alice_may(rule, b"sudoedit", Some(b"/etc/shadow")));
+        // Several files are one argument string, which the rule must match.
+        assert!(!alice_may(
+            rule,
+            b"sudoedit",
+            Some(b"/etc/motd /etc/shadow")
+        ));
+        // A rule to RUN a path does not grant editing it.
+        assert!(!alice_may(
+            "alice ALL = (root) /etc/motd\n",
+            b"sudoedit",
+            Some(b"/etc/motd")
+        ));
+        // A sudoedit rule runs nothing.
+        assert!(!alice_may(rule, b"/usr/bin/sudoedit", Some(b"/etc/motd")));
+        // `ALL` includes sudoedit.
+        assert!(alice_may(
+            "alice ALL = (root) ALL\n",
+            b"sudoedit",
+            Some(b"/etc/shadow")
+        ));
+    }
+
+    #[test]
+    fn sudoedit_patterns_do_not_cross_a_slash() {
+        let rule = "alice ALL = (root) sudoedit /etc/*\n";
+        assert!(alice_may(rule, b"sudoedit", Some(b"/etc/motd")));
+        assert!(!alice_may(rule, b"sudoedit", Some(b"/etc/ssh/sshd_config")));
+    }
+
+    /// None of these exists, so each is judged by its text -- and a text with
+    /// `.`, `..` or an empty component is not a path a pattern may match.
+    #[test]
+    fn a_pattern_does_not_match_through_dot_dot() {
+        let rule = "alice ALL = (root) /usr/bin/*\n";
+        assert!(!alice_may(rule, b"/usr/bin/../../tmp/evil", None));
+        assert!(!alice_may(rule, b"/usr/bin/./../sbin/x", None));
+        assert!(!alice_may(rule, b"/usr/bin//x", None));
+        assert!(!alice_may(rule, b"/usr/bin/sub/x", None));
+        assert!(alice_may(rule, b"/usr/bin/nonexistent-tool", None));
+    }
+
+    /// With real files the canonical program is what a pattern sees.
+    #[cfg(unix)]
+    #[test]
+    fn a_pattern_is_matched_against_the_canonical_program() {
+        let dir = ScratchDir::new("sudo_canon");
+        let root = fs::canonicalize(dir.dir())
+            .expect("canonical scratch dir")
+            .to_string_lossy()
+            .to_string();
+        fs::create_dir_all(format!("{root}/bin")).expect("bin");
+        fs::write(format!("{root}/bin/tool"), b"x").expect("tool");
+        fs::write(format!("{root}/evil"), b"x").expect("evil");
+
+        let rule = format!("alice ALL = (root) {root}/bin/*\n");
+        assert!(alice_may(
+            &rule,
+            format!("{root}/bin/tool").as_bytes(),
+            None
+        ));
+        assert!(!alice_may(
+            &rule,
+            format!("{root}/bin/../evil").as_bytes(),
+            None
+        ));
+
+        // A directory rule: every program directly in it.
+        let dir_rule = format!("alice ALL = (root) {root}/bin/\n");
+        assert!(alice_may(
+            &dir_rule,
+            format!("{root}/bin/tool").as_bytes(),
+            None
+        ));
+        assert!(!alice_may(
+            &dir_rule,
+            format!("{root}/evil").as_bytes(),
+            None
+        ));
+        assert!(!alice_may(
+            &dir_rule,
+            format!("{root}/bin/../evil").as_bytes(),
+            None
+        ));
+    }
+
+    #[test]
+    fn shell_mode_runs_the_shell_with_the_words_escaped() {
+        let opts = SudoOpts {
+            shell: true,
+            command: vec![OsString::from("ls"), OsString::from("&& id")],
+            ..SudoOpts::default()
+        };
+        assert_eq!(
+            invocation(&opts, "/bin/sh"),
+            Some((
+                OsString::from("/bin/sh"),
+                vec![OsString::from("-c"), OsString::from("ls \\&\\&\\ id")]
+            ))
+        );
+        // Alone, the shell itself.
+        let alone = SudoOpts {
+            login_shell: true,
+            ..SudoOpts::default()
+        };
+        assert_eq!(
+            invocation(&alone, "/bin/sh"),
+            Some((OsString::from("/bin/sh"), Vec::new()))
+        );
+    }
+
+    #[test]
+    fn without_a_shell_the_command_line_is_the_invocation() {
+        let opts = SudoOpts {
+            command: vec![OsString::from("ls"), OsString::from("-l")],
+            ..SudoOpts::default()
+        };
+        assert_eq!(
+            invocation(&opts, "/bin/sh"),
+            Some((OsString::from("ls"), vec![OsString::from("-l")]))
+        );
+        assert_eq!(invocation(&SudoOpts::default(), "/bin/sh"), None);
+    }
+
+    #[test]
+    fn shell_escaping_is_upstreams() {
+        let words = |w: &[&str]| -> Vec<OsString> { w.iter().map(OsString::from).collect() };
+        assert_eq!(
+            shell_escaped_command(&words(&["a$b_c-d9"])),
+            OsString::from("a$b_c-d9")
+        );
+        assert_eq!(
+            shell_escaped_command(&words(&["x y", "z"])),
+            OsString::from("x\\ y z")
+        );
+        assert_eq!(
+            shell_escaped_command(&words(&["a;b", "'c'"])),
+            OsString::from("a\\;b \\'c\\'")
+        );
+    }
+
+    /// In shell mode the SHELL is what sudoers is asked about, so a caller
+    /// allowed one program cannot reach the shell through it.
+    #[test]
+    fn shell_mode_authorises_the_shell_not_the_first_word() {
+        let opts = SudoOpts {
+            shell: true,
+            command: vec![OsString::from("/usr/bin/id"), OsString::from("&& reboot")],
+            ..SudoOpts::default()
+        };
+        let (program, args) = invocation(&opts, "/bin/sh").expect("something to run");
+        let program = os_bytes(&program).into_owned();
+        let joined = user_args(&args);
+        let config = parse_sudoers("alice ALL = (root) /usr/bin/id\n").expect("parses");
+        let request = Request {
+            command: &program,
+            args: joined.as_deref(),
+        };
+        assert!(
+            check_authorization(
+                &config,
+                "alice",
+                "localhost",
+                "root",
+                "",
+                &request,
+                &["alice".to_string()]
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn user_args_are_joined_with_single_spaces() {
+        assert_eq!(user_args(&[]), None);
+        assert_eq!(
+            user_args(&[OsString::from("a"), OsString::from("b c")]),
+            Some(b"a b c".to_vec())
+        );
+        assert_eq!(user_args(&[OsString::new()]), Some(Vec::new()));
+    }
+
+    // -- sudoedit: the editor runs as the caller on copies the caller owns --
+
+    #[test]
+    fn a_copy_is_named_as_upstream_names_it() {
+        assert_eq!(temp_name(b"motd.conf", b"ABCDEFGH"), b"motdABCDEFGH.conf");
+        assert_eq!(temp_name(b"motd", b"ABCDEFGH"), b"motd.ABCDEFGH");
+        assert_eq!(temp_name(b".bashrc", b"ABCDEFGH"), b"ABCDEFGH.bashrc");
+        assert_eq!(temp_name(b"a.b.c", b"ABCDEFGH"), b"a.bABCDEFGH.c");
+    }
+
+    #[test]
+    fn a_directory_is_writable_as_upstream_judges_it() {
+        let alice = Caller {
+            uid: 1000,
+            gid: 1000,
+        };
+        // The caller's own directory is, whatever its mode.
+        assert!(dir_writable_by(0o555, 1000, 0, alice));
+        // Others may write: so may the caller, sticky bit or not.
+        assert!(dir_writable_by(0o777, 0, 0, alice));
+        assert!(dir_writable_by(0o1777, 0, 0, alice));
+        // The group may write, and it is the caller's group.
+        assert!(dir_writable_by(0o775, 0, 1000, alice));
+        assert!(!dir_writable_by(0o775, 0, 50, alice));
+        // Root's ordinary directory is not.
+        assert!(!dir_writable_by(0o755, 0, 0, alice));
+    }
+
+    #[test]
+    fn the_editor_setting_is_split_into_words() {
+        assert_eq!(
+            editor_words(OsStr::new("vim -n")),
+            vec![OsString::from("vim"), OsString::from("-n")]
+        );
+        assert_eq!(
+            editor_words(OsStr::new("  ")),
+            vec![OsString::from(DEFAULT_EDITOR)]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_open_flags_are_the_c_librarys() {
+        assert_eq!(O_NOFOLLOW, posix::fcntl::O_NOFOLLOW);
+        assert_eq!(O_NONBLOCK, posix::fcntl::O_NONBLOCK);
+        assert_eq!(ELOOP, posix::errno::ELOOP);
+    }
+
+    /// The test's own identity, as sudoedit would see its caller.
+    #[cfg(unix)]
+    fn me() -> Caller {
+        Caller {
+            uid: authlib::identity::caller_uid().expect("uid"),
+            gid: authlib::identity::caller_gid().expect("gid"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_in_a_directory_the_caller_can_write_is_refused() {
+        let dir = ScratchDir::new("sudoedit_dirs");
+        let file = dir.dir().join("notes.txt");
+        fs::write(&file, b"x").expect("write");
+        let refused = check_path_dirs(&file, me()).expect_err("own directory");
+        assert!(
+            refused.ends_with("editing files in a writable directory is not permitted"),
+            "{refused}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_is_not_opened() {
+        let dir = ScratchDir::new("sudoedit_link");
+        let target = dir.dir().join("target");
+        fs::write(&target, b"secret").expect("write");
+        let link = dir.dir().join("link");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        let refused = open_original(&link).expect_err("a symlink");
+        assert!(
+            refused.ends_with("editing symbolic links is not permitted"),
+            "{refused}"
+        );
+        // And a directory in the path that is a symlink is refused too. Asked
+        // of that one step: walked from the root, this path fails earlier, at
+        // the world-writable `/tmp` it sits in -- which is also right.
+        let linked_dir = dir.dir().join("linked");
+        std::os::unix::fs::symlink(dir.dir(), &linked_dir).expect("symlink dir");
+        let refused = check_dir(
+            &linked_dir,
+            "'linked/target'",
+            Caller {
+                uid: u32::MAX,
+                gid: u32::MAX,
+            },
+        )
+        .expect_err("a symlinked directory");
+        assert!(
+            refused.ends_with("editing symbolic links is not permitted"),
+            "{refused}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_original_is_edited_from_empty_and_a_directory_is_refused() {
+        let dir = ScratchDir::new("sudoedit_open");
+        assert!(matches!(open_original(&dir.dir().join("absent")), Ok(None)));
+        let refused = open_original(dir.dir()).expect_err("a directory");
+        assert!(refused.ends_with("not a regular file"), "{refused}");
+    }
+
+    /// A copy made, edited and written back, without the editor: the two
+    /// halves either side of it, which are where the checks are.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_round_trips_and_an_untouched_one_is_unchanged() {
+        let dir = ScratchDir::new("sudoedit_round");
+        let original = dir.dir().join("motd");
+        fs::write(&original, b"hello\n").expect("write");
+        let tmpdir = dir.dir().join("tmp");
+        fs::create_dir(&tmpdir).expect("tmp");
+
+        // The copy: exclusive, 0600, the caller's, holding the original.
+        let edit = prepare_copy(&original, &tmpdir, me());
+        assert_eq!(fs::read(&edit.temp).expect("read copy"), b"hello\n");
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let meta = fs::metadata(&edit.temp).expect("meta");
+            assert_eq!(meta.mode() & 0o7777, 0o600);
+            assert_eq!(meta.uid(), me().uid);
+        }
+
+        // Untouched: reported unchanged, the copy removed, the original kept.
+        assert_eq!(copy_back(&edit, me(), true), Ok(()));
+        assert!(!edit.temp.exists());
+        assert_eq!(fs::read(&original).expect("read"), b"hello\n");
+
+        // Edited shorter: written back, and cut at the new length.
+        let edit = prepare_copy(&original, &tmpdir, me());
+        fs::write(&edit.temp, b"hi\n").expect("edit");
+        assert_eq!(copy_back(&edit, me(), true), Ok(()));
+        assert_eq!(fs::read(&original).expect("read"), b"hi\n");
+        assert!(!edit.temp.exists());
+    }
+
+    /// The checks a copy must pass before it is trusted over the original.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_that_is_not_what_was_made_is_not_written_back() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = ScratchDir::new("sudoedit_swap");
+        let original = dir.dir().join("motd");
+        fs::write(&original, b"hello\n").expect("write");
+        let tmpdir = dir.dir().join("tmp");
+        fs::create_dir(&tmpdir).expect("tmp");
+        let secret = dir.dir().join("secret");
+        fs::write(&secret, b"root's\n").expect("secret");
+
+        // Swapped for a symlink: refused, the original left alone.
+        let edit = prepare_copy(&original, &tmpdir, me());
+        fs::remove_file(&edit.temp).expect("rm");
+        std::os::unix::fs::symlink(&secret, &edit.temp).expect("symlink");
+        assert!(copy_back(&edit, me(), true).is_err());
+        assert_eq!(fs::read(&original).expect("read"), b"hello\n");
+
+        // Its mode changed: refused.
+        let edit = prepare_copy(&original, &tmpdir, me());
+        fs::set_permissions(&edit.temp, fs::Permissions::from_mode(0o644)).expect("chmod");
+        assert!(copy_back(&edit, me(), true).is_err());
+
+        // Owned by someone else (as seen by a different caller): refused.
+        let edit = prepare_copy(&original, &tmpdir, me());
+        let stranger = Caller {
+            uid: me().uid.wrapping_add(1),
+            gid: me().gid,
+        };
+        assert!(copy_back(&edit, stranger, true).is_err());
+        assert_eq!(fs::read(&original).expect("read"), b"hello\n");
+    }
+
+    /// `prepare_edit` without the directory check, which a test cannot pass:
+    /// every directory it can create is its own.
+    #[cfg(unix)]
+    fn prepare_copy(original: &Path, tmpdir: &Path, caller: Caller) -> EditFile {
+        prepare_edit_unchecked(original, tmpdir, caller).expect("copy made")
     }
 }

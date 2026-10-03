@@ -1,6 +1,7 @@
 # B → D: new coreutils programs for `scripts/rootfs-bin-manifest.txt`
 
 **Status:** OPEN — for lane D: add the names below to the manifest.
+**Grown 2026-10-02** by ten more, at the end ("Ten more, 2026-10-02").
 
 **From:** lane B. **Date:** 2026-09-25.
 
@@ -95,6 +96,38 @@ With `ptx` the table holds every GNU 9.4 program that has something on
 SlateOS to act on, so it will not grow again. (`chcon`, `runcon` and
 `stdbuf` are not ported, for want of SELinux contexts and of dynamic
 linking.) Whatever the table says is the whole ask.
+
+**Corrected 2026-10-02: it did grow.** The paragraph above counted only the
+programs coreutils had *never* built. It missed the ones that existed as
+standalone crates written here rather than ported -- and since then, under
+design-decisions §1005 (coreutils is the one home for a coreutils program),
+ten of those have been replaced by ports and their crates deleted. None
+of the ten was on the image, so nothing on the image changes hands; they are
+simply more of this request.
+
+## Ten more, 2026-10-02
+
+| Name | What it is for | Checked by |
+|---|---|---|
+| `install` | copy files into place with an owner, a mode and backups -- what every `make install` runs | `scripts/install-diff.sh` |
+| `fmt` | refill paragraphs of text to a width | `scripts/fmt-diff.sh` |
+| `mktemp` | make a temporary file or directory with a unique name, safely -- what shell scripts use instead of guessing `/tmp/foo.$$` | `scripts/mktemp-diff.sh` |
+| `shuf` | random permutations and samples of lines or numbers | `scripts/shuf-diff.sh` |
+| `tac` | lines (or records) in reverse order | `scripts/tac-diff.sh` |
+| `timeout` | run a command with a time limit, signalling it and its children when time is up | `scripts/timeout-diff.sh` |
+| `chroot` | run a command with another directory as its root, as another user if asked -- what setting up a container or rescuing an installed system starts with | `scripts/chroot-diff.sh` |
+| `who` | who is logged in: each session's terminal, login time and origin; `-b` the boot time, `-r` the run level, `-a` everything utmp records | `scripts/who-diff.sh` |
+| `w` | who is logged in and what each session is doing: `uptime`'s line, then idle time, CPU time and the command running on the terminal. procps-ng 4.0.4's program rather than GNU's, ported the same way | `scripts/w-diff.sh` |
+| `stty` | print or change a terminal's settings -- echo, line editing, the special characters, speeds and size; what a script runs to read a password without echoing it, and what `reset` and every job-control shell rely on | `scripts/stty-diff.sh` |
+
+None is a fastpy name or `sort` or `sh`, and nothing else stages any of
+them -- `create-ext4-rootfs.sh`'s `PROMOTED` map is the fourteen fastpy
+commands and no others. At the manifest's average of about 813 KiB each, the
+ten come to about 8 MiB.
+
+`stty` was the last of them: with it, the table again holds every GNU 9.4
+program that has something on SlateOS to act on, and it will not grow from
+this source again.
 
 ## What I need back
 

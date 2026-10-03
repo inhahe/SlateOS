@@ -2,15 +2,12 @@
 name = "lockfile"
 version = "0.1.0"
 edition = "2024"
-description = "SlateOS lockfile - create semaphore files, as procmail's lockfile(1)"
+description = "SlateOS lockfile - procmail 3.24's lockfile(1), ported: create semaphore files"
 
 [lints]
 workspace = true
 
 [dependencies]
-# getopt's usage diagnostics, spelled once: an unknown option is refused in
-# getopt_long's words. Pure formatting over `quoting`, no I/O, so §768 exempt.
-usageerror = { path = "../usageerror" }
-# A lock file's name is caller-chosen and may hold a newline; `-mu` reports a
-# removal it could not perform, and the name is quoted there (§370).
-quoting = { path = "../quoting" }
+# The passwd lookups behind -ml, -mu and -v (procmail's auth_finduser and
+# auth_finduid): the same reader whoami and id use.
+pwdb = { path = "../pwdb" }

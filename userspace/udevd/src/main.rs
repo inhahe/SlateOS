@@ -1489,6 +1489,13 @@ struct DaemonState {
     /// test therefore created a real directory at the root of the operator's
     /// data drive, where later runs of other crates found it.
     dev_dir: String,
+    /// Where the rules are read from, at start-up and on every reload. A field
+    /// rather than the `RULES_DIR` constant for the reason `dev_dir` is one:
+    /// the test of a reload "from a nonexistent directory" read the real
+    /// `/etc/udev/rules.d`. On the Windows host that path does not exist, so it
+    /// passed there; on a Linux host it holds the distribution's rules, and the
+    /// test failed -- `rules.is_empty()` against the machine's own udev setup.
+    rules_dir: String,
 }
 
 impl DaemonState {
@@ -1500,12 +1507,13 @@ impl DaemonState {
             event_count: 0,
             _resolve_names_early: resolve_names_early,
             dev_dir: DEV_DIR.to_string(),
+            rules_dir: RULES_DIR.to_string(),
         }
     }
 
     /// Reload rules from disk.
     fn reload_rules(&mut self) {
-        self.rules = load_rules(RULES_DIR);
+        self.rules = load_rules(&self.rules_dir);
         if self.log_level >= LogLevel::Info {
             eprintln!("udevd: reloaded {} rules", self.rules.len());
         }
@@ -3394,6 +3402,13 @@ mod tests {
                 .to_str()
                 .expect("scratch path is ASCII")
                 .to_string(),
+            // Never created: no rules on disk, whatever the host has in
+            // `/etc/udev/rules.d`.
+            rules_dir: scratch
+                .path("rules")
+                .to_str()
+                .expect("scratch path is ASCII")
+                .to_string(),
         };
 
         let ev = DeviceEvent {
@@ -3423,6 +3438,13 @@ mod tests {
             _resolve_names_early: false,
             dev_dir: scratch
                 .path("dev")
+                .to_str()
+                .expect("scratch path is ASCII")
+                .to_string(),
+            // Never created: no rules on disk, whatever the host has in
+            // `/etc/udev/rules.d`.
+            rules_dir: scratch
+                .path("rules")
                 .to_str()
                 .expect("scratch path is ASCII")
                 .to_string(),

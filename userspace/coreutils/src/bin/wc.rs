@@ -29,7 +29,7 @@ use coreutils::getopt::{self, Program, Takes};
 use coreutils::stdfd::{self, Stream};
 // No `quote` here: every diagnostic `wc` prints names its file with one of the
 // shell-escape styles, so none of them carry §351's curly marks.
-use coreutils::quote::{quoteaf, quoteaf_os, quotef_os};
+use coreutils::quote::{quoteaf, quoteaf_os, quotef, quotef_os};
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -116,11 +116,16 @@ impl Options {
     /// together in exactly this way, because one count of one input is printed
     /// with no padding at all.
     fn selected(self) -> usize {
-        usize::from(self.lines)
-            + usize::from(self.words)
-            + usize::from(self.chars)
-            + usize::from(self.bytes)
-            + usize::from(self.max_line)
+        [
+            self.lines,
+            self.words,
+            self.chars,
+            self.bytes,
+            self.max_line,
+        ]
+        .into_iter()
+        .filter(|&on| on)
+        .count()
     }
 }
 
@@ -378,7 +383,7 @@ fn long_option(
         // rather than resolving to `--debug` alone.
         "debug" => {}
         "total" => {
-            options.total = WC.argmatch(&value.unwrap_or_default(), "--total", TOTAL_WORDS)?
+            options.total = WC.argmatch(&value.unwrap_or_default(), "--total", TOTAL_WORDS)?;
         }
         "files0-from" => *files0_from = Some(os_from_bytes(&value.unwrap_or_default())),
         "help" => return Ok(Some(Request::Help)),
@@ -739,9 +744,10 @@ fn run(options: &Options, source: &Source, out: &mut Stream) -> ExitCode {
         // per-name complaint, not a fatal one — the names around it are still
         // counted, and only the exit status remembers.
         if name.as_deref() == Some(b"".as_slice()) {
+            // `quotef (files_from)`: bare unless the name needs quoting.
             diag!(
                 "wc: {}:{}: invalid zero-length file name",
-                String::from_utf8_lossy(inputs.label.as_deref().unwrap_or(b"-")),
+                quotef(inputs.label.as_deref().unwrap_or(b"-")),
                 n.saturating_add(1)
             );
             failed = true;
@@ -1099,10 +1105,18 @@ mod tests {
 
     #[test]
     fn a_soft_hyphen_and_a_private_use_character_are_ordinary_word_characters() {
-        // Measured 3 columns each: both are printable and one column wide,
-        // which is where `iswprint` and the Unicode category part company.
-        assert_eq!(count("a\u{ad}b\n".as_bytes()).max_line, 3);
+        // Both are printable, so neither splits a word -- which is where
+        // `iswprint` and the Unicode category part company.
+        assert_eq!(count("a\u{ad}b\n".as_bytes()).words, 1);
+        assert_eq!(count("a\u{e000}b\n".as_bytes()).words, 1);
+        // A private-use character is one column wide: measured, 3 columns.
         assert_eq!(count("a\u{e000}b\n".as_bytes()).max_line, 3);
+        // The soft hyphen takes none (design-decisions §1042: Unicode shows
+        // it only where a line breaks at it, and gnulib, which coreutils 9.5
+        // measures with, agrees). glibc's `wcwidth` gives it one, so
+        // Ubuntu's `wc -L` says 3 here; `scripts/wc-diff.sh` records that
+        // case as a difference on purpose.
+        assert_eq!(count("a\u{ad}b\n".as_bytes()).max_line, 2);
         // A zero-width space is printable but occupies nothing.
         assert_eq!(count("a\u{200b}b\n".as_bytes()).max_line, 2);
     }

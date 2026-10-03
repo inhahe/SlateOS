@@ -82,7 +82,7 @@ use std::process::ExitCode;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
 use coreutils::posixver;
-use coreutils::quote::{quote, quoteaf_os, quotef_os};
+use coreutils::quote::{os_bytes, quote, quoteaf_os, quotef_os};
 use keydef::{Blanks, KeySpec, Kind, parse_key, parse_obsolete_end, parse_obsolete_start};
 use order::Ignore;
 
@@ -324,10 +324,11 @@ fn merge<'a>(cfg: &Config, per_file: &[Vec<&'a [u8]>]) -> Vec<&'a [u8]> {
 /// Returns the exit status. With `-u` an equal pair is also a failure, since
 /// the file would not be the output of `sort -u`.
 fn check(cfg: &Config, lines: &[&[u8]], mode: Check) -> u8 {
+    // The name as given, which need not be text: upstream prints it bare.
     let name = cfg
         .files
         .first()
-        .map_or_else(|| "-".to_string(), |f| f.to_string_lossy().into_owned());
+        .map_or(std::borrow::Cow::Borrowed(b"-".as_slice()), |f| os_bytes(f));
     for index in 1..lines.len() {
         let (Some(prev), Some(cur)) = (lines.get(index.saturating_sub(1)), lines.get(index)) else {
             continue;
@@ -345,7 +346,9 @@ fn check(cfg: &Config, lines: &[&[u8]], mode: Check) -> u8 {
                 let mut err = Stream::stderr();
                 // The offending line goes out as bytes: it is not necessarily
                 // text, and a diagnostic is not a reason to mangle it.
-                let _ = write!(err, "sort: {name}:{}: disorder: ", index.saturating_add(1));
+                let _ = err.write_all(b"sort: ");
+                let _ = err.write_all(&name);
+                let _ = write!(err, ":{}: disorder: ", index.saturating_add(1));
                 let _ = err.write_all(cur);
                 let _ = err.write_all(&[cfg.delim]);
             }
@@ -416,9 +419,10 @@ fn read_files0(list: &OsString) -> Result<Vec<OsString>, String> {
     let mut names = Vec::new();
     for (index, name) in body.split(|&c| c == 0).enumerate() {
         if name.is_empty() {
+            // `quotef (files_from)`: bare unless the name needs quoting.
             return Err(format!(
                 "{}:{}: invalid zero-length file name",
-                list.to_string_lossy(),
+                quotef_os(list),
                 index.saturating_add(1)
             ));
         }

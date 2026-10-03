@@ -2024,7 +2024,7 @@ impl App {
         // 137, NOT 9. The second argument is an exit *code*, not a signal
         // number, and the tree's convention for "killed by signal N" is the
         // shell's 128+N -- `userspace/kill` uses 143/137/129/130 for
-        // TERM/KILL/HUP/INT and `userspace/pgrep` matches it. This line passed
+        // TERM/KILL/HUP/INT (as `userspace/pgrep` did until 2026-10-02). This line passed
         // 9 under a comment reading "exit code 9 (SIGKILL equivalent)", which
         // is where the confusion is visible: 9 is SIGKILL's *signal* number,
         // and as an exit code it is indistinguishable from a program that

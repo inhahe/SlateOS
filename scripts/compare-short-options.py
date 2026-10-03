@@ -214,7 +214,8 @@ def ours_located(source: str) -> list[tuple[str, str, str]]:
 
     THE ENCLOSING FUNCTION IS WHICH PROGRAM THE BINDING BELONGS TO, and
     without it a multi-personality crate is judged against whichever of its
-    references happens to be installed. `userspace/selinux` answers to twelve
+    references happens to be installed. `userspace/selinux` (deleted 2026-10-01,
+    design-decisions 1045) answered to twelve
     names; only `chcon` is present on this machine, so `-r`/`--range` -- which
     lives in `semanage_login`, and is real semanage syntax -- was reported
     against chcon's `-r, --role`. Likewise `userspace/xdg`: `-n`/`--no-open`

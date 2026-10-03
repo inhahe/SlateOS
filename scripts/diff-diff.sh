@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 # Differential test: our `diff` against GNU diffutils.
 #
+# Since 2026-10-02 the subject is a port of diffutils 3.10's `diff`
+# (`userspace/coreutils/src/bin/diff/`): `io.c`, `analyze.c` with gnulib's
+# `diffseq.h`, `dir.c` and every output format. The sections below are the
+# harness's history -- written when `diff` was still a duplicate pair §1005
+# had to decide -- and still explain its fixtures. The random pairs near the
+# end (`gen.py`) are what hold the port to GNU's *choice* of edit script,
+# where a diff that is merely correct and GNU's part company: see
+# `known-issues.md` -> TD-B-DIFF-CHOOSES-ITS-OWN-EDIT-SCRIPT.
+#
 # ## Why this harness exists
 #
 # `diff` is one of the sixteen duplicate pairs left under design decision §1005,
@@ -198,6 +207,109 @@ printf 'ALPHA\n'                                 > "db/$nonutf8"
 printf 'lonely\n'                                > "da/$onlyodd"
 printf 'top level\n'                             > "$nonutf8"
 stamp "da/$nonutf8" "db/$nonutf8" "da/$onlyodd" "$nonutf8"
+
+# For the cases the port of diffutils' diff added (2026-10-02): ed scripts
+# with a line that is just a dot, blank lines for -B, tabs for -E and -t,
+# trailing blanks for -Z, CRLF for --strip-trailing-cr, function lines for -p
+# and -F, NULs for the binary path, a file long enough for context and
+# horizon to matter, an exclusion list, and two symbolic links.
+printf 'alpha\n.\nbravo\n'                       > dot1.txt
+printf 'alpha\n.\nCHANGED\n.\n'                  > dot2.txt
+printf 'a\n\nb\n\n\nc\n'                         > blank1.txt
+printf 'a\nb\n\nc\n  \n'                         > blank2.txt
+printf '\tx\n  y\n\tz\n'                         > tabs1.txt
+printf '        x\n\ty\n\tZ\n'                   > tabs2.txt
+printf 'x  \ny\t\nz\n'                           > trail1.txt
+printf 'x\ny \nZ\n'                              > trail2.txt
+printf 'alpha\r\nbravo\r\ncharlie\r\ndelta\r\n'  > crlf.txt
+printf 'int main(void)\n{\n  a();\n  b();\n  c();\n  d();\n  e();\n}\n\nstatic int f(void)\n{\n  x();\n  y();\n  z();\n  w();\n}\n' > func1.c
+printf 'int main(void)\n{\n  a();\n  B();\n  c();\n  d();\n  e();\n}\n\nstatic int f(void)\n{\n  x();\n  y();\n  Z();\n  w();\n}\n' > func2.c
+printf 'bin\000ary one\n'                        > bin1
+printf 'bin\000ary two!\n'                       > bin2
+{ for i in $(seq 1 60); do printf 'l%02d\n' "$i"; done; }               > lng1.txt
+{ for i in $(seq 1 60); do
+    case $i in 10|11|30|50) printf 'L%02d\n' "$i" ;; 40) ;; *) printf 'l%02d\n' "$i" ;; esac
+  done; printf 'tail\n'; }                                             > lng2.txt
+printf '*.txt\nsub\n'                             > excl.lst
+ln -s base.txt link1
+ln -s mid.txt link2
+
+# Random pairs: `gen.py FIRST LAST` writes `rN.a`, `rN.b` and `rN.opts`.
+cat > gen.py <<'PY'
+import random, shlex, sys
+
+# Pairs of files for `diff`, from seeds: `gen.py FIRST LAST` writes `rN.a`,
+# `rN.b` and `rN.opts` (shell-quoted options) for each seed.
+VOCAB = ["a", "b", "c", "d", "", "}", "{", "x = 1;", "return;", "foo", "bar",
+         "  indented", "\ttabbed", "trailing  ", "Mixed Case", "#comment",
+         "int main(void)", "  ", "\t", "café", ".", "a\tb"]
+MODES = [[], ["-u"], ["-c"], ["-U1"], ["-U0"], ["-C2"], ["-e"], ["-f"],
+         ["-n"], ["--normal"], ["-y", "-W", "60"], ["-y", "-W", "80"],
+         ["-y", "--left-column"], ["-y", "--suppress-common-lines"],
+         ["-q"], ["-s"], ["-D", "NAME"], ["--line-format=%L"],
+         ["--unchanged-line-format=", "--old-line-format=-%l\n",
+          "--new-line-format=+%l\n"],
+         ["--old-group-format=<%dn,%dN>\n", "--new-group-format=[%dF]\n",
+          "--changed-group-format=%(n=1?one:many)\n",
+          "--unchanged-group-format="],
+         ["-y", "-t"], ["-u", "-p"], ["-c", "-F", "^[a-z]"]]
+EXTRA = [["-b"], ["-w"], ["-i"], ["-B"], ["-E"], ["-Z"], ["-t"], ["-T"],
+         ["-d"], ["-H"], ["--horizon-lines=2"], ["-I", "^#"],
+         ["--strip-trailing-cr"], ["--suppress-blank-empty"],
+         ["--tabsize=4"], ["-a"], ["--label", "L1", "--label", "L2"]]
+
+
+def lines(rng, vocab):
+    n = rng.randint(0, 60)
+    return [rng.choice(vocab) for _ in range(n)]
+
+
+def edit(rng, a, vocab):
+    b = list(a)
+    for _ in range(rng.randint(0, 10)):
+        op = rng.random()
+        pos = rng.randint(0, len(b))
+        if op < 0.35:
+            for _ in range(rng.randint(1, 3)):
+                b.insert(pos, rng.choice(vocab))
+        elif op < 0.7 and b:
+            del b[min(pos, len(b) - 1):min(pos, len(b) - 1) + rng.randint(1, 3)]
+        elif b:
+            k = min(pos, len(b) - 1)
+            b[k] = rng.choice([b[k].upper(), b[k] + " ", " " + b[k],
+                               b[k].replace(" ", "\t"), rng.choice(vocab)])
+    return b
+
+
+def text(rng, ls):
+    t = "\n".join(ls)
+    if ls and rng.random() < 0.85:
+        t += "\n"
+    if rng.random() < 0.05:
+        t = t.replace("\n", "\r\n")
+    return t.encode("utf-8")
+
+
+for seed in range(int(sys.argv[1]), int(sys.argv[2]) + 1):
+    rng = random.Random(seed)
+    vocab = VOCAB[: rng.randint(3, len(VOCAB))]
+    a = lines(rng, vocab)
+    if rng.random() < 0.1:
+        # Long and repetitive, past discard_confusing_lines' thresholds.
+        a = [rng.choice(vocab[:4]) for _ in range(rng.randint(200, 800))]
+    b = edit(rng, a, vocab)
+    with open(f"r{seed}.a", "wb") as f:
+        f.write(text(rng, a))
+    with open(f"r{seed}.b", "wb") as f:
+        f.write(text(rng, b))
+    opts = list(rng.choice(MODES))
+    for _ in range(rng.choice([0, 0, 1, 1, 2])):
+        opts += rng.choice(EXTRA)
+    with open(f"r{seed}.opts", "w", encoding="utf-8") as f:
+        f.write(" ".join(shlex.quote(o) for o in opts) + "\n")
+PY
+python3 gen.py 1 300 || exit 1
+stamp func1.c func2.c bin1 bin2 excl.lst r*.a r*.b
 
 # Everything gets the same mtime, including the directories, so no header and no
 # `-r` listing can differ for a reason that is not the program's.
@@ -577,14 +689,115 @@ run_case --color=never base.txt mid.txt
 run_case --horizon-lines=x base.txt mid.txt
 run_case -d base.txt mid.txt
 run_case --bogus --help
-xfail_case 'ifdef output is not implemented; ours refuses the option by name' -D X base.txt mid.txt
-xfail_case 'labels are not implemented; ours refuses the option by name' -L one -u base.txt mid.txt
+run_case -D X base.txt mid.txt
+run_case -L one -u base.txt mid.txt
 # POSIXLY_CORRECT: the first operand ends option parsing, so the `-u` after two
 # operands is a third one.
 ENVV=(POSIXLY_CORRECT=1)
 run_case base.txt mid.txt -u
 run_case -u base.txt mid.txt
 ENVV=()
+
+# --- the port: formats, filters and walks the hand-written diff lacked ---------
+# -D and the format options.
+run_case -D X base.txt added.txt
+run_case -D X base.txt removed.txt
+run_case -D X base.txt same.txt
+run_case --line-format='%L' base.txt mid.txt
+run_case --old-line-format='-%l
+' --new-line-format='+%l
+' --unchanged-line-format='=%l
+' base.txt mid.txt
+run_case --old-group-format='<%dn %df %dl %de %dm>
+' --new-group-format='[%dN %dF %dL %dE %dM]
+' --changed-group-format='{%(n=1?one:many)|%(N=1?one:many)}
+' --unchanged-group-format='' base.txt mid.txt
+run_case --line-format='%5dn|%-5dn|%05dn|%xn|%Xn|%on|%c'\''x'\''|%c'\''\101'\''|%%|%L' base.txt mid.txt
+run_case --unchanged-group-format='%=' --old-group-format='%<' --new-group-format='%>' base.txt last.txt
+run_case --changed-group-format='%(a=b?x:y)' base.txt mid.txt
+run_case --line-format='%q' base.txt mid.txt
+run_case -D X -D Y base.txt mid.txt
+# Labels.
+run_case -L one -L two -c base.txt mid.txt
+run_case --label=one --label two -u base.txt same.txt
+# ed scripts cannot say a file lacks its last newline: the diff, then the
+# complaint, and status 2.
+run_case -e base.txt nonl.txt
+run_case -f base.txt nonl.txt
+run_case -n base.txt nonl.txt
+run_case -e dot1.txt dot2.txt
+# Ignoring: blank lines, tab expansion, trailing space, carriage returns.
+run_case -B blank1.txt blank2.txt
+run_case -B -u blank1.txt blank2.txt
+run_case -E tabs1.txt tabs2.txt
+run_case -Z trail1.txt trail2.txt
+run_case -E -Z tabs1.txt trail2.txt
+run_case --strip-trailing-cr crlf.txt base.txt
+run_case -u --strip-trailing-cr crlf.txt base.txt
+run_case -u crlf.txt base.txt
+# Function lines.
+run_case -p func1.c func2.c
+run_case -u -p func1.c func2.c
+run_case -c -F '^[a-z]' func1.c func2.c
+run_case -u -F 'zzz' func1.c func2.c
+# Binary.
+run_case bin1 bin2
+run_case -q bin1 bin2
+run_case -a bin1 bin2
+run_case -s bin1 bin1
+# Context and horizon.
+run_case -U 0 base.txt mid.txt
+run_case -C 1 lng1.txt lng2.txt
+run_case --horizon-lines=0 -u lng1.txt lng2.txt
+run_case -d lng1.txt lng2.txt
+run_case -H lng1.txt lng2.txt
+# Tabs on output.
+run_case -t tabs1.txt tabs2.txt
+run_case -T base.txt mid.txt
+run_case -u -T base.txt mid.txt
+run_case --tabsize=4 -t tabs1.txt tabs2.txt
+run_case --suppress-blank-empty blank1.txt blank2.txt
+run_case -u --suppress-blank-empty blank1.txt blank2.txt
+# Colour, forced, and its palette.
+run_case --color=always base.txt mid.txt
+run_case --color=always -u base.txt mid.txt
+run_case --color=always --palette='ad=1;32:de=1;31:hd=4:ln=35' -u base.txt mid.txt
+run_case --color=always --palette='zz=1' base.txt mid.txt
+run_case --color=always --palette='ad' base.txt mid.txt
+run_case --color=bogus base.txt mid.txt
+# Directories: exclusions, a starting file, absent files.
+run_case -r -x 'b*' da db
+run_case -r -x '*.txt' da db
+run_case -r -X excl.lst da db
+run_case -r -S b.txt da db
+run_case -r -N da db
+run_case -r -P da db
+run_case -N base.txt nonexistent.txt
+run_case -P nonexistent.txt base.txt
+run_case -P base.txt nonexistent.txt
+run_case --from-file=base.txt mid.txt same.txt
+run_case --to-file=base.txt mid.txt same.txt
+run_case --from-file=base.txt --to-file=mid.txt
+run_case da base.txt
+run_case base.txt da
+run_case - da
+run_case -D X da db
+run_case --ignore-file-name-case -r da db
+run_case --no-dereference link1 link2
+run_case --no-dereference link1 base.txt
+run_case -s base.txt same.txt
+run_case -s base.txt base.txt
+run_case -q base.txt mid.txt
+
+# --- random pairs, random options ----------------------------------------------
+# `gen.py` writes seeded pairs of files and options for them: small vocabularies
+# so lines repeat, edits that insert, delete and change runs of lines, some long
+# repetitive files past `discard_confusing_lines`' thresholds, CRLF and missing
+# final newlines, and every output format and filter. Each pair is one case, so
+# a difference names its seed.
+for i in $(seq 1 300); do
+  eval "run_case $(cat "r$i.opts") r$i.a r$i.b"
+done
 
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 if [ "$xpass" -gt 0 ]; then

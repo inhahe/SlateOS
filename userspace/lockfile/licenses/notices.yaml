@@ -1,0 +1,14 @@
+# The procmail code lane B carries (design-decisions 1433), read by
+# scripts/gather-notices.py.
+#
+# userspace/lockfile is procmail 3.24's lockfile(1) -- src/lockfile.c, with
+# what it calls from exopen.c, acommon.c, authenticate.c and mcommon.c --
+# ported function by function, its messages and version text included.
+# procmail is offered under either licence, at the user's choice (its README):
+# the GNU GPL, version 2 or any later version, or the Artistic License.
+procmail:
+  version: 3.24
+  licence: GPL-2.0-or-later OR Artistic-1.0
+  texts:
+    - GPL-2.0
+    - Artistic-1.0

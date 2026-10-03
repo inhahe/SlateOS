@@ -1,8 +1,8 @@
-//! Slate OS loop device management utility.
+//! Slate OS loop device management utility: `losetup`, to set up and
+//! control loop devices.
 //!
-//! Multi-personality binary providing:
-//! - **losetup** — set up and control loop devices
-//! - **lodetach** — detach loop devices (alias for losetup -d)
+//! It used to answer to `lodetach` too, a name util-linux does not ship for
+//! what is `losetup -d`; the name went in the §1045 triage (2026-10-01).
 //!
 //! Loop devices allow regular files to be accessed as block devices.
 //! Manages `/dev/loop*` devices via `/sys/block/loop*/` sysfs interface
@@ -692,61 +692,12 @@ fn do_detach_all(verbose: bool) {
 }
 
 // ============================================================================
-// Personality: lodetach (alias for losetup -d)
-// ============================================================================
-
-fn cmd_lodetach(args: &[String]) {
-    if args.is_empty() {
-        eprintln!("lodetach: no device specified");
-        eprintln!("Usage: lodetach <device>");
-        process::exit(1);
-    }
-
-    for arg in args {
-        match arg.as_str() {
-            "-h" | "--help" => {
-                println!("Usage: lodetach <device>...");
-                println!("Detach one or more loop devices.");
-                process::exit(0);
-            }
-            "-V" | "--version" => {
-                println!("lodetach {VERSION}");
-                process::exit(0);
-            }
-            _ => {
-                do_detach(arg, true);
-            }
-        }
-    }
-}
-
-// ============================================================================
 // Entry point
 // ============================================================================
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
-
-    let prog_name = {
-        let s = args.first().map(|s| s.as_str()).unwrap_or("losetup");
-        let bytes = s.as_bytes();
-        let mut last_sep = 0;
-        for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' {
-                last_sep = i + 1;
-            }
-        }
-        let base = &s[last_sep..];
-        let base = base.strip_suffix(".exe").unwrap_or(base);
-        base.to_string()
-    };
-
-    let rest: Vec<String> = args.into_iter().skip(1).collect();
-
-    match prog_name.as_str() {
-        "lodetach" => cmd_lodetach(&rest),
-        _ => cmd_losetup(&rest),
-    }
+    let rest: Vec<String> = env::args().skip(1).collect();
+    cmd_losetup(&rest);
 }
 
 // ============================================================================
@@ -882,29 +833,6 @@ mod tests {
             format_size(u64::MAX),
             format!("{:.1}T", u64::MAX as f64 / 1_099_511_627_776.0)
         );
-    }
-
-    #[test]
-    fn test_personality_detection() {
-        let test_cases = [
-            ("/usr/sbin/losetup", "losetup"),
-            ("lodetach", "lodetach"),
-            ("/bin/losetup.exe", "losetup"),
-            ("C:\\tools\\lodetach.exe", "lodetach"),
-        ];
-
-        for (input, expected) in &test_cases {
-            let bytes = input.as_bytes();
-            let mut last_sep = 0;
-            for (i, &b) in bytes.iter().enumerate() {
-                if b == b'/' || b == b'\\' {
-                    last_sep = i + 1;
-                }
-            }
-            let basename = &input[last_sep..];
-            let basename = basename.strip_suffix(".exe").unwrap_or(basename);
-            assert_eq!(basename, *expected, "Failed for input: {input}");
-        }
     }
 
     #[test]

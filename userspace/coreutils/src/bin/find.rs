@@ -876,7 +876,7 @@ fn process_optimisation_option(arg: &[u8]) -> Result<(), Leading> {
     }
     // `strtoul` overflow, then the `USHRT_MAX` ceiling. Both refuse; only the
     // wording differs, and only the second one names the level.
-    let Some(level) = level.filter(|l| *l <= u64::from(u16::MAX)) else {
+    let Some(level) = level.filter(|l| u16::try_from(*l).is_ok()) else {
         return Err(Leading::Die(match level {
             Some(l) => format!(
                 "Optimisation level {l} is too high.  If you want to find files very quickly, \
@@ -1025,7 +1025,7 @@ struct Parser<'a> {
     depth_first: bool,
     xdev: bool,
     ignore_readdir_race: bool,
-    extended_regex: bool,
+    regex_type: RegexType,
     files0_from: Option<Vec<u8>>,
 
     // Time origins, fixed at startup.
@@ -1109,7 +1109,7 @@ impl<'a> Parser<'a> {
             depth_first: false,
             xdev: false,
             ignore_readdir_race: false,
-            extended_regex: false,
+            regex_type: RegexType::FindutilsDefault,
             files0_from: None,
             now,
             cur_day_start,
@@ -1466,27 +1466,42 @@ fn parse_type_letters(name: &[u8], arg: &[u8]) -> Parsed<Vec<u8>> {
     Ok(letters)
 }
 
-/// Upstream `lib/regextype.c`'s table, reduced to the one bit that changes
-/// what a pattern means here: basic or extended.
+/// One of findutils' thirteen `-regextype` names, as the dialect it is.
 ///
-/// The Emacs dialects are an approximation — `ere` has no Emacs syntax, so
-/// they are treated as POSIX basic, which agrees on everything except Emacs's
-/// own escapes (`\\|`, `\\(`…`\\)` are the same, but `\\w`, `\\b` and the
-/// symbol classes are not). Documented in `known-issues.md`.
-fn regex_is_extended(name: &[u8]) -> Option<bool> {
-    match name {
-        b"findutils-default"
-        | b"ed"
-        | b"emacs"
-        | b"grep"
-        | b"posix-basic"
-        | b"posix-minimal-basic"
-        | b"sed" => Some(false),
-        b"gnu-awk" | b"posix-awk" | b"awk" | b"posix-egrep" | b"egrep" | b"posix-extended" => {
-            Some(true)
-        }
-        _ => None,
-    }
+/// Upstream `lib/regextype.c` maps each name to a glibc syntax, and every one
+/// of those is here: the Emacs syntax through `ere::emacs`, the basic ones
+/// through `ere::bre`'s syntaxes, the extended ones through `ere::Syntax`.
+/// Until 2026-10-01 this was a boolean -- basic or extended -- so the default,
+/// which is Emacs syntax, was read as POSIX basic (`a+` a literal, `\{2\}` an
+/// interval, both backwards), and the three awk types as POSIX extended.
+/// Measured, every type, in `scripts/find-diff.sh`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegexType {
+    /// `RE_SYNTAX_EMACS | RE_DOT_NEWLINE`: the default.
+    FindutilsDefault,
+    /// `RE_SYNTAX_EMACS`, where `.` does not match a newline.
+    Emacs,
+    /// A basic syntax.
+    Basic(ere::bre::BreSyntax),
+    /// An extended one.
+    Extended(ere::Syntax),
+}
+
+fn regex_type(name: &[u8]) -> Option<RegexType> {
+    use ere::bre::BreSyntax;
+    Some(match name {
+        b"findutils-default" => RegexType::FindutilsDefault,
+        b"emacs" => RegexType::Emacs,
+        b"gnu-awk" => RegexType::Extended(ere::Syntax::GNU_AWK),
+        b"awk" => RegexType::Extended(ere::Syntax::AWK),
+        b"posix-awk" => RegexType::Extended(ere::Syntax::POSIX_AWK),
+        b"egrep" | b"posix-egrep" => RegexType::Extended(ere::Syntax::EGREP),
+        b"posix-extended" => RegexType::Extended(ere::Syntax::POSIX_EXTENDED),
+        b"grep" => RegexType::Basic(BreSyntax::GREP),
+        b"posix-minimal-basic" => RegexType::Basic(BreSyntax::POSIX_MINIMAL_BASIC),
+        b"posix-basic" | b"ed" | b"sed" => RegexType::Basic(BreSyntax::POSIX_BASIC),
+        _ => return None,
+    })
 }
 
 const REGEX_TYPES: &[&[u8]] = &[
@@ -1505,12 +1520,19 @@ const REGEX_TYPES: &[&[u8]] = &[
     b"sed",
 ];
 
-fn compile_regex(pattern: &[u8], extended: bool, ci: bool) -> Parsed<ere::Regex> {
-    let result = if extended {
-        ere::Regex::new_flags(pattern, ci)
-    } else {
-        ere::bre::compile(pattern, ci)
+fn compile_regex(pattern: &[u8], kind: RegexType, ci: bool) -> Parsed<ere::Regex> {
+    let result = match kind {
+        RegexType::FindutilsDefault => ere::emacs::compile_dot_newline(pattern, ci),
+        RegexType::Emacs => ere::emacs::compile(pattern, ci),
+        RegexType::Basic(syntax) => ere::bre::compile_syntax(pattern, ci, syntax),
+        RegexType::Extended(syntax) => ere::Regex::new_syntax(pattern, ci, syntax),
     };
+    // `re_compile_pattern`, which findutils compiles every type with, turns on
+    // glibc's `newline_anchor`: `^` and `$` hold beside a newline inside a name
+    // as well as at its ends. Measured: `-regextype posix-extended -regex
+    // 't/a$.b'` finds `a<newline>b`. (Only the types whose anchors can appear
+    // mid-pattern can tell.)
+    let result = result.map(|re| re.with_newline_anchor(true));
     result.map_err(|e| {
         // `e.message()`, not `e.detail`: upstream hands the pattern to GNU
         // regex and prints straight back whatever `re_compile_pattern`
@@ -1614,12 +1636,12 @@ impl Parser<'_> {
             }
             b"regex" | b"iregex" => {
                 let pat = self.arg(tok)?;
-                let re = compile_regex(&pat, self.extended_regex, canon == b"iregex")?;
+                let re = compile_regex(&pat, self.regex_type, canon == b"iregex")?;
                 self.push_prim(tok, Prim::Regex(Box::new(re)));
             }
             b"regextype" => {
                 let name = self.arg(tok)?;
-                let Some(extended) = regex_is_extended(&name) else {
+                let Some(kind) = regex_type(&name) else {
                     let names: Vec<String> = REGEX_TYPES.iter().map(|n| quote(n)).collect();
                     return Err(Fatal::new(format!(
                         "Unknown regular expression type {}; valid types are {}.",
@@ -1627,7 +1649,7 @@ impl Parser<'_> {
                         names.join(", ")
                     )));
                 };
-                self.extended_regex = extended;
+                self.regex_type = kind;
                 self.push_prim(tok, Prim::Noop);
             }
 
@@ -2458,7 +2480,9 @@ fn compile_format(fmt: &[u8], warnings: &mut Vec<String>) -> Parsed<Vec<Seg>> {
                             .copied()
                         {
                             Some(o) if (b'0'..=b'7').contains(&o) => {
-                                n = n.wrapping_mul(8).wrapping_add(u32::from(o - b'0'));
+                                n = n
+                                    .wrapping_mul(8)
+                                    .wrapping_add(u32::from(o.wrapping_sub(b'0')));
                                 k = k.saturating_add(1);
                             }
                             _ => break,
@@ -3033,7 +3057,7 @@ fn parse_spec(spec: &[u8], conv: u8) -> extfloat::Spec {
         }
         width = width
             .saturating_mul(10)
-            .saturating_add(usize::from(b - b'0'));
+            .saturating_add(usize::from(b.saturating_sub(b'0')));
         i = i.saturating_add(1);
     }
     out.width = width;
@@ -3046,7 +3070,7 @@ fn parse_spec(spec: &[u8], conv: u8) -> extfloat::Spec {
             }
             prec = prec
                 .saturating_mul(10)
-                .saturating_add(usize::from(b - b'0'));
+                .saturating_add(usize::from(b.saturating_sub(b'0')));
             i = i.saturating_add(1);
         }
         out.precision = Some(prec);
@@ -3743,7 +3767,8 @@ fn render_ls(
 fn ts_difference(a: Ts, b: Ts) -> f64 {
     #[allow(clippy::cast_precision_loss)]
     {
-        (a.sec as f64 - b.sec as f64) + 1.0e-9 * (i64::from(a.nsec) - i64::from(b.nsec)) as f64
+        (a.sec as f64 - b.sec as f64)
+            + 1.0e-9 * i64::from(a.nsec).saturating_sub(i64::from(b.nsec)) as f64
     }
 }
 
@@ -4190,9 +4215,9 @@ impl Ctx<'_> {
                         return false;
                     }
                     let mut sec = m.ctime.sec.saturating_sub(m.atime.sec);
-                    let mut nsec = i64::from(m.ctime.nsec) - i64::from(m.atime.nsec);
+                    let mut nsec = i64::from(m.ctime.nsec).saturating_sub(i64::from(m.atime.nsec));
                     if nsec < 0 {
-                        nsec += 1_000_000_000;
+                        nsec = nsec.saturating_add(1_000_000_000);
                         sec = sec.saturating_sub(1);
                     }
                     let delta = Ts {
@@ -5427,7 +5452,7 @@ mod tests {
             if self.unreadable.iter().any(|u| u == path) {
                 return Err(io::Error::from_raw_os_error(13));
             }
-            let mut prefix = path.to_vec();
+            let mut prefix = path.clone();
             if prefix.last() != Some(&b'/') {
                 prefix.push(b'/');
             }

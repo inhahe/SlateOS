@@ -1,5 +1,5 @@
 /* Emit glibc fnmatch(3)'s answer for a cross product of patterns, names and
- * flag sets, as the fixture read by userspace/coreutils/tests/fnmatch_glibc.rs.
+ * flag sets, as the fixture read by userspace/fnmatch/tests/fnmatch_glibc.rs.
  *
  * The cross product is large, so it is written as one line per
  * (flags, pattern) with a bitmap over the shared name list rather than one

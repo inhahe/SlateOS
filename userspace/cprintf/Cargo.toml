@@ -1,0 +1,20 @@
+[package]
+name = "cprintf"
+version = "0.1.0"
+edition = "2024"
+description = "C's numbers as glibc reads and writes them: strtold/strtod/strtof and printf's conversions"
+
+[lints]
+workspace = true
+
+# No dependencies: exact decimal/binary conversion over its own big integers.
+# These three modules -- `bignat`, `extfloat` and `cfmt` -- lived in coreutils
+# as src/*.rs until 2026-10-01 and moved out when `file` needed them: a magic
+# rule's description is a printf format applied to the value the rule read,
+# and its float values are read with strtod and strtof. `coreutils::bignat`,
+# `coreutils::extfloat` and `coreutils::cfmt` re-export them, so no coreutils
+# binary changed.
+
+[dev-dependencies]
+# `examples/extfloat-probe.rs` reads its mode argument as bytes.
+quoting = { path = "../quoting" }

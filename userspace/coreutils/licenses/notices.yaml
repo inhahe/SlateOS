@@ -1,0 +1,85 @@
+# The third-party code userspace/coreutils carries, and code of the same
+# upstreams in other lane B crates (design-decisions 1433), read by
+# scripts/gather-notices.py. A component may be named by one manifest only, so
+# each upstream below is named here and nowhere else: a crate that ports more of
+# it adds itself to the comment, not a second entry.
+#
+# Most of this crate's programs are translations of the C sources of the
+# releases below, function by function, each saying so in its module doc and
+# each measured against the real binary by a differential harness.
+
+# src/bin/*.rs that name coreutils 9.4 (`arch`, `chgrp`, `cksum`, `date`, `df`,
+# `dircolors`, `du`, `echo`, `factor`, `groups`, `hostid`, `id`, `link`, `ls`,
+# `mknod`, `nice`, `nohup`, `nproc`, `numfmt`, `pathchk`, `pinky`, `pr`,
+# `printenv`, `ptx`, `shred`, `sleep`, `sum`, `sync`, `tee`, `test`, `true`,
+# `truncate`, `unlink`, `users`, `yes` and more), src/digest.rs, src/ls.rs,
+# src/tabstops.rs, src/stdfd.rs.
+GNU coreutils:
+  version: 9.4
+  licence: GPL-3.0-or-later
+  texts:
+    - GPL-3.0
+
+# The gnulib modules coreutils 9.4 bundles, ported with the programs that use
+# them: canonicalize, human, quotearg, argmatch, closeout, xstrtol, fts,
+# parse-datetime, posixtm, backupfile, exclude, filevercmp, mbswidth, randint,
+# randread, userspec and others (GPL-3.0-or-later as coreutils ships them);
+# nstrftime, time_rz, fsusage, filevercmp, canon-host, gettime-res
+# (LGPL-3.0-or-later); base64, base32, dirname-lgpl, basename-lgpl, nproc,
+# mgetgroups, hard-locale, error, getndelim2 (LGPL-2.1-or-later). Beyond this
+# crate: userspace/modechange (modechange.c, filemode.c), userspace/userspec
+# (userspec.c), userspace/gnubase64 (base64.c, as coreutils 9.4 and sharutils
+# 4.15.2 bundle it), userspace/quoting (quotearg.c). gnulib makes no releases;
+# these are the copies in the coreutils-9.4 and sharutils-4.15.2 tarballs, each
+# under the licence its own header gives there. mktime.c, which glibc shares,
+# is glibc's entry (userspace/localtime).
+gnulib:
+  licence: GPL-3.0-or-later AND LGPL-3.0-or-later AND LGPL-2.1-or-later
+  texts:
+    - GPL-3.0
+    - LGPL-3.0
+    - LGPL-2.1
+
+# src/bin/find.rs (find/, with lib/listfile.c, lib/regextype.c) and
+# src/bin/xargs.rs (xargs/xargs.c, lib/buildcmd.c).
+GNU findutils:
+  version: 4.9.0
+  licence: GPL-3.0-or-later
+  texts:
+    - GPL-3.0
+
+# src/bin/diff.rs: diffutils 3.10's option table and side-by-side output.
+GNU diffutils:
+  version: 3.10
+  licence: GPL-3.0-or-later
+  texts:
+    - GPL-3.0
+
+# src/bin/time_cmd.rs: src/time.c.
+GNU Time:
+  version: 1.9
+  licence: GPL-3.0-or-later
+  texts:
+    - GPL-3.0
+
+# src/bin/free.rs (src/free.c and local/strutils.c, GPL-2.0-or-later;
+# library/meminfo.c, LGPL-2.1-or-later) and src/bin/uptime.rs (src/uptime.c,
+# LGPL-2.1-or-later).
+procps-ng:
+  version: 4.0.4
+  licence: GPL-2.0-or-later AND LGPL-2.1-or-later
+  texts:
+    - GPL-2.0
+    - LGPL-2.1
+
+# src/bin/hostname (hostname.c), also installed as dnsdomainname, domainname,
+# nisdomainname and ypdomainname: the hostname Debian split out of net-tools
+# and has maintained since, by Peter Tobias, Bernd Eckenfels, Graham Wilson
+# and Michael Meskes; its localdomain and localhost functions are Copyright
+# (C) 1996 Free Software Foundation, Inc., written by Miles Bader and Marcus
+# Brinkmann. 3.23 is the release Ubuntu 24.04 ships as 3.23+nmu2ubuntu2.
+Debian hostname:
+  version: 3.23
+  licence: GPL-2.0-or-later
+  texts:
+    - GPL-2.0

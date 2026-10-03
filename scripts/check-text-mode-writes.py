@@ -167,6 +167,16 @@ OPENERS = {
 # record rather than in someone's head.
 BUILTIN_SHAPED_RECEIVERS = {"io", "codecs", "os", "gzip", "bz2", "lzma"}
 
+# Receivers whose `open` is a different function with the same spelling, and
+# writes bytes by default. `gzip.open`, `bz2.open` and `lzma.open` take the
+# builtin's mode letters but read `"w"` as `"wb"`: they are text only when the
+# mode says `"t"`. `tarfile.open` writes an archive whatever its mode -- `"w"`,
+# `"w:gz"`, `"w|"` -- and has no text mode at all. Grading them as the builtin
+# flagged `tarfile.open(fileobj=buf, mode="w")` as a text write, which it
+# cannot be, and would have done the same to `gzip.open(p, "w")`.
+TEXT_ONLY_WITH_T_RECEIVERS = {"gzip", "bz2", "lzma"}
+NEVER_TEXT_RECEIVERS = {"tarfile"}
+
 UNKNOWN_MODE = "<computed>"
 
 
@@ -394,8 +404,13 @@ def analyse(source: bytes, path: str) -> tuple[list[Finding], int]:
 
         if name not in OPENERS:
             continue
+        if name == "open" and recv in NEVER_TEXT_RECEIVERS:
+            continue
 
         mode = resolve_mode(node, name, recv)
+        if (name == "open" and recv in TEXT_ONLY_WITH_T_RECEIVERS
+                and mode != UNKNOWN_MODE and "t" not in mode):
+            continue
         if mode == UNKNOWN_MODE:
             findings.append(Finding(
                 path, node.lineno, node.col_offset, name, mode,
@@ -611,6 +626,23 @@ def self_test() -> int:
         ("Path.open('rb') is not a finding", len(one("p.open('rb')")), 0),
         ("os.fdopen(fd,'w') is a finding", len(one("os.fdopen(fd,'w')")), 1),
         ("a bare os.fdopen(fd) is not", len(one("os.fdopen(fd)")), 0),
+
+        # -- openers that share the name and write bytes by default
+        ("tarfile.open(mode='w') is not -- an archive is never text",
+         len(one("tarfile.open(fileobj=b,mode='w')")), 0),
+        ("tarfile.open(p,'w:gz') is not", len(one("tarfile.open(p,'w:gz')")), 0),
+        ("tarfile.open with a computed mode is not -- still an archive",
+         len(one("tarfile.open(p,m)")), 0),
+        ("gzip.open(p,'w') is not -- 'w' is 'wb' there",
+         len(one("gzip.open(p,'w')")), 0),
+        ("gzip.open(p,'wt') is a finding -- 't' asks for text",
+         len(one("gzip.open(p,'wt')")), 1),
+        ("gzip.open(p,'wt',newline='') is not",
+         len(one("gzip.open(p,'wt',newline='')")), 0),
+        ("bz2.open(p,mode='w') is not", len(one("bz2.open(p,mode='w')")), 0),
+        ("lzma.open(p,'at') is a finding", len(one("lzma.open(p,'at')")), 1),
+        ("gzip.open with a computed mode is still a finding",
+         len(one("gzip.open(p,m)")), 1),
 
         # -- tempfile, whose default is the opposite of everything else's
         ("a bare NamedTemporaryFile is not a finding -- it defaults to binary",

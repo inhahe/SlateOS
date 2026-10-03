@@ -63,9 +63,8 @@
 //! | Case | Ours | GNU |
 //! |---|---|---|
 //! | `:` against a byte that is not valid UTF-8 | the byte is data; `.` matches it | the byte stops the match dead |
-//! | the text of a bad-pattern diagnostic | `ere`'s wording | `regcomp`'s wording |
 //!
-//! The first is a place where **GNU disagrees with itself** and we do not.
+//! It is a place where **GNU disagrees with itself** and we do not.
 //! Measured on GNU expr 9.4 under `C.UTF-8`, with `$raw` holding the three
 //! bytes `a`, `0xff`, `b`: `expr length "$raw"` answers `3` and `expr index
 //! "$raw" b` answers `3`, so its string half calls the undecodable byte a
@@ -77,17 +76,18 @@
 //! is the only reading under which `expr "$path" : '.*/\(.*\)'` still works on
 //! a path this filesystem allows — every byte but `/` and NUL.
 //!
-//! The second stays: `regcomp`'s messages are glibc's internal error taxonomy,
-//! and reproducing them would fit our engine to glibc rather than to expr.
-//!
-//! Two rows that used to be here are gone because they stopped being true.
+//! Three rows that used to be here are gone because they stopped being true.
+//! A pattern that will not compile is reported in glibc's words now --
+//! `expr: Unmatched ( or \(` -- because `ere` carries glibc's code for every
+//! refusal (`EreError::message`), which is what upstream prints.
 //! Backreferences (`\(a\)\1`) were the Pike VM's one real limitation and are
 //! now supported — see `known-issues.md`, fixed 2026-08-18 — and a stacked
-//! quantifier (`a**`) is now folded exactly as GNU folds it. Both were caught
-//! by `expr-diff.sh` reporting them as XPASS once it was measuring against real
-//! GNU expr rather than MSYS2's.
+//! quantifier (`a**`) is now folded exactly as GNU folds it. Those two were
+//! caught by `expr-diff.sh` reporting them as XPASS once it was measuring
+//! against real GNU expr rather than MSYS2's.
 
 use coreutils::diag;
+use coreutils::getopt;
 use coreutils::stdfd;
 use std::io::Write as _;
 use std::process::ExitCode;
@@ -166,6 +166,30 @@ Exit status:
 /// failure, which is the only thing this program can fail at afterwards.
 struct Fail(String);
 
+/// gnulib's `parse_long_options`, which GNU's `expr` calls before anything
+/// else: given a single argument, `getopt_long` over `--help` and `--version`
+/// alone, with `opterr` cleared. So an unambiguous prefix acts as the option
+/// -- `expr --he` is the help and `expr --v` the version, measured against
+/// 9.4 -- while anything `getopt` would complain about (`--help=x`, `--x`,
+/// `-h`, and `--=x`, which every option name begins with) is silently left to
+/// be what it otherwise is: an expression of one string, printed back.
+///
+/// Returns the option's name, or `None` for an argument that is not one.
+fn standard_option(arg: &[u8]) -> Option<&'static str> {
+    const TABLE: &[(&str, ())] = &[("help", ()), ("version", ())];
+    let typed = arg.strip_prefix(b"--")?;
+    // `--` alone ends the options; an `=` is an argument neither option
+    // takes, which `getopt` refuses -- quietly, here.
+    if typed.is_empty() || typed.contains(&b'=') {
+        return None;
+    }
+    let name = std::str::from_utf8(typed).ok()?;
+    getopt::Program::new("expr", 2)
+        .resolve_long(name, arg, TABLE)
+        .ok()
+        .map(|(resolved, ())| resolved)
+}
+
 /// The funnel. A diagnostic that could not be written turns the earned
 /// status into `exit_failure`, which is what upstream's `atexit
 /// (close_stdout)` does on every exit path at once. See
@@ -181,13 +205,16 @@ fn run_main() -> ExitCode {
     // as GNU's option parser does: `expr --help = --help` is a comparison of
     // two strings that happen to look like options, and answers 1.
     if let [only] = raw.as_slice() {
-        if only.as_slice() == b"--help" {
-            println!("{HELP}");
-            return ExitCode::SUCCESS;
-        }
-        if only.as_slice() == b"--version" {
-            println!("expr (SlateOS coreutils)");
-            return ExitCode::SUCCESS;
+        match standard_option(only) {
+            Some("help") => {
+                println!("{HELP}");
+                return ExitCode::SUCCESS;
+            }
+            Some("version") => {
+                println!("expr (SlateOS coreutils)");
+                return ExitCode::SUCCESS;
+            }
+            _ => {}
         }
     }
 
@@ -286,7 +313,10 @@ fn to_int(v: &[u8]) -> Result<BigInt, Fail> {
     if !looks_like_integer(v) {
         return Err(Fail("non-integer argument".to_string()));
     }
-    Ok(BigInt::from_str(&String::from_utf8_lossy(v)))
+    // `looks_like_integer` has just checked it is ASCII digits, so this decode
+    // cannot fail; if it ever did, the honest answer is the same refusal.
+    let text = std::str::from_utf8(v).map_err(|_| Fail("non-integer argument".to_string()))?;
+    Ok(BigInt::from_str(text))
 }
 
 /// A value as a machine integer for `substr`'s position and length, saturating
@@ -587,8 +617,13 @@ fn colon(subject: &[u8], pattern: &[u8]) -> Result<Str, Fail> {
     if pattern.is_empty() {
         return Ok(b"0".to_vec());
     }
-    let re = ere::bre::compile(pattern, false)
-        .map_err(|e| Fail(String::from_utf8_lossy(&e.detail).into_owned()))?;
+    // coreutils' basic syntax: no `RE_CONTEXT_INVALID_DUP` and no
+    // `RE_NO_EMPTY_RANGES`, so `a**` and `[z-a]` both compile (measured).
+    // A pattern that will not compile is `die (EXPR_INVALID, 0, "%s",
+    // errmsg)` upstream, where `errmsg` is what `re_compile_pattern` returned:
+    // glibc's sentence, and nothing else -- `expr: Unmatched ( or \(`.
+    let re = ere::bre::compile_syntax(pattern, false, ere::bre::BreSyntax::COREUTILS)
+        .map_err(|e| Fail(e.message().to_string()))?;
     // A search that gave up is neither a match nor a non-match. `expr` is used
     // for control flow — `expr "$f" : 'lib' >/dev/null || exit` — so reporting
     // it as "no match" would take the failure branch on a question we never
@@ -658,6 +693,36 @@ fn index_of(subject: &[u8], set: &[u8]) -> Str {
 )]
 mod tests {
     use super::*;
+
+    /// gnulib's `parse_long_options`: a prefix of `--help` or `--version` is
+    /// that option, and whatever `getopt` would refuse is an operand.
+    #[test]
+    fn a_lone_option_may_be_abbreviated_and_a_refused_one_is_an_operand() {
+        for (arg, want) in [
+            (&b"--help"[..], Some("help")),
+            (b"--he", Some("help")),
+            (b"--h", Some("help")),
+            (b"--version", Some("version")),
+            (b"--ver", Some("version")),
+            (b"--v", Some("version")),
+            (b"--help=x", None),
+            (b"--he=", None),
+            (b"--=x", None),
+            (b"--x", None),
+            (b"--helpx", None),
+            (b"--", None),
+            (b"-h", None),
+            (b"help", None),
+            (b"--h\xff", None),
+        ] {
+            assert_eq!(
+                standard_option(arg),
+                want,
+                "{}",
+                String::from_utf8_lossy(arg)
+            );
+        }
+    }
 
     /// Evaluate a whole command line, as `main` does, and require it to be
     /// fully consumed.
@@ -879,8 +944,12 @@ mod tests {
         // start still applies.
         assert_eq!(eval(&["abcabcx", ":", "\\(abc\\)\\1"]), "abc");
         // A reference to a group that does not exist is still a diagnostic,
-        // not a literal digit — `\2` must not quietly match a `2`.
-        assert!(eval_err(&["a2", ":", "\\(a\\)\\2"]).contains("backreference"));
+        // not a literal digit — `\2` must not quietly match a `2` — and it is
+        // glibc's sentence, as upstream prints it.
+        assert_eq!(
+            eval_err(&["a2", ":", "\\(a\\)\\2"]),
+            "Invalid back reference"
+        );
     }
 
     #[test]
@@ -947,10 +1016,19 @@ mod tests {
     }
 
     /// A path may hold any byte but `/` and NUL, and `expr` is how a portable
-    /// script takes it apart.
+    /// script takes it apart. The byte counts as one character, and -- as in
+    /// glibc's UTF-8 locales -- `.` does not match it: measured under
+    /// `C.UTF-8`, GNU `expr $'a\xffb' : '.*'` is 1 and `length` is 3.
     #[test]
     fn an_undecodable_byte_is_one_character_and_survives() {
         let args = vec![b"a\xffb".to_vec(), b":".to_vec(), b".*".to_vec()];
+        let mut p = Parser {
+            args: &args,
+            pos: 0,
+        };
+        assert_eq!(p.or().ok().as_deref(), Some(&b"1"[..]));
+        // Written into the pattern, it matches itself.
+        let args = vec![b"a\xffb".to_vec(), b":".to_vec(), b"a\xffb".to_vec()];
         let mut p = Parser {
             args: &args,
             pos: 0,

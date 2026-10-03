@@ -124,6 +124,32 @@ def test_the_hook_exists_and_is_a_shell_script(text):
     check("pre-push runs under set -u", "\nset -u\n" in text, True)
 
 
+def test_sigpipe_is_ignored_before_anything_is_written(text):
+    """A closed output pipe must not turn a refusal into a push.
+
+    Measured 2026-10-02 on Git for Windows: with `git push ... | head -5`, the
+    hook's first write after `head` exits kills its shell with SIGPIPE, and
+    git.exe reads that death as exit 0 -- the push goes through with every gate
+    failing. `trap '' PIPE` turns the kill into a failed write. It has to come
+    before the first write (a write before it can be the one that kills), and
+    nothing may put the default back.
+    """
+    lines = code_only(text).splitlines()
+    trap_at = next((i for i, ln in enumerate(lines)
+                    if ln.strip() == "trap '' PIPE"), None)
+    check("pre-push ignores SIGPIPE (`trap '' PIPE`, in code, not prose)",
+          trap_at is not None, True)
+    writes = re.compile(r"^\s*(echo|printf|cat|run_checker)\b|>&2")
+    first_write = next((i for i, ln in enumerate(lines) if writes.search(ln)),
+                       None)
+    check("...before the hook first writes anything",
+          trap_at is not None and first_write is not None
+          and trap_at < first_write, True)
+    check("...and nothing restores the default",
+          re.search(r"trap\s+-\s+PIPE|trap\s+(SIG)?PIPE\b|trap\s+-\s+13\b",
+                    code_only(text)) is None, True)
+
+
 def test_the_header_states_no_count(text):
     """The count word is GONE, and this keeps it gone.
 
@@ -265,7 +291,7 @@ HEAD_GATES = {
     "quote-names.py": "gate 8, file names in diagnostics",
     "check-requests-not-deleted.py": "gate 9, request deletion",
     "check-doc-links.py": "gate 11, dead doc links",
-    "check-design-decisions-bands.py": "gate 13, per-lane numbering bands",
+    "check-docs.py": "gate 13, the shared entry documents",
     "check-accidental-headings.py": "gate 14, `---` that renders as a heading",
 }
 

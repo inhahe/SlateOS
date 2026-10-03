@@ -324,7 +324,7 @@ impl Default for Numbering {
 
 /// The fast path: no option needs the bytes examined, so none examines them.
 fn copy_bytes(mut reader: impl Read, out: &mut impl Write) -> Result<(), Failure> {
-    let mut chunk = [0u8; 64 * 1024];
+    let mut chunk = vec![0u8; 64 * 1024];
     loop {
         let n = match reader.read(&mut chunk) {
             Ok(0) => return Ok(()),
@@ -821,7 +821,7 @@ mod tests {
         let e = fail_msg(&["--fo\ncat: /etc/shadow: Permission denied"]);
         assert_eq!(
             e,
-            r#"unrecognized option '--fo\ncat: /etc/shadow: Permission denied'"#
+            r"unrecognized option '--fo\ncat: /etc/shadow: Permission denied'"
         );
         assert_eq!(e.lines().count(), 1);
     }

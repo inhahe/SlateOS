@@ -3,6 +3,15 @@ name = "sysstat"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS sysstat utility"
+
+# Built as `sar` -- sysstat's `sar`, the command this is when run by its own
+# name -- not as `sysstat`, which nobody types: the image installs each binary
+# the workspace builds under the binary's name, and the names it also answers
+# to (`mpstat` and `pidstat`) as further names of the same file.
+[[bin]]
+name = "sar"
+path = "src/main.rs"
+
 [dependencies]
 libcall = { path = "../../libcall" }
 procinfo = { path = "../../procinfo" }

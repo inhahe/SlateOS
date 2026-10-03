@@ -3,4 +3,13 @@ name = "inotify"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS filesystem event monitor"
+
+# Built as `inotifywait` -- inotify-tools' `inotifywait`, the command this is
+# when run by its own name -- not as `inotify`, which nobody types: the image
+# installs each binary the workspace builds under the binary's name, and the
+# names it also answers to (`inotifywatch`) as further names of the same file.
+[[bin]]
+name = "inotifywait"
+path = "src/main.rs"
+
 [dependencies]

@@ -7,7 +7,11 @@ comparison blocks (`# bash: …`, `# osh : …`) most of all. A naive `^#` grep
 therefore mis-parses comments as headings and tears entries in half. Every
 consumer of this file's structure must go through `parse()` here.
 
-Used by `ki_archive.py`; also runnable directly for a report:
+Since the 2026-10-02 one-file-per-entry cutover, `known-issues.md` is a signpost
+and each issue is its own file; this scanner now serves `doc_entries.py`, which
+reads the old single-file layout when converting it (`docs-migrate.py`) and when
+carrying a lane's in-flight edits across the cutover (`docs-carry-forward.py`).
+Also runnable directly for a report on an old-layout checkout:
 
     python scripts/ki_split.py            # summarise entries by owner/status
 """

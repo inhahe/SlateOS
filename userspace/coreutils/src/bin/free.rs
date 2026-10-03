@@ -343,13 +343,16 @@ fn strtol(text: &[u8]) -> Result<i64, NumFault> {
         if !c.is_ascii_digit() {
             break;
         }
-        let digit = i64::from(c - b'0');
+        let digit = i64::from(c.saturating_sub(b'0'));
         // Accumulated with the sign already applied so that `-9223372036854775808`
         // is reachable, as it is for `strtol`.
-        match value
-            .checked_mul(10)
-            .and_then(|v| v.checked_add(if negative { -digit } else { digit }))
-        {
+        match value.checked_mul(10).and_then(|v| {
+            v.checked_add(if negative {
+                digit.saturating_neg()
+            } else {
+                digit
+            })
+        }) {
             Some(v) => value = v,
             // `strtol` keeps consuming digits after saturating, and so must
             // this, or `999999999999999999999x` would report the wrong fault.
@@ -412,7 +415,7 @@ fn strtod_nol(text: &[u8]) -> Result<f64, NumFault> {
         if !c.is_ascii_digit() {
             break;
         }
-        num += f64::from(c - b'0') * mult;
+        num += f64::from(c.saturating_sub(b'0')) * mult;
         mult /= 10.0;
         cp = cp.saturating_add(1);
     }
@@ -428,7 +431,7 @@ fn strtod_nol(text: &[u8]) -> Result<f64, NumFault> {
         if !c.is_ascii_digit() {
             break;
         }
-        num += f64::from(c - b'0') * mult;
+        num += f64::from(c.saturating_sub(b'0')) * mult;
         mult /= 10.0;
         cp = cp.saturating_add(1);
     }
@@ -562,7 +565,9 @@ fn read_ul(text: &[u8]) -> u64 {
         if !c.is_ascii_digit() {
             break;
         }
-        value = value.saturating_mul(10).saturating_add(u64::from(c - b'0'));
+        value = value
+            .saturating_mul(10)
+            .saturating_add(u64::from(c.saturating_sub(b'0')));
         i = i.saturating_add(1);
     }
     value
@@ -705,7 +710,7 @@ fn scale_size(size: u64, flags: Flags, args: CmdArgs) -> String {
         return match args.exponent {
             // `bytes / (long long int)base` — the float base is truncated to an
             // integer first, so this is integer division.
-            0 => (bytes / i64::from(base)).to_string(),
+            0 => bytes.checked_div(i64::from(base)).unwrap_or(0).to_string(),
             1 => bytes.to_string(),
             e => trunc(bytes as f64 / power(base, e.saturating_sub(1))).to_string(),
         };
@@ -1798,7 +1803,7 @@ mod tests {
         // Divergence 4: the file is read again for each iteration rather than
         // being cached for a second.
         assert_eq!(reads, 3);
-        assert_eq!(naps, vec![Duration::from_micros(250_000); 2]);
+        assert_eq!(naps, vec![Duration::from_millis(250); 2]);
     }
 
     /// `-L` withholds its newline until the last iteration, and the repeat tail
@@ -1815,6 +1820,8 @@ mod tests {
     /// `-s` alone never reaches the counter, so the `-L` newline never comes
     /// from the line itself.
     #[test]
+    // Two seconds in microseconds is exactly 2e6 in a double.
+    #[allow(clippy::float_cmp)]
     fn seconds_without_count_is_open_ended() {
         let flags = match scan(&[OsString::from("-s"), OsString::from("2")]).unwrap() {
             Request::Run { flags, args } => {

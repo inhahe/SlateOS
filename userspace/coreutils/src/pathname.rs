@@ -121,6 +121,39 @@ pub fn base_len(name: &[u8]) -> usize {
     len
 }
 
+/// gnulib's `file_name_concat (dir, base, NULL)`: `dir` cut at the end of its
+/// last component (so a run of trailing slashes goes), a separator, and
+/// `base`.
+///
+/// The separator is a slash unless either side already supplies one. When
+/// `dir` is a file-system root and `base` starts with a slash, it is a `.`
+/// instead: `/` and `/foo` make `/./foo`, because `//foo` names a different
+/// file on some POSIX systems. That rule is gnulib's current one (coreutils
+/// 9.4, diffutils 3.10); an older gnulib dropped the slash from `base`.
+///
+/// `ls -R`, `mktemp -p` and `diff -r` all build names with it, and all three
+/// print them, so the rule is visible output.
+#[must_use]
+pub fn file_name_concat(dir: &[u8], base: &[u8]) -> Vec<u8> {
+    let dirbase_at = last_component_offset(dir);
+    let dirbaselen = base_len(dir.get(dirbase_at..).unwrap_or_default());
+    let dirlen = dirbase_at.saturating_add(dirbaselen);
+    let sep = if dirbaselen == 0 {
+        // The dir is a file-system root.
+        (base.first().is_some_and(|&c| is_slash(c))).then_some(b'.')
+    } else {
+        let ends_in_slash = dirlen
+            .checked_sub(1)
+            .and_then(|last| dir.get(last))
+            .is_some_and(|&c| is_slash(c));
+        (!ends_in_slash && !base.first().is_some_and(|&c| is_slash(c))).then_some(b'/')
+    };
+    let mut out = dir.get(..dirlen).unwrap_or_default().to_vec();
+    out.extend(sep);
+    out.extend_from_slice(base);
+    out
+}
+
 /// The length of the directory part of `file` — `0` when there is none.
 ///
 /// gnulib's `dir_len`. Note `0` rather than `"."`: the caller decides how to
@@ -447,6 +480,20 @@ mod tests {
         // No last component at all: a root, or nothing.
         assert_eq!(last_component(b"///"), b"");
         assert_eq!(last_component(b""), b"");
+    }
+
+    #[test]
+    fn file_name_concat_is_gnulibs() {
+        assert_eq!(file_name_concat(b"/tmp", b"x"), b"/tmp/x");
+        assert_eq!(file_name_concat(b"/tmp/", b"x"), b"/tmp/x");
+        assert_eq!(file_name_concat(b"/tmp//", b"x"), b"/tmp/x");
+        assert_eq!(file_name_concat(b"/", b"x"), b"/x");
+        // A root and an absolute base meet at `.`, as gnulib has it now.
+        assert_eq!(file_name_concat(b"/", b"/x"), b"/./x");
+        assert_eq!(file_name_concat(b".", b"x"), b"./x");
+        assert_eq!(file_name_concat(b"a//b/", b"x"), b"a//b/x");
+        assert_eq!(file_name_concat(b"a", b"/x"), b"a/x");
+        assert_eq!(file_name_concat(b"", b"x"), b"x");
     }
 
     #[test]

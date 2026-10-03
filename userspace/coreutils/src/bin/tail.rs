@@ -1199,7 +1199,7 @@ fn remember(w: &mut Watched, m: &Metadata, file: &mut File) {
     // buffer contents as a length. See `filekind`.
     w.regular = filekind::is_regular(file);
     w.modified = m.modified().ok();
-    w.id = file_id(m);
+    w.id = Some(file_id(m));
     // Where reading actually stopped, which is not the same as the length: the
     // file may have grown between the last read and this `stat`, and those
     // bytes must not be skipped.
@@ -1372,7 +1372,11 @@ fn last_lines_seek(file: &mut File, out: &mut impl Write, n: u64, line_end: u8) 
     while pos > start {
         // The first block read is the *ragged* one, so that every subsequent
         // seek is block-aligned.
-        let span = match pos.saturating_sub(start) % (CHUNK as u64) {
+        let span = match pos
+            .saturating_sub(start)
+            .checked_rem(CHUNK as u64)
+            .unwrap_or(0)
+        {
             0 => CHUNK as u64,
             rest => rest,
         };
@@ -1680,7 +1684,7 @@ fn recheck(w: &mut Watched, options: &Options) {
         return;
     }
 
-    let id = file_id(&stats);
+    let id = Some(file_id(&stats));
     let fresh = if previous != Trouble::None && previous != Trouble::Io(ErrorKind::NotFound) {
         diag!("tail: {} has become accessible", quoteaf(&w.label));
         true
@@ -1754,26 +1758,26 @@ struct FileId {
 }
 
 #[cfg(unix)]
-fn file_id(m: &Metadata) -> Option<FileId> {
+fn file_id(m: &Metadata) -> FileId {
     use std::os::unix::fs::MetadataExt;
-    Some(FileId {
+    FileId {
         volume: m.dev(),
         file: m.ino(),
-    })
+    }
 }
 
 #[cfg(not(unix))]
-fn file_id(m: &Metadata) -> Option<FileId> {
+fn file_id(m: &Metadata) -> FileId {
     use std::os::windows::fs::MetadataExt;
     // The real answer is the volume serial number and the file index, which
     // `std` only exposes behind an unstable feature. Creation time is the
     // stand-in: it does not identify a file, but it does change when one name
     // comes to refer to a different file, which is the only question asked of
     // it here. This is the host test build; SlateOS presents as `unix`.
-    Some(FileId {
+    FileId {
         volume: 0,
         file: m.creation_time(),
-    })
+    }
 }
 
 /// Wait between iterations. A non-finite or absurd interval sleeps for as long
@@ -1899,6 +1903,10 @@ fn arg_bytes(a: &OsString) -> Vec<u8> {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::arithmetic_side_effects)]
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
+// `sleep_interval` is parsed from decimal text that binary floating point
+// holds exactly (0, 0.5, 1, 2, 10, 12, 16), so comparing it exactly is what
+// the tests mean, not a rounding hazard.
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
 

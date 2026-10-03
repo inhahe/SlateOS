@@ -29,6 +29,17 @@
 //! A row that changes is a finding, not a nuisance: look at what moved before
 //! adjusting anything.
 
+// A test fails by panicking, so the lints that keep panics out of production
+// code -- unwrap, expect, panic, indexing, unchecked arithmetic -- are allowed
+// here, where a panic is the point.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
+
 use coreutils::quote::{quote, quoteaf, quotef};
 
 const FIXTURE: &str = include_str!("quotearg-gnu.txt");

@@ -320,21 +320,6 @@ IGNORE = (
      "the tab's label after a save; `doc.path`, set beside it, is what is "
      "saved to and opened"),
 
-    ("stat", "from_utf8_lossy(TERSE_FILE)",
-     "TERSE_FILE is a const format string in this file; ASCII by construction"),
-    ("stat", "from_utf8_lossy(TERSE_FS)",
-     "TERSE_FS likewise"),
-    ("expr", "BigInt::from_str(&String::from_utf8_lossy(v))",
-     "guarded by looks_like_integer(v), which admits only ASCII digits and a "
-     "leading `-`, so the decode is provably lossless"),
-    ("od", "let typed = String::from_utf8_lossy(typed_bytes)",
-     "decoded only to MATCH a long-option name, all of which are ASCII; the "
-     "raw bytes are passed alongside and are what the diagnostic uses"),
-    ("split", "let shown = String::from_utf8_lossy(name)",
-     "`shown` reaches only println!/format!; the child's FILE= environment "
-     "variable is set from os_from_bytes(name) on the next line"),
-    ("strings", "let text = String::from_utf8_lossy(&bytes)",
-     "`text` reaches only STRINGS.usage(format!(...))"),
 )
 
 

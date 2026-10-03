@@ -43,7 +43,12 @@
 use crate::bytestr::ByteStrExt;
 use crate::fs::path::{Path, PathBuf};
 use crate::shellquote;
-use crate::sync::PreemptSpinMutex as Mutex;
+// The tracked lock, not `PreemptSpinMutex`, for all of the shell's state: the
+// cheap type is for true leaves only (design-decisions §975), and these are
+// held across `shell_println!`, which takes `SHELL_OUTPUT` and the console's
+// lock under them. rq42's leaf check caught two such pairs; the shell is a
+// cold path, so the ~235 ns per acquire lockdep costs is immaterial here.
+use crate::sync::Mutex;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -66,7 +71,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 /// name that does not exist. See `known-issues.md`
 /// → `TD-KSHELL-LINE-EDITOR-IS-UTF8`, which names this sink as the binding
 /// constraint on the rest of the byte-clean conversion.
-static SHELL_OUTPUT: Mutex<Option<Vec<u8>>> = Mutex::new(None);
+static SHELL_OUTPUT: Mutex<Option<Vec<u8>>> = Mutex::named(None, b"kshell_output");
 
 /// Running total of bytes written into [`SHELL_OUTPUT`] while a capture is
 /// active. Read by the liveness watchdog — see [`captured_output_count`].
@@ -557,7 +562,7 @@ fn deep_fixture_path(root: &str) -> String {
 /// resolved beneath it, which is a wider blast radius than the `cd` itself.
 /// The kernel proper already settled this direction --- `proc::pcb::get_cwd`
 /// hands back `Vec<u8>` --- so this is the shell catching up, not a new policy.
-static CWD: Mutex<PathBuf> = Mutex::new(PathBuf::new());
+static CWD: Mutex<PathBuf> = Mutex::named(PathBuf::new(), b"kshell_cwd");
 
 /// Shadow copy of shell command history for the `history` command.
 ///
@@ -565,7 +570,7 @@ static CWD: Mutex<PathBuf> = Mutex::new(PathBuf::new());
 /// and cleared when `History::new()` initializes.  This allows the
 /// `cmd_history()` function to list history without needing a reference
 /// to the stack-local `History` struct.
-static SHELL_HISTORY: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static SHELL_HISTORY: Mutex<Vec<String>> = Mutex::named(Vec::new(), b"kshell_history");
 
 /// Render a list of byte paths as one comma-separated line for the operator.
 ///
@@ -771,7 +776,8 @@ static OPT_XTRACE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBo
 /// - INT:  runs on interrupt (Ctrl+C)
 ///
 /// Set with `trap 'commands' SIGNAL`.  Clear with `trap - SIGNAL`.
-static TRAP_HANDLERS: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
+static TRAP_HANDLERS: Mutex<BTreeMap<String, String>> =
+    Mutex::named(BTreeMap::new(), b"kshell_traps");
 
 // ---------------------------------------------------------------------------
 // Environment variables
@@ -782,10 +788,10 @@ static TRAP_HANDLERS: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new
 /// Set with `export NAME=VALUE`, removed with `unset NAME`, listed with
 /// `printenv` or `env`.  Some built-in variables are populated at init
 /// (`PWD`, `SHELL`, `HOME`).
-static ENV_VARS: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
+static ENV_VARS: Mutex<BTreeMap<String, String>> = Mutex::named(BTreeMap::new(), b"kshell_env");
 
 /// Set of variable names that are read-only (cannot be re-assigned or unset).
-static READONLY_VARS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+static READONLY_VARS: Mutex<BTreeSet<String>> = Mutex::named(BTreeSet::new(), b"kshell_readonly");
 
 /// Check whether a variable is read-only.
 fn is_readonly(name: &str) -> bool {
@@ -828,7 +834,8 @@ fn env_remove(name: &str) -> bool {
 /// Declared with `arr=(word1 word2 ...)`.  Element access: `${arr[0]}`.
 /// All elements: `${arr[@]}` or `${arr[*]}`.  Length: `${#arr[@]}`.
 /// Element assignment: `arr[N]=value`.  Remove: `unset arr` or `unset arr[N]`.
-static ARRAY_VARS: Mutex<BTreeMap<String, Vec<String>>> = Mutex::new(BTreeMap::new());
+static ARRAY_VARS: Mutex<BTreeMap<String, Vec<String>>> =
+    Mutex::named(BTreeMap::new(), b"kshell_arrays");
 
 /// Get an array element by index.  Returns `None` if array or index doesn't exist.
 fn array_get(name: &str, index: usize) -> Option<String> {
@@ -2175,7 +2182,7 @@ fn str_replace_all(s: &str, pattern: &str, replacement: &str) -> String {
 ///
 /// Set with `alias name=value`, removed with `unalias name`, listed with
 /// `alias` (no arguments).
-static ALIASES: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
+static ALIASES: Mutex<BTreeMap<String, String>> = Mutex::named(BTreeMap::new(), b"kshell_aliases");
 
 /// Look up an alias.  Returns the expansion or `None`.
 fn alias_get(name: &str) -> Option<String> {
@@ -2254,7 +2261,7 @@ impl ControlState {
 /// When empty, all commands execute normally.  Each `if` pushes a frame;
 /// `fi` pops it.  Between `if` and `fi`, lines are executed or skipped
 /// based on the condition result.
-static CONTROL_STACK: Mutex<Vec<ControlState>> = Mutex::new(Vec::new());
+static CONTROL_STACK: Mutex<Vec<ControlState>> = Mutex::named(Vec::new(), b"kshell_control");
 
 /// What kind of loop is being collected.
 enum LoopKind {
@@ -2292,7 +2299,7 @@ struct LoopCollector {
 ///
 /// When `Some`, we are collecting lines for a loop body.
 /// When `done` is seen at nesting depth 0, the loop executes.
-static LOOP_COLLECTOR: Mutex<Option<LoopCollector>> = Mutex::new(None);
+static LOOP_COLLECTOR: Mutex<Option<LoopCollector>> = Mutex::named(None, b"kshell_loop");
 
 // ---------------------------------------------------------------------------
 // Shell functions
@@ -2302,7 +2309,8 @@ static LOOP_COLLECTOR: Mutex<Option<LoopCollector>> = Mutex::new(None);
 ///
 /// Functions are defined with `name() { ... }` or `function name { ... }`.
 /// Called like any built-in: `name arg1 arg2` — arguments become $1, $2, etc.
-static FUNCTIONS: Mutex<BTreeMap<String, Vec<String>>> = Mutex::new(BTreeMap::new());
+static FUNCTIONS: Mutex<BTreeMap<String, Vec<String>>> =
+    Mutex::named(BTreeMap::new(), b"kshell_funcs");
 
 /// Function body collector.
 ///
@@ -2320,7 +2328,7 @@ struct FuncCollector {
 }
 
 /// Active function body collector (only one at a time).
-static FUNC_COLLECTOR: Mutex<Option<FuncCollector>> = Mutex::new(None);
+static FUNC_COLLECTOR: Mutex<Option<FuncCollector>> = Mutex::named(None, b"kshell_funcdef");
 
 /// Positional parameter stack.
 ///
@@ -2328,7 +2336,7 @@ static FUNC_COLLECTOR: Mutex<Option<FuncCollector>> = Mutex::new(None);
 /// and pops it on return.  The topmost frame is the current scope.
 /// Outside any function, the stack is empty (positional params expand
 /// to empty string).
-static POSITIONAL_PARAMS: Mutex<Vec<Vec<String>>> = Mutex::new(Vec::new());
+static POSITIONAL_PARAMS: Mutex<Vec<Vec<String>>> = Mutex::named(Vec::new(), b"kshell_params");
 
 /// Flag: set by `return` inside a function body to short-circuit execution.
 ///
@@ -2361,7 +2369,7 @@ const MAX_FUNC_DEPTH: usize = 32;
 /// Each frame is a list of `(name, previous_value)` pairs.
 /// `previous_value = None` means the variable didn't exist before `local`.
 type LocalVarFrame = Vec<(String, Option<String>)>;
-static LOCAL_VARS: Mutex<Vec<LocalVarFrame>> = Mutex::new(Vec::new());
+static LOCAL_VARS: Mutex<Vec<LocalVarFrame>> = Mutex::named(Vec::new(), b"kshell_locals");
 
 /// Get a positional parameter from the current function scope.
 ///
@@ -2430,7 +2438,7 @@ struct HeredocCollector {
 }
 
 /// Active here-document collector (only one at a time).
-static HEREDOC_COLLECTOR: Mutex<Option<HeredocCollector>> = Mutex::new(None);
+static HEREDOC_COLLECTOR: Mutex<Option<HeredocCollector>> = Mutex::named(None, b"kshell_heredoc");
 
 /// Try to parse a heredoc start from a command line.
 ///
@@ -2563,7 +2571,7 @@ struct CaseCollector {
 }
 
 /// Active case statement collector (only one at a time).
-static CASE_COLLECTOR: Mutex<Option<CaseCollector>> = Mutex::new(None);
+static CASE_COLLECTOR: Mutex<Option<CaseCollector>> = Mutex::named(None, b"kshell_case");
 
 /// Check whether execution is currently active (not skipped by an
 /// outer control-flow block).
@@ -123293,7 +123301,7 @@ fn cmd_wc_input(args: &str, input: &[u8]) {
 /// Maximum nesting depth is 8 to prevent infinite recursion.
 fn cmd_source(args: &str) {
     /// Track recursion depth to prevent infinite `source` loops.
-    static SOURCE_DEPTH: Mutex<u8> = Mutex::new(0);
+    static SOURCE_DEPTH: Mutex<u8> = Mutex::named(0, b"kshell_source");
 
     const MAX_DEPTH: u8 = 8;
 

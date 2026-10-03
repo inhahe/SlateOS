@@ -75,7 +75,8 @@ output and exit status. Once lane D's staging is on the image:
 
 ```sh
 python scripts/guest.py start        # boots what your last boot test built; stays up
-python scripts/guest.py run --seconds 7200 --grants file \n    /bin/python3 /usr/share/oils-spec/run_all.py
+python scripts/guest.py run --seconds 7200 --grants file \
+    /bin/python3 /usr/share/oils-spec/run_all.py
 python scripts/guest.py stop
 ```
 

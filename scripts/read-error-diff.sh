@@ -43,7 +43,8 @@ DIFF_PROG='read-error'
 DIFF_GNU_SOURCE=9.4
 DIFF_NO_REF=1
 DIFF_NEED="timeout"
-DIFF_BINS="cut expand fold nl paste unexpand wc"
+DIFF_BINS="b2sum cksum cut expand fold md5sum nl paste sha1sum sha256sum sha512sum
+           sum unexpand wc"
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
@@ -145,6 +146,25 @@ sweep wc        - -
 sweep wc        f -
 sweep wc        --total=only -
 sweep wc        --files0-from=-
+# The digests: `PROG: -: ...` for the read, `PROG: standard input: ...` for
+# the close. With `-c` standard input is the checksum list, not the data.
+sweep md5sum
+sweep md5sum    -
+sweep md5sum    f -
+sweep md5sum    -c
+sweep md5sum    -c -
+sweep sha1sum
+sweep sha256sum
+sweep sha256sum --tag -
+sweep sha512sum
+sweep b2sum
+sweep b2sum     -l 128 -
+sweep cksum
+sweep cksum     -a md5 -
+sweep cksum     f -
+sweep sum
+sweep sum       -s
+sweep sum       f -
 
 # --- a file named on the command line is not standard input ------------------
 # Neither shape may change anything here: standard input is never read, so it
@@ -152,6 +172,8 @@ sweep wc        --files0-from=-
 sweep cut       -c1 f
 sweep nl        f
 sweep wc        f
+sweep md5sum    f
+sweep sum       f
 
 printf '\n'
 [ -n "$DIFF_SKIPPED" ] && printf 'not compared (no reference or no build):%s\n' "$DIFF_SKIPPED"

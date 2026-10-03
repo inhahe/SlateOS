@@ -1,7 +1,7 @@
 ## B-COREUTILS-A-CLOSED-STANDARD-INPUT-READS-AS-EMPTY (lane B, 2026-10-03)
 
 **Status:** OPEN (lane B). Fixed so far in `sed`, `tac`, `shuf`, `wc`, `cut`,
-`expand`, `fold`, `nl`, `paste`, `unexpand`, and the `-i`/`-ok` prompts of
+`expand`, `fold`, `nl`, `paste`, `unexpand`, the digests, and the `-i`/`-ok` prompts of
 `rm`, `cp`, `mv`, `ln` and `find`. The rest are listed, with GNU's wording,
 under "Where, measured".
 
@@ -76,7 +76,8 @@ carries on. `wc-diff.sh` gained 24 cases for all of this (`run_closed`,
 `scripts/read-error-diff.sh` is the regression net: every converted program,
 with standard input closed and with a directory as standard input, against a
 built coreutils 9.4. Converted so far: `cut expand fold nl paste unexpand wc`
-(also `sed`, `tac`, `shuf` and the prompts, which their own harnesses cover).
+and the digests (`md5sum sha*sum b2sum cksum sum`); also `sed`, `tac`, `shuf`
+and the prompts, which their own harnesses cover.
 
 A sweep of 49 command lines on 2026-10-03 found the rest. Each needs
 `stdfd::RawStdin` (or `stdio::StdioReader`), the guard if it lacks one, and
@@ -93,7 +94,6 @@ noted:
 | `tr`, `base64`, `base32`, `join` | `PROG: read error: Bad file descriptor`, 1 |
 | `tee` | `tee: read error: Bad file descriptor`, `tee: standard input: Bad file descriptor`, 1 |
 | `od` | `od: 'standard input': Bad file descriptor`, then `0000000` on stdout, `od: standard input: Bad file descriptor`, 1 |
-| `sum`, `cksum`, `md5sum`, `sha256sum` | `PROG: -: Bad file descriptor`, `PROG: standard input: Bad file descriptor`, 1 |
 | `tsort` | `tsort: -: read error: Bad file descriptor`, 1 |
 | `dircolors -` | `dircolors: -: read error: Bad file descriptor`, `dircolors: -: Bad file descriptor`, 1 |
 | `du --files0-from=-` | `du: -: read error: Bad file descriptor`, 1 |
@@ -109,5 +109,5 @@ noted:
 
 Other files contain `io::stdin()` too, some only for a tty check or in a
 comment: `bc diff ed find more patch sed sh split tar test`, and in the
-library `basenc.rs`, `digest.rs`, `filekind.rs`. The sweep found no
+library `basenc.rs` and `filekind.rs`. The sweep found no
 divergence for `split`, `pr`, `fmt`, `ptx`, `tac`, `shuf`, `diff`.

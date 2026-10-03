@@ -8600,7 +8600,11 @@ if [ "${GATE_CACHE:-0}" = "1" ] && [ -n "${GATE_CACHE_LOG:-}" ] && [ -s "$GATE_C
             print out
         }' "$GATE_CACHE_LOG") ==="
     if grep -q "VERIFY-FAILED" "$GATE_CACHE_LOG"; then
-        echo "=== Gate cache: a verification FAILED this run -- see VERIFY FAILED above; the cache is now off ==="
+        # Named here, because the note itself ("VERIFY FAILED for ...") is the
+        # gate's stderr, which a gate that passed keeps in its own log rather
+        # than on this console -- "see above" pointed at nothing (rq43).
+        _vf_gates=$(awk -F'\t' '$2 == "VERIFY-FAILED" { print $1 }' "$GATE_CACHE_LOG" | sort -u | tr '\n' ' ')
+        echo "=== Gate cache: a verification FAILED this run (${_vf_gates% }) -- the cache is now off; why is in that gate's log under $CHECKER_LOGDIR and in the store's DISABLED file ==="
     fi
 fi
 if [ -n "${CHECKER_TIMING_LOG:-}" ] && [ -s "$CHECKER_TIMING_LOG" ]; then

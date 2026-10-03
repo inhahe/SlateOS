@@ -1989,19 +1989,25 @@ impl MediaConvertApp {
 
     /// Handle a key press.
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        // Every key but a Ctrl chord is taken plain: a chord with Alt or the
+        // Windows key is the window's or the desktop's and arrives carrying
+        // its key -- Alt+Delete cleared the list of files.
+        let plain = textline::is_plain(key.modifiers);
         // Above the Ctrl branch, which returns for every Ctrl chord. Placed
         // after it, Ctrl+C would cancel the queue from behind the card.
-        if key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift) {
+        if plain && (key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift)) {
             self.show_help = !self.show_help;
             return EventResult::Consumed;
         }
         if self.show_help {
-            if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
+            if plain && matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
                 self.show_help = false;
             }
             return EventResult::Consumed;
         }
-        if key.modifiers.ctrl {
+        // A Ctrl chord, not Ctrl held: AltGr arrives as Ctrl+Alt and types,
+        // and AltGr+C -- a Polish `ć` -- cancelled everything queued.
+        if textline::is_ctrl_chord(key.modifiers) {
             return match key.key {
                 Key::O => {
                     self.open_picker(if key.modifiers.shift {
@@ -2030,6 +2036,9 @@ impl MediaConvertApp {
                 }
                 _ => EventResult::Ignored,
             };
+        }
+        if !plain {
+            return EventResult::Ignored;
         }
 
         match key.key {
@@ -3620,6 +3629,48 @@ mod tests {
             MediaCategory::Image,
         );
         app
+    }
+
+    /// **A key held with Alt or the Windows key is not the window's, and
+    /// AltGr is not Ctrl**: Alt+Delete cleared the list of files and Alt+3
+    /// changed the quality, each chord carrying its key; AltGr+O -- Ctrl+Alt,
+    /// a Polish `ó` -- opened a file dialog as Ctrl+O does.
+    #[test]
+    fn a_key_held_with_a_modifier_is_not_the_windows_and_altgr_is_not_ctrl() {
+        let altgr = guitk::event::Modifiers {
+            alt: true,
+            ..guitk::event::Modifiers::ctrl()
+        };
+        let mut app = seeded();
+        let (sources, panel, quality) = (app.sources.len(), app.active_panel, app.quality_preset);
+        for held in [
+            guitk::event::Modifiers::alt(),
+            guitk::event::Modifiers::super_key(),
+            altgr,
+        ] {
+            for k in [Key::Delete, Key::Num3, Key::Tab, Key::O, Key::C, Key::F1] {
+                assert_eq!(
+                    app.handle_event(&Event::Key(KeyEvent {
+                        key: k,
+                        pressed: true,
+                        modifiers: held,
+                        text: String::new(),
+                    })),
+                    EventResult::Ignored,
+                    "{held:?} {k:?} was taken"
+                );
+            }
+        }
+        assert_eq!(app.sources.len(), sources, "a chord cleared the files");
+        assert_eq!(app.active_panel, panel, "a chord changed the panel");
+        assert_eq!(app.quality_preset, quality, "a chord changed the quality");
+        assert!(!app.picker.is_open(), "AltGr+O opened a dialog");
+        assert!(!app.show_help, "a chord raised the keys");
+        assert_eq!(
+            app.handle_event(&key_ev(Key::O, true)),
+            EventResult::Consumed
+        );
+        assert!(app.picker.is_open(), "Ctrl+O no longer opens a dialog");
     }
 
     /// Three WAVs, named but not on disk.

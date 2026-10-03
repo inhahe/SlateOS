@@ -2348,6 +2348,7 @@ dependencies = [
  "oswindow",
  "pathtext",
  "safeio",
+ "textline",
  "wavpcm",
 ]
 

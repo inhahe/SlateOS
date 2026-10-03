@@ -118,8 +118,8 @@ MAIN = [
     ),
     (
         "running work can be abandoned",
-        "            if progress.complete && matches!(key.key, Key::Escape | Key::Enter) {",
-        "            if matches!(key.key, Key::Escape | Key::Enter) {",
+        "            if plain && progress.complete && matches!(key.key, Key::Escape | Key::Enter) {",
+        "            if plain && matches!(key.key, Key::Escape | Key::Enter) {",
         [OVERLAY],
     ),
     (
@@ -133,6 +133,78 @@ MAIN = [
         "                Key::Space => return self.schedule_control(ScheduleControl::Toggle),\n",
         "",
         [SCHEDULE],
+    ),
+    (
+        'a chord raises the list of keys',
+        '        if plain && (key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift)) {',
+        '        if key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift) {',
+        ['a_chord_is_neither_a_restore_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        'AltGr is taken for Ctrl in the list',
+        '        if textline::is_ctrl_chord(key.modifiers) {\n            return match key.key {',
+        '        if key.modifiers.ctrl {\n            return match key.key {',
+        ['a_chord_is_neither_a_restore_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        'Alt+Tab changes the view',
+        '            Key::Tab if plain => {\n                self.cycle_view(',
+        '            Key::Tab => {\n                self.cycle_view(',
+        ['a_chord_is_neither_a_restore_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        'Alt+Enter asks to restore',
+        '            Key::Enter if plain => {\n                if let Some(id) = self.selected_id {\n                    self.dialog = DialogKind::ConfirmRestore(id);',
+        '            Key::Enter => {\n                if let Some(id) = self.selected_id {\n                    self.dialog = DialogKind::ConfirmRestore(id);',
+        ['a_chord_is_neither_a_restore_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        'Alt+Delete asks to delete',
+        '            Key::Delete if plain => {\n                if let Some(id) = self.selected_id {\n                    self.dialog = DialogKind::ConfirmDelete(id);',
+        '            Key::Delete => {\n                if let Some(id) = self.selected_id {\n                    self.dialog = DialogKind::ConfirmDelete(id);',
+        ['a_chord_is_neither_a_restore_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        'Alt+Backspace deletes from the search',
+        '            Key::Backspace if !textline::is_alt_or_windows_chord(key.modifiers) => {\n                self.search_query.pop();',
+        '            Key::Backspace => {\n                self.search_query.pop();',
+        ['a_chord_is_neither_a_restore_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        "the search types a command's letter",
+        '            _ if !textline::types_into_field(key) => EventResult::Ignored,\n',
+        '',
+        ['a_chord_is_neither_a_restore_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        'a chorded Escape closes the dialog',
+        '            Key::Escape if plain => {\n                self.dialog = DialogKind::None;',
+        '            Key::Escape => {\n                self.dialog = DialogKind::None;',
+        ['a_chord_is_neither_a_restore_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        'a chorded Enter answers the dialog',
+        '            Key::Enter if plain => {\n                self.confirm_dialog();',
+        '            Key::Enter => {\n                self.confirm_dialog();',
+        ['a_chord_is_neither_a_restore_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        "Alt+Tab walks the form's fields",
+        '            Key::Tab if plain && self.dialog == DialogKind::CreateSnapshot => {',
+        '            Key::Tab if self.dialog == DialogKind::CreateSnapshot => {',
+        ['a_chord_is_neither_a_restore_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        'Alt+Backspace deletes from the form',
+        '                    && !textline::is_alt_or_windows_chord(key.modifiers) =>',
+        '                    =>',
+        ['a_chord_is_neither_a_restore_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        "the form types a command's letter",
+        '            _ if self.dialog == DialogKind::CreateSnapshot && textline::types_into_field(key) => {',
+        '            _ if self.dialog == DialogKind::CreateSnapshot && key.types_text() => {',
+        ['a_chord_is_neither_a_restore_key_nor_typing_and_altgr_types'],
     ),
 ]
 

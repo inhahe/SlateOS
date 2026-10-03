@@ -1066,7 +1066,10 @@ impl WordSearchApp {
         if !key.pressed {
             return None;
         }
-        if key.modifiers.ctrl {
+        // A Ctrl chord, not Ctrl held: AltGr arrives as Ctrl+Alt, and AltGr+2
+        // -- a German `²` -- threw the puzzle away for a new medium one. So
+        // did Ctrl with the Windows key, whose chords are the desktop's.
+        if textline::is_ctrl_chord(key.modifiers) {
             return match key.key {
                 Key::Num1 => Some(Action::SetDifficulty(Difficulty::Easy)),
                 Key::Num2 => Some(Action::SetDifficulty(Difficulty::Medium)),
@@ -3397,6 +3400,37 @@ mod tests {
             EventResult::Ignored
         );
         assert_eq!(a.hints_remaining(), MAX_HINTS, "Ctrl-H spent a hint");
+    }
+
+    /// **AltGr and a digit is not Ctrl and a digit**: AltGr arrives as
+    /// Ctrl+Alt, and AltGr+2 -- a German `²` -- threw the puzzle away for a
+    /// new medium one; so did Ctrl+Windows+2, a chord of the desktop's.
+    #[test]
+    fn altgr_or_the_windows_key_and_a_digit_is_not_a_difficulty() {
+        let mut a = game(51);
+        let before = (a.difficulty(), a.found_count());
+        let words: Vec<String> = a.words().iter().map(|w| w.word.clone()).collect();
+        for modifiers in [
+            Modifiers {
+                alt: true,
+                ..Modifiers::ctrl()
+            },
+            Modifiers {
+                super_key: true,
+                ..Modifiers::ctrl()
+            },
+        ] {
+            for k in [Key::Num1, Key::Num2, Key::Num3] {
+                assert_eq!(
+                    handle_event(&mut a, &Event::Key(press_with(k, modifiers))),
+                    EventResult::Ignored,
+                    "{modifiers:?} {k:?} was taken"
+                );
+            }
+        }
+        let now: Vec<String> = a.words().iter().map(|w| w.word.clone()).collect();
+        assert_eq!((a.difficulty(), a.found_count()), before);
+        assert_eq!(now, words, "a chord dealt a new puzzle");
     }
 
     #[test]

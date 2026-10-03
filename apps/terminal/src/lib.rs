@@ -2606,24 +2606,45 @@ terminal, so what you type goes nowhere.\r\n"
 
         let mods = &event.modifiers;
 
-        // If there is a text character (and no ctrl/alt modifiers), send it as UTF-8
-        // The whole run, not its first character: a dead key whose composition
-        // failed types two, and sending one would leave the shell reading a
-        // line the user never typed.
-        if !event.text.is_empty() && !mods.ctrl && !mods.alt {
-            return event.text.clone().into_bytes();
+        // The Windows key's chords are the desktop's, never the shell's:
+        // Windows+X sent an `x`, and Windows+Up an unmodified Up, since the
+        // xterm modifier code has no bit for it.
+        if mods.super_key {
+            return Vec::new();
         }
 
-        // Ctrl+letter produces control characters (^A = 0x01, ^Z = 0x1A, etc.)
+        // What was typed goes as its UTF-8 -- with AltGr too, which arrives as
+        // Ctrl+Alt: AltGr+Q is a German `@`, and AltGr is how half of Europe
+        // types a brace, a bracket, a pipe or a backslash. They were sent as
+        // nothing, Ctrl and Alt both being held. The whole run, not its first
+        // character: a dead key whose composition failed types two, and
+        // sending one would leave the shell reading a line the user never
+        // typed. Control characters are left to the keys below: Backspace
+        // carries `\x08` on most layouts, and sends DEL.
+        if textline::types_into_field(event) {
+            return event.typed().collect::<String>().into_bytes();
+        }
+
+        // Alt and a character: ESC and the character, the meta convention --
+        // Alt+B is readline's back-a-word. It sent nothing.
+        if mods.alt && !mods.ctrl && event.types_text() {
+            let mut bytes = vec![0x1b];
+            bytes.extend(event.typed().collect::<String>().bytes());
+            return bytes;
+        }
+
+        // Ctrl+letter produces control characters (^A = 0x01, ^Z = 0x1A,
+        // etc.), and with Alt -- a chord AltGr typed nothing for -- ESC
+        // before it, as xterm sends.
         if mods.ctrl
-            && !mods.alt
             && let Some(code) = self.ctrl_key_code(&event.key)
         {
-            return vec![code];
+            return if mods.alt {
+                vec![0x1b, code]
+            } else {
+                vec![code]
+            };
         }
-
-        // Alt+key sends ESC prefix
-        let prefix = if mods.alt { b"\x1b" as &[u8] } else { &[] };
 
         let seq: Vec<u8> = match event.key {
             Key::Enter => vec![0x0D],
@@ -2679,7 +2700,40 @@ terminal, so what you type goes nowhere.\r\n"
             return Vec::new();
         }
 
-        let mut result = prefix.to_vec();
+        // Alt sends an ESC before the key -- but for the keys whose xterm
+        // sequence says its modifiers itself: the arrows, the navigation keys
+        // and the function keys. An ESC before those said Alt twice, so
+        // Alt+Up arrived as ESC ESC [1;3A.
+        let says_its_modifiers = matches!(
+            event.key,
+            Key::Up
+                | Key::Down
+                | Key::Left
+                | Key::Right
+                | Key::Home
+                | Key::End
+                | Key::Insert
+                | Key::Delete
+                | Key::PageUp
+                | Key::PageDown
+                | Key::F1
+                | Key::F2
+                | Key::F3
+                | Key::F4
+                | Key::F5
+                | Key::F6
+                | Key::F7
+                | Key::F8
+                | Key::F9
+                | Key::F10
+                | Key::F11
+                | Key::F12
+        );
+        let mut result = if mods.alt && !says_its_modifiers {
+            vec![0x1b]
+        } else {
+            Vec::new()
+        };
         result.extend_from_slice(&seq);
         result
     }
@@ -6322,5 +6376,66 @@ mod tests {
         let of = |s: &str| widths.iter().find(|(t, _)| t == s).map(|(_, m)| *m);
         assert_eq!(of("a"), Some(w));
         assert_eq!(of("\u{4E2D}"), Some(w * 2.0));
+    }
+
+    /// **What each kind of chord sends the shell.** AltGr, which arrives as
+    /// Ctrl+Alt, sent nothing however it typed -- AltGr+Q is a German `@`,
+    /// and AltGr is how half of Europe types `{`, `[`, `|` and `\`; Alt and a
+    /// letter sent nothing, where readline reads ESC and the letter as meta;
+    /// the Windows key's chords reached the shell, Windows+X as an `x`; and
+    /// Alt on an arrow said Alt twice, as an ESC before an xterm sequence
+    /// that already carried it. And Backspace, whose text is `\x08` on most
+    /// layouts, sent that rather than DEL.
+    #[test]
+    fn each_kind_of_chord_sends_what_a_shell_expects() {
+        use guitk::event::{KeyEvent, Modifiers};
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let mut term = TerminalState::new(TerminalConfig::default());
+        let mut sends = |k: Key, text: &str, modifiers: Modifiers| {
+            term.translate_key(&KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: text.to_owned(),
+            })
+        };
+        let cases: [(&str, Key, &str, Modifiers, &[u8]); 14] = [
+            ("a letter", Key::A, "a", Modifiers::NONE, b"a"),
+            ("Shift", Key::A, "A", Modifiers::shift(), b"A"),
+            ("AltGr+Q", Key::Q, "@", altgr, b"@"),
+            ("AltGr+7", Key::Num7, "{", altgr, b"{"),
+            ("AltGr+S", Key::S, "\u{15b}", altgr, "\u{15b}".as_bytes()),
+            (
+                "AltGr on a key it types nothing for",
+                Key::C,
+                "",
+                altgr,
+                b"\x1b\x03",
+            ),
+            ("Alt+B", Key::B, "b", Modifiers::alt(), b"\x1bb"),
+            ("Ctrl+C", Key::C, "c", Modifiers::ctrl(), b"\x03"),
+            ("Windows+X", Key::X, "x", Modifiers::super_key(), b""),
+            ("Windows+Up", Key::Up, "", Modifiers::super_key(), b""),
+            ("Alt+Up", Key::Up, "", Modifiers::alt(), b"\x1b[1;3A"),
+            ("Alt+Enter", Key::Enter, "\r", Modifiers::alt(), b"\x1b\r"),
+            (
+                "Backspace",
+                Key::Backspace,
+                "\u{8}",
+                Modifiers::NONE,
+                b"\x7f",
+            ),
+            ("Shift+Tab", Key::Tab, "\t", Modifiers::shift(), b"\x1b[Z"),
+        ];
+        for (what, key, text, modifiers, expected) in cases {
+            assert_eq!(
+                sends(key, text, modifiers),
+                expected.to_vec(),
+                "{what} sent the wrong bytes"
+            );
+        }
     }
 }

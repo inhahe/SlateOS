@@ -13,6 +13,13 @@ toolkit's `Probe` its `Copy` targets. The other four say things with colour
 the tree cannot draw -- a value's kind, a device's status, a section's
 letter -- and wait on `requests/e-c-tree-rows-need-tones-and-a-badge.md`;
 `jsonviewer`, whose selection is still a row number, first.
+**Lane E, 2026-10-03:** `jsonviewer` done (827636d20), with lane C's tones:
+a `JsonTree` source over the document's own value, a member keyed by its
+name and its occurrence (JSON allows a repeated key), `expanded_paths`,
+the row-number selection and the pixel scroll gone. Its clicks reach the
+tree through `TreeView::handle_hit` on a frame of the tree's own, so the
+window can follow the hovered row. Next: `devicemanager`, `dbviewer`,
+`diskanalyzer`.
 
 ## In short
 

@@ -121,6 +121,12 @@ MUTATIONS = [
         '        false\n    }',
         ['a_unit_changed_in_one_window_reaches_the_others'],
     ),
+    (
+        "a chord works the window's keys",
+        '        if !textline::is_plain(key.modifiers) {\n            return EventResult::Ignored;\n        }\n',
+        '',
+        ['a_key_held_with_a_modifier_is_not_the_windows'],
+    ),
 ]
 
 if __name__ == "__main__":

@@ -74,12 +74,14 @@ name = "archivemanager"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "bzip2",
  "deflate",
  "guitk",
  "oswindow",
  "pathtext",
  "quoting",
  "tararchive",
+ "xz",
  "ziparchive",
 ]
 
@@ -363,6 +365,10 @@ checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "byteread"
+version = "0.1.0"
+
+[[package]]
+name = "bzip2"
 version = "0.1.0"
 
 [[package]]
@@ -2743,6 +2749,7 @@ dependencies = [
  "safeio",
  "scratchdir",
  "statehistory",
+ "textline",
  "unsaved",
 ]
 
@@ -3238,6 +3245,7 @@ dependencies = [
  "deflate",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]
@@ -3463,6 +3471,7 @@ dependencies = [
  "quoting",
  "scratchdir",
  "settingsfile",
+ "textline",
  "yamldoc",
 ]
 
@@ -4025,6 +4034,7 @@ dependencies = [
  "scratchdir",
  "settingsfile",
  "snapstore",
+ "textline",
 ]
 
 [[package]]
@@ -4070,6 +4080,7 @@ dependencies = [
  "libcall",
  "oswindow",
  "termchild",
+ "textline",
 ]
 
 [[package]]
@@ -4135,6 +4146,7 @@ dependencies = [
  "oswindow",
  "termchild",
  "terminal",
+ "textline",
  "tzrules",
 ]
 
@@ -4230,6 +4242,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]
@@ -4303,6 +4316,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]
@@ -4441,6 +4455,7 @@ dependencies = [
  "oswindow",
  "pathtext",
  "settingsfile",
+ "textline",
  "yamldoc",
 ]
 
@@ -4504,6 +4519,7 @@ dependencies = [
  "guitk",
  "oswindow",
  "settingsfile",
+ "textline",
  "yamldoc",
 ]
 
@@ -4523,6 +4539,7 @@ dependencies = [
  "oswindow",
  "pathtext",
  "safeio",
+ "textline",
  "unsaved",
  "yamldoc",
 ]
@@ -4563,6 +4580,7 @@ dependencies = [
  "gamechrome",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]
@@ -4574,6 +4592,7 @@ dependencies = [
  "guitk",
  "oswindow",
  "randrange",
+ "textline",
 ]
 
 [[package]]
@@ -4583,6 +4602,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "textline",
  "tzrules",
 ]
 
@@ -4607,6 +4627,14 @@ name = "xxhash64"
 version = "0.1.0"
 
 [[package]]
+name = "xz"
+version = "0.1.0"
+dependencies = [
+ "crc32",
+ "sha2",
+]
+
+[[package]]
 name = "yacc"
 version = "0.1.0"
 dependencies = [
@@ -4622,6 +4650,7 @@ dependencies = [
  "guitk",
  "oswindow",
  "randrange",
+ "textline",
 ]
 
 [[package]]

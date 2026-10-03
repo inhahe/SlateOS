@@ -1,0 +1,24 @@
+# name level generator args... input-length input-fnv64
+empty 9 fill 0 0 0 cbf29ce484222325
+empty 1 fill 0 0 0 cbf29ce484222325
+one 9 fill 1 88 1 af64154c86024d67
+run4 9 fill 4 65 4 8943628b9f33b719
+run5 9 fill 5 65 5 7137cb3f84e08a88
+run255 9 fill 255 65 255 e917faa2b8dbe286
+run256 9 fill 256 65 256 efa1a9801da25825
+run260 9 fill 260 65 260 e0114cc0b0bdbc19
+short 9 text 3000 1 3000 5fe86ced37d2283d
+text 1 text 160000 2 160000 37335dba45c8995a
+text 9 text 160000 2 160000 37335dba45c8995a
+random 9 random 20000 3 20000 4db1c3cabbfb3af0
+random 2 random 3000 4 3000 bb86295486a1f168
+runs 1 runs 150000 5 150000 b2db428251e7463a
+periodic 9 periodic 60000 10 6 60000 b869bd6f2eb78885
+periodic 5 periodic 7000 7 7 7000 1c90b40b175c09cd
+zeros 9 fill 1000000 0 1000000 8f6dd72fba193025
+aaaab 1 aaaab 400000 400000 0b7a0e8e461a4f25
+count 9 count 100000 100000 371690f901abd145
+ab 4 ab 60000 8 60000 215d7d22cbe779a7
+randomised 4 ab 330000 12 330000 1027c9eaa254fe71
+sample1 1 sample - 98696 540067ca851d6853
+sample3 3 sample - 120244 013bf457a6f60e59

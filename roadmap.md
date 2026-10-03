@@ -2863,11 +2863,13 @@ word; text inside them that says "lane C" is history.
   counted 2026-09-28, most without asking whether the key is a command --
   and the Ctrl shortcuts matched on Ctrl alone in the 64 programs that take
   text and test Ctrl somewhere without Alt (notes' body, and every field on
-  `TextInput::edit_key`, wait on the request above); the Alt/Super guard
-  (paint and the whiteboard done 2026-09-29; a survey of 2026-09-29 finds 60
-  more with a bare letter binding and no guard, listed in `known-issues.md`
-  "[E] A key held with Alt or the Windows key works a program's bare-key
-  binding", with the fix: `textline::is_command` before the bare bindings);
+  `TextInput::edit_key`, wait on the request above). *The Alt/Super guard:*
+  done 2026-10-03 for all sixty programs of the 2026-09-29 survey, each with
+  a test and mutation rows (`known-issues/E-a-key-held-with-alt-or-the-windows-key-works-a-programs-bare-key-binding.md`
+  lists them); most had the AltGr-as-Ctrl fault too and many typed a
+  command's letter, both fixed alongside; and `textline::apply_key` and
+  `TextArea::apply_key` themselves now refuse Alt's and the Windows key's
+  chords on their editing keys, as their docs said they did;
   Page Up/Down, Home/End and Ctrl+Home/End through
   `guitk::listview::ListKey` for programs with lists of their own (done
   2026-09-29 for pomodoro's log, rush's puzzle sheet, sokoban's level menu
@@ -3133,6 +3135,25 @@ word; text inside them that says "lane C" is history.
   answered rather than drawn. Without a connection nothing is pretended --
   a command says it was not sent. The window says "plain text" while
   connected (see E-Q2). Tested end to end against a loopback server.
+
+- `[-]` `[E]` **The archive codecs leave the kernel binary** — 2026-10-03,
+  lane A's answer to `requests/e-a-bzip2-xz-and-7z-are-trapped-in-the-kernel-binary.md`:
+  lane E ports the codecs into root crates any program can link, and lane A
+  switches the kernel's `fs/` copies to shims. Each is a port of the
+  reference implementation, held to that implementation's own output and
+  verdicts by its tests. **Done:** `bzip2/` (libbzip2 1.0.8, compressor
+  byte-identical, decoder verdict-identical on 2,943 corruptions), and the
+  archive manager reads and writes TAR.BZ2 through it; `xz/` decoders
+  (liblzma 5.2.5: `.xz` with every check and filter, `.lzma`, raw
+  LZMA/LZMA2), and the archive manager reads TAR.XZ through it. Both handed
+  to lane A (`requests/e-a-the-bzip2-crate-is-ready-for-the-kernel-shim.md`,
+  `requests/e-a-the-xz-crate-is-ready-and-xz-compress-loses-files.md` --
+  the second reports that the kernel's `xz_compress` writes unreadable
+  streams past 64 KiB compressed). **Next:** liblzma's encoder (match
+  finders, the fast and normal optimizers, presets 0-9 and extreme),
+  byte-identical to `xz`, then TAR.XZ written; `sevenz/` (7z: LZMA, LZMA2,
+  BZip2, Deflate, BCJ, Delta; names kept as UTF-16 units), then the
+  archive manager opens 7z.
 
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;
 bug-hunt sweeps over it are standing work between features (this was lane

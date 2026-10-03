@@ -331,6 +331,36 @@ MUTATIONS = [
         "                5,",
         [SEEK],
     ),
+    (
+        'a plain binding answers the Windows key',
+        '            Self::Plain(key) => event.key == key && plain && !mods.shift,',
+        '            Self::Plain(key) => event.key == key && !mods.shift && !mods.ctrl && !mods.alt,',
+        ['a_key_held_with_the_windows_key_is_not_the_players'],
+    ),
+    (
+        'a shifted binding answers the Windows key',
+        '            Self::Shift(key) => event.key == key && plain && mods.shift,',
+        '            Self::Shift(key) => event.key == key && mods.shift && !mods.ctrl && !mods.alt,',
+        ['a_key_held_with_the_windows_key_is_not_the_players'],
+    ),
+    (
+        'a Ctrl binding answers the Windows key',
+        '            Self::Ctrl(key) => event.key == key && textline::is_ctrl_chord(mods),',
+        '            Self::Ctrl(key) => event.key == key && mods.ctrl && !mods.alt,',
+        ['a_key_held_with_the_windows_key_is_not_the_players'],
+    ),
+    (
+        'a Ctrl binding answers AltGr',
+        '            Self::Ctrl(key) => event.key == key && textline::is_ctrl_chord(mods),',
+        '            Self::Ctrl(key) => event.key == key && mods.ctrl && !mods.super_key,',
+        ['a_key_held_with_the_windows_key_is_not_the_players'],
+    ),
+    (
+        'the digits answer the Windows key',
+        '            Self::Digit => Self::digit_of(event.key).is_some() && plain,',
+        '            Self::Digit => Self::digit_of(event.key).is_some() && !mods.ctrl && !mods.alt,',
+        ['a_key_held_with_the_windows_key_is_not_the_players'],
+    ),
 ]
 
 if __name__ == "__main__":

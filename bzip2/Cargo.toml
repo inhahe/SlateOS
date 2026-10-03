@@ -1,0 +1,21 @@
+[package]
+name = "bzip2"
+version = "0.1.0"
+edition = "2024"
+description = "bzip2, ported from libbzip2 1.0.8: a decoder that refuses what it refuses and a compressor that writes its bytes."
+# libbzip2's own licence, which travels with the port (its condition 1);
+# `licenses/notices.yaml` names it for the image's notices.
+license-file = "licenses/libbzip2-LICENSE"
+
+[lib]
+path = "src/lib.rs"
+
+# `no_std` + `alloc`, as `deflate`: the kernel links this, and a decompressor
+# cannot be allocation-free -- a block's length is not known until it ends.
+# No dependencies at all: bzip2's CRC is the *unreflected* CRC-32 (the
+# catalogue's CRC-32/BZIP2), not the reflected one the `crc32` crate computes
+# for gzip and ZIP, so it has its own table, transcribed from libbzip2.
+[dependencies]
+
+[lints]
+workspace = true

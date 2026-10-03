@@ -197,6 +197,12 @@ MUTATIONS = [
         '    modifiers.alt && !modifiers.ctrl\n}',
         ['a_chord_a_command_and_typing_by_modifiers'],
     ),
+    (
+        'a key held with Alt or the Windows key edits the field',
+        '    if is_alt_or_windows_chord(key.modifiers) {\n        return LineEdit::default();\n    }\n',
+        '',
+        ['a_key_held_with_alt_or_the_windows_key_edits_nothing'],
+    ),
 ]
 
 if __name__ == "__main__":

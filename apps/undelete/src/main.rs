@@ -2336,17 +2336,24 @@ impl UndeleteApp {
 
     /// Handle a key press.
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
-        if key.key == Key::F1 {
+        // A key on its own is taken plain, nothing held but Shift: a chord
+        // with Alt or the Windows key is the window's or the desktop's and
+        // arrives carrying its key -- Alt+Enter started a recovery, and
+        // Alt+Escape left the results for the setup screen.
+        let plain = textline::is_plain(key.modifiers);
+        if key.key == Key::F1 && plain {
             self.show_help = !self.show_help;
             return EventResult::Consumed;
         }
         if self.show_help {
-            if matches!(key.key, Key::Escape | Key::Enter) {
+            if plain && matches!(key.key, Key::Escape | Key::Enter) {
                 self.show_help = false;
             }
             return EventResult::Consumed;
         }
-        if key.modifiers.ctrl {
+        // A Ctrl chord, not Ctrl held: AltGr arrives as Ctrl+Alt, and AltGr+A
+        // -- a Polish `ą`, typed into the search -- selected every file.
+        if textline::is_ctrl_chord(key.modifiers) {
             return match key.key {
                 Key::A => {
                     self.engine.select_all(&self.filter);
@@ -2364,6 +2371,9 @@ impl UndeleteApp {
         }
 
         match self.screen {
+            // The results take typing, into their search.
+            UiScreen::Results => self.handle_results_key(key),
+            _ if !plain => EventResult::Ignored,
             UiScreen::ScanSetup => self.handle_setup_key(key),
             UiScreen::Scanning => {
                 if key.key == Key::Escape {
@@ -2373,7 +2383,6 @@ impl UndeleteApp {
                     EventResult::Ignored
                 }
             }
-            UiScreen::Results => self.handle_results_key(key),
             UiScreen::Recovering => {
                 if matches!(key.key, Key::Escape | Key::Enter) {
                     self.screen = UiScreen::Results;
@@ -2412,9 +2421,22 @@ impl UndeleteApp {
         }
     }
 
-    /// Keys on the results screen.
+    /// Keys on the results screen: the list's keys plain, and typing into
+    /// the search -- what was typed, AltGr's letters among it, not the letter
+    /// a command carries (Alt+X searched for `x`). Backspace edits the search,
+    /// so it is refused only to Alt and the Windows key.
     fn handle_results_key(&mut self, key: &KeyEvent) -> EventResult {
+        let plain = textline::is_plain(key.modifiers);
         match key.key {
+            Key::Backspace if !textline::is_alt_or_windows_chord(key.modifiers) => {
+                let mut search = self.filter.filename_search.clone();
+                if search.pop().is_none() {
+                    return EventResult::Ignored;
+                }
+                self.set_search(&search);
+                EventResult::Consumed
+            }
+            _ if !plain => self.type_into_search(key),
             Key::Up => {
                 self.select_prev();
                 EventResult::Consumed
@@ -2478,25 +2500,23 @@ impl UndeleteApp {
                     EventResult::Consumed
                 }
             }
-            Key::Backspace => {
-                let mut search = self.filter.filename_search.clone();
-                if search.pop().is_none() {
-                    return EventResult::Ignored;
-                }
-                self.set_search(&search);
-                EventResult::Consumed
-            }
-            _ => {
-                let typed: String = key.typed().collect();
-                if typed.is_empty() {
-                    return EventResult::Ignored;
-                }
-                let mut search = self.filter.filename_search.clone();
-                search.push_str(&typed);
-                self.set_search(&search);
-                EventResult::Consumed
-            }
+            _ => self.type_into_search(key),
         }
+    }
+
+    /// What `key` typed, onto the end of the search.
+    fn type_into_search(&mut self, key: &KeyEvent) -> EventResult {
+        if !textline::types_into_field(key) {
+            return EventResult::Ignored;
+        }
+        let typed: String = key.typed().collect();
+        if typed.is_empty() {
+            return EventResult::Ignored;
+        }
+        let mut search = self.filter.filename_search.clone();
+        search.push_str(&typed);
+        self.set_search(&search);
+        EventResult::Consumed
     }
 
     /// Handle a mouse event.
@@ -4746,6 +4766,97 @@ mod tests {
         app.start_scan();
         run_scan(&mut app);
         app
+    }
+
+    /// **A chord is neither an undelete key nor typing, and AltGr types**: a
+    /// chord with Alt or the Windows key carries its key -- Alt+Space chose a
+    /// file, Alt+Escape left the results, Alt+Tab re-sorted them and Alt+X
+    /// searched for `x`; and AltGr+A, a Polish `ą`, chose every file as
+    /// Ctrl+A does instead of typing into the search.
+    ///
+    /// Each key is asserted as it is pressed: the choice and the sort go
+    /// round.
+    #[test]
+    fn a_chord_is_neither_an_undelete_key_nor_typing() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let chord = |k: Key, text: &str, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: text.to_owned(),
+            })
+        };
+        let mut app = scanned();
+        assert_eq!(app.screen, UiScreen::Results, "control: a scan ran");
+        app.handle_event(&chord(Key::Down, "", Modifiers::NONE));
+        let state = |app: &UndeleteApp| {
+            (
+                (
+                    app.screen,
+                    app.selected_file_idx,
+                    app.engine.selected_count(),
+                ),
+                (app.sort_field, app.sort_direction, app.show_help),
+                app.filter.filename_search.clone(),
+            )
+        };
+        let before = state(&app);
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for k in [
+                Key::Space,
+                Key::Down,
+                Key::End,
+                Key::Tab,
+                Key::Enter,
+                Key::Escape,
+                Key::F1,
+                Key::A,
+                Key::D,
+            ] {
+                assert_eq!(
+                    app.handle_event(&chord(k, "", m)),
+                    EventResult::Ignored,
+                    "{m:?} {k:?} was taken"
+                );
+                assert_eq!(state(&app), before, "{m:?} {k:?} changed the results");
+            }
+        }
+
+        // The search types what was typed, AltGr's letters among it.
+        app.handle_event(&chord(Key::X, "x", Modifiers::alt()));
+        app.handle_event(&chord(Key::X, "x", Modifiers::super_key()));
+        app.handle_event(&chord(Key::A, "\u{105}", altgr));
+        assert_eq!(app.filter.filename_search, "\u{105}", "AltGr's ą was lost");
+        app.handle_event(&chord(Key::Backspace, "", Modifiers::alt()));
+        assert_eq!(
+            app.filter.filename_search, "\u{105}",
+            "Alt+Backspace deleted"
+        );
+        app.handle_event(&chord(Key::Backspace, "", Modifiers::NONE));
+        assert!(app.filter.filename_search.is_empty(), "control: Backspace");
+
+        // The list of keys goes on a plain Escape only.
+        app.handle_event(&chord(Key::F1, "", Modifiers::NONE));
+        assert!(app.show_help, "control: F1 raises it");
+        app.handle_event(&chord(Key::Escape, "", Modifiers::alt()));
+        assert!(app.show_help, "Alt+Escape put it away");
+        app.handle_event(&chord(Key::Escape, "", Modifiers::NONE));
+
+        // And the setup screen's keys are plain.
+        app.handle_event(&chord(Key::Escape, "", Modifiers::NONE));
+        assert_eq!(app.screen, UiScreen::ScanSetup, "control: Escape leaves");
+        let mode = app.scan_mode;
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            app.handle_event(&chord(Key::Tab, "", m));
+            assert_eq!(app.scan_mode, mode, "{m:?} Tab changed the scan");
+            app.handle_event(&chord(Key::Enter, "", m));
+            assert_eq!(app.screen, UiScreen::ScanSetup, "{m:?} Enter scanned");
+        }
     }
 
     // -- the scan is something you can watch --

@@ -3414,23 +3414,26 @@ mod tests {
             _ => None,
         };
         assert_eq!(dialog(&ui), Some((0, String::new())), "control: Ctrl+N");
+        // Filled in, so a save would go through and close it.
+        if let DialogState::AddEdit(d) = &mut ui.dialog {
+            d.name = String::from("kept");
+            d.path = String::from("/bin/kept");
+        }
+        let filled = Some((0, String::from("kept")));
         for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
             for k in [Key::Tab, Key::Down, Key::Up, Key::Enter, Key::Escape] {
                 ui.handle_key(&chord(k, "", m));
-                assert_eq!(
-                    dialog(&ui),
-                    Some((0, String::new())),
-                    "{m:?} {k:?} moved, saved or closed"
-                );
+                assert_eq!(dialog(&ui), filled, "{m:?} {k:?} moved, saved or closed");
             }
         }
+        assert_eq!(ui.manager.entry_count(), 3, "a chord saved the entry");
         ui.handle_key(&chord(Key::X, "x", Modifiers::alt()));
         ui.handle_key(&chord(Key::X, "x", Modifiers::super_key()));
         ui.handle_key(&chord(Key::S, "ś", altgr));
         ui.handle_key(&chord(Key::Backspace, "", Modifiers::super_key()));
         assert_eq!(
             dialog(&ui),
-            Some((0, String::from("ś"))),
+            Some((0, String::from("keptś"))),
             "the dialog typed a command's letter, or lost AltGr's"
         );
     }

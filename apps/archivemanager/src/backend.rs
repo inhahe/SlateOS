@@ -13,18 +13,20 @@
 //! links, promoted out of `kernel/src/fs/zip.rs` at lane C's request precisely
 //! so that this program would not have to grow a second one.
 //!
-//! TAR and TAR.GZ, via [`tararchive`] and the workspace's `deflate`: listed,
-//! extracted, tested, and written back -- a member added or deleted, a new
-//! archive created. A TAR is read in place like a ZIP; a TAR.GZ is one gzip
-//! stream over the whole archive, so it is inflated into memory (under the
-//! same [`MAX_ARCHIVE_BYTES`] as everything else) and rewritten whole. What
-//! the bytes are decides, not the name: a gzipped `.tar` opens as a TAR.GZ.
+//! TAR, TAR.GZ, TAR.BZ2 and TAR.XZ, via [`tararchive`] and the workspace's
+//! `deflate`, `bzip2` and `xz`: listed, extracted, tested, and -- all but
+//! TAR.XZ, until `xz` has its compressor -- written back, a member added or
+//! deleted, a new archive created. A TAR is read in place like a ZIP; a
+//! compressed TAR is one stream over the whole archive, so it is decompressed
+//! into memory (under the same [`MAX_ARCHIVE_BYTES`] as everything else) and
+//! rewritten whole. What the bytes are decides, not the name: a gzipped
+//! `.tar` opens as a TAR.GZ, a `.tgz` holding bzip2 as a TAR.BZ2.
 //!
-//! TAR.BZ2, TAR.XZ and 7z are named by [`ArchiveFormat`] and refused here in
-//! words rather than silently mis-parsed: `ArchiveError::NotYetReadable` says
-//! which format it was -- found by name, or by the bytes when the name says
-//! TAR. Their decompressors are in the kernel, where no program can reach
-//! them (`requests/e-a-bzip2-xz-and-7z-are-trapped-in-the-kernel-binary.md`).
+//! 7z is named by [`ArchiveFormat`] and refused here in words rather than
+//! silently mis-parsed: `ArchiveError::NotYetReadable` says so -- found by
+//! name, or by the bytes when the name says TAR. Its reader is still in the
+//! kernel, where no program can reach it
+//! (`requests/e-a-bzip2-xz-and-7z-are-trapped-in-the-kernel-binary.md`).
 //!
 //! # An entry name is not a path
 //!
@@ -90,6 +92,10 @@ pub enum ArchiveError {
     NotTar { why: tararchive::Damage },
     /// A `.tar.gz` whose gzip stream will not inflate.
     Gzip(deflate::Error),
+    /// A `.tar.bz2` whose bzip2 stream will not decompress.
+    Bzip2(bzip2::Error),
+    /// A `.tar.xz` whose xz stream will not decompress.
+    Xz(xz::Error),
 }
 
 impl fmt::Display for ArchiveError {
@@ -107,7 +113,7 @@ impl fmt::Display for ArchiveError {
             }
             Self::NotYetReadable { format } => write!(
                 f,
-                "{} — this build reads ZIP, TAR and TAR.GZ",
+                "{} — this build reads ZIP, TAR, TAR.GZ, TAR.BZ2 and TAR.XZ",
                 format.display_name()
             ),
             Self::Zip(e) => write!(f, "{e}"),
@@ -118,6 +124,18 @@ impl fmt::Display for ArchiveError {
                 guitk::bytes::iec(MAX_ARCHIVE_BYTES)
             ),
             Self::Gzip(e) => write!(f, "its gzip stream will not inflate: {e}"),
+            Self::Bzip2(bzip2::Error::OutputTooLarge) => write!(
+                f,
+                "it decompresses to more than {}, the most this program reads",
+                guitk::bytes::iec(MAX_ARCHIVE_BYTES)
+            ),
+            Self::Bzip2(e) => write!(f, "its bzip2 stream will not decompress: {e}"),
+            Self::Xz(xz::Error::OutputTooLarge) => write!(
+                f,
+                "it decompresses to more than {}, the most this program reads",
+                guitk::bytes::iec(MAX_ARCHIVE_BYTES)
+            ),
+            Self::Xz(e) => write!(f, "its xz stream will not decompress: {e}"),
         }
     }
 }
@@ -368,8 +386,8 @@ pub fn open(path: &Path) -> Result<ArchiveModel, ArchiveError> {
     if format == ArchiveFormat::Zip {
         return parse_zip(path, bytes);
     }
-    // A TAR or a TAR.GZ, by what its bytes are rather than its name -- and a
-    // TAR compressed some way this build cannot undo, named as what it is.
+    // A TAR or a compressed TAR, by what its bytes are rather than its name --
+    // and a 7z under a TAR's name, named as what it is.
     // Read as a TAR, its first block is compressed data, and "it is not a TAR
     // archive" would be the wrong refusal: it is one, inside a wrapper.
     let mut magic = [0_u8; 6];
@@ -380,20 +398,58 @@ pub fn open(path: &Path) -> Result<ArchiveModel, ArchiveError> {
             source,
         })?;
     let wrapped = compressed_as(magic.get(..read).unwrap_or_default());
+    // `decompress_tar` would refuse a 7z in the same words; refusing it here
+    // spares reading up to the whole open budget first.
     if let Some(format) = wrapped.filter(|f| !f.readable()) {
         return Err(ArchiveError::NotYetReadable { format });
     }
-    if wrapped == Some(ArchiveFormat::TarGz) {
-        let compressed = read_all(&bytes).map_err(|source| ArchiveError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        let limit = usize::try_from(MAX_ARCHIVE_BYTES).unwrap_or(usize::MAX);
-        let tar = deflate::gunzip_limited(&compressed, limit).map_err(ArchiveError::Gzip)?;
-        drop(compressed);
-        parse_tar(path, ArchiveBytes::Memory(tar), ArchiveFormat::TarGz, size)
-    } else {
-        parse_tar(path, bytes, ArchiveFormat::Tar, size)
+    match wrapped {
+        Some(format) => {
+            let compressed = read_all(&bytes).map_err(|source| ArchiveError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+            let tar = decompress_tar(format, &compressed)?;
+            drop(compressed);
+            parse_tar(path, ArchiveBytes::Memory(tar), format, size)
+        }
+        None => parse_tar(path, bytes, ArchiveFormat::Tar, size),
+    }
+}
+
+/// The TAR inside a compressed TAR's `compressed` bytes, under the open
+/// budget.
+fn decompress_tar(format: ArchiveFormat, compressed: &[u8]) -> Result<Vec<u8>, ArchiveError> {
+    let limit = usize::try_from(MAX_ARCHIVE_BYTES).unwrap_or(usize::MAX);
+    decompress_tar_within(format, compressed, limit)
+}
+
+/// As [`decompress_tar`], under `limit` bytes: apart so that a test can reach
+/// the cap without decompressing half a gigabyte.
+fn decompress_tar_within(
+    format: ArchiveFormat,
+    compressed: &[u8],
+    limit: usize,
+) -> Result<Vec<u8>, ArchiveError> {
+    match format {
+        ArchiveFormat::TarGz => {
+            deflate::gunzip_limited(compressed, limit).map_err(ArchiveError::Gzip)
+        }
+        ArchiveFormat::TarBz2 => {
+            bzip2::decompress_limited(compressed, limit).map_err(ArchiveError::Bzip2)
+        }
+        ArchiveFormat::TarXz => xz::decompress_limited(compressed, limit).map_err(ArchiveError::Xz),
+        format => Err(ArchiveError::NotYetReadable { format }),
+    }
+}
+
+/// A compressed TAR's bytes for the TAR `tar`: gzip at its default level,
+/// bzip2 at `bzip2 -9`, as the command-line tools write them by default.
+fn compress_tar(format: ArchiveFormat, tar: &[u8]) -> Result<Vec<u8>, SaveError> {
+    match format {
+        ArchiveFormat::TarGz => Ok(deflate::gzip(tar)),
+        ArchiveFormat::TarBz2 => Ok(bzip2::compress(tar, bzip2::Level::BEST)),
+        format => Err(SaveError::Unwritable { format }),
     }
 }
 
@@ -509,7 +565,7 @@ pub fn parse_tar(
         });
         by_id.insert(id, member);
     }
-    if format == ArchiveFormat::TarGz {
+    if format.is_compressed_tar() {
         model.total_compressed = on_disk;
     }
     model.damage = match listing.end {
@@ -543,6 +599,8 @@ fn carries_bytes(kind: tararchive::Kind) -> bool {
 fn tar_method(kind: tararchive::Kind, format: ArchiveFormat) -> String {
     match kind {
         tararchive::Kind::File if format == ArchiveFormat::TarGz => String::from("Gzip"),
+        tararchive::Kind::File if format == ArchiveFormat::TarBz2 => String::from("Bzip2"),
+        tararchive::Kind::File if format == ArchiveFormat::TarXz => String::from("XZ"),
         tararchive::Kind::File => String::from("Stored"),
         tararchive::Kind::Directory => String::new(),
         tararchive::Kind::Symlink => String::from("Symbolic link"),
@@ -1307,7 +1365,7 @@ impl fmt::Display for SaveError {
             Self::Io { path, source } => write!(f, "cannot write {}: {source}", path.shown()),
             Self::Unwritable { format } => write!(
                 f,
-                "this build writes ZIP, TAR and TAR.GZ, and not {}",
+                "this build writes ZIP, TAR, TAR.GZ and TAR.BZ2, and not {}",
                 format.display_name()
             ),
         }
@@ -1619,13 +1677,15 @@ fn save_within(
     })
 }
 
-/// [`save`] for a TAR or a TAR.GZ: the model's members, in its order, less
-/// those an added file of the same name displaces, then the added files.
+/// [`save`] for a TAR, a TAR.GZ or a TAR.BZ2: the model's members, in its
+/// order, less those an added file of the same name displaces, then the added
+/// files.
 ///
 /// A TAR is written to the file as it is produced, a member at a time, its
-/// bytes copied across a chunk at a time. A TAR.GZ is one gzip stream over
-/// the whole archive, so the archive is built in memory and compressed --
-/// which is what its projection counts, and refuses past `limit`.
+/// bytes copied across a chunk at a time. A TAR.GZ or TAR.BZ2 is one
+/// compressed stream over the whole archive, so the archive is built in memory
+/// and compressed -- which is what its projection counts, and refuses past
+/// `limit`.
 fn save_tar(
     model: &ArchiveModel,
     source: &ArchiveSource,
@@ -1633,9 +1693,9 @@ fn save_tar(
     adding: Vec<PendingAdd>,
     limit: u64,
 ) -> Result<SaveReport, SaveError> {
-    let gzipped = model.format == ArchiveFormat::TarGz;
+    let compressed = model.format.is_compressed_tar();
     let added_bytes: u64 = adding.iter().map(|a| a.data.len() as u64).sum();
-    let projected = if gzipped {
+    let projected = if compressed {
         // The archive being built -- every member padded, two headers each
         // at most -- and its compressed copy beside it.
         let members: u64 = model
@@ -1726,13 +1786,13 @@ fn save_tar(
         tararchive::write_end(&mut *out).map_err(failed)?;
         Ok((written, replaced))
     };
-    let ((written, replaced), bytes) = if gzipped {
+    let ((written, replaced), bytes) = if compressed {
         let mut tar = Vec::new();
         let counts = write(&mut tar)?;
-        let gz = deflate::gzip(&tar);
+        let packed = compress_tar(model.format, &tar)?;
         drop(tar);
-        replace_file(&model.path, &gz)?;
-        (counts, gz.len() as u64)
+        replace_file(&model.path, &packed)?;
+        (counts, packed.len() as u64)
     } else {
         replace_file_with(&model.path, |file| write(file))?
     };
@@ -1746,7 +1806,7 @@ fn save_tar(
 
 /// Write an empty archive at `path`, in the format its name says -- a ZIP
 /// when it names none. An empty TAR is its two closing blocks; an empty
-/// TAR.GZ, those gzipped.
+/// TAR.GZ or TAR.BZ2, those compressed.
 ///
 /// It wrote an empty ZIP whatever the name, so a new `backup.tar` was a ZIP
 /// under a TAR's name, which nothing then opened as either.
@@ -1760,8 +1820,10 @@ pub fn create_empty(path: &Path) -> Result<(), SaveError> {
     let bytes = match ArchiveFormat::from_path(path) {
         None | Some(ArchiveFormat::Zip) => ziparchive::create(&[]),
         Some(ArchiveFormat::Tar) => empty_tar.to_vec(),
-        Some(ArchiveFormat::TarGz) => deflate::gzip(&empty_tar),
-        Some(format @ (ArchiveFormat::TarBz2 | ArchiveFormat::TarXz | ArchiveFormat::SevenZip)) => {
+        Some(format @ (ArchiveFormat::TarGz | ArchiveFormat::TarBz2)) => {
+            compress_tar(format, &empty_tar)?
+        }
+        Some(format @ (ArchiveFormat::TarXz | ArchiveFormat::SevenZip)) => {
             return Err(SaveError::Unwritable { format });
         }
     };
@@ -2485,57 +2547,54 @@ mod tests {
         fs::write(&seven, b"7z\xBC\xAF\x27\x1C").expect("write it");
         match open(&seven) {
             Err(e @ ArchiveError::NotYetReadable { .. }) => {
-                assert!(e.to_string().contains("reads ZIP, TAR and TAR.GZ"), "{e}");
+                assert!(
+                    e.to_string()
+                        .contains("reads ZIP, TAR, TAR.GZ, TAR.BZ2 and TAR.XZ"),
+                    "{e}"
+                );
             }
             other => panic!("expected a refusal naming the format, got {other:?}"),
         }
 
-        // A TAR in a wrapper this build cannot undo is named as what it is,
-        // whatever the name says -- not "not a TAR", which it is, inside.
-        for (name, head, format) in [
-            (
-                "src.tar.xz",
-                &b"\xFD7zXZ\x00 then LZMA2"[..],
-                ArchiveFormat::TarXz,
-            ),
-            (
-                "xz-named-tar.tar",
-                &b"\xFD7zXZ\x00 then LZMA2"[..],
-                ArchiveFormat::TarXz,
-            ),
-            (
-                "bz-named-tgz.tgz",
-                &b"BZh91AY&SY then blocks"[..],
-                ArchiveFormat::TarBz2,
-            ),
-            (
-                "7z-named-tar.tar",
-                &b"7z\xBC\xAF\x27\x1C then headers"[..],
-                ArchiveFormat::SevenZip,
-            ),
-        ] {
-            let path = dir.join(name);
-            fs::write(&path, head).expect("write it");
-            match open(&path) {
-                Err(ArchiveError::NotYetReadable { format: said }) => {
-                    assert_eq!(said, format, "{name} was named as the wrong format");
-                }
-                other => panic!("{name}: expected {format:?} to be refused by name, got {other:?}"),
+        // A 7z under a TAR's name is named as what it is -- not "not a TAR".
+        let path = dir.join("7z-named-tar.tar");
+        fs::write(&path, b"7z\xBC\xAF\x27\x1C then headers").expect("write it");
+        match open(&path) {
+            Err(ArchiveError::NotYetReadable {
+                format: ArchiveFormat::SevenZip,
+            }) => {}
+            other => {
+                panic!("a 7z under a TAR's name: expected 7z to be refused by name, got {other:?}")
             }
         }
-        // A refused name is refused before a byte is read: a `.tar.bz2` whose
-        // bytes are nothing in particular is still named TAR.BZ2, not "not a
-        // TAR".
-        let named = dir.join("named-only.tar.bz2");
+        // A refused name is refused before a byte is read: a `.7z` whose
+        // bytes are nothing in particular is still named 7z.
+        let named = dir.join("named-only.7z");
         fs::write(&named, b"not really").expect("write it");
         assert!(
             matches!(
                 open(&named),
                 Err(ArchiveError::NotYetReadable {
-                    format: ArchiveFormat::TarBz2
+                    format: ArchiveFormat::SevenZip
                 })
             ),
-            "a .tar.bz2 was read before being refused by its name"
+            "a .7z was read before being refused by its name"
+        );
+        // An xz stream under a TAR's name is decompressed, and a damaged one
+        // says it is the xz that failed.
+        let xz_named = dir.join("xz-named-tar.tar");
+        fs::write(&xz_named, b"\xFD7zXZ\x00 then LZMA2").expect("write it");
+        match open(&xz_named) {
+            Err(e @ ArchiveError::Xz(_)) => assert!(e.to_string().contains("xz"), "{e}"),
+            other => panic!("expected the xz to be refused, got {other:?}"),
+        }
+        // A readable name is no promise: a `.tar.bz2` that is not bzip2 is
+        // read as what its bytes are -- here, not a TAR either.
+        let named = dir.join("named-only.tar.bz2");
+        fs::write(&named, b"not really").expect("write it");
+        assert!(
+            matches!(open(&named), Err(ArchiveError::NotTar { .. })),
+            "a .tar.bz2 holding no bzip2 was not read by its bytes"
         );
         // "BZh" with no block-size digit after it is not bzip2's magic.
         let almost = dir.join("almost.tar");
@@ -3262,6 +3321,133 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// A TAR.BZ2 is the same archive, bzip2-compressed: decompressed, listed,
+    /// its compressed size the file's -- whatever it is called, since the
+    /// bytes decide. A damaged stream says it is the bzip2 that failed.
+    #[test]
+    fn a_bzipped_tar_is_decompressed_and_listed_whatever_it_is_called() {
+        let dir = scratch("tbz-list");
+        let bz = bzip2::compress(&tar_fixture(), bzip2::Level::BEST);
+        for name in [
+            "bundle.tar.bz2",
+            "bundle.tbz2",
+            "misnamed.tar",
+            "misnamed.tgz",
+        ] {
+            let path = dir.join(name);
+            fs::write(&path, &bz).unwrap();
+            let model = open(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(model.format, ArchiveFormat::TarBz2, "{name}");
+            assert_eq!(model.entries.len(), 5, "{name}");
+            assert_eq!(model.total_compressed, bz.len() as u64, "{name}");
+            assert_eq!(model.entries[1].method, "Bzip2", "{name}");
+        }
+        let mut broken = bz.clone();
+        let middle = broken.len() / 2;
+        broken.truncate(middle);
+        let cut = dir.join("cut.tar.bz2");
+        fs::write(&cut, &broken).unwrap();
+        match open(&cut) {
+            Err(e @ ArchiveError::Bzip2(bzip2::Error::UnexpectedEnd)) => {
+                assert!(e.to_string().contains("bzip2"), "{e}");
+            }
+            other => panic!("expected the bzip2 to be refused, got {other:?}"),
+        }
+        let mut flipped = bz.clone();
+        let at = flipped.len() / 2;
+        flipped[at] ^= 0x55;
+        let bad = dir.join("bad.tar.bz2");
+        fs::write(&bad, &flipped).unwrap();
+        assert!(
+            matches!(open(&bad), Err(ArchiveError::Bzip2(_))),
+            "a damaged bzip2 stream was read"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A TAR.XZ that GNU tar and xz 5.2.5 wrote (`tests/data/real.tar.xz`:
+    /// `tar --format=ustar -cf - docs top.bin | xz -6`, the folder holding
+    /// `docs/readme.txt`, "read me first", and `top.bin`, 1300 bytes of 7):
+    /// decompressed, listed and extracted, whatever it is called.
+    #[test]
+    fn a_tar_xz_that_xz_wrote_is_listed_and_extracted() {
+        let dir = scratch("txz");
+        let real = include_bytes!("../tests/data/real.tar.xz");
+        for name in ["real.tar.xz", "real.txz", "misnamed.tar"] {
+            let path = dir.join(name);
+            fs::write(&path, real).unwrap();
+            let model = open(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(model.format, ArchiveFormat::TarXz, "{name}");
+            let paths: Vec<&str> = model.entries.iter().map(|e| e.path.as_str()).collect();
+            assert_eq!(paths, ["docs", "docs/readme.txt", "top.bin"], "{name}");
+            assert_eq!(model.total_compressed, real.len() as u64, "{name}");
+            let file = model.entries.iter().find(|e| e.path == "top.bin").unwrap();
+            assert_eq!((file.size, file.method.as_str()), (1300, "XZ"), "{name}");
+            let dest = dir.join(format!("{name}-out"));
+            let all: Vec<&ArchiveEntry> = model.entries.iter().collect();
+            extract(model.source.as_ref().unwrap(), &all, &dest);
+            assert_eq!(
+                fs::read(dest.join("docs/readme.txt")).unwrap(),
+                b"read me first"
+            );
+            assert_eq!(fs::read(dest.join("top.bin")).unwrap(), vec![7u8; 1300]);
+        }
+        let mut cut = real.to_vec();
+        cut.truncate(real.len() - 20);
+        let path = dir.join("cut.tar.xz");
+        fs::write(&path, &cut).unwrap();
+        assert!(matches!(
+            open(&path),
+            Err(ArchiveError::Xz(xz::Error::UnexpectedEnd))
+        ));
+        // Until `xz` has a compressor, a new TAR.XZ is refused in words.
+        match create_empty(&dir.join("new.tar.xz")) {
+            Err(e @ SaveError::Unwritable { .. }) => {
+                assert!(e.to_string().contains("TAR.XZ"), "{e}");
+            }
+            other => panic!("expected TAR.XZ to be refused, got {other:?}"),
+        }
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A compressed TAR that would decompress past the budget is refused as
+    /// too big for this program, in words -- not as damage, which it need not
+    /// be: every decoder stops at the cap it is given, and a decompression
+    /// bomb and a large archive reach it alike. A cap of exactly the TAR's
+    /// size still reads it.
+    #[test]
+    fn a_compressed_tar_past_the_budget_is_too_big_not_damaged() {
+        let real = include_bytes!("../tests/data/real.tar.xz");
+        let tar = xz::decompress(real).unwrap();
+        let budget = guitk::bytes::iec(MAX_ARCHIVE_BYTES);
+        for format in [
+            ArchiveFormat::TarGz,
+            ArchiveFormat::TarBz2,
+            ArchiveFormat::TarXz,
+        ] {
+            let compressed = if format == ArchiveFormat::TarXz {
+                real.to_vec()
+            } else {
+                compress_tar(format, &tar).unwrap()
+            };
+            assert_eq!(
+                decompress_tar_within(format, &compressed, tar.len()).unwrap(),
+                tar,
+                "{format:?} at a cap of exactly its size"
+            );
+            let e = decompress_tar_within(format, &compressed, tar.len() - 1).unwrap_err();
+            let said = e.to_string();
+            assert!(
+                said.contains("the most this program reads") && said.contains(&budget),
+                "{format:?}: {said}"
+            );
+            assert!(
+                !said.contains("will not"),
+                "{format:?} is told as damage: {said}"
+            );
+        }
+    }
+
     #[test]
     fn a_tar_extracts_its_files_folders_and_hard_links_and_not_its_symbolic_links() {
         let dir = scratch("tar-extract");
@@ -3342,20 +3528,25 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
-    /// Adding to a TAR, deleting from it, and the same for a TAR.GZ: the file
-    /// is rewritten in its own format, and reads back as the list said.
+    /// Adding to a TAR, deleting from it, and the same for a TAR.GZ and a
+    /// TAR.BZ2: the file is rewritten in its own format, and reads back as the
+    /// list said.
     #[test]
-    fn a_tar_and_a_tar_gz_are_rewritten_in_their_own_format() {
+    fn a_tar_and_a_compressed_tar_are_rewritten_in_their_own_format() {
         let dir = scratch("tar-save");
-        for (name, gzipped) in [("bundle.tar", false), ("bundle.tar.gz", true)] {
+        for (name, format) in [
+            ("bundle.tar", ArchiveFormat::Tar),
+            ("bundle.tar.gz", ArchiveFormat::TarGz),
+            ("bundle.tar.bz2", ArchiveFormat::TarBz2),
+        ] {
             let path = dir.join(name);
             let bytes = tar_fixture();
             fs::write(
                 &path,
-                if gzipped {
-                    deflate::gzip(&bytes)
-                } else {
-                    bytes
+                match format {
+                    ArchiveFormat::TarGz => deflate::gzip(&bytes),
+                    ArchiveFormat::TarBz2 => bzip2::compress(&bytes, bzip2::Level::BEST),
+                    _ => bytes,
                 },
             )
             .unwrap();
@@ -3383,14 +3574,7 @@ mod tests {
             .unwrap_or_else(|e| panic!("{name}: {e}"));
             assert_eq!((report.added, report.replaced), (2, 1), "{name}");
             let after = open(&path).unwrap();
-            assert_eq!(
-                after.format,
-                if gzipped {
-                    ArchiveFormat::TarGz
-                } else {
-                    ArchiveFormat::Tar
-                }
-            );
+            assert_eq!(after.format, format, "{name}");
             let paths: Vec<&str> = after.entries.iter().map(|e| e.path.as_str()).collect();
             assert_eq!(
                 paths,
@@ -3425,6 +3609,7 @@ mod tests {
         for (name, format) in [
             ("new.tar", ArchiveFormat::Tar),
             ("new.tar.gz", ArchiveFormat::TarGz),
+            ("new.tar.bz2", ArchiveFormat::TarBz2),
             ("new.zip", ArchiveFormat::Zip),
         ] {
             let path = dir.join(name);

@@ -1,10 +1,13 @@
 # E -> C: tree rows need tones and a badge -- four of the five trees tell things apart by colour
 
 **From:** Lane E. **To:** Lane C (`gui/toolkit/src/treeview.rs`).
-**Filed:** 2026-09-29. **Status:** OPEN.
+**Filed:** 2026-09-29. **Status:** DONE by lane C (e30506756:
+`TreeItem::with_label_tone`, `with_detail_tone`, `with_badge`); being used.
+**Lane E, 2026-10-03:** `jsonviewer` is on the tree with both tones
+(827636d20). `devicemanager`, `dbviewer` and `diskanalyzer` follow; nothing
+more is asked of lane C.
 **Context:** `requests/c-e-the-toolkit-has-a-treeview-now-and-five-apps-draw-their-own.md`.
-`archivemanager` is on the toolkit's tree (511b6f5fe); the other four wait on
-this.
+`archivemanager` is on the toolkit's tree (511b6f5fe).
 
 **In short:** Four of the five trees say something with colour that the
 toolkit's tree cannot draw: a row's label and its detail each come out in one

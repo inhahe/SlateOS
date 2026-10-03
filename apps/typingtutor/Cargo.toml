@@ -11,6 +11,9 @@ guitk = { path = "../../gui/toolkit" }
 # built the lesson list, dropped it and exited, so no lesson ever reached a
 # screen and no keystroke was ever counted by the thing that counts keystrokes.
 oswindow = { path = "../../gui/window" }
+# Whether a key is plain, or typed: a chord is not the tutor's, and AltGr's
+# letters are typing like any other.
+textline = { path = "../textline" }
 
 [lints]
 workspace = true

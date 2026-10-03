@@ -537,6 +537,54 @@ MUTATIONS = [
         '',
         ['the_picture_and_the_rotation_say_when_a_schedule_hides_them'],
     ),
+    (
+        'a chord raises the list of keys',
+        '        if evt.key == Key::F1 && plain {',
+        '        if evt.key == Key::F1 {',
+        ['a_chord_is_neither_a_settings_key_nor_typing'],
+    ),
+    (
+        'Alt+Escape abandons the exclusion pattern',
+        '                Key::Escape if plain => {\n                    self.exclusion_draft.clear();',
+        '                Key::Escape => {\n                    self.exclusion_draft.clear();',
+        ['a_chord_is_neither_a_settings_key_nor_typing'],
+    ),
+    (
+        'Alt+Enter adds the exclusion pattern',
+        '                Key::Enter if plain => {\n                    self.add_exclusion();',
+        '                Key::Enter => {\n                    self.add_exclusion();',
+        ['a_chord_is_neither_a_settings_key_nor_typing'],
+    ),
+    (
+        'Ctrl+F leaves the keyboard with the exclusion field',
+        '            self.search_focused = true;\n            self.focused_field = None;\n',
+        '            self.search_focused = true;\n',
+        ['a_chord_is_neither_a_settings_key_nor_typing'],
+    ),
+    (
+        'Alt+Escape leaves the search',
+        '            if evt.key == Key::Escape && plain {\n                self.search_focused = false;',
+        '            if evt.key == Key::Escape {\n                self.search_focused = false;',
+        ['a_chord_is_neither_a_settings_key_nor_typing'],
+    ),
+    (
+        'Escape cannot leave the search',
+        '            if evt.key == Key::Escape && plain {\n                self.search_focused = false;',
+        '            if evt.key == Key::Escape && plain && !plain {\n                self.search_focused = false;',
+        ['a_chord_is_neither_a_settings_key_nor_typing'],
+    ),
+    (
+        "a chord works the page's keys",
+        '        if !plain {\n            return EventResult::Ignored;\n        }\n        // Category navigation',
+        '        // Category navigation',
+        ['a_chord_is_neither_a_settings_key_nor_typing'],
+    ),
+    (
+        'a copy reaches only its own field',
+        '            *clipboard = copied;\n',
+        '            let _ = copied;\n',
+        ['a_chord_is_neither_a_settings_key_nor_typing'],
+    ),
 ]
 
 if __name__ == "__main__":

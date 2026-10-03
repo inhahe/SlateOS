@@ -204,7 +204,7 @@ MUTATIONS = [
     ),
     (
         "AltGr is taken for Ctrl",
-        "        if event.modifiers.ctrl && !event.modifiers.alt {",
+        "        if textline::is_ctrl_chord(event.modifiers) {",
         "        if event.modifiers.ctrl {",
         ["altgr_z_does_not_undo"],
     ),
@@ -216,21 +216,27 @@ MUTATIONS = [
     ),
     (
         "a key held with Alt is the board's",
-        '        if (event.modifiers.alt && !event.modifiers.ctrl) || event.modifiers.super_key {',
+        '        if textline::is_alt_or_windows_chord(event.modifiers) {',
         '        if event.modifiers.super_key {',
         ['a_key_held_with_alt_or_the_windows_key_is_not_the_boards'],
     ),
     (
         "a key held with the Windows key is the board's",
-        '        if (event.modifiers.alt && !event.modifiers.ctrl) || event.modifiers.super_key {',
+        '        if textline::is_alt_or_windows_chord(event.modifiers) {',
         '        if event.modifiers.alt && !event.modifiers.ctrl {',
         ['a_key_held_with_alt_or_the_windows_key_is_not_the_boards'],
     ),
     (
         'AltGr is taken for Alt',
-        '        if (event.modifiers.alt && !event.modifiers.ctrl) || event.modifiers.super_key {',
+        '        if textline::is_alt_or_windows_chord(event.modifiers) {',
         '        if event.modifiers.alt || event.modifiers.super_key {',
         ['a_key_held_with_alt_or_the_windows_key_is_not_the_boards'],
+    ),
+    (
+        'Ctrl with the Windows key undoes',
+        '        if textline::is_ctrl_chord(event.modifiers) {',
+        '        if event.modifiers.ctrl && !event.modifiers.alt {',
+        ['altgr_z_does_not_undo'],
     ),
 ]
 

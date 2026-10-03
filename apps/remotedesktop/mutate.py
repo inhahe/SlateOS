@@ -258,6 +258,48 @@ MAIN = [
         "            profile.display.refresh_rate = rate;\n            profile.display.scaling = ScalingMode::AutoFit;",
         [Z_SCALE],
     ),
+    (
+        'a chorded Escape abandons the password',
+        '            Key::Escape if plain => {\n                self.password_prompt = None;',
+        '            Key::Escape => {\n                self.password_prompt = None;',
+        ['a_chord_is_neither_a_remote_desktop_key_nor_typing'],
+    ),
+    (
+        'Alt+Backspace deletes from the password',
+        '            Key::Backspace if !textline::is_alt_or_windows_chord(key.modifiers) => {\n                prompt.text.pop();',
+        '            Key::Backspace => {\n                prompt.text.pop();',
+        ['a_chord_is_neither_a_remote_desktop_key_nor_typing'],
+    ),
+    (
+        'a chorded Enter connects',
+        '            Key::Enter if plain => {\n                let prompt = self.password_prompt.take();',
+        '            Key::Enter => {\n                let prompt = self.password_prompt.take();',
+        ['a_chord_is_neither_a_remote_desktop_key_nor_typing'],
+    ),
+    (
+        "the password takes any key's text",
+        '                if textline::types_into_field(key) {\n                    prompt.text.extend(key.typed());',
+        '                if !key.text.is_empty() {\n                    prompt.text.push_str(&key.text);',
+        ['a_chord_is_neither_a_remote_desktop_key_nor_typing'],
+    ),
+    (
+        'a chord raises the list of keys',
+        '        if plain && (key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift)) {',
+        '        if key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift) {',
+        ['a_chord_is_neither_a_remote_desktop_key_nor_typing'],
+    ),
+    (
+        'AltGr is taken for Ctrl',
+        '        if textline::is_ctrl_chord(key.modifiers) {\n            return self.handle_ctrl_chord(key);',
+        '        if key.modifiers.ctrl {\n            return self.handle_ctrl_chord(key);',
+        ['a_chord_is_neither_a_remote_desktop_key_nor_typing'],
+    ),
+    (
+        "a chord works the window's keys",
+        '        if !plain {\n            return EventResult::Ignored;\n        }\n',
+        '',
+        ['a_chord_is_neither_a_remote_desktop_key_nor_typing'],
+    ),
 ]
 
 RFB = [

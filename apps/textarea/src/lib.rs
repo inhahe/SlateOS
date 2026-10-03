@@ -386,6 +386,13 @@ impl TextArea {
         clipboard: &str,
         page: usize,
     ) -> Edited {
+        // The key held with Alt or the Windows key, above: the editing keys
+        // answered it all the same -- Alt+Enter broke the line, Alt+Backspace
+        // deleted, Windows+Up moved the caret while the desktop moved the
+        // window.
+        if textline::is_alt_or_windows_chord(key.modifiers) {
+            return Edited::default();
+        }
         let shift = key.modifiers.shift;
         let chord = textline::is_ctrl_chord(key.modifiers);
         let mut edited = Edited {
@@ -496,6 +503,46 @@ mod tests {
         a.move_to(1, false);
         a.apply_key(&typed("Q"), 100, "", 5);
         assert_eq!(a.text(), "aQb\ncx\nyz");
+    }
+
+    /// **A key held with Alt or the Windows key is not the field's**: the
+    /// editing keys answered it -- Alt+Enter broke the line, Alt+Backspace
+    /// deleted, Windows+Up moved the caret -- though the doc above says such
+    /// a key is the application's. AltGr's are the field's, as Ctrl's are.
+    #[test]
+    fn a_key_held_with_alt_or_the_windows_key_edits_nothing() {
+        let held = |k: Key, modifiers: Modifiers| KeyEvent {
+            modifiers,
+            ..key(k)
+        };
+        for modifiers in [Modifiers::alt(), Modifiers::super_key()] {
+            for k in [
+                Key::Enter,
+                Key::Backspace,
+                Key::Delete,
+                Key::Left,
+                Key::Up,
+                Key::Home,
+                Key::PageDown,
+            ] {
+                let mut a = area("ab\ncd");
+                a.move_to(4, false);
+                let edit = a.apply_key(&held(k, modifiers), 100, "", 5);
+                assert!(!edit.handled, "{modifiers:?} {k:?} was the field's");
+                assert_eq!(a.text(), "ab\ncd", "{modifiers:?} {k:?} edited");
+                assert_eq!(a.caret(), 4, "{modifiers:?} {k:?} moved the caret");
+            }
+        }
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let mut a = area("ab");
+        assert!(
+            a.apply_key(&held(Key::Backspace, altgr), 100, "", 5)
+                .changed
+        );
+        assert_eq!(a.text(), "a", "AltGr+Backspace is a Backspace");
     }
 
     /// Up and Down keep the column across a short line, and stop at the

@@ -1850,13 +1850,19 @@ impl Press {
     /// them, so `Shift+Right` cannot also be `Right`. That makes the table's
     /// order irrelevant, which is what stops a row added at the top from
     /// silently shadowing one below it.
+    ///
+    /// Clear of the Windows key too, whose chords are the desktop's: none of
+    /// these asked, so Windows+Space played and paused the film and
+    /// Ctrl+Windows+O opened a file. `Ctrl` is a Ctrl chord, not Ctrl held:
+    /// AltGr arrives as Ctrl+Alt.
     pub fn matches(self, event: &KeyEvent) -> bool {
         let mods = event.modifiers;
+        let plain = textline::is_plain(mods);
         match self {
-            Self::Plain(key) => event.key == key && !mods.shift && !mods.ctrl && !mods.alt,
-            Self::Shift(key) => event.key == key && mods.shift && !mods.ctrl && !mods.alt,
-            Self::Ctrl(key) => event.key == key && mods.ctrl && !mods.alt,
-            Self::Digit => Self::digit_of(event.key).is_some() && !mods.ctrl && !mods.alt,
+            Self::Plain(key) => event.key == key && plain && !mods.shift,
+            Self::Shift(key) => event.key == key && plain && mods.shift,
+            Self::Ctrl(key) => event.key == key && textline::is_ctrl_chord(mods),
+            Self::Digit => Self::digit_of(event.key).is_some() && plain,
         }
     }
 
@@ -8571,6 +8577,65 @@ as many times as before",
         };
         assert!(Press::Shift(Key::Right).matches(&shifted));
         assert!(!Press::Plain(Key::Right).matches(&shifted));
+    }
+
+    /// **The Windows key's chords are the desktop's, and AltGr is not
+    /// Ctrl**: no binding asked about the Windows key, so Windows+Space
+    /// played and paused the film, Windows+5 sought to half way and
+    /// Ctrl+Windows+O opened a file. AltGr, which arrives as Ctrl+Alt, was
+    /// already refused by Ctrl's bindings; this keeps it so.
+    #[test]
+    fn a_key_held_with_the_windows_key_is_not_the_players() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let windows = Modifiers::super_key();
+        let event = |k: Key, modifiers: Modifiers| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        };
+        let cases = [
+            (Press::Plain(Key::Space), event(Key::Space, windows)),
+            (
+                Press::Shift(Key::Right),
+                event(
+                    Key::Right,
+                    Modifiers {
+                        shift: true,
+                        ..windows
+                    },
+                ),
+            ),
+            (
+                Press::Ctrl(Key::O),
+                event(
+                    Key::O,
+                    Modifiers {
+                        ctrl: true,
+                        ..windows
+                    },
+                ),
+            ),
+            (Press::Ctrl(Key::O), event(Key::O, altgr)),
+            (Press::Digit, event(Key::Num5, windows)),
+        ];
+        for (press, chord) in cases {
+            assert!(
+                !press.matches(&chord),
+                "{press:?} answered {:?}",
+                chord.modifiers
+            );
+        }
+        // And through the window: nothing runs.
+        let mut app = loaded();
+        let (state, position) = (app.state, app.position);
+        assert!(!app.handle_event(&Event::Key(event(Key::Space, windows))));
+        assert!(!app.handle_event(&Event::Key(event(Key::Num5, windows))));
+        assert_eq!((app.state, app.position), (state, position));
+        assert!(!app.picker.is_open(), "Ctrl+Windows+O opened a file");
     }
 
     #[test]

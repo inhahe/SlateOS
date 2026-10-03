@@ -5093,12 +5093,13 @@ mod tests {
         app.handle_event(&key(Key::Escape));
         assert!(app.rename.is_none(), "control: Escape ends it");
 
-        // Ctrl's chords still answer, Ctrl+Right among them.
-        let at = app.open.as_ref().map(|o| o.cursor);
+        // Ctrl's chords still answer: Ctrl+Left goes to the marker before the
+        // cursor -- to it, not a tenth of a second back as Left does.
+        assert_eq!(app.open.as_ref().map(|o| o.cursor), Some(4_000));
         app.handle_event(&chord(Key::Left, Modifiers::ctrl()));
-        assert_ne!(
+        assert_eq!(
             app.open.as_ref().map(|o| o.cursor),
-            at,
+            Some(2_000),
             "control: Ctrl+Left goes to the marker"
         );
     }

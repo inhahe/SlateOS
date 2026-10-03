@@ -1,0 +1,4 @@
+# Compressed streams are opaque bytes: never let a line-ending conversion touch them.
+*.xz binary
+*.lzma binary
+*.raw binary

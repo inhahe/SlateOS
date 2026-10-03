@@ -22977,6 +22977,179 @@ pub fn self_test_linux_scm_rights() -> KernelResult<()> {
     Ok(())
 }
 
+/// A zombie keeps its `/proc/<pid>` until it is reaped, as on Linux, and reads
+/// as one there -- after the scheduler has freed its first thread's task, so
+/// every answer comes from what the process kept (`pcb::exited_leader`), not
+/// from a dead task that has not been swept up yet:
+/// - `/proc` lists it;
+/// - `stat` is `<pid> (<name>) Z ...` with a start time;
+/// - `status` says `State:\tZ (zombie)`, `comm` is its name, `wchan` is `0`;
+/// - a process-wide file, `mounts`, is still served.
+///
+/// Reaped, the directory is gone and unlisted. Until 2026-10-02 a zombie's
+/// directory went with its first thread's task at the scheduler's next reap
+/// pass, so `ps` could never show one.
+///
+/// # Errors
+///
+/// `InternalError` naming the first answer that was wrong; the spawn's own.
+pub fn self_test_zombie_keeps_proc_dir() -> KernelResult<()> {
+    /// The program exits at once; this only bounds a broken run.
+    const MAX_YIELDS: usize = 1024;
+    /// At most 15 bytes, so `comm` is the whole of it.
+    const NAME: &str = "zombie-procdir";
+    const EXIT_CODE: u8 = 0x2A;
+
+    fn fail(what: &str) -> KernelResult<()> {
+        serial_println!("[spawn]   FAIL: zombie /proc: {}", what);
+        Err(KernelError::InternalError)
+    }
+
+    fn listed(pid: ProcessId) -> bool {
+        let name = alloc::format!("{pid}");
+        crate::fs::Vfs::readdir("/proc")
+            .is_ok_and(|entries| entries.iter().any(|e| e.name.as_bytes() == name.as_bytes()))
+    }
+
+    /// Every check made while the zombie is waiting to be reaped.
+    fn check_zombie(pid: ProcessId) -> KernelResult<()> {
+        if !listed(pid) {
+            return fail("/proc does not list it");
+        }
+        let dir = alloc::format!("/proc/{pid}");
+        let read = |file: &str| crate::fs::Vfs::read_file(alloc::format!("{dir}/{file}"));
+
+        let stat = match read("stat") {
+            Ok(s) => s,
+            Err(e) => {
+                serial_println!("[spawn]   reading its stat: {:?}", e);
+                return fail("its stat could not be read");
+            }
+        };
+        let expect_head = alloc::format!("{pid} ({NAME}) Z ");
+        if !stat.starts_with(expect_head.as_bytes()) {
+            serial_println!(
+                "[spawn]   its stat begins `{}`",
+                stat.get(..stat.len().min(48)).unwrap_or(&[]).escape_ascii()
+            );
+            return fail("stat is not `<pid> (<name>) Z ...`");
+        }
+        // Field 22, starttime: the 20th of the fields after the `)`.
+        let starttime = stat
+            .rsplit(|&b| b == b')')
+            .next()
+            .and_then(|rest| rest.split(|&b| b == b' ').filter(|f| !f.is_empty()).nth(19))
+            .and_then(|f| core::str::from_utf8(f).ok())
+            .and_then(|f| f.parse::<u64>().ok());
+        if starttime.is_none_or(|t| t == 0) {
+            serial_println!("[spawn]   its starttime field reads {:?}", starttime);
+            return fail("stat's start time is gone");
+        }
+
+        let status = read("status").unwrap_or_default();
+        if !status
+            .split(|&b| b == b'\n')
+            .any(|line| line == b"State:\tZ (zombie)")
+        {
+            return fail("status does not say `State:\\tZ (zombie)`");
+        }
+        let expect_comm = alloc::format!("{NAME}\n");
+        if read("comm").ok().as_deref() != Some(expect_comm.as_bytes()) {
+            return fail("comm is not its name");
+        }
+        if read("wchan").ok().as_deref() != Some(b"0".as_slice()) {
+            return fail("wchan is not 0");
+        }
+        let mounts = read("mounts").unwrap_or_default();
+        if !mounts
+            .split(|&b| b == b'\n')
+            .any(|line| line.split(|&b| b == b' ').nth(1) == Some(b"/".as_slice()))
+        {
+            return fail("mounts has no line for the root mount");
+        }
+        Ok(())
+    }
+
+    serial_println!("[spawn] Running zombie /proc directory test...");
+    let exe = elf::build_linux_exit_elf(EXIT_CODE);
+    let argv: &[&[u8]] = &[NAME.as_bytes()];
+    let options = SpawnOptions {
+        name: NAME,
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp: &[],
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: zombie /proc: spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let (pid, task_id) = (result.pid, result.task_id);
+    // A zombie, and its first thread's task freed by the scheduler: what is
+    // read below must come from the process's own record.
+    let mut freed = false;
+    for _ in 0..MAX_YIELDS {
+        crate::sched::yield_now();
+        if pcb::state(pid) == Some(pcb::ProcessState::Zombie) {
+            crate::sched::reap_dead_tasks();
+            if !crate::sched::task_exists(task_id) {
+                freed = true;
+                break;
+            }
+        }
+    }
+    let state = pcb::state(pid);
+    let exit_code = pcb::exit_code(pid);
+    let verdict = if task_id != pid {
+        serial_println!("[spawn]   its first thread is {}, its pid {}", task_id, pid);
+        fail("the first thread's id is not the process's (§1504)")
+    } else if state != Some(pcb::ProcessState::Zombie) || exit_code != Some(i32::from(EXIT_CODE)) {
+        serial_println!(
+            "[spawn]   after {} yields: {:?}, exit {:?}",
+            MAX_YIELDS,
+            state,
+            exit_code
+        );
+        fail("the program did not become a zombie with its exit code")
+    } else if !freed {
+        fail("the scheduler never freed its dead thread's task")
+    } else {
+        check_zombie(pid)
+    };
+    teardown_fixture(pid, task_id);
+    verdict?;
+
+    // Reaped: gone, and no longer listed.
+    match crate::fs::Vfs::stat(alloc::format!("/proc/{pid}")) {
+        Err(KernelError::NotFound) => {}
+        other => {
+            serial_println!(
+                "[spawn]   /proc/{} after the reap: {:?}",
+                pid,
+                other.map(|_| ())
+            );
+            return fail("the directory outlived the reap");
+        }
+    }
+    if listed(pid) {
+        return fail("/proc still lists it after the reap");
+    }
+    serial_println!(
+        "[spawn]   zombie /proc directory (listed, stat `Z` with its name and start time, \
+         status, comm, wchan 0 and mounts from the process's own record after its thread \
+         was freed; gone with the reap): OK"
+    );
+    Ok(())
+}
+
 /// `FS_IOC_GETFLAGS` and `FS_IOC_SETFLAGS` from ring 3, as `lsattr` and
 /// `chattr` call them ([`elf::build_linux_file_flags_test_elf`]), run twice:
 /// as root, which may set the immutable flag and then finds a write, a

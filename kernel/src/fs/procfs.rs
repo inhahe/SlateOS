@@ -2340,12 +2340,8 @@ fn gen_security() -> Vec<u8> {
 /// and `Tgid`/`Pid` values are kept consistent with [`gen_pid_stat`] and
 /// the `getpid`/`getuid`/`getpgid` syscalls so the files never disagree.
 fn gen_pid_status(task_id: u64) -> KernelResult<Vec<u8>> {
-    let tasks = crate::sched::task_list();
-    let task = tasks
-        .iter()
-        .find(|t| t.id == task_id)
-        .ok_or(KernelError::NotFound)?;
-    Ok(build_pid_status(task, task_id))
+    let task = proc_task(task_id).ok_or(KernelError::NotFound)?;
+    Ok(build_pid_status(&task, task_id))
 }
 
 /// `/proc/<pid>/task/<tid>/status` — per-thread status.
@@ -2702,11 +2698,7 @@ fn gen_pid_cmdline(task_id: u64) -> KernelResult<Vec<u8>> {
     }
 
     // 3. Fall back to task name from the scheduler.
-    let tasks = crate::sched::task_list();
-    let task = tasks
-        .iter()
-        .find(|t| t.id == task_id)
-        .ok_or(KernelError::NotFound)?;
+    let task = proc_task(task_id).ok_or(KernelError::NotFound)?;
 
     // No decode: the name is bytes on both sides of this function, and
     // `/proc/<pid>/cmdline` is what `ps` reads, so a `???` here is the most
@@ -2781,17 +2773,15 @@ fn gen_pid_auxv(task_id: u64) -> KernelResult<Vec<u8>> {
 /// sizes use the Linux ABI page size of 4096 bytes (see [`gen_pid_statm`]),
 /// not the native 16 KiB frame size.
 fn gen_pid_stat(task_id: u64) -> KernelResult<Vec<u8>> {
-    let tasks = crate::sched::task_list();
-    let task = tasks
-        .iter()
-        .find(|t| t.id == task_id)
-        .ok_or(KernelError::NotFound)?;
+    let task = proc_task(task_id).ok_or(KernelError::NotFound)?;
     // The process-wide fields are the owning process's. For a process's own
     // directory that is the same number (its id is its main thread's); for a
     // thread's `/proc/<tid>` it is the thread's process; a kernel task has
     // none, and reports zeros.
-    let proc_id = crate::proc::thread::owner_process(task_id).unwrap_or(0);
-    Ok(build_pid_stat(task, proc_id, reader_may_inspect(task_id)))
+    // A first thread that has exited belongs to no process any more, but
+    // its directory is still the process's (`proc_target`).
+    let proc_id = proc_target(task_id).unwrap_or(0);
+    Ok(build_pid_stat(&task, proc_id, reader_may_inspect(task_id)))
 }
 
 /// `/proc/<pid>/wchan` and `/proc/<pid>/task/<tid>/wchan` — what the task
@@ -2805,7 +2795,15 @@ fn gen_pid_stat(task_id: u64) -> KernelResult<Vec<u8>> {
 /// ([`reader_may_inspect`]) reads `0`, as on Linux, which prints `0` rather
 /// than refusing.
 fn gen_wchan(task_id: u64) -> KernelResult<Vec<u8>> {
-    let report = crate::wchan::report(task_id).ok_or(KernelError::NotFound)?;
+    let Some(report) = crate::wchan::report(task_id) else {
+        // A first thread that has exited waits on nothing: Linux prints 0
+        // for its zombie leader.
+        return if crate::proc::pcb::exited_leader(task_id).is_some() {
+            Ok(b"0".to_vec())
+        } else {
+            Err(KernelError::NotFound)
+        };
+    };
     if !reader_may_inspect(task_id) {
         return Ok(b"0".to_vec());
     }
@@ -3621,11 +3619,7 @@ fn gen_pid_schedstat(task_id: u64) -> KernelResult<Vec<u8>> {
     /// Nanoseconds per scheduler tick (USER_HZ == TICK_RATE_HZ == 100).
     const NS_PER_TICK: u64 = 1_000_000_000 / 100;
 
-    let tasks = crate::sched::task_list();
-    let task = tasks
-        .iter()
-        .find(|t| t.id == task_id)
-        .ok_or(KernelError::NotFound)?;
+    let task = proc_task(task_id).ok_or(KernelError::NotFound)?;
 
     let cpu_ns = crate::bench::cycles_to_ns(task.total_cycles);
     let run_delay_ns = task.total_wait_ticks.saturating_mul(NS_PER_TICK);
@@ -3924,13 +3918,14 @@ fn gen_pid_comm(task_id: u64) -> KernelResult<Vec<u8>> {
     // `comm` reflects the scheduler task name (set by exec / prctl
     // PR_SET_NAME), which is what Linux's `comm` tracks — not the full
     // process name.  Fall back to the process name only if there is no
-    // scheduler task (e.g. a process record without a live task).
-    let tasks = crate::sched::task_list();
+    // scheduler task (a process record that never had a thread). A first
+    // thread that has exited still answers, from its process's snapshot of
+    // it (`proc_task`), as Linux's zombie group leader keeps its `comm`.
     // Bytes, not `String`: the scheduler stores comm as raw bytes and `execve`
     // writes it from `argv[0]` without validating UTF-8, so decoding here
     // rendered any such name as the literal `???` — and `???` is a *constant*,
     // so two processes with different unreadable names reported identically.
-    let name: alloc::vec::Vec<u8> = if let Some(task) = tasks.iter().find(|t| t.id == task_id) {
+    let name: alloc::vec::Vec<u8> = if let Some(task) = proc_task(task_id) {
         task.name.get(..task.name_len).unwrap_or(&[]).to_vec()
     } else if let Some(proc_name) = crate::proc::pcb::name(task_id) {
         proc_name.into_bytes()
@@ -4038,11 +4033,8 @@ fn gen_pid_limits(task_id: u64) -> KernelResult<Vec<u8>> {
 
     // Validate the task id resolves to *something* (process or task) so
     // a bogus pid yields NotFound rather than a default table.
-    if pcb::state(task_id).is_none() {
-        let tasks = crate::sched::task_list();
-        if !tasks.iter().any(|t| t.id == task_id) {
-            return Err(KernelError::NotFound);
-        }
+    if !pid_dir_exists(task_id) {
+        return Err(KernelError::NotFound);
     }
 
     let mut s = String::with_capacity(1024);
@@ -13996,13 +13988,38 @@ fn gen_properties() -> Vec<u8> {
     out.into_bytes()
 }
 
-/// Check if a task ID currently exists in the scheduler.
+/// Whether `/proc/<id>` exists: a live task has that id -- a process's first
+/// thread, any other thread (resolvable, though not listed), a kernel task
+/// -- or a process does, whatever has become of its threads.
 ///
-/// Uses the scheduler's cheap map lookup rather than building the full task
-/// list (which would allocate and scan every task's stack) just to test for
-/// membership.
-fn task_exists(task_id: u64) -> bool {
-    crate::sched::task_exists(task_id)
+/// The second half is Linux's rule. Its `/proc/<tgid>` follows the group
+/// leader's `task_struct`, which outlives the leader thread as a zombie
+/// until the whole process is reaped: a process whose first thread called
+/// `pthread_exit`, and a zombie its parent has not waited for yet, both keep
+/// their directory. Here the scheduler frees a dead thread's task at its
+/// next reap pass, so until 2026-10-02 both lost theirs at that moment --
+/// `ps` could not show a zombie at all, and `/proc/self` named a missing
+/// directory for a thread whose first thread had gone (rq42's `/etc/mtab`).
+///
+/// A dead task that is no process -- another thread, a kernel task -- has
+/// no directory, though the scheduler has not freed it yet: Linux releases
+/// such a thread as it exits.
+fn pid_dir_exists(id: u64) -> bool {
+    use crate::sched::task::TaskState;
+    crate::sched::task_state(id).is_some_and(|s| s != TaskState::Dead)
+        || crate::proc::pcb::state(id).is_some()
+}
+
+/// The thread `/proc/<id>`'s per-thread fields describe: the live task with
+/// that id, or -- once a process's first thread has exited -- the snapshot
+/// the process kept of it ([`crate::proc::pcb::exited_leader`]), whose
+/// state `Dead` reads as `Z`, as Linux's zombie group leader does. `None`
+/// for an id that is neither, and for a process that never had a thread.
+///
+/// One task's snapshot, not [`crate::sched::task_list`]'s: that scans every
+/// task's stack under the scheduler lock to find one.
+fn proc_task(id: u64) -> Option<crate::sched::TaskInfo> {
+    crate::sched::task_info(id).or_else(|| crate::proc::pcb::exited_leader(id))
 }
 
 /// The directory `/proc/self` names: the calling process's id -- its main
@@ -14897,13 +14914,25 @@ impl FileSystem for ProcFs {
                 // which has no process. A process's other threads are under its
                 // `task/` directory and not listed here, as on Linux; their own
                 // `/proc/<tid>` still resolves.
+                // Live tasks only: a dead one is listed below if it was a
+                // process's first thread, and is otherwise gone
+                // ([`pid_dir_exists`]).
+                let mut listed = alloc::collections::BTreeSet::new();
                 for task in &crate::sched::task_list() {
-                    if !is_listed_at_root(task.id) {
-                        continue;
+                    if task.state != crate::sched::task::TaskState::Dead
+                        && is_listed_at_root(task.id)
+                    {
+                        listed.insert(task.id);
                     }
+                }
+                // And every process whose first thread is gone -- one that
+                // went on without it, or a zombie not yet waited for: Linux
+                // lists a thread group until it is reaped ([`pid_dir_exists`]).
+                listed.extend(crate::proc::pcb::pids());
+                for id in listed {
                     entries.push(DirEntry {
                         ino: 0,
-                        name: PathBuf::from(format!("{}", task.id)),
+                        name: PathBuf::from(format!("{id}")),
                         entry_type: EntryType::Directory,
                         size: 0,
                     });
@@ -14913,7 +14942,7 @@ impl FileSystem for ProcFs {
             }
             ProcPath::PidDir(pid) => {
                 // Per-PID directory: list virtual files inside it.
-                if !task_exists(pid) {
+                if !pid_dir_exists(pid) {
                     return Err(KernelError::NotFound);
                 }
                 let mut entries: Vec<DirEntry> = PID_FILES
@@ -14964,7 +14993,7 @@ impl FileSystem for ProcFs {
                 // `/proc/<pid>/fdinfo` — one regular file per open fd, each
                 // holding that fd's pos/flags.  Same fd source and
                 // honestly-empty-for-native behaviour as `fd/`.
-                if !task_exists(pid) {
+                if !pid_dir_exists(pid) {
                     return Err(KernelError::NotFound);
                 }
                 if !reader_may_inspect(pid) {
@@ -14992,7 +15021,7 @@ impl FileSystem for ProcFs {
                 // Linux-ABI processes have a kernel-visible fd table; for a
                 // native process (fds live in userspace) the list is
                 // legitimately empty rather than fabricated.
-                if !task_exists(pid) {
+                if !pid_dir_exists(pid) {
                     return Err(KernelError::NotFound);
                 }
                 if !reader_may_inspect(pid) {
@@ -15070,7 +15099,7 @@ impl FileSystem for ProcFs {
             ProcPath::SysFile(rel) => gen_sys(rel),
             ProcPath::RootFile(name) => generate(name),
             ProcPath::PidFile(pid, file_name) => {
-                if !task_exists(pid) {
+                if !pid_dir_exists(pid) {
                     return Err(KernelError::NotFound);
                 }
                 generate_pid(pid, file_name)
@@ -15088,7 +15117,7 @@ impl FileSystem for ProcFs {
                 Err(KernelError::InvalidArgument)
             }
             ProcPath::PidFdInfoFile(pid, fd) => {
-                if !task_exists(pid) {
+                if !pid_dir_exists(pid) {
                     return Err(KernelError::NotFound);
                 }
                 if !reader_may_inspect(pid) {
@@ -15110,7 +15139,7 @@ impl FileSystem for ProcFs {
 
         match classify_path(rel) {
             ProcPath::PidFile(pid, "oom_score_adj") => {
-                if !task_exists(pid) {
+                if !pid_dir_exists(pid) {
                     return Err(KernelError::NotFound);
                 }
                 set_pid_oom_score_adj(pid, data)
@@ -15140,7 +15169,7 @@ impl FileSystem for ProcFs {
                 })
             }
             ProcPath::PidDir(pid) => {
-                if !task_exists(pid) {
+                if !pid_dir_exists(pid) {
                     return Err(KernelError::NotFound);
                 }
                 Ok(DirEntry {
@@ -15151,7 +15180,7 @@ impl FileSystem for ProcFs {
                 })
             }
             ProcPath::PidFile(pid, file_name) => {
-                if !task_exists(pid) {
+                if !pid_dir_exists(pid) {
                     return Err(KernelError::NotFound);
                 }
                 let size = generate_pid(pid, file_name).map_or(0, |d| d.len() as u64);
@@ -15163,7 +15192,7 @@ impl FileSystem for ProcFs {
                 })
             }
             ProcPath::PidLink(pid, link_name) => {
-                if !task_exists(pid) {
+                if !pid_dir_exists(pid) {
                     return Err(KernelError::NotFound);
                 }
                 Ok(DirEntry {
@@ -15180,7 +15209,7 @@ impl FileSystem for ProcFs {
                 size: 0,
             }),
             ProcPath::PidTaskDir(pid) => {
-                if !task_exists(pid) {
+                if !pid_dir_exists(pid) {
                     return Err(KernelError::NotFound);
                 }
                 Ok(DirEntry {
@@ -15214,7 +15243,7 @@ impl FileSystem for ProcFs {
                 })
             }
             ProcPath::PidFdDir(pid) => {
-                if !task_exists(pid) {
+                if !pid_dir_exists(pid) {
                     return Err(KernelError::NotFound);
                 }
                 Ok(DirEntry {
@@ -15236,7 +15265,7 @@ impl FileSystem for ProcFs {
                 })
             }
             ProcPath::PidFdInfoDir(pid) => {
-                if !task_exists(pid) {
+                if !pid_dir_exists(pid) {
                     return Err(KernelError::NotFound);
                 }
                 Ok(DirEntry {
@@ -15294,14 +15323,14 @@ impl FileSystem for ProcFs {
         // Where a process runs from, what it runs and what it has open: only
         // a reader who may inspect it, as Linux's `proc_fd_access_allowed`.
         if let ProcPath::PidLink(pid, _) | ProcPath::PidFdLink(pid, _) = link
-            && task_exists(pid)
+            && pid_dir_exists(pid)
             && !reader_may_inspect(pid)
         {
             return Err(KernelError::PermissionDenied);
         }
         match link {
             ProcPath::PidLink(pid, "root") => {
-                if !task_exists(pid) {
+                if !pid_dir_exists(pid) {
                     return Err(KernelError::NotFound);
                 }
                 Ok(PathBuf::from("/"))
@@ -15426,8 +15455,10 @@ pub fn make_etc_mtab() -> KernelResult<()> {
 
 /// `/etc/mtab` is the mount table: [`make_etc_mtab`] makes it a link to
 /// `/proc/self/mounts`, and a process reading it gets a line for the root
-/// mount. Read as a process, which `/proc/self` needs: a kernel task has no
-/// process directory.
+/// mount. Read as a process, which `/proc/self/mounts` needs: a kernel task
+/// has no mount table of its own. The process has no thread, so its
+/// directory is there because the process is ([`pid_dir_exists`]) -- which
+/// it was not until 2026-10-02, and this read was `NotFound` (rq42).
 ///
 /// # Errors
 ///
@@ -15847,7 +15878,7 @@ pub fn self_test() -> KernelResult<()> {
     // short-circuit with ReadOnlyFilesystem; the fs itself decides.
     // - A root file rejects the write at the fs layer (NotSupported).
     // - A well-formed oom_score_adj write to a non-existent PID reaches the
-    //   fs and returns NotFound (task_exists() false) — *not*
+    //   fs and returns NotFound (pid_dir_exists() false) — *not*
     //   ReadOnlyFilesystem, which would mean the write never routed here.
     {
         match crate::fs::Vfs::write_file("/proc/version", b"x") {

@@ -9035,16 +9035,15 @@ fn test_fault_swaps_in() -> KernelResult<()> {
         return fail(pid, "add_vma");
     }
 
-    // Populate the page, and fill it.
+    // Populate the page, and fill it -- through `copy_to_user_as`, which
+    // checks the mapping is writable, as every write into a process's page
+    // must (`check-user-access-sites`).
     if resolve_fault(pid, base, 1 << 2, true) != FaultOutcome::Resolved {
         return fail(pid, "the first touch did not demand-page");
     }
-    let Some(phys) = page_table::translate(pml4, VirtAddr::new(base)) else {
-        return fail(pid, "the populated page is not mapped");
-    };
-    for i in 0..frame {
-        // SAFETY: the frame just mapped, through the HHDM, in bounds.
-        unsafe { ((phys + hhdm + i) as *mut u8).write(pattern(i)) };
+    let fill: alloc::vec::Vec<u8> = (0..frame).map(pattern).collect();
+    if crate::mm::user::copy_to_user_as(pml4, base, &fill).is_err() {
+        return fail(pid, "the populated page could not be written");
     }
 
     // Out to swap; then the kernel faults it in for a read in its second part.

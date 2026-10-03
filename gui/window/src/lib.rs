@@ -187,6 +187,17 @@ pub enum EventResponse {
     KeepOpen,
 }
 
+/// A request to put the displays to sleep, whose answer is the wake: see
+/// [`EventLoop::sleep_displays`] and [`EventLoop::displays_woke`].
+///
+/// Opaque, because the only thing to do with it is ask whether the wake has
+/// come; the number inside is the request's on the wire.
+#[derive(Debug, PartialEq, Eq)]
+#[must_use = "the wake is reported through it"]
+pub struct DisplaySleep {
+    seq: u32,
+}
+
 /// What [`EventLoop::run_batched`] is handing over.
 ///
 /// Separate kinds rather than one because drawing and reacting happen at
@@ -1158,6 +1169,64 @@ impl<T: Transport> EventLoop<T> {
         self.conn.confirm(RequestBody::SetClipboard {
             text: text.to_owned(),
         })
+    }
+
+    /// Put every display to sleep, and get back the request whose answer is
+    /// the wake.
+    ///
+    /// The displays are powered down where the hardware can be, and black
+    /// where it cannot. They wake at the next key press, click, scroll or
+    /// pointer movement, and that input is not delivered -- the key that
+    /// wakes the screen does not also type. [`Self::displays_woke`] answers
+    /// `true` once they have: the moment, for instance, to show the lock
+    /// screen if waking needs a password. A shell's request.
+    ///
+    /// Does not wait: the answer comes when somebody touches the keyboard,
+    /// which may be hours away.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError::Transport`] if the request cannot be sent. A refusal
+    /// comes back through [`Self::displays_woke`].
+    pub fn sleep_displays(&mut self) -> Result<DisplaySleep, Error<T>> {
+        let seq = self.conn.send(RequestBody::SleepDisplays)?;
+        Ok(DisplaySleep { seq })
+    }
+
+    /// Whether the displays have woken from `sleep`: `true` once, at the
+    /// first look after the wake, and `false` before it and after it.
+    ///
+    /// Reads nothing itself: [`Self::poll`] reads the connection, and this
+    /// looks at what it has read, so call it as the loop goes round.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError::Refused`] if the compositor would not put the displays
+    /// to sleep (only a shell may), and [`ClientError::Mismatched`] for an
+    /// answer that is not one.
+    pub fn displays_woke(&mut self, sleep: &DisplaySleep) -> Result<bool, Error<T>> {
+        match self.conn.take_reply(sleep.seq) {
+            None => Ok(false),
+            Some(ResponseBody::Ok) => Ok(true),
+            Some(ResponseBody::Error { message }) => Err(ClientError::Refused(message)),
+            Some(
+                ResponseBody::WindowCreated { .. }
+                | ResponseBody::Display(_)
+                | ResponseBody::WorkArea { .. }
+                | ResponseBody::Modifiers(_)
+                | ResponseBody::Clipboard(_),
+            ) => Err(ClientError::Mismatched),
+        }
+    }
+
+    /// Wake the displays if they are asleep -- an alarm, a call -- which
+    /// answers every pending [`Self::sleep_displays`]. A shell's request.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn wake_displays(&mut self) -> Result<(), Error<T>> {
+        self.conn.confirm(RequestBody::WakeDisplays)
     }
 
     /// What is on the clipboard: what a paste inserts. `None` when nothing has
@@ -2303,6 +2372,11 @@ pub mod testing {
         /// its paste. Unlike the compositor it does not check focus -- that
         /// rule is the compositor's, tested there.
         pub clipboard: Option<String>,
+        /// The sleep requests waiting for the displays to wake, by sequence
+        /// number: answered by a `WakeDisplays`, or by
+        /// [`Self::wake_displays`], which stands in for the user touching a
+        /// key.
+        pub sleeping: Vec<u32>,
         /// Input to deliver, one batch per turn.
         pub script: VecDeque<Vec<InputEvent>>,
         /// The config-directory turn, held for as long as this desktop exists.
@@ -2348,6 +2422,7 @@ pub mod testing {
                 refuse: None,
                 held: Modifiers::NONE,
                 clipboard: None,
+                sleeping: Vec::new(),
                 script: VecDeque::new(),
                 #[cfg(test)]
                 _config_turn: settingsfile::testing::config_turn(),
@@ -2452,6 +2527,20 @@ pub mod testing {
                         RequestBody::GetClipboard => {
                             ResponseBody::Clipboard(self.clipboard.clone())
                         }
+                        // Answered at the wake, as the compositor answers it.
+                        RequestBody::SleepDisplays => {
+                            self.sleeping.push(req.seq);
+                            self.seen.push(req);
+                            continue;
+                        }
+                        RequestBody::WakeDisplays => {
+                            replies.extend(
+                                self.sleeping
+                                    .drain(..)
+                                    .map(|seq| Response::new(seq, ResponseBody::Ok)),
+                            );
+                            ResponseBody::Ok
+                        }
                         _ => ResponseBody::Ok,
                     }
                 };
@@ -2463,6 +2552,23 @@ pub mod testing {
             }
             self.pipe.write(&encode_responses(&replies)).unwrap();
             true
+        }
+
+        /// Wake the displays, as a key press would: every waiting sleep
+        /// request is answered.
+        ///
+        /// # Panics
+        ///
+        /// As [`Self::send_input`].
+        pub fn wake_displays(&mut self) {
+            let replies: Vec<Response> = self
+                .sleeping
+                .drain(..)
+                .map(|seq| Response::new(seq, ResponseBody::Ok))
+                .collect();
+            if !replies.is_empty() {
+                self.pipe.write(&encode_responses(&replies)).unwrap();
+            }
         }
 
         /// Deliver input to the client immediately.
@@ -2612,6 +2718,8 @@ pub mod testing {
                 RequestBody::RequestAttention { .. } => "RequestAttention",
                 RequestBody::SetClipboard { .. } => "SetClipboard",
                 RequestBody::GetClipboard => "GetClipboard",
+                RequestBody::SleepDisplays => "SleepDisplays",
+                RequestBody::WakeDisplays => "WakeDisplays",
                 RequestBody::SubscribeWindowList { .. } => "SubscribeWindowList",
                 RequestBody::SetTrayIcon { .. } => "SetTrayIcon",
                 RequestBody::RemoveTrayIcon { .. } => "RemoveTrayIcon",
@@ -3485,6 +3593,29 @@ mod tests {
             Modifiers::ctrl(),
             "a resize carries no modifiers, and taking its empty set would read as Ctrl let go"
         );
+    }
+
+    /// The displays' wake comes back as the answer to the sleep request, and
+    /// is reported once.
+    #[test]
+    fn a_sleep_is_answered_by_the_wake_and_reported_once() {
+        let (mut events, server) = wired();
+        let sleep = events.sleep_displays().unwrap();
+        server.borrow_mut().serve();
+        events.poll().unwrap();
+        assert!(
+            !events.displays_woke(&sleep).unwrap(),
+            "reported awake before anyone touched a key"
+        );
+
+        server.borrow_mut().wake_displays();
+        events.poll().unwrap();
+        assert!(events.displays_woke(&sleep).unwrap());
+        assert!(
+            !events.displays_woke(&sleep).unwrap(),
+            "the wake was reported twice"
+        );
+        assert_eq!(server.borrow_mut().asked(), vec!["SleepDisplays"]);
     }
 
     /// A copy goes to the compositor and a paste comes back from it, so what

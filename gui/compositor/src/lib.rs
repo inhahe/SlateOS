@@ -221,6 +221,15 @@ const MAX_FB_WIDTH: u32 = 7680;
 /// Maximum framebuffer height supported.
 const MAX_FB_HEIGHT: u32 = 4320;
 
+/// How long after the displays go to sleep pointer motion does not wake them
+/// (`Compositor::sleep_displays`).
+///
+/// A second: long enough for the hand that clicked "Sleep the display" in a
+/// menu to come off the mouse, short enough that a person who changes their
+/// mind is not left waiting. Keys and clicks wake at once -- they are
+/// deliberate in a way a twitch of the mouse is not.
+pub const SLEEP_MOTION_GRACE: Duration = Duration::from_secs(1);
+
 // ---------------------------------------------------------------------------
 // Window ID generation
 // ---------------------------------------------------------------------------
@@ -5643,6 +5652,25 @@ pub struct Compositor {
     /// compositor holds the selection, so a copy outlives the program it came
     /// from and a paste needs no connection but the one every window has.
     clipboard: Option<String>,
+    /// Whether the displays are asleep: see [`Self::sleep_displays`].
+    displays_asleep: bool,
+    /// When they went to sleep, while they are asleep: what the motion grace
+    /// ([`Self::sleep_motion_grace`]) is measured from.
+    slept_at: Option<Instant>,
+    /// How long after the displays go to sleep pointer motion does not wake
+    /// them. The hand that clicked "sleep" in a menu is still on the mouse,
+    /// and without this its next twitch would undo the click.
+    sleep_motion_grace: Duration,
+    /// The pending `SleepDisplays` requests, as (client, request sequence
+    /// number), answered at the wake.
+    sleep_waiters: Vec<(u64, u32)>,
+    /// Requests a wake has answered, whose replies the wire layer has not
+    /// yet sent to their clients.
+    wake_replies: Vec<(u64, u32)>,
+    /// Keys whose press woke the displays and was swallowed. Their repeats
+    /// and their release are swallowed with them: a program that never saw
+    /// the press must not be told about a release, or about a key typing.
+    swallowed_keys: Vec<u32>,
     /// Events addressed to a *connection* rather than to a window.
     ///
     /// The window-addressed queue cannot carry these: `route_input` delivers a
@@ -5936,6 +5964,12 @@ impl Compositor {
             window_list_scratch: Vec::new(),
             tray_icons: Vec::new(),
             clipboard: None,
+            displays_asleep: false,
+            slept_at: None,
+            sleep_motion_grace: SLEEP_MOTION_GRACE,
+            sleep_waiters: Vec::new(),
+            wake_replies: Vec::new(),
+            swallowed_keys: Vec::new(),
             tray_list_scratch: Vec::new(),
             pending_client_events: Vec::new(),
             modifiers: ModifierState::new(),
@@ -6119,6 +6153,124 @@ impl Compositor {
     #[must_use]
     pub const fn focused_window(&self) -> Option<WindowId> {
         self.focused_window
+    }
+
+    /// Put the displays to sleep for `client`'s request `seq`, which is
+    /// answered when they wake.
+    ///
+    /// The server turns the displays off
+    /// ([`Present::sleep`](crate::present::Present::sleep)) and stops
+    /// presenting while [`Self::displays_asleep`] says so. They wake at the
+    /// next key press, click, scroll or pointer movement ([`Self::handle_input`]
+    /// swallows that input), or at [`Self::wake_displays`]. Asking again while
+    /// asleep only adds a request to answer at the same wake.
+    pub fn sleep_displays(&mut self, client: u64, seq: u32) {
+        if !self.displays_asleep {
+            self.displays_asleep = true;
+            self.slept_at = Some(Instant::now());
+        }
+        self.sleep_waiters.push((client, seq));
+    }
+
+    /// Wake the displays, if they are asleep: every pending sleep request is
+    /// answered, and the whole screen is drawn again, since what it shows now
+    /// must be the desktop and not whatever it held before it went dark.
+    pub fn wake_displays(&mut self) {
+        if !self.displays_asleep {
+            return;
+        }
+        self.displays_asleep = false;
+        self.slept_at = None;
+        self.wake_replies.append(&mut self.sleep_waiters);
+        self.reset_for_recovery();
+    }
+
+    /// Whether the displays are asleep.
+    #[must_use]
+    pub const fn displays_asleep(&self) -> bool {
+        self.displays_asleep
+    }
+
+    /// The sequence numbers of `client`'s sleep requests that a wake has
+    /// answered and nobody has yet sent, taken.
+    pub fn take_wake_replies(&mut self, client: u64) -> Vec<u32> {
+        let mut taken = Vec::new();
+        self.wake_replies.retain(|&(owner, seq)| {
+            if owner == client {
+                taken.push(seq);
+                false
+            } else {
+                true
+            }
+        });
+        taken
+    }
+
+    /// Forget a departed client's sleep requests, pending or answered: there
+    /// is nobody left to tell, and a record kept for ever would grow with
+    /// every shell that slept the displays and died.
+    pub fn forget_sleep_requests(&mut self, client: u64) {
+        self.sleep_waiters.retain(|&(owner, _)| owner != client);
+        self.wake_replies.retain(|&(owner, _)| owner != client);
+    }
+
+    /// How long after the displays go to sleep pointer motion does not wake
+    /// them ([`SLEEP_MOTION_GRACE`] unless set).
+    pub const fn set_sleep_motion_grace(&mut self, grace: Duration) {
+        self.sleep_motion_grace = grace;
+    }
+
+    /// Whether `event` wakes sleeping displays, and must then be swallowed;
+    /// or is a swallowed key's repeat or release, and must be swallowed too.
+    /// Answers `true` when the event has been dealt with here.
+    ///
+    /// Only the modifier state is kept: a Shift that woke the screen is still
+    /// held, and the letter typed next is a capital.
+    fn absorb_while_asleep(&mut self, event: &InputEvent) -> bool {
+        match *event {
+            // A swallowed key's repeat, asleep or not: the program never saw
+            // it go down, so it must not see it type.
+            InputEvent::KeyDown { scancode, .. } if self.swallowed_keys.contains(&scancode) => true,
+            InputEvent::KeyUp { scancode } if self.swallowed_keys.contains(&scancode) => {
+                self.swallowed_keys.retain(|&s| s != scancode);
+                self.modifiers.update(scancode, false);
+                true
+            }
+            _ if !self.displays_asleep => false,
+            InputEvent::KeyDown { scancode, .. } => {
+                self.modifiers.update(scancode, true);
+                self.swallowed_keys.push(scancode);
+                self.wake_displays();
+                true
+            }
+            // Pointer motion keeps the pointer where the hand is, wakes once
+            // the grace has passed, and is not delivered.
+            InputEvent::MouseMove { x, y } => {
+                self.cursor_x = x;
+                self.cursor_y = y;
+                let settled = self
+                    .slept_at
+                    .is_none_or(|at| at.elapsed() >= self.sleep_motion_grace);
+                if settled {
+                    self.wake_displays();
+                }
+                true
+            }
+            // The press wakes and is not delivered, so it starts no grab, and
+            // its release goes nowhere -- the rule for any release whose press
+            // no window saw.
+            InputEvent::MouseButton { pressed: true, .. } | InputEvent::MouseScroll { .. } => {
+                self.wake_displays();
+                true
+            }
+            // A release while asleep is of a press made before it -- the key or
+            // the click that asked for sleep -- and is delivered as usual, and
+            // does not wake.
+            InputEvent::KeyUp { .. }
+            | InputEvent::MouseButton { pressed: false, .. }
+            | InputEvent::PointerLeft
+            | InputEvent::TextInput { .. } => false,
+        }
     }
 
     /// Take one icon out of the tray.
@@ -7966,6 +8118,12 @@ impl Compositor {
         // stretch is a fresh one to be told about.
         for watch in self.idle_watches.values_mut() {
             watch.fired = false;
+        }
+        // After the activity bookkeeping -- waking the screen is the user being
+        // present -- and before anything is delivered: the input that wakes
+        // sleeping displays reaches no window.
+        if self.absorb_while_asleep(&event) {
+            return;
         }
 
         // Hit testing derives from `frame_insets`, which is scaled, so input
@@ -25030,5 +25188,166 @@ mod tests {
             vec![(b, "Enter".to_string()), (b, "Move".to_string())],
             "a closed window still held the pointer"
         );
+    }
+
+    // -- displays asleep --------------------------------------------------------------
+
+    /// The key events reaching windows, as `(scancode-named key, pressed)`.
+    fn key_news(comp: &mut Compositor) -> Vec<(Key, bool)> {
+        comp.drain_notifications()
+            .into_iter()
+            .filter_map(|n| match n {
+                EventNotification::KeyEvent { key, pressed, .. } => Some((key, pressed)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn key_down(comp: &mut Compositor, scancode: u32) {
+        comp.handle_input(InputEvent::KeyDown {
+            scancode,
+            character: None,
+        });
+    }
+
+    fn key_up(comp: &mut Compositor, scancode: u32) {
+        comp.handle_input(InputEvent::KeyUp { scancode });
+    }
+
+    /// The key that wakes the screen does not type, nor do its repeats, nor
+    /// is its release reported; and the request that slept them is answered.
+    #[test]
+    fn the_key_that_wakes_the_displays_wakes_them_and_types_nothing() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let a = window_at_point(&mut comp, 100, 100, 200, 150);
+        comp.focus_window(a);
+        let _ = key_news(&mut comp);
+        comp.sleep_displays(7, 41);
+        assert!(comp.displays_asleep());
+        assert!(
+            comp.take_wake_replies(7).is_empty(),
+            "answered before the wake"
+        );
+
+        key_down(&mut comp, 0x1E); // A
+        assert!(!comp.displays_asleep());
+        assert_eq!(comp.take_wake_replies(7), vec![41]);
+        key_down(&mut comp, 0x1E); // its repeat
+        key_up(&mut comp, 0x1E);
+        assert_eq!(key_news(&mut comp), Vec::new(), "the waking key typed");
+
+        // The next press is an ordinary one.
+        key_down(&mut comp, 0x1E);
+        assert_eq!(key_news(&mut comp), vec![(Key::A, true)]);
+    }
+
+    /// A Shift that wakes the screen is still held: the waking press is not
+    /// delivered, and the letter typed next is still a capital.
+    #[test]
+    fn a_shift_that_wakes_the_displays_still_shifts_the_next_letter() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let a = window_at_point(&mut comp, 100, 100, 200, 150);
+        comp.focus_window(a);
+        comp.sleep_displays(7, 1);
+        key_down(&mut comp, 0x2A); // left Shift
+        assert!(!comp.displays_asleep());
+        assert!(comp.modifiers().shift);
+        let _ = key_news(&mut comp);
+        key_down(&mut comp, 0x1E);
+        let held = comp
+            .drain_notifications()
+            .into_iter()
+            .find_map(|n| match n {
+                EventNotification::KeyEvent { modifiers, .. } => Some(modifiers),
+                _ => None,
+            });
+        assert_eq!(held, Some(Modifiers::shift()));
+    }
+
+    /// Letting go of the hotkey that put the displays to sleep does not wake
+    /// them, and its release is delivered: its press was.
+    #[test]
+    fn a_key_released_while_asleep_does_not_wake_the_displays() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let a = window_at_point(&mut comp, 100, 100, 200, 150);
+        comp.focus_window(a);
+        key_down(&mut comp, 0x26); // L, pressed before the sleep
+        let _ = key_news(&mut comp);
+        comp.sleep_displays(7, 1);
+        key_up(&mut comp, 0x26);
+        assert!(
+            comp.displays_asleep(),
+            "letting go of the hotkey woke the displays"
+        );
+        assert_eq!(key_news(&mut comp), vec![(Key::L, false)]);
+    }
+
+    /// The hand that clicked "sleep" is still on the mouse: motion within the
+    /// grace does not wake the displays. After it, motion does. Neither is
+    /// delivered, and the pointer is where the hand is.
+    #[test]
+    fn pointer_motion_wakes_the_displays_only_after_the_grace() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let _a = window_at_point(&mut comp, 100, 100, 200, 150);
+        comp.set_sleep_motion_grace(Duration::from_hours(1));
+        comp.sleep_displays(7, 1);
+        move_to(&mut comp, 150, 150);
+        assert!(
+            comp.displays_asleep(),
+            "a twitch of the mouse woke the displays"
+        );
+
+        comp.set_sleep_motion_grace(Duration::ZERO);
+        move_to(&mut comp, 160, 160);
+        assert!(!comp.displays_asleep());
+        assert_eq!(
+            pointer_news(&mut comp),
+            Vec::new(),
+            "the waking motion was delivered"
+        );
+        assert_eq!(comp.cursor_position(), (160, 160));
+    }
+
+    /// A click that wakes the screen clicks nothing: its press is not
+    /// delivered, so it starts no grab, and its release goes nowhere.
+    #[test]
+    fn a_click_that_wakes_the_displays_reaches_no_window() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let _a = window_at_point(&mut comp, 100, 100, 200, 150);
+        move_to(&mut comp, 150, 150);
+        let _ = pointer_news(&mut comp);
+        comp.sleep_displays(7, 1);
+        button_down(&mut comp, MouseButton::Left, 150, 150);
+        assert!(!comp.displays_asleep());
+        button_up(&mut comp, MouseButton::Left, 150, 150);
+        let news = pointer_news(&mut comp);
+        assert!(
+            news.iter().all(|(_, kind)| !kind.starts_with("Button")),
+            "the waking click reached a window: {news:?}"
+        );
+    }
+
+    /// The screen was black or off, so waking it draws all of it again.
+    #[test]
+    fn waking_the_displays_draws_the_whole_screen_again() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let _a = window_at_point(&mut comp, 100, 100, 200, 150);
+        let _ = comp.compose_frame();
+        assert!(!comp.compose_frame(), "nothing changed");
+        comp.sleep_displays(7, 1);
+        comp.wake_displays();
+        assert!(comp.compose_frame(), "the wake drew nothing");
+    }
+
+    /// A client that goes away leaves no sleep request behind to answer.
+    #[test]
+    fn a_departed_client_s_sleep_requests_are_forgotten() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        comp.sleep_displays(7, 1);
+        comp.sleep_displays(8, 2);
+        comp.forget_sleep_requests(7);
+        comp.wake_displays();
+        assert!(comp.take_wake_replies(7).is_empty());
+        assert_eq!(comp.take_wake_replies(8), vec![2]);
     }
 }

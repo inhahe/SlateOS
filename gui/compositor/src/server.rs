@@ -248,6 +248,10 @@ pub struct Server {
     /// if the picture key has not changed: a presenter keeping its own copy
     /// must not be told it already has this one.
     force_new_serial: bool,
+    /// Whether the display has been told to sleep ([`Present::sleep`]):
+    /// what the server last made of `Compositor::displays_asleep`, so a
+    /// change in it is acted on once ([`Self::reconcile_sleep`]).
+    displays_asleep: bool,
     /// Stands in for a process id. A TCP peer cannot be asked what process it
     /// is — there is no `SO_PEERCRED` across a network, and a remote client has
     /// no pid in this machine's namespace at all — so the compositor is given a
@@ -297,6 +301,7 @@ impl Server {
             waits: WaitSet::new(),
             wait_failing: false,
             force_new_serial: false,
+            displays_asleep: false,
             // Zero is left free as "no client", matching the convention the
             // rest of the compositor uses for ids that may be absent.
             next_client_id: 1,
@@ -456,6 +461,8 @@ impl Server {
             if compositor.route_window_list(&mut client.link) {
                 self.stats.window_lists_sent = self.stats.window_lists_sent.saturating_add(1);
             }
+            // The answers a wake owes to the sleep requests this client made.
+            compositor.route_wake_replies(&mut client.link);
         }
         // Whatever no live link claimed. Counted rather than left to accumulate:
         // an unbounded queue of events for windows nobody owns would eventually
@@ -533,13 +540,7 @@ impl Server {
 
         compositor.reset_for_recovery();
         present.reset();
-
-        self.filtered = Vec::new();
-        self.filtered_for = None;
-        self.cursors = CursorCache::new();
-        self.shown_pointer = None;
-        self.last_shown = None;
-        self.force_new_serial = true;
+        self.forget_what_was_shown();
 
         for client in &mut self.clients {
             if client.ending.is_none() {
@@ -549,6 +550,48 @@ impl Server {
         }
         self.flush();
         self.stats.recoveries = self.stats.recoveries.saturating_add(1);
+    }
+
+    /// Forget the server's own copies of what is on screen -- the filtered
+    /// frame, the drawn pointer, when the last frame went up -- and give the
+    /// next frame a new serial, so it is drawn whole and shown at once and no
+    /// presenter is told it already has it. Recovery's step 4, and a wake's.
+    fn forget_what_was_shown(&mut self) {
+        self.filtered = Vec::new();
+        self.filtered_for = None;
+        self.cursors = CursorCache::new();
+        self.shown_pointer = None;
+        self.last_shown = None;
+        self.force_new_serial = true;
+    }
+
+    /// Bring the display's power in line with the compositor's: off when the
+    /// displays were put to sleep, on again when they woke
+    /// (`Compositor::sleep_displays`). Acts on a change, once.
+    ///
+    /// A display that cannot power down ([`Present::sleep`] answers `false`)
+    /// is shown one black frame, and then, like one that can, nothing until
+    /// the wake: compositing for a screen nobody can see is work for nothing.
+    /// At the wake the display is told ([`Present::wake`]), and the next frame
+    /// is drawn whole -- the compositor has already marked all of it damaged.
+    fn reconcile_sleep<P: Present>(&mut self, compositor: &Compositor, present: &mut P) {
+        let asleep = compositor.displays_asleep();
+        if asleep == self.displays_asleep {
+            return;
+        }
+        self.displays_asleep = asleep;
+        if asleep {
+            if !present.sleep() {
+                let (width, height) = compositor.frame_size();
+                let len = usize::try_from(u64::from(width).saturating_mul(u64::from(height)))
+                    .unwrap_or(0);
+                let black = vec![0xFF00_0000; len];
+                present.show(&Frame::new(&black, width, height));
+            }
+        } else {
+            present.wake();
+            self.forget_what_was_shown();
+        }
     }
 
     /// Remove the clients that ended, destroying the windows they left behind.
@@ -578,6 +621,12 @@ impl Server {
                 self.stats.protocol_errors = self.stats.protocol_errors.saturating_add(1);
             }
             Self::reclaim(compositor, &windows, &mut self.stats);
+            // Its tray icons go with it, as its windows do: a crash must not
+            // leave an icon in the tray that no process can remove, and that
+            // a click would be sent to nobody for. Its pending requests to
+            // be told the displays woke have nobody left to tell.
+            compositor.reap_tray_icons(id);
+            compositor.forget_sleep_requests(id);
             eprintln!("compositor: client {id} disconnected ({reason})");
         }
     }
@@ -913,6 +962,9 @@ impl Server {
             if compositor.take_recovery_request() {
                 self.recover(compositor, present);
             }
+            // After the tick, which may have served a request to sleep or to
+            // wake, and after the input, which may have woken them.
+            self.reconcile_sleep(compositor, present);
             self.present_if_due(compositor, present, interval);
 
             // Checked again before waiting, not only at the top: a display
@@ -942,6 +994,10 @@ impl Server {
         present: &mut P,
         interval: Duration,
     ) {
+        // Nothing goes up on a display that is asleep: see `reconcile_sleep`.
+        if self.displays_asleep {
+            return;
+        }
         let now = Instant::now();
         let slot_open = self
             .last_shown
@@ -984,6 +1040,13 @@ impl Server {
         now: Instant,
     ) -> Option<Instant> {
         let mut wake = earliest(display, compositor.wake_at());
+        // A frame owed to a display that is asleep is not owed until it wakes,
+        // and what wakes it is input, which wakes the loop by itself. Without
+        // this a client drawing behind a dark screen would wake the loop at
+        // every frame slot to be told there is nothing to show.
+        if self.displays_asleep {
+            return wake;
+        }
         let damage = compositor.frame_owed();
         if damage || self.pointer_changed(compositor) {
             let mut due = self
@@ -1201,6 +1264,71 @@ mod tests {
                 );
                 assert_eq!(server.stats().orphans_reclaimed, 1);
                 assert_eq!(server.stats().disconnected, 1);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panic!("the disconnection was never noticed");
+    }
+
+    /// A display that cannot power down is shown black while the displays
+    /// sleep, and then nothing until they wake -- and nothing wakes the loop
+    /// to show it either. At the wake it is told, and a frame goes up.
+    #[test]
+    fn a_sleeping_display_shows_black_and_then_nothing_until_it_wakes() {
+        let (mut server, mut compositor, _addr) = server();
+        let mut rec = Recording::new();
+        let _ = compositor.create_window("Busy".to_string(), 50, 50, 1);
+        compositor.sleep_displays(1, 1);
+        server.reconcile_sleep(&compositor, &mut rec);
+        let (_, _, pixels) = rec.last_frame().expect("a black frame");
+        assert!(
+            pixels.iter().all(|&p| p == 0xFF00_0000),
+            "the frame was not black"
+        );
+
+        let shown = rec.shown();
+        server.present_if_due(&mut compositor, &mut rec, Duration::ZERO);
+        assert_eq!(rec.shown(), shown, "a frame went up on a sleeping display");
+        assert_eq!(
+            server.next_wake(&compositor, None, Duration::from_millis(16), Instant::now()),
+            compositor.wake_at(),
+            "a window drawing behind a dark screen woke the loop for a frame"
+        );
+
+        let resets = rec.resets();
+        compositor.wake_displays();
+        server.reconcile_sleep(&compositor, &mut rec);
+        assert_eq!(rec.resets(), resets + 1, "the display was not told it woke");
+        server.present_if_due(&mut compositor, &mut rec, Duration::ZERO);
+        assert_eq!(rec.shown(), shown + 1, "nothing went up after the wake");
+    }
+
+    /// A crashed program's tray icon goes with it, as its windows do: left
+    /// behind it is an icon no process can remove, and a click on it would be
+    /// sent to nobody.
+    #[test]
+    fn a_departed_client_does_not_leave_its_tray_icon_behind() {
+        let (mut server, mut compositor, addr) = server();
+        let mut conn = dial(&mut server, &mut compositor, addr);
+        let seq = conn
+            .send(RequestBody::SetTrayIcon {
+                id: 1,
+                glyph: "B".to_string(),
+                tooltip: "Battery".to_string(),
+            })
+            .expect("send");
+        await_reply(&mut server, &mut compositor, &mut conn, seq);
+        assert_eq!(compositor.tray_list().icons.len(), 1);
+
+        drop(conn);
+        for _ in 0..1000 {
+            server.tick(&mut compositor).expect("tick");
+            if server.client_count() == 0 {
+                assert!(
+                    compositor.tray_list().icons.is_empty(),
+                    "the tray icon outlived its client"
+                );
                 return;
             }
             std::thread::sleep(Duration::from_millis(1));

@@ -133,7 +133,10 @@ pub const RESPONSE_MAGIC: [u8; 4] = *b"CRSP";
 /// [`RequestBody::GetClipboard`] (tag `0x2E`) and its answer
 /// [`ResponseBody::Clipboard`] (response tag `0x07`). Incompatible on 2's
 /// terms in both directions.
-pub const CONTROL_VERSION: u8 = 22;
+/// **23** — [`RequestBody::SleepDisplays`] (tag `0x2F`), answered when the
+/// displays wake, and [`RequestBody::WakeDisplays`] (tag `0x30`).
+/// Incompatible on 2's terms.
+pub const CONTROL_VERSION: u8 = 23;
 
 /// Control-frame header: magic + version + flags + message count.
 const CONTROL_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -1298,6 +1301,32 @@ pub enum RequestBody {
     /// that could read the clipboard whenever it liked would collect them.
     /// Refused otherwise.
     GetClipboard,
+    /// Put every display to sleep: powered down where the hardware can be
+    /// (its scanout disabled), black and no longer presented to where it
+    /// cannot. A shell's request -- "a key to put the monitor to sleep", and
+    /// an idle timer's.
+    ///
+    /// **Answered when the displays wake, not when they sleep.** That is the
+    /// report the shell needs (to show the lock screen, if waking needs a
+    /// password), and a deferred reply carries it without a new event. So send
+    /// it with [`Connection::send`](crate::client::Connection::send) and
+    /// collect the answer later with
+    /// [`take_reply`](crate::client::Connection::take_reply), never with
+    /// `round_trip`, which would wait until somebody touched the keyboard.
+    ///
+    /// The displays wake at the next key press, click, scroll, or pointer
+    /// movement -- motion within a second of going to sleep excepted, since
+    /// the hand that clicked "sleep" is still on the mouse -- and **that input
+    /// is not delivered**: the key that wakes the screen does not also type,
+    /// as a click on a sleeping laptop's touchpad does not click. A key
+    /// released while asleep does not wake: it is the hotkey being let go.
+    /// [`WakeDisplays`](Self::WakeDisplays) wakes them too. Every pending
+    /// `SleepDisplays` is answered `Ok` at the wake.
+    SleepDisplays,
+    /// Wake the displays if they are asleep, answering every pending
+    /// [`SleepDisplays`](Self::SleepDisplays). Answered with
+    /// [`ResponseBody::Ok`], asleep or not. A shell's request: an alarm, a call.
+    WakeDisplays,
     /// Recover the display from whatever has gone wrong with it: the same full
     /// redraw as the compositor's own Ctrl+Super+R.
     ///
@@ -1569,6 +1598,8 @@ enum RequestTag {
     RequestAttention = 0x2C,
     SetClipboard = 0x2D,
     GetClipboard = 0x2E,
+    SleepDisplays = 0x2F,
+    WakeDisplays = 0x30,
 }
 
 impl RequestTag {
@@ -1619,6 +1650,8 @@ impl RequestTag {
             0x2C => Self::RequestAttention,
             0x2D => Self::SetClipboard,
             0x2E => Self::GetClipboard,
+            0x2F => Self::SleepDisplays,
+            0x30 => Self::WakeDisplays,
             0x20 => Self::UngrabModifierChord,
             _ => return None,
         })
@@ -1965,6 +1998,8 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
             write_string(out, text);
         }
         RequestBody::GetClipboard => out.push(RequestTag::GetClipboard as u8),
+        RequestBody::SleepDisplays => out.push(RequestTag::SleepDisplays as u8),
+        RequestBody::WakeDisplays => out.push(RequestTag::WakeDisplays as u8),
         RequestBody::RecoverDisplay => out.push(RequestTag::RecoverDisplay as u8),
         RequestBody::ShellControl { window, action } => {
             out.push(RequestTag::ShellControl as u8);
@@ -2406,6 +2441,8 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
             text: r.read_string()?,
         },
         RequestTag::GetClipboard => RequestBody::GetClipboard,
+        RequestTag::SleepDisplays => RequestBody::SleepDisplays,
+        RequestTag::WakeDisplays => RequestBody::WakeDisplays,
         RequestTag::RecoverDisplay => RequestBody::RecoverDisplay,
         RequestTag::ShellControl => {
             let window = r.read_u64()?;
@@ -2856,6 +2893,8 @@ mod tests {
                 },
             ),
             Request::new(33, RequestBody::GetClipboard),
+            Request::new(34, RequestBody::SleepDisplays),
+            Request::new(35, RequestBody::WakeDisplays),
         ];
         assert_eq!(round_trip_requests(&reqs), reqs);
     }
@@ -3151,8 +3190,18 @@ mod tests {
         );
         assert_eq!(
             RequestTag::from_byte(0x2F),
+            Some(RequestTag::SleepDisplays),
+            "0x2F was taken by SleepDisplays in control version 23"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x30),
+            Some(RequestTag::WakeDisplays),
+            "0x30 was taken by WakeDisplays in control version 23"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x31),
             None,
-            "0x2F is the next free tag"
+            "0x31 is the next free tag"
         );
     }
 

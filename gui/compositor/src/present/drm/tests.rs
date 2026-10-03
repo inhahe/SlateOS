@@ -2548,3 +2548,68 @@ fn a_reset_programs_every_mode_again_and_forgets_what_the_buffers_hold() {
         "the old picture survived the reset"
     );
 }
+
+// ---------------------------------------------------------- sleep and wake --
+
+#[test]
+fn sleeping_turns_every_head_off_and_waking_programs_them_again() {
+    let card = FakeCard::two_monitors();
+    let mut scanout = DrmScanout::new(card.clone()).unwrap();
+    assert!(
+        scanout.sleep(),
+        "a card that can turn its heads off says so"
+    );
+    card.read(|s| assert!(s.modes.is_empty(), "a head is still timed: {:?}", s.modes));
+
+    let sets_before = card.read(|s| s.mode_sets.len());
+    scanout.wake();
+    card.read(|s| {
+        assert_eq!(
+            s.mode_sets.len(),
+            sets_before + 2,
+            "both heads programmed again"
+        );
+        assert_eq!(s.modes.len(), 2);
+    });
+    // And a frame goes up on both, which a CRTC with no mode would refuse.
+    let (w, h) = scanout.size();
+    let picture = vec![0xFF33_3333u32; (w * h) as usize];
+    let flips_before = card.read(|s| s.flips.len());
+    scanout.show(&Frame::new(&picture, w, h));
+    assert_eq!(card.read(|s| s.flips.len()), flips_before + 2);
+}
+
+#[test]
+fn a_card_that_will_not_turn_one_head_off_keeps_every_head_on() {
+    // Half asleep is the state to avoid: the server shows black instead, and a
+    // flip onto a CRTC left with no mode would be refused and lose the head.
+    let card = FakeCard::two_monitors();
+    let mut scanout = DrmScanout::new(card.clone()).unwrap();
+    let sets_so_far = card.read(|s| s.log.iter().filter(|&&r| r == uapi::SETCRTC).count());
+    // The first disable succeeds; the second, zero-based one after it, fails.
+    let second_disable = u32::try_from(sets_so_far + 1).unwrap();
+    card.edit(|s| s.fail_nth.push((uapi::SETCRTC, second_disable, ENODEV)));
+
+    assert!(
+        !scanout.sleep(),
+        "a sleep that stopped halfway says it did not sleep"
+    );
+    card.read(|s| {
+        assert_eq!(
+            s.modes.len(),
+            2,
+            "the head turned off first was not turned back on"
+        );
+    });
+
+    let (w, h) = scanout.size();
+    let black = vec![0xFF00_0000u32; (w * h) as usize];
+    let flips_before = card.read(|s| s.flips.len());
+    scanout.show(&Frame::new(&black, w, h));
+    assert_eq!(
+        card.read(|s| s.flips.len()),
+        flips_before + 2,
+        "the black frame did not go up on both heads"
+    );
+    assert!(scanout.is_open());
+}

@@ -603,6 +603,13 @@ fn to_compositor_request(
                 message: "clipboard requests are link-level".to_string(),
             });
         }
+        // Link-level too: a sleep request's answer is owed to the link that
+        // asked, at a moment no `CompositorRequest` can name.
+        RequestBody::SleepDisplays | RequestBody::WakeDisplays => {
+            return Err(ResponseBody::Error {
+                message: "display sleep requests are link-level".to_string(),
+            });
+        }
         // The one window request that is deliberately *not* resolved against
         // the sender's own windows: a taskbar button exists to act on somebody
         // else's window, so `resolve` would refuse every legitimate use. What
@@ -890,6 +897,24 @@ impl Compositor {
         Ok(served)
     }
 
+    /// Send `link` the answers a wake of the displays has made to its sleep
+    /// requests ([`RequestBody::SleepDisplays`]). Answers how many.
+    ///
+    /// Called for every link every tick, readable or not, because the shell
+    /// waiting to hear of the wake has nothing to say until it does.
+    pub fn route_wake_replies(&mut self, link: &mut ClientLink) -> usize {
+        let seqs = self.take_wake_replies(link.client_pid);
+        if seqs.is_empty() {
+            return 0;
+        }
+        let replies: Vec<Response> = seqs
+            .iter()
+            .map(|&seq| Response::new(seq, ResponseBody::Ok))
+            .collect();
+        encode_responses_into(&mut link.outbox, &replies);
+        replies.len()
+    }
+
     /// The refusal to send a client that may not touch the clipboard now, or
     /// `None` if it may: it must own the window with the keyboard focus.
     ///
@@ -983,6 +1008,27 @@ impl Compositor {
                     replies.push(Response::new(req.seq, body));
                     continue;
                 }
+                // Answered at the wake, not now: the deferred reply is how the
+                // shell hears the displays woke (`route_wake_replies`). Here
+                // because the reply has to find its way back to this link.
+                RequestBody::SleepDisplays => {
+                    match link.require_shell() {
+                        Ok(()) => self.sleep_displays(link.client_pid, req.seq),
+                        Err(refusal) => replies.push(Response::new(req.seq, refusal)),
+                    }
+                    continue;
+                }
+                RequestBody::WakeDisplays => {
+                    let body = match link.require_shell() {
+                        Ok(()) => {
+                            self.wake_displays();
+                            ResponseBody::Ok
+                        }
+                        Err(refusal) => refusal,
+                    };
+                    replies.push(Response::new(req.seq, body));
+                    continue;
+                }
                 _ => {}
             }
             if let RequestBody::SubscribeWindowList { subscribe } = req.body {
@@ -1028,7 +1074,12 @@ impl Compositor {
             };
             replies.push(Response::new(req.seq, body));
         }
-        encode_responses_into(&mut link.outbox, &replies);
+        // A batch can now end with nothing to say -- a lone `SleepDisplays`,
+        // answered at the wake -- and an empty frame would be bytes sent to
+        // say so.
+        if !replies.is_empty() {
+            encode_responses_into(&mut link.outbox, &replies);
+        }
     }
 
     /// Weigh an image upload against what its connection already holds, and
@@ -1490,6 +1541,46 @@ mod tests {
             .window_ref(WindowId::from_raw(theirs))
             .expect("still there");
         assert_eq!(victim.title, "Theirs");
+    }
+
+    /// A sleep request is answered when the displays wake, not before: the
+    /// deferred reply is how the shell hears of the wake.
+    #[test]
+    fn a_sleep_request_is_answered_when_the_displays_wake() {
+        let (mut comp, mut link) = wired();
+        link.receive(&encode_requests(&[Request::new(
+            9,
+            RequestBody::SleepDisplays,
+        )]));
+        comp.serve(&mut link).expect("serves");
+        assert!(comp.displays_asleep());
+        assert!(!link.has_outgoing(), "answered before the wake");
+        assert_eq!(comp.route_wake_replies(&mut link), 0);
+
+        // Somebody touches the space bar.
+        comp.handle_input(crate::InputEvent::KeyDown {
+            scancode: 0x39,
+            character: None,
+        });
+        assert_eq!(comp.route_wake_replies(&mut link), 1);
+        let (responses, _) = decode_responses(&link.take_outgoing()).expect("decodes");
+        assert_eq!(responses, vec![Response::new(9, ResponseBody::Ok)]);
+    }
+
+    /// Waking the displays by request answers that request and the sleep it
+    /// ends.
+    #[test]
+    fn waking_the_displays_by_request_answers_both() {
+        let (mut comp, mut link) = wired();
+        link.receive(&encode_requests(&[Request::new(
+            9,
+            RequestBody::SleepDisplays,
+        )]));
+        comp.serve(&mut link).expect("serves");
+        let responses = exchange(&mut comp, &mut link, vec![RequestBody::WakeDisplays]);
+        assert_eq!(responses, vec![Response::new(1, ResponseBody::Ok)]);
+        assert!(!comp.displays_asleep());
+        assert_eq!(comp.route_wake_replies(&mut link), 1);
     }
 
     /// Copy in one program, paste in another: the clipboard is the

@@ -12,6 +12,10 @@
 //!
 //! - [`bits`]: the uncompressed header's plain bits.
 //! - [`boolread`]: the arithmetic decoder everything after it is coded with.
+//! - [`header`]: the frame header's fields, and the superframe index that
+//!   packs several frames into one packet.
+//! - [`probs`]: the probabilities everything is decoded with, and how each
+//!   frame adapts them.
 //!
 //! # What a hostile stream can do
 //!
@@ -30,6 +34,7 @@
 pub mod bits;
 pub mod boolread;
 pub mod common;
+pub mod header;
 pub mod probs;
 // Generated from libvpx by `tools/gen_tables.py`, which formats what it
 // writes, so regenerating and diffing compares like with like.

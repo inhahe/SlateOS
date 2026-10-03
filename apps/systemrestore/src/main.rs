@@ -2848,17 +2848,22 @@ impl SystemRestoreUI {
 
     /// Handle a key press.
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        // A key on its own is taken plain, nothing held but Shift: a chord
+        // with Alt or the Windows key is the window's or the desktop's and
+        // arrives carrying its key -- Alt+Enter asked to restore a snapshot,
+        // and under the question Alt+Enter restored it.
+        let plain = textline::is_plain(key.modifiers);
         // Above the dialog branch below, which returns before the main match:
         // a check placed after it could raise the card from the list and not
         // dismiss it from a dialog.
-        if key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift) {
+        if plain && (key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift)) {
             self.show_help = !self.show_help;
             return EventResult::Consumed;
         }
         if self.show_help {
             // Modal. Letting keys through would mean restoring a snapshot the
             // reader cannot see.
-            if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
+            if plain && matches!(key.key, Key::Escape | Key::Enter) {
                 self.show_help = false;
             }
             return EventResult::Consumed;
@@ -2869,7 +2874,7 @@ impl SystemRestoreUI {
             // through, and nothing abandons it: it was Escape, over a
             // filmstrip, but real work stopped half-way is a folder half
             // restored. Once it has ended, Enter or Escape puts it away.
-            if progress.complete && matches!(key.key, Key::Escape | Key::Enter) {
+            if plain && progress.complete && matches!(key.key, Key::Escape | Key::Enter) {
                 self.progress = None;
                 return EventResult::Consumed;
             }
@@ -2880,7 +2885,9 @@ impl SystemRestoreUI {
             return self.handle_dialog_key(key);
         }
 
-        if key.modifiers.ctrl {
+        // A Ctrl chord, not Ctrl held: AltGr arrives as Ctrl+Alt and types
+        // into the search -- AltGr+Q, a German `@`, was taken for Ctrl+Q.
+        if textline::is_ctrl_chord(key.modifiers) {
             return match key.key {
                 Key::N => {
                     self.open_create_dialog();
@@ -2921,7 +2928,7 @@ impl SystemRestoreUI {
 
         // The schedule's controls, in its view. Space is a character the
         // search box would take anywhere else.
-        if self.view_mode == ViewMode::Schedule {
+        if plain && self.view_mode == ViewMode::Schedule {
             match key.key {
                 Key::Space => return self.schedule_control(ScheduleControl::Toggle),
                 Key::Left => return self.schedule_control(ScheduleControl::Slower),
@@ -2931,45 +2938,47 @@ impl SystemRestoreUI {
         }
 
         match key.key {
-            Key::Tab => {
+            Key::Tab if plain => {
                 self.cycle_view(if key.modifiers.shift { -1 } else { 1 });
                 EventResult::Consumed
             }
-            Key::Up => {
+            Key::Up if plain => {
                 self.move_selection(-1);
                 EventResult::Consumed
             }
-            Key::Down => {
+            Key::Down if plain => {
                 self.move_selection(1);
                 EventResult::Consumed
             }
-            Key::Home => {
+            Key::Home if plain => {
                 self.select_at(0);
                 EventResult::Consumed
             }
-            Key::End => {
+            Key::End if plain => {
                 let rows = self.visible_rows();
                 self.select_at(rows.len().saturating_sub(1));
                 EventResult::Consumed
             }
-            Key::Enter => {
+            Key::Enter if plain => {
                 if let Some(id) = self.selected_id {
                     self.dialog = DialogKind::ConfirmRestore(id);
                 }
                 EventResult::Consumed
             }
-            Key::Delete => {
+            Key::Delete if plain => {
                 if let Some(id) = self.selected_id {
                     self.dialog = DialogKind::ConfirmDelete(id);
                 }
                 EventResult::Consumed
             }
-            Key::Backspace => {
+            // Backspace edits the search, so it is refused only to Alt and
+            // the Windows key.
+            Key::Backspace if !textline::is_alt_or_windows_chord(key.modifiers) => {
                 self.search_query.pop();
                 self.reanchor_selection();
                 EventResult::Consumed
             }
-            Key::Escape => {
+            Key::Escape if plain => {
                 // The search box is the only thing Escape can clear here, and
                 // clearing it is the only way to get back to the whole list
                 // once a query has hidden most of it.
@@ -2980,6 +2989,9 @@ impl SystemRestoreUI {
                 self.reanchor_selection();
                 EventResult::Consumed
             }
+            // What was typed goes to the search, AltGr's letters among it; the
+            // letter a command carries does not -- Alt+X searched for `x`.
+            _ if !textline::types_into_field(key) => EventResult::Ignored,
             _ => {
                 let typed: String = key.typed().collect();
                 if typed.is_empty() {
@@ -2993,28 +3005,37 @@ impl SystemRestoreUI {
     }
 
     /// Keys while a dialog is open.
+    ///
+    /// Its own keys are plain -- Alt+Enter restored or deleted a snapshot --
+    /// and the form types what was typed: AltGr typed nothing, Ctrl being
+    /// held, and Alt+X typed an `x`. Backspace is refused only to Alt and the
+    /// Windows key.
     fn handle_dialog_key(&mut self, key: &KeyEvent) -> EventResult {
+        let plain = textline::is_plain(key.modifiers);
         match key.key {
-            Key::Escape => {
+            Key::Escape if plain => {
                 self.dialog = DialogKind::None;
                 EventResult::Consumed
             }
-            Key::Enter => {
+            Key::Enter if plain => {
                 self.confirm_dialog();
                 EventResult::Consumed
             }
-            Key::Tab if self.dialog == DialogKind::CreateSnapshot => {
+            Key::Tab if plain && self.dialog == DialogKind::CreateSnapshot => {
                 self.form_field = match self.form_field {
                     FormField::Name => FormField::Description,
                     FormField::Description => FormField::Name,
                 };
                 EventResult::Consumed
             }
-            Key::Backspace if self.dialog == DialogKind::CreateSnapshot => {
+            Key::Backspace
+                if self.dialog == DialogKind::CreateSnapshot
+                    && !textline::is_alt_or_windows_chord(key.modifiers) =>
+            {
                 self.form_text_mut().pop();
                 EventResult::Consumed
             }
-            _ if self.dialog == DialogKind::CreateSnapshot && !key.modifiers.ctrl => {
+            _ if self.dialog == DialogKind::CreateSnapshot && textline::types_into_field(key) => {
                 let typed: String = key.typed().collect();
                 if typed.is_empty() {
                     return EventResult::Ignored;
@@ -6475,6 +6496,132 @@ working filter from a broken one"
             "the snapshot should have been deleted"
         );
         assert_ne!(ui.selected_id, Some(id), "and the selection moved off it");
+    }
+
+    /// **A chord is neither a restore key nor typing, and AltGr types**:
+    /// each chord with Alt or the Windows key is the window's or the
+    /// desktop's and arrives carrying its key -- Alt+Delete asked to delete a
+    /// restore point and Alt+Enter then deleted it, Alt+Tab changed the view
+    /// and Alt+X searched for `x`; and AltGr, which arrives as Ctrl+Alt, was
+    /// taken for Ctrl -- AltGr+L, a Polish `ł`, locked a restore point, and
+    /// no AltGr letter reached the search or the form.
+    ///
+    /// Each key is asserted as it is pressed.
+    #[test]
+    fn a_chord_is_neither_a_restore_key_nor_typing_and_altgr_types() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let chord = |k: Key, text: &str, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: text.to_owned(),
+            })
+        };
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
+        let id = *ui
+            .visible_rows()
+            .iter()
+            .map(|(id, _)| id)
+            .find(|id| ui.manager.tree.children_of(**id).is_empty())
+            .expect("some snapshot is a leaf");
+        ui.selected_id = Some(id);
+        let state = |ui: &SystemRestoreUI| {
+            (
+                (ui.manager.tree.count(), ui.selected_id, ui.view_mode),
+                (ui.dialog.clone(), ui.search_query.clone(), ui.type_filter),
+                (
+                    ui.show_help,
+                    ui.manager.tree.get_snapshot(id).map(|s| s.locked),
+                ),
+            )
+        };
+        let before = state(&ui);
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for k in [
+                Key::Delete,
+                Key::Enter,
+                Key::Tab,
+                Key::Down,
+                Key::End,
+                Key::Backspace,
+                Key::Escape,
+                Key::F1,
+                Key::L,
+                Key::F,
+                Key::N,
+            ] {
+                if k == Key::Backspace && m == altgr {
+                    // Backspace with AltGr edits, as Ctrl+Backspace does.
+                    continue;
+                }
+                assert_eq!(
+                    ui.handle_event(&chord(k, "", m)),
+                    EventResult::Ignored,
+                    "{m:?} {k:?} was taken"
+                );
+                assert_eq!(state(&ui), before, "{m:?} {k:?} changed the window");
+            }
+        }
+
+        // The search types what was typed, AltGr's `@` among it.
+        ui.handle_event(&chord(Key::X, "x", Modifiers::alt()));
+        ui.handle_event(&chord(Key::X, "x", Modifiers::super_key()));
+        ui.handle_event(&chord(Key::Q, "@", altgr));
+        assert_eq!(
+            ui.search_query, "@",
+            "the search typed a command's letter, or lost AltGr's"
+        );
+        ui.handle_event(&chord(Key::Backspace, "", Modifiers::alt()));
+        assert_eq!(ui.search_query, "@", "Alt+Backspace deleted from it");
+        ui.handle_event(&press(Key::Escape));
+
+        // The question before a deletion answers plain keys only. (The search
+        // moved the selection to what it showed.)
+        ui.selected_id = Some(id);
+        ui.handle_event(&press(Key::Delete));
+        assert_eq!(ui.dialog, DialogKind::ConfirmDelete(id), "control: Delete");
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for k in [Key::Enter, Key::Escape] {
+                ui.handle_event(&chord(k, "", m));
+                assert_eq!(
+                    ui.dialog,
+                    DialogKind::ConfirmDelete(id),
+                    "{m:?} {k:?} answered"
+                );
+                assert!(
+                    ui.manager.tree.get_snapshot(id).is_some(),
+                    "{m:?} {k:?} deleted it"
+                );
+            }
+        }
+        ui.handle_event(&press(Key::Escape));
+
+        // So does the form, which types what was typed.
+        ui.handle_event(&ctrl(Key::N));
+        assert_eq!(ui.dialog, DialogKind::CreateSnapshot, "control: Ctrl+N");
+        let typed_before = (ui.form_name.clone(), ui.form_field);
+        for m in [Modifiers::alt(), Modifiers::super_key()] {
+            ui.handle_event(&chord(Key::X, "x", m));
+            ui.handle_event(&chord(Key::Tab, "", m));
+            ui.handle_event(&chord(Key::Backspace, "", m));
+            assert_eq!(
+                (ui.form_name.clone(), ui.form_field),
+                typed_before,
+                "{m:?} typed, moved or deleted"
+            );
+        }
+        ui.handle_event(&chord(Key::L, "ł", altgr));
+        assert_eq!(
+            ui.form_name,
+            format!("{}ł", typed_before.0),
+            "AltGr's ł was not typed"
+        );
+        assert_eq!(ui.dialog, DialogKind::CreateSnapshot, "a chord closed it");
     }
 
     #[test]

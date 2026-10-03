@@ -1,6 +1,6 @@
 ## B-MV-NEVER-WARNS-ABOUT-A-TWICE-NAMED-SOURCE-DIRECTORY — filed 2026-09-03 (lane B)
 
-**Status:** FIXED 2026-10-03 (lane B), boot confirmation pending. `mv`
+**Status:** FIXED 2026-10-03 (lane B), boot-tested on `main` at 469d88f2f. `mv`
 records a directory operand in the copied-inode table as upstream does
 (`copy.c:2664`), and `directory_named_again` in `mv.rs` is the directory arm
 of upstream's `earlier_file` block in its order: into itself, specified more

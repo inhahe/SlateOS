@@ -49,6 +49,9 @@ mod sys {
         pub fn setgroups(size: usize, list: *const u32) -> i32;
         pub fn setgid(gid: u32) -> i32;
         pub fn setuid(uid: u32) -> i32;
+        pub fn getpgrp() -> i32;
+        pub fn getsid(pid: i32) -> i32;
+        pub fn pidfd_open(pid: i32, flags: u32) -> i32;
     }
 }
 
@@ -375,6 +378,80 @@ fn set_uid_one(uid: u32) -> Result<(), i32> {
 
 #[cfg(not(unix))]
 fn set_uid_one(_uid: u32) -> Result<(), i32> {
+    Err(ENOSYS)
+}
+
+/// This process's process group: `getpgrp`, which cannot fail.
+///
+/// # Errors
+///
+/// [`ENOSYS`](crate::ENOSYS) off Unix, where there are no process groups to
+/// be in. On Unix, never.
+pub fn process_group() -> Result<i32, i32> {
+    process_group_one()
+}
+
+#[cfg(unix)]
+// One signature for both arms; only the host one can fail.
+#[allow(clippy::unnecessary_wraps)]
+fn process_group_one() -> Result<i32, i32> {
+    // SAFETY: no arguments, and no memory of ours read or written.
+    Ok(unsafe { sys::getpgrp() })
+}
+
+#[cfg(not(unix))]
+fn process_group_one() -> Result<i32, i32> {
+    Err(ENOSYS)
+}
+
+/// The session process `pid` belongs to -- 0 for this one: `getsid`.
+///
+/// # Errors
+///
+/// `ESRCH` for no such process, `EPERM` for one in another session that the
+/// system will not describe; [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn session_of(pid: i32) -> Result<i32, i32> {
+    session_of_one(pid)
+}
+
+#[cfg(unix)]
+fn session_of_one(pid: i32) -> Result<i32, i32> {
+    // SAFETY: one number in, one out; no memory of ours.
+    let sid = unsafe { sys::getsid(pid) };
+    if sid >= 0 { Ok(sid) } else { Err(last_errno()) }
+}
+
+#[cfg(not(unix))]
+fn session_of_one(_pid: i32) -> Result<i32, i32> {
+    Err(ENOSYS)
+}
+
+/// A descriptor that refers to process `pid` itself rather than to its
+/// number, and becomes readable when the process exits: `pidfd_open`.
+///
+/// The descriptor is the caller's to close.
+///
+/// # Errors
+///
+/// The `errno` from `pidfd_open`: `ESRCH` for no such process, `EINVAL` for a
+/// `pid` below 1 or unknown `flags`, `EMFILE`, and `ENOSYS` where the system
+/// cannot do it -- which today includes SlateOS's own library: its native
+/// system-call table has no number for the call the kernel implements for
+/// Linux programs (`known-issues/B-THE-NATIVE-LIBC-AND-THE-LINUX-ABI-DISAGREE-ABOUT-WHAT-EXISTS.md`).
+/// [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn pidfd_open(pid: i32, flags: u32) -> Result<i32, i32> {
+    pidfd_open_one(pid, flags)
+}
+
+#[cfg(unix)]
+fn pidfd_open_one(pid: i32, flags: u32) -> Result<i32, i32> {
+    // SAFETY: two numbers in, a descriptor or -1 out; no memory of ours.
+    let fd = unsafe { sys::pidfd_open(pid, flags) };
+    if fd >= 0 { Ok(fd) } else { Err(last_errno()) }
+}
+
+#[cfg(not(unix))]
+fn pidfd_open_one(_pid: i32, _flags: u32) -> Result<i32, i32> {
     Err(ENOSYS)
 }
 

@@ -65,7 +65,9 @@ use core::ffi::CStr;
 
 pub mod clock;
 pub mod conf;
+pub mod epoll;
 pub mod inotify;
+pub mod lock;
 pub mod netdb;
 pub mod process;
 pub mod pty;
@@ -98,6 +100,14 @@ pub const EINVAL: i32 = 22;
 pub const ENAMETOOLONG: i32 = 36;
 /// Function not implemented.
 pub const ENOSYS: i32 = 38;
+/// Interrupted by a signal before anything happened.
+pub const EINTR: i32 = 4;
+/// Try again: the resource is busy -- for a lock taken without waiting, held
+/// by someone else. Also `EWOULDBLOCK`, which is the same number on Linux.
+pub const EAGAIN: i32 = 11;
+/// Permission denied -- also what a record lock may fail with when another
+/// process holds a conflicting one.
+pub const EACCES: i32 = 13;
 
 /// No such process.
 ///
@@ -161,6 +171,10 @@ mod sys {
         pub fn getdomainname(name: *mut u8, len: usize) -> i32;
         pub fn klogctl(cmd: i32, buf: *mut u8, len: i32) -> i32;
         pub fn kill(pid: i32, sig: i32) -> i32;
+        // `union sigval` is eight bytes and passed by value, which on x86-64
+        // is one integer register: a `usize` holding the bytes is the same
+        // call.
+        pub fn sigqueue(pid: i32, sig: i32, value: usize) -> i32;
         pub fn signal(sig: i32, handler: usize) -> usize;
         pub fn __errno_location() -> *mut i32;
     }
@@ -629,6 +643,44 @@ fn kill_one(_pid: i32, _sig: i32) -> Result<(), i32> {
     Err(ENOSYS)
 }
 
+/// Send `sig` to process `pid` with an integer for its handler to read:
+/// `sigqueue (pid, sig, (union sigval){ .sival_int = value })`.
+///
+/// The rest of the eight-byte `union sigval` is zero, as it is in a C program
+/// that zero-initialises the union and then sets `sival_int` -- which is what
+/// `pkill -q` does.
+///
+/// Refuses a `pid` below 1 for the reason [`kill`] does: there is no
+/// broadcast here.
+///
+/// # Errors
+///
+/// The `errno` set by `sigqueue`: `EINVAL` for a `pid` below 1 or a number
+/// that is no signal, `ESRCH`, `EPERM`, `EAGAIN` when the target's queue is
+/// full, and `ENOSYS` where the library does not deliver queued signals
+/// (SlateOS's, today). [`ENOSYS`] off Unix.
+pub fn sigqueue(pid: i32, sig: i32, value: i32) -> Result<(), i32> {
+    if pid <= 0 {
+        return Err(EINVAL);
+    }
+    sigqueue_one(pid, sig, value)
+}
+
+#[cfg(unix)]
+fn sigqueue_one(pid: i32, sig: i32, value: i32) -> Result<(), i32> {
+    // `sival_int` is the union's first four bytes; the other four stay zero.
+    let bits = u32::from_ne_bytes(value.to_ne_bytes());
+    let word = usize::try_from(bits).unwrap_or(0);
+    // SAFETY: three scalars, and no memory of ours read or written.
+    let rc = unsafe { sys::sigqueue(pid, sig, word) };
+    if rc == 0 { Ok(()) } else { Err(last_errno()) }
+}
+
+#[cfg(not(unix))]
+fn sigqueue_one(_pid: i32, _sig: i32, _value: i32) -> Result<(), i32> {
+    Err(ENOSYS)
+}
+
 /// Send `sig` to every process in this one's process group, this one
 /// included: `kill (0, sig)`.
 ///
@@ -766,6 +818,9 @@ mod tests {
         assert_eq!(EFAULT, posix::errno::EFAULT);
         assert_eq!(EINVAL, posix::errno::EINVAL);
         assert_eq!(ENOSYS, posix::errno::ENOSYS);
+        assert_eq!(EINTR, posix::errno::EINTR);
+        assert_eq!(EAGAIN, posix::errno::EAGAIN);
+        assert_eq!(EACCES, posix::errno::EACCES);
         assert_eq!(ENAMETOOLONG, posix::errno::ENAMETOOLONG);
         assert_eq!(
             usize::try_from(posix::limits::HOST_NAME_MAX).ok(),

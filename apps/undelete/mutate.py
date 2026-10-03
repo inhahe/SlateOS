@@ -45,6 +45,48 @@ MUTATIONS = [
         "            Self::Mp4 | Self::M4a | Self::Mov | Self::Avi | Self::Mkv => FileCategory::Video,",
         [BRAND],
     ),
+    (
+        'a chord raises the list of keys',
+        '        if key.key == Key::F1 && plain {',
+        '        if key.key == Key::F1 {',
+        ['a_chord_is_neither_an_undelete_key_nor_typing'],
+    ),
+    (
+        'a chorded Escape puts the list of keys away',
+        '            if plain && matches!(key.key, Key::Escape | Key::Enter) {',
+        '            if matches!(key.key, Key::Escape | Key::Enter) {',
+        ['a_chord_is_neither_an_undelete_key_nor_typing'],
+    ),
+    (
+        'AltGr is taken for Ctrl',
+        '        if textline::is_ctrl_chord(key.modifiers) {\n            return match key.key {',
+        '        if key.modifiers.ctrl {\n            return match key.key {',
+        ['a_chord_is_neither_an_undelete_key_nor_typing'],
+    ),
+    (
+        "a chord works the setup screen's keys",
+        '            _ if !plain => EventResult::Ignored,\n            UiScreen::ScanSetup',
+        '            UiScreen::ScanSetup',
+        ['a_chord_is_neither_an_undelete_key_nor_typing'],
+    ),
+    (
+        'Alt+Backspace deletes from the search',
+        '            Key::Backspace if !textline::is_alt_or_windows_chord(key.modifiers) => {',
+        '            Key::Backspace => {',
+        ['a_chord_is_neither_an_undelete_key_nor_typing'],
+    ),
+    (
+        "a chord works the results' keys",
+        '            _ if !plain => self.type_into_search(key),\n',
+        '',
+        ['a_chord_is_neither_an_undelete_key_nor_typing'],
+    ),
+    (
+        "the search types a command's letter",
+        '        if !textline::types_into_field(key) {\n            return EventResult::Ignored;\n        }\n        let typed: String = key.typed().collect();',
+        '        let typed: String = key.typed().collect();',
+        ['a_chord_is_neither_an_undelete_key_nor_typing'],
+    ),
 ]
 
 if __name__ == "__main__":

@@ -5402,6 +5402,40 @@ enum PointerTarget {
     Desktop,
 }
 
+/// The implicit pointer grab a press in a client area starts.
+///
+/// Until the last button held in it comes up, every pointer event -- motion,
+/// scroll, and the presses and releases of any button -- goes to `window`,
+/// wherever the pointer is. That is the implicit grab every windowing system
+/// has, and what lets a slider, a scrollbar or a text selection keep following
+/// a pointer that has strayed outside the window.
+///
+/// The grab is the window's and not one button's, so it lasts until every
+/// button is up: press the left button, press the right, let go of the left,
+/// and the right button's release still belongs to the window both were
+/// pressed in. A grab tied to the first button ended at its release, and the
+/// second button's release then reached nobody, leaving the window believing
+/// that button was still down.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PointerGrab {
+    /// The window the grab began in.
+    window: WindowId,
+    /// The buttons held, one bit each ([`button_bit`]). Never empty while the
+    /// grab exists: the grab ends when the last one comes up.
+    held: u8,
+}
+
+/// A mouse button's bit in [`PointerGrab::held`].
+const fn button_bit(button: MouseButton) -> u8 {
+    match button {
+        MouseButton::Left => 1,
+        MouseButton::Right => 1 << 1,
+        MouseButton::Middle => 1 << 2,
+        MouseButton::Back => 1 << 3,
+        MouseButton::Forward => 1 << 4,
+    }
+}
+
 /// How the most recently presented frame was produced.
 ///
 /// In the [`Direct`](Scanout::Direct) case the displayed pixels come straight
@@ -5469,17 +5503,14 @@ pub struct Compositor {
     /// the one owed a `Leave` when that stops being true. See
     /// [`track_pointer_window`](Self::track_pointer_window).
     pointer_window: Option<WindowId>,
-    /// The window a held button was pressed in, and the button.
+    /// The window the held buttons were pressed in, and which are held: see
+    /// [`PointerGrab`].
     ///
-    /// Until that button is released, pointer motion and the release itself
-    /// go to that window wherever the pointer is — the implicit grab every
-    /// windowing system has, and what lets a slider, a scrollbar or a text
-    /// selection keep following a pointer that has strayed outside the window.
     /// Motion used to go to whatever window was under the pointer, so a drag
     /// stopped dead at the window's edge; and the release went to the
     /// *focused* window, which for a right-click on a window that was not
     /// focused is a different window from the one that saw the press.
-    pointer_grab: Option<(WindowId, MouseButton)>,
+    pointer_grab: Option<PointerGrab>,
     /// Active drag operation (if any).
     drag: Option<DragState>,
     /// Where the window being dragged would land if the user let go now.
@@ -6390,7 +6421,12 @@ impl Compositor {
         if self.pointer_window == Some(window_id) {
             self.pointer_window = None;
         }
-        if self.pointer_grab.is_some_and(|(id, _)| id == window_id) {
+        // Its grab ends with it: the buttons' releases then go nowhere, rather
+        // than to whatever window happens to be under the pointer.
+        if self
+            .pointer_grab
+            .is_some_and(|grab| grab.window == window_id)
+        {
             self.pointer_grab = None;
         }
 
@@ -7972,7 +8008,7 @@ impl Compositor {
         // otherwise to the client area under the pointer.
         let target = self
             .pointer_grab
-            .map(|(window_id, _)| window_id)
+            .map(|grab| grab.window)
             .or_else(|| self.window_at(x, y));
         if let Some(window_id) = target {
             self.notify_pointer(window_id, x, y, MouseEventKind::Move);
@@ -8142,14 +8178,35 @@ impl Compositor {
             // this compositor delivered — the press landed on a title bar, or
             // on the desktop — goes nowhere: a client told about a release it
             // never saw pressed would take it for the end of a click.
-            if let Some((window_id, held)) = self.pointer_grab
-                && held == button
+            if let Some(grab) = self.pointer_grab
+                && grab.held & button_bit(button) != 0
             {
-                self.pointer_grab = None;
-                self.notify_pointer(window_id, x, y, MouseEventKind::ButtonRelease(button));
-                // The grab held the pointer inside the window; now it is
-                // wherever it really is.
-                self.track_pointer_window(x, y);
+                let held = grab.held & !button_bit(button);
+                self.pointer_grab = (held != 0).then_some(PointerGrab { held, ..grab });
+                self.notify_pointer(grab.window, x, y, MouseEventKind::ButtonRelease(button));
+                if held == 0 {
+                    // The grab held the pointer inside the window; now it is
+                    // wherever it really is.
+                    self.track_pointer_window(x, y);
+                }
+            }
+            return;
+        }
+
+        // A press while the pointer is grabbed is the grabbing window's,
+        // wherever the pointer is -- even over another window's title bar,
+        // which would otherwise be focused, raised or dragged in the middle of
+        // a gesture that belongs to somebody else. A press of a button already
+        // held is no transition (a device's own repeat of a held button) and
+        // is not delivered: a second press with no release between would be
+        // read as the start of a double click.
+        if let Some(grab) = self.pointer_grab {
+            if grab.held & button_bit(button) == 0 {
+                self.pointer_grab = Some(PointerGrab {
+                    held: grab.held | button_bit(button),
+                    ..grab
+                });
+                self.notify_pointer(grab.window, x, y, MouseEventKind::ButtonPress(button));
             }
             return;
         }
@@ -8265,21 +8322,23 @@ impl Compositor {
     }
 
     /// Deliver a button press to a window's client area, and grab the pointer
-    /// for that window until the button comes back up.
+    /// for that window until every button is back up.
+    ///
+    /// Reached only with no grab in force: a press during one goes to the
+    /// grabbing window before any hit test (`handle_mouse_button`).
     fn press_in(&mut self, window_id: WindowId, button: MouseButton, x: i32, y: i32) {
         self.notify_pointer(window_id, x, y, MouseEventKind::ButtonPress(button));
-        // The first button down owns the grab; a second button pressed during
-        // it goes to the same window without taking the grab over.
-        if self.pointer_grab.is_none() {
-            self.pointer_grab = Some((window_id, button));
-        }
+        self.pointer_grab = Some(PointerGrab {
+            window: window_id,
+            held: button_bit(button),
+        });
     }
 
     fn handle_mouse_scroll(&mut self, dx: f32, dy: f32, x: i32, y: i32) {
         self.track_pointer_window(x, y);
         let target = self
             .pointer_grab
-            .map(|(window_id, _)| window_id)
+            .map(|grab| grab.window)
             .or_else(|| self.window_at(x, y));
         if let Some(window_id) = target {
             self.notify_pointer(window_id, x, y, MouseEventKind::Scroll { dx, dy });
@@ -24630,6 +24689,101 @@ mod tests {
             news.iter().all(|(id, _)| *id != a),
             "the focused window heard about a click on another window: {news:?}"
         );
+    }
+
+    /// The grab is the window's until every button is up, not the first
+    /// button's: press left, press right, let go of left, and the right
+    /// button's press and release still belong to the window the gesture
+    /// began in, wherever the pointer is.
+    #[test]
+    fn the_grab_lasts_until_the_last_button_is_up() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let a = window_at_point(&mut comp, 50, 100, 150, 150);
+        let b = window_at_point(&mut comp, 400, 100, 150, 150);
+        move_to(&mut comp, 100, 150);
+        button_down(&mut comp, MouseButton::Left, 100, 150);
+        let _ = pointer_news(&mut comp);
+
+        // Out over the other window, and a second button.
+        move_to(&mut comp, 450, 150);
+        button_down(&mut comp, MouseButton::Right, 450, 150);
+        button_up(&mut comp, MouseButton::Left, 450, 150);
+        move_to(&mut comp, 460, 160);
+        button_up(&mut comp, MouseButton::Right, 460, 160);
+        assert_eq!(
+            pointer_news(&mut comp),
+            vec![
+                (a, "Move".to_string()),
+                (a, "ButtonPress(Right)".to_string()),
+                (a, "ButtonRelease(Left)".to_string()),
+                // Still grabbed: the right button is down.
+                (a, "Move".to_string()),
+                (a, "ButtonRelease(Right)".to_string()),
+                // Only now is the pointer where it really is.
+                (a, "Leave".to_string()),
+                (b, "Enter".to_string()),
+            ]
+        );
+        // And the grab is over: motion goes to the window under the pointer.
+        move_to(&mut comp, 470, 170);
+        assert_eq!(pointer_news(&mut comp), vec![(b, "Move".to_string())]);
+    }
+
+    /// A press during a grab is the grabbing window's even over another
+    /// window's title bar, which would otherwise be focused and start a move
+    /// in the middle of somebody else's gesture.
+    #[test]
+    fn a_press_during_a_grab_is_not_taken_by_another_window_s_frame() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let a = window_at_point(&mut comp, 50, 100, 150, 150);
+        let b = window_at_point(&mut comp, 400, 100, 150, 150);
+        let bar = comp
+            .window_ref(b)
+            .expect("b")
+            .title_bar_rect()
+            .expect("a decorated window has a title bar");
+        let (bx, by) = (bar.x + bar.width as i32 / 2, bar.y + bar.height as i32 / 2);
+        let b_was = comp.window_ref(b).map(|w| (w.x, w.y));
+        comp.focus_window(a);
+
+        button_down(&mut comp, MouseButton::Right, 100, 150);
+        move_to(&mut comp, bx, by);
+        button_down(&mut comp, MouseButton::Left, bx, by);
+        move_to(&mut comp, bx + 60, by + 40);
+        let news = pointer_news(&mut comp);
+        assert!(
+            news.contains(&(a, "ButtonPress(Left)".to_string())),
+            "the left press did not reach the grabbing window: {news:?}"
+        );
+        assert!(news.iter().all(|(id, _)| *id != b), "{news:?}");
+        assert_eq!(
+            comp.window_ref(b).map(|w| (w.x, w.y)),
+            b_was,
+            "the other window was dragged by a press that was not its own"
+        );
+        assert!(
+            !comp.window_ref(b).expect("b").focused,
+            "the other window took focus"
+        );
+        assert!(comp.window_ref(a).expect("a").focused);
+    }
+
+    /// A button a device reports pressed again while it is held -- its own
+    /// repeat -- is not a second press: the window would read two presses
+    /// with no release between as the start of a double click.
+    #[test]
+    fn a_held_button_pressed_again_is_not_delivered_twice() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let a = window_at_point(&mut comp, 50, 100, 150, 150);
+        move_to(&mut comp, 100, 150);
+        button_down(&mut comp, MouseButton::Left, 100, 150);
+        button_down(&mut comp, MouseButton::Left, 100, 150);
+        button_up(&mut comp, MouseButton::Left, 100, 150);
+        let presses = pointer_news(&mut comp)
+            .into_iter()
+            .filter(|(id, kind)| *id == a && kind.starts_with("ButtonPress"))
+            .count();
+        assert_eq!(presses, 1);
     }
 
     /// A release whose press no window saw goes nowhere, rather than to

@@ -208,7 +208,7 @@ two disagree.
 | `printenv` | Print all or part of the environment. |  | `coreutils` |  |
 | `printf` | Format and print data. | yes | `coreutils` |  |
 | `prlimit` | Get and set process resource limits. |  |  |  |
-| `ps` | Report process status. | yes | `coreutils` |  |
+| `ps` | Report a snapshot of the current processes. | yes | `coreutils` |  |
 | `pstree` | Process tree display utilities. |  |  |  |
 | `ptx` | Produce a permuted index of file contents. |  | `coreutils` |  |
 | `pv` | Monitor data flowing through a pipe (pipe viewer). |  |  |  |

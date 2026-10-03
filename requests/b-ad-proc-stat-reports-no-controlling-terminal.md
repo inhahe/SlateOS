@@ -35,7 +35,9 @@ What a user sees:
 The console row is a wrong answer rather than a missing one, which is why this
 is filed rather than noted: `w` is now procps' own algorithm (coreutils'
 `w.rs`, 144 cases agreeing with procps-ng 4.0.4 in `scripts/w-diff.sh`), and
-it is right exactly when these numbers are.
+it is right exactly when these numbers are. So, since 2026-10-02, is `ps`
+(586 cases agreeing in `scripts/ps-diff.sh`), whose TTY column names a
+terminal only when a file in `/dev` has its number -- `?` until then.
 
 ## Where
 

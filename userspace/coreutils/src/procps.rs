@@ -1,12 +1,13 @@
-//! procps-ng 4.0.4's library: the pieces `uptime` and `w` share.
+//! procps-ng 4.0.4's library: the pieces `uptime`, `w` and `ps` share.
 //!
 //! procps' programs are thin over `libproc2`. The line `uptime` prints is the
 //! first line `w` prints, and both come from one function in
 //! `library/uptime.c`; the process table `w` searches comes from
 //! `library/readproc.c` by way of `library/pids.c`, which is where `ps` gets
 //! its columns too. This module is those library functions, transcribed, so
-//! that two programs here which print the same line print it from one
-//! function -- as the two programs there do.
+//! that programs here which read the same file read it with one function --
+//! as the programs there do. `w` and `ps` read `/proc/<pid>` through
+//! [`readproc`] alone.
 //!
 //! | here | procps-ng 4.0.4 |
 //! |---|---|
@@ -17,6 +18,11 @@
 //! | [`hertz`] | `procps_hertz_get` |
 //! | [`escape_str`], [`escape_command`] | `library/escape.c` |
 //! | [`Task`], [`tasks`] | `procps_pids_reap(…, PIDS_FETCH_TASKS_ONLY)` for the items `w` asks for |
+//! | [`readproc`] | `library/readproc.c`: `stat2proc`, `status2proc` and the rest, and the walks over `/proc` |
+//! | [`scanf`] | glibc's `strtol`, `strtoul`, `atoi` and `sscanf`, as `readproc.c` applies them |
+//! | [`devname`] | `library/devname.c`: a terminal's number to its name |
+//! | [`pwcache`] | `library/pwcache.c`: user and group names by number |
+//! | [`sysinfo`] | `procps_pid_length`, `btime` from `procps_stat_new`, `MemTotal`, `procps_uptime`, `lookup_wchan` |
 //!
 //! # Why `fscanf`, and not `str::parse`
 //!
@@ -31,7 +37,13 @@
 use std::io;
 
 use localtime::Tm;
-use procinfo::{ProcFs, ProcessStat, ProcessStatus};
+
+pub mod devname;
+pub mod pwcache;
+pub mod readproc;
+pub mod scanf;
+pub mod sysinfo;
+use procinfo::ProcFs;
 
 use crate::extfloat::{self, ExtF80, Spec};
 use crate::utmp::{Record, is_user_process};
@@ -45,9 +57,6 @@ pub const LOADAVG_FILE: &str = "/proc/loadavg";
 /// `MAX_BUFSZ`: the size of `readproc`'s buffers for a command line and its
 /// escaped form -- `1024*64*2`, one of which is kept for the NUL.
 pub const MAX_BUFSZ: usize = 1024 * 64 * 2;
-
-/// The size of the buffer `stat2proc` escapes a process's name into.
-const CMD_BUFSZ: usize = 64;
 
 /// `sysconf`'s name for the clock tick rate: 2 on Linux and on SlateOS.
 const SC_CLK_TCK: i32 = 2;
@@ -392,7 +401,7 @@ fn esc_all(s: &mut [u8]) {
 
 /// procps' `escape_str`: `src` up to its first NUL and at most `bufsize - 1`
 /// bytes of it -- the `snprintf` into a `bufsize`-byte buffer -- made safe to
-/// print: [`esc_ctl`]'s rules in a UTF-8 locale (`utf8`), [`esc_all`]'s in
+/// print: `esc_ctl`'s rules in a UTF-8 locale (`utf8`), `esc_all`'s in
 /// any other.
 #[must_use]
 pub fn escape_str(src: &[u8], bufsize: usize, utf8: bool) -> Vec<u8> {
@@ -466,11 +475,12 @@ pub fn unvectored(raw: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// `fill_cmdline_cvt`: the `CMDLINE` item, from what `/proc/<pid>/cmdline`
-/// held (`raw`, empty when it could not be read) and, for a process with no
-/// command line, its name and state.
+/// held (`raw`; `None` when it could not be read, which is treated as an
+/// empty file is, as upstream's `read_unvectored` returns 0 for both) and,
+/// for a process with no command line, its name and state.
 #[must_use]
-pub fn cmdline_cvt(raw: &[u8], cmd: &[u8], state: u8, utf8: bool) -> Vec<u8> {
-    let text = match unvectored(raw) {
+pub fn cmdline_cvt(raw: Option<&[u8]>, cmd: &[u8], state: u8, utf8: bool) -> Vec<u8> {
+    let text = match raw.and_then(unvectored) {
         Some(line) => escape_str(&line, MAX_BUFSZ, utf8),
         None => escape_command(cmd, state, MAX_BUFSZ, utf8),
     };
@@ -507,73 +517,43 @@ pub struct Task {
     pub cmdline: Vec<u8>,
 }
 
-/// C's conversion of a wider integer to `int`: the low 32 bits, as two's
-/// complement. `sscanf`'s `%d` does this to a field too wide for it.
-fn low_i32(v: i64) -> i32 {
-    let b = v.to_le_bytes();
-    i32::from_le_bytes([b[0], b[1], b[2], b[3]])
-}
-
-/// The owner of `/proc/<pid>`, which `readproc` takes as the effective UID
-/// until `status` says otherwise.
-#[cfg(unix)]
-fn owner(meta: &std::fs::Metadata) -> u32 {
-    use std::os::unix::fs::MetadataExt;
-    meta.uid()
-}
-
-/// The host build has no owners; it never reads a real `/proc`.
-#[cfg(not(unix))]
-fn owner(_meta: &std::fs::Metadata) -> u32 {
-    0
-}
-
-/// `simple_readproc` for one process, or `None` if it has gone -- its
-/// directory or its `stat` cannot be read, which upstream also takes as
-/// "skip it" -- or its `stat` is not shaped like one.
-fn task(procfs: &ProcFs, pid: u64, utf8: bool) -> Option<Task> {
-    let id = i32::try_from(pid).ok()?;
-    let meta = std::fs::metadata(procfs.root().join(pid.to_string())).ok()?;
-    let stat = ProcessStat::parse(&procfs.read(&format!("{pid}/stat")).ok()?)?;
-    let (mut euid, mut ruid) = (owner(&meta), 0);
-    // An unreadable `status` leaves the two as they were, as upstream's does.
-    if let Ok(text) = procfs.read(&format!("{pid}/status")) {
-        let status = ProcessStatus::parse(&text);
-        ruid = status.uid.unwrap_or(0);
-        euid = status.euid.unwrap_or(euid);
-    }
-    // `stat2proc` escapes the name into 64 bytes before anything else sees it.
-    let cmd = escape_str(&stat.comm, CMD_BUFSZ, utf8);
-    // A command line that cannot be read is upstream's `n == 0`: the name in
-    // brackets instead, which is a better answer than no row.
-    let raw = procfs.read(&format!("{pid}/cmdline")).unwrap_or_default();
-    Some(Task {
-        pid: id,
-        start: stat.starttime_ticks,
-        euid,
-        ruid,
-        tpgid: low_i32(stat.tpgid),
-        pgrp: low_i32(i64::try_from(stat.pgrp).unwrap_or(-1)),
-        tty: low_i32(stat.tty_nr),
-        tics_all: stat.utime_ticks.wrapping_add(stat.stime_ticks),
-        cmdline: cmdline_cvt(&raw, &cmd, stat.state, utf8),
-    })
-}
-
-/// `procps_pids_reap(info, PIDS_FETCH_TASKS_ONLY)`: every process under
-/// `procfs`, in process-ID order -- which is the order Linux lists `/proc` in,
-/// and so the order upstream sees them -- leaving out any that exit while
-/// being read.
+/// `procps_pids_reap(info, PIDS_FETCH_TASKS_ONLY)` for `w`'s items: every
+/// process under `procfs`, in the order the directory lists them -- which on
+/// Linux is process-ID order, and so the order upstream sees them -- read by
+/// [`readproc`] as upstream's library reads them: `stat`, then `status`
+/// (whose `Tgid:`, `Pid:` and `Uid:` lines win), then `cmdline`. A process
+/// that exits while being read, or whose `stat` cannot be read, is left out.
 ///
 /// # Errors
 ///
 /// `/proc` itself could not be listed: upstream's `Unable to load process
 /// information`.
 pub fn tasks(procfs: &ProcFs, utf8: bool) -> io::Result<Vec<Task>> {
-    Ok(procfs
-        .process_ids()?
+    let fill = readproc::Fill {
+        stat: true,
+        status: true,
+        cmdline: true,
+        ..readproc::Fill::default()
+    };
+    // `w` asks for no names, so no password database is read.
+    let pw = pwcache::Pwcache::with_db(pwdb::Db::default());
+    let mut reader = readproc::Reader::new(procfs.root().to_path_buf(), fill, utf8, pw);
+    Ok(reader
+        .reap()?
         .into_iter()
-        .filter_map(|pid| task(procfs, pid, utf8))
+        .map(|p| Task {
+            pid: p.tgid,
+            start: p.start_time,
+            euid: p.euid,
+            ruid: p.ruid,
+            tpgid: p.tpgid,
+            pgrp: p.pgrp,
+            tty: p.tty,
+            tics_all: p.utime.wrapping_add(p.stime),
+            // Always read, so always there; `?` is what upstream shows for
+            // a command line that escapes to nothing.
+            cmdline: p.cmdline.unwrap_or_else(|| b"?".to_vec()),
+        })
         .collect())
 }
 
@@ -814,20 +794,17 @@ mod tests {
     #[test]
     fn the_cmdline_item_falls_back_to_the_name_and_then_to_a_question_mark() {
         assert_eq!(
-            cmdline_cvt(b"sleep\x00600\x00", b"sleep", b'S', true),
+            cmdline_cvt(Some(b"sleep\x00600\x00"), b"sleep", b'S', true),
             b"sleep 600"
         );
-        assert_eq!(cmdline_cvt(b"", b"kthreadd", b'S', true), b"[kthreadd]");
-        assert_eq!(cmdline_cvt(b"", b"sh", b'Z', true), b"[sh] <defunct>");
-        assert_eq!(cmdline_cvt(b"\x00", b"sh", b'S', true), b"?");
-        assert_eq!(cmdline_cvt(b"\x1b[2J\x00", b"x", b'S', true), b"?[2J");
-    }
-
-    #[test]
-    fn low_i32_is_cs_conversion() {
-        assert_eq!(low_i32(-1), -1);
-        assert_eq!(low_i32(34819), 34819);
-        assert_eq!(low_i32(0x1_0000_0008), 8);
+        assert_eq!(cmdline_cvt(None, b"kthreadd", b'S', true), b"[kthreadd]");
+        assert_eq!(
+            cmdline_cvt(Some(b""), b"kthreadd", b'S', true),
+            b"[kthreadd]"
+        );
+        assert_eq!(cmdline_cvt(None, b"sh", b'Z', true), b"[sh] <defunct>");
+        assert_eq!(cmdline_cvt(Some(b"\x00"), b"sh", b'S', true), b"?");
+        assert_eq!(cmdline_cvt(Some(b"\x1b[2J\x00"), b"x", b'S', true), b"?[2J");
     }
 
     #[test]

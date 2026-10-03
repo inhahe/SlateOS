@@ -4908,7 +4908,13 @@ _Port ext4 first. Don't write a custom filesystem._
   of `scripts/stty-diff.sh`'s 312 cases to the port's 312: its tables as glibc's Linux headers
   resolve them, the terminal through the new `libcall::termios` -- so the speeds are the C
   library's, shared field and all -- and upstream's two passes over argv, `getopt` in
-  return-in-order mode restarted after every setting, quirks included);
+  return-in-order mode restarted after every setting, quirks included); `ps` (2026-10-02,
+  procps-ng 4.0.4's, replacing the coreutils `ps` written here, which agreed on 26 of
+  `scripts/ps-diff.sh`'s 586 comparable cases to the port's 586: each case in its own PID
+  namespace over a fixture `/proc`, so a moving process table is a fixed one; `readproc`,
+  `devname` and `pwcache` as `coreutils::procps`, which `w` now reads `/proc` through as well;
+  the 275 format specifiers generated from `output.c`; and the second, BSD reading of the
+  arguments that makes `ps -aux` work);
   and `nproc`,
   re-ported because the standalone crate that had it was not GNU's and is retired. The multi-personality crates that answered some of these
   names in part lost those branches (§1005: `getopt` printenv/sync/cksum, `pv` truncate and shred, `nproc` arch/pathchk/users, `shuf` numfmt and factor, `base64` base32, `finger` pinky).
@@ -4935,7 +4941,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] crontab: user crontab management (edit/list/remove/validate/install, cron syntax validation)
   - [x] fw: firewall rule management (allow/deny by port/IP, policy, logging, persistence, JSON output)
   - [x] diskutil: disk management (list/info/format/verify/repair/TRIM, benchmark, S.M.A.R.T., partitions)
-  - [x] ps: process listing (tree view, custom columns, full/long/user formats, JSON output)
+  - [x] ps: procps-ng 4.0.4's, a coreutils program since 2026-10-02 (see the coreutils item; `scripts/ps-diff.sh`, 590 cases)
   - [x] free: memory info display (human-readable units, repeat mode, wide output, JSON)
   - [x] df: disk free space (color-coded usage %, filesystem type filter, inode mode, JSON)
   - [x] kill/killall: process termination (graceful IPC + force kill, name matching, wait/timeout)

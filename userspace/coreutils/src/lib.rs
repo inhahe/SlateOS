@@ -487,8 +487,10 @@
 //! - [`posixver`] — gnulib's `posix2_version`, the POSIX edition
 //!   `_POSIX2_VERSION` names, for `sort`, `tail`, `touch` and `uniq`.
 //! - [`procps`] — procps-ng's library: the status line `uptime` and `w` both
-//!   print (`procps_uptime_sprint`), the `/proc` numbers under it, the
-//!   process table `w` searches, and `escape.c`'s escaping of what it shows.
+//!   print (`procps_uptime_sprint`), the `/proc` numbers under it,
+//!   `readproc.c`'s reading of each process -- the table `w` searches and
+//!   `ps` lists -- with the terminal namer, the name cache and `escape.c`'s
+//!   escaping of what they show.
 //! - [`randint`] — gnulib's `randread` and `randint`, for `shred`.
 //! - [`remove`] — what `rm` and `mv` must agree on about deleting a tree.
 //! - [`setfields`] — the `cut`-style LIST of fields, for `cut` and `numfmt

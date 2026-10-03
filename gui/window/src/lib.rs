@@ -547,6 +547,37 @@ impl<T: Transport> WindowHandle<'_, T> {
             .confirm(RequestBody::Restore { window: self.id })
     }
 
+    /// Ask for the user's attention: a chat with a new message, a finished
+    /// download, a dialog the user has not seen. The window's taskbar tile
+    /// shows it until the window is next focused.
+    ///
+    /// Asks; does not take. Nothing raises the window or moves the keyboard to
+    /// it, and a window that already has the focus changes nothing by asking,
+    /// since it already has the user.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn request_attention(&mut self) -> Result<(), Error<T>> {
+        self.events.confirm(RequestBody::RequestAttention {
+            window: self.id,
+            wanted: true,
+        })
+    }
+
+    /// Withdraw [`Self::request_attention`], before the user has looked: the
+    /// download was cancelled, the message read on another device.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn cancel_attention(&mut self) -> Result<(), Error<T>> {
+        self.events.confirm(RequestBody::RequestAttention {
+            window: self.id,
+            wanted: false,
+        })
+    }
+
     /// Map or unmap the window.
     ///
     /// # Errors
@@ -2512,6 +2543,7 @@ pub mod testing {
                 RequestBody::ShellSetWindowPolicy { .. } => "ShellSetWindowPolicy",
                 RequestBody::GetDisplayInfo => "GetDisplayInfo",
                 RequestBody::GetHeldModifiers => "GetHeldModifiers",
+                RequestBody::RequestAttention { .. } => "RequestAttention",
                 RequestBody::SubscribeWindowList { .. } => "SubscribeWindowList",
                 RequestBody::SetTrayIcon { .. } => "SetTrayIcon",
                 RequestBody::RemoveTrayIcon { .. } => "RemoveTrayIcon",
@@ -3387,6 +3419,37 @@ mod tests {
         );
     }
 
+    /// Asking for attention and withdrawing it are one request each way, for
+    /// the window the handle names.
+    #[test]
+    fn a_window_asks_for_attention_and_can_take_it_back() {
+        let (mut events, server) = wired();
+        let id = open(&mut events, "Chat");
+        let mut handle = events.window_mut(id).expect("the window just opened");
+        handle.request_attention().unwrap();
+        handle.cancel_attention().unwrap();
+        let asked: Vec<RequestBody> = server
+            .borrow_mut()
+            .seen
+            .iter()
+            .filter(|r| matches!(r.body, RequestBody::RequestAttention { .. }))
+            .map(|r| r.body.clone())
+            .collect();
+        assert_eq!(
+            asked,
+            vec![
+                RequestBody::RequestAttention {
+                    window: id,
+                    wanted: true
+                },
+                RequestBody::RequestAttention {
+                    window: id,
+                    wanted: false
+                },
+            ]
+        );
+    }
+
     /// A compositor that will not say -- because it can tell this program is
     /// not the shell -- is an error to the caller, not "nothing held".
     #[test]
@@ -3496,6 +3559,7 @@ mod tests {
                 minimized: false,
                 maximized: false,
                 focused: false,
+                demands_attention: true,
                 // Stored and meaningless: a `Background` window is on every
                 // desktop, so nothing should ever compare this against the one
                 // showing. It is here to be carried, not obeyed.
@@ -3521,6 +3585,7 @@ mod tests {
                 minimized: true,
                 maximized: true,
                 focused: true,
+                demands_attention: false,
                 workspace: 3,
                 x: 64,
                 y: 32,

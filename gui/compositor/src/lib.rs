@@ -995,6 +995,11 @@ pub struct Window {
     pub maximized: bool,
     /// Whether this window currently has keyboard focus.
     pub focused: bool,
+    /// Whether the window has asked for the user's attention and has not been
+    /// focused since. Never set while [`Self::focused`] is: a focused window's
+    /// request is moot, and focusing a window clears it. See
+    /// [`Compositor::set_attention`].
+    pub demands_attention: bool,
     /// Z-order index (higher = more in front).
     pub z_order: u32,
     /// Which band of the stacking order this window may move within.
@@ -1211,6 +1216,7 @@ impl Window {
             minimized: false,
             maximized: false,
             focused: false,
+            demands_attention: false,
             z_order: 0,
             layer: spec.layer,
             blur_behind: spec.blur_behind,
@@ -3459,6 +3465,9 @@ pub enum CompositorRequest {
     /// [`CompositorResponse::Modifiers`]. A shell's question: see
     /// [`guiremote::control::RequestBody::GetHeldModifiers`].
     GetHeldModifiers,
+    /// Ask for, or withdraw a request for, the user's attention for a window:
+    /// see [`Compositor::set_attention`].
+    SetAttention { window_id: WindowId, wanted: bool },
     /// Re-read the user's `appearance.yaml` and adopt whatever it now says.
     ///
     /// Carries no settings: see
@@ -7273,6 +7282,8 @@ impl Compositor {
             && win.is_showing(workspace)
         {
             win.focused = true;
+            // The user is looking at it now, which is all the request asked.
+            win.demands_attention = false;
             win.dirty = true;
             self.focused_window = Some(window_id);
 
@@ -7285,6 +7296,26 @@ impl Compositor {
             self.pending_notifications
                 .push_back(EventNotification::FocusGained { window_id });
         }
+    }
+
+    /// Mark a window as asking for the user's attention (`wanted`), or withdraw
+    /// the request.
+    ///
+    /// Shown by the shell on the window's taskbar tile, through the window
+    /// list's `demands_attention`; cleared when the window is next focused
+    /// ([`Self::focus_window`]). A focused window's request is moot and changes
+    /// nothing, so the flag is never set on the window that has the user.
+    /// Nothing else follows from it: no raise, no focus, no sound.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] for an id that names no window.
+    pub fn set_attention(&mut self, window_id: WindowId, wanted: bool) -> CompositorResult<()> {
+        let win = self
+            .window_mut(window_id)
+            .ok_or(CompositorError::WindowNotFound(window_id))?;
+        win.demands_attention = wanted && !win.focused;
+        Ok(())
     }
 
     /// Bring a window to the user: un-minimize it and switch to its workspace
@@ -10589,6 +10620,14 @@ impl Compositor {
             // holding when it was opened, which the evdev source reads then
             // and hands over before the first client is answered.
             CompositorRequest::GetHeldModifiers => CompositorResponse::Modifiers(self.modifiers()),
+            CompositorRequest::SetAttention { window_id, wanted } => {
+                match self.set_attention(window_id, wanted) {
+                    Ok(()) => CompositorResponse::Ok,
+                    Err(e) => CompositorResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
             CompositorRequest::ReloadAppearance => {
                 self.settings_rewritten(SettingsGroup::Appearance);
                 // `Ok` whether or not anything changed. The client is being
@@ -11608,6 +11647,7 @@ impl Compositor {
                     // `self.focused_window`, so the list cannot disagree with
                     // the window it describes if the two ever drift apart.
                     focused: w.focused,
+                    demands_attention: w.demands_attention,
                     workspace: w.workspace,
                     // Reported, never accepted back. Nothing in `ShellControl`
                     // takes a rectangle — a snap names an edge (§505) and a
@@ -23231,6 +23271,47 @@ mod tests {
         assert!(
             comp.window_list().windows.iter().any(|w| w.id == id.raw()),
             "a window on another desktop disappeared from the window list"
+        );
+    }
+
+    /// A window that asks for the user's attention is listed as asking until
+    /// it is focused; a focused window's request is moot; and a request can be
+    /// withdrawn before anyone looks.
+    #[test]
+    fn a_window_asking_for_attention_is_listed_until_it_is_focused() {
+        let mut comp = ungated_compositor(800, 600);
+        let chat = comp.create_window("Chat".to_string(), 200, 150, 1);
+        let editor = comp.create_window("Editor".to_string(), 200, 150, 2);
+        comp.focus_window(editor);
+        let asking = |comp: &Compositor, id: WindowId| {
+            comp.window_list()
+                .windows
+                .iter()
+                .find(|w| w.id == id.raw())
+                .map(|w| w.demands_attention)
+        };
+        assert_eq!(asking(&comp, chat), Some(false));
+
+        // A new message, while the user works in the editor.
+        comp.set_attention(chat, true).expect("chat");
+        assert_eq!(asking(&comp, chat), Some(true));
+        // The editor has the user already: asking changes nothing.
+        comp.set_attention(editor, true).expect("editor");
+        assert_eq!(asking(&comp, editor), Some(false));
+
+        // The user looks: focusing it is the end of the request.
+        comp.focus_window(chat);
+        assert_eq!(asking(&comp, chat), Some(false));
+
+        // Withdrawn before anyone looked: the message was read elsewhere.
+        comp.focus_window(editor);
+        comp.set_attention(chat, true).expect("chat");
+        comp.set_attention(chat, false).expect("chat");
+        assert_eq!(asking(&comp, chat), Some(false));
+
+        assert!(
+            comp.set_attention(WindowId::from_raw(9999), true).is_err(),
+            "a window that does not exist cannot ask"
         );
     }
 

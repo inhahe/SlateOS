@@ -547,6 +547,14 @@ fn to_compositor_request(
             link.require_shell()?;
             CompositorRequest::GetHeldModifiers
         }
+        // Self-only, like every request about the sender's own window: a
+        // program may ask for the user's attention for its windows, never for
+        // another program's, which could make a convincing fake of somebody
+        // else's dialog demand to be looked at.
+        RequestBody::RequestAttention { window, wanted } => CompositorRequest::SetAttention {
+            window_id: link.resolve(window)?,
+            wanted,
+        },
         // Unlike every window request above there is no `link.resolve` on
         // either of these, and nothing to resolve: a reload names no window and
         // carries no settings, so there is no ownership question to ask. They
@@ -1436,6 +1444,50 @@ mod tests {
             .window_ref(WindowId::from_raw(theirs))
             .expect("still there");
         assert_eq!(victim.title, "Theirs");
+    }
+
+    /// A program asks for attention for its own windows only: one asking for
+    /// another program's could make a convincing fake of somebody else's
+    /// dialog demand to be looked at.
+    #[test]
+    fn a_window_asks_for_attention_for_itself_and_nobody_else() {
+        let (mut comp, mut link) = wired();
+        let mine = open(&mut comp, &mut link, "Mine");
+        let mut other = ClientLink::new(99);
+        let theirs = open(&mut comp, &mut other, "Theirs");
+        // A third window has the user, so neither request is moot.
+        let third = comp.create_window("Third".to_string(), 50, 50, 7);
+        comp.focus_window(third);
+
+        let responses = exchange(
+            &mut comp,
+            &mut link,
+            vec![
+                RequestBody::RequestAttention {
+                    window: mine,
+                    wanted: true,
+                },
+                RequestBody::RequestAttention {
+                    window: theirs,
+                    wanted: true,
+                },
+            ],
+        );
+        assert!(
+            matches!(responses[0].body, ResponseBody::Ok),
+            "{responses:?}"
+        );
+        assert!(
+            matches!(responses[1].body, ResponseBody::Error { .. }),
+            "asking for another program's window was not refused: {responses:?}"
+        );
+        let asking = |id: u64| {
+            comp.window_ref(WindowId::from_raw(id))
+                .expect("window")
+                .demands_attention
+        };
+        assert!(asking(mine));
+        assert!(!asking(theirs));
     }
 
     #[test]

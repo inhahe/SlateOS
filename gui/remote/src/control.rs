@@ -126,7 +126,10 @@ pub const RESPONSE_MAGIC: [u8; 4] = *b"CRSP";
 /// asks which modifier keys are down, and its answer
 /// [`ResponseBody::Modifiers`] (response tag `0x06`). Incompatible on 2's
 /// terms in both directions: an unknown tag stops either decoder.
-pub const CONTROL_VERSION: u8 = 20;
+/// **21** — [`RequestBody::RequestAttention`] (tag `0x2C`), by which a window
+/// asks for the user's attention, shown in the window list's
+/// `demands_attention`. Incompatible on 2's terms.
+pub const CONTROL_VERSION: u8 = 21;
 
 /// Control-frame header: magic + version + flags + message count.
 const CONTROL_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -1251,6 +1254,20 @@ pub enum RequestBody {
     /// shell-only request, refuses nobody until the kernel can say who a
     /// connection is.
     GetHeldModifiers,
+    /// Ask for the user's attention for one of the sender's own windows
+    /// (`wanted`), or withdraw the request. Answered with
+    /// [`ResponseBody::Ok`].
+    ///
+    /// A chat with a new message, a finished download, a dialog behind other
+    /// windows: the shell shows it on the window's taskbar tile, through the
+    /// window list's [`demands_attention`](crate::window_list::WindowInfo::demands_attention).
+    /// It lasts until the window is next focused, which clears it. A focused
+    /// window's request changes nothing -- it already has the user -- and is
+    /// still answered `Ok`, since the request was not wrong, only moot.
+    ///
+    /// Asking for attention, not for focus: nothing here raises the window or
+    /// moves the keyboard to it. The user decides whether to look.
+    RequestAttention { window: u64, wanted: bool },
     /// Recover the display from whatever has gone wrong with it: the same full
     /// redraw as the compositor's own Ctrl+Super+R.
     ///
@@ -1519,6 +1536,7 @@ enum RequestTag {
     PatchImage = 0x29,
     AnnounceSettings = 0x2A,
     GetHeldModifiers = 0x2B,
+    RequestAttention = 0x2C,
 }
 
 impl RequestTag {
@@ -1566,6 +1584,7 @@ impl RequestTag {
             0x29 => Self::PatchImage,
             0x2A => Self::AnnounceSettings,
             0x2B => Self::GetHeldModifiers,
+            0x2C => Self::RequestAttention,
             0x20 => Self::UngrabModifierChord,
             _ => return None,
         })
@@ -1896,6 +1915,11 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
             write_settings_name(out, *name);
         }
         RequestBody::GetHeldModifiers => out.push(RequestTag::GetHeldModifiers as u8),
+        RequestBody::RequestAttention { window, wanted } => {
+            out.push(RequestTag::RequestAttention as u8);
+            write_u64(out, *window);
+            out.push(u8::from(*wanted));
+        }
         RequestBody::RecoverDisplay => out.push(RequestTag::RecoverDisplay as u8),
         RequestBody::ShellControl { window, action } => {
             out.push(RequestTag::ShellControl as u8);
@@ -2319,6 +2343,10 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
             name: read_settings_name(r)?,
         },
         RequestTag::GetHeldModifiers => RequestBody::GetHeldModifiers,
+        RequestTag::RequestAttention => RequestBody::RequestAttention {
+            window: r.read_u64()?,
+            wanted: read_bool(r)?,
+        },
         RequestTag::RecoverDisplay => RequestBody::RecoverDisplay,
         RequestTag::ShellControl => {
             let window = r.read_u64()?;
@@ -2735,6 +2763,21 @@ mod tests {
                 },
             ),
             Request::new(28, RequestBody::GetHeldModifiers),
+            // Both polarities, for `SubscribeWindowList`'s reason.
+            Request::new(
+                29,
+                RequestBody::RequestAttention {
+                    window: 7,
+                    wanted: true,
+                },
+            ),
+            Request::new(
+                30,
+                RequestBody::RequestAttention {
+                    window: u64::MAX,
+                    wanted: false,
+                },
+            ),
         ];
         assert_eq!(round_trip_requests(&reqs), reqs);
     }
@@ -3015,8 +3058,13 @@ mod tests {
         );
         assert_eq!(
             RequestTag::from_byte(0x2C),
+            Some(RequestTag::RequestAttention),
+            "0x2C was taken by RequestAttention in control version 21"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x2D),
             None,
-            "0x2C is the next free tag"
+            "0x2D is the next free tag"
         );
     }
 

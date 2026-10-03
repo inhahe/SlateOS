@@ -104,7 +104,11 @@ pub const WINDOW_LIST_MAGIC: [u8; 4] = *b"WLST";
 ///   to skip a record it does not care about. It is still a version bump, for
 ///   the reason `3` gives — a v3 decoder stops one record early and reports the
 ///   frame as truncated, which is the loud failure this numbering exists for.
-pub const WINDOW_LIST_VERSION: u8 = 4;
+/// - `5` — a fifth state bit, [`demands_attention`](WindowInfo::demands_attention).
+///   No byte moved, and a v4 decoder refuses the bit rather than ignoring it
+///   (`STATE_KNOWN`), so it is a version bump on the input protocol's terms: a
+///   vocabulary change is a version change.
+pub const WINDOW_LIST_VERSION: u8 = 5;
 
 /// Window-list header: magic + version + flags + showing desktop + window count.
 const WINDOW_LIST_HEADER_LEN: usize = 4 + 1 + 1 + 4 + 4;
@@ -123,12 +127,14 @@ const STATE_VISIBLE: u8 = 1 << 0;
 const STATE_MINIMIZED: u8 = 1 << 1;
 const STATE_MAXIMIZED: u8 = 1 << 2;
 const STATE_FOCUSED: u8 = 1 << 3;
+const STATE_ATTENTION: u8 = 1 << 4;
 
 /// Bits with a meaning. A set bit outside this mask is rejected rather than
 /// ignored, for the reason `input::MOD_KNOWN` gives: when a later version adds
 /// a state, an older shell should say so loudly rather than quietly draw a
 /// window as though it did not have it.
-const STATE_KNOWN: u8 = STATE_VISIBLE | STATE_MINIMIZED | STATE_MAXIMIZED | STATE_FOCUSED;
+const STATE_KNOWN: u8 =
+    STATE_VISIBLE | STATE_MINIMIZED | STATE_MAXIMIZED | STATE_FOCUSED | STATE_ATTENTION;
 
 /// One window, as the rest of the desktop sees it.
 ///
@@ -176,6 +182,16 @@ pub struct WindowInfo {
     pub maximized: bool,
     /// Whether it currently holds keyboard focus. At most one entry has this.
     pub focused: bool,
+    /// Whether the window has asked for the user's attention -- a chat with a
+    /// new message, a finished download, a dialog behind other windows -- and
+    /// has not been focused since.
+    ///
+    /// Windows' flashing taskbar button, X11's urgency hint. The window asks
+    /// with [`RequestBody::RequestAttention`](crate::control::RequestBody::RequestAttention);
+    /// the compositor clears it when the window is next focused, and a focused
+    /// window's request changes nothing, because it already has the user. So a
+    /// focused entry never has this set.
+    pub demands_attention: bool,
     /// Which virtual desktop the window is filed on.
     ///
     /// Compare against [`WindowList::current_workspace`] to know whether the
@@ -224,6 +240,7 @@ impl WindowInfo {
             minimized: false,
             maximized: false,
             focused: false,
+            demands_attention: false,
             workspace: 0,
             x: 0,
             y: 0,
@@ -270,6 +287,9 @@ impl WindowInfo {
         }
         if self.focused {
             bits |= STATE_FOCUSED;
+        }
+        if self.demands_attention {
+            bits |= STATE_ATTENTION;
         }
         bits
     }
@@ -449,6 +469,7 @@ fn decode_one(r: &mut Reader<'_>) -> Result<WindowInfo, DecodeError> {
         minimized: state & STATE_MINIMIZED != 0,
         maximized: state & STATE_MAXIMIZED != 0,
         focused: state & STATE_FOCUSED != 0,
+        demands_attention: state & STATE_ATTENTION != 0,
         workspace,
         x,
         y,
@@ -489,6 +510,7 @@ mod tests {
                     minimized: false,
                     maximized: false,
                     focused: false,
+                    demands_attention: false,
                     // Furniture: recorded, ignored, and deliberately not equal
                     // to the showing desktop, so a codec that confused the two
                     // numbers cannot pass.
@@ -514,6 +536,7 @@ mod tests {
                     minimized: false,
                     maximized: true,
                     focused: true,
+                    demands_attention: false,
                     workspace: 2,
                     // A monitor arranged to the left of the primary one.
                     x: -1920,
@@ -533,6 +556,9 @@ mod tests {
                     minimized: true,
                     maximized: false,
                     focused: false,
+                    // Asking for attention while minimised: the case a
+                    // taskbar tile exists to show.
+                    demands_attention: true,
                     workspace: 7,
                     x: 37,
                     y: -12,
@@ -549,6 +575,7 @@ mod tests {
                     minimized: false,
                     maximized: false,
                     focused: false,
+                    demands_attention: false,
                     workspace: 1,
                     x: 12,
                     y: 1040,
@@ -779,8 +806,8 @@ mod tests {
 
     #[test]
     fn a_state_bit_with_no_meaning_is_refused_rather_than_ignored() {
-        // The point of STATE_KNOWN. A newer compositor that grows a fifth state
-        // must not have an older shell silently drop it.
+        // The point of STATE_KNOWN. A newer compositor that grows a state this
+        // build has no name for must not have an older shell silently drop it.
         let list = WindowList::new(0, vec![WindowInfo::new(1, 1, "W")]);
         let mut bytes = encode_window_list(&list);
         // header + id (8) + pid (8) + layer (1) = the state byte.

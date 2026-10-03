@@ -2724,23 +2724,24 @@ impl AppState {
         if !key.pressed {
             return Action::None;
         }
+        let plain = textline::is_plain(key.modifiers);
         // Above the field branch, which takes every character and returns.
-        if key.key == Key::F1 {
+        if key.key == Key::F1 && plain {
             self.show_help = !self.show_help;
             return Action::Redraw;
         }
         if self.show_help {
             // Modal, and Escape especially: on this window it quits.
-            if matches!(key.key, Key::Escape | Key::Enter) {
+            if plain && matches!(key.key, Key::Escape | Key::Enter) {
                 self.show_help = false;
             }
             return Action::Redraw;
         }
 
-        if let Some(field) = self.focus {
-            return self.handle_key_in_field(key, field);
-        }
-        if key.modifiers.ctrl {
+        // A Ctrl chord, not Ctrl held -- AltGr, which arrives as Ctrl+Alt,
+        // types: AltGr+S is a Polish `ś` -- and ahead of the fields, which
+        // took Ctrl+S as a typed `s` and never saved.
+        if textline::is_ctrl_chord(key.modifiers) {
             match key.key {
                 // The two keys that let a snippet outlive the window. The
                 // existing Export and Import controls move the history in and
@@ -2756,8 +2757,18 @@ impl AppState {
                     self.picker.open_to_read();
                     return Action::Redraw;
                 }
-                _ => {}
+                _ => return Action::None,
             }
+        }
+        if let Some(field) = self.focus {
+            return self.handle_key_in_field(key, field);
+        }
+        // The list's keys are its own only with nothing but Shift held: a
+        // chord with Alt or the Windows key is the window's or the
+        // desktop's, and arrives carrying its key -- Alt+Delete deleted the
+        // selected entry and Alt+Escape closed the window.
+        if !plain {
+            return Action::None;
         }
         let page = rows_that_fit(size.1).max(1);
         match key.key {
@@ -2795,6 +2806,21 @@ impl AppState {
 
     /// A keystroke while a text box holds the keyboard.
     fn handle_key_in_field(&mut self, key: &KeyEvent, field: Field) -> Action {
+        // What a key typed goes in, AltGr's among it -- and not a command's
+        // letter: Alt+W typed a `w`.
+        if textline::types_into_field(key) {
+            let typed: String = key.typed().collect();
+            self.field_mut(field).push_str(&typed);
+            if field == Field::Search {
+                self.scroll_offset = 0;
+                self.refresh_filter();
+            }
+            return Action::Redraw;
+        }
+        // The field's own keys take no chord: Alt+Enter added a tag.
+        if !textline::is_plain(key.modifiers) {
+            return Action::None;
+        }
         match key.key {
             Key::Escape => {
                 self.focus = None;
@@ -2822,21 +2848,7 @@ impl AppState {
                 }
                 Action::Redraw
             }
-            _ => {
-                // `typed()` already drops the control characters Enter, Tab,
-                // Escape and Backspace produce on most layouts, so an unmatched
-                // key cannot smuggle a `\r` into a tag.
-                let typed: String = key.typed().collect();
-                if typed.is_empty() {
-                    return Action::None;
-                }
-                self.field_mut(field).push_str(&typed);
-                if field == Field::Search {
-                    self.scroll_offset = 0;
-                    self.refresh_filter();
-                }
-                Action::Redraw
-            }
+            _ => Action::None,
         }
     }
 
@@ -3059,6 +3071,65 @@ mod tests {
             modifiers: guitk::event::Modifiers::ctrl(),
             text: String::new(),
         })
+    }
+
+    /// **A chord is neither a key of the list nor typing, and AltGr types**:
+    /// Alt+Delete deleted the selected entry and Alt+Escape closed the
+    /// window; AltGr+S, a Polish `ś`, opened the save dialog; and in a field
+    /// Ctrl+S typed an `s` rather than saving, and Alt+W typed a `w`.
+    #[test]
+    fn a_chord_is_neither_a_key_of_the_list_nor_typing_and_altgr_types() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let size = (1000.0, 700.0);
+        let key = |k: Key, text: &str, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: text.to_owned(),
+            })
+        };
+        let mut app = AppState::new();
+        app.store.add(
+            String::from("kept"),
+            ClipType::PlainText,
+            10,
+            String::from("t"),
+        );
+        app.refresh_filter();
+        app.selected_id = app.filtered_ids.first().copied();
+        for held in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for k in [Key::Delete, Key::Escape, Key::Enter, Key::F1, Key::S] {
+                assert_eq!(
+                    app.handle_event(&key(k, "", held), size),
+                    Action::None,
+                    "{held:?} {k:?} was taken"
+                );
+            }
+        }
+        assert_eq!(app.filtered_ids.len(), 1, "a chord deleted the entry");
+        assert!(!app.show_help, "a chord raised the keys");
+        assert!(!app.picker.is_open(), "AltGr+S opened the save dialog");
+
+        // In the search field: AltGr's `ś` is typed, a command's letter is
+        // not, and Ctrl+S saves rather than typing.
+        app.focus = Some(Field::Search);
+        app.handle_event(&key(Key::W, "w", Modifiers::alt()), size);
+        app.handle_event(&key(Key::W, "w", Modifiers::super_key()), size);
+        app.handle_event(&key(Key::S, "ś", altgr), size);
+        assert_eq!(
+            app.search_query, "ś",
+            "the field typed a command or lost AltGr's ś"
+        );
+        app.handle_event(&key(Key::Enter, "", Modifiers::alt()), size);
+        assert_eq!(app.focus, Some(Field::Search), "Alt+Enter left the field");
+        app.handle_event(&key(Key::S, "s", Modifiers::ctrl()), size);
+        assert_eq!(app.search_query, "ś", "Ctrl+S was typed");
+        assert!(app.picker.is_open(), "Ctrl+S in a field did not save");
     }
 
     /// An open picker takes the keys, and the list behind it does not move.

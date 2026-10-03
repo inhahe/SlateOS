@@ -45,10 +45,11 @@ use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, M
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::undo::{Travel, UndoHistory};
 use pathtext::ShowPath;
 
 use oswindow::app::{self, App, Response};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -109,7 +110,11 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("B", "Show or hide the sidebar"),
     ("= / -", "Zoom in / out"),
     ("Ctrl+0", "Reset the view"),
-    ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
+    ("Ctrl+Z / Ctrl+Y", "Undo / redo; Ctrl+Shift+Z redoes too"),
+    (
+        "Alt+Z / Alt+Shift+Z",
+        "The map before / after this, on any branch",
+    ),
     ("Ctrl+F", "Find a node"),
     ("Ctrl+N", "A new map"),
     ("Ctrl+O", "Open a map or an outline"),
@@ -228,6 +233,11 @@ const ROOT_NODE_W: f32 = 180.0;
 const ROOT_NODE_H: f32 = 50.0;
 /// Maximum undo/redo steps.
 const MAX_UNDO: usize = 200;
+/// [`MAX_UNDO`] as the history takes it.
+const UNDO_LIMIT: core::num::NonZeroUsize = match core::num::NonZeroUsize::new(MAX_UNDO) {
+    Some(limit) => limit,
+    None => core::num::NonZeroUsize::MIN,
+};
 /// Horizontal spacing between parent and children in radial layout.
 const RADIAL_H_GAP: f32 = 60.0;
 /// Vertical spacing between sibling nodes.
@@ -481,7 +491,7 @@ pub enum Action {
 // ============================================================================
 
 /// A single mind map containing a tree of nodes.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct MindMap {
     /// Name/title of this map.
     pub name: String,
@@ -498,8 +508,10 @@ pub struct MindMap {
     /// This map's history. It was the window's, replayed onto whichever map
     /// was showing -- and node numbers repeat from map to map, so undoing a
     /// change made on one map could delete a node of another.
-    pub undo_stack: VecDeque<Action>,
-    pub redo_stack: Vec<Action>,
+    ///
+    /// A tree, not a line: a change after an undo keeps what was undone as a
+    /// branch, reached with Alt+Z (C-Q24, `design-decisions.md` §1416).
+    pub history: UndoHistory<Action>,
     /// The map's own file, once it has one.
     pub document_path: Option<std::path::PathBuf>,
     /// Whether the map has changed since it was last saved or opened.
@@ -519,8 +531,7 @@ impl MindMap {
             root_id,
             id_gen: id_gen.clone(),
             id: 0,
-            undo_stack: VecDeque::new(),
-            redo_stack: Vec::new(),
+            history: UndoHistory::new(UNDO_LIMIT),
             document_path: None,
             dirty: false,
         }
@@ -1182,8 +1193,7 @@ fn mindmap_from_document(doc: &yamldoc::Document) -> Result<MindMap, String> {
             next: highest.saturating_add(1),
         },
         id: 0,
-        undo_stack: VecDeque::new(),
-        redo_stack: Vec::new(),
+        history: UndoHistory::new(UNDO_LIMIT),
         document_path: None,
         dirty: false,
     })
@@ -1960,32 +1970,61 @@ impl MindMapApp {
     fn push_undo(&mut self, action: Action) {
         let map = self.active_map_mut();
         map.dirty = true;
-        map.redo_stack.clear();
-        if map.undo_stack.len() >= MAX_UNDO {
-            map.undo_stack.pop_front();
-        }
-        map.undo_stack.push_back(action);
+        map.history.record(action);
     }
 
     /// Undo the last change to the map showing: that map's, from that map's
-    /// own history, whatever was done to other maps in between.
-    pub fn undo(&mut self) {
-        if let Some(action) = self.active_map_mut().undo_stack.pop_back() {
-            self.apply_reverse(&action);
-            let map = self.active_map_mut();
-            map.redo_stack.push(action);
-            // Undoing past a save leaves a map its file does not hold.
-            map.dirty = true;
-        }
+    /// own history, whatever was done to other maps in between. Answers
+    /// whether there was one.
+    pub fn undo(&mut self) -> bool {
+        let Some(action) = self.active_map_mut().history.undo() else {
+            return false;
+        };
+        self.apply_reverse(&action);
+        // Undoing past a save leaves a map its file does not hold.
+        self.active_map_mut().dirty = true;
+        true
     }
 
-    pub fn redo(&mut self) {
-        if let Some(action) = self.active_map_mut().redo_stack.pop() {
-            self.apply_forward(&action);
-            let map = self.active_map_mut();
-            map.undo_stack.push_back(action);
-            map.dirty = true;
+    /// Redo a change undone, on the branch the map is on. Answers whether
+    /// there was one.
+    pub fn redo(&mut self) -> bool {
+        let Some(action) = self.active_map_mut().history.redo() else {
+            return false;
+        };
+        self.apply_forward(&action);
+        self.active_map_mut().dirty = true;
+        true
+    }
+
+    /// Go to the map as it was before this version was first reached, on
+    /// whichever branch -- Alt+Z. Answers whether there was one.
+    pub fn earlier(&mut self) -> bool {
+        let steps = self.active_map_mut().history.earlier();
+        self.travel(steps)
+    }
+
+    /// Go to the version of the map first reached after this one, on
+    /// whichever branch -- Alt+Shift+Z. Answers whether there was one.
+    pub fn later(&mut self) -> bool {
+        let steps = self.active_map_mut().history.later();
+        self.travel(steps)
+    }
+
+    /// Take the steps a journey through the map's history hands back, in
+    /// order.
+    fn travel(&mut self, steps: Vec<Travel<Action>>) -> bool {
+        let moved = !steps.is_empty();
+        for step in steps {
+            match step {
+                Travel::Undo(action) => self.apply_reverse(&action),
+                Travel::Redo(action) => self.apply_forward(&action),
+            }
         }
+        if moved {
+            self.active_map_mut().dirty = true;
+        }
+        moved
     }
 
     fn apply_reverse(&mut self, action: &Action) {
@@ -2107,11 +2146,11 @@ impl MindMapApp {
     }
 
     pub fn can_undo(&self) -> bool {
-        !self.active_map_ref().undo_stack.is_empty()
+        self.active_map_ref().history.can_undo()
     }
 
     pub fn can_redo(&self) -> bool {
-        !self.active_map_ref().redo_stack.is_empty()
+        self.active_map_ref().history.can_redo()
     }
 
     // ========================================================================
@@ -2945,7 +2984,30 @@ impl MindMapApp {
             return self.handle_key_search(key);
         }
         let ctrl = key.modifiers.ctrl;
+        let moved = |did: bool| {
+            if did {
+                EventResult::Consumed
+            } else {
+                EventResult::Ignored
+            }
+        };
         match key.key {
+            // Alt+Z and Alt+Shift+Z: every version of the map there has been,
+            // in the order each was made -- the way back to a branch undone
+            // out of.
+            Key::Z if key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key => {
+                moved(if key.modifiers.shift {
+                    self.later()
+                } else {
+                    self.earlier()
+                })
+            }
+            // Any other key held with Alt or the Windows key is not this
+            // window's: Windows+ keys are the desktop's, and AltGr -- which
+            // arrives as Ctrl+Alt -- types a letter (Polish AltGr+Z is ż),
+            // which is no chord and must not be taken for what its plain key
+            // does either.
+            _ if key.modifiers.alt || key.modifiers.super_key => EventResult::Ignored,
             // `show_sidebar` gates the sidebar's draw and had no writer, so
             // the panel could never be closed. Safe as a plain key: the
             // editing and search modes above return before reaching here, so
@@ -3057,23 +3119,10 @@ impl MindMapApp {
                 EventResult::Consumed
             }
             // Undo and redo, which the app already tracks and had no way to
-            // reach.
-            Key::Z if ctrl => {
-                if self.can_undo() {
-                    self.undo();
-                    EventResult::Consumed
-                } else {
-                    EventResult::Ignored
-                }
-            }
-            Key::Y if ctrl => {
-                if self.can_redo() {
-                    self.redo();
-                    EventResult::Consumed
-                } else {
-                    EventResult::Ignored
-                }
-            }
+            // reach. Ctrl+Shift+Z redoes, as Ctrl+Y does.
+            Key::Z if ctrl && key.modifiers.shift => moved(self.redo()),
+            Key::Z if ctrl => moved(self.undo()),
+            Key::Y if ctrl => moved(self.redo()),
             Key::F if ctrl => {
                 self.toggle_search();
                 EventResult::Consumed
@@ -3130,10 +3179,13 @@ impl MindMapApp {
                 EventResult::Consumed
             }
             _ => {
-                if key.text.is_empty() || key.modifiers.ctrl {
+                // AltGr arrives as Ctrl+Alt and types -- Polish `ż` is
+                // AltGr+Z. A command carries its letter as text and types
+                // none of it: Ctrl or Alt on its own, the Windows key.
+                if !textline::types_into_field(key) {
                     return EventResult::Ignored;
                 }
-                self.edit_buffer.push_str(&key.text);
+                self.edit_buffer.extend(key.typed());
                 EventResult::Consumed
             }
         }
@@ -3163,11 +3215,13 @@ impl MindMapApp {
                 EventResult::Consumed
             }
             _ => {
-                if key.text.is_empty() || key.modifiers.ctrl {
+                // As a node's text takes it: AltGr's letters, and no
+                // command's.
+                if !textline::types_into_field(key) {
                     return EventResult::Ignored;
                 }
                 let mut q = self.search_query.clone();
-                q.push_str(&key.text);
+                q.extend(key.typed());
                 self.set_search_query(q);
                 EventResult::Consumed
             }
@@ -4664,6 +4718,166 @@ mod tests {
         assert_eq!(app.handle_event(&press_ctrl(Key::Z)), EventResult::Ignored);
     }
 
+    // ---- The history: a tree, walked with Alt+Z (C-Q24) --------------------
+
+    fn with_modifiers(key: Key, modifiers: Modifiers) -> Event {
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
+    }
+
+    fn alt_z(shift: bool) -> Event {
+        with_modifiers(
+            Key::Z,
+            Modifiers {
+                alt: true,
+                shift,
+                ..Modifiers::NONE
+            },
+        )
+    }
+
+    /// The names of the root's children, in order.
+    fn children_of_root(app: &MindMapApp) -> Vec<String> {
+        let map = app.active_map_ref();
+        map.node(map.root_id)
+            .map(|root| {
+                root.children
+                    .iter()
+                    .filter_map(|id| map.node(*id))
+                    .map(|n| n.text.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// **A change made after an undo starts a branch, and the undone one is
+    /// kept**: redo follows the new branch, and Alt+Z walks back through
+    /// every version of the map there has been, in the order each was made,
+    /// marking it changed; Alt+Shift+Z comes forward again.
+    #[test]
+    fn a_change_after_an_undo_keeps_the_undone_map_reachable_with_alt_z() {
+        let mut app = MindMapApp::new();
+        let root = app.active_map_ref().root_id;
+        app.selected_node = Some(root);
+        app.add_child_to_selected(String::from("Kept"));
+        assert!(app.undo());
+        assert!(children_of_root(&app).is_empty());
+        app.selected_node = Some(root);
+        app.add_child_to_selected(String::from("Instead"));
+        assert!(!app.redo(), "redo went onto the branch left");
+        app.active_map_mut().dirty = false;
+        assert_eq!(app.handle_event(&alt_z(false)), EventResult::Consumed);
+        assert_eq!(
+            children_of_root(&app),
+            ["Kept"],
+            "the undone change was lost"
+        );
+        assert!(
+            app.active_map_ref().dirty,
+            "a journey did not mark the map changed"
+        );
+        app.handle_event(&alt_z(false));
+        assert!(children_of_root(&app).is_empty());
+        app.handle_event(&alt_z(true));
+        app.handle_event(&alt_z(true));
+        assert_eq!(children_of_root(&app), ["Instead"]);
+        assert_eq!(
+            app.handle_event(&alt_z(true)),
+            EventResult::Ignored,
+            "past the newest map"
+        );
+    }
+
+    /// **Ctrl+Shift+Z redoes**, as Ctrl+Y does.
+    #[test]
+    fn ctrl_shift_z_redoes() {
+        let mut app = MindMapApp::new();
+        let n = app.active_map_ref().nodes.len();
+        app.handle_event(&press(Key::Tab));
+        app.handle_event(&press_ctrl(Key::Z));
+        assert_eq!(app.active_map_ref().nodes.len(), n);
+        let ctrl_shift = Modifiers {
+            ctrl: true,
+            shift: true,
+            ..Modifiers::NONE
+        };
+        assert_eq!(
+            app.handle_event(&with_modifiers(Key::Z, ctrl_shift)),
+            EventResult::Consumed
+        );
+        assert_eq!(app.active_map_ref().nodes.len(), n + 1);
+    }
+
+    /// **AltGr is not Ctrl.** It arrives as Ctrl+Alt; what it types -- ż on
+    /// a Polish keyboard -- is not a chord, so AltGr+Z undoes nothing.
+    #[test]
+    fn altgr_z_does_not_undo() {
+        let mut app = MindMapApp::new();
+        app.handle_event(&press(Key::Tab));
+        let n = app.active_map_ref().nodes.len();
+        let altgr = Modifiers {
+            ctrl: true,
+            alt: true,
+            ..Modifiers::NONE
+        };
+        app.handle_event(&with_modifiers(Key::Z, altgr));
+        assert_eq!(app.active_map_ref().nodes.len(), n, "AltGr+Z undid");
+    }
+
+    /// **Alt+Z held with the Windows key is the desktop's**, not a journey.
+    #[test]
+    fn alt_z_with_the_windows_key_goes_nowhere() {
+        let mut app = MindMapApp::new();
+        app.handle_event(&press(Key::Tab));
+        let n = app.active_map_ref().nodes.len();
+        let super_alt = Modifiers {
+            alt: true,
+            super_key: true,
+            ..Modifiers::NONE
+        };
+        app.handle_event(&with_modifiers(Key::Z, super_alt));
+        assert_eq!(app.active_map_ref().nodes.len(), n, "Super+Alt+Z went back");
+    }
+
+    /// **A key held with AltGr, Alt or the Windows key is no shortcut
+    /// here.** Tab adds a child; AltGr+Tab, Alt+Tab (the desktop's window
+    /// switcher) and Windows+Tab must not.
+    #[test]
+    fn a_key_held_with_altgr_alt_or_the_windows_key_is_no_shortcut() {
+        for modifiers in [
+            Modifiers {
+                ctrl: true,
+                alt: true,
+                ..Modifiers::NONE
+            },
+            Modifiers {
+                alt: true,
+                ..Modifiers::NONE
+            },
+            Modifiers {
+                super_key: true,
+                ..Modifiers::NONE
+            },
+        ] {
+            let mut app = MindMapApp::new();
+            let n = app.active_map_ref().nodes.len();
+            assert_eq!(
+                app.handle_event(&with_modifiers(Key::Tab, modifiers)),
+                EventResult::Ignored,
+                "{modifiers:?}"
+            );
+            assert_eq!(
+                app.active_map_ref().nodes.len(),
+                n,
+                "{modifiers:?}+Tab added a node"
+            );
+        }
+    }
+
     #[test]
     fn typing_in_the_search_box_searches_rather_than_editing_a_node() {
         let mut app = MindMapApp::new();
@@ -4679,6 +4893,67 @@ mod tests {
         assert_eq!(app.search_query, "");
         app.handle_event(&press(Key::Escape));
         assert!(!app.show_search);
+    }
+
+    fn held(k: Key, modifiers: Modifiers, text: &str) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        })
+    }
+
+    /// **A node's text and the search box take what AltGr types, and no
+    /// command's letter.** AltGr arrives as Ctrl+Alt -- `ż` is AltGr+Z on a
+    /// Polish keyboard -- and both refused every key held with Ctrl. A
+    /// command carries its letter as text on a real machine (Ctrl+K arrives
+    /// as `k`, Alt+F as `f`), and both typed Alt's and the Windows key's.
+    #[test]
+    fn a_node_and_the_search_box_take_altgr_letters_and_no_commands_letter() {
+        let altgr = Modifiers {
+            ctrl: true,
+            alt: true,
+            ..Modifiers::NONE
+        };
+        let commands = [
+            (Key::K, Modifiers::ctrl(), "k"),
+            (Key::F, Modifiers::alt(), "f"),
+            (Key::E, Modifiers::super_key(), "e"),
+        ];
+        let mut app = MindMapApp::new();
+        let root = app.active_map_ref().root_id;
+        app.selected_node = Some(root);
+        app.handle_event(&press(Key::F2));
+        let seeded = app.edit_buffer.clone();
+        assert_eq!(
+            app.handle_event(&held(Key::Z, altgr, "\u{17c}")),
+            EventResult::Consumed
+        );
+        for (k, modifiers, text) in commands {
+            assert_eq!(
+                app.handle_event(&held(k, modifiers, text)),
+                EventResult::Ignored,
+                "{modifiers:?}+{k:?} was typed into the node"
+            );
+        }
+        assert_eq!(app.edit_buffer, format!("{seeded}\u{17c}"));
+        app.handle_event(&press(Key::Escape));
+
+        app.handle_event(&press_ctrl(Key::F));
+        assert!(app.show_search);
+        assert_eq!(
+            app.handle_event(&held(Key::Z, altgr, "\u{17c}")),
+            EventResult::Consumed
+        );
+        for (k, modifiers, text) in commands {
+            assert_eq!(
+                app.handle_event(&held(k, modifiers, text)),
+                EventResult::Ignored,
+                "{modifiers:?}+{k:?} was typed into the search"
+            );
+        }
+        assert_eq!(app.search_query, "\u{17c}");
     }
 
     #[test]
@@ -5790,13 +6065,27 @@ mod tests {
         assert!(!app.can_redo());
     }
 
+    /// The history keeps the last `MAX_UNDO` changes and drops the oldest.
     #[test]
     fn test_app_undo_stack_limit() {
         let mut app = MindMapApp::new();
-        for i in 0..MAX_UNDO + 50 {
+        // Written out, not read from `MAX_UNDO`: a test that counts to the
+        // constant it checks counts to whatever the constant becomes
+        // (`known-issues.md` lesson 52).
+        const CAP: usize = 200;
+        for i in 0..CAP + 50 {
             app.add_child_to_selected(format!("Node {i}"));
         }
-        assert!(app.active_map_ref().undo_stack.len() <= MAX_UNDO);
+        let mut undone = 0;
+        while undone <= CAP && app.undo() {
+            undone += 1;
+        }
+        assert_eq!(undone, CAP);
+        assert_eq!(
+            app.active_map_ref().nodes.len(),
+            51,
+            "not the map before the oldest change kept"
+        );
     }
 
     // ---- Search ----
@@ -6550,6 +6839,10 @@ mod tests {
         app.active_map_mut().dirty = false;
         app.handle_event(&press_ctrl(Key::Z));
         assert!(app.active_map_ref().dirty, "an undo did not mark the map");
+        // And so is redoing it.
+        app.active_map_mut().dirty = false;
+        app.handle_event(&press_ctrl(Key::Y));
+        assert!(app.active_map_ref().dirty, "a redo did not mark the map");
     }
 
     /// L marks the map only when it moves something.

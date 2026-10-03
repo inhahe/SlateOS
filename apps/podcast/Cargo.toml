@@ -12,6 +12,8 @@ oswindow = { path = "../../gui/window" }
 # Ctrl+S writes through `safeio::write_str_atomically`, not `fs::write`, which
 # truncates the target before writing it.
 safeio = { path = "../safeio" }
+# `is_plain`, `is_ctrl_chord`, `types_into_field`: a chord is neither a player key nor its letter.
+textline = { path = "../textline" }
 
 [lints]
 workspace = true

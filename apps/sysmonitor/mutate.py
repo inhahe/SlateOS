@@ -50,6 +50,36 @@ MUTATIONS = [
         "",
         [READ, KEEP],
     ),
+    (
+        'AltGr is taken for Ctrl in the monitor',
+        '        if textline::is_ctrl_chord(key.modifiers) {\n            return match key.key {',
+        '        if key.modifiers.ctrl {\n            return match key.key {',
+        ['a_chord_is_neither_a_monitor_key_nor_typing'],
+    ),
+    (
+        "a chord works the monitor's keys",
+        '        if !textline::is_plain(key.modifiers) {\n            return EventResult::Ignored;\n        }\n',
+        '',
+        ['a_chord_is_neither_a_monitor_key_nor_typing'],
+    ),
+    (
+        'a chorded Escape or Enter leaves the filter',
+        '            Key::Escape | Key::Enter if textline::is_plain(key.modifiers) => {',
+        '            Key::Escape | Key::Enter => {',
+        ['a_chord_is_neither_a_monitor_key_nor_typing'],
+    ),
+    (
+        'Alt+Backspace deletes from the filter',
+        '            Key::Backspace if !textline::is_alt_or_windows_chord(key.modifiers) => {',
+        '            Key::Backspace => {',
+        ['a_chord_is_neither_a_monitor_key_nor_typing'],
+    ),
+    (
+        "the filter types a command's letter",
+        '            _ if !textline::types_into_field(key) => EventResult::Consumed,\n',
+        '',
+        ['a_chord_is_neither_a_monitor_key_nor_typing'],
+    ),
 ]
 
 if __name__ == "__main__":

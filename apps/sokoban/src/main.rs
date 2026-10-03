@@ -104,19 +104,20 @@
 //!     has. No level could enter the arm, so no test could own it. The check is
 //!     gone and the invariant is asserted over the whole table instead.
 
-use gamechrome::Chrome;
+use gamechrome::{Chrome, HistoryKey, help};
 use guitk::button::{Kind, State};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
+use guitk::listview::ListKey;
 use guitk::palette::{Palette, SurfaceStyle};
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::surface::Surface;
 use guitk::text;
+use guitk::undo::{Travel, UndoHistory};
 use oswindow::app::{self, App, Response};
-use std::collections::VecDeque;
 use std::process::ExitCode;
 
 // ── Colours ─────────────────────────────────────────────────────────
@@ -209,6 +210,11 @@ const BAND_DROP_ORDER: [usize; 3] = [2, 0, 1];
 /// longer be unwound to its opening position — which is why the header shows
 /// the depth.
 const MAX_UNDO: usize = 1000;
+/// [`MAX_UNDO`] as the history takes it.
+const UNDO_LIMIT: core::num::NonZeroUsize = match core::num::NonZeroUsize::new(MAX_UNDO) {
+    Some(limit) => limit,
+    None => core::num::NonZeroUsize::MIN,
+};
 
 /// The largest warehouse `parse_level` will accept, in cells. Bigger than any
 /// built-in level and small enough that a grid of cells is still a grid rather
@@ -627,11 +633,15 @@ pub enum Screen {
     Playing,
 }
 
-/// One move, enough to reverse it.
+/// One move, enough to reverse it and to make it again.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UndoEntry {
     /// Where the player stood before the move.
     pub player: Pos,
+    /// Where the player stood after it. A push says so itself -- the player
+    /// steps into the crate's old cell -- but a walk does not, and a redo
+    /// has to know.
+    pub dest: Pos,
     /// The crate that was pushed, as (before, after). `None` for a walk.
     pub push: Option<(Pos, Pos)>,
 }
@@ -894,11 +904,43 @@ pub fn first_visible(cursor: usize, count: usize, rows: usize) -> usize {
 }
 
 /// The keyboard reminder, per screen. The second line is the one dropped first
-/// when the footer has room for only one.
-const SELECT_FOOTER: [&str; 2] = ["Up/Down: choose   Enter: play", "1-9: jump to a level"];
+/// when the footer has room for only one, so each first line ends with the
+/// key to the rest.
+const SELECT_FOOTER: [&str; 2] = [
+    "Up/Down: choose   Enter: play   F1: all keys",
+    "1-9: jump to a level",
+];
 const PLAY_FOOTER: [&str; 2] = [
-    "Arrows/WASD: move   Z: undo   R: restart",
+    "Arrows/WASD: move   Z: undo   R: restart   F1: all keys",
     "Esc: menu   N: next level",
+];
+
+/// Every key this game answers, on either screen, on the list F1 raises.
+///
+/// The game had no list, and its footers had room for neither the history's
+/// keys -- Ctrl+Shift+Z and Alt+Z, which the operator's answer to C-Q24 added
+/// (`design-decisions.md` §1416) -- nor Home and End on the list of levels.
+/// **Each row is a key this game answers**, checked by
+/// `every_advertised_key_does_something`.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Arrows / WASD", "Walk; walking into a box pushes it"),
+    ("Z / Ctrl+Z", "Take back a move"),
+    ("Ctrl+Y / Ctrl+Shift+Z", "Make it again"),
+    (
+        "Alt+Z / Alt+Shift+Z",
+        "The warehouse before / after this, on any branch",
+    ),
+    ("R", "Start this level again"),
+    ("N", "The next level"),
+    ("Esc", "Back to the list of levels"),
+    (
+        "Enter / Space",
+        "Play the chosen level, or the next once solved",
+    ),
+    ("Home / End", "The first / last level on the list"),
+    ("Page Up / Page Down", "A page up / down the list of levels"),
+    ("1-9", "Choose level 1 to 9 on the list"),
+    ("F1 / ?", "This list"),
 ];
 
 /// The buttons on each screen, in the order `Layout::button_rects` lays them
@@ -936,7 +978,10 @@ pub struct Sokoban {
     boxes: Vec<Pos>,
     moves: usize,
     pushes: usize,
-    undo_stack: VecDeque<UndoEntry>,
+    /// Every move made, as a tree (C-Q24, `design-decisions.md` §1416): a
+    /// move made after an undo keeps the moves undone as a branch, reached
+    /// with Alt+Z.
+    history: UndoHistory<UndoEntry>,
     /// The size the last frame was drawn at, which is the size the next click
     /// is read against.
     size_drawn: (f32, f32),
@@ -946,6 +991,9 @@ pub struct Sokoban {
     palette: Palette,
     /// `palette`'s colours as this window draws them: rebuilt with it.
     colours: Colours,
+    /// Whether the list of keys is up. While it is, it is the window's: a
+    /// box pushed under it would be one the player cannot see.
+    show_help: bool,
 }
 
 impl Default for Sokoban {
@@ -978,10 +1026,11 @@ impl Sokoban {
             boxes: Vec::new(),
             moves: 0,
             pushes: 0,
-            undo_stack: VecDeque::new(),
+            history: UndoHistory::new(UNDO_LIMIT),
             size_drawn: (WINDOW_WIDTH, WINDOW_HEIGHT),
             palette: Palette::for_mode(false),
             colours: Colours::of(&Palette::for_mode(false)),
+            show_help: false,
         };
         // The table is validated at startup and is never empty, so level 0 is
         // always there; the answer is discarded because a game with no first
@@ -1034,7 +1083,7 @@ impl Sokoban {
         self.boxes.clone_from(&level.boxes);
         self.moves = 0;
         self.pushes = 0;
-        self.undo_stack.clear();
+        self.history.clear();
         true
     }
 
@@ -1064,7 +1113,7 @@ impl Sokoban {
         self.boxes.clone_from(&level.boxes);
         self.moves = 0;
         self.pushes = 0;
-        self.undo_stack.clear();
+        self.history.clear();
         self.screen = Screen::Playing;
     }
 
@@ -1152,8 +1201,8 @@ impl Sokoban {
     }
 
     #[must_use]
-    pub fn undo_depth(&self) -> usize {
-        self.undo_stack.len()
+    pub fn can_undo(&self) -> bool {
+        self.history.can_undo()
     }
 
     #[must_use]
@@ -1269,15 +1318,11 @@ impl Sokoban {
             self.move_box(from, to);
             self.pushes = self.pushes.saturating_add(1);
         }
-        self.undo_stack.push_back(UndoEntry {
+        self.history.record(UndoEntry {
             player: self.player,
+            dest,
             push,
         });
-        // A `VecDeque` so that dropping the oldest move is a pop rather than an
-        // O(n) shift of every move you have made.
-        if self.undo_stack.len() > MAX_UNDO {
-            self.undo_stack.pop_front();
-        }
         self.player = dest;
         self.moves = self.moves.saturating_add(1);
 
@@ -1291,18 +1336,69 @@ impl Sokoban {
 
     /// Take back the last move. Returns whether there was one.
     pub fn undo(&mut self) -> bool {
-        let Some(entry) = self.undo_stack.pop_back() else {
+        let Some(entry) = self.history.undo() else {
             return false;
         };
+        self.take_back(entry);
+        true
+    }
+
+    /// Make the move last taken back again, on the branch the game is on --
+    /// Ctrl+Y or Ctrl+Shift+Z -- its push included. Returns whether there
+    /// was one.
+    pub fn redo(&mut self) -> bool {
+        let Some(entry) = self.history.redo() else {
+            return false;
+        };
+        self.make_again(entry);
+        true
+    }
+
+    /// The position reached just before this one, on whichever branch --
+    /// Alt+Z: the way back to moves undone and then played over.
+    pub fn earlier(&mut self) -> bool {
+        let steps = self.history.earlier();
+        self.travel(steps)
+    }
+
+    /// The position reached just after this one -- Alt+Shift+Z.
+    pub fn later(&mut self) -> bool {
+        let steps = self.history.later();
+        self.travel(steps)
+    }
+
+    /// Take the steps a journey through the history hands back, in order.
+    fn travel(&mut self, steps: Vec<Travel<UndoEntry>>) -> bool {
+        let moved = !steps.is_empty();
+        for step in steps {
+            match step {
+                Travel::Undo(entry) => self.take_back(entry),
+                Travel::Redo(entry) => self.make_again(entry),
+            }
+        }
+        moved
+    }
+
+    /// Put the player back where `entry` found them, and the crate it
+    /// pushed, uncounting both.
+    fn take_back(&mut self, entry: UndoEntry) {
         self.player = entry.player;
-        // The lint bans bare `-`; the clamp is unreachable, because a non-empty
-        // stack means at least one move was counted.
         self.moves = self.moves.saturating_sub(1);
         if let Some((from, to)) = entry.push {
             self.move_box(to, from);
             self.pushes = self.pushes.saturating_sub(1);
         }
-        true
+    }
+
+    /// Make `entry`'s move again: the player to where it took them, the
+    /// crate it pushed pushed again, counting both.
+    fn make_again(&mut self, entry: UndoEntry) {
+        self.player = entry.dest;
+        self.moves = self.moves.saturating_add(1);
+        if let Some((from, to)) = entry.push {
+            self.move_box(from, to);
+            self.pushes = self.pushes.saturating_add(1);
+        }
     }
 
     /// The direction of one step from the player towards cell `(row, col)`, or
@@ -1361,6 +1457,17 @@ impl Sokoban {
         if self.screen == Screen::Playing && self.is_solved() {
             self.draw_win(&mut f, &l);
         }
+        // Last, over everything, because it is what the player asked to see.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut f,
+                &self.palette,
+                (l.window.w, l.window.h),
+                0.0,
+                SHORTCUTS,
+                help::CLOSES,
+            );
+        }
         f
     }
 
@@ -1407,7 +1514,10 @@ impl Sokoban {
                     self.pushes,
                     self.boxes_on_targets(),
                     self.target_count(),
-                    self.undo_stack.len()
+                    // Whether undo can go: the history is a tree and keeps
+                    // no count of how far (requests/e-c-undohistory-could-
+                    // say-how-far-undo-and-redo-go.md).
+                    if self.history.can_undo() { "yes" } else { "no" }
                 ),
             ),
         };
@@ -1767,7 +1877,7 @@ impl Sokoban {
             // Undo on an empty stack is drawn dim but still recorded: it
             // answers `false` and changes nothing, and a target that reports
             // "nothing happened" is the thing a test can hold on to.
-            let live = target != Target::Undo || !self.undo_stack.is_empty();
+            let live = target != Target::Undo || self.history.can_undo();
             let size = (r.h * 0.45).clamp(7.0, l.font);
             self.button(f, r, name, size, false, live, self.colours.mantle);
             f.hit(target, r);
@@ -1981,6 +2091,15 @@ impl Sokoban {
     }
 
     pub fn handle_mouse(&mut self, ev: &MouseEvent) -> EventResult {
+        // A click anywhere puts the list of keys away, and does nothing
+        // else: the warehouse under the card is one the player cannot see.
+        if self.show_help {
+            if let MouseEventKind::Press(_) = ev.kind {
+                self.show_help = false;
+                return EventResult::Consumed;
+            }
+            return EventResult::Ignored;
+        }
         if !matches!(ev.kind, MouseEventKind::Press(MouseButton::Left)) {
             return EventResult::Ignored;
         }
@@ -2007,6 +2126,43 @@ impl Sokoban {
         if !ev.pressed {
             return EventResult::Ignored;
         }
+        // The list of keys is modal: what raised it, Escape or Enter put it
+        // away, and nothing reaches the screen under it.
+        if self.show_help {
+            if help::closes(ev) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
+        if help::raises(ev) {
+            self.show_help = true;
+            return EventResult::Consumed;
+        }
+        // The history's keys, in the warehouse, read as every game reads them
+        // (C-Q24): Ctrl+Z, Ctrl+Y or Ctrl+Shift+Z, Alt+Z and Alt+Shift+Z.
+        if self.screen == Screen::Playing
+            && let Some(key) = HistoryKey::of(ev)
+        {
+            let moved = match key {
+                HistoryKey::Undo => self.undo(),
+                HistoryKey::Redo => self.redo(),
+                HistoryKey::Earlier => self.earlier(),
+                HistoryKey::Later => self.later(),
+            };
+            return if moved {
+                EventResult::Consumed
+            } else {
+                EventResult::Ignored
+            };
+        }
+        // Any other key held with Ctrl, Alt or the Windows key is not the
+        // game's. The letters that stand for a shortcut asked for no
+        // modifier, but the arrows and WASD asked for nothing: Ctrl+W, which
+        // closes windows, walked the warehouse keeper up, and Ctrl+S down.
+        let m = ev.modifiers;
+        if m.ctrl || m.alt || m.super_key {
+            return EventResult::Ignored;
+        }
         let plain = ev.modifiers == guitk::event::Modifiers::NONE;
         match self.screen {
             Screen::Select => self.key_select(ev, plain),
@@ -2016,11 +2172,20 @@ impl Sokoban {
 
     fn key_select(&mut self, ev: &KeyEvent, plain: bool) -> EventResult {
         let last = self.level_count().saturating_sub(1);
+        // Up and Down, Home and End, and Page Up and Down a menu's height
+        // at a time, as every list in the shell reads them
+        // (`guitk::listview::ListKey`). The page keys went nowhere.
+        if let Some(movement) = ListKey::of(ev) {
+            let page = self.layout().list_rows();
+            if let Some(to) = movement.target(Some(self.cursor), self.level_count(), page) {
+                self.cursor = to;
+            }
+            return EventResult::Consumed;
+        }
         match ev.key {
-            Key::Up | Key::W => self.cursor = self.cursor.saturating_sub(1),
-            Key::Down | Key::S => self.cursor = self.cursor.saturating_add(1).min(last),
-            Key::Home => self.cursor = 0,
-            Key::End => self.cursor = last,
+            // The game's own keys for up and down, in its menu too.
+            Key::W => self.cursor = self.cursor.saturating_sub(1),
+            Key::S => self.cursor = self.cursor.saturating_add(1).min(last),
             Key::Enter | Key::Space => self.start_level(self.cursor),
             Key::Num1
             | Key::Num2
@@ -2425,8 +2590,7 @@ mod tests {
     #[test]
     fn every_text_reads_on_what_is_under_it_in_either_theme() {
         let mut bad = Vec::new();
-        for (light, cards) in [(false, false), (true, false), (false, true), (true, true)] {
-            let p = palette(light, cards);
+        for (look, p) in gamechrome::legibility::looks() {
             let c = Colours::of(&p);
             let off = guitk::button::paint(
                 &p,
@@ -2444,7 +2608,7 @@ mod tests {
                 };
                 for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
                     bad.push(format!(
-                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        "{what}, {look}: {:?} {:.2}:1 on {:?}",
                         r.text,
                         r.ratio(),
                         r.ground
@@ -2605,6 +2769,104 @@ mod tests {
         assert!(g.try_move(Direction::Right), "the winning push was refused");
         assert!(g.is_solved(), "the fixture did not actually solve");
         g
+    }
+
+    /// Games chosen so that between them every key on the list of keys has
+    /// work: the list of levels, a warehouse, a move made (Ctrl+Z, Alt+Z) and
+    /// one taken back (Ctrl+Y, Alt+Shift+Z).
+    fn list_states() -> Vec<Sokoban> {
+        let mut undone = solved();
+        assert!(undone.undo(), "the winning push could not be taken back");
+        vec![game(), playing(), solved(), undone]
+    }
+
+    /// **Every key the list of keys advertises is one this game answers.**
+    ///
+    /// Read with `guitk::shortcut` and pressed, rather than matched against
+    /// a table beside it here. The property is "some screen answers this
+    /// key": Home is the list's, R the warehouse's.
+    #[test]
+    fn every_advertised_key_does_something() {
+        let mut checked = 0usize;
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = list_states()
+                    .iter_mut()
+                    .any(|g| probe::key(g, &stroke) == EventResult::Consumed);
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+                checked = checked.saturating_add(1);
+            }
+        }
+        assert!(checked >= 28, "only {checked} keystrokes were checked");
+    }
+
+    /// Every string the window paints at the probe's size, joined.
+    fn drawn_texts(g: &Sokoban) -> String {
+        text_commands(&g.draw(SIZE))
+            .into_iter()
+            .map(|(s, ..)| s)
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// **The list of keys reaches the window**, every row of it, and goes
+    /// when it is put away; and each footer's first line says how to raise
+    /// it, so a window with room for one line still shows where the rest
+    /// are.
+    #[test]
+    fn the_list_of_keys_reaches_the_window() {
+        let mut g = game();
+        assert!(
+            !drawn_texts(&g).contains(help::CLOSES),
+            "up before anybody asked"
+        );
+        for line in [SELECT_FOOTER[0], PLAY_FOOTER[0]] {
+            assert!(line.contains("F1"), "{line:?} does not say F1");
+        }
+        assert_eq!(
+            probe::key(&mut g, &probe::press(Key::F1)),
+            EventResult::Consumed
+        );
+        let shown = drawn_texts(&g);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+        probe::key(&mut g, &probe::press(Key::Escape));
+        assert!(
+            !drawn_texts(&g).contains(help::CLOSES),
+            "Escape did not close it"
+        );
+    }
+
+    /// **While the list of keys is up, the screen under it takes nothing**:
+    /// a box pushed under the card would be one the player cannot see. A
+    /// click puts the card away and does nothing else.
+    #[test]
+    fn the_list_of_keys_is_the_windows_while_it_is_up() {
+        let mut g = playing();
+        probe::key(&mut g, &probe::press(Key::F1));
+        let before = (g.moves, g.current, g.screen, g.player);
+        for key in [Key::Right, Key::D, Key::Z, Key::R, Key::N, Key::Num1] {
+            assert_eq!(
+                probe::key(&mut g, &probe::press(key)),
+                EventResult::Consumed
+            );
+            assert!(g.show_help, "{key:?} put the list away");
+        }
+        let now = (g.moves, g.current, g.screen, g.player);
+        assert_eq!(now, before, "a key reached the warehouse");
+        probe::click_background(&mut g);
+        assert!(!g.show_help, "a click did not put the list away");
+        let now = (g.moves, g.current, g.screen, g.player);
+        assert_eq!(now, before, "the click did something");
+        probe::key(&mut g, &probe::press(Key::F1));
+        probe::key(&mut g, &probe::press(Key::Enter));
+        assert!(!g.show_help, "Enter did not put the list away");
     }
 
     fn text_commands(f: &Frame<Target>) -> Vec<(String, f32, f32, f32, FontWeightHint)> {
@@ -3969,13 +4231,13 @@ mod tests {
     fn a_step_into_a_wall_changes_nothing() {
         let mut g = game();
         g.position(concat!("#####\n", "#@$.#\n", "#####\n"));
-        let before = (g.player(), g.moves(), g.undo_depth());
+        let before = (g.player(), g.moves(), g.can_undo());
         assert!(
             !g.try_move(Direction::Left),
             "the wall let the player through"
         );
         assert_eq!(
-            (g.player(), g.moves(), g.undo_depth()),
+            (g.player(), g.moves(), g.can_undo()),
             before,
             "a refused move still changed the game"
         );
@@ -4139,7 +4401,7 @@ mod tests {
         assert!(g.undo(), "there was nothing to undo after a step");
         assert_eq!(g.player(), before, "undo did not restore the player");
         assert_eq!(g.moves(), 0, "undo did not take back the move count");
-        assert_eq!(g.undo_depth(), 0, "undo left its own entry on the stack");
+        assert!(!g.can_undo(), "undo left its own entry in the history");
     }
 
     #[test]
@@ -4152,6 +4414,121 @@ mod tests {
         assert_eq!(g.player(), player, "undo did not restore the player");
         assert_eq!(g.boxes(), boxes, "undo did not put the crate back");
         assert_eq!(g.pushes(), 0, "undo did not take back the push count");
+    }
+
+    // ── The history: a tree, walked with Alt+Z (C-Q24) ──────────────────
+
+    fn held(ctrl: bool, alt: bool, shift: bool, key: Key) -> KeyEvent {
+        probe::press_with(
+            key,
+            guitk::event::Modifiers {
+                ctrl,
+                alt,
+                shift,
+                super_key: false,
+            },
+        )
+    }
+
+    /// **A move made after an undo starts a branch, and the undone one is
+    /// kept**: redo follows the new branch, and Alt+Z walks back through
+    /// every position there has been, in the order each was reached;
+    /// Alt+Shift+Z comes forward again.
+    #[test]
+    fn a_move_after_an_undo_keeps_the_undone_one_reachable_with_alt_z() {
+        let mut g = room();
+        let start = g.player();
+        assert!(g.try_move(Direction::Left));
+        let went_left = g.player();
+        assert!(g.undo());
+        assert!(g.try_move(Direction::Right));
+        let went_right = g.player();
+        assert!(!g.redo(), "redo went onto the branch left");
+        assert_eq!(
+            probe::key(&mut g, &held(false, true, false, Key::Z)),
+            EventResult::Consumed
+        );
+        assert_eq!(g.player(), went_left, "the move undone was lost");
+        probe::key(&mut g, &held(false, true, false, Key::Z));
+        assert_eq!((g.player(), g.moves()), (start, 0));
+        probe::key(&mut g, &held(false, true, true, Key::Z));
+        probe::key(&mut g, &held(false, true, true, Key::Z));
+        assert_eq!((g.player(), g.moves()), (went_right, 1));
+        assert_eq!(
+            probe::key(&mut g, &held(false, true, true, Key::Z)),
+            EventResult::Ignored,
+            "past the newest position"
+        );
+    }
+
+    /// **Ctrl+Z takes a move back, and Ctrl+Y and Ctrl+Shift+Z make it
+    /// again** -- a push with its crate and its count. There was no redo, and
+    /// Ctrl+Z was handed on.
+    #[test]
+    fn ctrl_z_and_ctrl_y_take_back_and_make_again() {
+        let mut g = nearly_solved();
+        assert!(g.try_move(Direction::Right), "the push was refused");
+        let after = (g.player(), g.boxes().to_vec(), g.moves(), g.pushes());
+        assert_eq!(
+            probe::key(&mut g, &held(true, false, false, Key::Z)),
+            EventResult::Consumed
+        );
+        assert_eq!(g.pushes(), 0, "Ctrl+Z did not take the push back");
+        assert_eq!(
+            probe::key(&mut g, &held(true, false, false, Key::Y)),
+            EventResult::Consumed
+        );
+        assert_eq!(
+            (g.player(), g.boxes().to_vec(), g.moves(), g.pushes()),
+            after,
+            "Ctrl+Y did not make the push again"
+        );
+        probe::key(&mut g, &held(true, false, false, Key::Z));
+        probe::key(&mut g, &held(true, false, true, Key::Z));
+        assert_eq!(
+            (g.player(), g.boxes().to_vec(), g.moves(), g.pushes()),
+            after,
+            "Ctrl+Shift+Z did not make it again"
+        );
+    }
+
+    /// **A key held with AltGr, Alt or the Windows key is not the game's.**
+    /// The arrows and WASD asked for nothing, so Windows+Left walked, and
+    /// AltGr+Z (ż on a Polish keyboard) is no undo.
+    #[test]
+    fn a_key_held_with_altgr_alt_or_the_windows_key_is_not_the_games() {
+        let windows = |key| {
+            probe::press_with(
+                key,
+                guitk::event::Modifiers {
+                    ctrl: false,
+                    alt: false,
+                    shift: false,
+                    super_key: true,
+                },
+            )
+        };
+        let mut g = room();
+        assert!(g.try_move(Direction::Left));
+        let before = (g.player(), g.moves());
+        for event in [
+            windows(Key::Left),
+            windows(Key::A),
+            held(false, true, false, Key::Left),
+            held(true, true, false, Key::Z),
+            windows(Key::Z),
+        ] {
+            assert_eq!(
+                probe::key(&mut g, &event),
+                EventResult::Ignored,
+                "{event:?}"
+            );
+        }
+        assert_eq!(
+            (g.player(), g.moves()),
+            before,
+            "a held key moved the keeper"
+        );
     }
 
     #[test]
@@ -4179,7 +4556,12 @@ mod tests {
         ] {
             assert!(g.try_move(dir), "{dir:?} was refused walking the room");
         }
-        while g.undo() {}
+        // Bounded: an undo that never ran out would hang the suite.
+        for _ in 0..20 {
+            if !g.undo() {
+                break;
+            }
+        }
         assert_eq!(
             (g.player(), g.boxes().to_vec()),
             start,
@@ -4207,9 +4589,14 @@ mod tests {
         // entries are dropped, so the stack stays bounded and the *recent*
         // moves are still undoable — which is the point of dropping the old
         // ones rather than refusing new ones.
+        //
+        // The cap is written out, not read from `MAX_UNDO`: a test that counts
+        // to the constant it checks counts to whatever the constant becomes
+        // (`known-issues.md` lesson 52).
+        const CAP: usize = 1000;
         let mut g = room();
         let mut done = 0_usize;
-        while done < MAX_UNDO.saturating_add(50) {
+        while done < CAP + 50 {
             let dir = if done.is_multiple_of(2) {
                 Direction::Left
             } else {
@@ -4218,8 +4605,12 @@ mod tests {
             assert!(g.try_move(dir), "step {done} was refused");
             done = done.saturating_add(1);
         }
-        assert_eq!(g.undo_depth(), MAX_UNDO, "the undo stack grew past its cap");
-        assert!(g.undo(), "the capped stack could not undo the last move");
+        // Counted by undoing, bounded: the history keeps no count.
+        let mut undone = 0;
+        while undone <= done && g.undo() {
+            undone += 1;
+        }
+        assert_eq!(undone, CAP, "the undo history grew past its cap");
     }
 
     // ── Winning ────────────────────────────────────────────────────
@@ -4431,7 +4822,7 @@ mod tests {
             "restart did not put the warehouse back"
         );
         assert_eq!(g.moves(), 0, "restart left the move count behind");
-        assert_eq!(g.undo_depth(), 0, "restart left the undo stack behind");
+        assert!(!g.can_undo(), "restart left the history behind");
         assert_eq!(
             g.screen(),
             Screen::Playing,
@@ -4681,7 +5072,7 @@ mod tests {
     #[test]
     fn the_undo_button_with_nothing_to_undo_reports_that_nothing_happened() {
         let mut g = playing();
-        assert_eq!(g.undo_depth(), 0, "the fresh level has moves to undo");
+        assert!(!g.can_undo(), "the fresh level has moves to undo");
         assert_eq!(
             probe::click(&mut g, Target::Undo),
             EventResult::Ignored,
@@ -5046,12 +5437,16 @@ mod tests {
 
     #[test]
     fn a_warehouse_shortcut_with_a_modifier_held_is_handed_on() {
+        // Not Ctrl+Z: the operator's answer to C-Q24 (design-decisions
+        // §1416) makes it the undo in every program that can undo, beside
+        // the bare `Z` -- `ctrl_z_and_ctrl_y_take_back_and_make_again`.
         let mut g = room();
         assert!(g.try_move(Direction::Left), "the step was refused");
         for ev in [
-            probe::ctrl(Key::Z),
             probe::ctrl(Key::R),
             probe::ctrl(Key::N),
+            probe::ctrl(Key::W),
+            probe::ctrl(Key::S),
         ] {
             assert_eq!(
                 probe::key(&mut g, &ev),
@@ -5163,6 +5558,41 @@ mod tests {
         );
     }
 
+    /// **Page Up and Page Down move the menu a page at a time** -- a page
+    /// being the rows it shows -- and stop at the ends, as every list in the
+    /// shell does. They went nowhere.
+    #[test]
+    fn the_page_keys_move_the_menu_a_page_at_a_time() {
+        let mut g = game();
+        probe::key(&mut g, &probe::press(Key::Home));
+        let page = g.layout().list_rows();
+        let last = LEVELS.len().saturating_sub(1);
+        assert!(
+            page > 1 && page < last,
+            "{page} rows of {}: nothing to page",
+            LEVELS.len()
+        );
+        probe::key(&mut g, &probe::press(Key::PageDown));
+        assert_eq!(g.cursor(), page, "Page Down did not move a page");
+        for _ in 0..LEVELS.len() {
+            probe::key(&mut g, &probe::press(Key::PageDown));
+        }
+        assert_eq!(g.cursor(), last, "Page Down ran past the last level");
+        probe::key(&mut g, &probe::press(Key::S));
+        assert_eq!(g.cursor(), last, "S ran past the last level");
+        probe::key(&mut g, &probe::press(Key::PageUp));
+        assert_eq!(g.cursor(), last - page, "Page Up did not move a page");
+        for _ in 0..LEVELS.len() {
+            probe::key(&mut g, &probe::press(Key::PageUp));
+        }
+        assert_eq!(g.cursor(), 0, "Page Up ran past the first level");
+        // The game's own W and S still step it.
+        probe::key(&mut g, &probe::press(Key::S));
+        assert_eq!(g.cursor(), 1);
+        probe::key(&mut g, &probe::press(Key::W));
+        assert_eq!(g.cursor(), 0);
+    }
+
     #[test]
     fn the_board_draws_a_square_for_every_tile_inside_the_warehouse() {
         let g = playing();
@@ -5253,6 +5683,20 @@ mod tests {
                 g.target_count()
             )),
             "the header does not show the crate tally: {joined}"
+        );
+        assert!(
+            joined.contains("Undo: yes"),
+            "the header does not say undo can go: {joined}"
+        );
+        assert!(g.undo());
+        let joined = text_commands(&g.draw(SIZE))
+            .into_iter()
+            .map(|(s, ..)| s)
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(
+            joined.contains("Undo: no"),
+            "the header says undo can go with nothing to take back: {joined}"
         );
     }
 

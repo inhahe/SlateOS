@@ -59,16 +59,16 @@ use dropzone::{
     DragModifiers, DropOperation, DropResult, DropZone, DropZoneEvent, DropZoneManager, Rect,
 };
 use fileops::{
-    ConflictAnswer, ConflictPolicy, ConflictQuestion, ErrorPolicy, FileOpEvent, FileOperation,
-    OperationExecutor, OperationPlan, OperationProgress, OperationSummary, RecycleBin, UndoStack,
-    UndoTarget,
+    ConflictAnswer, ConflictPolicy, ConflictQuestion, ErrorAnswer, ErrorPolicy, ErrorQuestion,
+    FileOpEvent, FileOperation, OperationExecutor, OperationPlan, OperationProgress,
+    OperationSummary, RecycleBin, UndoStack, UndoTarget,
 };
 use thumbs::{
     ThumbCategory, ThumbConfig, Thumbnail, ThumbnailCache, ThumbnailGenerator, ThumbnailRequest,
 };
 
 use std::collections::{HashSet, VecDeque};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -377,6 +377,29 @@ pub enum SortBy {
     Custom,
 }
 
+impl SortBy {
+    /// The column whose heading carries this sort's arrow, and whose heading
+    /// a click sorts by -- `None` for the hand arrangement, which is no
+    /// column's. One mapping, read both ways, so the arrow and the click
+    /// cannot come to disagree.
+    const fn column(self) -> Option<ColumnId> {
+        match self {
+            Self::Name => Some(ColumnId::NAME),
+            Self::Size => Some(ColumnId::SIZE),
+            Self::Modified => Some(ColumnId::DATE_MODIFIED),
+            Self::Type => Some(ColumnId::TYPE),
+            Self::Custom => None,
+        }
+    }
+
+    /// The sort a column's heading asks for, if the listing has one.
+    fn for_column(column: ColumnId) -> Option<Self> {
+        [Self::Name, Self::Size, Self::Modified, Self::Type]
+            .into_iter()
+            .find(|by| by.column() == Some(column))
+    }
+}
+
 /// Sort direction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SortDir {
@@ -467,7 +490,8 @@ struct Outcome {
 }
 
 impl Outcome {
-    /// Everything asked for happened.
+    /// Everything asked for happened -- or what did not, the user has been
+    /// told about already and said what to do.
     fn ok(message: String) -> Self {
         Self {
             message,
@@ -620,6 +644,9 @@ enum Modal {
     /// A paste, move or link stopped at a name the folder already has, under
     /// "Ask each time", waiting to be told what to do with it.
     Conflict { prompt: ConflictPrompt },
+    /// A file an operation could not carry out, under "ask" --
+    /// `ErrorPolicy::Ask`.
+    Failed { prompt: ErrorPrompt },
     /// An erasure from the recycle bin the user has been asked to confirm.
     ///
     /// Its own variant rather than a [`PendingAction`]: that one acts on the
@@ -699,6 +726,13 @@ enum PromptControl {
     ForTheRest,
 }
 
+/// Whether `k` is held with Alt alone -- not AltGr, which is Ctrl+Alt and
+/// types, and not with the Windows key, whose chords are the desktop's: the
+/// shape of back and forward, Alt+Left and Alt+Right.
+fn alt_alone(k: &KeyEvent) -> bool {
+    k.modifiers.alt && !k.modifiers.ctrl && !k.modifiers.super_key
+}
+
 /// The prompt's answers, left to right, with the words and the key each is
 /// drawn with. Keep both is first and is Enter's: of the four it is the one
 /// that loses nothing and changes nothing that is already there.
@@ -747,6 +781,10 @@ impl ConflictPrompt {
     /// modal -- except a tick, which the work behind it still needs.
     fn handle(&mut self, event: &Event) -> (bool, Option<ConflictAnswer>) {
         match event {
+            // Answered by a plain key: Alt+R, a chord that is no answer,
+            // replaced the file. Swallowed all the same -- the prompt is
+            // modal.
+            Event::Key(key) if key.pressed && !textline::is_plain(key.modifiers) => (true, None),
             Event::Key(key) if key.pressed => {
                 if key.key == Key::A {
                     self.for_the_rest = !self.for_the_rest;
@@ -799,7 +837,10 @@ impl ConflictPrompt {
             card_w,
             card_h,
             8.0,
-            appearance::Surface::Card,
+            // A panel, as a dialog is: filled in every look. A card is an
+            // outline alone under borders, and the prompt's words would sit
+            // on the dimmed listing with its rows showing through.
+            appearance::Surface::Panel,
         );
         let left = x + 20.0;
         tree.text_in_weighted(
@@ -864,16 +905,211 @@ impl ConflictPrompt {
     }
 }
 
-/// Where each of [`CONFLICT_BUTTONS`] goes in a width of `inner`: its offset
-/// from the left, its row and its width -- and how many rows that takes.
+/// The question a file operation stopped at because it could not carry a
+/// file out -- `ErrorPolicy::Ask`: try it again, skip it, skip it and every
+/// later failure, or stop.
 ///
-/// A button that would cross the right edge starts a new row; the first in a
-/// row always stays, so a width too narrow for even one button still gives
-/// every answer a place rather than none.
-fn conflict_button_rows(inner: f32) -> ([(f32, u8, f32); 4], u8) {
-    let mut placed = [(0.0, 0, 0.0); 4];
+/// Drawn here, as the taken-name prompt is: four answers do not map onto an
+/// alert's OK, Cancel, Yes and No. It used to be no question at all: the
+/// window skipped a failed file and said so at the end, so a copy that met a
+/// file held open by another program could not be told to wait and go
+/// again.
+struct ErrorPrompt {
+    /// The operation that asked, by its plan's id: the answer goes back to
+    /// the operation that stopped, whatever has started or finished since.
+    plan: u64,
+    /// "Could not copy “notes.txt”".
+    title: String,
+    /// Why, as the system said it.
+    why: String,
+    /// Where each answer was drawn, for clicks. Empty until the first frame.
+    hits: Vec<(ErrorAnswer, Rect)>,
+}
+
+/// The failure prompt's answers, left to right, with the words and the key
+/// each is drawn with. Try again is first and is Enter's, as in every file
+/// manager that asks: the cause is often gone by the time anyone reads the
+/// question -- a drive plugged back in, a file closed in another program.
+const ERROR_BUTTONS: [(ErrorAnswer, &str, Key); 4] = [
+    (ErrorAnswer::TryAgain, "Try again (T)", Key::T),
+    (ErrorAnswer::Skip, "Skip (S)", Key::S),
+    (ErrorAnswer::SkipAll, "Skip all (A)", Key::A),
+    (ErrorAnswer::Stop, "Stop (Esc)", Key::Escape),
+];
+
+/// What an operation was doing, for "Could not ... ".
+fn present_verb(operation: &FileOperation) -> &'static str {
+    match operation {
+        FileOperation::Copy => "copy",
+        FileOperation::Move => "move",
+        FileOperation::Delete => "delete",
+        FileOperation::Recycle => "move to the recycle bin",
+        FileOperation::Restore => "restore",
+        FileOperation::Link => "make a link to",
+    }
+}
+
+impl ErrorPrompt {
+    fn new(plan: u64, operation: &FileOperation, question: &ErrorQuestion) -> Self {
+        let name = question.path.file_name().map_or_else(
+            || question.path.shown().to_string(),
+            |n| n.shown().to_string(),
+        );
+        Self {
+            plan,
+            title: format!(
+                "Could not {} \u{201c}{name}\u{201d}",
+                present_verb(operation)
+            ),
+            why: question.error.clone(),
+            hits: Vec::new(),
+        }
+    }
+
+    /// What an event does to the prompt: whether it was the prompt's, and
+    /// the answer it gave, if it gave one. Every key and click is the
+    /// prompt's while it is up -- it is modal -- except a tick.
+    fn handle(&mut self, event: &Event) -> (bool, Option<ErrorAnswer>) {
+        match event {
+            // Answered by a plain key, as the taken-name prompt is.
+            Event::Key(key) if key.pressed && !textline::is_plain(key.modifiers) => (true, None),
+            Event::Key(key) if key.pressed => {
+                if key.key == Key::Enter {
+                    return (true, Some(ErrorAnswer::TryAgain));
+                }
+                let answer = ERROR_BUTTONS
+                    .iter()
+                    .find(|(_, _, k)| *k == key.key)
+                    .map(|(answer, _, _)| *answer);
+                (true, answer)
+            }
+            Event::Key(_) => (true, None),
+            Event::Mouse(m) => {
+                if m.kind != MouseEventKind::Press(MouseButton::Left) {
+                    return (true, None);
+                }
+                let answer = self
+                    .hits
+                    .iter()
+                    .find(|(_, r)| r.contains(m.x, m.y))
+                    .map(|(answer, _)| *answer);
+                (true, answer)
+            }
+            _ => (false, None),
+        }
+    }
+
+    /// Draw the prompt over the window, dimming what is behind it, and note
+    /// where each answer went.
+    fn render(&mut self, pal: &Palette, w: f32, h: f32, tree: &mut RenderTree) {
+        tree.fill_rect(0.0, 0.0, w, h, with_alpha(pal.crust, 140));
+        let card_w = PROMPT_W.min(w - 32.0).max(0.0);
+        let inner = (card_w - 40.0).max(0.0);
+        let (buttons, rows) = prompt_button_rows(ERROR_BUTTONS.map(|(_, label, _)| label), inner);
+        let why = why_lines(&self.why, inner);
+        // The lines past the first push the answers down, and the card
+        // grows to hold them.
+        let more_why = WHY_LINE * f32::from(u8::try_from(why.len().saturating_sub(1)).unwrap_or(0));
+        let card_h = ERROR_PROMPT_H + more_why + PROMPT_ROW * f32::from(rows.saturating_sub(1));
+        let x = ((w - card_w) / 2.0).max(0.0);
+        let y = ((h - card_h) / 2.0).max(0.0);
+        pal.push_surface(
+            &mut tree.commands,
+            x,
+            y,
+            card_w,
+            card_h,
+            8.0,
+            // A panel, as a dialog is: filled in every look. A card is an
+            // outline alone under borders, and the prompt's words would sit
+            // on the dimmed listing with its rows showing through.
+            appearance::Surface::Panel,
+        );
+        let left = x + 20.0;
+        tree.text_in_weighted(
+            left,
+            y + 18.0,
+            inner,
+            &self.title,
+            pal.text,
+            14.0,
+            guitk::render::FontWeightHint::Bold,
+        );
+        let mut line_y = y + 48.0;
+        for line in &why {
+            tree.text_in(left, line_y, inner, line, pal.subtext1, 12.0);
+            line_y += WHY_LINE;
+        }
+
+        self.hits.clear();
+        let first_row = y + ERROR_PROMPT_H - 50.0 + more_why;
+        for (i, ((answer, label, _), (dx, row, bw))) in
+            ERROR_BUTTONS.iter().zip(buttons).enumerate()
+        {
+            let rect = Rect::new(left + dx, first_row + PROMPT_ROW * f32::from(row), bw, 30.0);
+            let (surface, ink) = if i == 0 {
+                (appearance::Surface::Selected, pal.ink(pal.blue))
+            } else {
+                (appearance::Surface::Card, pal.text)
+            };
+            pal.push_surface(
+                &mut tree.commands,
+                rect.x,
+                rect.y,
+                rect.w,
+                rect.h,
+                4.0,
+                surface,
+            );
+            tree.text_in(
+                rect.x + 12.0,
+                rect.y + 8.0,
+                (bw - 20.0).max(0.0),
+                label,
+                ink,
+                12.0,
+            );
+            self.hits.push((*answer, rect));
+        }
+    }
+}
+
+/// The failure prompt's height with every answer on one row and the reason
+/// on one line.
+const ERROR_PROMPT_H: f32 = 140.0;
+
+/// The distance between the lines of a failure's reason.
+const WHY_LINE: f32 = 18.0;
+
+/// The most lines a failure's reason is given.
+const WHY_LINES: usize = 3;
+
+/// A failure's reason in lines that fit `inner`: at most [`WHY_LINES`], the
+/// last cut with "…" when there is more.
+///
+/// Wrapped rather than drawn on one line, because a system's reason often
+/// runs past one -- "The process cannot access the file because it is being
+/// used by another process." -- and one line cut at the card's edge loses the
+/// end, which is the part that says what is in the way.
+fn why_lines(why: &str, inner: f32) -> Vec<String> {
+    let weight = guitk::render::FontWeightHint::Regular;
+    let mut lines = guitk::text::wrap_hard(why, inner, 12.0, weight);
+    if lines.len() > WHY_LINES {
+        let rest = lines.split_off(WHY_LINES - 1).join(" ");
+        lines.push(guitk::text::elide(&rest, inner, "\u{2026}", 12.0, weight));
+    }
+    lines
+}
+
+/// Where each of `labels` goes as a prompt's buttons in a width of `inner`:
+/// its offset from the left, its row and its width -- and how many rows that
+/// takes. A button that would cross the right edge starts a new row; the
+/// first in a row always stays, so a width too narrow for even one button
+/// still gives every answer a place rather than none.
+fn prompt_button_rows<const N: usize>(labels: [&str; N], inner: f32) -> ([(f32, u8, f32); N], u8) {
+    let mut placed = [(0.0, 0, 0.0); N];
     let (mut dx, mut row) = (0.0_f32, 0_u8);
-    for (slot, (_, label, _)) in placed.iter_mut().zip(CONFLICT_BUTTONS.iter()) {
+    for (slot, label) in placed.iter_mut().zip(labels) {
         let bw =
             guitk::text::padded_width(label, 12.0, 12.0, guitk::render::FontWeightHint::Regular);
         if dx > 0.0 && dx + bw > inner {
@@ -884,6 +1120,16 @@ fn conflict_button_rows(inner: f32) -> ([(f32, u8, f32); 4], u8) {
         dx += bw + 8.0;
     }
     (placed, row.saturating_add(1))
+}
+
+/// Where each of [`CONFLICT_BUTTONS`] goes in a width of `inner`: its offset
+/// from the left, its row and its width -- and how many rows that takes.
+///
+/// A button that would cross the right edge starts a new row; the first in a
+/// row always stays, so a width too narrow for even one button still gives
+/// every answer a place rather than none.
+fn conflict_button_rows(inner: f32) -> ([(f32, u8, f32); 4], u8) {
+    prompt_button_rows(CONFLICT_BUTTONS.map(|(_, label, _)| label), inner)
 }
 
 /// One side of a taken name, for the prompt: its size and when it last
@@ -1051,6 +1297,21 @@ pub struct ExplorerState {
     /// pointer overwrite "Deleted 5 items, 2 failed" on its way past a button
     /// would lose the one line the user needed to read.
     hover_hint: String,
+    /// The folder whose columns are shown: set on entering a folder, so a
+    /// listing of the same one again keeps columns shown and not saved.
+    columns_folder: Option<PathBuf>,
+    /// How a program is started on a file: its path and its arguments. A
+    /// field so the tests can see what would start without starting it.
+    launch: fn(&OsStr, &[OsString]) -> std::io::Result<()>,
+    /// Where installed programs' desktop entries are looked for, for what
+    /// opens a file nobody chose a program for and for Open With: the
+    /// environment's data directories, which `main` sets -- none otherwise,
+    /// so a test's explorer knows SlateOS's own programs on every machine.
+    app_dirs: desktopentry::scan::DataDirs,
+    /// The programs the file menu's Open With offered, in its order: the
+    /// row chosen starts the program it showed, whatever was installed
+    /// since.
+    open_with: Vec<desktopentry::App>,
     /// The context menu a right-click opened, if any.
     ///
     /// `guitk::menu::ContextMenu`, not a list drawn here: the shell already
@@ -1184,6 +1445,10 @@ pub struct ExplorerState {
     /// user's choice from the folder menu, kept in `explorer.yaml` (C-Q26).
     /// Until 2026-09-27 it was always "keep both", for everyone.
     pub conflict_policy: ConflictPolicy,
+    /// What an operation does with a file it cannot carry out -- ask, or
+    /// skip it and say so at the end: the user's choice from the folder
+    /// menu, kept in `explorer.yaml` (design-decisions §1228).
+    pub failure_policy: ErrorPolicy,
     /// Thumbnails generated but not yet handed to the compositor.
     ///
     /// Drained by [`Self::take_pending_uploads`]. The explorer cannot register
@@ -1218,9 +1483,11 @@ pub struct ExplorerState {
 
 impl ExplorerState {
     pub fn new(start_path: &Path) -> Self {
-        // Read once, before the literal: two fields are derived from it, and
-        // reading the file twice would let them disagree if it changed between.
-        let prefs = settingsfile::load(columnprefs::CONFIG_NAME);
+        // The out-of-the-box choices until `take_up_prefs`, below, takes up
+        // the file's -- from one reading of it, the same a re-read makes. The
+        // file was read five times here, and one changed between two of the
+        // readings would have given the window half of each.
+        let none = yamldoc::Document::new();
         let mut state = Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             current_path: start_path.to_path_buf(),
@@ -1254,40 +1521,35 @@ impl ExplorerState {
             show_help: false,
             manual_order: Vec::new(),
             row_drag: None,
-            preview_open: columnprefs::preview_open(&prefs),
-            preview_split: columnprefs::preview_split(&prefs),
-            preview_side: columnprefs::preview_side(&prefs),
+            preview_open: columnprefs::preview_open(&none),
+            preview_split: columnprefs::preview_split(&none),
+            preview_side: columnprefs::preview_side(&none),
             preview_text: None,
             divider_grab: None,
             search_showing: None,
             search_origin: None,
             columns: ColumnManager::with_defaults(),
-            column_prefs: prefs,
+            columns_folder: None,
+            launch: start_program,
+            app_dirs: desktopentry::scan::DataDirs::new(Vec::new()),
+            open_with: Vec::new(),
+            column_prefs: settingsfile::load(columnprefs::CONFIG_NAME),
             thumbs: ThumbnailCache::default_capacity(),
             thumb_gen: ThumbnailGenerator::with_default_disk_cache(),
-            icon_labels: columnprefs::icon_labels(&settingsfile::load(columnprefs::CONFIG_NAME)),
-            conflict_policy: columnprefs::conflict_policy(&settingsfile::load(
-                columnprefs::CONFIG_NAME,
-            )),
-            thumb_config: {
-                // The size the user last chose, if they chose one. Applied
-                // here rather than after construction so the first listing is
-                // already generating at the right size -- otherwise every
-                // thumbnail on screen at start-up is made twice.
-                let mut config = ThumbConfig::default();
-                if let Some(size) =
-                    columnprefs::thumb_size(&settingsfile::load(columnprefs::CONFIG_NAME))
-                {
-                    config.size = size;
-                }
-                config
-            },
+            icon_labels: columnprefs::icon_labels(&none),
+            conflict_policy: columnprefs::conflict_policy(&none),
+            failure_policy: columnprefs::failure_policy(&none),
+            thumb_config: ThumbConfig::default(),
             pending_uploads: Vec::new(),
             thumb_worker: None,
             uploaded: HashSet::new(),
             dropzone: DropZoneManager::new(start_path.to_path_buf()),
             drag: None,
         };
+        // Before the first listing, so that it is already generating
+        // thumbnails at the size the user chose -- otherwise every one on
+        // screen at start-up is made twice.
+        state.take_up_prefs();
         state.sync_sort_indicator();
         state.load_directory();
         state
@@ -1376,18 +1638,124 @@ impl ExplorerState {
             return;
         }
         let (path, name) = (entry.path.clone(), entry.name.clone());
-        self.status_message = match Self::opener_for(&path) {
-            Some(program) => match process::Command::new(&program).arg(&path).spawn() {
-                Ok(_) => format!("Opening {name} with {program}"),
-                // Named, because the interesting failures are all about
-                // *which* program: an association carried over from another
-                // machine names a path that is not here, and saying so is the
-                // difference between "this file cannot be opened" and "that
-                // association is wrong".
-                Err(e) => format!("Could not start {program}: {e}"),
-            },
+        self.status_message = match self.opener(&path) {
+            Some(opener) => self.start(&opener, &name),
             None => format!("Nothing is set to open {name}"),
         };
+    }
+
+    /// What opening `path` starts: the program the person chose for its
+    /// kind (`gui/associations`), or else the one SlateOS opens its type with
+    /// (`programs::default_for`, the type read from the toolkit's table of
+    /// extensions) -- among the programs installed here, with SlateOS's own
+    /// behind them. `None` when neither says.
+    ///
+    /// Only the person's choice was asked, so every file of a kind nobody
+    /// had chosen for -- all of them, on a new machine -- said "Nothing is
+    /// set to open" when SlateOS has a program for it.
+    fn opener(&self, path: &Path) -> Option<Opener> {
+        if let Some(program) = Self::opener_for(path) {
+            return Some(Opener {
+                label: program.clone(),
+                program: OsString::from(program),
+                args: vec![path.as_os_str().to_os_string()],
+            });
+        }
+        let ext = path.extension().and_then(OsStr::to_str)?;
+        let id = programs::default_for(guitk::filetypes::mime_for_extension(ext))?;
+        let app = known_programs(&self.app_dirs)
+            .into_iter()
+            .find(|app| app.id == id)?;
+        Opener::of(&app, path)
+    }
+
+    /// Start `opener`'s program on the file called `name`, and say so.
+    fn start(&self, opener: &Opener, name: &str) -> String {
+        let label = &opener.label;
+        match (self.launch)(&opener.program, &opener.args) {
+            Ok(()) => format!("Opening {name} with {label}"),
+            // Named, because the interesting failures are all about *which*
+            // program: an association carried over from another machine
+            // names a path that is not here, and saying so is the difference
+            // between "this file cannot be opened" and "that association is
+            // wrong".
+            Err(e) => format!("Could not start {label}: {e}"),
+        }
+    }
+
+    /// The programs that open `path`'s kind of file -- those whose entries
+    /// list its type -- for Open With: SlateOS's default for the type first,
+    /// then the rest in the order `known_programs` gives, installed ones
+    /// before SlateOS's own. Empty for a folder, or a type nothing opens.
+    fn programs_opening(&self, path: &Path) -> Vec<desktopentry::App> {
+        let Some(ext) = path.extension().and_then(OsStr::to_str) else {
+            return Vec::new();
+        };
+        let mime = guitk::filetypes::mime_for_extension(ext);
+        let mut list: Vec<desktopentry::App> = known_programs(&self.app_dirs)
+            .into_iter()
+            .filter(|app| app.mime_types.iter().any(|m| m.eq_ignore_ascii_case(mime)))
+            .collect();
+        if let Some(at) =
+            programs::default_for(mime).and_then(|id| list.iter().position(|app| app.id == id))
+        {
+            let default = list.remove(at);
+            list.insert(0, default);
+        }
+        list
+    }
+
+    /// The file menu's Open With: the programs that open the file, as
+    /// `programs_opening` found them when the menu opened. Greyed rather
+    /// than absent when none does, so the rows below do not move.
+    fn open_with_menu(&self) -> MenuItem {
+        MenuItem::Submenu {
+            id: MENU_OPEN_WITH_BASE,
+            label: String::from("Open with"),
+            icon: None,
+            enabled: !self.open_with.is_empty(),
+            children: self
+                .open_with
+                .iter()
+                .enumerate()
+                .map(|(i, app)| MenuItem::Action {
+                    id: MENU_OPEN_WITH_BASE
+                        .saturating_add(1)
+                        .saturating_add(i as u64),
+                    label: app.name.clone(),
+                    shortcut: None,
+                    icon: None,
+                    enabled: true,
+                    checked: None,
+                })
+                .collect(),
+        }
+    }
+
+    /// Open the selected file with the program chosen from Open With.
+    /// Answers whether the id was one of these.
+    fn open_with_action(&mut self, id: u64) -> bool {
+        let Some(app) = id
+            .checked_sub(MENU_OPEN_WITH_BASE.saturating_add(1))
+            .and_then(|n| usize::try_from(n).ok())
+            .and_then(|n| self.open_with.get(n))
+            .cloned()
+        else {
+            return false;
+        };
+        let Some(entry) = self
+            .selected_indices
+            .first()
+            .and_then(|&i| self.entries.get(i))
+        else {
+            return true;
+        };
+        let (path, name) = (entry.path.clone(), entry.name.clone());
+        self.status_message = match Opener::of(&app, &path) {
+            Some(opener) => self.start(&opener, &name),
+            None => format!("{} cannot be started with a file", app.name),
+        };
+        true
     }
 
     /// The program the user has chosen for this kind of file.
@@ -1726,7 +2094,18 @@ impl ExplorerState {
         // change?" with no answer a user can reach. Until the picker landed,
         // the guess was the only way any extra column ever appeared, which is
         // why it outlived the rule.
-        self.apply_saved_columns();
+        //
+        // On entering a folder, not on listing the same one again: a refresh,
+        // or the reload after a paste, is no reason to undo columns shown and
+        // not saved -- which it did, for a folder with a saved set. And the
+        // out-of-the-box set when nothing is saved: a folder with nothing of
+        // its own kept the columns of the folder before it.
+        if self.columns_folder.as_deref() != Some(self.current_path.as_path()) {
+            if !self.apply_saved_columns() {
+                self.columns.show_built_in();
+            }
+            self.columns_folder = Some(self.current_path.clone());
+        }
         self.queue_thumbnails();
     }
 
@@ -1950,19 +2329,13 @@ impl ExplorerState {
     /// The explorer owns the sort — [`Self::sort_entries`] does the work — so
     /// the column manager is told the answer rather than asked for one.
     fn sync_sort_indicator(&mut self) {
-        let id = match self.sort_by {
-            SortBy::Name => ColumnId::NAME,
-            SortBy::Size => ColumnId::SIZE,
-            SortBy::Modified => ColumnId::DATE_MODIFIED,
-            SortBy::Type => ColumnId::TYPE,
+        let Some(id) = self.sort_by.column() else {
             // A hand arrangement is not a column, so no header carries an
             // arrow. Pointing one at Name would say the list is in name order
             // when it is in the user's own -- a header that lies about what it
             // is showing is worse than a header that says nothing.
-            SortBy::Custom => {
-                self.columns.set_sort(ColumnId::NAME, SortOrder::None);
-                return;
-            }
+            self.columns.set_sort(ColumnId::NAME, SortOrder::None);
+            return;
         };
         let order = match self.sort_dir {
             SortDir::Ascending => SortOrder::Ascending,
@@ -2287,7 +2660,7 @@ impl ExplorerState {
             // An operation stopped at a question does nothing until it is
             // answered, so stepping it would spin out the slice for nothing.
             while !running.executor.is_done()
-                && running.executor.waiting_on().is_none()
+                && !running.executor.asking()
                 && std::time::Instant::now() < deadline
             {
                 running.executor.step();
@@ -2296,35 +2669,52 @@ impl ExplorerState {
         }
         self.retire_finished();
         self.update_operation_status();
-        self.ask_about_a_taken_name();
+        self.ask_about_a_stop();
         true
     }
 
-    /// Put up the question an operation has stopped at, when nothing else is
-    /// up -- and take down one nobody is waiting on any more.
-    fn ask_about_a_taken_name(&mut self) {
-        if let Some(Modal::Conflict { prompt }) = &self.modal {
-            let plan = prompt.plan;
-            let still_asking = self
-                .operations
-                .iter()
-                .any(|op| op.executor.plan_id() == plan && op.executor.waiting_on().is_some());
-            if !still_asking {
-                self.modal = None;
+    /// Put up the question an operation has stopped at -- a taken name, or a
+    /// file it could not carry out -- when nothing else is up, and take down
+    /// one nobody is waiting on any more.
+    fn ask_about_a_stop(&mut self) {
+        let asking = |ops: &[RunningOperation], plan: u64, failed: bool| {
+            ops.iter().any(|op| {
+                op.executor.plan_id() == plan
+                    && if failed {
+                        op.executor.failed_on().is_some()
+                    } else {
+                        op.executor.waiting_on().is_some()
+                    }
+            })
+        };
+        match &self.modal {
+            Some(Modal::Conflict { prompt }) => {
+                if !asking(&self.operations, prompt.plan, false) {
+                    self.modal = None;
+                }
+                return;
             }
-            return;
+            Some(Modal::Failed { prompt }) => {
+                if !asking(&self.operations, prompt.plan, true) {
+                    self.modal = None;
+                }
+                return;
+            }
+            Some(_) => return,
+            None => {}
         }
-        if self.modal.is_some() {
-            return;
-        }
-        let prompt = self.operations.iter().find_map(|op| {
-            op.executor
-                .waiting_on()
-                .map(|question| ConflictPrompt::new(op.executor.plan_id(), question))
+        self.modal = self.operations.iter().find_map(|op| {
+            let plan = op.executor.plan_id();
+            if let Some(question) = op.executor.waiting_on() {
+                Some(Modal::Conflict {
+                    prompt: ConflictPrompt::new(plan, question),
+                })
+            } else {
+                op.executor.failed_on().map(|question| Modal::Failed {
+                    prompt: ErrorPrompt::new(plan, op.executor.operation(), question),
+                })
+            }
         });
-        if let Some(prompt) = prompt {
-            self.modal = Some(Modal::Conflict { prompt });
-        }
     }
 
     /// Give `answer` to the operation that asked, found by its plan's id.
@@ -2341,15 +2731,27 @@ impl ExplorerState {
         }
     }
 
+    /// Give `answer` to the operation that failed, found by its plan's id.
+    fn answer_failure(&mut self, plan: u64, answer: ErrorAnswer) {
+        if let Some(running) = self
+            .operations
+            .iter_mut()
+            .find(|op| op.executor.plan_id() == plan)
+        {
+            running.executor.answer_error(answer);
+        }
+        if answer == ErrorAnswer::Stop {
+            self.status_message = "Stopped: what was already done stays done".to_string();
+        }
+    }
+
     /// Whether a file operation can get on without being told something: one
     /// running and not stopped at a question.
     ///
     /// What the clock is asked for by. An operation waiting on an answer needs
     /// no tick -- the answer is an event, and an event wakes the window.
     fn work_moving(&self) -> bool {
-        self.operations
-            .iter()
-            .any(|op| op.executor.waiting_on().is_none())
+        self.operations.iter().any(|op| !op.executor.asking())
             || (self.operations.is_empty() && !self.pending.is_empty())
     }
 
@@ -2610,7 +3012,15 @@ impl ExplorerState {
                     op.executor.progress().completed_files,
                     op.total_files
                 );
-                match op.executor.waiting_on().and_then(|q| q.dest.file_name()) {
+                // The name it is asking about: the one taken, or the file
+                // that could not be done.
+                let asking_about = op
+                    .executor
+                    .waiting_on()
+                    .map(|q| q.dest.as_path())
+                    .or_else(|| op.executor.failed_on().map(|q| q.path.as_path()))
+                    .and_then(Path::file_name);
+                match asking_about {
                     Some(name) => format!(
                         "{done} \u{2014} asking about \u{201c}{}\u{201d}",
                         name.shown()
@@ -2709,6 +3119,13 @@ impl ExplorerState {
         if let Some(index) = on_row {
             self.select_single(index);
         }
+        // Found now, for the file the menu is about, and kept: the row chosen
+        // from Open With is the program it showed.
+        self.open_with = on_row
+            .and_then(|index| self.entries.get(index))
+            .filter(|entry| !entry.is_dir)
+            .map(|entry| self.programs_opening(&entry.path))
+            .unwrap_or_default();
         let items = if on_row.is_some() {
             self.file_menu_items()
         } else {
@@ -2717,6 +3134,35 @@ impl ExplorerState {
         let mut menu = ContextMenu::new(items);
         menu.show(x, y, (self.window_width as f32, self.window_height as f32));
         self.menu = Some(menu);
+    }
+
+    /// Sort by the column whose heading is under `x`, or the other way when
+    /// the listing is sorted by it already -- how a detail view is sorted.
+    ///
+    /// The header drew an arrow and nothing could move it: `set_sort` had no
+    /// caller but a test, and the module's "Sort by name/size/date/type" was
+    /// reachable by nobody. A heading this listing cannot sort by says so,
+    /// rather than being a control that does nothing.
+    fn sort_by_heading(&mut self, x: f32) -> bool {
+        let list = self.list_rect();
+        let table_w = (list.w - ICON_GUTTER).max(0.0);
+        let Some(column) = columns::column_at(&self.columns, table_w, x - list.x - ICON_GUTTER)
+        else {
+            return false;
+        };
+        match SortBy::for_column(column) {
+            Some(by) => self.set_sort(by),
+            None => {
+                let label = self
+                    .columns
+                    .column_def(column)
+                    .map_or_else(String::new, |d| d.label.clone());
+                self.status_message = format!(
+                    "The list cannot be sorted by {label} -- by Name, Size, Date modified or Type"
+                );
+            }
+        }
+        true
     }
 
     /// Whether `(x, y)` is over the detail view's header row.
@@ -2781,6 +3227,52 @@ impl ExplorerState {
         }
     }
 
+    /// What an operation does with a file it cannot carry out, ticked at the
+    /// one in force.
+    fn failure_menu(&self) -> MenuItem {
+        MenuItem::Submenu {
+            id: MENU_FAILURE_BASE,
+            label: String::from("When a file cannot be done"),
+            icon: None,
+            enabled: true,
+            children: columnprefs::FAILURE_CHOICES
+                .iter()
+                .zip(0u64..)
+                .map(|((policy, _, said), n)| {
+                    Self::label_row(
+                        MENU_FAILURE_BASE.saturating_add(n),
+                        said,
+                        *policy == self.failure_policy,
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// Choose what an operation does with a file it cannot carry out, and
+    /// remember it. Answers whether the id was one of these. An operation
+    /// already running keeps the choice it started with.
+    fn failure_action(&mut self, id: u64) -> bool {
+        let Some(chosen) = id
+            .checked_sub(MENU_FAILURE_BASE)
+            .and_then(|n| usize::try_from(n).ok())
+            .and_then(|n| columnprefs::FAILURE_CHOICES.get(n))
+        else {
+            return false;
+        };
+        let (policy, _, said) = *chosen;
+        self.failure_policy = policy;
+        columnprefs::set_failure_policy(&mut self.column_prefs, policy);
+        self.status_message =
+            match settingsfile::store(columnprefs::CONFIG_NAME, &self.column_prefs) {
+                Ok(()) => format!("A file that cannot be done now: {}", said.to_lowercase()),
+                Err(e) => {
+                    format!("The choice holds until the window closes -- it was not saved: {e}")
+                }
+            };
+        true
+    }
+
     /// Choose what a paste does with a taken name, and remember it. Answers
     /// whether the id was one of these.
     fn conflict_action(&mut self, id: u64) -> bool {
@@ -2843,6 +3335,58 @@ impl ExplorerState {
                 },
                 Err(e) => format!("The label choice was not saved: {e}"),
             };
+        true
+    }
+
+    /// The sorts offered, ticked at the one in force: the four columns a
+    /// heading sorts by, and the folder's own order -- the way back to it
+    /// after a column sort, which overrides it only for as long as it is
+    /// chosen (`roadmap-detailed.md` §4.1). Offered only where the folder has
+    /// an order of its own: dragging a file is how one is made.
+    fn sort_menu(&self) -> MenuItem {
+        MenuItem::Submenu {
+            id: MENU_SORT_BASE,
+            label: String::from("Sort by"),
+            icon: None,
+            enabled: true,
+            children: SORTS
+                .iter()
+                .enumerate()
+                .map(|(i, &(by, label))| MenuItem::Action {
+                    id: MENU_SORT_BASE.saturating_add(1).saturating_add(i as u64),
+                    label: label.to_string(),
+                    shortcut: None,
+                    icon: None,
+                    enabled: by != SortBy::Custom || !self.manual_order.is_empty(),
+                    checked: Some(self.sort_by == by),
+                })
+                .collect(),
+        }
+    }
+
+    /// Choose a sort from the menu. Answers whether the id was one of these.
+    ///
+    /// Choosing the sort in force changes nothing: the menu names a sort, not
+    /// a direction, and a click on the heading is how the direction turns.
+    fn sort_action(&mut self, id: u64) -> bool {
+        let Some(&(by, _)) = id
+            .checked_sub(MENU_SORT_BASE.saturating_add(1))
+            .and_then(|n| usize::try_from(n).ok())
+            .and_then(|n| SORTS.get(n))
+        else {
+            return false;
+        };
+        if by == SortBy::Custom && self.manual_order.is_empty() {
+            self.status_message =
+                String::from("This folder has no order of its own: drag a file to make one");
+            return true;
+        }
+        if self.sort_by != by {
+            self.sort_by = by;
+            self.sort_dir = SortDir::Ascending;
+            self.sync_sort_indicator();
+            self.resort();
+        }
         true
     }
 
@@ -2977,7 +3521,16 @@ impl ExplorerState {
 
     /// The column picker: every column, ticked when shown, and the two saves.
     fn open_column_menu(&mut self, x: f32, y: f32) {
-        let mut items = self.column_menu_items();
+        let mut menu = ContextMenu::new(self.heading_menu_items());
+        menu.show(x, y, (self.window_width as f32, self.window_height as f32));
+        self.menu = Some(menu);
+    }
+
+    /// The headings' menu: how the listing is sorted, which columns it
+    /// shows, and where the set shown is saved.
+    fn heading_menu_items(&self) -> Vec<MenuItem> {
+        let mut items = vec![self.sort_menu(), MenuItem::Separator];
+        items.extend(self.column_menu_items());
         items.push(MenuItem::Separator);
         items.push(Self::menu_action(
             MENU_COLUMNS_SAVE_FOLDER,
@@ -2989,9 +3542,7 @@ impl ExplorerState {
             "Save as default for all folders",
             true,
         ));
-        let mut menu = ContextMenu::new(items);
-        menu.show(x, y, (self.window_width as f32, self.window_height as f32));
-        self.menu = Some(menu);
+        items
     }
 
     /// One row per column, ticked when it is currently shown.
@@ -3103,6 +3654,7 @@ impl ExplorerState {
     fn file_menu_items(&self) -> Vec<MenuItem> {
         vec![
             Self::menu_action(MENU_OPEN, "Open", true),
+            self.open_with_menu(),
             Self::menu_action(MENU_CUT, "Cut", true),
             Self::menu_action(MENU_COPY, "Copy", true),
             Self::menu_action(MENU_RENAME, "Rename", true),
@@ -3121,7 +3673,9 @@ impl ExplorerState {
             // next.
             Self::menu_action(MENU_PASTE, "Paste", self.clipboard.is_some()),
             Self::menu_action(MENU_REFRESH, "Refresh", true),
+            self.sort_menu(),
             self.conflict_menu(),
+            self.failure_menu(),
         ];
         // Only where thumbnails are drawn. In Details and List the sizes
         // change nothing visible, and a submenu that silently does nothing is
@@ -3201,6 +3755,9 @@ impl ExplorerState {
             || self.thumb_size_action(id)
             || self.icon_label_action(id)
             || self.conflict_action(id)
+            || self.failure_action(id)
+            || self.sort_action(id)
+            || self.open_with_action(id)
         {
             return;
         }
@@ -3406,13 +3963,13 @@ impl ExplorerState {
                 &paths,
                 &self.current_path,
                 self.conflict_policy,
-                ErrorPolicy::SkipAndContinue,
+                self.failure_policy,
             ),
             _ => OperationPlan::plan_copy(
                 &paths,
                 &self.current_path,
                 self.conflict_policy,
-                ErrorPolicy::SkipAndContinue,
+                self.failure_policy,
             ),
         };
 
@@ -3469,7 +4026,7 @@ impl ExplorerState {
         }
 
         if permanent {
-            match OperationPlan::plan_delete(&paths, ErrorPolicy::SkipAndContinue) {
+            match OperationPlan::plan_delete(&paths, self.failure_policy) {
                 // No undo entries: a permanent delete has nothing to put back.
                 Ok(plan) => {
                     self.start_operation(plan, "Deleted", false);
@@ -3530,7 +4087,7 @@ impl ExplorerState {
     fn describe_outcome(events: &[FileOpEvent], verb: &str) -> Outcome {
         let summary = events.iter().find_map(|e| match e {
             FileOpEvent::Complete { summary } => Some(summary),
-            _ => None,
+            FileOpEvent::Error { .. } => None,
         });
 
         let Some(OperationSummary {
@@ -3546,8 +4103,10 @@ impl ExplorerState {
             let reason = events
                 .iter()
                 .find_map(|e| match e {
-                    FileOpEvent::Error { error, .. } => Some(error.clone()),
-                    _ => None,
+                    FileOpEvent::Error { path, error } => {
+                        Some(format!("{}: {error}", path.shown()))
+                    }
+                    FileOpEvent::Complete { .. } => None,
                 })
                 .unwrap_or_else(|| "operation did not complete".to_string());
             let message = format!("{verb} nothing — {reason}");
@@ -3563,25 +4122,30 @@ impl ExplorerState {
         }
 
         msg.push_str(&format!(", {failed} failed"));
-        // The dialog names the first failure in full. Listing all of them
-        // would be the right thing for a queue view and the wrong thing for a
-        // dialog, which has to be readable at a glance; the status bar keeps
-        // the count, so nothing is lost.
-        let detail = match errors.first() {
-            Some(first) => {
-                msg.push_str(&format!(" — {}: {}", first.path.shown(), first.message));
-                format!(
-                    "{failed} of {} could not be done.\n\n{}: {}",
-                    succeeded.saturating_add(*failed),
-                    first.path.shown(),
-                    first.message
-                )
-            }
+        let Some(first) = errors.first() else {
             // A failure count with no error to go with it is the executor
             // contradicting itself. Say so rather than showing an empty
             // dialog, which reads as a bug in the dialog.
-            None => format!("{failed} item(s) could not be done, with no reason given."),
+            let detail = format!("{failed} item(s) could not be done, with no reason given.");
+            return Outcome::failed(msg, detail);
         };
+        msg.push_str(&format!(" — {}: {}", first.path.shown(), first.message));
+        // The dialog names the first failure the user has not been shown.
+        // One answered in the failure prompt -- skipped, or stopped at -- was
+        // shown there, and a dialog repeating it after the user said what to
+        // do about it is one more thing to dismiss for nothing: no file
+        // manager that asks does that. Listing every failure would be right
+        // for a queue view and wrong for a dialog, which has to be readable
+        // at a glance; the status bar keeps the count, so nothing is lost.
+        let Some(untold) = errors.iter().find(|e| !e.answered) else {
+            return Outcome::ok(msg);
+        };
+        let detail = format!(
+            "{failed} of {} could not be done.\n\n{}: {}",
+            succeeded.saturating_add(*failed),
+            untold.path.shown(),
+            untold.message
+        );
         Outcome::failed(msg, detail)
     }
 
@@ -3848,7 +4412,7 @@ impl ExplorerState {
                     &result.sources,
                     &result.target_dir,
                     self.conflict_policy,
-                    ErrorPolicy::SkipAndContinue,
+                    self.failure_policy,
                 ),
                 "Moved",
             ),
@@ -3857,7 +4421,7 @@ impl ExplorerState {
                     &result.sources,
                     &result.target_dir,
                     self.conflict_policy,
-                    ErrorPolicy::SkipAndContinue,
+                    self.failure_policy,
                 ),
                 "Copied",
             ),
@@ -3866,12 +4430,12 @@ impl ExplorerState {
                     &result.sources,
                     &result.target_dir,
                     self.conflict_policy,
-                    // The same policy the other two use, and for a reason
-                    // specific to links: a filesystem that refuses them
-                    // refuses each one separately -- Windows needs a
-                    // privilege -- so a batch must report which failed rather
-                    // than abandoning the ones that would have worked.
-                    ErrorPolicy::SkipAndContinue,
+                    // The same policy the other two use, and it suits links
+                    // in particular: a filesystem that refuses them refuses
+                    // each one separately -- Windows needs a privilege -- and
+                    // "Skip all" at the first lets the ones that would work
+                    // go on, rather than the batch being abandoned.
+                    self.failure_policy,
                 )),
                 "Linked",
             ),
@@ -3982,6 +4546,7 @@ impl ExplorerState {
                 dialog.render(&self.palette, w, h, &mut tree);
             }
             Some(Modal::Conflict { prompt }) => prompt.render(&self.palette, w, h, &mut tree),
+            Some(Modal::Failed { prompt }) => prompt.render(&self.palette, w, h, &mut tree),
             Some(Modal::ConfirmBin { dialog, .. }) => dialog.render(&self.palette, w, h, &mut tree),
             None => {}
         }
@@ -4235,6 +4800,95 @@ impl ExplorerState {
                 .render(&palette, rect.w.max(0.0) as u32, rect.h.max(0.0) as u32);
         tree.commands.extend(commands);
         tree.untranslate();
+    }
+
+    /// Take up the choices `explorer.yaml` keeps for every folder -- the
+    /// preview, the icons' labels, what a paste does with a name that is
+    /// taken, what an operation does with a file it cannot carry out, and the
+    /// thumbnails' size -- from the document this window holds: when the
+    /// window opens, and again whenever the desktop says the file changed.
+    ///
+    /// Thumbnails made at another size are dropped and made again, as
+    /// choosing a size from the menu does.
+    fn take_up_prefs(&mut self) {
+        let prefs = &self.column_prefs;
+        self.preview_open = columnprefs::preview_open(prefs);
+        self.preview_split = columnprefs::preview_split(prefs);
+        self.preview_side = columnprefs::preview_side(prefs);
+        self.icon_labels = columnprefs::icon_labels(prefs);
+        self.conflict_policy = columnprefs::conflict_policy(prefs);
+        self.failure_policy = columnprefs::failure_policy(prefs);
+        let size = columnprefs::thumb_size(prefs).unwrap_or(ThumbConfig::default().size);
+        if size != self.thumb_config.size {
+            self.thumb_config.size = size;
+            self.thumbs.clear();
+            self.queue_thumbnails();
+        }
+    }
+
+    /// Read `explorer.yaml` again after the desktop said it changed -- a
+    /// choice made in another window, or a hand edit (§1418, §1434). Whether
+    /// the file held anything this window did not.
+    ///
+    /// The file replaces the document this window holds. Every choice made
+    /// here is saved by writing that document whole, so a copy read only when
+    /// the window opened went stale, and the next choice -- a column set, the
+    /// preview, an arrangement -- wrote it over whatever another window had
+    /// chosen meanwhile.
+    ///
+    /// This folder's columns and arrangement are taken up again only when the
+    /// file's entry for them changed. Columns shown or hidden here and not
+    /// saved are this window's own view, and another window choosing a
+    /// thumbnail size is no reason to undo them.
+    fn reread_prefs(&mut self) -> bool {
+        let prefs = settingsfile::load(columnprefs::CONFIG_NAME);
+        if prefs.to_text() == self.column_prefs.to_text() {
+            return false;
+        }
+        let before = std::mem::replace(&mut self.column_prefs, prefs);
+        self.take_up_prefs();
+        let folder = self.current_path.clone();
+        let saved_columns = |prefs: &yamldoc::Document| {
+            columnprefs::for_folder(prefs, &folder).or_else(|| columnprefs::global(prefs))
+        };
+        if saved_columns(&before) != saved_columns(&self.column_prefs) {
+            self.apply_saved_columns();
+        }
+        if manualorder::for_folder(&before, &folder)
+            != manualorder::for_folder(&self.column_prefs, &folder)
+        {
+            // A row being dragged is a position in the order just replaced.
+            self.row_drag = None;
+            self.load_manual_order();
+            self.sync_sort_indicator();
+            self.resort();
+        }
+        true
+    }
+
+    /// Sort the listing again, keeping the selection on the files it was on.
+    ///
+    /// The selection is a list of positions in `entries`, and sorting moves
+    /// the entries: sorted without this, the same rows stayed lit over other
+    /// files, and the next Delete acted on files nobody had chosen.
+    fn resort(&mut self) {
+        let chosen: Vec<PathBuf> = self
+            .selected_indices
+            .iter()
+            .filter_map(|&i| self.entries.get(i))
+            .map(|e| e.path.clone())
+            .collect();
+        self.sort_entries();
+        let at: std::collections::HashMap<&Path, usize> = self
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.path.as_path(), i))
+            .collect();
+        self.selected_indices = chosen
+            .iter()
+            .filter_map(|path| at.get(path.as_path()).copied())
+            .collect();
     }
 
     /// Show the columns saved for this folder, or the saved default.
@@ -5347,7 +6001,7 @@ impl ExplorerState {
             self.sort_dir = SortDir::Ascending;
         }
         self.sync_sort_indicator();
-        self.sort_entries();
+        self.resort();
     }
 
     /// Switch view modes, re-deriving what thumbnail work the new mode needs.
@@ -5541,6 +6195,22 @@ const MENU_THUMB_SIZE_BASE: u64 = 2000;
 const MENU_ICON_LABEL_BASE: u64 = 3000;
 /// One id per choice of what a paste does with a taken name.
 const MENU_CONFLICT_BASE: u64 = 4000;
+/// One id per choice of what an operation does with a file it cannot do.
+const MENU_FAILURE_BASE: u64 = 5000;
+/// The "Sort by" submenu; its rows are the base plus one, plus their place in
+/// [`SORTS`].
+const MENU_SORT_BASE: u64 = 6000;
+/// The file menu's "Open with" submenu; its rows are the base plus one, plus
+/// their place in `ExplorerState::open_with`.
+const MENU_OPEN_WITH_BASE: u64 = 7000;
+/// The sorts the menu offers, in its order.
+const SORTS: [(SortBy, &str); 5] = [
+    (SortBy::Name, "Name"),
+    (SortBy::Size, "Size"),
+    (SortBy::Modified, "Date modified"),
+    (SortBy::Type, "Type"),
+    (SortBy::Custom, "Your own order"),
+];
 const MENU_CUT: u64 = 2;
 const MENU_COPY: u64 = 3;
 const MENU_RENAME: u64 = 4;
@@ -5768,6 +6438,13 @@ impl ExplorerState {
     /// disagreed, the user would click one file and open another.
     #[must_use]
     pub fn handle_event(&mut self, event: &Event) -> bool {
+        // A settings file changed and the desktop says so (§1434). Not input,
+        // so ahead of the modal, which owns input: a choice made in another
+        // window while a dialog is up here is still what this window's next
+        // save has to start from.
+        if let Event::SettingsChanged { group } = event {
+            return group.file_name() == columnprefs::CONFIG_NAME && self.reread_prefs();
+        }
         // A modal owns the INPUT while it is up. Falling through to the
         // listing as well is how a Delete confirmation also moves the
         // selection, so that confirming it acts on a different file than the
@@ -5807,21 +6484,11 @@ impl ExplorerState {
             // nothing new to draw, and saying so is what stops the loop
             // repainting the whole window sixty times a second for no reason.
             Event::Tick { .. } => self.tick_work(),
-            // `SettingsChanged` is a different kind of "no" from its
-            // neighbours here, and is grouped with them only because the
-            // answer happens to coincide. The others are events this window
-            // has nothing to *do* about; this one is an announcement that the
-            // user's settings were rewritten, which this program ignores
-            // because it reads no settings file at all -- it draws in its own
-            // palette and takes no preference from disk. If that ever stops
-            // being true, this arm is where the re-read belongs, and moving it
-            // out of this group is part of the change.
-            //
-            // `ModifierChord` is here for a third reason again: this program
-            // never asks for one, so the compositor never sends it. Named
-            // rather than swept up in a `_ =>` because a wildcard here would
-            // also swallow the *next* event added to the vocabulary, which may
-            // well be one this window should act on.
+            // `ModifierChord` is here for another reason: this program never
+            // asks for one, so the compositor never sends it. Named rather
+            // than swept up in a `_ =>` because a wildcard here would also
+            // swallow the *next* event added to the vocabulary, which may well
+            // be one this window should act on.
             Event::CloseRequested
             | Event::Moved { .. }
             | Event::FocusIn
@@ -5835,8 +6502,9 @@ impl ExplorerState {
             // window dispatch. Listed because this match is exhaustive on
             // purpose -- a wildcard would swallow the next event added, which
             // may well be one this program should act on.
-            | Event::TrayIconClicked { .. }
-            | Event::SettingsChanged { .. } => false,
+            | Event::TrayIconClicked { .. } => false,
+            // Answered at the top, ahead of the modal.
+            Event::SettingsChanged { .. } => false,
         }
     }
 
@@ -5970,6 +6638,10 @@ impl ExplorerState {
             }
             return true;
         }
+        // A column's heading sorts by that column, and again the other way.
+        if self.over_column_header(x, y) {
+            return self.sort_by_heading(x);
+        }
         if self.bin.is_none()
             && let Some(index) = self.dropzone.find_file_row(x, y)
         {
@@ -6059,13 +6731,28 @@ impl ExplorerState {
         //
         // Not unconditional: a widget that swallowed keys whenever it was
         // merely *visible* would take the arrow keys the file list needs.
-        let starts_editing = k.modifiers.ctrl && k.key == Key::L;
+        //
+        // The shortcuts are Ctrl chords, not Ctrl held: AltGr arrives as
+        // Ctrl+Alt and types, and AltGr+C -- a Polish `ć` -- copied the
+        // selection. Back and forward are Alt alone. Every other key is taken
+        // plain: a chord with Alt or the Windows key is the window's or the
+        // desktop's and arrives carrying its key -- Alt+Delete asked to
+        // recycle the selection and Alt+2 changed the view.
+        let chord = textline::is_ctrl_chord(k.modifiers);
+        let plain = textline::is_plain(k.modifiers);
+        let starts_editing = chord && k.key == Key::L;
         // Typing a path is going somewhere, and the bar is not drawn over
         // the bin: leave it, and edit the folder's path.
         if starts_editing {
             self.leave_recycle_bin();
         }
         if self.pathbar.is_editing() || starts_editing {
+            // Not the bar's either: it is the toolkit's field, which types
+            // the letter of a chord it does not know -- Alt+X typed an `x`
+            // into the path.
+            if textline::is_alt_or_windows_chord(k.modifiers) {
+                return false;
+            }
             let taken = self.pathbar.handle_key_event(k);
             if self.route_to_pathbar(taken) {
                 return true;
@@ -6074,7 +6761,7 @@ impl ExplorerState {
         // The shortcut list, after the address bar and only with no dialog up:
         // both of those take typed text, and `?` belongs in a filename or a
         // path before it belongs to help.
-        if self.modal.is_none() {
+        if self.modal.is_none() && plain {
             let asked = k.key == Key::F1 || (k.key == Key::Slash && k.modifiers.shift);
             if asked {
                 self.show_help = !self.show_help;
@@ -6091,22 +6778,43 @@ impl ExplorerState {
             return self.handle_bin_key(k);
         }
 
-        let ctrl = k.modifiers.ctrl;
+        let alt = alt_alone(k);
         match k.key {
-            Key::A if ctrl => {
+            Key::A if chord => {
                 if self.entries.is_empty() {
                     return false;
                 }
                 self.select_all();
                 true
             }
-            Key::F if ctrl => {
+            Key::F if chord => {
                 self.open_search();
                 true
             }
+            Key::Z if chord => {
+                self.undo_last();
+                true
+            }
+            Key::C if chord => {
+                self.copy_selected();
+                true
+            }
+            Key::X if chord => {
+                self.cut_selected();
+                true
+            }
+            Key::V if chord => {
+                self.paste();
+                true
+            }
+            Key::H if chord => {
+                self.toggle_hidden();
+                true
+            }
+            Key::Left if alt => self.go_back_if_possible(),
+            Key::Right if alt => self.go_forward_if_possible(),
+            _ if !plain => false,
             Key::Backspace => self.go_up_if_possible(),
-            Key::Left if k.modifiers.alt => self.go_back_if_possible(),
-            Key::Right if k.modifiers.alt => self.go_forward_if_possible(),
             Key::Up | Key::Left => self.move_selection(-1),
             Key::Down | Key::Right => self.move_selection(1),
             Key::Home => self.move_selection_to(0),
@@ -6171,26 +6879,6 @@ impl ExplorerState {
             Key::Delete if k.modifiers.shift => self.ask_delete(PendingAction::DeletePermanently),
             Key::Delete => self.ask_delete(PendingAction::Recycle),
             Key::F2 => self.ask_rename(),
-            Key::Z if ctrl => {
-                self.undo_last();
-                true
-            }
-            Key::C if ctrl => {
-                self.copy_selected();
-                true
-            }
-            Key::X if ctrl => {
-                self.cut_selected();
-                true
-            }
-            Key::V if ctrl => {
-                self.paste();
-                true
-            }
-            Key::H if ctrl => {
-                self.toggle_hidden();
-                true
-            }
             _ => false,
         }
     }
@@ -6287,7 +6975,22 @@ impl ExplorerState {
 
     /// The bin's keys. Answers whether anything visible changed.
     fn handle_bin_key(&mut self, k: &KeyEvent) -> bool {
-        let (shift, ctrl, alt) = (k.modifiers.shift, k.modifiers.ctrl, k.modifiers.alt);
+        // As over a folder: Ctrl+A a Ctrl chord, back Alt alone, and every
+        // other key plain -- Alt+Delete asked to erase what was chosen.
+        let shift = k.modifiers.shift;
+        if k.key == Key::A && textline::is_ctrl_chord(k.modifiers) {
+            return self.bin.as_mut().is_some_and(|bin| {
+                bin.choose_all();
+                true
+            });
+        }
+        if k.key == Key::Left && alt_alone(k) {
+            self.leave_recycle_bin();
+            return true;
+        }
+        if !textline::is_plain(k.modifiers) {
+            return false;
+        }
         match k.key {
             // Escape stops file work first, as it does over a folder.
             Key::Escape if self.work_in_flight() => {
@@ -6295,10 +6998,6 @@ impl ExplorerState {
                 true
             }
             Key::Escape | Key::Backspace => {
-                self.leave_recycle_bin();
-                true
-            }
-            Key::Left if alt => {
                 self.leave_recycle_bin();
                 true
             }
@@ -6320,7 +7019,6 @@ impl ExplorerState {
                     Key::PageDown => bin.step(page, shift),
                     Key::Home => bin.go_to(0, shift),
                     Key::End => bin.go_to(usize::MAX, shift),
-                    Key::A if ctrl => bin.choose_all(),
                     _ => return false,
                 }
                 true
@@ -6620,6 +7318,9 @@ impl ExplorerState {
         if matches!(self.modal, Some(Modal::Conflict { .. })) {
             return self.handle_conflict_prompt(event);
         }
+        if matches!(self.modal, Some(Modal::Failed { .. })) {
+            return self.handle_failure_prompt(event);
+        }
         let Some(modal) = self.modal.as_mut() else {
             return false;
         };
@@ -6632,7 +7333,7 @@ impl ExplorerState {
             | Modal::NewFolder { dialog }
             | Modal::Search { dialog } => dialog.handle_event(event),
             // Answered above, and never reaches here.
-            Modal::Conflict { .. } => EventResult::Ignored,
+            Modal::Conflict { .. } | Modal::Failed { .. } => EventResult::Ignored,
         } == EventResult::Consumed;
 
         let answer = match modal {
@@ -6642,7 +7343,7 @@ impl ExplorerState {
             Modal::Rename { dialog, .. }
             | Modal::NewFolder { dialog }
             | Modal::Search { dialog } => dialog.result().cloned(),
-            Modal::Conflict { .. } => None,
+            Modal::Conflict { .. } | Modal::Failed { .. } => None,
         };
 
         let Some(answer) = answer else {
@@ -6669,6 +7370,21 @@ impl ExplorerState {
         let (plan, for_the_rest) = (prompt.plan, prompt.for_the_rest);
         self.modal = None;
         self.answer_conflict(plan, answer, for_the_rest);
+        true
+    }
+
+    /// Route an event to the failed-file prompt, and carry out its answer.
+    fn handle_failure_prompt(&mut self, event: &Event) -> bool {
+        let Some(Modal::Failed { prompt }) = self.modal.as_mut() else {
+            return false;
+        };
+        let (consumed, answer) = prompt.handle(event);
+        let Some(answer) = answer else {
+            return consumed;
+        };
+        let plan = prompt.plan;
+        self.modal = None;
+        self.answer_failure(plan, answer);
         true
     }
 
@@ -6729,7 +7445,7 @@ impl ExplorerState {
             // has already been reported; there is nothing left to carry out.
             // A notice has been reported already; a taken-name prompt is
             // answered through `handle_conflict_prompt` and never here.
-            Some(Modal::Notice { .. } | Modal::Conflict { .. }) | None => {}
+            Some(Modal::Notice { .. } | Modal::Conflict { .. } | Modal::Failed { .. }) | None => {}
         }
     }
 
@@ -6948,6 +7664,75 @@ fn restore_outcome(restored: &[(String, PathBuf, bool)], failed: &[String]) -> O
     )
 }
 
+/// A program to start on a file, and what to call it when saying so.
+struct Opener {
+    /// The program's name, or the path the person chose.
+    label: String,
+    program: OsString,
+    args: Vec<OsString>,
+}
+
+impl Opener {
+    /// `app` as its entry starts it on the file at `path`: the entry's own
+    /// command line, `%f` or `%F` standing for the file. A program the entry
+    /// says runs in a terminal is started in one. `None` for an entry with
+    /// no command line.
+    fn of(app: &desktopentry::App, path: &Path) -> Option<Self> {
+        let exec = app.exec.as_ref()?;
+        let invocation = desktopentry::Invocation {
+            icon: app.icon.as_deref(),
+            name: &app.name,
+            location: None,
+        };
+        let mut line = exec
+            .command_lines(
+                &[desktopentry::Target::File(path.to_path_buf())],
+                &invocation,
+            )
+            .into_iter()
+            .next()?
+            .into_iter();
+        let first = line.next()?;
+        let (program, args) = if app.terminal {
+            let mut args = vec![OsString::from("-e"), first];
+            args.extend(line);
+            (OsString::from(TERMINAL), args)
+        } else {
+            (first, line.collect())
+        };
+        Some(Self {
+            label: app.name.clone(),
+            program,
+            args,
+        })
+    }
+}
+
+/// The terminal, for a program whose entry says it runs in one.
+const TERMINAL: &str = "/usr/bin/terminal";
+
+/// Start `program` with `args`, and let it run: the file manager does not
+/// wait for what it opens.
+fn start_program(program: &OsStr, args: &[OsString]) -> std::io::Result<()> {
+    process::Command::new(program).args(args).spawn().map(drop)
+}
+
+/// The programs this machine has: those installed here, read as the start
+/// menu reads them, with SlateOS's own (`programs::built_in`) behind them --
+/// an installed entry with the same id replaces SlateOS's. The rule
+/// `apps/settings`' `known_programs` keeps for its Default Apps page.
+fn known_programs(dirs: &desktopentry::scan::DataDirs) -> Vec<desktopentry::App> {
+    let scan = desktopentry::scan::scan(dirs);
+    let (mut list, _unusable) = desktopentry::scan::apps(&scan, None);
+    let installed: Vec<String> = list.iter().map(|app| app.id.clone()).collect();
+    list.extend(
+        programs::built_in(None)
+            .into_iter()
+            .filter(|own| !installed.contains(&own.id)),
+    );
+    list
+}
+
 fn main() -> std::process::ExitCode {
     // A path given on the command line is what makes "open containing folder"
     // possible from anywhere else in the desktop.
@@ -6966,6 +7751,9 @@ fn main() -> std::process::ExitCode {
     };
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let mut explorer = explorer_for(&args.rest, home);
+    // Where installed programs' entries are, for opening a file nobody chose
+    // a program for and for Open With: as the start menu reads them.
+    explorer.app_dirs = desktopentry::scan::DataDirs::from_env(|name| std::env::var_os(name));
     oswindow::app::launch_with("explorer", args.display.as_deref(), &mut explorer)
 }
 
@@ -7283,8 +8071,13 @@ mod tests {
     ///
     /// Bounded, and it panics rather than looping for ever: an operation that
     /// never finishes is a bug this should report, not hang on.
+    /// Tick until no file operation is running or waiting. At most ten
+    /// thousand ticks: each can spend a frame's slice stepping, so a paste
+    /// that never ends costs this at most a minute and a half, where a
+    /// hundred thousand cost a quarter of an hour -- past the time a
+    /// mutation sweep gives a suite.
     fn settle(state: &mut ExplorerState) {
-        for _ in 0..100_000 {
+        for _ in 0..10_000 {
             if !state.work_in_flight() {
                 return;
             }
@@ -7350,6 +8143,10 @@ mod tests {
             let _turn = settingsfile::testing::config_turn();
             ExplorerState::new(dir)
         };
+        // Nothing a test opens is started: what would have been is written
+        // down (`launched`).
+        state.launch = record_launch;
+        LAUNCHED.with(|l| l.borrow_mut().clear());
         state.recycle = RecycleBin::new(dir.join(".recycle"), Duration::from_secs(3600));
         state.thumb_gen =
             ThumbnailGenerator::with_disk_cache(thumbs::DiskCache::new(dir.join(".thumbs")));
@@ -8557,8 +9354,24 @@ mod tests {
                 .find(|s| *s != before)
                 .expect("the offered sizes are not all the same");
 
+            state.thumbs.insert(
+                root.join("a.txt"),
+                0,
+                1,
+                Thumbnail {
+                    width: 1,
+                    height: 1,
+                    pixels: vec![0; 4],
+                    source_path: root.join("a.txt"),
+                    source_mtime: 0,
+                },
+            );
             state.activate_menu_item(MENU_THUMB_SIZE_BASE + u64::from(wanted));
             assert_eq!(state.thumb_config.size, wanted, "the size was not applied");
+            assert!(
+                state.thumbs.is_empty(),
+                "thumbnails made at the old size were kept"
+            );
 
             let again = state_at(&root);
             assert_eq!(
@@ -8731,6 +9544,71 @@ mod tests {
         });
     }
 
+    /// **A folder with nothing saved shows the out-of-the-box columns**, not
+    /// the columns of the folder before it: the saved set was applied on
+    /// entering a folder and nothing was applied when there was none.
+    #[test]
+    fn a_folder_with_nothing_saved_shows_the_built_in_columns() {
+        settingsfile::testing::with_scratch_config("explorer-built-in-columns", |_root| {
+            let scratch = temp_dir("built_in_columns");
+            let root = scratch.dir().to_path_buf();
+            let (saved, plain) = (root.join("saved"), root.join("plain"));
+            for dir in [&saved, &plain] {
+                fs::create_dir(dir).unwrap();
+                fs::write(dir.join("a.txt"), "x").unwrap();
+            }
+            let mut doc = settingsfile::load(columnprefs::CONFIG_NAME);
+            assert!(columnprefs::set_for_folder(
+                &mut doc,
+                &saved,
+                &["size", "name"]
+            ));
+            settingsfile::store(columnprefs::CONFIG_NAME, &doc)
+                .expect("the scratch config is writable");
+
+            let mut state = state_at(&saved);
+            assert_eq!(state.columns.visible_keys(), vec!["size", "name"]);
+            state.navigate_to(&plain);
+            assert_eq!(
+                state.columns.visible_keys(),
+                vec!["name", "size", "date_modified"],
+                "a folder with nothing saved kept the last folder's columns"
+            );
+            state.navigate_to(&saved);
+            assert_eq!(state.columns.visible_keys(), vec!["size", "name"]);
+        });
+    }
+
+    /// **Columns shown and not saved outlast a refresh** -- or the reload
+    /// after a paste. Listing the same folder again re-applied its saved set.
+    #[test]
+    fn columns_shown_and_not_saved_outlast_a_refresh() {
+        settingsfile::testing::with_scratch_config("explorer-refresh-columns", |_root| {
+            let scratch = temp_dir("refresh_columns");
+            let root = scratch.dir().to_path_buf();
+            fs::write(root.join("a.txt"), "x").unwrap();
+            let mut doc = settingsfile::load(columnprefs::CONFIG_NAME);
+            assert!(columnprefs::set_for_folder(
+                &mut doc,
+                &root,
+                &["size", "name"]
+            ));
+            settingsfile::store(columnprefs::CONFIG_NAME, &doc)
+                .expect("the scratch config is writable");
+
+            let mut state = state_at(&root);
+            state
+                .columns
+                .set_columns(vec![ColumnId::NAME, ColumnId::DATE_MODIFIED]);
+            state.activate_menu_item(MENU_REFRESH);
+            assert_eq!(
+                state.columns.visible_keys(),
+                vec!["name", "date_modified"],
+                "a refresh undid the columns shown"
+            );
+        });
+    }
+
     /// With nothing saved for the folder, the saved default is used.
     #[test]
     fn a_folder_with_no_preference_falls_back_to_the_default() {
@@ -8747,6 +9625,430 @@ mod tests {
             let state = state_at(&root);
             assert_eq!(state.columns.visible_keys(), vec!["name", "date_modified"]);
         });
+    }
+
+    /// What the desktop sends every window when `name.yaml` changed.
+    fn announce(name: &[u8]) -> Event {
+        Event::SettingsChanged {
+            group: guitk::event::SettingsGroup::Program(
+                guitk::event::SettingsName::new(name).expect("a settings name"),
+            ),
+        }
+    }
+
+    /// **A choice made in another window reaches this one** when the desktop
+    /// says `explorer.yaml` changed (§1434) -- every choice the file keeps.
+    /// Read when the window opened and not again, each window kept its own,
+    /// and the next choice in one wrote its whole stale copy over the other's.
+    /// Another program's announcement is not this one's; a window's own save
+    /// announced back changes nothing.
+    #[test]
+    fn a_choice_made_in_another_window_reaches_this_one() {
+        settingsfile::testing::with_scratch_config("explorer-reread", |_root| {
+            let scratch = temp_dir("reread");
+            let root = scratch.dir().to_path_buf();
+            fs::write(root.join("a.txt"), "x").unwrap();
+            let mut first = state_at(&root);
+            let mut second = state_at(&root);
+
+            // One of each, all different from what the second window has.
+            let side = columnprefs::PreviewSide::ALL
+                .iter()
+                .position(|s| *s != second.preview_side)
+                .unwrap();
+            let conflict = columnprefs::CONFLICT_CHOICES
+                .iter()
+                .position(|c| c.0 != second.conflict_policy)
+                .unwrap();
+            let failure = columnprefs::FAILURE_CHOICES
+                .iter()
+                .position(|c| c.0 != second.failure_policy)
+                .unwrap();
+            let size = columnprefs::THUMB_SIZES
+                .iter()
+                .copied()
+                .find(|s| *s != second.thumb_config.size)
+                .unwrap();
+            first.activate_menu_item(MENU_PREVIEW_TOGGLE);
+            first.activate_menu_item(MENU_PREVIEW_SIDE_BASE + side as u64);
+            first.activate_menu_item(MENU_CONFLICT_BASE + conflict as u64);
+            first.activate_menu_item(MENU_FAILURE_BASE + failure as u64);
+            first.activate_menu_item(MENU_ICON_LABEL_BASE + 1);
+            first.activate_menu_item(MENU_THUMB_SIZE_BASE + u64::from(size));
+            let split = if (second.preview_split - 0.5).abs() < 0.01 {
+                0.4
+            } else {
+                0.5
+            };
+            first.preview_split = split;
+            columnprefs::set_preview_split(&mut first.column_prefs, split);
+            first.persist_view_prefs("resized");
+            first
+                .columns
+                .set_columns(vec![ColumnId::SIZE, ColumnId::NAME]);
+            first.activate_menu_item(MENU_COLUMNS_SAVE_FOLDER);
+
+            second.thumbs.insert(
+                root.join("a.txt"),
+                0,
+                1,
+                Thumbnail {
+                    width: 1,
+                    height: 1,
+                    pixels: vec![0; 4],
+                    source_path: root.join("a.txt"),
+                    source_mtime: 0,
+                },
+            );
+            assert!(!second.handle_event(&announce(b"notes")));
+            assert_ne!(
+                second.preview_open, first.preview_open,
+                "another file was read"
+            );
+            assert!(second.handle_event(&announce(b"explorer")));
+            assert_eq!(second.preview_open, first.preview_open);
+            assert_eq!(second.preview_side, first.preview_side);
+            assert!((second.preview_split - first.preview_split).abs() < 0.001);
+            assert_eq!(second.icon_labels, first.icon_labels);
+            assert_eq!(second.conflict_policy, first.conflict_policy);
+            assert_eq!(second.failure_policy, first.failure_policy);
+            assert_eq!(second.thumb_config.size, size);
+            assert!(
+                second.thumbs.is_empty(),
+                "thumbnails made at the old size were kept"
+            );
+            assert_eq!(second.columns.visible_keys(), vec!["size", "name"]);
+            assert!(
+                !first.handle_event(&announce(b"explorer")),
+                "a window's own save, announced back, changed it"
+            );
+
+            // The second window's next choice keeps the first's.
+            second.activate_menu_item(MENU_PREVIEW_TOGGLE);
+            let third = state_at(&root);
+            assert_eq!(third.preview_open, !first.preview_open);
+            assert_eq!(
+                third.thumb_config.size, size,
+                "the other window's choice was written over"
+            );
+            assert_eq!(third.conflict_policy, first.conflict_policy);
+            assert_eq!(third.columns.visible_keys(), vec!["size", "name"]);
+        });
+    }
+
+    /// **A choice made in another window is taken up while a dialog is open
+    /// here.** The dialog owns the input; an announcement is not input, and
+    /// held back by the dialog it was lost -- the window's next save then
+    /// wrote its stale copy over the other window's choice.
+    #[test]
+    fn a_choice_made_elsewhere_is_taken_up_while_a_dialog_is_open() {
+        settingsfile::testing::with_scratch_config("explorer-reread-modal", |_root| {
+            let scratch = temp_dir("reread_modal");
+            let root = scratch.dir().to_path_buf();
+            fs::write(root.join("a.txt"), "x").unwrap();
+            let mut first = state_at(&root);
+            let mut second = state_at(&root);
+            second.activate_menu_item(MENU_NEW_FOLDER);
+            assert!(second.modal.is_some(), "no dialog opened: nothing tested");
+
+            first.activate_menu_item(MENU_PREVIEW_TOGGLE);
+            assert!(second.handle_event(&announce(b"explorer")));
+            assert_eq!(second.preview_open, first.preview_open);
+            assert!(second.modal.is_some(), "the dialog was closed by it");
+        });
+    }
+
+    /// **Columns shown or hidden here and not saved outlast another window's
+    /// choice** of something else: they are this window's own view. A column
+    /// set saved for this folder in another window is taken up.
+    #[test]
+    fn unsaved_columns_outlast_another_windows_choice() {
+        settingsfile::testing::with_scratch_config("explorer-reread-columns", |_root| {
+            let scratch = temp_dir("reread_columns");
+            let root = scratch.dir().to_path_buf();
+            fs::write(root.join("a.txt"), "x").unwrap();
+            let mut first = state_at(&root);
+            let mut second = state_at(&root);
+            first
+                .columns
+                .set_columns(vec![ColumnId::SIZE, ColumnId::NAME]);
+            first.activate_menu_item(MENU_COLUMNS_SAVE_FOLDER);
+            assert!(second.handle_event(&announce(b"explorer")));
+            assert_eq!(second.columns.visible_keys(), vec!["size", "name"]);
+
+            // Shown here, not saved; another window changes something else.
+            second
+                .columns
+                .set_columns(vec![ColumnId::NAME, ColumnId::DATE_MODIFIED]);
+            first.activate_menu_item(MENU_PREVIEW_TOGGLE);
+            assert!(second.handle_event(&announce(b"explorer")));
+            assert_eq!(second.columns.visible_keys(), vec!["name", "date_modified"]);
+
+            // Another set saved for this folder is taken up.
+            first
+                .columns
+                .set_columns(vec![ColumnId::DATE_MODIFIED, ColumnId::SIZE]);
+            first.activate_menu_item(MENU_COLUMNS_SAVE_FOLDER);
+            assert!(second.handle_event(&announce(b"explorer")));
+            assert_eq!(second.columns.visible_keys(), vec!["date_modified", "size"]);
+        });
+    }
+
+    /// **An arrangement made in another window is taken up, and the selection
+    /// stays on its files.** The selection is positions in the listing; moved
+    /// under it, it would have lit other files.
+    #[test]
+    fn an_arrangement_made_elsewhere_keeps_the_selection_on_its_files() {
+        settingsfile::testing::with_scratch_config("explorer-reread-order", |_root| {
+            let scratch = temp_dir("reread_order");
+            let root = scratch.dir().to_path_buf();
+            for name in ["a.txt", "b.txt", "c.txt"] {
+                fs::write(root.join(name), "x").unwrap();
+            }
+            let names = |state: &ExplorerState| -> Vec<String> {
+                state.entries.iter().map(|e| e.name.clone()).collect()
+            };
+            let mut first = state_at(&root);
+            let mut second = state_at(&root);
+            // The second window is arranged by hand, c first, with a chosen.
+            assert!(second.reorder_rows(vec![2], 0));
+            assert_eq!(names(&second), ["c.txt", "a.txt", "b.txt"]);
+            second.selected_indices = vec![1];
+            // Another window takes that arrangement up, shows it, and moves a
+            // to the end.
+            assert!(first.handle_event(&announce(b"explorer")));
+            first.set_sort(SortBy::Custom);
+            assert_eq!(names(&first), ["c.txt", "a.txt", "b.txt"]);
+            assert!(first.reorder_rows(vec![1], 3));
+            assert_eq!(names(&first), ["c.txt", "b.txt", "a.txt"]);
+
+            second.row_drag = Some(RowDrag {
+                start_x: 0.0,
+                start_y: 0.0,
+                rows: vec![0],
+                active: true,
+                insert_at: 2,
+            });
+            assert!(second.handle_event(&announce(b"explorer")));
+            assert_eq!(names(&second), ["c.txt", "b.txt", "a.txt"]);
+            assert!(
+                second.row_drag.is_none(),
+                "a drag went on moving positions in the order replaced"
+            );
+            let chosen: Vec<&str> = second
+                .selected_indices
+                .iter()
+                .map(|&i| second.entries[i].name.as_str())
+                .collect();
+            assert_eq!(chosen, ["a.txt"], "the selection moved to another file");
+        });
+    }
+
+    /// The middle of `column`'s heading, where the window draws it.
+    fn heading(state: &ExplorerState, column: ColumnId) -> (f32, f32) {
+        let list = state.list_rect();
+        let table_w = (list.w - ICON_GUTTER).max(0.0);
+        let (_, left, width) = columns::heading_spans(&state.columns, table_w)
+            .into_iter()
+            .find(|(id, _, _)| *id == column)
+            .expect("the column is shown");
+        (
+            list.x + ICON_GUTTER + left + width / 2.0,
+            list.y + HEADER_H / 2.0,
+        )
+    }
+
+    /// The listing's names, in order.
+    fn listed(state: &ExplorerState) -> Vec<String> {
+        state.entries.iter().map(|e| e.name.clone()).collect()
+    }
+
+    /// **A click on a heading sorts by its column, and a second the other
+    /// way.** `set_sort` had no caller but a test: the header drew an arrow
+    /// that nothing could move. The file chosen stays chosen -- lit, and the
+    /// one an action takes.
+    #[test]
+    fn a_click_on_a_heading_sorts_by_it_and_again_the_other_way() {
+        let scratch = temp_dir("heading_sort");
+        let root = scratch.dir().to_path_buf();
+        fs::write(root.join("a.txt"), "xxx").unwrap();
+        fs::write(root.join("b.txt"), "x").unwrap();
+        fs::write(root.join("c.txt"), "xx").unwrap();
+        let mut state = state_at(&root);
+        let a = state
+            .entries
+            .iter()
+            .position(|e| e.name == "a.txt")
+            .unwrap();
+        state.select_single(a);
+
+        let (x, y) = heading(&state, ColumnId::SIZE);
+        assert!(press(&mut state, x, y));
+        assert_eq!(listed(&state), ["b.txt", "c.txt", "a.txt"]);
+        assert_eq!(
+            state.columns.current_sort(),
+            (Some(ColumnId::SIZE), SortOrder::Ascending)
+        );
+        let (x, y) = heading(&state, ColumnId::SIZE);
+        assert!(press(&mut state, x, y));
+        assert_eq!(listed(&state), ["a.txt", "c.txt", "b.txt"]);
+        assert_eq!(
+            state.columns.current_sort(),
+            (Some(ColumnId::SIZE), SortOrder::Descending)
+        );
+        let (x, y) = heading(&state, ColumnId::NAME);
+        assert!(press(&mut state, x, y));
+        assert_eq!(listed(&state), ["a.txt", "b.txt", "c.txt"]);
+
+        let chosen: Vec<&str> = state
+            .selected_indices
+            .iter()
+            .map(|&i| state.entries[i].name.as_str())
+            .collect();
+        assert_eq!(chosen, ["a.txt"], "an action would take another file");
+        let lit: Vec<&str> = state
+            .entries
+            .iter()
+            .filter(|e| e.selected)
+            .map(|e| e.name.as_str())
+            .collect();
+        assert_eq!(lit, ["a.txt"], "another file is lit");
+    }
+
+    /// A heading the listing cannot sort by says so, and the order stays.
+    #[test]
+    fn a_heading_that_cannot_sort_says_so() {
+        let scratch = temp_dir("heading_unsorted");
+        let root = scratch.dir().to_path_buf();
+        fs::write(root.join("a.txt"), "xxx").unwrap();
+        fs::write(root.join("b.txt"), "x").unwrap();
+        let mut state = state_at(&root);
+        state
+            .columns
+            .set_columns(vec![ColumnId::NAME, ColumnId::DIMENSIONS]);
+        let (x, y) = heading(&state, ColumnId::DIMENSIONS);
+        assert!(press(&mut state, x, y));
+        assert_eq!(state.sort_by, SortBy::Name);
+        assert_eq!(listed(&state), ["a.txt", "b.txt"]);
+        assert!(
+            state.status_message.contains("cannot be sorted by"),
+            "{}",
+            state.status_message
+        );
+    }
+
+    /// **The folder's own order comes back from the menu** after a column
+    /// sort, which overrides it only while chosen (`roadmap-detailed.md`
+    /// §4.1). Dragging was the only way into it, and a drag saves the order
+    /// on screen -- so once sorted by name, the arrangement could only be
+    /// written over, never returned to.
+    #[test]
+    fn the_folders_own_order_comes_back_from_the_menu() {
+        settingsfile::testing::with_scratch_config("explorer-sort-back", |_root| {
+            let scratch = temp_dir("sort_back");
+            let root = scratch.dir().to_path_buf();
+            for name in ["a.txt", "b.txt", "c.txt"] {
+                fs::write(root.join(name), "x").unwrap();
+            }
+            let mut state = state_at(&root);
+            assert!(state.reorder_rows(vec![2], 0));
+            assert_eq!(listed(&state), ["c.txt", "a.txt", "b.txt"]);
+
+            state.activate_menu_item(MENU_SORT_BASE + 1);
+            assert_eq!(state.sort_by, SortBy::Name);
+            assert_eq!(listed(&state), ["a.txt", "b.txt", "c.txt"]);
+            state.activate_menu_item(MENU_SORT_BASE + 5);
+            assert_eq!(state.sort_by, SortBy::Custom);
+            assert_eq!(listed(&state), ["c.txt", "a.txt", "b.txt"]);
+            assert_eq!(state.columns.current_sort().1, SortOrder::None);
+            // The menu names a sort, not a direction: choosing it again
+            // changes nothing.
+            state.activate_menu_item(MENU_SORT_BASE + 2);
+            state.activate_menu_item(MENU_SORT_BASE + 2);
+            assert_eq!(
+                (state.sort_by, state.sort_dir),
+                (SortBy::Size, SortDir::Ascending)
+            );
+        });
+    }
+
+    /// Your own order is offered only where the folder has one, and asking
+    /// for it anyway says how one is made.
+    #[test]
+    fn your_own_order_is_offered_only_where_there_is_one() {
+        settingsfile::testing::with_scratch_config("explorer-sort-none", |_root| {
+            let scratch = temp_dir("sort_none");
+            let root = scratch.dir().to_path_buf();
+            fs::write(root.join("a.txt"), "x").unwrap();
+            let mut state = state_at(&root);
+            let own = |state: &ExplorerState| -> bool {
+                let MenuItem::Submenu { children, .. } = state.sort_menu() else {
+                    panic!("Sort by is not a submenu");
+                };
+                children.iter().any(|c| {
+                    matches!(c, MenuItem::Action { label, enabled: true, .. }
+                        if label == "Your own order")
+                })
+            };
+            assert!(!own(&state), "offered for a folder with no order");
+            state.activate_menu_item(MENU_SORT_BASE + 5);
+            assert_eq!(state.sort_by, SortBy::Name);
+            assert!(
+                state.status_message.contains("no order of its own"),
+                "{}",
+                state.status_message
+            );
+            fs::write(root.join("b.txt"), "x").unwrap();
+            state.load_directory();
+            assert!(state.reorder_rows(vec![1], 0));
+            assert!(own(&state), "not offered once the folder has one");
+        });
+    }
+
+    /// "Sort by" is on the folder's menu, which every view has, and on the
+    /// headings' own menu.
+    #[test]
+    fn sort_by_is_on_the_folder_menu_and_the_headings_menu() {
+        let scratch = temp_dir("sort_menus");
+        let root = scratch.dir().to_path_buf();
+        fs::write(root.join("a.txt"), "x").unwrap();
+        let state = state_at(&root);
+        let has_sort = |items: &[MenuItem]| {
+            items
+                .iter()
+                .any(|i| matches!(i, MenuItem::Submenu { label, .. } if label == "Sort by"))
+        };
+        assert!(has_sort(&state.folder_menu_items()));
+        assert!(has_sort(&state.heading_menu_items()));
+    }
+
+    /// **Sorting keeps the selection on the files it was on.** The selection
+    /// is positions in the listing and sorting moves the files: the same rows
+    /// stayed lit over other files, and a Delete after a sort acted on files
+    /// nobody had chosen.
+    #[test]
+    fn sorting_keeps_the_selection_on_its_files() {
+        let scratch = temp_dir("sort_selection");
+        let root = scratch.dir().to_path_buf();
+        fs::write(root.join("a.txt"), "xxx").unwrap();
+        fs::write(root.join("b.txt"), "x").unwrap();
+        fs::write(root.join("c.txt"), "xx").unwrap();
+        let mut state = state_at(&root);
+        let a = state
+            .entries
+            .iter()
+            .position(|e| e.name == "a.txt")
+            .unwrap();
+        state.selected_indices = vec![a];
+        state.set_sort(SortBy::Size);
+        let names: Vec<&str> = state.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["b.txt", "c.txt", "a.txt"]);
+        let chosen: Vec<&str> = state
+            .selected_indices
+            .iter()
+            .map(|&i| state.entries[i].name.as_str())
+            .collect();
+        assert_eq!(chosen, ["a.txt"], "the selection moved to another file");
     }
 
     /// A name the address bar cannot represent is skipped, not mangled.
@@ -8855,6 +10157,203 @@ mod tests {
                 state.status_message
             );
         });
+    }
+
+    thread_local! {
+        /// What the test launcher was asked to start, in order.
+        static LAUNCHED: std::cell::RefCell<Vec<(OsString, Vec<OsString>)>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// A launcher that starts nothing and writes down what it was asked.
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "the signature is the launch field's, which the real spawn fills"
+    )]
+    fn record_launch(program: &OsStr, args: &[OsString]) -> std::io::Result<()> {
+        LAUNCHED.with(|l| {
+            l.borrow_mut().push((program.to_os_string(), args.to_vec()));
+        });
+        Ok(())
+    }
+
+    /// What was started since the last ask, clearing it.
+    fn launched() -> Vec<(OsString, Vec<OsString>)> {
+        LAUNCHED.with(|l| std::mem::take(&mut *l.borrow_mut()))
+    }
+
+    /// **A file nobody chose a program for opens with SlateOS's own** -- the
+    /// default for its type (`programs::default_for`), started as its entry
+    /// says. Only the person's choice was asked, so every file of a kind
+    /// nobody had chosen for said "Nothing is set to open" -- on a new
+    /// machine, every file.
+    #[test]
+    fn a_file_nobody_chose_a_program_for_opens_with_slateos_default() {
+        settingsfile::testing::with_scratch_config("explorer-open-default", |_root| {
+            let scratch = temp_dir("open_default");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("notes.txt"), "hello");
+            let mut state = state_at(&root);
+            let index = state
+                .entries
+                .iter()
+                .position(|e| e.name == "notes.txt")
+                .expect("the file is in the listing");
+            state.open_entry(index);
+            assert_eq!(
+                launched(),
+                [(
+                    OsString::from("/usr/bin/editor"),
+                    vec![root.join("notes.txt").into_os_string()]
+                )]
+            );
+            assert!(
+                state
+                    .status_message
+                    .contains("Opening notes.txt with Text Editor"),
+                "{}",
+                state.status_message
+            );
+        });
+    }
+
+    /// **The person's choice goes before SlateOS's default.**
+    #[test]
+    fn the_persons_choice_goes_before_the_default() {
+        settingsfile::testing::with_scratch_config("explorer-open-chosen", |_root| {
+            let mut doc = yamldoc::Document::new();
+            doc.set_str(
+                &[associations::ASSOCIATIONS, "txt"],
+                "/nowhere/chosen-editor",
+            );
+            settingsfile::store(associations::CONFIG_NAME, &doc)
+                .expect("scratch config is writable");
+            let scratch = temp_dir("open_chosen");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("notes.txt"), "hello");
+            let mut state = state_at(&root);
+            let index = state
+                .entries
+                .iter()
+                .position(|e| e.name == "notes.txt")
+                .expect("the file is in the listing");
+            state.open_entry(index);
+            assert_eq!(
+                launched(),
+                [(
+                    OsString::from("/nowhere/chosen-editor"),
+                    vec![root.join("notes.txt").into_os_string()]
+                )]
+            );
+        });
+    }
+
+    /// **Open With offers the programs that open the file's kind** --
+    /// SlateOS's default first, and a program installed here that claims the
+    /// type -- and starts the one chosen on the file, as its entry says.
+    #[test]
+    fn open_with_offers_the_programs_that_open_the_type() {
+        settingsfile::testing::with_scratch_config("explorer-open-with", |_root| {
+            let scratch = temp_dir("open_with");
+            let root = scratch.dir().to_path_buf();
+            let share = scratch.dir().join("share");
+            fs::create_dir_all(share.join("applications")).expect("make the entries' folder");
+            // A program that runs in a terminal is started in one.
+            fs::write(
+                share.join("applications").join("org.example.Pager.desktop"),
+                "[Desktop Entry]\nType=Application\nName=Pager\nExec=pager %f\nTerminal=true\n\
+                 MimeType=text/plain;\n",
+            )
+            .expect("write the entry");
+            fs::write(
+                share.join("applications").join("org.example.Notepad.desktop"),
+                "[Desktop Entry]\nType=Application\nName=Notepad\nExec=notepad %f\nMimeType=text/plain;\n",
+            )
+            .expect("write the entry");
+            let mut state = one_file(&root, "notes.txt");
+            state.app_dirs = desktopentry::scan::DataDirs::new(vec![share]);
+            let (x, y) = row_centre(&state, "notes.txt");
+            right_click(&mut state, x, y);
+            let names: Vec<String> = state.open_with.iter().map(|a| a.name.clone()).collect();
+            assert_eq!(
+                names.first().map(String::as_str),
+                Some("Text Editor"),
+                "{names:?}"
+            );
+            let notepad = names
+                .iter()
+                .position(|n| n == "Notepad")
+                .unwrap_or_else(|| panic!("the installed program is not offered: {names:?}"));
+            assert!(
+                state.file_menu_items().iter().any(|item| matches!(
+                    item,
+                    MenuItem::Submenu { label, enabled: true, .. } if label == "Open with"
+                )),
+                "the file menu has no Open with"
+            );
+            state.activate_menu_item(MENU_OPEN_WITH_BASE + 1 + notepad as u64);
+            assert_eq!(
+                launched(),
+                [(
+                    OsString::from("notepad"),
+                    vec![root.join("notes.txt").into_os_string()]
+                )]
+            );
+            assert!(
+                state.status_message.contains("with Notepad"),
+                "{}",
+                state.status_message
+            );
+
+            let pager = names
+                .iter()
+                .position(|n| n == "Pager")
+                .unwrap_or_else(|| panic!("the terminal program is not offered: {names:?}"));
+            state.activate_menu_item(MENU_OPEN_WITH_BASE + 1 + pager as u64);
+            assert_eq!(
+                launched(),
+                [(
+                    OsString::from("/usr/bin/terminal"),
+                    vec![
+                        OsString::from("-e"),
+                        OsString::from("pager"),
+                        root.join("notes.txt").into_os_string()
+                    ]
+                )]
+            );
+        });
+    }
+
+    /// **A kind of file nothing else opens is offered the hex editor**, which
+    /// reads any file as bytes: every unrecognised file has the type its
+    /// entry claims (`gui/programs/INVENTORY.md`, section 4 -- the type has no
+    /// default, so opening such a file starts nothing, but Open With offers
+    /// the hex editor). A folder's Open With is greyed, not missing, so the
+    /// rows below it stay where they were.
+    #[test]
+    fn an_unknown_kind_is_offered_the_hex_editor_and_a_folder_nothing() {
+        let scratch = temp_dir("open_with_unknown");
+        let root = scratch.dir().to_path_buf();
+        // Named like a text file, so only its being a folder keeps the text
+        // editor off its menu.
+        fs::create_dir(root.join("old.txt")).expect("make a folder");
+        let mut state = one_file(&root, "mystery.zzz");
+        let (x, y) = row_centre(&state, "mystery.zzz");
+        right_click(&mut state, x, y);
+        let names: Vec<&str> = state.open_with.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, ["Hex Editor"]);
+
+        state.menu = None;
+        let (x, y) = row_centre(&state, "old.txt");
+        right_click(&mut state, x, y);
+        assert!(state.open_with.is_empty(), "{:?}", state.open_with);
+        assert!(
+            state.file_menu_items().iter().any(|item| matches!(
+                item,
+                MenuItem::Submenu { label, enabled: false, .. } if label == "Open with"
+            )),
+            "a folder's Open with is not there greyed"
+        );
     }
 
     /// A type nobody has chosen a program for says so, rather than pretending.
@@ -11390,16 +12889,22 @@ mod tests {
         );
     }
 
-    /// An Alt-drag makes a link, or says it could not -- never a copy.
+    /// An Alt-drag makes a link, or asks about the one it could not make --
+    /// never a copy.
     ///
     /// Both outcomes are accepted because only one of them is available on a
     /// given machine: Windows needs a privilege to create a symbolic link, so
-    /// a host without it gets a per-file failure, which is the behaviour
-    /// `ErrorPolicy::SkipAndContinue` was chosen for. What is asserted in
-    /// *both* cases is the thing that must never happen -- a second
-    /// independent file. Silently copying would give the user a duplicate that
-    /// drifts out of step with the original with no sign it was ever meant to
-    /// be a stand-in, which is worse than the gesture failing.
+    /// a host without it gets a per-file failure, which the window asks
+    /// about (`ErrorPolicy::Ask`). What is asserted in *both* cases is the
+    /// thing that must never happen -- a second independent file. Silently
+    /// copying would give the user a duplicate that drifts out of step with
+    /// the original with no sign it was ever meant to be a stand-in, which is
+    /// worse than the gesture failing.
+    ///
+    /// It used to check straight after the drop, before the operation had
+    /// run: no link was there yet, and the progress line "Linked 0 of 1"
+    /// passed for "said it could not", so it passed on every host whatever
+    /// the link operation did.
     #[test]
     fn an_alt_drag_makes_a_link_or_reports_that_it_could_not() {
         let scratch = temp_dir("dz_link");
@@ -11423,6 +12928,13 @@ mod tests {
 
         let result = state.drop_at(x, y, alt).expect("drop");
         assert!(result.valid);
+        settle_until_asked(&mut state);
+        let asked = failure_prompt_of(&state).map(|prompt| prompt.title.clone());
+        if asked.is_some() {
+            // Skipped, so the drop finishes and says what it did.
+            assert!(state.handle_event(&Event::Key(key_press(Key::S))));
+        }
+        settle(&mut state);
 
         let made = root.join("target/note.txt");
         match fs::symlink_metadata(&made) {
@@ -11436,12 +12948,17 @@ mod tests {
                     fs::read_to_string(&made).expect("the link resolves"),
                     "hello"
                 );
+                assert_eq!(asked, None, "a link was made and asked about too");
             }
             Err(_) => {
+                assert_eq!(
+                    asked.as_deref(),
+                    Some("Could not make a link to \u{201c}note.txt\u{201d}"),
+                    "no link was made and nobody was asked"
+                );
                 assert!(
-                    state.status_message.contains("failed")
-                        || state.status_message.contains("Linked 0"),
-                    "no link was made and nothing said so: {:?}",
+                    state.status_message.contains("Linked 0 item(s), 1 failed"),
+                    "the drop did not say it made nothing: {:?}",
                     state.status_message
                 );
             }
@@ -13556,6 +15073,109 @@ mod tests {
         assert!(offered, "the folder menu does not offer the choice");
     }
 
+    // ---- what an operation does with a file it cannot do (2026-09-28) ----
+
+    #[test]
+    fn a_failed_file_is_asked_about_until_the_user_chooses_otherwise_and_the_choice_is_remembered()
+    {
+        settingsfile::testing::with_scratch_config("explorer-failure", |_root| {
+            let scratch = temp_dir("failure_choice");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
+            let mut state = state_at(&root);
+            assert_eq!(state.failure_policy, ErrorPolicy::Ask);
+            let skip = columnprefs::FAILURE_CHOICES
+                .iter()
+                .position(|(p, _, _)| *p == ErrorPolicy::SkipAndContinue)
+                .expect("Skip is offered");
+            state.activate_menu_item(MENU_FAILURE_BASE + skip as u64);
+            assert_eq!(state.failure_policy, ErrorPolicy::SkipAndContinue);
+            assert!(
+                state
+                    .status_message
+                    .contains("skip it and say so at the end"),
+                "{}",
+                state.status_message
+            );
+            let again = state_at(&root);
+            assert_eq!(
+                again.failure_policy,
+                ErrorPolicy::SkipAndContinue,
+                "the choice did not survive"
+            );
+        });
+    }
+
+    /// **Told to skip, a paste skips a file it cannot copy and says so at
+    /// the end** -- nobody is asked, the rest is copied, and the end raises
+    /// the dialog, since nobody was shown the file.
+    #[test]
+    fn a_paste_told_to_skip_skips_a_file_it_cannot_copy_and_says_so_at_the_end() {
+        let scratch = temp_dir("failure_skip");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 2);
+        state.failure_policy = ErrorPolicy::SkipAndContinue;
+        state.paste();
+        fs::remove_file(root.join("src").join("f0.txt")).unwrap();
+        settle_until_asked(&mut state);
+        assert!(failure_prompt_of(&state).is_none(), "it asked anyway");
+        settle(&mut state);
+        assert!(root.join("dst").join("f1.txt").exists(), "it did not go on");
+        assert!(
+            state.status_message.contains("1 failed"),
+            "{}",
+            state.status_message
+        );
+        let notice = notice_text(&state).expect("a failure nobody saw was not reported");
+        assert!(notice.contains("f0.txt"), "{notice}");
+    }
+
+    #[test]
+    fn the_failure_choice_is_offered_on_the_folder_menu() {
+        let scratch = temp_dir("failure_menu");
+        let root = scratch.dir().to_path_buf();
+        let mut state = state_at(&root);
+        // Which row is ticked: the one in force, and only it.
+        let ticked = |state: &ExplorerState| -> Vec<String> {
+            state
+                .folder_menu_items()
+                .iter()
+                .find_map(|item| match item {
+                    MenuItem::Submenu { id, children, .. } if *id == MENU_FAILURE_BASE => {
+                        Some(children.clone())
+                    }
+                    _ => None,
+                })
+                .expect("the folder menu does not offer the choice")
+                .iter()
+                .filter_map(|row| match row {
+                    MenuItem::Action {
+                        label,
+                        checked: Some(true),
+                        ..
+                    } => Some(label.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        state.failure_policy = ErrorPolicy::Ask;
+        assert_eq!(ticked(&state), ["Ask each time"]);
+        state.failure_policy = ErrorPolicy::SkipAndContinue;
+        assert_eq!(ticked(&state), ["Skip it and say so at the end"]);
+    }
+
+    #[test]
+    fn ask_is_what_a_failure_does_until_told_otherwise() {
+        assert_eq!(
+            columnprefs::FAILURE_CHOICES.first().map(|(p, _, _)| *p),
+            Some(ErrorPolicy::Ask)
+        );
+        assert_eq!(
+            columnprefs::failure_policy(&yamldoc::Document::new()),
+            ErrorPolicy::Ask
+        );
+    }
+
     // ---- a cut pasted back where it came from (2026-09-27) ----
 
     #[test]
@@ -13603,6 +15223,458 @@ mod tests {
         }
     }
 
+    fn failure_prompt_of(state: &ExplorerState) -> Option<&ErrorPrompt> {
+        match state.modal.as_ref() {
+            Some(Modal::Failed { prompt }) => Some(prompt),
+            _ => None,
+        }
+    }
+
+    /// A paste of `f0.txt` and `f1.txt`, with `f0.txt` gone from under it
+    /// after the paste began, ticked until it asks.
+    fn paste_with_a_file_gone(scratch: &Path) -> ExplorerState {
+        let mut state = paste_of(scratch, 2);
+        state.paste();
+        fs::remove_file(scratch.join("src").join("f0.txt")).unwrap();
+        settle_until_asked(&mut state);
+        state
+    }
+
+    /// **A file a paste cannot copy is asked about**, and the paste waits:
+    /// try again, skip, skip all, stop. It skipped the file and said so at
+    /// the end, so a copy that met a file held open elsewhere could not be
+    /// told to go again.
+    #[test]
+    fn a_file_a_paste_cannot_copy_is_asked_about() {
+        let scratch = temp_dir("fail_prompt");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_with_a_file_gone(&root);
+        let prompt = failure_prompt_of(&state).expect("nobody was asked");
+        assert_eq!(prompt.title, "Could not copy \u{201c}f0.txt\u{201d}");
+        assert!(!prompt.why.is_empty(), "the prompt does not say why");
+        assert!(
+            state.work_in_flight(),
+            "the paste finished without an answer"
+        );
+        assert!(
+            !state.work_moving(),
+            "a paste waiting on an answer still wants the clock"
+        );
+        assert_eq!(
+            state.transfer_labels(),
+            ["Pasted 0 of 2 \u{2014} asking about \u{201c}f0.txt\u{201d}"],
+            "the Transfers view does not say what it is waiting on"
+        );
+        let drawn = state.render();
+        let texts: Vec<String> = drawn
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                guitk::render::RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        for (_, label, _) in ERROR_BUTTONS {
+            assert!(
+                texts.iter().any(|t| t == label),
+                "{label} is not drawn: {texts:?}"
+            );
+        }
+        // Keys that mean something elsewhere mean nothing behind it.
+        assert!(state.handle_event(&Event::Key(key_press(Key::Delete))));
+        assert!(failure_prompt_of(&state).is_some());
+    }
+
+    /// **Each answer does what it says**: Try again copies the file once
+    /// it is back, Skip and Skip all leave it and go on, and every one lets
+    /// the rest of the paste finish.
+    #[test]
+    fn each_answer_to_a_failure_does_what_it_says() {
+        for (key, restore, f0_copied) in [
+            (Key::T, true, true),
+            (Key::Enter, true, true),
+            (Key::S, false, false),
+            (Key::A, false, false),
+        ] {
+            let scratch = temp_dir(&format!("fail_answer_{key:?}"));
+            let root = scratch.dir().to_path_buf();
+            let mut state = paste_with_a_file_gone(&root);
+            if restore {
+                write(&root.join("src").join("f0.txt"), "some content");
+            }
+            assert!(state.handle_event(&Event::Key(key_press(key))));
+            assert!(
+                failure_prompt_of(&state).is_none(),
+                "{key:?}: the prompt stayed up"
+            );
+            settle(&mut state);
+            let dst = root.join("dst");
+            assert_eq!(dst.join("f0.txt").exists(), f0_copied, "{key:?}");
+            assert!(
+                dst.join("f1.txt").exists(),
+                "{key:?}: the paste did not go on"
+            );
+            if !f0_copied {
+                assert!(
+                    state.status_message.contains("1 failed"),
+                    "{key:?}: {}",
+                    state.status_message
+                );
+            }
+            // The one failure was asked about and answered, so the end says
+            // it in the status bar and puts up no dialog about it again.
+            assert!(
+                state.modal.is_none(),
+                "{key:?}: a failure the user answered was reported again"
+            );
+        }
+    }
+
+    /// **Stop at a failure stops the paste**: what was done stays done, and
+    /// nothing after it is copied.
+    #[test]
+    fn stop_at_a_failure_stops_the_paste() {
+        let scratch = temp_dir("fail_stop");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_with_a_file_gone(&root);
+        assert!(state.handle_event(&Event::Key(key_press(Key::Escape))));
+        assert!(failure_prompt_of(&state).is_none());
+        settle(&mut state);
+        assert!(
+            !root.join("dst").join("f1.txt").exists(),
+            "it went on after Stop"
+        );
+        assert!(!state.work_in_flight());
+        // Asked and answered: the end says what happened without a second
+        // dialog to dismiss for the same file.
+        assert!(
+            state.modal.is_none(),
+            "a failure the user answered was reported again"
+        );
+        assert!(
+            state.status_message.contains("1 failed") && state.status_message.contains("stopped"),
+            "{}",
+            state.status_message
+        );
+    }
+
+    /// **A click answers the failure prompt as its key does**, each button
+    /// the answer it names.
+    #[test]
+    fn the_failure_prompt_answers_a_click_on_its_buttons() {
+        for (answer, f0_copied, f1_copied) in [
+            (ErrorAnswer::TryAgain, true, true),
+            (ErrorAnswer::Skip, false, true),
+            (ErrorAnswer::SkipAll, false, true),
+            (ErrorAnswer::Stop, false, false),
+        ] {
+            let scratch = temp_dir(&format!("fail_click_{answer:?}"));
+            let root = scratch.dir().to_path_buf();
+            let mut state = paste_with_a_file_gone(&root);
+            if answer == ErrorAnswer::TryAgain {
+                write(&root.join("src").join("f0.txt"), "some content");
+            }
+            let _ = state.render();
+            let button = failure_prompt_of(&state)
+                .and_then(|p| p.hits.iter().find(|(a, _)| *a == answer).map(|(_, r)| *r))
+                .expect("the answer was not drawn");
+            // A click beside every button does nothing.
+            let beside = Event::Mouse(MouseEvent {
+                x: 2.0,
+                y: 2.0,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            });
+            assert!(state.handle_event(&beside));
+            assert!(
+                failure_prompt_of(&state).is_some(),
+                "a click beside it answered"
+            );
+            // Passing over the button, or letting go on it, is not a press.
+            for kind in [
+                MouseEventKind::Move,
+                MouseEventKind::Release(MouseButton::Left),
+            ] {
+                let what = format!("{kind:?}");
+                let over = Event::Mouse(MouseEvent {
+                    x: button.x + button.w / 2.0,
+                    y: button.y + button.h / 2.0,
+                    kind,
+                });
+                assert!(state.handle_event(&over));
+                assert!(
+                    failure_prompt_of(&state).is_some(),
+                    "{what} over the button answered"
+                );
+            }
+            let click = Event::Mouse(MouseEvent {
+                x: button.x + button.w / 2.0,
+                y: button.y + button.h / 2.0,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            });
+            assert!(state.handle_event(&click));
+            assert!(failure_prompt_of(&state).is_none(), "{answer:?}: still up");
+            settle(&mut state);
+            let dst = root.join("dst");
+            assert_eq!(dst.join("f0.txt").exists(), f0_copied, "{answer:?}");
+            assert_eq!(dst.join("f1.txt").exists(), f1_copied, "{answer:?}");
+        }
+    }
+
+    /// **Cancelling a paste stopped at a failure takes its prompt down**:
+    /// the question belongs to an operation that has gone.
+    #[test]
+    fn cancelling_a_paste_stopped_at_a_failure_takes_its_prompt_down() {
+        let scratch = temp_dir("fail_cancel");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_with_a_file_gone(&root);
+        assert!(state.cancel_operation());
+        settle(&mut state);
+        assert!(
+            failure_prompt_of(&state).is_none(),
+            "the prompt stayed up for an operation that has gone"
+        );
+        assert!(!root.join("dst").join("f1.txt").exists());
+    }
+
+    /// Skip all, then another failure: nobody is asked the second time, and
+    /// the end says so -- the second was never shown.
+    #[test]
+    fn a_failure_after_skip_all_is_reported_at_the_end() {
+        let scratch = temp_dir("fail_skip_all_end");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 3);
+        state.paste();
+        fs::remove_file(root.join("src").join("f0.txt")).unwrap();
+        fs::remove_file(root.join("src").join("f2.txt")).unwrap();
+        settle_until_asked(&mut state);
+        assert!(state.handle_event(&Event::Key(key_press(Key::A))));
+        settle_until_asked(&mut state);
+        assert!(
+            failure_prompt_of(&state).is_none(),
+            "asked again after Skip all"
+        );
+        settle(&mut state);
+        assert!(root.join("dst").join("f1.txt").exists());
+        let notice = notice_text(&state).expect("a failure nobody saw was not reported");
+        assert!(notice.contains("f2.txt"), "{notice}");
+        assert!(notice.starts_with("2 of 3"), "{notice}");
+    }
+
+    /// **The prompt keeps its answers inside a narrow window**, a row under
+    /// another when they do not fit side by side.
+    #[test]
+    fn the_failure_prompt_keeps_its_answers_inside_a_narrow_window() {
+        let scratch = temp_dir("fail_narrow");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_with_a_file_gone(&root);
+        for width in [1200.0_f32, 320.0, 240.0] {
+            let Some(Modal::Failed { prompt }) = state.modal.as_mut() else {
+                panic!("nobody was asked");
+            };
+            let mut tree = RenderTree::new();
+            prompt.render(&state.palette, width, 600.0, &mut tree);
+            let answers: Vec<Rect> = prompt.hits.iter().map(|(_, r)| *r).collect();
+            assert_eq!(answers.len(), ERROR_BUTTONS.len());
+            let (card, _) = card_of(&tree).expect("no card was drawn");
+            for r in &answers {
+                assert!(
+                    r.x >= card.x
+                        && r.y >= card.y
+                        && r.x + r.w <= card.x + card.w + 0.5
+                        && r.y + r.h <= card.y + card.h + 0.5,
+                    "an answer runs past the card at {width}: {r:?} {card:?}"
+                );
+            }
+            for (i, a) in answers.iter().enumerate() {
+                for b in answers.iter().skip(i + 1) {
+                    let apart = a.x + a.w <= b.x
+                        || b.x + b.w <= a.x
+                        || a.y + a.h <= b.y
+                        || b.y + b.h <= a.y;
+                    assert!(apart, "two answers overlap at {width}: {a:?} {b:?}");
+                }
+            }
+        }
+    }
+
+    /// The failure prompt for `why`, drawn `width` wide: the reason's lines
+    /// with where each is, where the answers are, and the card.
+    fn failure_prompt_drawn(why: &str, width: f32) -> (Vec<(f32, String)>, Vec<Rect>, Rect) {
+        let mut prompt = ErrorPrompt::new(
+            7,
+            &FileOperation::Copy,
+            &ErrorQuestion {
+                action: 0,
+                path: PathBuf::from("notes.txt"),
+                error: why.to_string(),
+            },
+        );
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let mut tree = RenderTree::new();
+        prompt.render(&pal, width, 600.0, &mut tree);
+        let lines = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                guitk::render::RenderCommand::Text { y, text, .. }
+                    if !text.is_empty() && why.contains(text.as_str()) =>
+                {
+                    Some((*y, text.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        let (card, _) = card_of(&tree).expect("no card was drawn");
+        let answers = prompt.hits.iter().map(|(_, r)| *r).collect();
+        (lines, answers, card)
+    }
+
+    /// A prompt's card -- the one box drawn with corners of 8 -- and its
+    /// fill, if it has one.
+    fn card_of(tree: &RenderTree) -> Option<(Rect, guitk::color::Color)> {
+        tree.commands.iter().find_map(|c| match c {
+            guitk::render::RenderCommand::FillRect {
+                x,
+                y,
+                width,
+                height,
+                color,
+                corner_radii,
+            } if *corner_radii == guitk::style::CornerRadii::all(8.0) => {
+                Some((Rect::new(*x, *y, *width, *height), *color))
+            }
+            _ => None,
+        })
+    }
+
+    /// **Both prompts stand on a filled panel in every look**, every answer
+    /// inside it. They were drawn as cards, and under borders a card is an
+    /// outline alone: the prompt's words sat on the dimmed listing, its rows
+    /// showing through them.
+    #[test]
+    fn the_prompts_are_filled_in_every_look() {
+        let scratch = temp_dir("prompt_filled");
+        let root = scratch.dir().to_path_buf();
+        let mut asking = paste_onto_a_taken_name(&root);
+        for style in [
+            appearance::SurfaceStyle::Borders,
+            appearance::SurfaceStyle::Cards,
+        ] {
+            let mut pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+            pal.set_surface_style(style);
+            let mut failed = ErrorPrompt::new(
+                7,
+                &FileOperation::Copy,
+                &ErrorQuestion {
+                    action: 0,
+                    path: PathBuf::from("notes.txt"),
+                    error: "Access is denied.".to_string(),
+                },
+            );
+            let mut tree = RenderTree::new();
+            failed.render(&pal, 800.0, 600.0, &mut tree);
+            let failed_answers: Vec<Rect> = failed.hits.iter().map(|(_, r)| *r).collect();
+            let Some(Modal::Conflict { prompt }) = asking.modal.as_mut() else {
+                panic!("nobody was asked about the taken name");
+            };
+            let mut conflict_tree = RenderTree::new();
+            prompt.render(&pal, 800.0, 600.0, &mut conflict_tree);
+            let conflict_answers: Vec<Rect> = prompt
+                .hits
+                .iter()
+                .filter(|(c, _)| matches!(c, PromptControl::Answer(_)))
+                .map(|(_, r)| *r)
+                .collect();
+            for (which, tree, answers) in [
+                ("failure", &tree, &failed_answers),
+                ("taken name", &conflict_tree, &conflict_answers),
+            ] {
+                let (card, fill) = card_of(tree)
+                    .unwrap_or_else(|| panic!("{style:?}: the {which} prompt has no fill"));
+                assert_eq!(
+                    fill.a, 255,
+                    "{style:?}: the {which} prompt's fill is see-through"
+                );
+                for r in answers {
+                    assert!(
+                        r.x >= card.x
+                            && r.y >= card.y
+                            && r.x + r.w <= card.x + card.w + 0.5
+                            && r.y + r.h <= card.y + card.h + 0.5,
+                        "{style:?}: a {which} answer is outside its card: {r:?} {card:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **A long reason is wrapped, not cut at the card's edge**: every word
+    /// of it drawn, on lines that fit, with the answers as far below its
+    /// last line as they are below a reason of one, in a card grown to hold
+    /// them.
+    #[test]
+    fn a_long_reason_is_wrapped_above_the_answers() {
+        let why = "The process cannot access the file because it is being used by \
+                   another process. (os error 32)";
+        // Narrow enough that the reason cannot be one line in any font.
+        let width = 400.0;
+        let inner = PROMPT_W.min(width - 32.0) - 40.0;
+        let weight = guitk::render::FontWeightHint::Regular;
+        let (lines, answers, card) = failure_prompt_drawn(why, width);
+        assert!(
+            lines.len() > 1,
+            "a reason wider than the card is on one line: {lines:?}"
+        );
+        let joined: Vec<&str> = lines.iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(joined.join(" "), why, "the reason lost words");
+        for (_, line) in &lines {
+            assert!(
+                guitk::text::measure(line, 12.0, weight) <= inner + 0.5,
+                "{line:?} overflows"
+            );
+        }
+        let lowest =
+            |lines: &[(f32, String)]| lines.iter().map(|(y, _)| *y).fold(f32::MIN, f32::max);
+        let top = |answers: &[Rect]| answers.iter().map(|r| r.y).fold(f32::MAX, f32::min);
+        // What is left of the card under the answers.
+        let margin = |answers: &[Rect], card: Rect| {
+            card.y + card.h - answers.iter().map(|r| r.y + r.h).fold(f32::MIN, f32::max)
+        };
+        let (one_line, one_line_answers, one_line_card) =
+            failure_prompt_drawn("Access is denied.", width);
+        assert_eq!(one_line.len(), 1, "{one_line:?}");
+        let gap = top(&answers) - lowest(&lines);
+        let one_line_gap = top(&one_line_answers) - lowest(&one_line);
+        assert!(
+            (gap - one_line_gap).abs() < 0.5,
+            "the answers are {gap} below the reason's last line, and {one_line_gap} below one line"
+        );
+        let under = margin(&answers, card);
+        let one_line_under = margin(&one_line_answers, one_line_card);
+        assert!(
+            (under - one_line_under).abs() < 0.5,
+            "the card ends {under} under the answers, and {one_line_under} under one line's"
+        );
+    }
+
+    /// A reason too long for three lines is cut on the third, with "…".
+    #[test]
+    fn a_reason_past_three_lines_is_cut_on_the_third() {
+        let why = "word ".repeat(200);
+        let lines = why_lines(&why, 300.0);
+        assert_eq!(lines.len(), WHY_LINES);
+        assert!(lines[2].ends_with('\u{2026}'), "{:?}", lines[2]);
+        let weight = guitk::render::FontWeightHint::Regular;
+        for line in &lines {
+            assert!(
+                guitk::text::measure(line, 12.0, weight) <= 300.5,
+                "{line:?} overflows"
+            );
+        }
+        // And a short one is one line, as it was.
+        assert_eq!(why_lines("Access is denied.", 300.0), ["Access is denied."]);
+    }
+
     /// A paste of `f0.txt` onto a folder that already has one, asking.
     fn paste_onto_a_taken_name(scratch: &Path) -> ExplorerState {
         let mut state = paste_of(scratch, 2);
@@ -13611,6 +15683,141 @@ mod tests {
         state.paste();
         settle_until_asked(&mut state);
         state
+    }
+
+    /// **A chord is not the file list's key, and AltGr is not Ctrl**:
+    /// Alt+Delete asked to recycle the selection and Alt+2 changed the view,
+    /// each chord arriving carrying its key; AltGr+C -- a Polish `ć` --
+    /// copied the selection; and Alt+R answered the taken-name prompt with
+    /// Replace. Ctrl+C still copies, and Alt+Left alone still goes back.
+    #[test]
+    fn a_chord_is_not_the_file_lists_key_and_altgr_is_not_ctrl() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let press = |key: Key, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key,
+                pressed: true,
+                modifiers,
+                text: String::new(),
+            })
+        };
+        let scratch = temp_dir("chords");
+        let root = scratch.dir().to_path_buf();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            write(&root.join(name), "x");
+        }
+        let mut state = state_at(&root);
+        assert!(state.handle_event(&Event::Key(key_press(Key::Down))));
+        let (view, selected) = (state.view_mode, state.selected_indices.clone());
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for k in [Key::Delete, Key::Num2, Key::Down, Key::F2, Key::C, Key::F1] {
+                assert!(!state.handle_event(&press(k, m)), "{m:?} {k:?} was taken");
+            }
+        }
+        assert!(state.modal.is_none(), "a chord asked to recycle or rename");
+        assert_eq!(state.view_mode, view, "a chord changed the view");
+        assert_eq!(
+            state.selected_indices, selected,
+            "a chord moved the selection"
+        );
+        assert!(state.clipboard.is_none(), "AltGr+C copied");
+        assert!(!state.show_help, "a chord raised the keys");
+        assert!(state.handle_event(&press(Key::C, Modifiers::ctrl())));
+        assert!(state.clipboard.is_some(), "Ctrl+C no longer copies");
+
+        // The path bar is the toolkit's field: a chord's letter is not
+        // typed into it.
+        assert!(state.handle_event(&press(Key::L, Modifiers::ctrl())));
+        assert!(state.pathbar.is_editing(), "control: Ctrl+L edits the path");
+        let path = state.pathbar.typed_text().map(str::to_owned);
+        for m in [Modifiers::alt(), Modifiers::super_key()] {
+            let x = Event::Key(KeyEvent {
+                key: Key::X,
+                pressed: true,
+                modifiers: m,
+                text: String::from("x"),
+            });
+            assert!(!state.handle_event(&x), "{m:?}+X went to the path bar");
+        }
+        assert_eq!(
+            state.pathbar.typed_text().map(str::to_owned),
+            path,
+            "a chord's letter was typed into the path"
+        );
+        assert!(state.handle_event(&Event::Key(key_press(Key::Escape))));
+
+        // The recycle bin's keys are plain too, its Ctrl+A a Ctrl chord and
+        // its way back Alt alone.
+        state.open_recycle_bin();
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            assert!(
+                !state.handle_event(&press(Key::Delete, m)),
+                "{m:?} Delete was taken"
+            );
+            assert!(
+                !state.handle_event(&press(Key::Escape, m)),
+                "{m:?} Escape was taken"
+            );
+        }
+        for m in [Modifiers::super_key(), altgr] {
+            assert!(
+                !state.handle_event(&press(Key::Left, m)),
+                "{m:?} Left was taken"
+            );
+        }
+        assert!(
+            !state.handle_event(&press(Key::A, altgr)),
+            "AltGr+A chose everything"
+        );
+        assert!(state.bin.is_some(), "a chord left the bin");
+        assert!(state.modal.is_none(), "a chorded Delete asked to erase");
+        assert!(state.handle_event(&press(Key::Left, Modifiers::alt())));
+        assert!(state.bin.is_none(), "Alt+Left no longer leaves the bin");
+
+        // The failure prompt takes a plain answer only.
+        let scratch = temp_dir("chords_failed");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_with_a_file_gone(&root);
+        assert!(
+            failure_prompt_of(&state).is_some(),
+            "control: the copy failed and asks"
+        );
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            assert!(
+                state.handle_event(&press(Key::Enter, m)),
+                "the prompt let a key through"
+            );
+        }
+        assert!(
+            failure_prompt_of(&state).is_some(),
+            "a chord answered the failure prompt"
+        );
+
+        // The taken-name prompt takes a plain answer only.
+        let scratch = temp_dir("chords_prompt");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_onto_a_taken_name(&root);
+        for m in [
+            Modifiers::alt(),
+            Modifiers::super_key(),
+            altgr,
+            Modifiers::ctrl(),
+        ] {
+            assert!(
+                state.handle_event(&press(Key::R, m)),
+                "the prompt let a key through"
+            );
+        }
+        assert!(prompt_of(&state).is_some(), "a chord answered the prompt");
+        assert_eq!(
+            fs::read_to_string(root.join("dst").join("f0.txt")).unwrap(),
+            "already here",
+            "a chord replaced the file"
+        );
     }
 
     #[test]

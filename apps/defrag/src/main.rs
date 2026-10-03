@@ -1843,12 +1843,17 @@ impl DefragUI {
             return EventResult::Ignored;
         }
 
-        if key.key == Key::F1 {
+        // Every key but what the pattern field types is taken plain: a chord
+        // with Ctrl, Alt or the Windows key is the window's or the desktop's
+        // and arrives carrying its key -- Alt+Enter answered the SSD warning
+        // with "defragment anyway".
+        let plain = textline::is_plain(key.modifiers);
+        if key.key == Key::F1 && plain {
             self.show_help = !self.show_help;
             return EventResult::Consumed;
         }
         if self.show_help {
-            if matches!(key.key, Key::Escape | Key::Enter) {
+            if plain && matches!(key.key, Key::Escape | Key::Enter) {
                 self.show_help = false;
             }
             return EventResult::Consumed;
@@ -1859,6 +1864,7 @@ impl DefragUI {
         // buttons already have.
         if self.show_ssd_warning {
             return match key.key {
+                _ if !plain => EventResult::Consumed,
                 Key::Escape => {
                     self.show_ssd_warning = false;
                     EventResult::Consumed
@@ -1872,7 +1878,19 @@ impl DefragUI {
         }
 
         if self.show_exclude_editor {
+            // `typed` rather than the raw `text`: it drops control
+            // characters, which would be invisible in the field and
+            // meaningless in a glob, and it yields *every* character the
+            // keystroke produced -- a dead key followed by a non-composing
+            // one types two, and taking only the first would silently eat
+            // what someone typed. Typed, not a command's letter, which a
+            // chord carries: Alt+X typed an `x` into the pattern.
+            if textline::types_into_field(key) {
+                self.exclude_input.extend(key.typed());
+                return EventResult::Consumed;
+            }
             match key.key {
+                _ if !plain => {}
                 Key::Escape => {
                     self.show_exclude_editor = false;
                     self.exclude_input.clear();
@@ -1888,22 +1906,14 @@ impl DefragUI {
                 Key::Backspace => {
                     self.exclude_input.pop();
                 }
-                _ => {
-                    // `typed` rather than the raw `text`: it drops control
-                    // characters, which would be invisible in the field and
-                    // meaningless in a glob, and it yields *every* character
-                    // the keystroke produced -- a dead key followed by a
-                    // non-composing one types two, and taking only the first
-                    // would silently eat what someone typed.
-                    self.exclude_input.extend(key.typed());
-                }
+                _ => {}
             }
             return EventResult::Consumed;
         }
 
         // Tab cycles the views, which is the one thing in this window worth a
         // key of its own: the four tabs are the whole app.
-        if key.key == Key::Tab {
+        if key.key == Key::Tab && plain {
             let tabs = ViewTab::all();
             let here = tabs.iter().position(|t| *t == self.view_tab).unwrap_or(0);
             let step = if key.modifiers.shift {
@@ -1980,10 +1990,11 @@ impl App for DefragUI {
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
+        // A Ctrl chord, not Ctrl held: AltGr+Q -- Ctrl+Alt -- is a German `@`.
         if let Event::Key(key) = event
             && key.pressed
             && key.key == Key::Q
-            && key.modifiers.ctrl
+            && textline::is_ctrl_chord(key.modifiers)
         {
             return Response::Exit;
         }
@@ -4570,6 +4581,80 @@ mod tests {
         );
         assert!(!ui.show_exclude_editor, "Enter left the editor open");
         assert!(ui.exclude_input.is_empty(), "Enter left the field dirty");
+    }
+
+    /// **A chord is neither a key of the window nor typing, and AltGr types**:
+    /// Alt+Enter answered the SSD warning with "defragment anyway", Alt+X
+    /// typed an `x` into a pattern, Alt+Tab-like chords changed the view, and
+    /// AltGr+Q -- a German `@` -- closed the window.
+    #[test]
+    fn a_chord_is_neither_a_key_of_the_window_nor_typing() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let key = |k: Key, text: &str, modifiers: Modifiers| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        };
+        let chords = [
+            Modifiers::alt(),
+            Modifiers::super_key(),
+            altgr,
+            Modifiers::ctrl(),
+        ];
+
+        let mut ui = populated_ui();
+        let view = ui.view_tab;
+        // Each press must be refused, not only the end state checked: four
+        // chorded Tabs go round the four tabs and back, and four chorded F1s
+        // raise the card and put it away twice.
+        for m in chords {
+            for k in [Key::Tab, Key::F1] {
+                assert_eq!(
+                    probe::key(&mut ui, &key(k, "", m)),
+                    EventResult::Ignored,
+                    "{m:?} {k:?} was taken"
+                );
+            }
+        }
+        assert_eq!(ui.view_tab, view, "a chord changed the view");
+        assert!(!ui.show_help, "a chord raised the keys");
+        assert!(
+            !matches!(
+                ui.on_event(&Event::Key(key(Key::Q, "@", altgr))),
+                Response::Exit
+            ),
+            "AltGr+Q closed the window"
+        );
+
+        // The SSD warning is answered by a plain key only.
+        ui.show_ssd_warning = true;
+        let state = ui.defrag_state();
+        for m in chords {
+            probe::key(&mut ui, &key(Key::Enter, "", m));
+            probe::key(&mut ui, &key(Key::Escape, "", m));
+        }
+        assert!(ui.show_ssd_warning, "a chord answered the SSD warning");
+        assert_eq!(ui.defrag_state(), state, "a chord started the defrag");
+        ui.show_ssd_warning = false;
+
+        // The pattern field types what a key typed.
+        ui.set_view_tab(ViewTab::Schedule);
+        probe::click(&mut ui, Target::ExcludeAdd);
+        for m in [Modifiers::alt(), Modifiers::super_key(), Modifiers::ctrl()] {
+            probe::key(&mut ui, &key(Key::X, "x", m));
+            probe::key(&mut ui, &key(Key::Escape, "", m));
+        }
+        assert!(ui.show_exclude_editor, "a chord closed the field");
+        probe::key(&mut ui, &key(Key::Q, "@", altgr));
+        assert_eq!(
+            ui.exclude_input, "@",
+            "the field typed a command or lost AltGr's @"
+        );
     }
 
     #[test]

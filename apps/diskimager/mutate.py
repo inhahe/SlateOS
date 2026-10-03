@@ -37,6 +37,18 @@ MUTATIONS = [
         '                "",',
         [FORMAT],
     ),
+    (
+        'AltGr is taken for Ctrl',
+        '        if textline::is_ctrl_chord(key.modifiers) {\n            return match key.key {',
+        '        if key.modifiers.ctrl {\n            return match key.key {',
+        ['a_key_held_with_a_modifier_is_not_the_windows_and_altgr_is_not_ctrl'],
+    ),
+    (
+        "a key held with Alt or the Windows key is the window's",
+        '        if !textline::is_plain(key.modifiers) {\n            return EventResult::Ignored;\n        }\n',
+        '',
+        ['a_key_held_with_a_modifier_is_not_the_windows_and_altgr_is_not_ctrl'],
+    ),
 ]
 
 if __name__ == "__main__":

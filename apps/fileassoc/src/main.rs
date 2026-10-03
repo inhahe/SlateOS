@@ -448,11 +448,22 @@ impl AssociationRegistry {
         }
     }
 
-    /// Create a registry pre-populated with built-in file types and apps.
+    /// A registry of every file type the toolkit knows and SlateOS's own
+    /// programs (`programs::built_in`), each type associated with the program
+    /// SlateOS opens it with. Reads no filesystem: `with_programs` takes the
+    /// programs installed here too.
     pub fn with_defaults() -> Self {
+        Self::with_programs(&::programs::built_in(None))
+    }
+
+    /// A registry of every file type the toolkit knows and `programs` -- the
+    /// one list of them, with those installed here -- each type associated
+    /// with the program SlateOS opens it with (`programs::default_for`), when
+    /// that program is among them and opens it.
+    pub fn with_programs(programs: &[desktopentry::App]) -> Self {
         let mut reg = Self::new();
         reg.add_default_file_types();
-        reg.add_default_apps();
+        reg.add_programs(programs);
         reg.assign_default_associations();
         reg
     }
@@ -784,6 +795,7 @@ impl AssociationRegistry {
             // belongs, and the next save rewrites it as a path.
             let app_id = self
                 .app_id_for_exec(&written)
+                .or_else(|| self.app_id_for_name(&written))
                 .unwrap_or_else(|| written.clone());
             if let Err(e) = self.set_default_app(&extension, &app_id) {
                 errors.push(e);
@@ -798,6 +810,25 @@ impl AssociationRegistry {
         self.apps
             .values()
             .find(|app| app.exec_path == exec_path)
+            .map(|app| app.id.clone())
+    }
+
+    /// The id of the application `name` names: an id, or the file name of
+    /// the program an application runs -- `editor`, as a file written before
+    /// the programs came from the one list of them (2026-09-29) calls the text
+    /// editor, whose id is now its desktop entry's.
+    #[must_use]
+    pub fn app_id_for_name(&self, name: &str) -> Option<String> {
+        if self.apps.contains_key(name) {
+            return Some(name.to_string());
+        }
+        self.apps
+            .values()
+            .find(|app| {
+                std::path::Path::new(&app.exec_path)
+                    .file_name()
+                    .is_some_and(|file| file == name)
+            })
             .map(|app| app.id.clone())
     }
 
@@ -880,158 +911,70 @@ impl AssociationRegistry {
         }
     }
 
-    /// Populate with the applications this system actually ships.
+    /// Register `programs`, each with the extensions it opens: the file types
+    /// whose type its entry lists (`MimeType=`).
     ///
-    /// **Every id here is a directory under `apps/`, and every path is the
-    /// binary that directory builds.** That was not true until 2026-09-14:
-    /// the table named `textedit`, `photoviewer`, `archiver`, `fileexplorer`,
-    /// `codeeditor`, `imageeditor`, `browser` and `office`, of which *none*
-    /// exist. Eight of eleven entries were fictional, so the program let a user
-    /// choose which imaginary application should open their photographs, and
-    /// as of the same morning it wrote that choice to disk and read it back.
+    /// Until 2026-09-29 this was a list of eight programs and the extensions
+    /// each opened, beside the one list of programs (`gui/programs`, C-Q20,
+    /// design-decisions §1425) that the shell reads: a second answer to "what
+    /// opens a `.pdf`", which agreed with the first only because lane C built
+    /// the library from it (`requests/c-e-read-the-one-list-of-programs.md`).
     ///
-    /// Two of the eight were also duplicates of a role already in the list --
-    /// `codeeditor` beside `textedit`, `imageeditor` beside `photoviewer` --
-    /// which is why the count falls: one program per role, named after the
-    /// program.
-    ///
-    /// `browser` and `office` are gone with no replacement because this tree
-    /// has neither. An association is a promise that pressing Enter opens
-    /// something, and there is nothing to open.
-    fn add_default_apps(&mut self) {
-        let apps: &[(&str, &str, &str, &[&str], u64)] = &[
-            (
-                "editor",
-                "Text Editor",
-                "/usr/bin/editor",
-                &[
-                    "txt", "rs", "py", "js", "ts", "html", "css", "json", "xml", "toml", "yaml",
-                    "c", "cpp", "h", "log", "ini", "csv", "rtf", "odt",
-                ],
-                1,
-            ),
-            ("pdfviewer", "PDF Viewer", "/usr/bin/pdfviewer", &["pdf"], 2),
-            (
-                "imageviewer",
-                "Image Viewer",
-                "/usr/bin/imageviewer",
-                &[
-                    "png", "jpg", "jpeg", "gif", "bmp", "svg", "webp", "avif", "ico", "tif", "tiff",
-                ],
-                3,
-            ),
-            (
-                "musicplayer",
-                "Music Player",
-                "/usr/bin/musicplayer",
-                &["mp3", "wav", "flac", "ogg", "m4a"],
-                4,
-            ),
-            (
-                "videoplayer",
-                "Video Player",
-                "/usr/bin/videoplayer",
-                &["mp4", "mkv", "avi", "webm", "mov"],
-                5,
-            ),
-            (
-                "archivemanager",
-                "Archive Manager",
-                "/usr/bin/archivemanager",
-                &["zip", "tar", "gz", "7z", "rar"],
-                6,
-            ),
-            (
-                "explorer",
-                "File Explorer",
-                "/usr/bin/explorer",
-                &["iso", "bin", "zip", "tar", "gz", "7z", "rar"],
-                10,
-            ),
-            (
-                "hexeditor",
-                "Hex Editor",
-                "/usr/bin/hexeditor",
-                &["bin", "iso"],
-                12,
-            ),
-        ];
-
-        for (id, name, path, exts, icon) in apps {
-            self.register_app(AppInfo::new(id, name, path, exts, *icon));
+    /// A program is recorded by the program its entry runs -- what the
+    /// associations file holds and what the file manager starts, with the file
+    /// as its one argument. So one that runs in a terminal, or has no command
+    /// line, is left out: the file manager cannot start it that way.
+    fn add_programs(&mut self, programs: &[desktopentry::App]) {
+        for app in programs {
+            if app.terminal {
+                continue;
+            }
+            let Some(exec_path) = program_of(app) else {
+                continue;
+            };
+            let opens: Vec<String> = self
+                .file_types
+                .iter()
+                .filter(|(_, ft)| {
+                    app.mime_types
+                        .iter()
+                        .any(|m| m.eq_ignore_ascii_case(&ft.mime_type))
+                })
+                .map(|(ext, _)| ext.clone())
+                .collect();
+            let opens: Vec<&str> = opens.iter().map(String::as_str).collect();
+            self.register_app(AppInfo::new(&app.id, &app.name, &exec_path, &opens, 0));
         }
     }
 
-    /// Assign sensible default associations after file types and apps are loaded.
+    /// Associate every file type with the program SlateOS opens its type with
+    /// (`programs::default_for`), when that program is registered and opens
+    /// it.
+    ///
+    /// This was seven defaults by group and three overrides of this program's
+    /// own. Two of the overrides -- `.bin` in the hex editor and `.iso` in the
+    /// file manager -- are not defaults in the one list, on purpose
+    /// (`gui/programs/INVENTORY.md`, section 4: the type of `.bin` is every
+    /// unrecognised file's, and the file manager handed a file opens the
+    /// folder holding it). The hex editor is still offered for every type its
+    /// entry lists -- `.img`, whose type is that of every unrecognised file;
+    /// the toolkit's table has no `.bin`, so the old override never applied.
     fn assign_default_associations(&mut self) {
-        // Maps category to its primary default app ID.
-        let category_defaults: &[(FileCategory, &str)] = &[
-            (FileCategory::Documents, "editor"),
-            (FileCategory::Images, "imageviewer"),
-            (FileCategory::Audio, "musicplayer"),
-            (FileCategory::Video, "videoplayer"),
-            (FileCategory::Archives, "archivemanager"),
-            // Code opened `codeeditor`, which did not exist. The text editor
-            // does, and it has syntax highlighting for twelve languages, so
-            // this is the program that was meant rather than a downgrade.
-            (FileCategory::Code, "editor"),
-            (FileCategory::Other, "editor"),
-        ];
-
-        // Specific overrides that take precedence over the category default.
-        //
-        // The nine office-document overrides are gone with the `office` entry
-        // they pointed at. Those file types keep their category default, which
-        // is the text editor: opening a .docx in a text editor is a poor
-        // answer, and it is a better one than a association naming a program
-        // that was never written. When an office suite exists it gets its
-        // overrides back in one line each.
-        let specific_overrides: &[(&str, &str)] = &[
-            ("pdf", "pdfviewer"),
-            ("iso", "explorer"),
-            ("bin", "hexeditor"),
-        ];
-
-        // First pass: assign by category.
-        let extensions: Vec<(String, FileCategory)> = self
+        let chosen: Vec<(String, String)> = self
             .file_types
-            .keys()
-            .map(|ext| {
-                let cat = self.get_category(ext);
-                (ext.clone(), cat)
+            .iter()
+            .filter_map(|(ext, ft)| {
+                let id = ::programs::default_for(&ft.mime_type)?;
+                let app = self.apps.get(id)?;
+                app.supports_extension(ext)
+                    .then(|| (ext.clone(), id.to_string()))
             })
             .collect();
-
-        for (ext, cat) in &extensions {
-            for (def_cat, app_id) in category_defaults {
-                if cat == def_cat {
-                    // Only assign if the app actually supports this extension.
-                    if let Some(app) = self.apps.get(*app_id)
-                        && app.supports_extension(ext)
-                    {
-                        self.associations
-                            .insert(ext.clone(), Association::new(ext, app_id));
-                        if let Some(ft) = self.file_types.get_mut(ext) {
-                            ft.default_app_id = Some(app_id.to_string());
-                        }
-                    }
-                    break;
-                }
-            }
-        }
-
-        // Second pass: apply specific overrides.
-        for (ext, app_id) in specific_overrides {
-            let ext_lower = ext.to_lowercase();
-            if self.file_types.contains_key(&ext_lower)
-                && let Some(app) = self.apps.get(*app_id)
-                && app.supports_extension(&ext_lower)
-            {
-                self.associations
-                    .insert(ext_lower.clone(), Association::new(&ext_lower, app_id));
-                if let Some(ft) = self.file_types.get_mut(&ext_lower) {
-                    ft.default_app_id = Some(app_id.to_string());
-                }
+        for (ext, id) in chosen {
+            self.associations
+                .insert(ext.clone(), Association::new(&ext, &id));
+            if let Some(ft) = self.file_types.get_mut(&ext) {
+                ft.default_app_id = Some(id);
             }
         }
     }
@@ -1508,7 +1451,13 @@ impl FileAssocUI {
     /// report to someone who has simply never changed an association.
     #[must_use]
     pub fn load() -> Self {
-        Self::from_document(settingsfile::load(CONFIG_NAME))
+        // The programs installed here beside SlateOS's own, read from the
+        // environment's data directories as the start menu reads them.
+        let dirs = desktopentry::scan::DataDirs::from_env(|name| std::env::var_os(name));
+        Self::from_document_over(
+            settingsfile::load(CONFIG_NAME),
+            AssociationRegistry::with_programs(&known_programs(&dirs)),
+        )
     }
 
     /// Open on an already-read document.
@@ -1517,7 +1466,15 @@ impl FileAssocUI {
     /// exercised without a filesystem.
     #[must_use]
     pub fn from_document(doc: Document) -> Self {
+        Self::from_document_over(doc, AssociationRegistry::with_defaults())
+    }
+
+    /// [`from_document`](Self::from_document), over `registry`'s file types
+    /// and programs rather than SlateOS's own alone.
+    #[must_use]
+    pub fn from_document_over(doc: Document, registry: AssociationRegistry) -> Self {
         let mut ui = Self::new();
+        ui.registry = registry;
         // **Once a file exists it is the whole truth about associations**, so
         // the built-in defaults are cleared before it is applied. Otherwise an
         // association the user deliberately cleared comes straight back: a
@@ -2182,16 +2139,20 @@ impl FileAssocUI {
     }
 
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        // Every key but a Ctrl chord and what is typed is taken plain: a
+        // chord with Alt or the Windows key is the window's or the desktop's
+        // and arrives carrying its key -- Alt+Enter chose what opens a type.
+        let plain = textline::is_plain(key.modifiers);
         // Above the typed-text branch, which claims every printable key. F1
         // carries no text, so this does not take anything from the caret.
-        if key.key == Key::F1 {
+        if key.key == Key::F1 && plain {
             self.show_help = !self.show_help;
             return EventResult::Consumed;
         }
         if self.show_help {
             // Modal. Ctrl+E writes a file and Enter picks what opens a type;
             // neither should happen from behind a list.
-            if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
+            if plain && matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
                 self.show_help = false;
             }
             return EventResult::Consumed;
@@ -2199,8 +2160,33 @@ impl FileAssocUI {
 
         // Typed text goes wherever the caret is, and is checked before the
         // named keys so a key that produces text is not also read as a command.
-        if !key.text.is_empty() && !key.modifiers.ctrl && !key.modifiers.alt {
+        // What a key typed: AltGr's characters among it -- refused here, so a
+        // German `@` could not be typed -- and not a command's letter, which
+        // a chord carries: Windows+E typed an `e`.
+        if textline::types_into_field(key) {
             return self.type_text(&key.text);
+        }
+
+        // The Ctrl chords, as Ctrl chords: AltGr arrives as Ctrl+Alt.
+        if textline::is_ctrl_chord(key.modifiers) {
+            return match key.key {
+                Key::E => {
+                    self.open_transfer_dialog(Transfer::Export);
+                    EventResult::Consumed
+                }
+                Key::I => {
+                    self.open_transfer_dialog(Transfer::Import);
+                    EventResult::Consumed
+                }
+                Key::F => {
+                    self.search_focused = true;
+                    EventResult::Consumed
+                }
+                _ => EventResult::Ignored,
+            };
+        }
+        if !plain {
+            return EventResult::Ignored;
         }
 
         match key.key {
@@ -2223,18 +2209,6 @@ impl FileAssocUI {
             Key::Backspace => self.backspace(),
             Key::Up => self.move_selection(-1),
             Key::Down => self.move_selection(1),
-            Key::E if key.modifiers.ctrl => {
-                self.open_transfer_dialog(Transfer::Export);
-                EventResult::Consumed
-            }
-            Key::I if key.modifiers.ctrl => {
-                self.open_transfer_dialog(Transfer::Import);
-                EventResult::Consumed
-            }
-            Key::F if key.modifiers.ctrl => {
-                self.search_focused = true;
-                EventResult::Consumed
-            }
             _ => EventResult::Ignored,
         }
     }
@@ -3423,11 +3397,12 @@ impl App for FileAssocUI {
 
     fn on_event(&mut self, event: &Event) -> Response {
         // Ctrl+Q closes the window. Escape does not: it backs out of a dialog,
-        // a search or a selection, which is what the key is for here.
+        // a search or a selection, which is what the key is for here. A Ctrl
+        // chord, not Ctrl held: AltGr+Q -- Ctrl+Alt -- is a German `@`.
         if let Event::Key(key) = event
             && key.pressed
             && key.key == Key::Q
-            && key.modifiers.ctrl
+            && textline::is_ctrl_chord(key.modifiers)
         {
             return Response::Exit;
         }
@@ -3476,6 +3451,41 @@ impl Probe for FileAssocUI {
 // ============================================================================
 // Entry point
 // ============================================================================
+
+/// The program `app`'s entry runs: the first word of its command line.
+fn program_of(app: &desktopentry::App) -> Option<String> {
+    let exec = app.exec.as_ref()?;
+    let invocation = desktopentry::Invocation {
+        icon: app.icon.as_deref(),
+        name: &app.name,
+        location: None,
+    };
+    exec.command_lines(&[], &invocation)
+        .into_iter()
+        .next()?
+        .into_iter()
+        .next()?
+        .into_string()
+        .ok()
+}
+
+/// The programs this machine has: those installed here, read as the start
+/// menu reads them, with SlateOS's own (`programs::built_in`) behind them --
+/// an installed entry with the same id replaces SlateOS's. The rule
+/// `apps/settings` and `apps/explorer` keep too, and the three are asked to
+/// become one in `gui/programs`
+/// (`requests/e-c-the-installed-and-built-in-programs-belong-in-gui-programs.md`).
+fn known_programs(dirs: &desktopentry::scan::DataDirs) -> Vec<desktopentry::App> {
+    let scan = desktopentry::scan::scan(dirs);
+    let (mut list, _unusable) = desktopentry::scan::apps(&scan, None);
+    let installed: Vec<String> = list.iter().map(|app| app.id.clone()).collect();
+    list.extend(
+        ::programs::built_in(None)
+            .into_iter()
+            .filter(|own| !installed.contains(&own.id)),
+    );
+    list
+}
 
 fn main() -> ExitCode {
     app::launch("fileassoc", &mut FileAssocUI::load())
@@ -3529,6 +3539,61 @@ mod tests {
     // modifier set, because the app reads `key.modifiers.ctrl` off the event it
     // was handed and never constructs one.
     use guitk::event::Modifiers;
+
+    /// **A chord is neither a key of the window nor typing, and AltGr
+    /// types**: Alt+Enter chose what opens a type, a chord arriving carrying
+    /// its key; AltGr's characters -- a German `@` -- could not be typed
+    /// into a field while Windows+E typed an `e`; and AltGr+E and AltGr+Q,
+    /// Ctrl+Alt, exported and closed the window.
+    #[test]
+    fn a_chord_is_neither_a_key_of_the_window_nor_typing() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let key = |k: Key, text: &str, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: text.to_owned(),
+            })
+        };
+        let mut ui = FileAssocUI::new();
+        ui.selected_index = Some(0);
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for k in [Key::Enter, Key::Down, Key::Escape, Key::F1, Key::E] {
+                assert_eq!(
+                    ui.handle_event(&key(k, "", m)),
+                    EventResult::Ignored,
+                    "{m:?} {k:?} was taken"
+                );
+            }
+        }
+        assert_eq!(
+            ui.active_dialog,
+            ActiveDialog::None,
+            "a chord opened a dialog"
+        );
+        assert_eq!(ui.selected_index, Some(0), "a chord moved the selection");
+        assert!(!ui.picker.is_open(), "AltGr+E exported");
+        assert!(!ui.show_help, "a chord raised the keys");
+        assert!(
+            !matches!(ui.on_event(&key(Key::Q, "@", altgr)), Response::Exit),
+            "AltGr+Q closed the window"
+        );
+
+        // The search types what a key typed.
+        ui.handle_event(&key(Key::F, "f", Modifiers::ctrl()));
+        assert!(ui.search_focused, "control: Ctrl+F searches");
+        ui.handle_event(&key(Key::E, "e", Modifiers::super_key()));
+        ui.handle_event(&key(Key::X, "x", Modifiers::alt()));
+        ui.handle_event(&key(Key::Q, "@", altgr));
+        assert_eq!(
+            ui.search_query, "@",
+            "the search typed a command or lost AltGr's @"
+        );
+    }
     // The free helpers -- `click`, `rect_of`, `press`. The production code
     // imports only the `Probe` trait it implements.
     use guitk::probe;
@@ -3712,6 +3777,90 @@ mod tests {
         }
     }
 
+    /// **The programs are the one list's, and open what their entries say**
+    /// (`gui/programs`, C-Q20): the text editor `.txt` and `.rs`, the archive
+    /// manager `.zip`, the hex editor `.img` -- whose type is every
+    /// unrecognised file's, so it has no default (`INVENTORY.md`, section 4) --
+    /// and the file manager no file at all: this program's own list had it
+    /// opening archives and disk images, and handed one it shows the folder
+    /// holding it. A type opens with SlateOS's default for it, recorded by the
+    /// program the default's entry runs.
+    #[test]
+    fn the_programs_open_what_their_entries_say() {
+        let reg = AssociationRegistry::with_defaults();
+        let opens = |id: &str, ext: &str| {
+            reg.apps
+                .get(id)
+                .is_some_and(|app| app.supports_extension(ext))
+        };
+        assert!(opens(EDITOR, "txt") && opens(EDITOR, "rs"));
+        assert!(opens(ARCHIVES, "zip"));
+        assert!(opens("org.slateos.HexEditor.desktop", "img"));
+        assert_eq!(
+            reg.get_default_app("img").map(|a| a.id.as_str()),
+            None,
+            ".img opens in something by default"
+        );
+        for ext in ["zip", "iso", "tar", "txt"] {
+            assert!(
+                !opens("org.slateos.Explorer.desktop", ext),
+                "the file manager is registered as opening .{ext}"
+            );
+        }
+        assert_eq!(
+            reg.get_default_app("txt").map(|a| a.id.as_str()),
+            Some(EDITOR)
+        );
+        assert_eq!(reg.opener_path("txt"), Some("/usr/bin/editor"));
+        assert_eq!(
+            reg.get_default_app("zip").map(|a| a.id.as_str()),
+            Some(ARCHIVES)
+        );
+    }
+
+    /// **A program installed here is offered for what its entry opens**,
+    /// SlateOS's default staying the default; one that runs in a terminal is
+    /// not offered, since the file manager starts what it associates itself.
+    #[test]
+    fn a_program_installed_here_is_offered_for_what_its_entry_opens() {
+        let mut programs = ::programs::built_in(None);
+        for (id, text) in [
+            (
+                "org.example.Pad.desktop",
+                "[Desktop Entry]\nType=Application\nName=Pad\nExec=pad %f\nMimeType=text/plain;\n",
+            ),
+            (
+                "org.example.Pager.desktop",
+                "[Desktop Entry]\nType=Application\nName=Pager\nExec=pager %f\nTerminal=true\n\
+                 MimeType=text/plain;\n",
+            ),
+        ] {
+            let entry = desktopentry::DesktopEntry::parse(text.as_bytes()).expect("parses");
+            programs.push(desktopentry::App::from_entry(&entry, id, None).expect("a program"));
+        }
+        let reg = AssociationRegistry::with_programs(&programs);
+        let ids: Vec<&str> = reg
+            .apps_for_extension("txt")
+            .iter()
+            .map(|a| a.id.as_str())
+            .collect();
+        assert!(ids.contains(&"org.example.Pad.desktop"), "{ids:?}");
+        assert!(
+            !ids.contains(&"org.example.Pager.desktop"),
+            "a terminal program is offered: {ids:?}"
+        );
+        assert_eq!(
+            reg.get_default_app("txt").map(|a| a.id.as_str()),
+            Some(EDITOR)
+        );
+        assert_eq!(
+            reg.apps
+                .get("org.example.Pad.desktop")
+                .map(|a| a.exec_path.as_str()),
+            Some("pad")
+        );
+    }
+
     #[test]
     fn test_registry_with_defaults_has_associations() {
         let reg = AssociationRegistry::with_defaults();
@@ -3731,7 +3880,7 @@ mod tests {
         for ext in ["png", "jpg", "gif", "webp", "tif", "tiff"] {
             assert_eq!(
                 reg.get_default_app(ext).map(|app| app.id.as_str()),
-                Some("imageviewer"),
+                Some(IMAGES),
                 "{ext}"
             );
         }
@@ -3842,7 +3991,7 @@ mod tests {
 
     #[test]
     fn test_apps_for_extension() {
-        let reg = AssociationRegistry::with_defaults();
+        let reg = sharing();
         // `zip`, because it is a file type this system really does have two
         // programs for. The extension used to be `html` on the strength of
         // "textedit, codeeditor, browser" -- the test's own comment named three
@@ -3852,7 +4001,7 @@ mod tests {
         let apps = reg.apps_for_extension("zip");
         let ids: Vec<&str> = apps.iter().map(|a| a.id.as_str()).collect();
         assert!(
-            ids.contains(&"archivemanager") && ids.contains(&"explorer"),
+            ids.contains(&ARCHIVES) && ids.contains(&ZIP_TOOL),
             "zip should be openable by both, got {ids:?}"
         );
     }
@@ -4059,7 +4208,11 @@ mod tests {
         assert!(errors.is_empty());
         let app = reg.get_default_app("txt");
         assert!(app.is_some());
-        assert_eq!(app.map(|a| a.id.as_str()), Some("editor"));
+        assert_eq!(
+            app.map(|a| a.id.as_str()),
+            Some(EDITOR),
+            "a file naming the program as it was named before is not read"
+        );
     }
 
     #[test]
@@ -4477,12 +4630,47 @@ mod tests {
     /// An extension more than one installed app can open, which is what the
     /// "Open With" dialog and the compatible-apps list are for.
     /// A file type more than one installed program can open, which is what
-    /// the "Open with" tests need to have anything to choose between.
+    /// the "Open with" tests need to have anything to choose between: `zip`,
+    /// which the archive manager opens, and a program installed beside it
+    /// ([`sharing`]).
     ///
-    /// Was `html` while three fictional programs claimed it. `zip` is claimed
-    /// by `archivemanager` and `explorer`, both of which are directories under
-    /// `apps/` that build the binaries named here.
+    /// Was `html` while three fictional programs claimed it, then `zip` on the
+    /// strength of the file manager, which this program's own list said opens
+    /// one -- it opens the folder holding it. No two of SlateOS's programs
+    /// open the same type (`gui/programs`), so the second is installed.
     const SHARED_EXT: &str = "zip";
+
+    /// The ids of SlateOS's programs the tests name: their desktop entries'.
+    const EDITOR: &str = "org.slateos.Editor.desktop";
+    const IMAGES: &str = "org.slateos.ImageViewer.desktop";
+    const MUSIC: &str = "org.slateos.MusicPlayer.desktop";
+    const ARCHIVES: &str = "org.slateos.ArchiveManager.desktop";
+    /// The program installed beside them that opens zip files too.
+    const ZIP_TOOL: &str = "org.example.ZipTool.desktop";
+
+    /// SlateOS's programs and one installed beside them that opens zip files.
+    fn programs_sharing_zip() -> Vec<desktopentry::App> {
+        let mut list = ::programs::built_in(None);
+        let entry = desktopentry::DesktopEntry::parse(
+            b"[Desktop Entry]\nType=Application\nName=Zip Tool\nExec=/usr/bin/ziptool %f\n\
+              MimeType=application/zip;\n",
+        )
+        .expect("the entry parses");
+        list.push(desktopentry::App::from_entry(&entry, ZIP_TOOL, None).expect("a program"));
+        list
+    }
+
+    /// A registry over [`programs_sharing_zip`].
+    fn sharing() -> AssociationRegistry {
+        AssociationRegistry::with_programs(&programs_sharing_zip())
+    }
+
+    /// A window over [`programs_sharing_zip`].
+    fn sharing_ui() -> FileAssocUI {
+        let mut ui = FileAssocUI::new();
+        ui.registry = sharing();
+        ui
+    }
 
     #[test]
     fn every_control_answers_where_the_frame_draws_it() {
@@ -4831,8 +5019,8 @@ mod tests {
                 .registry
                 .apps_for_extension("mp3")
                 .iter()
-                .position(|a| a.id == "musicplayer")
-                .expect("musicplayer opens mp3");
+                .position(|a| a.id == MUSIC)
+                .expect("the music player opens mp3");
             probe::click(&mut ui, Target::DialogApp(idx));
             probe::click(&mut ui, Target::DialogUseForGroup);
             assert!(
@@ -4847,7 +5035,7 @@ mod tests {
             let mut alone = AssociationRegistry::with_defaults();
             let (opens, cannot): (Vec<&str>, Vec<&str>) = group
                 .extensions()
-                .partition(|ext| alone.set_default_app(ext, "musicplayer").is_ok());
+                .partition(|ext| alone.set_default_app(ext, MUSIC).is_ok());
             assert!(
                 !opens.is_empty() && !cannot.is_empty(),
                 "control: this is about a group musicplayer opens only part of \
@@ -4857,15 +5045,15 @@ mod tests {
             for ext in &opens {
                 assert_eq!(
                     ui.registry.get_default_app(ext).map(|a| a.id.clone()),
-                    Some(String::from("musicplayer")),
-                    ".{ext} is opened by musicplayer and was not set"
+                    Some(String::from(MUSIC)),
+                    ".{ext} is opened by the music player and was not set"
                 );
             }
             // The ones it cannot open were left alone rather than cleared.
             for ext in &cannot {
                 assert_ne!(
                     ui.registry.get_default_app(ext).map(|a| a.id.clone()),
-                    Some(String::from("musicplayer")),
+                    Some(String::from(MUSIC)),
                     ".{ext} was set to an app that cannot open it"
                 );
             }
@@ -4889,7 +5077,7 @@ mod tests {
     #[test]
     fn the_open_with_dialog_only_changes_the_default_when_always_is_ticked() {
         writing("open_with_dialog", || {
-            let mut ui = FileAssocUI::new();
+            let mut ui = sharing_ui();
             select_ext(&mut ui, SHARED_EXT);
             let before = ui
                 .registry
@@ -4932,7 +5120,7 @@ mod tests {
 
     #[test]
     fn the_open_with_dialog_starts_on_the_app_that_is_already_the_default() {
-        let mut ui = FileAssocUI::new();
+        let mut ui = sharing_ui();
         select_ext(&mut ui, SHARED_EXT);
         let current = ui
             .registry
@@ -4956,7 +5144,7 @@ mod tests {
     #[test]
     fn clicking_a_compatible_app_makes_it_the_default_without_a_dialog() {
         writing("compatible_app", || {
-            let mut ui = FileAssocUI::new();
+            let mut ui = sharing_ui();
             select_ext(&mut ui, SHARED_EXT);
 
             let apps = ui.registry.apps_for_extension(SHARED_EXT);
@@ -5180,17 +5368,17 @@ mod tests {
         writing("fileassoc_transfer", || {
             let dir = guarded_scratch("fileassoc_transfer");
 
-            let mut from = FileAssocUI::new();
+            let mut from = sharing_ui();
             from.registry
-                .set_default_app("zip", "explorer")
-                .expect("explorer handles zip");
+                .set_default_app("zip", ZIP_TOOL)
+                .expect("the zip tool opens zip");
             probe::click(&mut from, Target::ExportButton);
             save_as(&mut from, dir.dir(), "carried.conf");
 
-            let mut to = FileAssocUI::new();
+            let mut to = sharing_ui();
             assert_ne!(
                 to.registry.get_default_app("zip").map(|a| a.id.as_str()),
-                Some("explorer"),
+                Some(ZIP_TOOL),
                 "the fixture proves nothing if it is already the default"
             );
 
@@ -5200,7 +5388,7 @@ mod tests {
             assert!(!to.picker.is_open(), "the picker stayed up");
             assert_eq!(
                 to.registry.get_default_app("zip").map(|a| a.id.as_str()),
-                Some("explorer"),
+                Some(ZIP_TOOL),
                 "status was {:?}",
                 to.status
             );
@@ -5649,7 +5837,7 @@ mod tests {
     /// before, rather than being left with none.
     #[test]
     fn uninstalling_a_handler_falls_back_to_the_previous_one() {
-        let mut reg = AssociationRegistry::with_defaults();
+        let mut reg = sharing();
         let openers: Vec<String> = reg
             .apps_for_extension(SHARED_EXT)
             .iter()
@@ -5681,7 +5869,7 @@ mod tests {
     /// covered it because each map was only ever checked on its own.
     #[test]
     fn both_records_of_the_default_agree_after_a_removal() {
-        let mut reg = AssociationRegistry::with_defaults();
+        let mut reg = sharing();
         let openers: Vec<String> = reg
             .apps_for_extension(SHARED_EXT)
             .iter()
@@ -5719,7 +5907,7 @@ mod tests {
     /// The history is a fallback chain and not an audit log, so it is bounded.
     #[test]
     fn the_handler_history_is_bounded() {
-        let mut reg = AssociationRegistry::with_defaults();
+        let mut reg = sharing();
         let openers: Vec<String> = reg
             .apps_for_extension(SHARED_EXT)
             .iter()
@@ -5741,7 +5929,7 @@ mod tests {
     /// which would let an app fall back to itself after being uninstalled.
     #[test]
     fn an_app_never_becomes_its_own_fallback() {
-        let mut reg = AssociationRegistry::with_defaults();
+        let mut reg = sharing();
         let one = reg.apps_for_extension(SHARED_EXT)[0].id.clone();
         reg.set_default_app(SHARED_EXT, &one).expect("assignable");
         reg.set_default_app(SHARED_EXT, &one).expect("assignable");

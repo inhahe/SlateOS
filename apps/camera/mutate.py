@@ -126,8 +126,8 @@ MUTATIONS = [
     # -- what is painted -----------------------------------------------------
     (
         "only the viewfinder is filled, leaving the rest of the window bare",
-        "        fill(&mut f, l.window, CRUST, CornerRadii::ZERO);",
-        "        fill(&mut f, l.viewfinder, CRUST, CornerRadii::ZERO);",
+        "        fill(&mut f, l.window, self.palette.crust, CornerRadii::ZERO);",
+        "        fill(&mut f, l.viewfinder, self.palette.crust, CornerRadii::ZERO);",
         ["the_window_is_filled_edge_to_edge_before_anything_else"],
     ),
     (

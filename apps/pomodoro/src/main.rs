@@ -54,6 +54,7 @@ use guitk::color::Color;
 use guitk::date::Date;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
+use guitk::listview::ListKey;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
@@ -1024,44 +1025,45 @@ impl PomodoroApp {
             return self.handle_settings_key(key);
         }
 
+        // The log's keys, as every list reads them (`ListKey`): Home and
+        // End with or without Ctrl, and nothing held with Alt or the Windows
+        // key.
+        if self.screen == Screen::Log
+            && let Some(movement) = ListKey::of(key)
+        {
+            let rows = self.layout().log_rows();
+            match movement {
+                ListKey::Previous => self.scroll_log(-1),
+                ListKey::Next => self.scroll_log(1),
+                ListKey::PageUp => self.scroll_log(page(rows).saturating_neg()),
+                ListKey::PageDown => self.scroll_log(page(rows)),
+                ListKey::First => self.log_scroll = 0,
+                ListKey::Last => self.log_scroll = self.max_log_scroll(),
+            }
+            return EventResult::Consumed;
+        }
+
+        // Every key from here on is a bare key, and one held with Ctrl, Alt
+        // or the Windows key is not this window's: Windows+1 is the
+        // desktop's, not the timer screen, and AltGr -- which arrives as
+        // Ctrl+Alt -- types a letter, not Alt+R's reset.
+        if key.modifiers.ctrl || key.modifiers.alt || key.modifiers.super_key {
+            return EventResult::Ignored;
+        }
+
         // A digit switches screens from anywhere; the tab strip is the same
         // four targets under the pointer.
         if let Some(result) = self.handle_screen_key(key) {
             return result;
         }
 
-        let ctrl = key.modifiers.ctrl;
         match key.key {
             Key::Space => self.activate(Target::StartPause),
-            Key::R if !ctrl => self.activate(Target::Reset),
-            Key::S if !ctrl => self.activate(Target::Skip),
-            Key::T if !ctrl => self.activate(Target::Task),
-            Key::A if !ctrl => self.activate(Target::Sound),
-            Key::N if !ctrl => self.activate(Target::Notification),
-            Key::PageUp if self.screen == Screen::Log => {
-                self.scroll_log(page(self.layout().log_rows()).saturating_neg());
-                EventResult::Consumed
-            }
-            Key::PageDown if self.screen == Screen::Log => {
-                self.scroll_log(page(self.layout().log_rows()));
-                EventResult::Consumed
-            }
-            Key::Up if self.screen == Screen::Log => {
-                self.scroll_log(-1);
-                EventResult::Consumed
-            }
-            Key::Down if self.screen == Screen::Log => {
-                self.scroll_log(1);
-                EventResult::Consumed
-            }
-            Key::Home if self.screen == Screen::Log => {
-                self.log_scroll = 0;
-                EventResult::Consumed
-            }
-            Key::End if self.screen == Screen::Log => {
-                self.log_scroll = self.max_log_scroll();
-                EventResult::Consumed
-            }
+            Key::R => self.activate(Target::Reset),
+            Key::S => self.activate(Target::Skip),
+            Key::T => self.activate(Target::Task),
+            Key::A => self.activate(Target::Sound),
+            Key::N => self.activate(Target::Notification),
             _ => EventResult::Ignored,
         }
     }
@@ -1092,8 +1094,11 @@ impl PomodoroApp {
                 // The typed text, not the key name: a label is whatever the
                 // keyboard produced, including characters no `Key` names.
                 // `typed` has already dropped the control characters that
-                // Enter, Tab and Escape produce on most layouts.
-                if key.modifiers.ctrl || !key.types_text() {
+                // Enter, Tab and Escape produce on most layouts. AltGr
+                // arrives as Ctrl+Alt and types -- Polish `ż` is AltGr+Z; a
+                // command carries its letter as text and types none of it
+                // (`textline::types_into_field`).
+                if !textline::types_into_field(key) {
                     return EventResult::Ignored;
                 }
                 self.current_task.extend(key.typed());
@@ -3230,6 +3235,100 @@ mod tests {
         assert_eq!(app.log_scroll, app.max_log_scroll());
         press(&mut app, Key::Home);
         assert_eq!(app.log_scroll, 0);
+    }
+
+    /// **Ctrl+Home and Ctrl+End are the ends of the log too**, as in every
+    /// list (C-Q24); and a key held with Alt or the Windows key moves it
+    /// nowhere.
+    #[test]
+    fn ctrl_home_and_ctrl_end_are_the_ends_of_the_log() {
+        let mut app = with_log(60);
+        assert!(app.max_log_scroll() > 0, "the test needs a log to scroll");
+        probe::key(&mut app, &probe::ctrl(Key::End));
+        assert_eq!(app.log_scroll, app.max_log_scroll());
+        probe::key(&mut app, &probe::ctrl(Key::Home));
+        assert_eq!(app.log_scroll, 0);
+        for modifiers in [Modifiers::alt(), Modifiers::super_key()] {
+            assert_eq!(
+                probe::key(&mut app, &probe::press_with(Key::End, modifiers)),
+                EventResult::Ignored,
+                "{modifiers:?}+End"
+            );
+            assert_eq!(app.log_scroll, 0, "{modifiers:?}+End scrolled");
+        }
+    }
+
+    fn held(key: Key, modifiers: Modifiers, text: &str) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        }
+    }
+
+    /// Ctrl+Alt, as Windows and a remote client on it report AltGr.
+    const ALTGR: Modifiers = Modifiers {
+        shift: false,
+        ctrl: true,
+        alt: true,
+        super_key: false,
+    };
+
+    /// **The task's name takes what AltGr types, and no command's letter.**
+    /// AltGr arrives as Ctrl+Alt -- `ż` is AltGr+Z on a Polish keyboard --
+    /// and was refused with every key held with Ctrl. A command carries its
+    /// letter as text on a real machine (Ctrl+K arrives as `k`, Alt+F as
+    /// `f`), and Alt's and the Windows key's were typed.
+    #[test]
+    fn the_task_name_takes_altgr_letters_and_no_commands_letter() {
+        let mut app = sample();
+        press(&mut app, Key::T);
+        assert!(app.task_input_active);
+        assert_eq!(
+            probe::key(&mut app, &held(Key::Z, ALTGR, "\u{17c}")),
+            EventResult::Consumed
+        );
+        for (key, modifiers, text) in [
+            (Key::K, Modifiers::ctrl(), "k"),
+            (Key::F, Modifiers::alt(), "f"),
+            (Key::E, Modifiers::super_key(), "e"),
+        ] {
+            assert_eq!(
+                probe::key(&mut app, &held(key, modifiers, text)),
+                EventResult::Ignored,
+                "{modifiers:?}+{key:?} was typed"
+            );
+        }
+        assert_eq!(app.current_task, "\u{17c}");
+    }
+
+    /// **A key held with Ctrl, Alt or the Windows key is no bare key.**
+    /// Windows+2 -- the desktop's -- switched to the statistics as 2 does,
+    /// and Alt+T, Alt+A and Windows+T began a task or changed the sound as
+    /// T and A do; AltGr+2 (`ě` on a Czech keyboard) too.
+    #[test]
+    fn a_key_held_with_ctrl_alt_or_the_windows_key_is_no_bare_key() {
+        let mut app = sample();
+        let screen = app.screen;
+        let sound = app.ambient_sound;
+        for modifiers in [
+            Modifiers::ctrl(),
+            ALTGR,
+            Modifiers::alt(),
+            Modifiers::super_key(),
+        ] {
+            for key in [Key::Num2, Key::T, Key::A] {
+                assert_eq!(
+                    probe::key(&mut app, &held(key, modifiers, "")),
+                    EventResult::Ignored,
+                    "{modifiers:?}+{key:?}"
+                );
+            }
+            assert_eq!(app.screen, screen, "{modifiers:?}+2 switched screens");
+            assert!(!app.task_input_active, "{modifiers:?}+T began a task");
+            assert_eq!(app.ambient_sound, sound, "{modifiers:?}+A changed it");
+        }
     }
 
     #[test]

@@ -237,13 +237,13 @@ MUTATIONS = [
     ),
     (
         "Escape does not stop editing",
-        "        if ev.key == Key::Escape {\n            doc.source = None;\n            return;\n        }",
-        "        if ev.key == Key::Escape {\n            return;\n        }",
+        "        if ev.key == Key::Escape && plain {\n            doc.source = None;\n            return;\n        }",
+        "        if ev.key == Key::Escape && plain {\n            return;\n        }",
         [ESCAPE],
     ),
     (
         "Tab is left to the text area, which ignores it",
-        "        let edited = if ev.key == Key::Tab && !ev.modifiers.ctrl && !ev.modifiers.shift {",
+        "        let edited = if ev.key == Key::Tab && plain && !ev.modifiers.shift {",
         "        let edited = if false {",
         [TAB],
     ),
@@ -444,6 +444,54 @@ MUTATIONS = [
         "        let read = match safeio::read_to_string_capped(path, MAX_OPEN_BYTES) {",
         "        let read = match safeio::read_to_string_capped(path, usize::MAX / 2) {",
         [TRUNC],
+    ),
+    (
+        'a chord raises the keys',
+        '        if !typing && plain {',
+        '        if !typing {',
+        ['a_chord_is_neither_a_viewer_key_nor_typing'],
+    ),
+    (
+        'AltGr is taken for Ctrl',
+        '        if textline::is_ctrl_chord(modifiers) {',
+        '        if modifiers.ctrl {',
+        ['a_chord_is_neither_a_viewer_key_nor_typing'],
+    ),
+    (
+        "a command's letter is typed into a value",
+        '                _ if textline::types_into_field(ev) => {\n                    if let Some(ch) = text\n                        && self.edit_buffer.len()',
+        '                _ if ev.types_text() => {\n                    if let Some(ch) = text\n                        && self.edit_buffer.len()',
+        ['a_chord_is_neither_a_viewer_key_nor_typing'],
+    ),
+    (
+        "a chord works a value's own keys",
+        '                _ if !plain => return,\n                Key::Escape => {\n                    self.cancel_edit();',
+        '                Key::Escape => {\n                    self.cancel_edit();',
+        ['a_chord_is_neither_a_viewer_key_nor_typing'],
+    ),
+    (
+        "a command's letter is typed into the search",
+        '                _ if textline::types_into_field(ev) => {\n                    if let Some(ch) = text\n                        && self.search_query.len()',
+        '                _ if ev.types_text() => {\n                    if let Some(ch) = text\n                        && self.search_query.len()',
+        ['a_chord_is_neither_a_viewer_key_nor_typing'],
+    ),
+    (
+        "a chord works the search's own keys",
+        '                _ if !plain => return,\n                Key::Escape => {\n                    self.search_visible = false;',
+        '                Key::Escape => {\n                    self.search_visible = false;',
+        ['a_chord_is_neither_a_viewer_key_nor_typing'],
+    ),
+    (
+        'a chord works the views',
+        '        if !plain {\n            return;\n        }\n\n        // Enter edits the text itself',
+        '        // Enter edits the text itself',
+        ['a_chord_is_neither_a_viewer_key_nor_typing'],
+    ),
+    (
+        'a chorded Escape closes the text',
+        '        if ev.key == Key::Escape && plain {',
+        '        if ev.key == Key::Escape {',
+        ['a_chord_is_neither_a_viewer_key_nor_typing'],
     ),
 ]
 

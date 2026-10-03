@@ -586,8 +586,8 @@ MUTATIONS = [
     ),
     (
         "Escape does not shut the statistics",
-        "                Key::Escape | Key::Enter | Key::S => {\n                    self.show_stats = false;",
-        "                Key::Enter | Key::S => {\n                    self.show_stats = false;",
+        "                Key::Escape | Key::Enter | Key::S if plain => {\n                    self.show_stats = false;",
+        "                Key::Enter | Key::S if plain => {\n                    self.show_stats = false;",
         ["escape_shuts_the_statistics"],
     ),
     (
@@ -638,8 +638,8 @@ MUTATIONS = [
     ),
     (
         "ctrl-F does not reach the search box",
-        "            Key::F if ev.modifiers.ctrl => {\n                self.search_focus = true;",
-        "            Key::F if ev.modifiers.ctrl => {\n                self.search_focus = false;",
+        "            if ev.key == Key::F {\n                self.search_focus = true;",
+        "            if ev.key == Key::F {\n                self.search_focus = false;",
         ["slash_and_ctrl_f_both_reach_the_search_box"],
     ),
     (
@@ -654,7 +654,7 @@ MUTATIONS = [
     ),
     (
         "a keystroke that types nothing still types",
-        "                if !ev.types_text() {\n                    return EventResult::Ignored;\n                }",
+        "                if !textline::types_into_field(ev) {\n                    return EventResult::Ignored;\n                }",
         "                if false {\n                    return EventResult::Ignored;\n                }",
         # Not `enter_and_escape_both_leave_the_search_box`: Enter and Escape
         # are matched by an arm above this one and never reach it.
@@ -668,13 +668,13 @@ MUTATIONS = [
     ),
     (
         "escape does not leave the search box",
-        "            Key::Escape | Key::Enter => {\n                self.search_focus = false;",
-        "            Key::Enter => {\n                self.search_focus = false;",
+        "            Key::Escape | Key::Enter if plain => {\n                self.search_focus = false;",
+        "            Key::Enter if plain => {\n                self.search_focus = false;",
         ["enter_and_escape_both_leave_the_search_box"],
     ),
     (
         "the arrows stop working while the box has the keyboard",
-        "            Key::Up => self.move_selection(-1),\n            Key::Down => self.move_selection(1),\n            _ => {",
+        "            Key::Up if plain => self.move_selection(-1),\n            Key::Down if plain => self.move_selection(1),\n            _ => {",
         "            _ => {",
         ["the_arrows_still_walk_the_list_while_the_search_box_has_the_keyboard"],
     ),
@@ -1065,6 +1065,72 @@ MUTATIONS = [
         "        if let Some(error) = &self.store_error {",
         "        if let Some(error) = None::<&String> {",
         [BROKEN, FAILING],
+    ),
+    (
+        'a chord answers "discard?"',
+        '        if ed.confirm_discard {\n            if plain {',
+        '        if ed.confirm_discard {\n            if plain || !plain {',
+        ['a_chord_is_neither_a_library_key_nor_typing'],
+    ),
+    (
+        'AltGr is taken for Ctrl in the editor',
+        '        if textline::is_ctrl_chord(ev.modifiers) && ev.key == Key::S {',
+        '        if ev.modifiers.ctrl && ev.key == Key::S {',
+        ['a_chord_is_neither_a_library_key_nor_typing'],
+    ),
+    (
+        'a chorded Escape leaves the editor',
+        '            Key::Escape if plain => {\n                self.leave_editor();',
+        '            Key::Escape => {\n                self.leave_editor();',
+        ['a_chord_is_neither_a_library_key_nor_typing'],
+    ),
+    (
+        "Alt+Tab walks the editor's fields",
+        '            Key::Tab if plain => {',
+        '            Key::Tab => {',
+        ['a_chord_is_neither_a_library_key_nor_typing'],
+    ),
+    (
+        'Alt+Enter saves the snippet',
+        '            Key::Enter if plain && field != SnippetField::Content => {',
+        '            Key::Enter if field != SnippetField::Content => {',
+        ['a_chord_is_neither_a_library_key_nor_typing'],
+    ),
+    (
+        'a chord answers "delete?"',
+        '        if let Some(id) = self.pending_delete {\n            if plain {',
+        '        if let Some(id) = self.pending_delete {\n            if plain || !plain {',
+        ['a_chord_is_neither_a_library_key_nor_typing'],
+    ),
+    (
+        'AltGr is taken for Ctrl in the library',
+        '        if textline::is_ctrl_chord(ev.modifiers) {\n            if ev.key == Key::F {',
+        '        if ev.modifiers.ctrl {\n            if ev.key == Key::F {',
+        ['a_chord_is_neither_a_library_key_nor_typing'],
+    ),
+    (
+        "a chord works the library's keys",
+        '        if !plain {\n            return EventResult::Ignored;\n        }\n        match ev.key {\n            Key::Slash => {',
+        '        match ev.key {\n            Key::Slash => {',
+        ['a_chord_is_neither_a_library_key_nor_typing'],
+    ),
+    (
+        'a chorded Escape or Enter leaves the search',
+        '            Key::Escape | Key::Enter if plain => {\n                self.search_focus = false;',
+        '            Key::Escape | Key::Enter => {\n                self.search_focus = false;',
+        ['a_chord_is_neither_a_library_key_nor_typing'],
+    ),
+    (
+        'Alt+Backspace deletes from the search',
+        '            Key::Backspace if !textline::is_alt_or_windows_chord(ev.modifiers) => {',
+        '            Key::Backspace => {',
+        ['a_chord_is_neither_a_library_key_nor_typing'],
+    ),
+    (
+        "the search types a command's letter",
+        '                if !textline::types_into_field(ev) {',
+        '                if !ev.types_text() {',
+        ['a_chord_is_neither_a_library_key_nor_typing'],
     ),
 ]
 

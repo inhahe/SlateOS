@@ -20,6 +20,10 @@ from mutation_harness import sweep  # noqa: E402  (path set above)
 
 SRC = Path(__file__).parent / "src" / "lib.rs"
 
+ALTGR = "altgr_types_where_a_ctrl_chord_would_select_copy_cut_or_paste"
+COMMAND = "a_command_types_nothing_though_it_carries_its_letter"
+ESCAPE = "a_key_that_types_only_a_control_character_keeps_the_selection"
+
 # (name, old, new, [tests that must fail])
 MUTATIONS = [
     (
@@ -63,6 +67,30 @@ MUTATIONS = [
         "            .find(|i| self.text.is_char_boundary(*i))",
         "            .find(|_| true)",
         ["deletion_takes_whole_characters"],
+    ),
+    (
+        "AltGr is a Ctrl chord in the area",
+        "        let chord = textline::is_ctrl_chord(key.modifiers);",
+        "        let chord = key.modifiers.ctrl;",
+        [ALTGR],
+    ),
+    (
+        "AltGr+Home is Ctrl+Home",
+        "            Key::Home if chord => self.move_to(0, shift),",
+        "            Key::Home if key.modifiers.ctrl => self.move_to(0, shift),",
+        [ALTGR],
+    ),
+    (
+        "the area types a command's letter",
+        "                if textline::types_into_field(key) {",
+        "                if key.types_text() {",
+        [COMMAND],
+    ),
+    (
+        "Escape's control character types over the selection",
+        "                if textline::types_into_field(key) {",
+        "                if !key.text.is_empty() && !textline::is_command(key.modifiers) {",
+        [ESCAPE],
     ),
     (
         "Tab is taken from the application",

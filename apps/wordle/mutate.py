@@ -670,6 +670,24 @@ MUTATIONS = [
         "                text: \"Press N or Esc for a new word\",\n                size: l.small,\n                weight: FontWeightHint::Regular,\n                color: c.chrome.off,",
         ["every_text_reads_on_what_is_under_it_in_either_theme"],
     ),
+    (
+        "an unguessed key's letter is the page's text on its face",
+        "        c.chrome.on(face).text",
+        "        c.chrome.text",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "ENTER and DEL are the page's text on their keys",
+        "                    color: c.chrome.on(c.chrome.lit).text,",
+        "                    color: c.chrome.text,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "a header button's name is the page's text on the button",
+        "                c.chrome.on(c.chrome.raised).text\n            };",
+        "                c.chrome.text\n            };",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
 ]
 
 if __name__ == "__main__":

@@ -25,7 +25,7 @@
 
 use std::process::ExitCode;
 
-use gamechrome::{Chrome, cards};
+use gamechrome::{Chrome, HistoryKey, cards, help};
 use guitk::color::Color;
 use guitk::event::{
     Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -38,6 +38,7 @@ use guitk::style::CornerRadii;
 use guitk::surface::Surface;
 use guitk::text;
 use oswindow::app::{self, App, Response};
+use statehistory::StateHistory;
 
 // ── Colours ─────────────────────────────────────────────────────────
 //
@@ -549,39 +550,29 @@ enum Selection {
     Foundation(usize),
 }
 
-// ── Undo ────────────────────────────────────────────────────────────
+// ── The history ─────────────────────────────────────────────────────────────
 
-/// Records one undoable action.
+/// The cards as they lay at one moment, for the history: every pile, the
+/// move count, and whether the game was won. What an undo puts back whole --
+/// so a move is never taken back by hand, as it was, pile by pile, a flipped
+/// card turned down again by a rule of its own.
 #[derive(Clone, Debug)]
-enum UndoAction {
-    /// Drew a card from stock to waste.
-    Draw,
-    /// Recycled waste back to stock.
-    Recycle,
-    /// Moved card(s) between piles.
-    Move {
-        from: MoveSource,
-        to: MoveDest,
-        count: usize,
-        /// If a tableau card was flipped face-up after the move.
-        flipped: bool,
-    },
+struct Snapshot {
+    stock: Vec<Card>,
+    waste: Vec<Card>,
+    foundations: [Vec<Card>; FOUNDATION_COUNT],
+    tableau: [Vec<PileCard>; TABLEAU_COLS],
+    move_count: u32,
+    won: bool,
 }
 
-/// Source of a move (for undo).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MoveSource {
-    Waste,
-    Foundation(usize),
-    Tableau(usize),
-}
-
-/// Destination of a move (for undo).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MoveDest {
-    Foundation(usize),
-    Tableau(usize),
-}
+/// How many moves the history keeps: a game is a few hundred, and the
+/// history keeps branches too, each a game taken back and played another
+/// way.
+const HISTORY_LIMIT: core::num::NonZeroUsize = match core::num::NonZeroUsize::new(1_000) {
+    Some(limit) => limit,
+    None => core::num::NonZeroUsize::MIN,
+};
 
 // ── Game state ──────────────────────────────────────────────────────
 
@@ -599,8 +590,10 @@ struct GameState {
     focus: FocusArea,
     /// Current selection (if any).
     selection: Option<Selection>,
-    /// Undo history.
-    undo_stack: Vec<UndoAction>,
+    /// Every position this game has been in, as a tree (C-Q24,
+    /// `design-decisions.md` §1416): a move made after an undo keeps the
+    /// moves undone as a branch, reached with Alt+Z.
+    history: StateHistory<Snapshot>,
     /// Total moves made.
     move_count: u32,
     /// Whether the game has been won.
@@ -631,7 +624,7 @@ impl GameState {
             ],
             focus: FocusArea::default_focus(),
             selection: None,
-            undo_stack: Vec::new(),
+            history: StateHistory::new(HISTORY_LIMIT),
             move_count: 0,
             won: false,
             rng: SeededRng::new(seed),
@@ -656,7 +649,7 @@ impl GameState {
             t.clear();
         }
         self.selection = None;
-        self.undo_stack.clear();
+        self.history.clear();
         self.move_count = 0;
         self.won = false;
         self.focus = FocusArea::default_focus();
@@ -688,16 +681,17 @@ impl GameState {
 
     /// Draw one card from stock to waste.
     fn draw_from_stock(&mut self) {
+        let before = self.snapshot();
         if let Some(card) = self.stock.pop() {
             self.waste.push(card);
-            self.undo_stack.push(UndoAction::Draw);
+            self.history.begin(before);
             self.bump_moves();
         } else if !self.waste.is_empty() {
             // Recycle waste back to stock (reversed).
             while let Some(card) = self.waste.pop() {
                 self.stock.push(card);
             }
-            self.undo_stack.push(UndoAction::Recycle);
+            self.history.begin(before);
             self.bump_moves();
         }
     }
@@ -772,6 +766,7 @@ impl GameState {
         if !card.can_place_on_foundation(self.foundation_top_value(fidx)) {
             return false;
         }
+        let before = self.snapshot();
         // The destination is taken by name before the source is popped: a pop
         // followed by a push that turned out to have nowhere to go would
         // delete the card outright.
@@ -780,12 +775,7 @@ impl GameState {
         };
         pile.push(card);
         self.waste.pop();
-        self.undo_stack.push(UndoAction::Move {
-            from: MoveSource::Waste,
-            to: MoveDest::Foundation(fidx),
-            count: 1,
-            flipped: false,
-        });
+        self.history.begin(before);
         self.bump_moves();
         self.check_win();
         true
@@ -799,17 +789,13 @@ impl GameState {
         if !self.can_place_on_tableau(card, col) {
             return false;
         }
+        let before = self.snapshot();
         let Some(pile) = self.col_mut(col) else {
             return false;
         };
         pile.push(PileCard::new(card, true));
         self.waste.pop();
-        self.undo_stack.push(UndoAction::Move {
-            from: MoveSource::Waste,
-            to: MoveDest::Tableau(col),
-            count: 1,
-            flipped: false,
-        });
+        self.history.begin(before);
         self.bump_moves();
         true
     }
@@ -856,26 +842,20 @@ impl GameState {
         if self.tableau.get(to_col).is_none() {
             return false;
         }
+        let before = self.snapshot();
 
         let Some(source) = self.col_mut(from_col) else {
             return false;
         };
         let cards: Vec<PileCard> = source.drain(abs_idx..).collect();
-        let count = cards.len();
         let Some(dest) = self.col_mut(to_col) else {
             return false;
         };
         dest.extend(cards);
 
         // Flip the new top card if it was face-down.
-        let flipped = self.flip_top_if_needed(from_col);
-
-        self.undo_stack.push(UndoAction::Move {
-            from: MoveSource::Tableau(from_col),
-            to: MoveDest::Tableau(to_col),
-            count,
-            flipped,
-        });
+        self.flip_top_if_needed(from_col);
+        self.history.begin(before);
         self.bump_moves();
         true
     }
@@ -894,19 +874,15 @@ impl GameState {
         if self.foundations.get(fidx).is_none() {
             return false;
         }
+        let before = self.snapshot();
         if let Some(source) = self.col_mut(col) {
             source.pop();
         }
         if let Some(pile) = self.foundations.get_mut(fidx) {
             pile.push(card);
         }
-        let flipped = self.flip_top_if_needed(col);
-        self.undo_stack.push(UndoAction::Move {
-            from: MoveSource::Tableau(col),
-            to: MoveDest::Foundation(fidx),
-            count: 1,
-            flipped,
-        });
+        self.flip_top_if_needed(col);
+        self.history.begin(before);
         self.bump_moves();
         self.check_win();
         true
@@ -920,6 +896,7 @@ impl GameState {
         if !self.can_place_on_tableau(card, col) {
             return false;
         }
+        let before = self.snapshot();
         let Some(pile) = self.col_mut(col) else {
             return false;
         };
@@ -927,12 +904,7 @@ impl GameState {
         if let Some(source) = self.foundations.get_mut(fidx) {
             source.pop();
         }
-        self.undo_stack.push(UndoAction::Move {
-            from: MoveSource::Foundation(fidx),
-            to: MoveDest::Tableau(col),
-            count: 1,
-            flipped: false,
-        });
+        self.history.begin(before);
         self.bump_moves();
         true
     }
@@ -971,81 +943,63 @@ impl GameState {
         false
     }
 
-    /// Undo the last action.
-    fn undo(&mut self) {
-        let action = match self.undo_stack.pop() {
-            Some(a) => a,
-            None => return,
-        };
-        match action {
-            UndoAction::Draw => {
-                if let Some(card) = self.waste.pop() {
-                    self.stock.push(card);
-                }
-                self.move_count = self.move_count.saturating_sub(1);
-            }
-            UndoAction::Recycle => {
-                while let Some(card) = self.stock.pop() {
-                    self.waste.push(card);
-                }
-                self.move_count = self.move_count.saturating_sub(1);
-            }
-            UndoAction::Move {
-                from,
-                to,
-                count,
-                flipped,
-            } => {
-                // Un-flip if needed.
-                if flipped
-                    && let MoveSource::Tableau(col) = from
-                    && let Some(pile) = self.col_mut(col)
-                    && let Some(top) = pile.last_mut()
-                {
-                    top.face_up = false;
-                }
-                // Move cards back.
-                let cards: Vec<PileCard> = match to {
-                    MoveDest::Foundation(fidx) => {
-                        let mut result = Vec::new();
-                        if let Some(pile) = self.foundations.get_mut(fidx) {
-                            for _ in 0..count {
-                                if let Some(c) = pile.pop() {
-                                    result.push(PileCard::new(c, true));
-                                }
-                            }
-                        }
-                        result.reverse();
-                        result
-                    }
-                    MoveDest::Tableau(col) => self.col_mut(col).map_or_else(Vec::new, |pile| {
-                        let start = pile.len().saturating_sub(count);
-                        pile.drain(start..).collect()
-                    }),
-                };
-                match from {
-                    MoveSource::Waste => {
-                        for pc in cards {
-                            self.waste.push(pc.card);
-                        }
-                    }
-                    MoveSource::Foundation(fidx) => {
-                        if let Some(pile) = self.foundations.get_mut(fidx) {
-                            for pc in cards {
-                                pile.push(pc.card);
-                            }
-                        }
-                    }
-                    MoveSource::Tableau(col) => {
-                        if let Some(pile) = self.col_mut(col) {
-                            pile.extend(cards);
-                        }
-                    }
-                }
-                self.move_count = self.move_count.saturating_sub(1);
-                self.won = false;
-            }
+    /// Take back the last move. Returns whether there was one.
+    fn undo(&mut self) -> bool {
+        let now = self.snapshot();
+        let then = self.history.undo(now);
+        self.put_back(then)
+    }
+
+    /// Make the move last taken back again, on the branch the game is on --
+    /// Ctrl+Y or Ctrl+Shift+Z.
+    fn redo(&mut self) -> bool {
+        let now = self.snapshot();
+        let then = self.history.redo(now);
+        self.put_back(then)
+    }
+
+    /// The cards as they lay just before this, on whichever branch --
+    /// Alt+Z: the way back to moves undone and then played over.
+    fn earlier(&mut self) -> bool {
+        let now = self.snapshot();
+        let then = self.history.earlier(now);
+        self.put_back(then)
+    }
+
+    /// The cards as they lay just after this -- Alt+Shift+Z.
+    fn later(&mut self) -> bool {
+        let now = self.snapshot();
+        let then = self.history.later(now);
+        self.put_back(then)
+    }
+
+    /// The game as it stands, for the history.
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            stock: self.stock.clone(),
+            waste: self.waste.clone(),
+            foundations: self.foundations.clone(),
+            tableau: self.tableau.clone(),
+            move_count: self.move_count,
+            won: self.won,
         }
+    }
+
+    /// Put the cards the history handed back in place, if it handed any.
+    /// A selection goes: the cards it held may have moved. Where the
+    /// focus is stays -- it is where the player is looking.
+    fn put_back(&mut self, then: Option<Snapshot>) -> bool {
+        let Some(s) = then else {
+            return false;
+        };
+        self.stock = s.stock;
+        self.waste = s.waste;
+        self.foundations = s.foundations;
+        self.tableau = s.tableau;
+        self.move_count = s.move_count;
+        self.won = s.won;
+        self.selection = None;
+        true
     }
 
     /// Handle the Enter/Space action on the current focus.
@@ -1283,13 +1237,43 @@ impl GameState {
     /// return nothing at all, so every key -- including the ones this game has
     /// no use for -- looked to the caller exactly like a move.
     fn handle_key(&mut self, key: Key, modifiers: Modifiers) -> EventResult {
+        // A key held with Ctrl, Alt or the Windows key is the window's or the
+        // desktop's, bar the history's own. The keys here matched on the key
+        // alone: Ctrl+N dealt a new game under the window's own Ctrl+N,
+        // Ctrl+A played every card it could, and AltGr+Z -- which types ż,
+        // and arrives as Ctrl+Alt -- took a move back.
+        let held = modifiers.ctrl || modifiers.alt || modifiers.super_key;
         if self.won {
             // The board is finished and covered by the banner; the only key
             // that still means something is the one that deals again.
-            if key == Key::N {
+            if key == Key::N && !held {
                 self.new_game();
                 return EventResult::Consumed;
             }
+            return EventResult::Ignored;
+        }
+        // The history's keys, read as every game reads them (C-Q24): Ctrl+Z,
+        // Ctrl+Y or Ctrl+Shift+Z, Alt+Z and Alt+Shift+Z.
+        let event = KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        };
+        if let Some(history) = HistoryKey::of(&event) {
+            let moved = match history {
+                HistoryKey::Undo => self.undo(),
+                HistoryKey::Redo => self.redo(),
+                HistoryKey::Earlier => self.earlier(),
+                HistoryKey::Later => self.later(),
+            };
+            return if moved {
+                EventResult::Consumed
+            } else {
+                EventResult::Ignored
+            };
+        }
+        if held {
             return EventResult::Ignored;
         }
 
@@ -1307,7 +1291,6 @@ impl GameState {
             Key::Down => self.move_vertical(1),
             Key::Enter | Key::Space => self.activate(),
             Key::Z => {
-                self.selection = None;
                 self.undo();
             }
             Key::N => {
@@ -1394,7 +1377,7 @@ impl GameState {
                 let drawn = label_in(
                     f,
                     help,
-                    "N:New  Z:Undo  A:Auto",
+                    HEADER_KEYS,
                     Ink::new(l.small, FontWeightHint::Regular, c.chrome.dim),
                 );
                 f.hit(Target::Help, drawn);
@@ -1869,11 +1852,41 @@ fn union(a: Rect, b: Rect) -> Rect {
 // ── Application ─────────────────────────────────────────────────────
 
 /// The solitaire application: the game, and the size the window last gave it.
+/// The keys the header names: the few a game is played with, and the one
+/// that lists the rest.
+const HEADER_KEYS: &str = "N:New  Z:Undo  A:Auto  F1:All keys";
+
+/// Every key the game answers, on the list F1 raises.
+///
+/// The game had no list, and its header had room for four keys and not the
+/// history's -- Ctrl+Shift+Z and Alt+Z, which the operator's answer to C-Q24
+/// added (`design-decisions.md` §1416) -- nor the arrows, Tab, Enter or
+/// Escape. **Each row is a key the game answers**, checked by
+/// `every_advertised_key_does_something`.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Arrows", "Move between the piles and down a column"),
+    ("Tab / Shift+Tab", "The next / previous pile"),
+    ("Enter / Space", "Pick up the card, or put it down"),
+    ("Esc", "Put the card back"),
+    ("Z / Ctrl+Z", "Take back a move"),
+    ("Ctrl+Y / Ctrl+Shift+Z", "Make it again"),
+    (
+        "Alt+Z / Alt+Shift+Z",
+        "The table before / after this, on any branch",
+    ),
+    ("A", "Send home every card that can go"),
+    ("N", "Deal a new game"),
+    ("F1 / ?", "This list"),
+];
+
 struct SolitaireApp {
     state: GameState,
     /// The size the last frame was drawn at, which is the size the next click
     /// is read against. It exists for that and nothing else.
     size: (f32, f32),
+    /// Whether the list of keys is up. While it is, it is the window's: a
+    /// card moved under it would be one the player cannot see.
+    show_help: bool,
 }
 
 impl SolitaireApp {
@@ -1881,6 +1894,7 @@ impl SolitaireApp {
         Self {
             state: GameState::new(42),
             size: (WINDOW_WIDTH, WINDOW_HEIGHT),
+            show_help: false,
         }
     }
 
@@ -1889,7 +1903,19 @@ impl SolitaireApp {
     }
 
     fn frame(&self, w: f32, h: f32) -> Frame<Target> {
-        self.state.frame(w, h)
+        let mut f = self.state.frame(w, h);
+        // Last, over everything, because it is what the player asked to see.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut f,
+                &self.state.palette,
+                (w, h),
+                0.0,
+                SHORTCUTS,
+                help::CLOSES,
+            );
+        }
+        f
     }
 
     /// Route a click to the pile it landed on.
@@ -1968,6 +1994,37 @@ impl SolitaireApp {
 /// One route from an event to the game, shared by the window and the tests,
 /// so a test cannot exercise a path the window does not take.
 fn handle_event(app: &mut SolitaireApp, event: &Event) -> EventResult {
+    // The list of keys is modal: what raised it, Escape, Enter or a click
+    // put it away, and nothing reaches the table under it.
+    if app.show_help {
+        match event {
+            Event::Key(key) => {
+                if help::closes(key) {
+                    app.show_help = false;
+                }
+                return if key.pressed {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                };
+            }
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Press(_),
+                ..
+            }) => {
+                app.show_help = false;
+                return EventResult::Consumed;
+            }
+            // A resize still resizes, below.
+            _ => {}
+        }
+    }
+    if let Event::Key(key) = event
+        && help::raises(key)
+    {
+        app.show_help = true;
+        return EventResult::Consumed;
+    }
     match event {
         Event::Key(KeyEvent {
             key,
@@ -2147,8 +2204,7 @@ mod tests {
     #[test]
     fn every_text_reads_on_what_is_under_it_in_either_theme() {
         let mut bad = Vec::new();
-        for (light, cards) in LOOKS {
-            let p = palette(light, cards);
+        for (look, p) in gamechrome::legibility::looks() {
             let chrome = gamechrome::Chrome::of(&p);
             let off: Vec<_> = [chrome.band, chrome.page, chrome.well]
                 .into_iter()
@@ -2173,7 +2229,7 @@ mod tests {
             for (what, f) in every_look(&p) {
                 for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
                     bad.push(format!(
-                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        "{what}, {look}: {:?} {:.2}:1 on {:?}",
                         r.text,
                         r.ratio(),
                         r.ground
@@ -2847,8 +2903,9 @@ mod tests {
             Response::Idle,
             "a key coming back up changes nothing"
         );
+        // F9, not F1: F1 raises the list of keys.
         assert_eq!(
-            app.on_event(&Event::Key(probe::press(Key::F1))),
+            app.on_event(&Event::Key(probe::press(Key::F9))),
             Response::Idle,
             "a key the game has no use for must not cost a repaint"
         );
@@ -3301,8 +3358,9 @@ mod tests {
     #[test]
     fn test_draw_adds_undo() {
         let mut gs = new_game();
+        assert!(!gs.history.can_undo());
         gs.draw_from_stock();
-        assert_eq!(gs.undo_stack.len(), 1);
+        assert!(gs.history.can_undo(), "a draw left nothing to undo");
     }
 
     #[test]
@@ -3892,6 +3950,19 @@ mod tests {
         assert_eq!(*gs.waste.last().unwrap(), card(Suit::Hearts, Rank::Five));
     }
 
+    /// An undo drops the selection: the cards it pointed at may have moved.
+    #[test]
+    fn an_undo_drops_the_selection() {
+        let mut gs = new_game();
+        gs.draw_from_stock();
+        gs.selection = Some(Selection::Waste);
+        assert!(gs.undo());
+        assert_eq!(
+            gs.selection, None,
+            "the selection points at a card now back in the stock"
+        );
+    }
+
     #[test]
     fn test_undo_tableau_to_tableau_with_flip() {
         let mut gs = new_game();
@@ -3912,6 +3983,268 @@ mod tests {
         assert!(!gs.tableau[0][0].face_up);
         assert_eq!(gs.tableau[0].len(), 2);
         assert_eq!(gs.tableau[1].len(), 1);
+    }
+
+    // ── The history: a tree, walked with Alt+Z (C-Q24) ──────────────────
+
+    fn held(ctrl: bool, alt: bool, shift: bool) -> Modifiers {
+        Modifiers {
+            ctrl,
+            alt,
+            shift,
+            super_key: false,
+        }
+    }
+
+    /// Tables chosen so that between them every key on the list of keys
+    /// has work: a fresh deal, a move made (Ctrl+Z, Alt+Z), and one taken
+    /// back (Ctrl+Y, Alt+Shift+Z).
+    fn list_states() -> Vec<SolitaireApp> {
+        let with = |state: GameState| SolitaireApp {
+            state,
+            ..SolitaireApp::new()
+        };
+        let mut moved = five_between_two_sixes();
+        assert!(moved.try_tableau_to_tableau(0, 0, 1));
+        let mut undone = five_between_two_sixes();
+        assert!(undone.try_tableau_to_tableau(0, 0, 1));
+        assert!(undone.undo());
+        vec![SolitaireApp::new(), with(moved), with(undone)]
+    }
+
+    /// **Every key the list of keys advertises is one the game answers.**
+    ///
+    /// Read with `guitk::shortcut` and pressed through the window's own
+    /// route, rather than matched against a table beside it here. The
+    /// property is "some table answers this key": Ctrl+Y has nothing to make
+    /// again until a move is taken back.
+    #[test]
+    fn every_advertised_key_does_something() {
+        let mut checked = 0usize;
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = list_states()
+                    .iter_mut()
+                    .any(|a| probe::key(a, &stroke) == EventResult::Consumed);
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+                checked = checked.saturating_add(1);
+            }
+        }
+        assert!(checked >= 19, "only {checked} keystrokes were checked");
+    }
+
+    /// Every string the window paints at its opening size, joined.
+    fn drawn_texts(app: &SolitaireApp) -> String {
+        app.frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// **The list of keys reaches the window**, every row of it, and goes
+    /// when it is put away; and the header says how to raise it.
+    #[test]
+    fn the_list_of_keys_reaches_the_window() {
+        let mut app = SolitaireApp::new();
+        let before = drawn_texts(&app);
+        assert!(!before.contains(help::CLOSES), "up before anybody asked");
+        assert!(
+            before.contains("F1"),
+            "the header does not say F1: {before}"
+        );
+        assert_eq!(
+            probe::key(&mut app, &probe::press(Key::F1)),
+            EventResult::Consumed
+        );
+        let shown = drawn_texts(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+        probe::key(&mut app, &probe::press(Key::Escape));
+        assert!(
+            !drawn_texts(&app).contains(help::CLOSES),
+            "Escape did not close it"
+        );
+    }
+
+    /// **While the list of keys is up, the table takes nothing**: a card
+    /// moved under the card of keys would be one the player cannot see. A
+    /// click puts the list away and does nothing else.
+    #[test]
+    fn the_list_of_keys_is_the_windows_while_it_is_up() {
+        let mut app = SolitaireApp::new();
+        probe::key(&mut app, &probe::press(Key::F1));
+        let seen = |a: &SolitaireApp| (a.state.move_count, a.state.stock.len(), a.state.focus);
+        let before = seen(&app);
+        // Checked after each key, not once after all of them: N deals a new
+        // game, which would put back whatever a key before it moved.
+        for key in [Key::Space, Key::Right, Key::A, Key::Z, Key::N] {
+            assert_eq!(
+                probe::key(&mut app, &probe::press(key)),
+                EventResult::Consumed
+            );
+            assert!(app.show_help, "{key:?} put the list away");
+            assert_eq!(seen(&app), before, "{key:?} reached the table");
+        }
+        probe::click(&mut app, Target::Stock);
+        assert!(!app.show_help, "a click did not put the list away");
+        assert_eq!(seen(&app), before, "the click dealt from the stock");
+        probe::key(&mut app, &probe::press(Key::F1));
+        probe::key(&mut app, &probe::press(Key::Enter));
+        assert!(!app.show_help, "Enter did not put the list away");
+        assert_eq!(seen(&app), before, "Enter played as it closed");
+    }
+
+    /// A red five on a hidden king in column 0, and a black six to go on in
+    /// each of columns 1 and 2: two different moves of one card, each
+    /// turning the king up.
+    fn five_between_two_sixes() -> GameState {
+        let mut gs = new_game();
+        gs.tableau[0].clear();
+        gs.tableau[0].push(PileCard::new(card(Suit::Clubs, Rank::King), false));
+        gs.tableau[0].push(PileCard::new(card(Suit::Hearts, Rank::Five), true));
+        gs.tableau[1].clear();
+        gs.tableau[1].push(PileCard::new(card(Suit::Spades, Rank::Six), true));
+        gs.tableau[2].clear();
+        gs.tableau[2].push(PileCard::new(card(Suit::Clubs, Rank::Six), true));
+        gs
+    }
+
+    /// **A move made after an undo starts a branch, and the undone one is
+    /// kept**: redo follows the new branch, and Alt+Z walks back through
+    /// every position there has been, in the order each was reached;
+    /// Alt+Shift+Z comes forward again.
+    #[test]
+    fn a_move_after_an_undo_keeps_the_undone_one_reachable_with_alt_z() {
+        let mut gs = five_between_two_sixes();
+        assert!(gs.try_tableau_to_tableau(0, 0, 1));
+        assert!(gs.undo());
+        assert!(gs.try_tableau_to_tableau(0, 0, 2));
+        assert!(!gs.redo(), "redo went onto the branch left");
+        let lens = |gs: &GameState| {
+            (
+                gs.tableau[0].len(),
+                gs.tableau[1].len(),
+                gs.tableau[2].len(),
+            )
+        };
+        assert_eq!(
+            gs.handle_key(Key::Z, held(false, true, false)),
+            EventResult::Consumed
+        );
+        assert_eq!(lens(&gs), (1, 2, 1), "the move undone was lost");
+        gs.handle_key(Key::Z, held(false, true, false));
+        assert_eq!(lens(&gs), (2, 1, 1));
+        assert!(!gs.tableau[0][0].face_up, "the king was left face up");
+        gs.handle_key(Key::Z, held(false, true, true));
+        gs.handle_key(Key::Z, held(false, true, true));
+        assert_eq!(lens(&gs), (1, 1, 2));
+        assert_eq!(
+            gs.handle_key(Key::Z, held(false, true, true)),
+            EventResult::Ignored,
+            "past the newest position"
+        );
+    }
+
+    /// **Ctrl+Y and Ctrl+Shift+Z make a move again**, the card it turned up
+    /// turned up again. There was no redo.
+    #[test]
+    fn ctrl_y_and_ctrl_shift_z_make_a_move_again_with_its_flip() {
+        let mut gs = five_between_two_sixes();
+        assert!(gs.try_tableau_to_tableau(0, 0, 1));
+        let moves = gs.move_count;
+        gs.handle_key(Key::Z, held(true, false, false));
+        assert!(!gs.tableau[0][0].face_up, "Ctrl+Z did not undo");
+        assert_eq!(
+            gs.handle_key(Key::Y, held(true, false, false)),
+            EventResult::Consumed
+        );
+        assert!(
+            gs.tableau[0][0].face_up,
+            "Ctrl+Y did not turn the king up again"
+        );
+        assert_eq!((gs.tableau[1].len(), gs.move_count), (2, moves));
+        gs.handle_key(Key::Z, held(true, false, false));
+        gs.handle_key(Key::Z, held(true, false, true));
+        assert_eq!(gs.tableau[1].len(), 2, "Ctrl+Shift+Z did not make it again");
+    }
+
+    /// **A win taken back is taken back, and made again is won again.**
+    #[test]
+    fn a_win_undone_and_redone_is_lost_and_won_again() {
+        let mut gs = new_game();
+        for pile in &mut gs.tableau {
+            pile.clear();
+        }
+        gs.stock.clear();
+        gs.waste.clear();
+        for (i, &suit) in Suit::ALL.iter().enumerate() {
+            let ranks = if suit == Suit::Diamonds { 12 } else { 13 };
+            gs.foundations[i] = Rank::ALL
+                .iter()
+                .take(ranks)
+                .map(|&rank| card(suit, rank))
+                .collect();
+        }
+        gs.waste.push(card(Suit::Diamonds, Rank::King));
+        assert!(gs.try_waste_to_foundation());
+        assert!(gs.won);
+        assert!(gs.undo());
+        assert!(!gs.won, "the undone win is still a win");
+        assert!(gs.redo());
+        assert!(gs.won, "the redone win is not a win");
+        // Over the won board, a bare N deals again and Ctrl+N is the window's.
+        assert_eq!(
+            gs.handle_key(Key::N, held(true, false, false)),
+            EventResult::Ignored
+        );
+        assert!(gs.won, "Ctrl+N dealt over the won board");
+    }
+
+    /// **A key held with Ctrl, Alt or the Windows key is not the game's**,
+    /// bar the history's. The keys matched on the key alone: Ctrl+N dealt a
+    /// new game, Ctrl+A played every card it could, AltGr+Z -- ż on a Polish
+    /// keyboard -- took a move back.
+    #[test]
+    fn a_key_held_with_ctrl_alt_or_the_windows_key_is_not_the_games() {
+        let mut gs = new_game();
+        gs.draw_from_stock();
+        let before = (gs.move_count, gs.waste.clone(), gs.stock.len());
+        let windows = Modifiers {
+            ctrl: false,
+            alt: false,
+            shift: false,
+            super_key: true,
+        };
+        for (key, modifiers) in [
+            (Key::N, held(true, false, false)),
+            (Key::A, held(true, false, false)),
+            (Key::Z, held(true, true, false)),
+            (Key::Z, windows),
+            (Key::N, held(false, true, false)),
+            (Key::Enter, windows),
+        ] {
+            assert_eq!(
+                gs.handle_key(key, modifiers),
+                EventResult::Ignored,
+                "{modifiers:?}+{key:?}"
+            );
+        }
+        assert_eq!(
+            (gs.move_count, gs.waste.clone(), gs.stock.len()),
+            before,
+            "a held key changed the game"
+        );
     }
 
     #[test]

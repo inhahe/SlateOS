@@ -200,8 +200,8 @@ MUTATIONS = [
     ),
     (
         "N adds nothing",
-        "            Key::N if !key.modifiers.ctrl => {\n                self.open_new_task();",
-        "            Key::N if !key.modifiers.ctrl => {\n                let _ = 0;",
+        "            Key::N => {\n                self.open_new_task();",
+        "            Key::N => {\n                let _ = 0;",
         [KEPT],
     ),
     (
@@ -253,6 +253,54 @@ MUTATIONS = [
         "        if self.store.is_empty() {\n            lines.push((String::from(NO_TASKS_LINE), false));",
         "        if false {\n            lines.push((String::from(NO_TASKS_LINE), false));",
         [EMPTY, NOTICE],
+    ),
+    (
+        'AltGr is taken for Ctrl in the list',
+        '        // not Ctrl held: AltGr arrives as Ctrl+Alt.\n        if textline::is_ctrl_chord(key.modifiers) {',
+        '        // not Ctrl held: AltGr arrives as Ctrl+Alt.\n        if key.modifiers.ctrl {',
+        ['a_chord_is_not_a_reminders_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        "a chord works the list's keys",
+        '        if !textline::is_plain(key.modifiers) {\n            return EventResult::Ignored;\n        }\n        // Shift and a digit',
+        '        // Shift and a digit',
+        ['a_chord_is_not_a_reminders_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'a chord answers the question before a delete',
+        '        if textline::is_plain(key.modifiers) {\n            match key.key {\n                Key::Enter | Key::Y',
+        '        if !key.modifiers.shift || key.modifiers.shift {\n            match key.key {\n                Key::Enter | Key::Y',
+        ['a_chord_is_not_a_reminders_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'a chord answers the snooze prompt',
+        '    fn handle_snooze_key(&mut self, key: &KeyEvent) -> EventResult {\n        if !textline::is_plain(key.modifiers) {\n            return EventResult::Ignored;\n        }\n',
+        '    fn handle_snooze_key(&mut self, key: &KeyEvent) -> EventResult {\n',
+        ['a_chord_is_not_a_reminders_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        "Alt+Tab walks the form's fields",
+        '            Key::Tab if plain => {',
+        '            Key::Tab => {',
+        ['a_chord_is_not_a_reminders_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'a chord saves the form',
+        '            Key::Enter if plain => {\n                if field == TaskField::NewStep',
+        '            Key::Enter => {\n                if field == TaskField::NewStep',
+        ['a_chord_is_not_a_reminders_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'a chord closes the form',
+        '            Key::Escape if plain => {\n                self.form = None;',
+        '            Key::Escape => {\n                self.form = None;',
+        ['a_chord_is_not_a_reminders_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'a chord works a field that is not typed into',
+        '            _ if !plain && !field.is_text() => EventResult::Ignored,\n',
+        '',
+        ['a_chord_is_not_a_reminders_key_and_altgr_is_not_ctrl'],
     ),
 ]
 

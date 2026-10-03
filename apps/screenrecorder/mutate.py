@@ -49,6 +49,36 @@ MUTATIONS = [
         "        let row = (y / SIDEBAR_ITEM_H) as usize;",
         [SIDEBAR],
     ),
+    (
+        'a chord raises the list of keys',
+        '        if plain && (key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift)) {',
+        '        if key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift) {',
+        ['a_chord_is_not_a_recorder_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'a chorded Escape puts the list of keys away',
+        '            if plain && matches!(key.key, Key::Escape | Key::Enter) {',
+        '            if matches!(key.key, Key::Escape | Key::Enter) {',
+        ['a_chord_is_not_a_recorder_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'AltGr is taken for Ctrl in the recorder',
+        '        if textline::is_ctrl_chord(key.modifiers) {\n            return self.handle_ctrl_chord(key);',
+        '        if key.modifiers.ctrl {\n            return self.handle_ctrl_chord(key);',
+        ['a_chord_is_not_a_recorder_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        "a chord works the recorder's keys",
+        '        if !plain {\n            return EventResult::Ignored;\n        }\n',
+        '',
+        ['a_chord_is_not_a_recorder_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        "Shift and the arrows move the history's selection, not the microphone",
+        '            Key::Up | Key::Down if key.modifiers.shift => {\n                let delta = if key.key == Key::Up { 0.1 } else { -0.1 };\n                let mic',
+        '            Key::Up | Key::Down if key.modifiers.shift && self.active_view != ActiveView::History => {\n                let delta = if key.key == Key::Up { 0.1 } else { -0.1 };\n                let mic',
+        ['a_chord_is_not_a_recorder_key_and_altgr_is_not_ctrl'],
+    ),
 ]
 
 if __name__ == "__main__":

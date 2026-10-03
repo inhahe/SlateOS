@@ -36,6 +36,7 @@ use appearance::Surface;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
+use guitk::listview::ListKey;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::scroll_window;
@@ -3746,6 +3747,17 @@ impl SchedulerUI {
 
     /// Keys that act on the main window, with no dialog open.
     fn handle_key_main(&mut self, key: &KeyEvent) -> bool {
+        // A key held with Alt or the Windows key is not this window's: the
+        // Windows key's are the desktop's, and AltGr -- which arrives as
+        // Ctrl+Alt -- types a letter, which the main window has nowhere to
+        // put: AltGr+N (`ń` on a Polish keyboard) opened a new task as Ctrl+N
+        // does.
+        if key.modifiers.alt || key.modifiers.super_key {
+            return false;
+        }
+        if let Some(movement) = ListKey::of(key) {
+            return self.move_through_list(movement);
+        }
         match key.key {
             Key::Tab => {
                 // The two tabs, not a focus ring: there is nothing else here
@@ -3755,16 +3767,6 @@ impl SchedulerUI {
                     UiTab::History => UiTab::Tasks,
                 });
                 true
-            }
-            Key::Up => self.move_selection(-1),
-            Key::Down => self.move_selection(1),
-            Key::Home => {
-                let before = self.list_scroll();
-                match self.tab {
-                    UiTab::Tasks => self.scroll_task_list_to_top(),
-                    UiTab::History => self.scroll_history_to_top(),
-                }
-                before != self.list_scroll()
             }
             Key::Delete => {
                 let Some(id) = self.selected_task_id else {
@@ -3815,13 +3817,17 @@ impl SchedulerUI {
                 _ => self.save_dialog(),
             },
             _ => {
-                // A keystroke with Ctrl or Alt held is a shortcut, not text:
-                // Ctrl-N while filling in the Name field must not put an `n`
-                // in it. Everything else goes through `KeyEvent::typed`, which
-                // is the layout's own answer to what was typed -- Enter, Tab
-                // and Escape all *produce* text on most layouts, and a field
-                // that appended `key.text` raw would fill with control bytes.
-                if key.modifiers.ctrl || key.modifiers.alt {
+                // A command is a shortcut, not text, though it carries its
+                // letter as text: Ctrl-N while filling in the Name field must
+                // not put an `n` in it, and nor may a key held with Alt or the
+                // Windows key. AltGr, which arrives as Ctrl+Alt, types -- `ł`
+                // is AltGr+L on a Polish keyboard
+                // (`textline::types_into_field`). What is typed goes through
+                // `KeyEvent::typed`, which is the layout's own answer to what
+                // was typed -- Enter, Tab and Escape all *produce* text on most
+                // layouts, and a field that appended `key.text` raw would fill
+                // with control bytes.
+                if !textline::types_into_field(key) {
                     return false;
                 }
                 let mut typed = false;
@@ -3833,62 +3839,69 @@ impl SchedulerUI {
         }
     }
 
-    /// Where the showing list is scrolled to, in rows.
-    fn list_scroll(&self) -> usize {
-        match self.tab {
-            UiTab::Tasks => self.task_list_scroll,
-            UiTab::History => self.history_scroll,
-        }
-    }
-
-    /// Move the selection `delta` rows through the task list.
+    /// Move through the list showing, as every list in the shell moves
+    /// (`guitk::listview::ListKey`): Up and Down, Home and End, and Page Up
+    /// and Down a list's height at a time.
     ///
-    /// Only on the Tasks tab: the History tab has no selection to move, and
-    /// silently moving the hidden one would leave the toolbar acting on a task
-    /// the user cannot see.
-    fn move_selection(&mut self, delta: isize) -> bool {
-        if self.tab != UiTab::Tasks {
-            return false;
+    /// The Tasks tab moves its selection, and keeps it on screen; the History
+    /// tab, which has no selection, scrolls. Home scrolled the task list to
+    /// the top without choosing the first task, End and the page keys went
+    /// nowhere, and the history answered Home alone.
+    ///
+    /// With nothing chosen, every key but End chooses the first task -- the
+    /// shell's rule, and a way onto the list either way.
+    fn move_through_list(&mut self, movement: ListKey) -> bool {
+        let page = self.list_capacity();
+        if self.tab == UiTab::History {
+            let offered = self.scheduler.history.recent(HISTORY_ROWS_OFFERED).len();
+            let last_top = offered.saturating_sub(page);
+            let before = self.history_scroll;
+            let from = before.min(last_top);
+            self.history_scroll = match movement {
+                ListKey::Previous => from.saturating_sub(1),
+                ListKey::Next => from.saturating_add(1).min(last_top),
+                ListKey::PageUp => from.saturating_sub(page),
+                ListKey::PageDown => from.saturating_add(page).min(last_top),
+                ListKey::First => 0,
+                ListKey::Last => last_top,
+            };
+            return before != self.history_scroll;
         }
         let tasks = self.scheduler.list_tasks();
-        if tasks.is_empty() {
-            return false;
-        }
-        let last = tasks.len().saturating_sub(1);
         let current = self
             .selected_task_id
             .and_then(|id| tasks.iter().position(|t| t.id == id));
-        let next = match (current, delta) {
-            // Nothing selected: Down picks the first row and Up the last, so
-            // either arrow gets a keyboard user onto the list.
-            (None, d) if d >= 0 => 0,
-            (None, _) => last,
-            (Some(i), d) if d >= 0 => i.saturating_add(1).min(last),
-            (Some(i), _) => i.saturating_sub(1),
-        };
-        let Some(task) = tasks.get(next) else {
+        let Some(next) = movement.target(current, tasks.len(), page) else {
             return false;
         };
-        let id = task.id;
+        let Some(id) = tasks.get(next).map(|t| t.id) else {
+            return false;
+        };
         let changed = self.selected_task_id != Some(id);
+        let scrolled = self.task_list_scroll;
         self.select_task(id);
         // Keep the newly selected row on screen. Without this the selection
         // walks off the bottom of the viewport and the arrow keys appear to
         // stop working.
         self.reveal_row(next);
-        changed
+        changed || scrolled != self.task_list_scroll
     }
 
-    /// Scroll the task list so that row `index` is inside the viewport.
-    fn reveal_row(&mut self, index: usize) {
+    /// How many whole rows the list showing has room for: what
+    /// `scroll_window::visible` draws, and so what a page is.
+    fn list_capacity(&self) -> usize {
         let content = Layout::new(
             self.window_width,
             self.window_height,
             self.status_message.is_some(),
         )
         .content;
-        let capacity =
-            scroll_window::capacity(ROW_HEIGHT, content.h - ROW_HEIGHT - LIST_MORE_HEIGHT);
+        scroll_window::capacity(ROW_HEIGHT, content.h - ROW_HEIGHT - LIST_MORE_HEIGHT)
+    }
+
+    /// Scroll the task list so that row `index` is inside the viewport.
+    fn reveal_row(&mut self, index: usize) {
+        let capacity = self.list_capacity();
         if capacity == 0 {
             return;
         }
@@ -4095,6 +4108,7 @@ mod tests {
     )]
 
     use super::*;
+    use guitk::event::Modifiers;
     use guitk::probe;
 
     // -- CronField tests ----------------------------------------------------
@@ -5319,6 +5333,91 @@ mod tests {
         assert_eq!(drawn.last().map(String::as_str), Some("T003"));
     }
 
+    /// **The task list moves as every list in the shell does**: Home and End
+    /// choose the first and last task and bring them on screen, and Page Up
+    /// and Down move a list's height. Home only scrolled, choosing nothing,
+    /// and End and the page keys went nowhere.
+    #[test]
+    fn the_task_list_moves_as_every_list_does() {
+        let mut ui = ui_with_tasks(100);
+        let ids: Vec<u64> = ui.scheduler.list_tasks().iter().map(|t| t.id).collect();
+        let page = ui.list_capacity();
+        assert!(page > 1 && page < 99, "{page} rows: nothing to page");
+        let chosen = |ui: &SchedulerUI| ids.iter().position(|&id| Some(id) == ui.selected_task_id);
+        let shown =
+            |ui: &SchedulerUI, row: usize| probe::rect_of(ui, Target::TaskRow(ids[row])).is_some();
+
+        // With nothing chosen, Up chooses the first task, as Down does.
+        assert_eq!(
+            probe::key(&mut ui, &probe::press(Key::Up)),
+            EventResult::Consumed
+        );
+        assert_eq!(chosen(&ui), Some(0));
+        assert_eq!(
+            probe::key(&mut ui, &probe::press(Key::End)),
+            EventResult::Consumed
+        );
+        assert_eq!(chosen(&ui), Some(99));
+        assert!(shown(&ui, 99), "the last task is not on screen");
+        probe::key(&mut ui, &probe::press(Key::PageUp));
+        assert_eq!(chosen(&ui), Some(99 - page));
+        assert!(shown(&ui, 99 - page));
+        probe::key(&mut ui, &probe::press(Key::Home));
+        assert_eq!(chosen(&ui), Some(0));
+        assert!(shown(&ui, 0), "the first task is not on screen");
+        probe::key(&mut ui, &probe::press(Key::PageDown));
+        assert_eq!(chosen(&ui), Some(page));
+        assert!(shown(&ui, page));
+
+        // The chosen task scrolled away by the wheel: the key that brings it
+        // back changes what is shown, though not what is chosen.
+        probe::key(&mut ui, &probe::press(Key::Home));
+        ui.scroll_task_list_by(30);
+        assert!(!shown(&ui, 0));
+        assert_eq!(
+            probe::key(&mut ui, &probe::press(Key::Home)),
+            EventResult::Consumed,
+            "bringing the chosen task back on screen was not a change"
+        );
+        assert!(shown(&ui, 0));
+    }
+
+    /// **The history scrolls with the same keys** -- it has no selection to
+    /// move -- and stops at both ends. It answered Home alone.
+    #[test]
+    fn the_history_scrolls_with_the_list_keys() {
+        let mut ui = ui_with_history(100);
+        let page = ui.list_capacity();
+        assert!(page > 1 && page < 50, "{page} rows: nothing to page");
+        let last_top = 100 - page;
+        assert_eq!(
+            probe::key(&mut ui, &probe::press(Key::Down)),
+            EventResult::Consumed
+        );
+        assert_eq!(ui.history_scroll, 1);
+        probe::key(&mut ui, &probe::press(Key::End));
+        assert_eq!(ui.history_scroll, last_top);
+        assert_eq!(
+            probe::key(&mut ui, &probe::press(Key::Down)),
+            EventResult::Ignored,
+            "the history scrolled past its end"
+        );
+        probe::key(&mut ui, &probe::press(Key::PageUp));
+        assert_eq!(ui.history_scroll, last_top - page);
+        probe::key(&mut ui, &probe::press(Key::Up));
+        assert_eq!(ui.history_scroll, last_top - page - 1);
+        probe::key(&mut ui, &probe::press(Key::Home));
+        assert_eq!(ui.history_scroll, 0);
+        assert_eq!(
+            probe::key(&mut ui, &probe::press(Key::Up)),
+            EventResult::Ignored,
+            "the history scrolled past its top"
+        );
+        probe::key(&mut ui, &probe::press(Key::PageDown));
+        assert_eq!(ui.history_scroll, page);
+        assert_eq!(ui.selected_task_id, None, "the history chose a task");
+    }
+
     /// Scrolling up from the top stays at the top rather than wrapping.
     #[test]
     fn scrolling_a_list_up_from_the_top_stays_at_the_top() {
@@ -5676,6 +5775,77 @@ mod tests {
         probe::click(&mut ui, Target::DeleteConfirm);
         assert_eq!(ui.scheduler.list_tasks().len(), 2);
         assert_eq!(ui.selected_task_id, None);
+    }
+
+    fn held(key: Key, modifiers: Modifiers, text: &str) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        }
+    }
+
+    /// Ctrl+Alt, as Windows and a remote client on it report AltGr.
+    const ALTGR: Modifiers = Modifiers {
+        shift: false,
+        ctrl: true,
+        alt: true,
+        super_key: false,
+    };
+
+    /// **The form takes what AltGr types, and no command's letter.** AltGr
+    /// arrives as Ctrl+Alt -- `ł` is AltGr+L on a Polish keyboard -- and the
+    /// form refused every key held with Ctrl or Alt. The Windows key's
+    /// letters, which a real machine sends with the key, were typed.
+    #[test]
+    fn the_form_takes_altgr_letters_and_no_commands_letter() {
+        let mut ui = SchedulerUI::new();
+        probe::click(&mut ui, Target::Add);
+        assert_eq!(
+            probe::key(&mut ui, &held(Key::L, ALTGR, "\u{142}")),
+            EventResult::Consumed,
+            "AltGr+L was refused"
+        );
+        for (key, modifiers, text) in [
+            (Key::K, Modifiers::ctrl(), "k"),
+            (Key::F, Modifiers::alt(), "f"),
+            (Key::E, Modifiers::super_key(), "e"),
+        ] {
+            assert_eq!(
+                probe::key(&mut ui, &held(key, modifiers, text)),
+                EventResult::Ignored,
+                "{modifiers:?}+{key:?} was typed"
+            );
+        }
+        assert_eq!(ui.form.name, "\u{142}");
+    }
+
+    /// **A key held with Alt or the Windows key is not the main window's.**
+    /// AltGr+N -- `ń` on a Polish keyboard, arriving as Ctrl+Alt -- opened a
+    /// new task as Ctrl+N does; Alt+Delete and Windows+Delete asked to delete
+    /// the selected task, Alt+Enter opened it, and Alt+Space switched it off.
+    #[test]
+    fn a_key_held_with_alt_or_the_windows_key_is_not_the_main_windows() {
+        let mut ui = ui_with_tasks(3);
+        probe::key(&mut ui, &probe::press(Key::Down));
+        let id = ui.selected_task_id.expect("Down selected a task");
+        let enabled = ui.scheduler.get_task(id).is_some_and(|t| t.enabled);
+        for modifiers in [ALTGR, Modifiers::alt(), Modifiers::super_key()] {
+            for key in [Key::N, Key::Delete, Key::Enter, Key::Space] {
+                assert_eq!(
+                    probe::key(&mut ui, &held(key, modifiers, "")),
+                    EventResult::Ignored,
+                    "{modifiers:?}+{key:?}"
+                );
+            }
+            assert_eq!(ui.dialog, UiDialog::None, "{modifiers:?} opened a dialog");
+            assert_eq!(
+                ui.scheduler.get_task(id).is_some_and(|t| t.enabled),
+                enabled,
+                "{modifiers:?}+Space switched the task"
+            );
+        }
     }
 
     /// A key release is not a second press. Acting on both edges would run

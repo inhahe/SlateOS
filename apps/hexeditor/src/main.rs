@@ -37,6 +37,7 @@ use guitk::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree, TextO
 #[allow(unused_imports)]
 use guitk::style::{Borders, CornerRadii, Edges, FontWeight, Style, TextAlign};
 use guitk::text;
+use guitk::undo::{Travel, UndoHistory};
 use guitk::wheel;
 #[allow(unused_imports)]
 use guitk::widget::{Widget, WidgetId, WidgetTree};
@@ -131,7 +132,7 @@ const MAX_RECENT_FILES: usize = 20;
 
 /// Maximum undo stack depth (unlimited in spirit, capped at a large value to
 /// prevent unbounded memory growth).
-const MAX_UNDO_DEPTH: usize = 10_000;
+const MAX_UNDO_DEPTH: core::num::NonZeroUsize = core::num::NonZeroUsize::MIN.saturating_add(9_999);
 
 // ============================================================================
 // Data model — View configuration
@@ -541,7 +542,7 @@ pub struct HighlightPattern {
 // ============================================================================
 
 /// A single open document in the hex editor.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct HexDocument {
     /// The raw file data.
     pub data: Vec<u8>,
@@ -557,10 +558,12 @@ pub struct HexDocument {
     pub whole_len: Option<usize>,
     /// Whether the buffer has been modified since last save.
     pub modified: bool,
-    /// Undo stack (most recent at the end).
-    pub undo_stack: Vec<UndoEntry>,
-    /// Redo stack (most recent at the end).
-    pub redo_stack: Vec<UndoEntry>,
+    /// The edits, kept as a tree: an edit made after undoing starts a branch
+    /// beside what was undone, rather than throwing it away (C-Q24,
+    /// `design-decisions.md` §1416). Ctrl+Z and Ctrl+Y go back and forth
+    /// along the branch the file is on; Alt+Z and Alt+Shift+Z walk every
+    /// version it has been in, in the order each was made.
+    pub history: UndoHistory<UndoEntry>,
     /// Bookmarks.
     pub bookmarks: Vec<Bookmark>,
     /// Current cursor position (byte offset).
@@ -589,8 +592,7 @@ impl HexDocument {
             path: None,
             whole_len: None,
             modified: false,
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
+            history: UndoHistory::new(MAX_UNDO_DEPTH),
             bookmarks: Vec::new(),
             cursor: 0,
             selection: None,
@@ -816,73 +818,83 @@ impl HexDocument {
         self.modified = true;
     }
 
-    /// Push an undo entry, clearing redo and capping stack size.
+    /// Record an edit as the next step. One made after undoing starts a
+    /// branch, and what was undone stays in the history.
     fn push_undo(&mut self, entry: UndoEntry) {
-        self.redo_stack.clear();
-        self.undo_stack.push(entry);
-        if self.undo_stack.len() > MAX_UNDO_DEPTH {
-            self.undo_stack.remove(0);
-        }
+        self.history.record(entry);
     }
 
-    /// Undo the most recent edit.
+    /// Undo the most recent edit on the branch the file is on.
     pub fn undo(&mut self) -> bool {
-        if let Some(entry) = self.undo_stack.pop() {
-            // Reverse the operation: remove new_bytes, insert old_bytes.
-            let start = entry.offset;
-            let new_len = entry.new_bytes.len();
-            let drain_end = start.saturating_add(new_len).min(self.data.len());
-            if new_len > 0 && start < self.data.len() {
-                self.data.drain(start..drain_end);
-            }
-            for (i, &b) in entry.old_bytes.iter().enumerate() {
-                let pos = start.saturating_add(i).min(self.data.len());
-                self.data.insert(pos, b);
-            }
-            self.cursor = entry.cursor_before;
-            self.clamp_cursor();
-
-            // Move to redo stack (with swapped old/new).
-            self.redo_stack.push(UndoEntry {
-                offset: entry.offset,
-                old_bytes: entry.new_bytes,
-                new_bytes: entry.old_bytes,
-                cursor_before: entry.cursor_before,
-            });
-            self.modified = true;
-            true
-        } else {
-            false
-        }
+        let Some(entry) = self.history.undo() else {
+            return false;
+        };
+        self.revert(&entry);
+        true
     }
 
-    /// Redo the most recently undone edit.
+    /// Redo the most recently undone edit on the branch the file is on --
+    /// the one undone out of, or the one made since.
     pub fn redo(&mut self) -> bool {
-        if let Some(entry) = self.redo_stack.pop() {
-            let start = entry.offset;
-            let new_len = entry.new_bytes.len();
-            let drain_end = start.saturating_add(new_len).min(self.data.len());
-            if new_len > 0 && start < self.data.len() {
-                self.data.drain(start..drain_end);
-            }
-            for (i, &b) in entry.old_bytes.iter().enumerate() {
-                let pos = start.saturating_add(i).min(self.data.len());
-                self.data.insert(pos, b);
-            }
-            self.cursor = entry.cursor_before;
-            self.clamp_cursor();
+        let Some(entry) = self.history.redo() else {
+            return false;
+        };
+        self.reapply(&entry);
+        true
+    }
 
-            self.undo_stack.push(UndoEntry {
-                offset: entry.offset,
-                old_bytes: entry.new_bytes,
-                new_bytes: entry.old_bytes,
-                cursor_before: entry.cursor_before,
-            });
-            self.modified = true;
-            true
-        } else {
-            false
+    /// Go to the version the file was in before this one was first reached,
+    /// on whichever branch -- Alt+Z. Answers whether there was one.
+    pub fn earlier(&mut self) -> bool {
+        let steps = self.history.earlier();
+        self.travel(steps)
+    }
+
+    /// Go to the version first reached after this one, on whichever branch
+    /// -- Alt+Shift+Z. Answers whether there was one.
+    pub fn later(&mut self) -> bool {
+        let steps = self.history.later();
+        self.travel(steps)
+    }
+
+    /// Take the steps a journey through the history hands back, in order.
+    fn travel(&mut self, steps: Vec<Travel<UndoEntry>>) -> bool {
+        let moved = !steps.is_empty();
+        for step in steps {
+            match step {
+                Travel::Undo(entry) => self.revert(&entry),
+                Travel::Redo(entry) => self.reapply(&entry),
+            }
         }
+        moved
+    }
+
+    /// Put back the bytes `entry` replaced, and the cursor where it was.
+    fn revert(&mut self, entry: &UndoEntry) {
+        self.splice_bytes(entry.offset, entry.new_bytes.len(), &entry.old_bytes);
+        self.cursor = entry.cursor_before;
+        self.clamp_cursor();
+        self.modified = true;
+    }
+
+    /// Make `entry` again. The cursor goes where it was before the edit, as
+    /// redo always put it.
+    fn reapply(&mut self, entry: &UndoEntry) {
+        self.splice_bytes(entry.offset, entry.old_bytes.len(), &entry.new_bytes);
+        self.cursor = entry.cursor_before;
+        self.clamp_cursor();
+        self.modified = true;
+    }
+
+    /// Replace `remove` bytes at `offset` with `insert`, clamped to the data:
+    /// a recorded step was valid against the data it is being applied to, so
+    /// the clamps should never bite -- and an index past the end is a panic.
+    /// One splice, where the undo and the redo each inserted a byte at a time,
+    /// moving the rest of the file once per byte.
+    fn splice_bytes(&mut self, offset: usize, remove: usize, insert: &[u8]) {
+        let start = offset.min(self.data.len());
+        let end = start.saturating_add(remove).min(self.data.len());
+        self.data.splice(start..end, insert.iter().copied());
     }
 
     // ========================================================================
@@ -1460,7 +1472,7 @@ pub enum FocusedPanel {
 }
 
 /// Complete hex editor application state.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct HexEditor {
     /// Open documents (tabs).
     pub documents: Vec<HexDocument>,
@@ -1601,7 +1613,12 @@ const SHORTCUTS: &[(&str, &str)] = &[
         "Ctrl+W",
         "Close the tab, asking first if it is not saved -- in the search bar, wrap round or not",
     ),
-    ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
+    ("Ctrl+Z / Ctrl+Y", "Undo / redo; Ctrl+Shift+Z redoes too"),
+    (
+        "Alt+Z / Alt+Shift+Z",
+        "The version before / after this one, on any branch",
+    ),
+    ("Ctrl+F4", "Close the tab"),
     ("Ctrl+C / Ctrl+V", "Copy / paste the selection"),
     ("Ctrl+F", "Find"),
     ("Ctrl+I", "Match case, while the search bar is up"),
@@ -1919,8 +1936,23 @@ impl HexEditor {
             return EventResult::Consumed;
         }
 
-        // Global shortcuts (regardless of focus).
-        if key.modifiers.ctrl {
+        // Alt+Z and Alt+Shift+Z: every version the file has been in, in the
+        // order each was made. Alt without Ctrl: Ctrl+Alt is AltGr.
+        if key.key == Key::Z && key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key
+        {
+            let doc = self.active_doc_mut();
+            if key.modifiers.shift {
+                doc.later();
+            } else {
+                doc.earlier();
+            }
+            return EventResult::Consumed;
+        }
+
+        // Global shortcuts (regardless of focus). Ctrl without Alt: Ctrl+Alt
+        // is AltGr, which types a letter on several layouts -- one the text
+        // pane writes into the file.
+        if key.modifiers.ctrl && !key.modifiers.alt {
             match key.key {
                 Key::O => {
                     self.open_file_dialog();
@@ -1940,8 +1972,18 @@ impl HexEditor {
                     self.request_close_tab(self.active_tab);
                     return EventResult::Consumed;
                 }
+                Key::Z if key.modifiers.shift => {
+                    self.active_doc_mut().redo();
+                    return EventResult::Consumed;
+                }
                 Key::Z => {
                     self.active_doc_mut().undo();
+                    return EventResult::Consumed;
+                }
+                // Ctrl+F4 closes the tab too (C-Q24, §1416) -- in the search
+                // bar as well, where Ctrl+W is taken.
+                Key::F4 => {
+                    self.request_close_tab(self.active_tab);
                     return EventResult::Consumed;
                 }
                 Key::Y => {
@@ -4968,8 +5010,8 @@ mod tests {
         assert!(!doc.modified);
         assert_eq!(doc.cursor, 0);
         assert!(doc.selection.is_none());
-        assert!(doc.undo_stack.is_empty());
-        assert!(doc.redo_stack.is_empty());
+        assert!(!doc.history.can_undo());
+        assert!(!doc.history.can_redo());
     }
 
     #[test]
@@ -5543,7 +5585,7 @@ mod tests {
         let mut doc = HexDocument::from_data(vec![0xAA]);
         doc.overwrite_byte(0, 0xAA);
         assert!(!doc.modified);
-        assert!(doc.undo_stack.is_empty());
+        assert!(!doc.history.can_undo());
     }
 
     // ====================================================================
@@ -5678,14 +5720,47 @@ mod tests {
         assert!(!doc.redo());
     }
 
+    /// **An edit made after an undo starts a branch, and the undone one is
+    /// kept**: redo follows the new branch, and Alt+Z reaches the old one --
+    /// in the order the versions were made.
     #[test]
-    fn test_redo_cleared_on_new_edit() {
+    fn a_new_edit_after_an_undo_starts_a_branch_and_keeps_the_undone_one() {
         let mut doc = HexDocument::from_data(vec![0xAA, 0xBB]);
         doc.overwrite_byte(0, 0x11);
         doc.undo();
-        assert!(!doc.redo_stack.is_empty());
+        assert!(doc.history.can_redo());
         doc.overwrite_byte(0, 0x22);
-        assert!(doc.redo_stack.is_empty());
+        assert!(
+            !doc.history.can_redo(),
+            "redo would go onto the branch left"
+        );
+        assert!(doc.earlier());
+        assert_eq!(doc.data, vec![0x11, 0xBB], "the undone branch was lost");
+        assert!(doc.earlier());
+        assert_eq!(doc.data, vec![0xAA, 0xBB]);
+        assert!(!doc.earlier(), "before the first version");
+        assert!(doc.later());
+        assert!(doc.later());
+        assert_eq!(doc.data, vec![0x22, 0xBB]);
+        assert!(!doc.later(), "past the newest version");
+    }
+
+    /// An insert and a delete of several bytes go back and forth whole.
+    #[test]
+    fn a_several_byte_edit_goes_back_and_forth_whole() {
+        let mut doc = HexDocument::from_data(vec![1, 2, 3, 4]);
+        doc.push_undo(UndoEntry {
+            offset: 1,
+            old_bytes: vec![2, 3],
+            new_bytes: vec![9, 9, 9],
+            cursor_before: 1,
+        });
+        doc.data = vec![1, 9, 9, 9, 4];
+        assert!(doc.undo());
+        assert_eq!(doc.data, vec![1, 2, 3, 4]);
+        assert!(doc.redo());
+        assert_eq!(doc.data, vec![1, 9, 9, 9, 4]);
+        assert_eq!(doc.cursor, 1);
     }
 
     #[test]
@@ -7078,5 +7153,97 @@ mod tests {
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    // ---- the history as a tree, and the keys (C-Q24, §1416) ------------------
+
+    fn alt_z(shift: bool) -> KeyEvent {
+        key_press(
+            Key::Z,
+            Modifiers {
+                alt: true,
+                shift,
+                ..Modifiers::NONE
+            },
+        )
+    }
+
+    /// **Alt+Z reaches the version an undo left behind, and Alt+Shift+Z
+    /// comes forward again.**
+    #[test]
+    fn alt_z_reaches_the_branch_an_undo_left() {
+        let mut editor = make_test_editor(vec![0xAA]);
+        editor.active_doc_mut().overwrite_byte(0, 0x11);
+        editor.active_doc_mut().undo();
+        editor.active_doc_mut().overwrite_byte(0, 0x22);
+        editor.handle_key(&alt_z(false));
+        assert_eq!(editor.active_doc().data[0], 0x11, "Alt+Z did not go back");
+        editor.handle_key(&alt_z(true));
+        assert_eq!(
+            editor.active_doc().data[0],
+            0x22,
+            "Alt+Shift+Z did not come forward"
+        );
+    }
+
+    /// **Ctrl+Shift+Z redoes**, as Ctrl+Y does.
+    #[test]
+    fn ctrl_shift_z_redoes() {
+        let mut editor = make_test_editor(vec![0xAA]);
+        editor.active_doc_mut().overwrite_byte(0, 0xFF);
+        editor.active_doc_mut().undo();
+        editor.handle_key(&key_press(
+            Key::Z,
+            Modifiers {
+                ctrl: true,
+                shift: true,
+                ..Modifiers::NONE
+            },
+        ));
+        assert_eq!(editor.active_doc().data[0], 0xFF);
+    }
+
+    /// **Ctrl+F4 closes the tab** -- in the search bar too, where Ctrl+W
+    /// says whether the search wraps.
+    #[test]
+    fn ctrl_f4_closes_the_tab_even_in_the_search_bar() {
+        let mut editor = make_test_editor(vec![0xAA]);
+        editor.open_tab(HexDocument::from_data(vec![0xBB]));
+        editor.handle_key(&key_press(Key::F4, Modifiers::ctrl()));
+        assert_eq!(editor.documents.len(), 1, "Ctrl+F4 did not close the tab");
+        editor.open_tab(HexDocument::from_data(vec![0xCC]));
+        editor.focused_panel = FocusedPanel::SearchBar;
+        editor.handle_key(&key_press(Key::F4, Modifiers::ctrl()));
+        assert_eq!(editor.documents.len(), 1, "not in the search bar");
+    }
+
+    /// **AltGr is not Ctrl.** AltGr arrives as Ctrl+Alt, and AltGr+Z --
+    /// Polish's ż -- undid the last edit.
+    #[test]
+    fn altgr_z_does_not_undo() {
+        let mut editor = make_test_editor(vec![0xAA]);
+        editor.active_doc_mut().overwrite_byte(0, 0x11);
+        editor.handle_key(&KeyEvent {
+            key: Key::Z,
+            pressed: true,
+            modifiers: Modifiers {
+                ctrl: true,
+                alt: true,
+                ..Modifiers::NONE
+            },
+            text: "\u{17c}".to_string(),
+        });
+        assert_eq!(editor.active_doc().data[0], 0x11, "AltGr+Z undid");
+    }
+
+    /// The shortcut list names the new keys.
+    #[test]
+    fn the_shortcut_list_names_the_history_keys() {
+        for key in ["Alt+Z / Alt+Shift+Z", "Ctrl+F4"] {
+            assert!(
+                SHORTCUTS.iter().any(|(k, _)| *k == key),
+                "{key} is not listed"
+            );
+        }
     }
 }

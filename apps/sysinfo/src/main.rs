@@ -4145,17 +4145,6 @@ mod tests {
             .collect()
     }
 
-    /// The top edge of every property row the detail pane actually draws.
-    ///
-    /// Identified by the alternating row stripe: a fill one row high in one of
-    /// the two stripe colours. Structural rather than positional, for the
-    /// reason given on [`drawn_sidebar_rows`].
-    ///
-    /// The height test is not belt-and-braces. The even stripe and the search
-    /// field share `base`, so a colour-only filter also matches
-    /// the pane's own background and reports one row more than the table
-    /// drew — which is exactly how the first draft of this helper made two
-    /// correct page-step assertions fail by one. A helper filtered on the
     /// Every colour this app draws comes from the user's palette.
     ///
     /// The guard §822 expects each converted crate to adopt. It is also what
@@ -4193,6 +4182,17 @@ mod tests {
         }
     }
 
+    /// The top edge of every property row the detail pane actually draws.
+    ///
+    /// Identified by the alternating row stripe: a fill one row high in one of
+    /// the two stripe colours. Structural rather than positional, for the
+    /// reason given on [`drawn_sidebar_rows`].
+    ///
+    /// The height test is not belt-and-braces. The even stripe and the search
+    /// field share `base`, so a colour-only filter also matches
+    /// the pane's own background and reports one row more than the table
+    /// drew — which is exactly how the first draft of this helper made two
+    /// correct page-step assertions fail by one. A helper filtered on the
     /// wrong property is as wrong as the code it is checking.
     fn drawn_property_rows(app: &SysInfoState) -> Vec<(f32, Color)> {
         let mut t = RenderTree::new();

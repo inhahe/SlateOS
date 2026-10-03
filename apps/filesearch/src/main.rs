@@ -1488,14 +1488,6 @@ const ROW_FONT: f32 = 12.0;
 /// Font size of the results table's header and its remaining cells.
 const ROW_FONT_SMALL: f32 = 11.0;
 
-/// Main file search application
-/// The keys this program answers, raised by `F1`.
-///
-/// `?` is not a second way in: the search box takes a typed query, so a `?`
-/// has somewhere to go -- the `apps/spreadsheet` case in design-decisions 863.
-///
-/// The six sort chords are `Ctrl` plus the first letter of the column, which
-/// is the only reason they are letters rather than a menu.
 /// What the query's `ext:` and `in:` words narrowed a search to, for the
 /// status line -- so a search that found nothing because of them says so.
 fn narrowing(criteria: &SearchCriteria) -> String {
@@ -1513,6 +1505,13 @@ fn narrowing(criteria: &SearchCriteria) -> String {
     }
 }
 
+/// The keys this program answers, raised by `F1`.
+///
+/// `?` is not a second way in: the search box takes a typed query, so a `?`
+/// has somewhere to go -- the `apps/spreadsheet` case in design-decisions 863.
+///
+/// The six sort chords are `Ctrl` plus the first letter of the column, which
+/// is the only reason they are letters rather than a menu.
 const SHORTCUTS: &[(&str, &str)] = &[
     ("Up / Down", "Move through the results"),
     ("PageUp / PageDown", "A page of results"),
@@ -1537,6 +1536,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("F1", "This list"),
 ];
 
+/// Main file search application
 pub struct FileSearchApp {
     pub index: FileIndex,
     pub criteria: SearchCriteria,
@@ -1823,6 +1823,7 @@ impl FileSearchApp {
             search.is_bookmarked = false;
             search.name = None;
         }
+        self.keep_filters_in_reach();
     }
 
     /// Get selected entry
@@ -1962,7 +1963,19 @@ impl FileSearchApp {
                     self.window = (*width as f32, *height as f32);
                 }
                 self.keep_selection_visible();
+                self.keep_filters_in_reach();
                 EventResult::Consumed
+            }
+            // A search saved or forgotten in another window, and the desktop
+            // says so: this window follows. Read at startup only, its list
+            // went stale -- and its next save wrote the stale list over the
+            // other window's, losing what that one had saved.
+            Event::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {
+                if self.reread_saved_searches() {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
             }
             _ => EventResult::Ignored,
         }
@@ -3353,7 +3366,14 @@ impl FileSearchApp {
         EventResult::Consumed
     }
 
-    /// Read the saved searches from the user's settings.
+    /// Make this window's saved searches the ones `doc` records: at startup,
+    /// and again whenever the desktop says `filesearch.yaml` changed.
+    ///
+    /// A search saved here that `doc` no longer has is forgotten as its ×
+    /// forgets it, staying among the recent ones; one `doc` has that is not
+    /// saved here is saved as Ctrl+D saves it, keeping what it found when it
+    /// last ran here. Either way a search keeps its id, so a row the pointer
+    /// is over is still that search's row.
     ///
     /// Entries that do not parse -- an unknown mode word, an empty query -- are
     /// not shown, and not invented into something else either. They are kept,
@@ -3361,16 +3381,38 @@ impl FileSearchApp {
     /// search this version cannot run (one saved by a newer version, say) is
     /// still theirs.
     pub fn load_saved_searches(&mut self, doc: &yamldoc::Document) {
+        let mut wanted = Vec::new();
+        self.unreadable_saved.clear();
         for item in doc.get_seq(&SAVED_KEY).unwrap_or_default() {
             let parsed = item.split_once(':').and_then(|(word, query)| {
                 SearchMode::from_key(word)
                     .filter(|_| !query.is_empty())
                     .map(|mode| (mode, query.to_string()))
             });
-            let Some((mode, query)) = parsed else {
-                self.unreadable_saved.push(item);
+            match parsed {
+                Some(search) => wanted.push(search),
+                None => self.unreadable_saved.push(item),
+            }
+        }
+        for search in &mut self.search_history {
+            let kept = wanted
+                .iter()
+                .any(|(mode, query)| search.mode == *mode && search.query == *query);
+            if search.is_bookmarked && !kept {
+                search.is_bookmarked = false;
+                search.name = None;
+            }
+        }
+        for (mode, query) in wanted {
+            if let Some(search) = self
+                .search_history
+                .iter_mut()
+                .find(|s| s.mode == mode && s.query == query)
+            {
+                search.is_bookmarked = true;
+                search.name = Some(query);
                 continue;
-            };
+            }
             let id = self.next_search_id;
             self.next_search_id = self.next_search_id.saturating_add(1);
             self.search_history.push(SavedSearch {
@@ -3383,6 +3425,27 @@ impl FileSearchApp {
                 is_bookmarked: true,
             });
         }
+        self.keep_filters_in_reach();
+    }
+
+    /// Read the saved searches again after the desktop said `filesearch.yaml`
+    /// changed -- a search saved or forgotten in another window, or a hand
+    /// edit (§1418, §1434). Whether anything changed.
+    fn reread_saved_searches(&mut self) -> bool {
+        let before = self.saved_search_items();
+        self.load_saved_searches(&settingsfile::load(CONFIG_NAME));
+        before != self.saved_search_items()
+    }
+
+    /// Keep the filters panel's scroll within what it holds, which shrinks
+    /// when a saved search is forgotten -- here or in another window -- or
+    /// the window grows. Past it, the panel showed its top rows scrolled away
+    /// and nothing beneath them until the wheel was turned.
+    fn keep_filters_in_reach(&mut self) {
+        let l = Layout::of(self, self.window.0, self.window.1);
+        self.filters_scroll = self
+            .filters_scroll
+            .min(self.filters_scroll_limit(l.filters));
     }
 
     /// The saved searches as the settings file records them.
@@ -5756,6 +5819,219 @@ mod tests {
             assert!(kept.contains(&"fuzzy:repor".to_string()), "{kept:?}");
             assert!(kept.contains(&"glob:*.md".to_string()), "{kept:?}");
             assert!(kept.contains(&"name:notes".to_string()), "{kept:?}");
+        });
+    }
+
+    /// What the desktop sends every window when `name.yaml` changed.
+    fn announce(name: &[u8]) -> Event {
+        Event::SettingsChanged {
+            group: guitk::event::SettingsGroup::Program(
+                guitk::event::SettingsName::new(name).expect("a settings name"),
+            ),
+        }
+    }
+
+    /// The saved searches as the file would record them, in a stable order.
+    fn saved_items(app: &FileSearchApp) -> Vec<String> {
+        let mut items = app.saved_search_items();
+        items.sort();
+        items
+    }
+
+    /// **A search saved or forgotten in another window reaches this one**,
+    /// when the desktop says `filesearch.yaml` changed (§1434). Read at
+    /// startup only, the list went stale -- and this window's next save wrote
+    /// it over the file, losing what the other window had saved.
+    ///
+    /// A search this window ran stays the one it ran: saved elsewhere, it
+    /// keeps its id and what it found rather than being listed twice;
+    /// forgotten elsewhere, it stays among the recent ones, as its × leaves
+    /// it. An entry this version cannot read is written back once however
+    /// often the file is read again.
+    #[test]
+    fn a_search_saved_in_another_window_reaches_this_one() {
+        settingsfile::testing::with_scratch_config("fs_reread", |_| {
+            let mut doc = yamldoc::Document::new();
+            doc.set_seq(&SAVED_KEY, &["fuzzy:repor"]);
+            settingsfile::store(CONFIG_NAME, &doc).expect("store the file");
+            let mut first = wired();
+            first.load_saved_searches(&settingsfile::load(CONFIG_NAME));
+            let mut second = wired();
+            second.load_saved_searches(&settingsfile::load(CONFIG_NAME));
+
+            // The second window has run `*.rs` and opened what it found.
+            second.criteria.query = "*.rs".to_string();
+            second.criteria.mode = SearchMode::Glob;
+            second.execute_search();
+            second.selected_result = Some(0);
+            second.open_selected();
+            let ran = second
+                .search_history
+                .iter()
+                .find(|s| s.query == "*.rs")
+                .map(|s| (s.id, s.result_count))
+                .expect("the search was not remembered");
+            assert_eq!(ran.1, 2);
+
+            // The first saves it, and another.
+            for (query, mode) in [
+                ("*.rs", SearchMode::Glob),
+                ("budget", SearchMode::Substring),
+            ] {
+                first.criteria.query = query.to_string();
+                first.criteria.mode = mode;
+                first.toggle_saved();
+            }
+
+            assert_eq!(
+                second.handle_event(&announce(b"weather")),
+                EventResult::Ignored
+            );
+            assert_eq!(
+                saved_items(&second),
+                ["fuzzy:repor"],
+                "another program's file was read"
+            );
+            assert_eq!(
+                second.handle_event(&announce(b"filesearch")),
+                EventResult::Consumed
+            );
+            assert_eq!(
+                saved_items(&second),
+                ["fuzzy:repor", "glob:*.rs", "name:budget"]
+            );
+            let rs = second
+                .search_history
+                .iter()
+                .find(|s| s.query == "*.rs")
+                .map(|s| (s.id, s.result_count));
+            assert_eq!(rs, Some(ran), "the search this window ran became another");
+            assert_eq!(
+                second.search_history.len(),
+                2,
+                "a search was listed twice: {:?}",
+                second.search_history
+            );
+            assert_eq!(
+                first.handle_event(&announce(b"filesearch")),
+                EventResult::Ignored,
+                "a window's own save, announced back, changed its list"
+            );
+
+            // The second's own save keeps the first's.
+            second.criteria.query = "notes".to_string();
+            second.criteria.mode = SearchMode::Substring;
+            second.toggle_saved();
+            first.handle_event(&announce(b"filesearch"));
+            assert_eq!(
+                saved_items(&first),
+                ["fuzzy:repor", "glob:*.rs", "name:budget", "name:notes"]
+            );
+
+            // The first forgets `*.rs`, and so does the second -- which still
+            // offers it as a search it ran.
+            first.criteria.query = "*.rs".to_string();
+            first.criteria.mode = SearchMode::Glob;
+            first.toggle_saved();
+            assert_eq!(
+                second.handle_event(&announce(b"filesearch")),
+                EventResult::Consumed
+            );
+            assert_eq!(
+                saved_items(&second),
+                ["fuzzy:repor", "name:budget", "name:notes"]
+            );
+            assert!(
+                second
+                    .search_history
+                    .iter()
+                    .any(|s| s.query == "*.rs" && !s.is_bookmarked),
+                "a search this window ran left its recent ones"
+            );
+            let kept = settingsfile::load(CONFIG_NAME)
+                .get_seq(&SAVED_KEY)
+                .expect("the saved list");
+            assert_eq!(
+                kept.iter().filter(|item| *item == "fuzzy:repor").count(),
+                1,
+                "{kept:?}"
+            );
+        });
+    }
+
+    /// **The filters panel is not left scrolled past its end** when what it
+    /// holds shrinks: saved searches forgotten in another window, one
+    /// forgotten by its ×, or the window grown. It showed its top rows
+    /// scrolled away and nothing beneath them until the wheel was turned.
+    #[test]
+    fn the_filters_panel_is_not_left_scrolled_past_its_end() {
+        settingsfile::testing::with_scratch_config("fs_filters_reach", |_| {
+            let store = |count: usize| {
+                let items: Vec<String> = (0..count).map(|i| format!("name:q{i:02}")).collect();
+                let refs: Vec<&str> = items.iter().map(String::as_str).collect();
+                let mut doc = yamldoc::Document::new();
+                doc.set_seq(&SAVED_KEY, &refs);
+                settingsfile::store(CONFIG_NAME, &doc).expect("store the file");
+            };
+            let mut app = wired();
+            app.window = <FileSearchApp as Probe>::SIZE;
+            let panel = Layout::of(&app, app.window.0, app.window.1).filters;
+            let at_end = |app: &mut FileSearchApp| {
+                let limit = app.filters_scroll_limit(panel);
+                assert!(limit > 0.0, "the panel does not scroll: nothing to test");
+                app.filters_scroll = limit;
+                limit
+            };
+            store(40);
+            app.load_saved_searches(&settingsfile::load(CONFIG_NAME));
+
+            // Another window forgets twenty; eight are listed as recent.
+            let end = at_end(&mut app);
+            store(20);
+            app.handle_event(&announce(b"filesearch"));
+            let limit = app.filters_scroll_limit(panel);
+            assert!(limit < end, "the panel did not shrink: nothing tested");
+            assert!(
+                app.filters_scroll <= limit,
+                "scrolled {} past an end at {limit}",
+                app.filters_scroll
+            );
+
+            // Its × forgets one more, which the full recent list does not show.
+            let end = at_end(&mut app);
+            let last = app
+                .search_history
+                .iter()
+                .rfind(|s| s.is_bookmarked)
+                .map(|s| s.id)
+                .expect("a saved search");
+            assert!(probe::is_visible(&app, Target::Unsave(last)));
+            probe::click(&mut app, Target::Unsave(last));
+            let limit = app.filters_scroll_limit(panel);
+            assert!(limit < end, "the panel did not shrink: nothing tested");
+            assert!(
+                app.filters_scroll <= limit,
+                "scrolled {} past an end at {limit}",
+                app.filters_scroll
+            );
+
+            // The window grows by less than the panel scrolls.
+            let end = at_end(&mut app);
+            app.handle_event(&Event::Resize {
+                width: 1280,
+                height: 900,
+            });
+            let taller = Layout::of(&app, 1280.0, 900.0).filters;
+            let limit = app.filters_scroll_limit(taller);
+            assert!(
+                limit > 0.0 && limit < end,
+                "{limit} against {end}: nothing tested"
+            );
+            assert!(
+                app.filters_scroll <= limit,
+                "scrolled {} past an end at {limit}",
+                app.filters_scroll
+            );
         });
     }
 

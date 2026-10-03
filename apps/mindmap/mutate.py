@@ -11,6 +11,11 @@ without a word.  One undo history served every map, and acted on whichever was
 showing.  The tabs and the toolbar were drawn and answered no click.  The table
 covers what replaced all of that; the rest of the suite predates it.
 
+Each map's history is a tree now (C-Q24): a change after an undo keeps the
+undone one as a branch, reached with Alt+Z.  Its rows cover the keys -- and
+AltGr, which arrives as Ctrl+Alt, being taken for no chord and no plain key --
+the marking, and the cap; the tree itself is the toolkit's to test.
+
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
 """
@@ -49,6 +54,11 @@ CTRL_TAB = "ctrl_tab_goes_round_the_maps"
 BESIDE = "a_press_beside_the_canvas_keeps_the_selection"
 LAST = "closing_the_last_map_leaves_a_fresh_one"
 NAMES = "a_new_map_is_not_named_after_one_still_open"
+TREE = "a_change_after_an_undo_keeps_the_undone_map_reachable_with_alt_z"
+CTRL_SHIFT_Z = "ctrl_shift_z_redoes"
+ALTGR = "altgr_z_does_not_undo"
+SUPER = "alt_z_with_the_windows_key_goes_nowhere"
+GUARD = "a_key_held_with_altgr_alt_or_the_windows_key_is_no_shortcut"
 
 # (name, old, new, [tests that must fail])
 MUTATIONS = [
@@ -189,20 +199,20 @@ MUTATIONS = [
     ),
     (
         "a change does not mark the map",
-        "        let map = self.active_map_mut();\n        map.dirty = true;\n        map.redo_stack.clear();",
-        "        let map = self.active_map_mut();\n        map.redo_stack.clear();",
+        "        let map = self.active_map_mut();\n        map.dirty = true;\n        map.history.record(action);",
+        "        let map = self.active_map_mut();\n        map.history.record(action);",
         [MARK, CLOSE_MAP],
     ),
     (
         "an undo does not mark the map",
-        "            // Undoing past a save leaves a map its file does not hold.\n            map.dirty = true;\n",
+        "        // Undoing past a save leaves a map its file does not hold.\n        self.active_map_mut().dirty = true;\n",
         "",
         [MARK],
     ),
     (
         "a layout marks the map whether or not it moved anything",
-        "        if moved {",
-        "        if true {",
+        "            .any(|(id, n)| before.get(id) != Some(&(n.x, n.y)));\n        if moved {",
+        "            .any(|(id, n)| before.get(id) != Some(&(n.x, n.y)));\n        if true {",
         [LAYOUT],
     ),
     (
@@ -217,11 +227,98 @@ MUTATIONS = [
         "            PickerFor::Export => {\n                let said = self.write_outline(path);\n                self.active_map_mut().dirty = false;\n                said\n            }",
         [EXPORT],
     ),
+    # ---- the history: a tree, walked with Alt+Z (C-Q24) ----
+    (
+        "a redo does not mark the map",
+        "        self.apply_forward(&action);\n        self.active_map_mut().dirty = true;\n        true",
+        "        self.apply_forward(&action);\n        true",
+        [MARK],
+    ),
+    (
+        "a journey does not mark the map",
+        "        if moved {\n            self.active_map_mut().dirty = true;\n        }\n        moved",
+        "        moved",
+        [TREE],
+    ),
+    (
+        "a journey takes its steps back the wrong way",
+        "                Travel::Undo(action) => self.apply_reverse(&action),",
+        "                Travel::Undo(action) => self.apply_forward(&action),",
+        [TREE],
+    ),
+    (
+        "Alt+Z goes nowhere",
+        "                } else {\n                    self.earlier()\n                })",
+        "                } else {\n                    false\n                })",
+        [TREE, "every_advertised_key_does_something"],
+    ),
+    (
+        "Alt+Shift+Z goes back too",
+        "                    self.later()\n                } else {",
+        "                    self.earlier()\n                } else {",
+        [TREE],
+    ),
+    (
+        "Alt+Z only undoes",
+        "        let steps = self.active_map_mut().history.earlier();",
+        "        let steps: Vec<Travel<Action>> =\n"
+        "            self.active_map_mut().history.undo().map(Travel::Undo).into_iter().collect();",
+        [TREE],
+    ),
+    (
+        "Alt+Shift+Z only redoes",
+        "        let steps = self.active_map_mut().history.later();",
+        "        let steps: Vec<Travel<Action>> =\n"
+        "            self.active_map_mut().history.redo().map(Travel::Redo).into_iter().collect();",
+        [TREE],
+    ),
+    (
+        "AltGr+Z goes back",
+        "Key::Z if key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key =>",
+        "Key::Z if key.modifiers.alt && !key.modifiers.super_key =>",
+        [ALTGR],
+    ),
+    (
+        "Super+Alt+Z goes back",
+        "Key::Z if key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key =>",
+        "Key::Z if key.modifiers.alt && !key.modifiers.ctrl =>",
+        [SUPER],
+    ),
+    (
+        "a key held with Alt is a shortcut",
+        "            _ if key.modifiers.alt || key.modifiers.super_key => EventResult::Ignored,",
+        "            _ if key.modifiers.super_key => EventResult::Ignored,",
+        [ALTGR, GUARD],
+    ),
+    (
+        "a key held with the Windows key is a shortcut",
+        "            _ if key.modifiers.alt || key.modifiers.super_key => EventResult::Ignored,",
+        "            _ if key.modifiers.alt => EventResult::Ignored,",
+        [GUARD],
+    ),
+    (
+        "Ctrl+Shift+Z undoes",
+        "            Key::Z if ctrl && key.modifiers.shift => moved(self.redo()),\n",
+        "",
+        [CTRL_SHIFT_Z],
+    ),
+    (
+        "redo undoes",
+        "        let Some(action) = self.active_map_mut().history.redo() else {",
+        "        let Some(action) = self.active_map_mut().history.undo() else {",
+        [CTRL_SHIFT_Z, "ctrl_z_reaches_the_undo_stack_the_app_was_already_keeping"],
+    ),
+    (
+        "the history keeps more than its limit",
+        "const UNDO_LIMIT: core::num::NonZeroUsize = match core::num::NonZeroUsize::new(MAX_UNDO) {",
+        "const UNDO_LIMIT: core::num::NonZeroUsize = match core::num::NonZeroUsize::new(MAX_UNDO + 20) {",
+        ["test_app_undo_stack_limit"],
+    ),
     # ---- each map its own history ----
     (
         "one history for every map",
-        "        !self.active_map_ref().undo_stack.is_empty()",
-        "        self.maps.iter().any(|m| !m.undo_stack.is_empty())",
+        "        self.active_map_ref().history.can_undo()",
+        "        self.maps.iter().any(|m| m.history.can_undo())",
         [UNDO],
     ),
     # ---- the question ----
@@ -381,6 +478,52 @@ MUTATIONS = [
         '            Some(said) => format!("{said} | {counts}"),',
         "            Some(_) => counts.clone(),",
         [STATUS],
+    ),
+    (
+        "the history keeps ten changes more",
+        "const MAX_UNDO: usize = 200;",
+        "const MAX_UNDO: usize = 210;",
+        ["test_app_undo_stack_limit"],
+    ),
+    (
+        "a node's text refuses what AltGr types",
+        "                if !textline::types_into_field(key) {\n"
+        "                    return EventResult::Ignored;\n                }\n"
+        "                self.edit_buffer.extend(key.typed());",
+        "                if !textline::types_into_field(key) || key.modifiers.ctrl {\n"
+        "                    return EventResult::Ignored;\n                }\n"
+        "                self.edit_buffer.extend(key.typed());",
+        ["a_node_and_the_search_box_take_altgr_letters_and_no_commands_letter"],
+    ),
+    (
+        "a node's text takes a command's letter",
+        "                if !textline::types_into_field(key) {\n"
+        "                    return EventResult::Ignored;\n                }\n"
+        "                self.edit_buffer.extend(key.typed());",
+        "                if !key.types_text() {\n"
+        "                    return EventResult::Ignored;\n                }\n"
+        "                self.edit_buffer.extend(key.typed());",
+        ["a_node_and_the_search_box_take_altgr_letters_and_no_commands_letter"],
+    ),
+    (
+        "the search box refuses what AltGr types",
+        "                if !textline::types_into_field(key) {\n"
+        "                    return EventResult::Ignored;\n                }\n"
+        "                let mut q = self.search_query.clone();",
+        "                if !textline::types_into_field(key) || key.modifiers.ctrl {\n"
+        "                    return EventResult::Ignored;\n                }\n"
+        "                let mut q = self.search_query.clone();",
+        ["a_node_and_the_search_box_take_altgr_letters_and_no_commands_letter"],
+    ),
+    (
+        "the search box takes a command's letter",
+        "                if !textline::types_into_field(key) {\n"
+        "                    return EventResult::Ignored;\n                }\n"
+        "                let mut q = self.search_query.clone();",
+        "                if !key.types_text() {\n"
+        "                    return EventResult::Ignored;\n                }\n"
+        "                let mut q = self.search_query.clone();",
+        ["a_node_and_the_search_box_take_altgr_letters_and_no_commands_letter"],
     ),
 ]
 

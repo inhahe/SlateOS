@@ -73,6 +73,10 @@ struct Colours {
     /// whichever of the text and the page stands off it.
     on_right: Color,
     on_wrong: Color,
+    /// A key's letter before it is guessed, on the key's raised face: the
+    /// text moved only as far as it must be to read there. Under a theme
+    /// whose text is only as dark as the page needs it was 3.6:1.
+    on_key: Color,
 }
 
 impl Colours {
@@ -93,6 +97,7 @@ impl Colours {
             lavender: p.ink(p.lavender),
             on_right: gamechrome::legible_on((p.text, p.base), p.ink(p.green)),
             on_wrong: gamechrome::legible_on((p.text, p.base), p.ink(p.red)),
+            on_key: gamechrome::Ink::on(p.text, &[p.surface0]).small,
         }
     }
 }
@@ -1761,7 +1766,7 @@ impl HangmanApp {
                         (self.colours.red, self.colours.on_wrong)
                     }
                 } else {
-                    (self.colours.surface0, self.colours.text)
+                    (self.colours.surface0, self.colours.on_key)
                 };
                 fill(f, r, bg, CornerRadii::all(4.0));
                 run_in(
@@ -2028,6 +2033,14 @@ impl HangmanApp {
             // to act on Escape, so a reader who opened the list and wants out
             // does not also get thrown back to the categories.
             Event::Key(ke) if ke.pressed => {
+                // Every binding here is on the key itself -- a letter key
+                // guesses its letter -- so a key is the game's only with
+                // nothing but Shift held. A chord arrives carrying its key:
+                // Alt+A guessed A, and so did Ctrl+A. AltGr+A types a
+                // character on some layouts, or none, and is not A.
+                if !textline::is_plain(ke.modifiers) {
+                    return EventResult::Ignored;
+                }
                 if ke.key == Key::F1 || (ke.key == Key::Slash && ke.modifiers.shift) {
                     self.show_help = !self.show_help;
                     return EventResult::Consumed;
@@ -2523,8 +2536,7 @@ mod tests {
     #[test]
     fn every_text_reads_on_what_is_under_it_in_either_theme() {
         let mut bad = Vec::new();
-        for (light, cards) in [(false, false), (true, false), (false, true), (true, true)] {
-            let p = palette(light, cards);
+        for (look, p) in gamechrome::legibility::looks() {
             let offs: Vec<_> = [p.base, p.mantle]
                 .into_iter()
                 .map(|ground| {
@@ -2547,7 +2559,7 @@ mod tests {
                 };
                 for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
                     bad.push(format!(
-                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        "{what}, {look}: {:?} {:.2}:1 on {:?}",
                         r.text,
                         r.ratio(),
                         r.ground
@@ -3319,6 +3331,44 @@ mod tests {
     }
 
     // -- Playing keys ---------------------------------------------------
+
+    /// **A key held with Ctrl, Alt or the Windows key guesses nothing**:
+    /// Alt+A and Ctrl+A guessed A, a chord arriving carrying its key. AltGr
+    /// (Ctrl+Alt) is not A either. Shift+A is.
+    #[test]
+    fn a_key_held_with_a_modifier_guesses_nothing() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let mut app = playing_app("cat");
+        for held in [
+            Modifiers::ctrl(),
+            Modifiers::alt(),
+            Modifiers::super_key(),
+            altgr,
+        ] {
+            for k in [Key::C, Key::H, Key::Num3, Key::Enter, Key::F1] {
+                assert_eq!(
+                    guitk::probe::key(&mut app, &guitk::probe::press_with(k, held)),
+                    EventResult::Ignored,
+                    "{held:?} {k:?} was taken"
+                );
+            }
+        }
+        assert_eq!(total_guessed(&app), 0, "a chord guessed a letter");
+        assert!(!app.hint_used, "a chord took the hint");
+        assert_eq!(app.difficulty, playing_app("cat").difficulty);
+        assert!(!app.show_help, "a chord raised the keys");
+        assert_eq!(app.word, b"cat", "a chord started a new round");
+
+        guitk::probe::key(
+            &mut app,
+            &guitk::probe::press_with(Key::C, Modifiers::shift()),
+        );
+        assert!(app.is_guessed(b'c'), "Shift+C guessed nothing");
+    }
 
     #[test]
     fn test_playing_letter_key() {

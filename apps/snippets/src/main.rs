@@ -2359,25 +2359,36 @@ impl App {
         let Some(ed) = self.editing.as_mut() else {
             return EventResult::Ignored;
         };
+        // The editor's own keys are plain, nothing held but Shift: a chord
+        // with Alt or the Windows key is the window's or the desktop's and
+        // arrives carrying its key -- Alt+Enter threw the edits away under
+        // "discard?", and Alt+Tab, the desktop's window switcher, moved
+        // between the fields. A chord goes on to a field typed into, which
+        // knows a command from typing.
+        let plain = textline::is_plain(ev.modifiers);
         if ed.confirm_discard {
-            match ev.key {
-                Key::Enter => self.editing = None,
-                Key::Escape => ed.confirm_discard = false,
-                _ => {}
+            if plain {
+                match ev.key {
+                    Key::Enter => self.editing = None,
+                    Key::Escape => ed.confirm_discard = false,
+                    _ => {}
+                }
             }
             return EventResult::Consumed;
         }
         let field = ed.field;
+        // Ctrl+S, a Ctrl chord and not Ctrl held: AltGr arrives as Ctrl+Alt,
+        // and AltGr+S -- a Polish `ś` -- saved instead of typing.
+        if textline::is_ctrl_chord(ev.modifiers) && ev.key == Key::S {
+            self.save_edit();
+            return EventResult::Consumed;
+        }
         match ev.key {
-            Key::S if ev.modifiers.ctrl => {
-                self.save_edit();
-                return EventResult::Consumed;
-            }
-            Key::Escape => {
+            Key::Escape if plain => {
                 self.leave_editor();
                 return EventResult::Consumed;
             }
-            Key::Tab if ev.modifiers.shift => {
+            Key::Tab if plain && ev.modifiers.shift => {
                 let all = SnippetField::ALL;
                 let at = all.iter().position(|f| *f == field).unwrap_or(0);
                 ed.field = at
@@ -2388,10 +2399,10 @@ impl App {
                 return EventResult::Consumed;
             }
             // In the code, Tab is an indent: it is code.
-            Key::Tab if field == SnippetField::Content => {
+            Key::Tab if plain && field == SnippetField::Content => {
                 ed.content.insert(INDENT, MAX_CONTENT_LEN);
             }
-            Key::Tab => {
+            Key::Tab if plain => {
                 let all = SnippetField::ALL;
                 let at = all.iter().position(|f| *f == field).unwrap_or(0);
                 ed.field = all
@@ -2400,12 +2411,12 @@ impl App {
                     .unwrap_or(SnippetField::Title);
                 return EventResult::Consumed;
             }
-            Key::Enter if field != SnippetField::Content => {
+            Key::Enter if plain && field != SnippetField::Content => {
                 self.save_edit();
                 return EventResult::Consumed;
             }
             Key::Left | Key::Right | Key::Space
-                if matches!(field, SnippetField::Language | SnippetField::Folder) =>
+                if plain && matches!(field, SnippetField::Language | SnippetField::Folder) =>
             {
                 ed.step(field, ev.key != Key::Left, &folders);
             }
@@ -3116,11 +3127,18 @@ impl App {
         if self.editing.is_some() {
             return self.handle_edit_key(ev);
         }
+        // Every key below is taken plain, nothing held but Shift, but Ctrl+F:
+        // a chord with Alt or the Windows key is the window's or the
+        // desktop's and arrives carrying its key -- Alt+Y answered "delete?"
+        // with yes, Alt+Delete asked it and Alt+F starred a snippet.
+        let plain = textline::is_plain(ev.modifiers);
         if let Some(id) = self.pending_delete {
-            match ev.key {
-                Key::Enter | Key::Y => self.confirm_delete(id),
-                Key::Escape | Key::N => self.pending_delete = None,
-                _ => {}
+            if plain {
+                match ev.key {
+                    Key::Enter | Key::Y => self.confirm_delete(id),
+                    Key::Escape | Key::N => self.pending_delete = None,
+                    _ => {}
+                }
             }
             return EventResult::Consumed;
         }
@@ -3129,7 +3147,7 @@ impl App {
         // the overlay describing a library that had moved on.
         if self.show_stats {
             return match ev.key {
-                Key::Escape | Key::Enter | Key::S => {
+                Key::Escape | Key::Enter | Key::S if plain => {
                     self.show_stats = false;
                     EventResult::Consumed
                 }
@@ -3139,12 +3157,19 @@ impl App {
         if self.search_focus {
             return self.handle_search_key(ev);
         }
+        // A Ctrl chord, not Ctrl held: AltGr arrives as Ctrl+Alt.
+        if textline::is_ctrl_chord(ev.modifiers) {
+            if ev.key == Key::F {
+                self.search_focus = true;
+                return EventResult::Consumed;
+            }
+            return EventResult::Ignored;
+        }
+        if !plain {
+            return EventResult::Ignored;
+        }
         match ev.key {
             Key::Slash => {
-                self.search_focus = true;
-                EventResult::Consumed
-            }
-            Key::F if ev.modifiers.ctrl => {
                 self.search_focus = true;
                 EventResult::Consumed
             }
@@ -3187,13 +3212,18 @@ impl App {
     /// A letter means "find this" here and "do this" outside, which is the
     /// only thing that lets one keyboard serve both a text field and a set of
     /// single-letter shortcuts.
+    ///
+    /// Its own keys are plain, and it types only what was typed: a command
+    /// arrives carrying its letter, so Alt+X put an `x` in the query. AltGr
+    /// types; Backspace is refused only to Alt and the Windows key.
     fn handle_search_key(&mut self, ev: &KeyEvent) -> EventResult {
+        let plain = textline::is_plain(ev.modifiers);
         match ev.key {
-            Key::Escape | Key::Enter => {
+            Key::Escape | Key::Enter if plain => {
                 self.search_focus = false;
                 EventResult::Consumed
             }
-            Key::Backspace => {
+            Key::Backspace if !textline::is_alt_or_windows_chord(ev.modifiers) => {
                 if self.search_query.pop().is_none() {
                     return EventResult::Ignored;
                 }
@@ -3202,10 +3232,10 @@ impl App {
             }
             // Arrows still move the selection while typing: a search you
             // cannot walk the results of is half a search.
-            Key::Up => self.move_selection(-1),
-            Key::Down => self.move_selection(1),
+            Key::Up if plain => self.move_selection(-1),
+            Key::Down if plain => self.move_selection(1),
             _ => {
-                if !ev.types_text() {
+                if !textline::types_into_field(ev) {
                     return EventResult::Ignored;
                 }
                 // `typed`, not `text`: on most layouts Enter, Tab and Escape
@@ -5397,6 +5427,133 @@ mod tests {
             .find(|s| s.title == title)
             .unwrap_or_else(|| panic!("no snippet titled {title}"))
             .id
+    }
+
+    // ── Chords ──────────────────────────────────────────────────────────
+
+    /// **A chord is neither a library key nor typing, and AltGr+S is not
+    /// Ctrl+S**: a chord with Alt or the Windows key is the window's or the
+    /// desktop's and arrives carrying its key -- Alt+Delete asked to delete a
+    /// snippet and Alt+Y then deleted it, Alt+F starred one, Alt+X typed an
+    /// `x` into the search, Alt+Tab walked the editor's fields and Alt+Enter,
+    /// under "discard?", threw the edits away; and AltGr+S, a Polish `ś`,
+    /// saved the snippet being written instead of typing into it.
+    ///
+    /// Each key is asserted as it is pressed: the toggles go round. E is left
+    /// out because it writes an export file.
+    #[test]
+    fn a_chord_is_neither_a_library_key_nor_typing() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let chord = |k: Key, text: &str, modifiers: Modifiers| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        };
+        let mut a = app_with(&["one", "two", "three"]);
+        key(&mut a, &press(Key::Down));
+        assert!(selected_title(&a).is_some(), "control: a selection");
+        let state = |a: &App| {
+            (
+                titles(a),
+                selected_title(a),
+                a.snippets.iter().map(|s| s.favorite).collect::<Vec<_>>(),
+                (a.pending_delete, a.editing.is_some()),
+                (a.search_focus, a.show_stats, a.search_query.clone()),
+                (a.sort_order, a.sidebar_view),
+            )
+        };
+        let before = state(&a);
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for k in [
+                Key::Delete,
+                Key::F,
+                Key::S,
+                Key::N,
+                Key::F2,
+                Key::O,
+                Key::Slash,
+                Key::Tab,
+                Key::Down,
+                Key::End,
+                Key::Enter,
+            ] {
+                assert_eq!(
+                    key(&mut a, &chord(k, "", m)),
+                    EventResult::Ignored,
+                    "{m:?} {k:?} was taken"
+                );
+                assert_eq!(state(&a), before, "{m:?} {k:?} changed the library");
+            }
+        }
+
+        // The question before a delete answers plain keys only.
+        key(&mut a, &press(Key::Delete));
+        assert!(a.pending_delete.is_some(), "control: Delete asks");
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for k in [Key::Y, Key::Enter, Key::N, Key::Escape] {
+                key(&mut a, &chord(k, "", m));
+                assert_eq!(titles(&a), before.0, "{m:?} {k:?} deleted it");
+                assert!(a.pending_delete.is_some(), "{m:?} {k:?} answered");
+            }
+        }
+        key(&mut a, &press(Key::N));
+        assert!(a.pending_delete.is_none(), "control: N keeps it");
+
+        // The search types what was typed, and AltGr's letters.
+        key(&mut a, &press(Key::Slash));
+        assert!(a.search_focus, "control: / opens the search");
+        key(&mut a, &chord(Key::X, "x", Modifiers::alt()));
+        key(&mut a, &chord(Key::X, "x", Modifiers::super_key()));
+        key(&mut a, &chord(Key::F, "f", Modifiers::ctrl()));
+        key(&mut a, &chord(Key::E, "ę", altgr));
+        key(&mut a, &chord(Key::Backspace, "", Modifiers::alt()));
+        key(&mut a, &chord(Key::Enter, "", Modifiers::alt()));
+        key(&mut a, &chord(Key::Escape, "", Modifiers::super_key()));
+        assert_eq!(
+            a.search_query, "ę",
+            "the search typed a command's letter, or lost AltGr's"
+        );
+        assert!(a.search_focus, "a chorded Enter or Escape left the search");
+        key(&mut a, &press(Key::Escape));
+        a.search_query.clear();
+
+        // The editor: its own keys plain, AltGr typing.
+        key(&mut a, &press(Key::N));
+        assert!(a.editing.is_some(), "control: N opens the editor");
+        let field = |a: &App| a.editing.as_ref().map(|ed| ed.field);
+        let start = field(&a);
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            key(&mut a, &chord(Key::Tab, "", m));
+            assert_eq!(field(&a), start, "{m:?} Tab moved on");
+            key(&mut a, &chord(Key::Escape, "", m));
+            assert!(a.editing.is_some(), "{m:?} Escape left the editor");
+        }
+        key(&mut a, &chord(Key::S, "ś", altgr));
+        assert!(a.editing.is_some(), "AltGr+S saved");
+        let title = |a: &App| a.editing.as_ref().map(|ed| ed.title.text().to_owned());
+        assert!(
+            title(&a).is_some_and(|t| t.ends_with('ś')),
+            "AltGr+S typed nothing: {:?}",
+            title(&a)
+        );
+        key(&mut a, &chord(Key::Enter, "", Modifiers::alt()));
+        assert!(a.editing.is_some(), "Alt+Enter saved");
+
+        // "Discard?" answers plain keys only.
+        key(&mut a, &press(Key::Escape));
+        assert!(
+            a.editing.as_ref().is_some_and(|ed| ed.confirm_discard),
+            "control: Escape over changes asks"
+        );
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            key(&mut a, &chord(Key::Enter, "", m));
+            assert!(a.editing.is_some(), "{m:?} Enter threw the edits away");
+        }
     }
 
     // ── Languages ───────────────────────────────────────────────────────

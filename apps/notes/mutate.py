@@ -348,6 +348,39 @@ MUTATIONS = [
         "    if true {\n        out.push('\\n');",
         ["an_export_holds_a_checklists_items_a_tables_rows_and_the_tags"],
     ),
+    (
+        "a key held with Alt or the Windows key is a shortcut",
+        "        if key.modifiers.alt || key.modifiers.super_key {\n"
+        "            return EventResult::Ignored;\n        }\n"
+        "        let ctrl = key.modifiers.ctrl;",
+        "        let ctrl = key.modifiers.ctrl;",
+        [
+            "altgr_types_into_a_field_and_runs_no_shortcut",
+            "a_command_types_nothing_and_alt_or_windows_is_no_shortcut",
+        ],
+    ),
+    (
+        "a key held with the Windows key is a shortcut",
+        "        if key.modifiers.alt || key.modifiers.super_key {\n"
+        "            return EventResult::Ignored;\n        }\n"
+        "        let ctrl = key.modifiers.ctrl;",
+        "        if key.modifiers.alt {\n"
+        "            return EventResult::Ignored;\n        }\n"
+        "        let ctrl = key.modifiers.ctrl;",
+        ["a_command_types_nothing_and_alt_or_windows_is_no_shortcut"],
+    ),
+    (
+        "a field refuses what AltGr types",
+        "                if !textline::types_into_field(key) {",
+        "                if !textline::types_into_field(key) || key.modifiers.ctrl {",
+        ["altgr_types_into_a_field_and_runs_no_shortcut"],
+    ),
+    (
+        "a field types a command's letter",
+        "                if !textline::types_into_field(key) {",
+        "                if !key.types_text() {",
+        ["a_command_types_nothing_and_alt_or_windows_is_no_shortcut"],
+    ),
 ]
 
 if __name__ == "__main__":

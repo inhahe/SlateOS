@@ -1743,8 +1743,12 @@ impl FlashcardsApp {
     /// Escape leaves, and the rest edit the field the keyboard is in.
     fn handle_editor_key(&mut self, key: &KeyEvent) -> EventResult {
         let fields = self.fields();
+        // The editor's own keys are taken plain -- Alt+Enter kept a card and
+        // Alt+Escape threw one away -- and anything else goes to the field,
+        // which knows a command from typing (`textline::apply_key`).
+        let plain = textline::is_plain(key.modifiers);
         match key.key {
-            Key::Tab => {
+            Key::Tab if plain => {
                 let at = fields.iter().position(|f| *f == self.field).unwrap_or(0);
                 let next = if key.modifiers.shift {
                     at.checked_sub(1).unwrap_or(fields.len().saturating_sub(1))
@@ -1754,7 +1758,7 @@ impl FlashcardsApp {
                 self.field = fields.get(next).copied().unwrap_or(self.field);
                 EventResult::Consumed
             }
-            Key::Enter => {
+            Key::Enter if plain => {
                 if self.view == AppView::DeckEditor {
                     self.save_deck_edits();
                 } else {
@@ -1762,7 +1766,7 @@ impl FlashcardsApp {
                 }
                 EventResult::Consumed
             }
-            Key::Escape => {
+            Key::Escape if plain => {
                 self.leave_editor();
                 EventResult::Consumed
             }
@@ -2027,27 +2031,32 @@ impl FlashcardsApp {
         if !key.pressed {
             return EventResult::Ignored;
         }
+        let plain = textline::is_plain(key.modifiers);
         // The list of keys, from anywhere; while it is up nothing else hears a
         // key, which would change a view nobody can see.
-        if key.key == Key::F1 {
+        if key.key == Key::F1 && plain {
             self.show_help = !self.show_help;
             return EventResult::Consumed;
         }
         if self.show_help {
-            if matches!(key.key, Key::Escape | Key::Enter) {
+            if plain && matches!(key.key, Key::Escape | Key::Enter) {
                 self.show_help = false;
                 return EventResult::Consumed;
             }
             return EventResult::Ignored;
         }
         // A delete waiting on its answer takes the next key, and only Y
-        // deletes.
+        // deletes -- a Y typed, plain or with AltGr, not a chord carrying its
+        // letter: Alt+Y deleted.
         if let Some(doomed) = self.pending_delete.take() {
             // The character typed, not the key: on a layout that puts Y
             // somewhere else, the key that types "y" is the one that means yes.
-            let yes = key
-                .single_char()
-                .map_or(key.key == Key::Y, |c| c.eq_ignore_ascii_case(&'y'));
+            let typed_y = |c: char| c.eq_ignore_ascii_case(&'y');
+            let yes = if plain {
+                key.single_char().map_or(key.key == Key::Y, typed_y)
+            } else {
+                textline::types_into_field(key) && key.single_char().is_some_and(typed_y)
+            };
             if yes {
                 self.delete_doomed(doomed);
             } else {
@@ -2066,24 +2075,35 @@ impl FlashcardsApp {
         // **the picker would be up and invisible**. `apps/hexeditor` nearly
         // shipped that same bug by a different route, and `apps/jsonviewer`
         // carries a comment about it.
-        if key.modifiers.ctrl {
-            match key.key {
+        //
+        // Ctrl chords, not Ctrl held -- AltGr arrives as Ctrl+Alt and types
+        // -- and only these two: Ctrl+X, carrying its `x`, asked to delete
+        // the deck as X does.
+        if textline::is_ctrl_chord(key.modifiers) {
+            return match key.key {
                 Key::S => {
                     self.open_save_dialog();
-                    return EventResult::Consumed;
+                    EventResult::Consumed
                 }
                 Key::O => {
                     self.picker.open_to_read();
-                    return EventResult::Consumed;
+                    EventResult::Consumed
                 }
-                _ => {}
-            }
+                _ => EventResult::Ignored,
+            };
+        }
+        // A chord with Alt alone or the Windows key is the window's or the
+        // desktop's: Alt+S started studying. AltGr counts by what it types,
+        // as a plain key by its character -- and AltGr that types nothing is
+        // not the letter under it.
+        if !plain && !textline::types_into_field(key) {
+            return EventResult::Ignored;
         }
         let Some(name) = Self::key_name(key) else {
             return EventResult::Ignored;
         };
         let before = self.state_fingerprint();
-        self.handle_key(&name, key.modifiers.ctrl, key.modifiers.shift);
+        self.handle_key(&name, false, key.modifiers.shift);
         if self.state_fingerprint() == before {
             EventResult::Ignored
         } else {
@@ -2122,8 +2142,9 @@ impl FlashcardsApp {
             Key::Space => "Space",
             _ => {
                 // Everything else is only interesting as the character it
-                // typed, which is how the shortcuts are written.
-                let typed = key.text.chars().next()?;
+                // typed, which is how the shortcuts are written -- a character
+                // (`typed`), not a control character a chord hands over.
+                let typed = key.typed().next()?;
                 return Some(typed.to_string());
             }
         };
@@ -4103,6 +4124,71 @@ mod tests {
     ///
     /// Found by reading the fingerprint after `apps/jsonviewer` turned out to
     /// have three of these, not by anybody using the app.
+    /// **A chord is neither a flashcards key nor typing, and AltGr types**:
+    /// Ctrl+X, carrying its `x`, asked to delete the deck as X does; Alt+S
+    /// started studying and Windows+N opened an editor; an AltGr+S that typed
+    /// nothing was the S under it; Alt+Y answered "delete?" with yes; and
+    /// Alt+Escape threw an editor away. Ctrl+O still opens a file.
+    #[test]
+    fn a_chord_is_neither_a_flashcards_key_nor_typing() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let key = |k: Key, text: &str, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: text.to_owned(),
+            })
+        };
+        let mut app = FlashcardsApp::new();
+        app.view = AppView::DeckDetail;
+        let decks = app.decks.len();
+        for (k, text, m) in [
+            (Key::X, "x", Modifiers::ctrl()),
+            (Key::S, "s", Modifiers::alt()),
+            (Key::S, "", altgr),
+            (Key::N, "n", Modifiers::super_key()),
+            (Key::Escape, "", Modifiers::alt()),
+            (Key::Delete, "", Modifiers::alt()),
+            (Key::F1, "", Modifiers::alt()),
+        ] {
+            assert_eq!(
+                app.handle_event(&key(k, text, m)),
+                EventResult::Ignored,
+                "{m:?} {k:?} {text:?} was taken"
+            );
+        }
+        assert_eq!(app.view, AppView::DeckDetail, "a chord left the deck");
+        assert!(app.pending_delete.is_none(), "a chord asked to delete");
+        assert!(app.study_session.is_none(), "a chord started studying");
+        assert!(!app.show_help, "a chord raised the keys");
+
+        // Asked by a plain X, the question takes no chorded answer.
+        app.view = AppView::DeckList;
+        app.handle_event(&key(Key::X, "x", Modifiers::NONE));
+        assert!(app.pending_delete.is_some(), "control: X asks");
+        app.handle_event(&key(Key::Y, "y", Modifiers::alt()));
+        assert_eq!(app.decks.len(), decks, "Alt+Y deleted the deck");
+
+        // An editor's own keys are plain.
+        app.handle_event(&key(Key::N, "n", Modifiers::NONE));
+        assert_eq!(app.view, AppView::DeckEditor, "control: N opens an editor");
+        app.handle_event(&key(Key::Escape, "", Modifiers::alt()));
+        app.handle_event(&key(Key::Enter, "", Modifiers::alt()));
+        assert_eq!(app.view, AppView::DeckEditor, "a chord closed the editor");
+        app.handle_event(&key(Key::Escape, "", Modifiers::NONE));
+
+        // AltGr is not Ctrl.
+        app.handle_event(&key(Key::O, "ó", altgr));
+        assert!(!app.picker.is_open(), "AltGr+O opened a file");
+        app.handle_event(&key(Key::O, "o", Modifiers::ctrl()));
+        assert!(app.picker.is_open(), "Ctrl+O no longer opens a file");
+    }
+
     #[test]
     fn revealing_the_answer_is_a_redraw() {
         let mut app = FlashcardsApp::new();

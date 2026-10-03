@@ -4,8 +4,10 @@
 //! - Progress tracking (bytes, files, ETA)
 //! - Journalling that lets an interrupted operation continue without redoing
 //!   work (see the caveat below: this is not crash recovery)
-//! - Conflict resolution policies
-//! - Per-file error handling (skip, retry, stop)
+//! - Conflict resolution policies, one of which asks
+//!   ([`OperationExecutor::waiting_on`])
+//! - Per-file error handling: ask -- try again, skip, skip all, stop
+//!   ([`OperationExecutor::failed_on`]) -- or skip, or stop, without asking
 //! - Undo via an operation journal
 //! - Recycle bin management with auto-purge
 //!
@@ -26,17 +28,6 @@
 //! anywhere. Surviving a restart needs the plan persisted too, which is a
 //! change to this file's format rather than a reader to add. Recorded in
 //! `roadmap-detailed.md` §4.1 under durable bulk operations.
-
-// What this suppression is hiding, measured 2026-09-16 by removing it:
-// ten findings, including that three `ConflictPolicy` variants (`Overwrite`,
-// `OverwriteIfNewer`, `Ask`), two error policies (`StopOnFirst`, `RetryN`) and
-// `ExecutorConfig` are never constructed anywhere -- while the list at the top
-// of this file advertises "conflict resolution policies" and "per-file error
-// handling (skip, retry, stop)". The allow stays for now because removing it
-// means deciding, variant by variant, between wiring and deleting; it is no
-// longer *silent*, which was the part that let the gap live here unremarked.
-// See known-issues TD-C-THE-FILE-OPERATIONS-MODULE-ADVERTISES-POLICIES-NOTHING-SELECTS.
-#![allow(dead_code)]
 
 use pathtext::ShowPath;
 use std::collections::HashMap;
@@ -87,8 +78,8 @@ pub enum ConflictPolicy {
     OverwriteIfNewer,
     /// Rename the destination with a numeric suffix, e.g. `file (2).txt`.
     Rename,
-    /// Stop at the taken name -- emit a [`FileOpEvent::Conflict`] and wait,
-    /// doing nothing more, until the caller answers with
+    /// Stop at the taken name -- ask ([`OperationExecutor::waiting_on`]) and
+    /// wait, doing nothing more, until the caller answers with
     /// [`OperationExecutor::answer`].
     ///
     /// Until 2026-09-27 this emitted the event and then *skipped the file*
@@ -140,12 +131,46 @@ impl ConflictAnswer {
 /// What to do when a per-file error occurs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorPolicy {
-    /// Abort the entire operation on the first error.
-    StopOnFirst,
-    /// Record the error and continue with the next file.
+    /// Stop at the file and ask: try it again, skip it, skip it and every
+    /// later failure, or stop ([`OperationExecutor::failed_on`]). What the
+    /// file manager's own operations use -- every mainstream file manager
+    /// asks, and asking decides nothing on the user's behalf.
+    Ask,
+    /// Record the error and continue with the next file: what "Skip all"
+    /// makes the policy for the rest of an operation.
+    ///
+    /// There is no "stop at the first error" beside these. It was here, and
+    /// nothing chose it: the window asks, and stopping is one of the
+    /// answers, given when the user can see what failed.
     SkipAndContinue,
-    /// Retry up to N times, then skip.
-    RetryN(u32),
+}
+
+/// A file the operation failed on and has stopped at, under
+/// [`ErrorPolicy::Ask`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ErrorQuestion {
+    /// The planned action it stopped at.
+    pub action: u32,
+    /// The file it failed on.
+    pub path: PathBuf,
+    /// Why.
+    pub error: String,
+}
+
+/// What to do about a file the operation failed on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ErrorAnswer {
+    /// Carry the file out again from its start: the cause may have gone --
+    /// a drive plugged back in, a file closed in another program.
+    TryAgain,
+    /// Leave it undone, counted as failed, and go on.
+    Skip,
+    /// Leave it and every later failure in this operation undone, and ask
+    /// no more.
+    SkipAll,
+    /// Stop the whole operation here. What is done stays done -- see
+    /// [`OperationExecutor::cancel`].
+    Stop,
 }
 
 /// Current state of an in-progress operation.
@@ -238,32 +263,19 @@ impl OperationProgress {
 /// Events emitted by a running file operation.
 #[derive(Clone, Debug)]
 pub enum FileOpEvent {
-    /// Periodic progress update.
-    Progress(OperationProgress),
-    /// A conflict needs resolution (only when policy is [`ConflictPolicy::Ask`]).
-    Conflict {
-        src: PathBuf,
-        dest: PathBuf,
-        policy: ConflictPolicy,
-    },
-    /// A per-file error occurred.
+    /// A per-file error, or the operation failing to start: `path` is the
+    /// file, or the folder it could not start in.
     Error { path: PathBuf, error: String },
     /// The operation finished.
     Complete { summary: OperationSummary },
-    /// An undo operation is now available.
-    UndoAvailable(u64),
 }
 
 /// Summary returned when an operation completes.
 #[derive(Clone, Debug)]
 pub struct OperationSummary {
-    pub operation: FileOperation,
-    pub total_files: u32,
     pub succeeded: u32,
     pub skipped: u32,
     pub failed: u32,
-    pub total_bytes: u64,
-    pub elapsed: Duration,
     pub errors: Vec<FileOpError>,
 }
 
@@ -272,6 +284,11 @@ pub struct OperationSummary {
 pub struct FileOpError {
     pub path: PathBuf,
     pub message: String,
+    /// Whether the user was asked about it and answered -- skip it, or
+    /// stop -- and so has been shown it already. One skipped by the plan's
+    /// policy or after "Skip all", and one met while cleaning up after a
+    /// Move, never were.
+    pub answered: bool,
 }
 
 // ============================================================================
@@ -830,7 +847,9 @@ impl OperationJournal {
         Ok(())
     }
 
-    /// Number of completed actions recorded.
+    /// Number of completed actions recorded. For the tests: nothing else
+    /// asks.
+    #[cfg(test)]
     pub fn completed_count(&self) -> usize {
         self.completed.len()
     }
@@ -951,12 +970,6 @@ fn source_is_newer(src: &Path, dest: &Path) -> bool {
 // Executor — runs a plan
 // ============================================================================
 
-/// Configuration for running an operation plan.
-pub struct ExecutorConfig {
-    pub conflict_policy: ConflictPolicy,
-    pub error_policy: ErrorPolicy,
-}
-
 /// Execute an [`OperationPlan`], returning progress, a summary, and undo info.
 ///
 /// Writes completed actions to a journal in the destination directory so the
@@ -981,9 +994,9 @@ pub struct OperationExecutor {
     actions: Vec<PlannedAction>,
     /// The next action to carry out.
     next: usize,
-    /// Set when an action ended the operation early -- cancelled, or failed
-    /// under `ErrorPolicy::StopOnFirst`. Distinct from `next == len`, which is
-    /// the ordinary end, because the two mean different things to a resume.
+    /// Set when the operation was cancelled -- by the caller, or by a Stop
+    /// answered to a question. Distinct from `next == len`, which is the
+    /// ordinary end, because the two mean different things to a resume.
     stopped: bool,
     /// A file copy part-way through, held between steps.
     cursor: Option<CopyCursor>,
@@ -999,6 +1012,13 @@ pub struct OperationExecutor {
     /// "The same for the rest": the answer given for every later taken name,
     /// in place of the plan's policy.
     policy_for_the_rest: Option<ConflictPolicy>,
+    /// The file the operation failed on and has stopped at, under
+    /// [`ErrorPolicy::Ask`]. While it is here nothing moves; see
+    /// [`failed_on`](Self::failed_on).
+    failed: Option<ErrorQuestion>,
+    /// "Skip all": the error policy for every later failure, in place of the
+    /// plan's -- as `policy_for_the_rest` is for taken names.
+    error_policy_for_the_rest: Option<ErrorPolicy>,
 }
 
 impl OperationExecutor {
@@ -1022,31 +1042,43 @@ impl OperationExecutor {
             question: None,
             answered: None,
             policy_for_the_rest: None,
+            failed: None,
+            error_policy_for_the_rest: None,
         }
     }
 
     /// Run the full operation without returning until it is finished.
     ///
-    /// Now a loop over [`step`](Self::step), kept because some callers
-    /// genuinely want to block: the tests, and the undo path, which is a short
-    /// operation with no window to keep alive. A caller that *does* have a
-    /// window should drive `begin`/`step`/`finish` itself -- see `step`.
+    /// A loop over [`step`](Self::step), for the tests, which want to block.
+    /// Nothing else calls it: the window drives `begin`/`step`/`finish`
+    /// itself -- see `step`.
     ///
     /// Returns the events emitted during execution.
     ///
-    /// A plan under [`ConflictPolicy::Ask`] cannot be run this way: there is
-    /// nobody to answer, so the first taken name stops it as though it had
-    /// been told to stop there.
+    /// A plan under [`ConflictPolicy::Ask`] or [`ErrorPolicy::Ask`] cannot be
+    /// run this way: there is nobody to answer, so the first taken name or
+    /// failure stops it as though it had been told to stop there.
+    #[cfg(test)]
     pub fn execute(&mut self) -> Vec<FileOpEvent> {
         if !self.begin() {
             return std::mem::take(&mut self.events);
         }
-        while !self.is_done() {
+        // Bounded, and far past any operation a test makes: a defect that has
+        // an operation neither finish nor ask fails the test that met it,
+        // rather than looping until the whole suite is killed.
+        for _ in 0..1_000_000 {
+            if self.is_done() {
+                break;
+            }
             if self.question.is_some() {
                 self.answer(ConflictAnswer::Stop, false);
             }
+            if self.failed.is_some() {
+                self.answer_error(ErrorAnswer::Stop);
+            }
             self.step();
         }
+        assert!(self.is_done(), "the operation neither finished nor asked");
         self.finish();
         std::mem::take(&mut self.events)
     }
@@ -1071,6 +1103,7 @@ impl OperationExecutor {
     /// never reach the check that ends it.
     pub fn cancel(&mut self) {
         self.question = None;
+        self.failed = None;
         self.progress.state = OperationState::Cancelled;
     }
 
@@ -1104,6 +1137,75 @@ impl OperationExecutor {
                 self.progress.state = OperationState::Running;
             }
         }
+    }
+
+    /// The file the operation failed on and has stopped at, if it has --
+    /// under [`ErrorPolicy::Ask`].
+    ///
+    /// While there is one, [`step`](Self::step) does nothing and
+    /// [`is_done`](Self::is_done) answers false, as for a taken name.
+    #[must_use]
+    pub fn failed_on(&self) -> Option<&ErrorQuestion> {
+        self.failed.as_ref()
+    }
+
+    /// Whether the operation has stopped at a question of either kind -- a
+    /// taken name ([`waiting_on`](Self::waiting_on)) or a failed file
+    /// ([`failed_on`](Self::failed_on)) -- and does nothing until it is
+    /// answered.
+    #[must_use]
+    pub fn asking(&self) -> bool {
+        self.question.is_some() || self.failed.is_some()
+    }
+
+    /// Answer the failure the operation stopped at, and let it go on.
+    /// Nothing happens when there is none.
+    pub fn answer_error(&mut self, answer: ErrorAnswer) {
+        let Some(failed) = self.failed.take() else {
+            return;
+        };
+        match answer {
+            // The action is still the next one: it was stepped back to when
+            // it failed, so the next step carries it out again.
+            ErrorAnswer::TryAgain => {}
+            ErrorAnswer::Skip | ErrorAnswer::SkipAll => {
+                self.record_failure(&failed.path, &failed.error, true);
+                self.next = self.next.saturating_add(1);
+                if answer == ErrorAnswer::SkipAll {
+                    self.error_policy_for_the_rest = Some(ErrorPolicy::SkipAndContinue);
+                }
+            }
+            ErrorAnswer::Stop => {
+                self.record_failure(&failed.path, &failed.error, true);
+                self.cancel();
+                return;
+            }
+        }
+        self.progress.state = OperationState::Running;
+    }
+
+    /// A file that failed: said in the events and kept for the summary,
+    /// with whether the user was asked about it ([`FileOpError::answered`]).
+    /// A failure is counted as failed and nothing else -- it was counted as
+    /// skipped too, which took it off the files done as well, so three
+    /// files with one failure said one was done.
+    fn record_failure(&mut self, path: &Path, error: &str, answered: bool) {
+        self.events.push(FileOpEvent::Error {
+            path: path.to_path_buf(),
+            error: error.to_owned(),
+        });
+        self.errors.push(FileOpError {
+            path: path.to_path_buf(),
+            message: error.to_owned(),
+            answered,
+        });
+    }
+
+    /// What the operation does -- copy, move, delete -- for a caller
+    /// saying what could not be done.
+    #[must_use]
+    pub fn operation(&self) -> &FileOperation {
+        &self.plan.operation
     }
 
     /// Which plan this is carrying out, for a caller that has to find the
@@ -1210,15 +1312,16 @@ impl OperationExecutor {
     /// used to run every action in one call, inside an event handler, so for
     /// the length of the operation the explorer did not repaint, did not
     /// answer a click, and could not move the progress bar it was already
-    /// computing -- every `FileOpEvent::Progress` it pushed arrived after the
-    /// last byte was copied. One action is the unit because it is the unit the
+    /// computing -- every progress event it pushed arrived after the last
+    /// byte was copied. One action is the unit because it is the unit the
     /// journal already records, so it is also the unit an interrupted
     /// operation resumes from.
     ///
     /// No-op once [`is_done`](Self::is_done) answers true, and while the
-    /// operation is waiting on an answer ([`waiting_on`](Self::waiting_on)).
+    /// operation is waiting on an answer ([`waiting_on`](Self::waiting_on),
+    /// [`failed_on`](Self::failed_on)).
     pub fn step(&mut self) {
-        if self.question.is_some() {
+        if self.asking() {
             return;
         }
         // Taken and put back rather than borrowed: the body below calls
@@ -1252,7 +1355,9 @@ impl OperationExecutor {
                 .policy_for_the_rest
                 .unwrap_or(self.plan.conflict_policy),
         };
-        let error_policy = self.plan.error_policy;
+        let error_policy = self
+            .error_policy_for_the_rest
+            .unwrap_or(self.plan.error_policy);
 
         if self.progress.state == OperationState::Cancelled {
             self.stopped = true;
@@ -1322,85 +1427,33 @@ impl OperationExecutor {
                 }
             }
             Err(e) => {
-                let err = FileOpError {
-                    path: action.src.clone(),
-                    message: e.to_string(),
-                };
-                self.events.push(FileOpEvent::Error {
-                    path: action.src.clone(),
-                    error: e.to_string(),
-                });
-                self.errors.push(err);
-
+                // A file that failed part-way starts again from its first
+                // byte if it is tried again, and leaves nothing behind if it
+                // is not: the temporary it was writing goes now.
+                self.discard_cursor();
                 match error_policy {
-                    ErrorPolicy::StopOnFirst => {
-                        self.progress.state = OperationState::Failed;
-                        self.stopped = true;
-                        return;
+                    ErrorPolicy::Ask => {
+                        // Back to the same action, and nothing more until the
+                        // question is answered, as for a taken name.
+                        self.next = self.next.saturating_sub(1);
+                        self.progress.state = OperationState::Paused;
+                        self.failed = Some(ErrorQuestion {
+                            action: action.index,
+                            path: action.src.clone(),
+                            error: e.to_string(),
+                        });
                     }
                     ErrorPolicy::SkipAndContinue => {
-                        self.skipped = self.skipped.saturating_add(1);
-                        return;
-                    }
-                    ErrorPolicy::RetryN(max) => {
-                        let mut retried = false;
-                        for _ in 0..max {
-                            let retry = match operation {
-                                FileOperation::Copy | FileOperation::Move => {
-                                    self.execute_copy_action(action, conflict_policy)
-                                }
-                                FileOperation::Delete => self.execute_delete_action(action),
-                                FileOperation::Recycle => self.execute_recycle_action(action),
-                                FileOperation::Restore => self.execute_restore_action(action),
-                                FileOperation::Link => {
-                                    self.execute_link_action(action, conflict_policy)
-                                }
-                            };
-                            if let Ok(outcome) = retry {
-                                // A retry that came back part-way is not a
-                                // success to record: leave the retry loop and
-                                // let the next step carry the same action on.
-                                if matches!(
-                                    outcome,
-                                    ActionOutcome::Partial | ActionOutcome::Waiting
-                                ) {
-                                    if outcome == ActionOutcome::Waiting {
-                                        self.progress.state = OperationState::Paused;
-                                    }
-                                    self.next = self.next.saturating_sub(1);
-                                    retried = true;
-                                    break;
-                                }
-                                if matches!(outcome, ActionOutcome::Skipped) {
-                                    let _ = journal.mark_skipped(action.index);
-                                    self.skipped = self.skipped.saturating_add(1);
-                                } else {
-                                    let _ = journal.mark_complete(action.index);
-                                }
-                                if !action.is_dir {
-                                    self.progress.completed_files =
-                                        self.progress.completed_files.saturating_add(1);
-                                    self.progress.copied_bytes =
-                                        self.progress.copied_bytes.saturating_add(action.size);
-                                }
-                                retried = true;
-                                break;
-                            }
-                        }
-                        if !retried {
-                            self.skipped = self.skipped.saturating_add(1);
-                        }
+                        self.record_failure(&action.src, &e.to_string(), false);
                     }
                 }
+                return;
             }
         }
 
-        // Emit progress periodically.
         if let Some(start) = self.started {
             self.progress.update_rates(start.elapsed());
         }
-        self.events
-            .push(FileOpEvent::Progress(self.progress.clone()));
     }
 
     /// Everything that happens after the last action.
@@ -1410,8 +1463,8 @@ impl OperationExecutor {
     /// must run once, after every action has had its turn, and it must see the
     /// finished journal.
     pub fn finish(&mut self) {
-        // A copy stopped part-way -- cancelled, or failed under `StopOnFirst`
-        // -- leaves a temporary beside its destination. It is removed here
+        // A copy cancelled part-way leaves a temporary beside its
+        // destination. It is removed here
         // rather than left for the user to find: it is a part-sized file under
         // a name they never asked for, and nothing tells them it is ours.
         self.discard_cursor();
@@ -1425,20 +1478,20 @@ impl OperationExecutor {
         //
         // The condition is `journal.transferred(..)`, not "the operation did
         // not fail". A Move is a copy followed by a delete, and the delete is
-        // only ever safe for an action whose copy *transferred data*. Three
+        // only ever safe for an action whose copy *transferred data*. Two
         // kinds of action reach this point having transferred nothing:
         //
         //   - skipped by conflict policy (`ConflictPolicy::Skip`, or
         //     `OverwriteIfNewer` where the source was not newer) — the file
         //     sitting at the destination is some pre-existing file, not this
         //     source;
-        //   - failed and continued past under `ErrorPolicy::SkipAndContinue`;
-        //   - failed every retry under `ErrorPolicy::RetryN`.
+        //   - failed and continued past, under `ErrorPolicy::SkipAndContinue`
+        //     or by a Skip under `ErrorPolicy::Ask`.
         //
-        // This used to delete all three, which destroyed the user's only copy
+        // This used to delete both, which destroyed the user's only copy
         // of the data. Deleting only what was transferred degrades those cases
         // to "the file stayed where it was", which is recoverable.
-        if operation == FileOperation::Move && self.progress.state != OperationState::Failed {
+        if operation == FileOperation::Move {
             // Whether anything was left behind. A source directory that is
             // still non-empty is *expected* when something under it was left
             // behind, and an anomaly worth reporting when nothing was.
@@ -1516,6 +1569,7 @@ impl OperationExecutor {
                 self.errors.push(FileOpError {
                     path: journal_path,
                     message,
+                    answered: false,
                 });
             }
         }
@@ -1525,18 +1579,13 @@ impl OperationExecutor {
 
     /// The `Complete` event: what was done, skipped and failed.
     fn push_summary(&mut self) {
-        let elapsed = self.started.map_or(Duration::ZERO, |s| s.elapsed());
         let succeeded = self.progress.completed_files.saturating_sub(self.skipped);
 
         self.events.push(FileOpEvent::Complete {
             summary: OperationSummary {
-                operation: self.plan.operation.clone(),
-                total_files: self.plan.total_files,
                 succeeded,
                 skipped: self.skipped,
                 failed: u32::try_from(self.errors.len()).unwrap_or(u32::MAX),
-                total_bytes: self.plan.total_bytes,
-                elapsed,
                 errors: self.errors.clone(),
             },
         });
@@ -1558,6 +1607,7 @@ impl OperationExecutor {
         self.errors.push(FileOpError {
             path: src.to_path_buf(),
             message,
+            answered: false,
         });
     }
 
@@ -1709,14 +1759,8 @@ impl OperationExecutor {
     }
 
     /// Stop at `dest`, taken, and say so: the question for
-    /// [`waiting_on`](Self::waiting_on), and the event for a caller reading
-    /// the event stream.
+    /// [`waiting_on`](Self::waiting_on).
     fn ask(&mut self, action: &PlannedAction, dest: &Path) -> ActionOutcome {
-        self.events.push(FileOpEvent::Conflict {
-            src: action.src.clone(),
-            dest: dest.to_path_buf(),
-            policy: ConflictPolicy::Ask,
-        });
         self.question = Some(ConflictQuestion {
             action: action.index,
             src: action.src.clone(),
@@ -1878,6 +1922,8 @@ impl OperationExecutor {
         let Some(chunk) = buf.get(..filled) else {
             return Err(io::Error::other("filled more of the buffer than it has"));
         };
+        #[cfg(test)]
+        testing::fail_a_write()?;
         cursor.tmp.write_all(chunk)?;
         if filled == COPY_CHUNK {
             // The buffer filled, so there may be more. One more turn.
@@ -2346,6 +2392,41 @@ fn move_back(to: &Path, from: &Path) -> io::Result<()> {
     fs::rename(from, to)
 }
 
+/// A test's way to make a copy fail part-way through a file, which nothing
+/// on a working machine does on demand: a disk filling up, a drive pulled
+/// out.
+#[cfg(test)]
+mod testing {
+    use std::cell::Cell;
+    use std::io;
+
+    thread_local! {
+        /// How many more chunks are written before one fails; `None`, none.
+        static WRITES_BEFORE_A_FAILURE: Cell<Option<u32>> = const { Cell::new(None) };
+    }
+
+    /// Fail the chunk write after the next `writes` succeed, on this
+    /// thread -- one failure, then writes succeed again.
+    pub(super) fn fail_a_write_after(writes: u32) {
+        WRITES_BEFORE_A_FAILURE.with(|n| n.set(Some(writes)));
+    }
+
+    /// Called before each chunk is written: the failure, when it is due.
+    pub(super) fn fail_a_write() -> io::Result<()> {
+        WRITES_BEFORE_A_FAILURE.with(|n| match n.get() {
+            Some(0) => {
+                n.set(None);
+                Err(io::Error::other("the drive went away"))
+            }
+            Some(more) => {
+                n.set(Some(more.saturating_sub(1)));
+                Ok(())
+            }
+            None => Ok(()),
+        })
+    }
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -2418,7 +2499,7 @@ mod tests {
             &[src_dir.join("hello.txt")],
             &dst_dir,
             ConflictPolicy::Skip,
-            ErrorPolicy::StopOnFirst,
+            ErrorPolicy::Ask,
         )
         .unwrap();
 
@@ -2468,8 +2549,7 @@ mod tests {
         write_file(&src_dir.join("data").join("x.txt"), "xxxx");
         write_file(&src_dir.join("data").join("y.txt"), "yy");
 
-        let plan =
-            OperationPlan::plan_delete(&[src_dir.join("data")], ErrorPolicy::StopOnFirst).unwrap();
+        let plan = OperationPlan::plan_delete(&[src_dir.join("data")], ErrorPolicy::Ask).unwrap();
 
         assert_eq!(plan.total_files, 2);
         assert_eq!(plan.total_bytes, 6);
@@ -2677,7 +2757,7 @@ mod tests {
             &[src_dir.join("a.txt"), src_dir.join("b.txt")],
             &dst_dir,
             ConflictPolicy::Overwrite,
-            ErrorPolicy::StopOnFirst,
+            ErrorPolicy::Ask,
         )
         .unwrap();
 
@@ -2702,7 +2782,7 @@ mod tests {
             &[src_dir.join("a.txt"), src_dir.join("b.txt")],
             &dst_dir,
             ConflictPolicy::Overwrite,
-            ErrorPolicy::StopOnFirst,
+            ErrorPolicy::Ask,
         )
         .unwrap();
 
@@ -2836,7 +2916,7 @@ mod tests {
             .iter()
             .find_map(|e| match e {
                 FileOpEvent::Complete { summary } => Some(summary),
-                _ => None,
+                FileOpEvent::Error { .. } => None,
             })
             .expect("no completion summary");
         assert!(summary.failed >= 1, "the failed copy was not reported");
@@ -2871,7 +2951,7 @@ mod tests {
             std::slice::from_ref(&src),
             &dst_dir,
             ConflictPolicy::Overwrite,
-            ErrorPolicy::StopOnFirst,
+            ErrorPolicy::Ask,
         )
         .unwrap();
 
@@ -2930,7 +3010,7 @@ mod tests {
         // already reported against the file, so it must not add an error.
         let summary = events.iter().find_map(|e| match e {
             FileOpEvent::Complete { summary } => Some(summary),
-            _ => None,
+            FileOpEvent::Error { .. } => None,
         });
         let summary = summary.expect("no completion summary");
         assert_eq!(
@@ -3103,7 +3183,7 @@ mod tests {
             &[src_dir.join("test.txt")],
             &dst_dir,
             ConflictPolicy::Skip,
-            ErrorPolicy::StopOnFirst,
+            ErrorPolicy::Ask,
         )
         .unwrap();
 
@@ -3157,7 +3237,7 @@ mod tests {
             ],
             &dst_dir,
             ConflictPolicy::Skip,
-            ErrorPolicy::StopOnFirst,
+            ErrorPolicy::Ask,
         )
         .unwrap();
         let total = plan.actions.len();
@@ -3202,13 +3282,9 @@ mod tests {
         }
 
         let sources: Vec<PathBuf> = names.iter().map(|n| src_dir.join(n)).collect();
-        let plan = OperationPlan::plan_copy(
-            &sources,
-            &dst_dir,
-            ConflictPolicy::Skip,
-            ErrorPolicy::StopOnFirst,
-        )
-        .unwrap();
+        let plan =
+            OperationPlan::plan_copy(&sources, &dst_dir, ConflictPolicy::Skip, ErrorPolicy::Ask)
+                .unwrap();
 
         let mut executor = OperationExecutor::new(plan);
         assert!(executor.begin());
@@ -3217,13 +3293,8 @@ mod tests {
         let mut seen = Vec::new();
         while !executor.is_done() {
             executor.step();
+            // Read between steps, which is where the window reads it.
             seen.push(executor.progress().completed_files);
-            // And the events are available *now*, not at the end.
-            let events = executor.take_events();
-            assert!(
-                events.iter().any(|e| matches!(e, FileOpEvent::Progress(_))),
-                "a step emitted no progress the caller could draw"
-            );
         }
         executor.finish();
 
@@ -3247,13 +3318,9 @@ mod tests {
         }
 
         let sources: Vec<PathBuf> = names.iter().map(|n| src_dir.join(n)).collect();
-        let plan = OperationPlan::plan_copy(
-            &sources,
-            &dst_dir,
-            ConflictPolicy::Skip,
-            ErrorPolicy::StopOnFirst,
-        )
-        .unwrap();
+        let plan =
+            OperationPlan::plan_copy(&sources, &dst_dir, ConflictPolicy::Skip, ErrorPolicy::Ask)
+                .unwrap();
 
         let mut executor = OperationExecutor::new(plan);
         assert!(executor.begin());
@@ -3287,13 +3354,8 @@ mod tests {
         }
         let sources: Vec<PathBuf> = names.iter().map(|n| src_dir.join(n)).collect();
         let make = || {
-            OperationPlan::plan_copy(
-                &sources,
-                &dst_dir,
-                ConflictPolicy::Skip,
-                ErrorPolicy::StopOnFirst,
-            )
-            .unwrap()
+            OperationPlan::plan_copy(&sources, &dst_dir, ConflictPolicy::Skip, ErrorPolicy::Ask)
+                .unwrap()
         };
 
         let mut executor = OperationExecutor::new(make());
@@ -3346,7 +3408,7 @@ mod tests {
             std::slice::from_ref(&src),
             &dst_dir,
             ConflictPolicy::Skip,
-            ErrorPolicy::StopOnFirst,
+            ErrorPolicy::Ask,
         )
         .unwrap();
         assert_eq!(plan.actions.len(), 1, "one file is one action");
@@ -3389,13 +3451,9 @@ mod tests {
         let src = src_dir.join("big.bin");
         fs::write(&src, vec![7_u8; COPY_CHUNK * 3]).unwrap();
 
-        let plan = OperationPlan::plan_copy(
-            &[src],
-            &dst_dir,
-            ConflictPolicy::Skip,
-            ErrorPolicy::StopOnFirst,
-        )
-        .unwrap();
+        let plan =
+            OperationPlan::plan_copy(&[src], &dst_dir, ConflictPolicy::Skip, ErrorPolicy::Ask)
+                .unwrap();
         let mut executor = OperationExecutor::new(plan);
         assert!(executor.begin());
         executor.step();
@@ -3439,13 +3497,9 @@ mod tests {
             write_file(&src_dir.join(name), name);
         }
         let sources: Vec<PathBuf> = names.iter().map(|n| src_dir.join(n)).collect();
-        let plan = OperationPlan::plan_move(
-            &sources,
-            &dst_dir,
-            ConflictPolicy::Skip,
-            ErrorPolicy::StopOnFirst,
-        )
-        .unwrap();
+        let plan =
+            OperationPlan::plan_move(&sources, &dst_dir, ConflictPolicy::Skip, ErrorPolicy::Ask)
+                .unwrap();
 
         let mut executor = OperationExecutor::new(plan);
         assert!(executor.begin());
@@ -3481,7 +3535,7 @@ mod tests {
             &[src_dir.join("conflict.txt")],
             &dst_dir,
             ConflictPolicy::Skip,
-            ErrorPolicy::StopOnFirst,
+            ErrorPolicy::Ask,
         )
         .unwrap();
 
@@ -3506,7 +3560,7 @@ mod tests {
             &[src_dir.join("file.txt")],
             &dst_dir,
             ConflictPolicy::Overwrite,
-            ErrorPolicy::StopOnFirst,
+            ErrorPolicy::Ask,
         )
         .unwrap();
 
@@ -3530,7 +3584,7 @@ mod tests {
             &[src_dir.join("file.txt")],
             &dst_dir,
             ConflictPolicy::Rename,
-            ErrorPolicy::StopOnFirst,
+            ErrorPolicy::Ask,
         )
         .unwrap();
 
@@ -3557,7 +3611,7 @@ mod tests {
             &[src_dir.join("mydir")],
             &dst_dir,
             ConflictPolicy::Skip,
-            ErrorPolicy::StopOnFirst,
+            ErrorPolicy::Ask,
         )
         .unwrap();
 
@@ -3586,7 +3640,7 @@ mod tests {
             &[src_dir.join("moveme.txt")],
             &dst_dir,
             ConflictPolicy::Skip,
-            ErrorPolicy::StopOnFirst,
+            ErrorPolicy::Ask,
         )
         .unwrap();
 
@@ -3604,8 +3658,7 @@ mod tests {
         write_file(&dir.join("delme").join("x.txt"), "xxx");
         write_file(&dir.join("delme").join("y.txt"), "yy");
 
-        let plan =
-            OperationPlan::plan_delete(&[dir.join("delme")], ErrorPolicy::StopOnFirst).unwrap();
+        let plan = OperationPlan::plan_delete(&[dir.join("delme")], ErrorPolicy::Ask).unwrap();
 
         let mut executor = OperationExecutor::new(plan);
         executor.execute();
@@ -3857,7 +3910,7 @@ mod tests {
             ],
             &root.join("dst"),
             policy,
-            ErrorPolicy::StopOnFirst,
+            ErrorPolicy::Ask,
         )
         .unwrap();
         let mut executor = OperationExecutor::new(plan);
@@ -3889,24 +3942,21 @@ mod tests {
             "an operation waiting on an answer is not done"
         );
         assert_eq!(executor.progress().state, OperationState::Paused);
-        // Stepping a waiting operation does nothing at all.
+        // Stepping a waiting operation does nothing at all -- not even when
+        // the name comes free: the user was asked, and the question stands
+        // until it is answered.
+        fs::remove_file(root.join("dst").join("a.txt")).unwrap();
         for _ in 0..10 {
             executor.step();
         }
-        assert!(executor.waiting_on().is_some());
-        assert_eq!(read_file(&root.join("dst").join("a.txt")), "old a");
+        assert_eq!(executor.waiting_on(), Some(&question));
+        assert!(
+            !root.join("dst").join("a.txt").exists(),
+            "it copied without an answer"
+        );
         assert!(
             !root.join("dst").join("b.txt").exists(),
             "it went on past the question"
-        );
-        let asked = executor
-            .take_events()
-            .iter()
-            .filter(|e| matches!(e, FileOpEvent::Conflict { .. }))
-            .count();
-        assert_eq!(
-            asked, 1,
-            "asked {asked} times: a waiting operation was stepped anyway"
         );
     }
 
@@ -3985,7 +4035,7 @@ mod tests {
             ],
             &root.join("dst"),
             ConflictPolicy::Ask,
-            ErrorPolicy::StopOnFirst,
+            ErrorPolicy::Ask,
         )
         .unwrap();
         let mut executor = OperationExecutor::new(plan);
@@ -4021,7 +4071,7 @@ mod tests {
             ],
             &root.join("dst"),
             ConflictPolicy::Ask,
-            ErrorPolicy::StopOnFirst,
+            ErrorPolicy::Ask,
         )
         .unwrap();
         let mut executor = OperationExecutor::new(plan);
@@ -4052,7 +4102,7 @@ mod tests {
             &[root.join("src").join("big.bin")],
             &root.join("dst"),
             ConflictPolicy::Ask,
-            ErrorPolicy::StopOnFirst,
+            ErrorPolicy::Ask,
         )
         .unwrap();
         let mut executor = OperationExecutor::new(plan);
@@ -4078,7 +4128,7 @@ mod tests {
             &[root.join("src").join("a.txt")],
             &root.join("dst"),
             ConflictPolicy::Ask,
-            ErrorPolicy::StopOnFirst,
+            ErrorPolicy::Ask,
         )
         .unwrap();
         let mut executor = OperationExecutor::new(plan);
@@ -4113,7 +4163,7 @@ mod tests {
             ],
             &root.join("dst"),
             ConflictPolicy::Ask,
-            ErrorPolicy::StopOnFirst,
+            ErrorPolicy::Ask,
         )
         .unwrap();
         let mut executor = OperationExecutor::new(plan);
@@ -4162,13 +4212,9 @@ mod tests {
             let scratch = temp_dir(&format!("self_move_{policy:?}"));
             let root = scratch.dir().to_path_buf();
             write_file(&root.join("note.txt"), "hello");
-            let plan = OperationPlan::plan_move(
-                &[root.join("note.txt")],
-                &root,
-                policy,
-                ErrorPolicy::StopOnFirst,
-            )
-            .unwrap();
+            let plan =
+                OperationPlan::plan_move(&[root.join("note.txt")], &root, policy, ErrorPolicy::Ask)
+                    .unwrap();
             assert!(
                 plan.actions.is_empty(),
                 "{policy:?}: a move to where it is planned work"
@@ -4195,13 +4241,9 @@ mod tests {
             let scratch = temp_dir(&format!("self_copy_{policy:?}"));
             let root = scratch.dir().to_path_buf();
             write_file(&root.join("note.txt"), "hello");
-            let plan = OperationPlan::plan_copy(
-                &[root.join("note.txt")],
-                &root,
-                policy,
-                ErrorPolicy::StopOnFirst,
-            )
-            .unwrap();
+            let plan =
+                OperationPlan::plan_copy(&[root.join("note.txt")], &root, policy, ErrorPolicy::Ask)
+                    .unwrap();
             let mut executor = OperationExecutor::new(plan);
             let _events = executor.execute();
             assert_eq!(read_file(&root.join("note.txt")), "hello", "{policy:?}");
@@ -4223,7 +4265,7 @@ mod tests {
             &[root.join("album")],
             &root,
             ConflictPolicy::Overwrite,
-            ErrorPolicy::StopOnFirst,
+            ErrorPolicy::Ask,
         )
         .unwrap();
         let mut executor = OperationExecutor::new(plan);
@@ -4249,7 +4291,7 @@ mod tests {
             &[root.join("album")],
             &root,
             ConflictPolicy::Overwrite,
-            ErrorPolicy::StopOnFirst,
+            ErrorPolicy::Ask,
         )
         .unwrap();
         assert!(plan.actions.is_empty());
@@ -4269,13 +4311,13 @@ mod tests {
                     &[root.join("album")],
                     &dest,
                     ConflictPolicy::Rename,
-                    ErrorPolicy::StopOnFirst,
+                    ErrorPolicy::Ask,
                 ),
                 OperationPlan::plan_move(
                     &[root.join("album")],
                     &dest,
                     ConflictPolicy::Rename,
-                    ErrorPolicy::StopOnFirst,
+                    ErrorPolicy::Ask,
                 ),
             ] {
                 let err = plan.expect_err("a folder was planned into itself");
@@ -4289,7 +4331,7 @@ mod tests {
                 &[root.join("album")],
                 &root.join("album2"),
                 ConflictPolicy::Rename,
-                ErrorPolicy::StopOnFirst,
+                ErrorPolicy::Ask,
             )
             .is_ok()
         );
@@ -4363,8 +4405,7 @@ mod tests {
             eprintln!("skipped: this host can make no link");
             return;
         }
-        let plan =
-            OperationPlan::plan_delete(&[root.join("doomed")], ErrorPolicy::StopOnFirst).unwrap();
+        let plan = OperationPlan::plan_delete(&[root.join("doomed")], ErrorPolicy::Ask).unwrap();
         assert!(
             plan.actions.iter().all(|a| !a
                 .src
@@ -4447,8 +4488,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.actions.len(), 3, "{:?}", plan.actions);
-        let deletion =
-            OperationPlan::plan_delete(&[root.join("album")], ErrorPolicy::StopOnFirst).unwrap();
+        let deletion = OperationPlan::plan_delete(&[root.join("album")], ErrorPolicy::Ask).unwrap();
         assert_eq!(deletion.actions.len(), 3, "{:?}", deletion.actions);
     }
 
@@ -4535,7 +4575,7 @@ mod tests {
                 total_bytes: 5,
                 total_files: 1,
                 conflict_policy: ConflictPolicy::Overwrite,
-                error_policy: ErrorPolicy::StopOnFirst,
+                error_policy: ErrorPolicy::Ask,
             };
             let mut executor = OperationExecutor::new(plan);
             let _events = executor.execute();
@@ -4557,11 +4597,11 @@ mod tests {
             &[root.join("top")],
             &root.join("dst"),
             ConflictPolicy::Rename,
-            ErrorPolicy::StopOnFirst,
+            ErrorPolicy::Ask,
         )
         .expect_err("a tree deeper than the limit was planned");
         assert!(err.to_string().contains("nested more than"), "{err}");
-        let err = OperationPlan::plan_delete(&[root.join("top")], ErrorPolicy::StopOnFirst)
+        let err = OperationPlan::plan_delete(&[root.join("top")], ErrorPolicy::Ask)
             .expect_err("a tree deeper than the limit was planned for deletion");
         assert!(err.to_string().contains("nested more than"), "{err}");
     }
@@ -4592,15 +4632,14 @@ mod tests {
             &[root.join("top")],
             &root.join("dst"),
             ConflictPolicy::Rename,
-            ErrorPolicy::StopOnFirst,
+            ErrorPolicy::Ask,
         )
         .unwrap();
         let copy_order = names(&copy);
         let pos = |order: &[String], n: &str| order.iter().position(|s| s == n).unwrap();
         assert_eq!(copy_order.first().map(String::as_str), Some("top"));
         assert!(pos(&copy_order, "top/a") < pos(&copy_order, "top/a/x.txt"));
-        let delete =
-            OperationPlan::plan_delete(&[root.join("top")], ErrorPolicy::StopOnFirst).unwrap();
+        let delete = OperationPlan::plan_delete(&[root.join("top")], ErrorPolicy::Ask).unwrap();
         let delete_order = names(&delete);
         assert_eq!(delete_order.last().map(String::as_str), Some("top"));
         assert!(pos(&delete_order, "top/a/x.txt") < pos(&delete_order, "top/a"));
@@ -4612,5 +4651,275 @@ mod tests {
             b < a || b > x,
             "a neighbour came between a folder and its contents: {copy_order:?}"
         );
+    }
+
+    // ---- a failed file, asked about (2026-09-28) ----
+
+    /// A copy of `a.txt`, `b.txt` and `c.txt` under `ErrorPolicy::Ask`,
+    /// begun, with `b.txt` gone from under it after it was planned.
+    fn a_copy_with_a_file_gone(tag: &str) -> (ScratchDir, PathBuf, OperationExecutor) {
+        let scratch = temp_dir(tag);
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("dst")).unwrap();
+        let sources: Vec<PathBuf> = ["a.txt", "b.txt", "c.txt"]
+            .iter()
+            .map(|name| {
+                let path = root.join("src").join(name);
+                write_file(&path, name);
+                path
+            })
+            .collect();
+        let plan = OperationPlan::plan_copy(
+            &sources,
+            &root.join("dst"),
+            ConflictPolicy::Overwrite,
+            ErrorPolicy::Ask,
+        )
+        .unwrap();
+        fs::remove_file(root.join("src").join("b.txt")).unwrap();
+        let mut executor = OperationExecutor::new(plan);
+        assert!(executor.begin());
+        (scratch, root, executor)
+    }
+
+    /// Step until the operation is done or stops at a question.
+    fn step_until_stopped(executor: &mut OperationExecutor) {
+        for _ in 0..1_000 {
+            if executor.is_done() || executor.failed_on().is_some() {
+                return;
+            }
+            executor.step();
+        }
+        panic!("the operation neither finished nor stopped");
+    }
+
+    /// The summary `finish` reported.
+    fn summary_of(events: &[FileOpEvent]) -> OperationSummary {
+        events
+            .iter()
+            .find_map(|e| match e {
+                FileOpEvent::Complete { summary } => Some(summary.clone()),
+                FileOpEvent::Error { .. } => None,
+            })
+            .expect("no summary")
+    }
+
+    #[test]
+    fn a_failed_file_is_asked_about_and_nothing_moves_until_it_is_answered() {
+        let (_scratch, root, mut executor) = a_copy_with_a_file_gone("err_ask");
+        step_until_stopped(&mut executor);
+        let question = executor.failed_on().expect("nobody was asked").clone();
+        assert_eq!(question.path, root.join("src").join("b.txt"));
+        assert!(!question.error.is_empty(), "the question does not say why");
+        assert!(
+            !executor.is_done(),
+            "an operation waiting on an answer is not done"
+        );
+        assert_eq!(executor.progress().state, OperationState::Paused);
+        // Not even when the cause goes away: the question stands until it
+        // is answered.
+        write_file(&root.join("src").join("b.txt"), "back");
+        for _ in 0..10 {
+            executor.step();
+        }
+        assert_eq!(executor.failed_on(), Some(&question));
+        assert!(
+            !root.join("dst").join("b.txt").exists(),
+            "it tried again without an answer"
+        );
+        assert!(root.join("dst").join("a.txt").exists());
+        assert!(
+            !root.join("dst").join("c.txt").exists(),
+            "it went on past the question"
+        );
+    }
+
+    #[test]
+    fn try_again_carries_the_file_out_again() {
+        let (_scratch, root, mut executor) = a_copy_with_a_file_gone("err_again");
+        step_until_stopped(&mut executor);
+        write_file(&root.join("src").join("b.txt"), "back");
+        executor.answer_error(ErrorAnswer::TryAgain);
+        assert_eq!(executor.progress().state, OperationState::Running);
+        step_until_stopped(&mut executor);
+        assert!(
+            executor.is_done(),
+            "it stopped again: {:?}",
+            executor.failed_on()
+        );
+        executor.finish();
+        assert_eq!(read_file(&root.join("dst").join("b.txt")), "back");
+        assert!(root.join("dst").join("c.txt").exists());
+        let summary = summary_of(&executor.take_events());
+        assert_eq!(
+            (summary.succeeded, summary.skipped, summary.failed),
+            (3, 0, 0)
+        );
+    }
+
+    #[test]
+    fn skip_leaves_the_file_failed_and_goes_on() {
+        let (_scratch, root, mut executor) = a_copy_with_a_file_gone("err_skip");
+        step_until_stopped(&mut executor);
+        executor.answer_error(ErrorAnswer::Skip);
+        step_until_stopped(&mut executor);
+        assert!(executor.is_done());
+        executor.finish();
+        assert!(root.join("dst").join("c.txt").exists(), "it did not go on");
+        assert!(!root.join("dst").join("b.txt").exists());
+        let summary = summary_of(&executor.take_events());
+        // Two done and one failed -- not "one done, one skipped, one
+        // failed", which a failure counted as skipped as well used to make.
+        assert_eq!(
+            (summary.succeeded, summary.skipped, summary.failed),
+            (2, 0, 1)
+        );
+        assert_eq!(summary.errors[0].path, root.join("src").join("b.txt"));
+    }
+
+    #[test]
+    fn skip_all_skips_every_later_failure_without_asking() {
+        let (_scratch, root, mut executor) = a_copy_with_a_file_gone("err_skip_all");
+        fs::remove_file(root.join("src").join("c.txt")).unwrap();
+        step_until_stopped(&mut executor);
+        executor.answer_error(ErrorAnswer::SkipAll);
+        step_until_stopped(&mut executor);
+        assert!(
+            executor.is_done(),
+            "it asked again: {:?}",
+            executor.failed_on()
+        );
+        executor.finish();
+        let summary = summary_of(&executor.take_events());
+        assert_eq!((summary.succeeded, summary.failed), (1, 2));
+    }
+
+    #[test]
+    fn stop_ends_the_operation_and_what_is_done_stays_done() {
+        let (_scratch, root, mut executor) = a_copy_with_a_file_gone("err_stop");
+        step_until_stopped(&mut executor);
+        executor.answer_error(ErrorAnswer::Stop);
+        assert_eq!(executor.progress().state, OperationState::Cancelled);
+        assert!(executor.failed_on().is_none());
+        step_until_stopped(&mut executor);
+        assert!(executor.is_done());
+        executor.finish();
+        assert!(
+            root.join("dst").join("a.txt").exists(),
+            "what was done was undone"
+        );
+        assert!(
+            !root.join("dst").join("c.txt").exists(),
+            "it went on after Stop"
+        );
+        assert_eq!(summary_of(&executor.take_events()).failed, 1);
+    }
+
+    #[test]
+    fn a_failure_the_plan_skips_is_counted_as_failed_alone() {
+        let scratch = temp_dir("err_counts");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("dst")).unwrap();
+        let sources: Vec<PathBuf> = ["a.txt", "b.txt", "c.txt"]
+            .iter()
+            .map(|name| {
+                let path = root.join("src").join(name);
+                write_file(&path, name);
+                path
+            })
+            .collect();
+        let plan = OperationPlan::plan_copy(
+            &sources,
+            &root.join("dst"),
+            ConflictPolicy::Overwrite,
+            ErrorPolicy::SkipAndContinue,
+        )
+        .unwrap();
+        fs::remove_file(root.join("src").join("b.txt")).unwrap();
+        let summary = summary_of(&OperationExecutor::new(plan).execute());
+        assert_eq!(
+            (summary.succeeded, summary.skipped, summary.failed),
+            (2, 0, 1)
+        );
+    }
+
+    /// **A file that failed part-way is tried again from its first byte**,
+    /// and nothing part-written is left beside it while the question waits.
+    ///
+    /// The chunk being written when the write failed had already been read
+    /// from the source. Carrying on from where the copy stood would start
+    /// after it, and the copy would be the file less that chunk -- a
+    /// complete-looking file with a megabyte missing from its middle.
+    #[test]
+    fn a_file_that_failed_part_way_is_tried_again_from_its_first_byte() {
+        let scratch = temp_dir("err_part_way");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("dst")).unwrap();
+        let size = COPY_CHUNK * 2 + COPY_CHUNK / 2;
+        let content: Vec<u8> = (0..size)
+            .map(|i| u8::try_from(i % 251).unwrap_or(0))
+            .collect();
+        let src = root.join("src").join("big.bin");
+        fs::write(&src, &content).unwrap();
+        let plan = OperationPlan::plan_copy(
+            std::slice::from_ref(&src),
+            &root.join("dst"),
+            ConflictPolicy::Overwrite,
+            ErrorPolicy::Ask,
+        )
+        .unwrap();
+        let mut executor = OperationExecutor::new(plan);
+        assert!(executor.begin());
+        // The first chunk is written; the second fails.
+        testing::fail_a_write_after(1);
+        step_until_stopped(&mut executor);
+        let question = executor.failed_on().expect("nobody was asked").clone();
+        assert_eq!(question.error, "the drive went away");
+        let dest = root.join("dst").join("big.bin");
+        assert!(
+            !root
+                .join("dst")
+                .join(OperationExecutor::temp_name(&dest))
+                .exists(),
+            "a part-written file was left beside the destination"
+        );
+        executor.answer_error(ErrorAnswer::TryAgain);
+        step_until_stopped(&mut executor);
+        assert!(executor.is_done(), "{:?}", executor.failed_on());
+        executor.finish();
+        assert!(
+            fs::read(&dest).unwrap() == content,
+            "the copy tried again is not the file"
+        );
+    }
+
+    /// **Cancelling an operation stopped at a failure ends it**: the
+    /// question goes with it, or the operation would wait for ever on an
+    /// answer nobody can give.
+    #[test]
+    fn cancelling_an_operation_stopped_at_a_failure_ends_it() {
+        let (_scratch, root, mut executor) = a_copy_with_a_file_gone("err_cancel");
+        step_until_stopped(&mut executor);
+        executor.cancel();
+        assert!(
+            executor.failed_on().is_none(),
+            "the question outlived the cancel"
+        );
+        step_until_stopped(&mut executor);
+        assert!(executor.is_done(), "a cancelled operation never ended");
+        executor.finish();
+        assert!(root.join("dst").join("a.txt").exists());
+        assert!(!root.join("dst").join("c.txt").exists());
+    }
+
+    #[test]
+    fn execute_stops_at_a_failure_it_has_nobody_to_ask_about() {
+        let (_scratch, root, mut executor) = a_copy_with_a_file_gone("err_execute");
+        let summary = summary_of(&executor.execute());
+        assert_eq!(summary.failed, 1);
+        assert!(!root.join("dst").join("c.txt").exists());
     }
 }

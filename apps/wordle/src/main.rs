@@ -134,7 +134,9 @@ fn letter_ink(face: Color, c: &Colours) -> Color {
     if [CORRECT, PRESENT, ABSENT].contains(&face) {
         gamechrome::legible_on(ANSWER_INKS, face)
     } else {
-        c.chrome.text
+        // An unguessed key's face is not the page: under a theme whose text
+        // is only as dark as the page needs, the page's text was 3.0:1 on it.
+        c.chrome.on(face).text
     }
 }
 
@@ -1334,7 +1336,8 @@ impl Wordle {
             } else if lit {
                 c.on_lit
             } else {
-                c.chrome.text
+                // Written for the raised button, not the page.
+                c.chrome.on(c.chrome.raised).text
             };
             fill(f, r, bg, CornerRadii::all(4.0));
             label_centred(
@@ -1457,7 +1460,7 @@ impl Wordle {
                     text: name,
                     size: l.key_h * 0.28,
                     weight: FontWeightHint::Bold,
-                    color: c.chrome.text,
+                    color: c.chrome.on(c.chrome.lit).text,
                 },
                 r,
             );
@@ -1804,7 +1807,18 @@ mod tests {
     fn the_window_is_drawn_in_the_users_colours() {
         for (light, cards) in LOOKS {
             let p = palette(light, cards);
-            let derived = [CORRECT, PRESENT, ABSENT, ANSWER_INKS.0, ANSWER_INKS.1];
+            // A lit header button's letter is `on_accent`, which is
+            // `readable_on(accent)`: a colour made from the accent, so it is
+            // declared -- today it happens to equal one of the palette's
+            // roles, and the check will not always take that on trust.
+            let derived = [
+                CORRECT,
+                PRESENT,
+                ABSENT,
+                ANSWER_INKS.0,
+                ANSWER_INKS.1,
+                p.on_accent(),
+            ];
             for (what, f) in every_look(&p) {
                 appearance::palette_check::assert_drawn_from(
                     &p,
@@ -1865,8 +1879,7 @@ mod tests {
     #[test]
     fn every_text_reads_on_what_is_under_it_in_either_theme() {
         let mut bad = Vec::new();
-        for (light, cards) in LOOKS {
-            let p = palette(light, cards);
+        for (look, p) in gamechrome::legibility::looks() {
             // A switched-off button's label is exempt, as WCAG exempts an
             // inactive control: Hard mode, once the first guess is in.
             let c = Colours::of(&p);
@@ -1900,7 +1913,7 @@ mod tests {
                 }
                 for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
                     bad.push(format!(
-                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        "{what}, {look}: {:?} {:.2}:1 on {:?}",
                         r.text,
                         r.ratio(),
                         r.ground

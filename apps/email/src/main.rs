@@ -3048,16 +3048,21 @@ impl EmailApp {
 
     /// Handle a key press.
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        // Every key but a Ctrl chord and what is typed is taken plain: a
+        // chord with Alt or the Windows key is the window's or the desktop's
+        // and arrives carrying its key -- Alt+Delete deleted the message and
+        // Alt+R started a reply.
+        let plain = textline::is_plain(key.modifiers);
         // Above the compose form and the search box, because `F1` is not text
         // and a reader may want the keys from either.
-        if key.key == Key::F1 {
+        if key.key == Key::F1 && plain {
             self.show_help = !self.show_help;
             return EventResult::Consumed;
         }
         if self.show_help {
             // Modal: letting keys through would mean deleting a message you
             // cannot see.
-            if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
+            if plain && matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
                 self.show_help = false;
             }
             return EventResult::Consumed;
@@ -3069,7 +3074,9 @@ impl EmailApp {
             return self.handle_search_key(key);
         }
 
-        if key.modifiers.ctrl {
+        // As Ctrl chords: AltGr arrives as Ctrl+Alt and types, and AltGr+S --
+        // a Polish `ś` -- changed the sort order.
+        if textline::is_ctrl_chord(key.modifiers) {
             return match key.key {
                 Key::N => {
                     self.compose_new();
@@ -3096,6 +3103,9 @@ impl EmailApp {
                 }
                 _ => EventResult::Ignored,
             };
+        }
+        if !plain {
+            return EventResult::Ignored;
         }
 
         match key.key {
@@ -3173,6 +3183,17 @@ impl EmailApp {
 
     /// Keys while the search box is open.
     fn handle_search_key(&mut self, key: &KeyEvent) -> EventResult {
+        // What a key typed, AltGr's among it, and not a command's letter,
+        // which a chord carries: Ctrl+A in the box typed an `a`, and Alt+X an
+        // `x`. The box's own keys are taken plain.
+        if textline::types_into_field(key) {
+            self.search_query.extend(key.typed());
+            self.reanchor_selection();
+            return EventResult::Consumed;
+        }
+        if !textline::is_plain(key.modifiers) {
+            return EventResult::Ignored;
+        }
         match key.key {
             Key::Escape => {
                 self.searching = false;
@@ -3189,15 +3210,7 @@ impl EmailApp {
                 self.reanchor_selection();
                 EventResult::Consumed
             }
-            _ => {
-                let typed: String = key.typed().collect();
-                if typed.is_empty() {
-                    return EventResult::Ignored;
-                }
-                self.search_query.push_str(&typed);
-                self.reanchor_selection();
-                EventResult::Consumed
-            }
+            _ => EventResult::Ignored,
         }
     }
 
@@ -3207,12 +3220,21 @@ impl EmailApp {
     /// says it cannot send, Escape closes (asking first over unsaved work),
     /// and everything else types into the field.
     fn handle_compose_key(&mut self, key: &KeyEvent) -> EventResult {
-        let ctrl = key.modifiers.ctrl;
+        // Alt's and the Windows key's chords are never the form's nor a
+        // field's: the body is the toolkit's field, which types the letter of
+        // a chord it does not know, and Alt+X typed an `x` into the message.
+        if textline::is_alt_or_windows_chord(key.modifiers) {
+            return EventResult::Ignored;
+        }
+        // Ctrl chords, not Ctrl held: AltGr arrives as Ctrl+Alt, and AltGr+S
+        // -- a Polish `ś` -- saved a draft instead of typing.
+        let ctrl = textline::is_ctrl_chord(key.modifiers);
+        let plain = textline::is_plain(key.modifiers);
         match key.key {
-            Key::Escape => self.close_compose(),
+            Key::Escape if plain => self.close_compose(),
             Key::Enter if ctrl => self.send(),
             Key::S if ctrl => self.save_draft(),
-            Key::Tab => {
+            Key::Tab if plain => {
                 if let Some(compose) = self.compose.as_mut() {
                     compose.field = compose.field.step(key.modifiers.shift);
                 }
@@ -5599,6 +5621,95 @@ mod tests {
         let mut app = EmailApp::new();
         app.seed_sample_mail();
         app
+    }
+
+    /// **A chord is neither a mail key nor typing, and AltGr types**:
+    /// Alt+Delete deleted the message and Alt+R started a reply, each chord
+    /// arriving carrying its key; AltGr+S -- a Polish `ś` -- changed the sort
+    /// order, and in a message saved a draft instead of typing; Alt+X typed
+    /// an `x` into the search and into the message.
+    #[test]
+    fn a_chord_is_neither_a_mail_key_nor_typing() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let typed = |key: Key, text: &str, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key,
+                pressed: true,
+                modifiers,
+                text: text.to_owned(),
+            })
+        };
+        let mut app = seeded();
+        app.selected_message = app.messages.first().map(|m| m.id);
+        let where_it_is = |app: &EmailApp| {
+            app.selected_message
+                .and_then(|id| app.messages.iter().find(|m| m.id == id))
+                .map(|m| m.mailbox.clone())
+        };
+        let (sort, selected, mailbox) = (app.sort_order, app.selected_message, where_it_is(&app));
+        assert!(mailbox.is_some(), "control: a message is selected");
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for k in [Key::Delete, Key::R, Key::S, Key::Down, Key::Right, Key::F1] {
+                assert_eq!(
+                    app.handle_event(&typed(k, "", m)),
+                    EventResult::Ignored,
+                    "{m:?} {k:?} was taken"
+                );
+            }
+        }
+        assert_eq!(app.sort_order, sort, "a chord changed the sort order");
+        assert_eq!(
+            app.selected_message, selected,
+            "a chord moved the selection"
+        );
+        assert_eq!(where_it_is(&app), mailbox, "a chord deleted the message");
+        assert!(app.compose.is_none(), "a chord started a reply");
+
+        // The search types what a key typed.
+        app.handle_event(&typed(Key::F, "f", Modifiers::ctrl()));
+        assert!(app.searching, "control: Ctrl+F searches");
+        app.handle_event(&typed(Key::A, "a", Modifiers::ctrl()));
+        app.handle_event(&typed(Key::X, "x", Modifiers::alt()));
+        app.handle_event(&typed(Key::S, "ś", altgr));
+        assert_eq!(
+            app.search_query, "ś",
+            "the search typed a command or lost AltGr's ś"
+        );
+        app.handle_event(&typed(Key::Backspace, "", Modifiers::alt()));
+        app.handle_event(&typed(Key::Escape, "", Modifiers::alt()));
+        assert_eq!(app.search_query, "ś", "Alt+Backspace deleted");
+        assert!(app.searching, "Alt+Escape closed the search");
+
+        // So does a message, and AltGr+S saves no draft.
+        let mut app = writing_a_body();
+        let drafts = app.messages.len();
+        app.handle_event(&typed(Key::X, "x", Modifiers::alt()));
+        app.handle_event(&typed(Key::X, "x", Modifiers::super_key()));
+        app.handle_event(&typed(Key::S, "ś", altgr));
+        assert_eq!(
+            body_text(&app),
+            "ś",
+            "the body typed a command or lost AltGr's ś"
+        );
+        assert_eq!(app.messages.len(), drafts, "AltGr+S saved a draft");
+        app.handle_event(&typed(Key::Escape, "", Modifiers::alt()));
+        app.handle_event(&typed(Key::Escape, "", Modifiers::ctrl()));
+        app.handle_event(&typed(Key::Tab, "", Modifiers::ctrl()));
+        // The message holds unsaved text, so a first Escape would only ask:
+        // the question is what shows a chorded one was taken.
+        assert!(
+            app.compose.as_ref().is_some_and(|c| !c.confirm_close),
+            "a chorded Escape closed the message or asked to"
+        );
+        assert_eq!(
+            app.compose.as_ref().map(|c| c.field),
+            Some(ComposeField::Body),
+            "Ctrl+Tab left the body"
+        );
     }
 
     /// Every string the window draws, joined.

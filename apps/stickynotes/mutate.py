@@ -8,6 +8,12 @@ Ctrl+Q quit without saving, losing what had been typed since the last
 autosave; the close button saved and quit whether or not the save worked.  The
 table covers the repair; the rest of the suite predates it.
 
+Each note's history is a tree now (C-Q24): an edit after an undo keeps the
+undone one as a branch, reached with Alt+Z.  Its rows cover the keys and the
+cap, and a title being typed around the history: recorded before the history
+moves, and compared, at the next commit, against the title as it was last
+recorded or moved to.
+
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
 """
@@ -22,6 +28,9 @@ from mutation_harness import sweep  # noqa: E402  (path set above)
 SRC = Path(__file__).parent / "src" / "main.rs"
 
 FAILS = "a_close_whose_save_fails_keeps_the_window_once"
+TREE = "alt_z_walks_the_active_notes_history"
+NOTE_TREE = "a_note_edit_after_an_undo_keeps_the_undone_one_reachable"
+ALTGR = "altgr_z_and_windows_alt_z_walk_nothing"
 
 # (name, old, new, [tests that must fail])
 MUTATIONS = [
@@ -185,8 +194,8 @@ MUTATIONS = [
     ),
     (
         "an undo leaves the writing's start where it was",
-        "        if undone {\n            self.refill_body();",
-        "        if undone {",
+        "        if moved {\n            self.refill_body();",
+        "        if moved {",
         ["the_toolbar_undo_while_writing_takes_the_writing_back"],
     ),
     (
@@ -194,6 +203,126 @@ MUTATIONS = [
         "        self.caret_width = settings.caret_width();",
         "        let _ = settings;",
         ["the_caret_is_as_wide_as_the_setting_says"],
+    ),
+    # -- the note's history: a tree, walked with Alt+Z (C-Q24) ----------------
+    (
+        "Alt+Z goes nowhere",
+        "            } else {\n                self.earlier_active()\n            };",
+        "            } else {\n                Action::None\n            };",
+        # Not the advertised-keys test: its note is being written, and the
+        # text field answers Alt+Z itself.
+        [TREE],
+    ),
+    (
+        "Alt+Shift+Z goes back too",
+        "                self.later_active()\n            } else {",
+        "                self.earlier_active()\n            } else {",
+        [TREE],
+    ),
+    (
+        "a journey takes its steps back the wrong way",
+        "                Travel::Undo(action) => self.revert(&action),",
+        "                Travel::Undo(action) => self.replay(&action),",
+        [TREE, NOTE_TREE],
+    ),
+    (
+        "Alt+Z only undoes",
+        "        let steps = self.undo_history.earlier();",
+        "        let steps: Vec<Travel<EditAction>> =\n"
+        "            self.undo_history.undo().map(Travel::Undo).into_iter().collect();",
+        [TREE, NOTE_TREE],
+    ),
+    (
+        "Alt+Shift+Z only redoes",
+        "        let steps = self.undo_history.later();",
+        "        let steps: Vec<Travel<EditAction>> =\n"
+        "            self.undo_history.redo().map(Travel::Redo).into_iter().collect();",
+        [TREE, NOTE_TREE],
+    ),
+    (
+        "a journey does not mark the notes",
+        "            self.clamp_caret();\n            self.store.mark_dirty();",
+        "            self.clamp_caret();",
+        [TREE],
+    ),
+    (
+        "AltGr+Z goes back",
+        "if event.key == Key::Z && m.alt && !m.ctrl && !m.super_key {",
+        "if event.key == Key::Z && m.alt && !m.super_key {",
+        [ALTGR],
+    ),
+    (
+        "Windows+Alt+Z goes back",
+        "if event.key == Key::Z && m.alt && !m.ctrl && !m.super_key {",
+        "if event.key == Key::Z && m.alt && !m.ctrl {",
+        [ALTGR],
+    ),
+    (
+        "Ctrl+Shift+Z undoes",
+        "                Key::Z if m.shift => self.redo_active(),\n",
+        "",
+        ["ctrl_shift_z_redoes"],
+    ),
+    (
+        "redo undoes",
+        "        match self.undo_history.redo() {",
+        "        match self.undo_history.undo() {",
+        ["ctrl_shift_z_redoes", "a_note_undoes_and_redoes_an_edit"],
+    ),
+    (
+        "a note keeps more than a hundred edits",
+        "const UNDO_LIMIT: core::num::NonZeroUsize = match core::num::NonZeroUsize::new(100) {",
+        "const UNDO_LIMIT: core::num::NonZeroUsize = match core::num::NonZeroUsize::new(120) {",
+        ["a_note_keeps_its_last_hundred_edits"],
+    ),
+    # -- a title being typed, around the history ------------------------------
+    (
+        "the history moves before the typing is recorded",
+        "    fn step_active(&mut self, step: fn(&mut Note) -> bool) -> Action {\n        self.commit_focus();\n",
+        "    fn step_active(&mut self, step: fn(&mut Note) -> bool) -> Action {\n",
+        ["redo_keeps_a_title_being_typed", "the_toolbar_undo_while_writing_takes_the_writing_back"],
+    ),
+    (
+        "a commit leaves the title's starting point empty",
+        "        self.title_before = note.title.clone();\n        self.store.mark_dirty();",
+        "        self.store.mark_dirty();",
+        # Not the second-undo test: the undo moves the note, and the title's
+        # starting point is taken again from where it moved to.
+        ["a_save_while_typing_a_title_keeps_its_starting_point", "redo_keeps_a_title_being_typed"],
+    ),
+    (
+        "a title left as it was loses its starting point",
+        "        if note.title == before {\n            self.title_before = before;\n            return;",
+        "        if note.title == before {\n            return;",
+        ["an_undo_with_nothing_typed_keeps_the_titles_starting_point"],
+    ),
+    (
+        "a move under a title being typed is recorded as an edit",
+        "            self.refill_body();\n            self.refill_title();",
+        "            self.refill_body();",
+        ["leaving_a_title_after_undoing_its_typing_keeps_the_redo"],
+    ),
+    (
+        "a title and the search refuse what AltGr types",
+        "        if let Some(focus @ (Focus::Title(_) | Focus::Search)) = self.focus\n"
+        "            && textline::types_into_field(event)",
+        "        if let Some(focus @ (Focus::Title(_) | Focus::Search)) = self.focus\n"
+        "            && false",
+        ["a_title_and_the_search_take_altgr_letters_and_no_commands_letter"],
+    ),
+    (
+        "a title and the search type a command's letter",
+        "        if let Some(focus @ (Focus::Title(_) | Focus::Search)) = self.focus\n"
+        "            && textline::types_into_field(event)",
+        "        if let Some(focus @ (Focus::Title(_) | Focus::Search)) = self.focus\n"
+        "            && event.types_text()",
+        ["a_title_and_the_search_take_altgr_letters_and_no_commands_letter"],
+    ),
+    (
+        "Ctrl held with the Windows key is a chord",
+        "        if textline::is_ctrl_chord(m) {",
+        "        if m.ctrl && !m.alt {",
+        ["ctrl_with_the_windows_key_is_no_chord"],
     ),
 ]
 

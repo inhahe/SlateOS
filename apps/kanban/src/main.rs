@@ -4585,16 +4585,23 @@ fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
         return false;
     }
 
+    // Three kinds of key, each asked for as itself: Ctrl chords, not Ctrl
+    // held (AltGr arrives as Ctrl+Alt and types, and AltGr+D -- Ctrl+Alt+D
+    // -- deleted the chosen card); the views' Alt+1 to Alt+4, Alt alone; and
+    // every other key plain, nothing held but Shift -- a chord with Alt or
+    // the Windows key arrives carrying its key, and Alt+M moved a card.
+    let plain = textline::is_plain(key.modifiers);
+
     // Above the input router: naming a card takes typed text and `F1` is not
     // text, so a reader half-way through a title still gets the keys.
-    if key.key == Key::F1 {
+    if key.key == Key::F1 && plain {
         app.show_help = !app.show_help;
         return true;
     }
     if app.show_help {
         // Modal. Letting keys through would mean deleting a card the reader
         // cannot see.
-        if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
+        if plain && matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
             app.show_help = false;
         }
         return true;
@@ -4624,13 +4631,23 @@ fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
         return answered;
     }
 
+    if textline::is_ctrl_chord(key.modifiers) {
+        return handle_ctrl_chord(app, key);
+    }
+    if key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key {
+        return handle_alt_chord(app, key);
+    }
+    if !plain {
+        return false;
+    }
+
     // The board list is a *chooser*, and until this arm existed it was only a
     // list: `switch_board` had a test and no caller, so Alt+4 showed every
     // board and no key picked one.
     if app.view == View::BoardList {
         match key.key {
             // A new board. `add_board` had tests and no key.
-            Key::N if !key.modifiers.ctrl && !key.modifiers.alt => {
+            Key::N => {
                 app.input_mode = InputMode::NewBoardName;
                 app.input_buffer.clear();
                 return true;
@@ -4681,7 +4698,7 @@ fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
         }
 
         // N = new card
-        Key::N if !key.modifiers.ctrl => {
+        Key::N => {
             if app.view == View::Board {
                 app.input_mode = InputMode::NewCardTitle;
                 app.input_buffer.clear();
@@ -4695,39 +4712,6 @@ fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
             if app.view == View::Board {
                 app.input_mode = InputMode::NewColumnName;
                 app.input_buffer.clear();
-                return true;
-            }
-            false
-        }
-
-        // F = toggle filter bar
-        Key::F if key.modifiers.ctrl => {
-            app.show_filter_bar = !app.show_filter_bar;
-            if !app.show_filter_bar {
-                app.filter.clear();
-            }
-            true
-        }
-
-        // E = write the board out, O = read one back. NOT Ctrl+S, which
-        // this app bound to the search bar long before it had a door: the
-        // app's own vocabulary outranks consistency with its neighbours, and
-        // a second `Key::S if ctrl` arm would simply never be reached.
-        Key::E if key.modifiers.ctrl => {
-            let name = sanitise_board_name(&app.active_board().name);
-            app.picker.open_to_write(format!("{name}.json"));
-            true
-        }
-        Key::O if key.modifiers.ctrl => {
-            app.picker.open_to_read();
-            true
-        }
-
-        // S = toggle search
-        Key::S if key.modifiers.ctrl => {
-            if app.show_filter_bar {
-                app.input_mode = InputMode::SearchFilter;
-                app.input_buffer = app.filter.search_text.clone();
                 return true;
             }
             false
@@ -4813,51 +4797,8 @@ fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
             false
         }
 
-        // D = delete card
-        Key::D if key.modifiers.ctrl => {
-            if let Some(card_id) = app.selected_card {
-                let row = app.selected_row();
-                app.active_board_mut().delete_card(card_id);
-                app.choose_neighbour(row);
-                return true;
-            }
-            false
-        }
-
-        // A = archive card
-        Key::A if key.modifiers.ctrl && !key.modifiers.shift => {
-            if let Some(card_id) = app.selected_card {
-                let row = app.selected_row();
-                app.active_board_mut().archive_card(card_id);
-                app.choose_neighbour(row);
-                return true;
-            }
-            false
-        }
-
-        // 1-5 = switch view
-        Key::Num1 if key.modifiers.alt => {
-            app.view = View::Board;
-            true
-        }
-        Key::Num2 if key.modifiers.alt => {
-            app.view = View::Statistics;
-            true
-        }
-        Key::Num3 if key.modifiers.alt => {
-            app.view = View::Archive;
-            app.archive_cursor = 0;
-            true
-        }
-        Key::Num4 if key.modifiers.alt => {
-            app.view = View::BoardList;
-            // On the board that is open, which is where the user is.
-            app.board_cursor = app.active_board_idx;
-            true
-        }
-
         // P = cycle priority on selected card
-        Key::P if !key.modifiers.ctrl => {
+        Key::P => {
             if let Some(card_id) = app.selected_card
                 && let Some(card) = app.active_board_mut().cards.get_mut(&card_id)
             {
@@ -4926,7 +4867,7 @@ fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
         }
 
         // R = rename the chosen column, starting from its name.
-        Key::R if app.view == View::Board && !key.modifiers.ctrl && !key.modifiers.alt => {
+        Key::R if app.view == View::Board => {
             let Some(name) = app
                 .active_board()
                 .columns
@@ -4941,7 +4882,7 @@ fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
         }
 
         // Z = collapse or open the chosen column.
-        Key::Z if app.view == View::Board && !key.modifiers.ctrl => {
+        Key::Z if app.view == View::Board => {
             let col = app.selected_column;
             let Some(column) = app.active_board_mut().columns.get_mut(col) else {
                 return false;
@@ -4981,9 +4922,71 @@ fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
             true
         }
 
+        _ => false,
+    }
+}
+
+/// A Ctrl chord: Ctrl without Alt or the Windows key, Shift as it is.
+fn handle_ctrl_chord(app: &mut KanbanApp, key: &KeyEvent) -> bool {
+    match key.key {
+        // F = toggle filter bar
+        Key::F => {
+            app.show_filter_bar = !app.show_filter_bar;
+            if !app.show_filter_bar {
+                app.filter.clear();
+            }
+            true
+        }
+
+        // E = write the board out, O = read one back. NOT Ctrl+S, which
+        // this app bound to the search bar long before it had a door: the
+        // app's own vocabulary outranks consistency with its neighbours, and
+        // a second `Key::S if ctrl` arm would simply never be reached.
+        Key::E => {
+            let name = sanitise_board_name(&app.active_board().name);
+            app.picker.open_to_write(format!("{name}.json"));
+            true
+        }
+        Key::O => {
+            app.picker.open_to_read();
+            true
+        }
+
+        // S = toggle search
+        Key::S => {
+            if app.show_filter_bar {
+                app.input_mode = InputMode::SearchFilter;
+                app.input_buffer = app.filter.search_text.clone();
+                return true;
+            }
+            false
+        }
+
+        // D = delete card
+        Key::D => {
+            if let Some(card_id) = app.selected_card {
+                let row = app.selected_row();
+                app.active_board_mut().delete_card(card_id);
+                app.choose_neighbour(row);
+                return true;
+            }
+            false
+        }
+
+        // A = archive card
+        Key::A if !key.modifiers.shift => {
+            if let Some(card_id) = app.selected_card {
+                let row = app.selected_row();
+                app.active_board_mut().archive_card(card_id);
+                app.choose_neighbour(row);
+                return true;
+            }
+            false
+        }
+
         // With the filter bar open: Ctrl+P steps the priority shown, Ctrl+U
         // types an assignee, Ctrl+L steps the label shown.
-        Key::P if key.modifiers.ctrl && app.show_filter_bar => {
+        Key::P if app.show_filter_bar => {
             let all = Priority::all();
             app.filter.priority_filter = match app.filter.priority_filter {
                 None => all.first().copied(),
@@ -4995,12 +4998,12 @@ fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
             app.refit_choice();
             true
         }
-        Key::U if key.modifiers.ctrl && app.show_filter_bar => {
+        Key::U if app.show_filter_bar => {
             app.input_mode = InputMode::AssigneeFilter;
             app.input_buffer = app.filter.assignee_filter.clone();
             true
         }
-        Key::L if key.modifiers.ctrl && app.show_filter_bar => {
+        Key::L if app.show_filter_bar => {
             let labels: Vec<Id> = app.active_board().labels.iter().map(|l| l.id).collect();
             app.filter.label_filter = match app.filter.label_filter {
                 None => labels.first().copied(),
@@ -5012,7 +5015,32 @@ fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
             app.refit_choice();
             true
         }
+        _ => false,
+    }
+}
 
+/// A chord with Alt alone: the four views.
+fn handle_alt_chord(app: &mut KanbanApp, key: &KeyEvent) -> bool {
+    match key.key {
+        Key::Num1 => {
+            app.view = View::Board;
+            true
+        }
+        Key::Num2 => {
+            app.view = View::Statistics;
+            true
+        }
+        Key::Num3 => {
+            app.view = View::Archive;
+            app.archive_cursor = 0;
+            true
+        }
+        Key::Num4 => {
+            app.view = View::BoardList;
+            // On the board that is open, which is where the user is.
+            app.board_cursor = app.active_board_idx;
+            true
+        }
         _ => false,
     }
 }
@@ -5021,7 +5049,9 @@ fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
 /// for the rest (Escape, the view switches).
 fn handle_archive_key(app: &mut KanbanApp, key: &KeyEvent) -> Option<bool> {
     let count = app.active_board().archived_card_ids.len();
-    let plain = !key.modifiers.ctrl && !key.modifiers.alt;
+    // Plain is nothing held but Shift: the Windows key's chords were let
+    // through, and Windows+R restored a card.
+    let plain = textline::is_plain(key.modifiers);
     match key.key {
         Key::Up if plain => {
             let Some(to) = app.archive_cursor.checked_sub(1) else {
@@ -5069,7 +5099,8 @@ fn handle_archive_key(app: &mut KanbanApp, key: &KeyEvent) -> Option<bool> {
                 .min(app.active_board().archived_card_ids.len().saturating_sub(1));
             Some(true)
         }
-        Key::D if key.modifiers.ctrl => {
+        // A Ctrl chord, not Ctrl held: AltGr+D -- Ctrl+Alt -- types.
+        Key::D if textline::is_ctrl_chord(key.modifiers) => {
             let card_id = *app
                 .active_board()
                 .archived_card_ids
@@ -5093,7 +5124,8 @@ fn handle_archive_key(app: &mut KanbanApp, key: &KeyEvent) -> Option<bool> {
 /// checklist item and Space ticks it. Every one of these was modelled --
 /// the input modes, `toggle_checklist_item` -- and no key reached it.
 fn handle_detail_key(app: &mut KanbanApp, key: &KeyEvent) -> Option<bool> {
-    let plain = !key.modifiers.ctrl && !key.modifiers.alt;
+    // Nothing held but Shift: Windows+E began editing the title.
+    let plain = textline::is_plain(key.modifiers);
     let card_id = app.selected_card?;
     let card = app.active_board().cards.get(&card_id)?;
     let (mode, seed) = match key.key {
@@ -5184,6 +5216,16 @@ impl KanbanApp {
 
 /// Handle key events during input mode.
 fn handle_input_key(app: &mut KanbanApp, key: &KeyEvent) -> bool {
+    // What a key typed goes in -- AltGr's among it, and not a command's
+    // letter, which a chord carries: Ctrl+S typed an `s` into a card's title.
+    // The line's own keys are plain: Alt+Enter added the card.
+    if textline::types_into_field(key) {
+        app.input_buffer.extend(key.typed());
+        return true;
+    }
+    if !textline::is_plain(key.modifiers) {
+        return false;
+    }
     match key.key {
         Key::Escape => {
             app.input_mode = InputMode::None;
@@ -5272,13 +5314,7 @@ fn handle_input_key(app: &mut KanbanApp, key: &KeyEvent) -> bool {
             app.input_buffer.pop();
             true
         }
-        _ => {
-            if key.types_text() {
-                app.input_buffer.extend(key.typed());
-                return true;
-            }
-            false
-        }
+        _ => false,
     }
 }
 
@@ -5523,6 +5559,131 @@ mod tests {
         // `false`, which is correct and is not a missing binding.
         app.show_filter_bar = true;
         app
+    }
+
+    /// **Each kind of key is asked for as itself**: AltGr+D -- Ctrl+Alt, which
+    /// types -- deleted the chosen card as Ctrl+D does; AltGr+2 changed the
+    /// view as Alt+2 does; Alt+M and Windows+P moved the card and stepped its
+    /// priority, each chord carrying its key; Ctrl+S typed an `s` into a
+    /// card's title; and Alt+Enter added the card. Ctrl+D and Alt+2 still do
+    /// theirs.
+    #[test]
+    fn each_kind_of_key_is_asked_for_as_itself() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let key = |k: Key, text: &str, modifiers: Modifiers| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        };
+        let mut app = with_card();
+        let card = app.selected_card;
+        let column = app.selected_column;
+        let priority = |app: &KanbanApp| {
+            card.and_then(|id| app.active_board().cards.get(&id).map(|c| c.priority))
+        };
+        let before = priority(&app);
+        for (k, m) in [
+            (Key::D, altgr),
+            (Key::Num2, altgr),
+            (Key::M, Modifiers::alt()),
+            (Key::P, Modifiers::super_key()),
+            (Key::N, Modifiers::alt()),
+            (Key::Enter, Modifiers::alt()),
+            (Key::F1, Modifiers::alt()),
+            (Key::Escape, Modifiers::super_key()),
+        ] {
+            assert!(
+                !handle_key_event(&mut app, &key(k, "", m)),
+                "{m:?} {k:?} was taken"
+            );
+        }
+        assert_eq!(
+            app.selected_card, card,
+            "a chord deleted or let go of the card"
+        );
+        assert_eq!(app.selected_column, column, "a chord moved the card");
+        assert_eq!(priority(&app), before, "a chord stepped the priority");
+        assert_eq!(app.view, View::Board, "a chord changed the view");
+        assert_eq!(app.input_mode, InputMode::None, "a chord began typing");
+        assert!(!app.show_help, "a chord raised the keys");
+
+        // The input line types what a key typed; its own keys are plain.
+        assert!(handle_key_event(
+            &mut app,
+            &key(Key::N, "n", Modifiers::NONE)
+        ));
+        assert_eq!(
+            app.input_mode,
+            InputMode::NewCardTitle,
+            "control: N names a card"
+        );
+        handle_key_event(&mut app, &key(Key::S, "s", Modifiers::ctrl()));
+        handle_key_event(&mut app, &key(Key::X, "x", Modifiers::alt()));
+        handle_key_event(&mut app, &key(Key::S, "ś", altgr));
+        handle_key_event(&mut app, &key(Key::Enter, "", Modifiers::alt()));
+        assert_eq!(
+            app.input_buffer, "ś",
+            "the line typed a command or lost AltGr's ś"
+        );
+        assert_eq!(
+            app.input_mode,
+            InputMode::NewCardTitle,
+            "Alt+Enter added the card"
+        );
+        handle_key_event(&mut app, &key(Key::Escape, "", Modifiers::NONE));
+
+        // The open card's keys are plain too.
+        app.view = View::CardDetail;
+        assert!(!handle_key_event(
+            &mut app,
+            &key(Key::E, "", Modifiers::super_key())
+        ));
+        assert_eq!(
+            app.input_mode,
+            InputMode::None,
+            "Windows+E began editing the title"
+        );
+        app.view = View::Board;
+
+        // So are the archive's: Windows+R restored a card, and AltGr+D
+        // deleted one there as Ctrl+D does.
+        let archived = app.selected_card.expect("the card");
+        app.active_board_mut().archive_card(archived);
+        app.view = View::Archive;
+        app.archive_cursor = 0;
+        for (k, m) in [(Key::R, Modifiers::super_key()), (Key::D, altgr)] {
+            handle_key_event(&mut app, &key(k, "", m));
+        }
+        assert_eq!(
+            app.active_board().archived_card_ids,
+            vec![archived],
+            "a chord restored or deleted the archived card"
+        );
+        app.active_board_mut().restore_card(archived);
+        app.selected_card = Some(archived);
+        app.selected_column = column;
+        app.view = View::Board;
+
+        // The chords themselves still work.
+        assert!(handle_key_event(
+            &mut app,
+            &key(Key::Num2, "", Modifiers::alt())
+        ));
+        assert_eq!(
+            app.view,
+            View::Statistics,
+            "Alt+2 no longer changes the view"
+        );
+        app.view = View::Board;
+        assert!(handle_key_event(
+            &mut app,
+            &key(Key::D, "", Modifiers::ctrl())
+        ));
+        assert_ne!(app.selected_card, card, "Ctrl+D no longer deletes");
     }
 
     /// **Every key the list advertises is one this program answers.**

@@ -57,8 +57,8 @@ MUTATIONS = [
     ),
     (
         "undo answers from the first page's history whatever page is showing",
-        "        if let Some(action) = self.current_page_mut().undo_stack.pop_back() {",
-        "        if let Some(action) = self.pages[0].undo_stack.pop_back() {",
+        "        if let Some(action) = self.current_page_mut().history.undo() {",
+        "        if let Some(action) = self.pages[0].history.undo() {",
         ["undo_acts_only_on_the_page_it_is_about"],
     ),
     (
@@ -69,8 +69,8 @@ MUTATIONS = [
     ),
     (
         "a change does not mark the board",
-        "        page.undo_stack.push_back(action);\n        self.dirty = true;\n",
-        "        page.undo_stack.push_back(action);\n",
+        "        self.current_page_mut().history.record(action);\n        self.dirty = true;\n",
+        "        self.current_page_mut().history.record(action);\n",
         [KEYS, CLOSE],
     ),
     (
@@ -170,6 +170,67 @@ MUTATIONS = [
         "        if let Some(note) = &self.status_message {",
         "        if let Some(note) = None::<&String> {",
         ["the_status_bar_says_what_the_last_save_did"],
+    ),
+    # -- each page's history as a tree, and the keys (C-Q24, §1416) --------------
+    (
+        "a journey takes its steps the wrong way",
+        "                Travel::Undo(action) => self.revert(&action),",
+        "                Travel::Undo(action) => self.apply_action_silent(&action),",
+        ["an_action_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"],
+    ),
+    (
+        "Alt+Z goes forward in time",
+        "        let steps = self.current_page_mut().history.earlier();",
+        "        let steps = self.current_page_mut().history.later();",
+        ["an_action_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"],
+    ),
+    (
+        "a journey does not mark the board",
+        "        self.dirty |= moved;",
+        "",
+        ["an_action_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"],
+    ),
+    (
+        "Alt+Z is not a key",
+        "        if event.key == Key::Z\n            && event.modifiers.alt",
+        "        if false\n            && event.modifiers.alt",
+        ["an_action_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"],
+    ),
+    (
+        "Alt+Shift+Z goes back as Alt+Z does",
+        "                self.later();",
+        "                self.earlier();",
+        ["an_action_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"],
+    ),
+    (
+        "AltGr is taken for Ctrl",
+        "        if event.modifiers.ctrl && !event.modifiers.alt {",
+        "        if event.modifiers.ctrl {",
+        ["altgr_z_does_not_undo"],
+    ),
+    (
+        "the history keeps ten actions more",
+        "const MAX_UNDO_STEPS: usize = 200;",
+        "const MAX_UNDO_STEPS: usize = 210;",
+        ["test_undo_stack_limit"],
+    ),
+    (
+        "a key held with Alt is the board's",
+        '        if (event.modifiers.alt && !event.modifiers.ctrl) || event.modifiers.super_key {',
+        '        if event.modifiers.super_key {',
+        ['a_key_held_with_alt_or_the_windows_key_is_not_the_boards'],
+    ),
+    (
+        "a key held with the Windows key is the board's",
+        '        if (event.modifiers.alt && !event.modifiers.ctrl) || event.modifiers.super_key {',
+        '        if event.modifiers.alt && !event.modifiers.ctrl {',
+        ['a_key_held_with_alt_or_the_windows_key_is_not_the_boards'],
+    ),
+    (
+        'AltGr is taken for Alt',
+        '        if (event.modifiers.alt && !event.modifiers.ctrl) || event.modifiers.super_key {',
+        '        if event.modifiers.alt || event.modifiers.super_key {',
+        ['a_key_held_with_alt_or_the_windows_key_is_not_the_boards'],
     ),
 ]
 

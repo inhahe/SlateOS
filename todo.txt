@@ -56578,7 +56578,16 @@ failed; no session started" instead of being let in with a warning. That is the
 correct behaviour for an expired password and the wrong reason for it, so if it
 shows up, check setuid before changing this code.
 
-## Games: read every word under themes that leave no room (lane E, 2026-09-28) -- NEXT
+## ~~Games: read every word under themes that leave no room (lane E, 2026-09-28)~~ -- DONE 2026-09-28
+
+**Done:** `gamechrome::legibility::looks()` -- the stock palettes and four
+themes a user can put together that sit at the palette's floor (soft text,
+light and dark; pale hues on light; deep hues on dark), each in both surface
+looks -- and every game's legibility test reads all twelve. It found words
+in five games, each moved for its ground: battleship's message bar, 2048's
+score values, hangman's keys, tic-tac-toe's winning marks and wordle's
+keys and header buttons. Reversi's score-bar row came back and is caught.
+The original entry, for the record:
 
 The games' legibility tests read the four stock looks (light and dark, bordered
 and card). Those palettes' text and hues read on every ground a game fills

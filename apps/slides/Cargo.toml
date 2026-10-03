@@ -16,8 +16,14 @@ oswindow = { path = "../../gui/window" }
 # The export replaces a file the user chose, and `fs::write` truncates
 # the target before writing it.
 safeio = { path = "../safeio" }
+
+# Whether a key types into a box or is a command: AltGr arrives as Ctrl+Alt,
+# and a command carries its letter as text.
+textline = { path = "../textline" }
 # "Unsaved changes -- save them?", asked the way every editor here asks it.
 unsaved = { path = "../unsaved" }
+# The undo history: the toolkit's tree, kept of whole decks (C-Q24).
+statehistory = { path = "../statehistory" }
 
 # A deck is kept as YAML, like everything else here a person might open in an
 # editor, and read back through the same library.

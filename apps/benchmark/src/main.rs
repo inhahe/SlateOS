@@ -1965,16 +1965,30 @@ impl BenchmarkApp {
     }
 
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        // Ctrl+E is the one chord, asked as a Ctrl chord: AltGr, which
+        // arrives as Ctrl+Alt, types € on E on a German keyboard, and
+        // exported. Every other binding is on the key itself and is taken
+        // only with nothing but Shift held -- a chord with Alt or the
+        // Windows key is the window's or the desktop's, and arrives carrying
+        // its key: Alt+2 opened the CPU tab.
+        let export = key.key == Key::E && textline::is_ctrl_chord(key.modifiers);
+        if !export && !textline::is_plain(key.modifiers) {
+            return EventResult::Ignored;
+        }
         if key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift) {
             self.show_help = !self.show_help;
             return EventResult::Consumed;
         }
         if self.show_help {
-            // Modal. F5 starts a run that takes over the window, and Ctrl+Q
-            // ends the program; neither should happen from behind a list.
+            // Modal. F5 starts a run that takes over the window, which
+            // should not happen from behind a list.
             if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
                 self.show_help = false;
             }
+            return EventResult::Consumed;
+        }
+        if export {
+            self.begin_export();
             return EventResult::Consumed;
         }
         match key.key {
@@ -1991,10 +2005,6 @@ impl BenchmarkApp {
             }
             Key::Tab if key.modifiers.shift => {
                 self.cycle_tab_backward();
-                EventResult::Consumed
-            }
-            Key::E if key.modifiers.ctrl => {
-                self.begin_export();
                 EventResult::Consumed
             }
             // Through `Tab::from_key`, so the digit a key opens and the
@@ -3386,11 +3396,12 @@ impl App for BenchmarkApp {
 
     fn on_event(&mut self, event: &Event) -> Response {
         // Ctrl+Q closes the window. Escape does not: here it clears the History
-        // tab's selection, which is what the key is already for.
+        // tab's selection, which is what the key is already for. A Ctrl
+        // chord, not Ctrl held: AltGr+Q -- Ctrl+Alt -- is a German `@`.
         if let Event::Key(key) = event
             && key.pressed
             && key.key == Key::Q
-            && key.modifiers.ctrl
+            && textline::is_ctrl_chord(key.modifiers)
         {
             return Response::Exit;
         }
@@ -5000,6 +5011,51 @@ mod tests {
     }
 
     /// Export asks where to put it, from either control.
+    /// **A key held with Ctrl, Alt or the Windows key is not the window's
+    /// unless it is a chord the window has**: Alt+2 opened the CPU tab and
+    /// Windows+F5 ran the suite, each chord arriving carrying its key. AltGr
+    /// -- Ctrl+Alt -- types € on E and @ on Q on a German keyboard, and
+    /// exported and quit; Ctrl+E and Ctrl+Q still do.
+    #[test]
+    fn only_the_windows_own_chords_are_taken_and_altgr_is_not_one() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let mut app = app_with_history();
+        app.active_tab = Tab::Overview;
+        let runs = app.history.len();
+        for held in [
+            Modifiers::ctrl(),
+            Modifiers::alt(),
+            Modifiers::super_key(),
+            altgr,
+        ] {
+            for key in [Key::Num2, Key::F5, Key::F1, Key::Tab, Key::End] {
+                assert_eq!(
+                    app.handle_event(&Event::Key(probe::press_with(key, held))),
+                    EventResult::Ignored,
+                    "{held:?} {key:?} was taken"
+                );
+            }
+        }
+        assert_eq!(app.active_tab, Tab::Overview, "a chord changed the tab");
+        assert_eq!(app.history.len(), runs, "a chord ran the suite");
+        assert!(!app.show_help, "a chord raised the keys");
+
+        for held in [altgr, Modifiers::alt(), Modifiers::super_key()] {
+            app.handle_event(&Event::Key(probe::press_with(Key::E, held)));
+            assert!(!app.picker.is_open(), "{held:?}+E exported");
+            assert_ne!(
+                app.on_event(&Event::Key(probe::press_with(Key::Q, held))),
+                Response::Exit,
+                "{held:?}+Q closed the window"
+            );
+        }
+        app.handle_event(&ctrl(Key::E));
+        assert!(app.picker.is_open(), "Ctrl+E no longer exports");
+    }
+
     #[test]
     fn both_export_controls_open_the_picker() {
         let mut app = app_with_history();

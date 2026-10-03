@@ -10,6 +10,11 @@ cannot take answers `Handled`, not `Changed`); and a paste that leaves control c
 out, as `insert_text` types (a paste of nothing else keeps the selection). A copy or cut is
 on `clipboard()` afterwards, for a window that shares one clipboard between fields.
 `textline::LineEdit::handled` is `edit_key(..) != KeyEdit::Unhandled`.
+**Lane E's move onto it waits** (2026-09-28) on
+`e-cf-a-toolkit-field-types-the-letter-of-a-shortcut-it-does-not-know.md`:
+`edit_key` types the letter a Ctrl, Alt or Windows-key chord carries on real
+hardware (Ctrl+K types `k`), which `textline` refuses, so moving now would
+bring that into every field moved.
 Previously: open — nothing in lane E is blocked. The copies are gone: since
 2026-09-26 the seven applications share one, the lane E crate `apps/textline`
 (below), which goes when this lands.

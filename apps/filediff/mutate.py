@@ -30,8 +30,8 @@ CTRL_D = "ctrl_d_asks_for_the_left_folder_then_the_right"
 MUTATIONS = [
     (
         "Ctrl+D compares nothing",
-        "            Key::D if key.modifiers.ctrl => {",
-        "            Key::D if key.modifiers.ctrl && false => {",
+        "            Key::D => {\n                self.choose_folders();",
+        "            Key::D if false => {\n                self.choose_folders();",
         [CTRL_D],
     ),
     (
@@ -66,9 +66,69 @@ MUTATIONS = [
     ),
     (
         "Escape does not go back to the folders",
-        "        if key.key == Key::Escape && self.from_folders && self.dir_compare.is_some() {",
-        "        if key.key == Key::Escape && self.from_folders && self.dir_compare.is_some() && false {",
+        "        if key.key == Key::Escape && plain && self.from_folders && self.dir_compare.is_some() {",
+        "        if key.key == Key::Escape && plain && self.from_folders && self.dir_compare.is_some() && false {",
         [PAIR],
+    ),
+    (
+        'a chord raises the keys',
+        '        if key.key == Key::F1 && plain {',
+        '        if key.key == Key::F1 {',
+        ['each_kind_of_key_is_asked_for_as_itself'],
+    ),
+    (
+        'a chord puts the list of keys away',
+        '        if key.key == Key::Escape && plain && self.show_help {',
+        '        if key.key == Key::Escape && self.show_help {',
+        ['each_kind_of_key_is_asked_for_as_itself'],
+    ),
+    (
+        'a chord works the folder view',
+        '            && plain\n            && let Some(answered) = self.handle_folder_key(key)',
+        '            && let Some(answered) = self.handle_folder_key(key)',
+        ['each_kind_of_key_is_asked_for_as_itself'],
+    ),
+    (
+        'AltGr is taken for Ctrl',
+        '        if textline::is_ctrl_chord(key.modifiers) {\n            return self.handle_ctrl_chord(key);',
+        '        if key.modifiers.ctrl && !key.modifiers.super_key {\n            return self.handle_ctrl_chord(key);',
+        ['each_kind_of_key_is_asked_for_as_itself'],
+    ),
+    (
+        'AltGr is taken for Alt',
+        '        if key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key {',
+        '        if key.modifiers.alt && !key.modifiers.super_key {',
+        ['each_kind_of_key_is_asked_for_as_itself'],
+    ),
+    (
+        'a chord works the comparison',
+        '        if !plain {\n            return EventResult::Ignored;\n        }\n',
+        '',
+        ['each_kind_of_key_is_asked_for_as_itself'],
+    ),
+    (
+        "AltGr+I toggles the search's case",
+        '        if key.key == Key::I && textline::is_ctrl_chord(key.modifiers) {',
+        '        if key.key == Key::I && key.modifiers.ctrl {',
+        ['each_kind_of_key_is_asked_for_as_itself'],
+    ),
+    (
+        "a command's letter is typed into the search",
+        '        if textline::types_into_field(key) {',
+        '        if key.types_text() {',
+        ['each_kind_of_key_is_asked_for_as_itself'],
+    ),
+    (
+        'a chord works the search box',
+        '        if !textline::is_plain(key.modifiers) {\n            return EventResult::Ignored;\n        }\n',
+        '',
+        ['each_kind_of_key_is_asked_for_as_itself'],
+    ),
+    (
+        'a chord goes back to the folders',
+        '        if key.key == Key::Escape && plain && self.from_folders && self.dir_compare.is_some() {',
+        '        if key.key == Key::Escape && self.from_folders && self.dir_compare.is_some() {',
+        ['enter_opens_the_pair_and_escape_goes_back_to_the_folders'],
     ),
 ]
 

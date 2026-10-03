@@ -10,6 +10,8 @@ guitk = { path = "../../gui/toolkit" }
 # reached a screen and no key ever arrived.
 oswindow = { path = "../../gui/window" }
 randrange = { path = "../../randrange" }
+# `is_plain`: a key pressed with Alt or the Windows key is not the game's.
+textline = { path = "../textline" }
 
 [dev-dependencies]
 # `palette_check`: the window is drawn from the palette.

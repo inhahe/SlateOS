@@ -28,6 +28,8 @@ settingsfile = { path = "../../gui/settingsfile" }
 # four escapes, which the ledger, the workbook and the notes library share.
 textfmt = { path = "../../textfmt" }
 
+# `is_plain`, `is_ctrl_chord`, `types_into_field`: a chord is neither a contacts key nor typing.
+textline = { path = "../textline" }
 # "Save the contact being edited before closing?", asked the way every editor
 # here asks it.
 unsaved = { path = "../unsaved" }

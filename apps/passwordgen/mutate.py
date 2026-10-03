@@ -84,8 +84,8 @@ MUTATIONS = [
     ),
     (
         "the program's window keeps nothing",
-        "        self.keeps_settings = true;\n        let (rules, problems)",
-        "        self.keeps_settings = false;\n        let (rules, problems)",
+        "        self.keeps_settings = true;\n        self.read_settings();",
+        "        self.keeps_settings = false;\n        self.read_settings();",
         [KEPT],
     ),
     (
@@ -197,14 +197,14 @@ MUTATIONS = [
     ),
     (
         "Ctrl+R is typed",
-        "                Key::R if key.modifiers.ctrl => {",
+        "                Key::R if textline::is_ctrl_chord(key.modifiers) => {",
         "                Key::R if false => {",
         [DOTS],
     ),
     (
         "a control character is typed",
-        "                        || key.text.chars().any(char::is_control)\n",
-        "",
+        "                    if !textline::types_into_field(key) {",
+        "                    if key.text.is_empty() || textline::is_command(key.modifiers) {",
         [CONTROL],
     ),
     (
@@ -242,6 +242,98 @@ MUTATIONS = [
         "            let rules = if shown.is_empty() {",
         "            let rules = if false {",
         [STATUS],
+    ),
+    (
+        "AltGr+E opens the export dialog",
+        "        if textline::is_ctrl_chord(key.modifiers) && key.key == Key::E {",
+        "        if key.modifiers.ctrl && key.key == Key::E {",
+        ["altgr_types_into_the_analyser_and_runs_no_chord"],
+    ),
+    (
+        "AltGr+R reveals the password",
+        "                Key::R if textline::is_ctrl_chord(key.modifiers) => {",
+        "                Key::R if key.modifiers.ctrl => {",
+        ["altgr_types_into_the_analyser_and_runs_no_chord"],
+    ),
+    (
+        "the analyser refuses what AltGr types",
+        "                    if !textline::types_into_field(key) {",
+        "                    if !textline::types_into_field(key) || key.modifiers.ctrl {",
+        ["altgr_types_into_the_analyser_and_runs_no_chord"],
+    ),
+    (
+        "the analyser types a command's letter",
+        "                    if !textline::types_into_field(key) {",
+        "                    if !key.types_text() {",
+        ["altgr_types_into_the_analyser_and_runs_no_chord"],
+    ),
+    (
+        "a key held with Ctrl, Alt or the Windows key is a bare key",
+        "        if key.modifiers.ctrl || key.modifiers.alt || key.modifiers.super_key {\n"
+        "            return EventResult::Ignored;\n        }\n"
+        "        // On the Rules tab",
+        "        // On the Rules tab",
+        ["a_key_held_with_ctrl_alt_or_the_windows_key_is_no_bare_key"],
+    ),
+    (
+        "a key held with Ctrl is a bare key",
+        "        if key.modifiers.ctrl || key.modifiers.alt || key.modifiers.super_key {\n"
+        "            return EventResult::Ignored;\n        }\n"
+        "        // On the Rules tab",
+        "        if key.modifiers.alt || key.modifiers.super_key {\n"
+        "            return EventResult::Ignored;\n        }\n"
+        "        // On the Rules tab",
+        ["a_key_held_with_ctrl_alt_or_the_windows_key_is_no_bare_key"],
+    ),
+    (
+        "a key held with Alt is a bare key",
+        "        if key.modifiers.ctrl || key.modifiers.alt || key.modifiers.super_key {\n"
+        "            return EventResult::Ignored;\n        }\n"
+        "        // On the Rules tab",
+        "        if key.modifiers.ctrl || key.modifiers.super_key {\n"
+        "            return EventResult::Ignored;\n        }\n"
+        "        // On the Rules tab",
+        ["a_key_held_with_ctrl_alt_or_the_windows_key_is_no_bare_key"],
+    ),
+    (
+        "a key held with the Windows key is a bare key",
+        "        if key.modifiers.ctrl || key.modifiers.alt || key.modifiers.super_key {\n"
+        "            return EventResult::Ignored;\n        }\n"
+        "        // On the Rules tab",
+        "        if key.modifiers.ctrl || key.modifiers.alt {\n"
+        "            return EventResult::Ignored;\n        }\n"
+        "        // On the Rules tab",
+        ["a_key_held_with_ctrl_alt_or_the_windows_key_is_no_bare_key"],
+    ),
+    (
+        'an announced change is not read',
+        '            && group.file_name() == CONFIG_NAME\n        {\n            return if self.reread_settings() {',
+        '            && false\n        {\n            return if self.reread_settings() {',
+        ['a_rule_changed_in_one_window_reaches_the_others'],
+    ),
+    (
+        "every program's announcement is read as this one's",
+        '            && group.file_name() == CONFIG_NAME\n        {\n            return if self.reread_settings() {',
+        '            && !group.file_name().is_empty()\n        {\n            return if self.reread_settings() {',
+        ['a_rule_changed_in_one_window_reaches_the_others'],
+    ),
+    (
+        'a window that keeps no settings reads them',
+        '        if !self.keeps_settings {\n            return false;\n        }\n        let before = (self.policy.clone(), self.settings_problems.clone());',
+        '        let before = (self.policy.clone(), self.settings_problems.clone());',
+        ['a_rule_changed_in_one_window_reaches_the_others'],
+    ),
+    (
+        'a re-read says it changed nothing',
+        '        before != (self.policy.clone(), self.settings_problems.clone())',
+        '        false',
+        ['a_rule_changed_in_one_window_reaches_the_others'],
+    ),
+    (
+        'a re-read says it changed something when it did not',
+        '        before != (self.policy.clone(), self.settings_problems.clone())',
+        '        true',
+        ['a_rule_changed_in_one_window_reaches_the_others'],
     ),
 ]
 

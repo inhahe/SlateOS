@@ -31,7 +31,14 @@ the toolkit paints text on, and a panel's fill is one of them in either look
 panel moves nothing -- every "unmoved for its panel" mutation survived the
 sweeps in tictactoe, 2048, Connect Four and Simon -- so a panel's words are
 written in the roles as they are, and only a ground the game fills itself is
-a reason to move them. For the other applications: the same reader over
+a reason to move them.
+
+Since 2026-09-28 the games' tests read that under more than the stock
+palettes (`gamechrome::legibility::looks()`): four themes a user can put
+together that sit at the palette's 4.5:1 floor on the page -- soft text,
+light and dark, pale hues on light, deep hues on dark -- where the stock
+palettes' text and hues have room to spare on a game's own grounds. They
+found five more games' words, now moved. For the other applications: the same reader over
 each one's states -- the reader is in `apps/gamechrome` today, and an
 application that is not a game would need it moved or re-exported where it
 can reach it -- then the same two remedies.

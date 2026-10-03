@@ -189,3 +189,15 @@ remotedesktop	F8	ditto
 remotedesktop	F9	ditto
 remotedesktop	F10	ditto
 remotedesktop	F12	ditto
+
+# --- gamechrome: a library that reads keys for the games that call it ------
+# `HistoryKey::of` (apps/gamechrome/src/history.rs) reads the history's keys
+# -- Ctrl+Z, Ctrl+Y or Ctrl+Shift+Z, Alt+Z and Alt+Shift+Z (C-Q24,
+# design-decisions §1416) -- for the ten games that call it, and draws
+# nothing: there is no window of its own to name them in. Each of the ten
+# names them on its list of keys (F1): towers, game2048, connect4, gomoku,
+# klotski, rush, sokoban, solitaire, freecell, mahjong, every one with a
+# test that presses each row. Answered after those lists existed, not before
+# them.
+gamechrome	Y	a library that draws nothing: HistoryKey::of reads Ctrl+Y for the ten games that call it, and each names it on its list of keys
+gamechrome	Z	ditto -- Ctrl+Z, Ctrl+Shift+Z, Alt+Z and Alt+Shift+Z

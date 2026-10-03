@@ -761,6 +761,19 @@ impl CompassApp {
     }
 
     fn handle_key_compass(&mut self, event: &KeyEvent, shift: bool) {
+        // Ctrl+D is the one chord here, asked as a Ctrl chord: AltGr, which
+        // arrives as Ctrl+Alt, types a character on D on some layouts.
+        if event.key == Key::D && textline::is_ctrl_chord(event.modifiers) {
+            self.adjust_declination(if shift { 5.0 } else { 1.0 });
+            self.status = format!("Declination: {:+.0}", self.declination);
+            return;
+        }
+        // Every other key is taken plain: a chord with Alt or the Windows key
+        // is the window's or the desktop's, and arrives carrying its key --
+        // Alt+M dropped a waypoint.
+        if !textline::is_plain(event.modifiers) {
+            return;
+        }
         let step = if shift { 10.0 } else { 1.0 };
         match event.key {
             Key::Left => self.rotate(-step),
@@ -768,14 +781,8 @@ impl CompassApp {
             Key::Up => self.move_position(0.01, 0.0),
             Key::Down => self.move_position(-0.01, 0.0),
             Key::D => {
-                if event.modifiers.ctrl {
-                    // Ctrl+D: switch to magnetic declination adjust mode
-                    self.adjust_declination(if shift { 5.0 } else { 1.0 });
-                    self.status = format!("Declination: {:+.0}", self.declination);
-                } else {
-                    self.adjust_declination(if shift { -5.0 } else { -1.0 });
-                    self.status = format!("Declination: {:+.0}", self.declination);
-                }
+                self.adjust_declination(if shift { -5.0 } else { -1.0 });
+                self.status = format!("Declination: {:+.0}", self.declination);
             }
             Key::U => self.toggle_units(),
             Key::W => self.set_view(View::Waypoints),
@@ -823,6 +830,10 @@ impl CompassApp {
     }
 
     fn handle_key_waypoints(&mut self, event: &KeyEvent) {
+        // Taken plain, as the compass's: Alt+Delete removed a waypoint.
+        if !textline::is_plain(event.modifiers) {
+            return;
+        }
         match event.key {
             Key::Escape => self.set_view(View::Compass),
             Key::Up => {
@@ -853,6 +864,32 @@ impl CompassApp {
     }
 
     fn handle_key_coord_entry(&mut self, event: &KeyEvent) {
+        // A key that typed something goes into the field -- AltGr's among
+        // it, and not a command's letter, which a chord carries: Alt+5 typed
+        // a 5 into a latitude.
+        if textline::types_into_field(event) {
+            let field = self.active_coord_field;
+            // What the keyboard *produced*, not where the key sits. The old
+            // route was a `key_to_char` table mapping `Key::Num1` to `'1'`,
+            // which is a claim about a US layout: on any other one the digits
+            // and the minus sign are elsewhere, and a coordinate could not be
+            // typed at all. It also ignored shift, so its own table could not
+            // have produced a `+`.
+            for c in event.text.chars() {
+                if !accepts_char(field, c) {
+                    continue;
+                }
+                let buf = self.active_buffer();
+                if buf.chars().count() < 16 {
+                    buf.push(c);
+                }
+            }
+            return;
+        }
+        // The form's own keys are taken plain: Alt+Enter added the waypoint.
+        if !textline::is_plain(event.modifiers) {
+            return;
+        }
         match event.key {
             Key::Escape => self.set_view(View::Compass),
             Key::Tab => self.active_coord_field = self.active_coord_field.next(),
@@ -862,25 +899,7 @@ impl CompassApp {
             Key::Backspace => {
                 self.active_buffer().pop();
             }
-            // Anything else that produced a character goes into the field.
-            _ => {
-                let field = self.active_coord_field;
-                // What the keyboard *produced*, not where the key sits. The
-                // old route was a `key_to_char` table mapping `Key::Num1` to
-                // `'1'`, which is a claim about a US layout: on any other one
-                // the digits and the minus sign are elsewhere, and a
-                // coordinate could not be typed at all. It also ignored shift,
-                // so its own table could not have produced a `+`.
-                for c in event.text.chars() {
-                    if !accepts_char(field, c) {
-                        continue;
-                    }
-                    let buf = self.active_buffer();
-                    if buf.chars().count() < 16 {
-                        buf.push(c);
-                    }
-                }
-            }
+            _ => {}
         }
     }
 
@@ -2777,6 +2796,75 @@ mod tests {
         let event = Event::Key(make_key_event(Key::D, false, true));
         app.handle_event(&event, SIZE);
         assert!((app.declination - 1.0).abs() < f64::EPSILON);
+    }
+
+    /// **A key held with Alt or the Windows key is not the compass's, AltGr
+    /// is not Ctrl, and a field types what was typed**: Alt+M dropped a
+    /// waypoint, Alt+Delete removed one, AltGr+D moved the declination as
+    /// Ctrl+D does, and Alt+5 typed a 5 into a latitude.
+    #[test]
+    fn a_key_held_with_a_modifier_is_not_the_compasss() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let held = |key: Key, text: &str, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key,
+                pressed: true,
+                modifiers,
+                text: text.to_owned(),
+            })
+        };
+        let mut app = default_app();
+        let heading = app.heading;
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for key in [Key::M, Key::D, Key::U, Key::Right, Key::W, Key::Num1] {
+                app.handle_event(&held(key, "", m), SIZE);
+            }
+        }
+        assert!(app.waypoints.is_empty(), "a chord dropped a waypoint");
+        assert!(
+            app.declination.abs() < f64::EPSILON,
+            "a chord moved the declination"
+        );
+        assert!(
+            (app.heading - heading).abs() < f64::EPSILON,
+            "a chord turned the compass"
+        );
+        assert_eq!(app.view, View::Compass, "a chord changed the view");
+
+        app.add_waypoint_at_current_position();
+        app.set_view(View::Waypoints);
+        app.selected_waypoint = Some(0);
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            app.handle_event(&held(Key::Delete, "", m), SIZE);
+            app.handle_event(&held(Key::Escape, "", m), SIZE);
+        }
+        assert_eq!(app.waypoints.len(), 1, "a chord removed the waypoint");
+        assert_eq!(app.view, View::Waypoints, "a chord left the list");
+
+        app.set_view(View::CoordinateEntry);
+        app.active_coord_field = CoordField::Latitude;
+        app.handle_event(&held(Key::Num5, "5", Modifiers::alt()), SIZE);
+        app.handle_event(&held(Key::Num5, "5", Modifiers::super_key()), SIZE);
+        app.handle_event(&held(Key::Enter, "", Modifiers::alt()), SIZE);
+        assert_eq!(app.entry_lat_buf, "", "a command's letter was typed");
+        assert_eq!(app.view, View::CoordinateEntry, "Alt+Enter took the form");
+        app.handle_event(&held(Key::Num5, "5", altgr), SIZE);
+        assert_eq!(app.entry_lat_buf, "5", "AltGr's 5 was not typed");
+        // The form's own keys are plain: Alt+Backspace deletes nothing, and
+        // Alt+Escape and Alt+Tab leave the form and the field as they are.
+        app.handle_event(&held(Key::Backspace, "", Modifiers::alt()), SIZE);
+        app.handle_event(&held(Key::Tab, "", Modifiers::alt()), SIZE);
+        app.handle_event(&held(Key::Escape, "", Modifiers::alt()), SIZE);
+        assert_eq!(app.entry_lat_buf, "5", "Alt+Backspace deleted");
+        assert_eq!(
+            app.active_coord_field,
+            CoordField::Latitude,
+            "Alt+Tab moved on"
+        );
+        assert_eq!(app.view, View::CoordinateEntry, "Alt+Escape left the form");
     }
 
     // ── Waypoint list navigation tests ──────────────────────────────

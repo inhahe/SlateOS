@@ -1143,6 +1143,28 @@ impl SysMonitorState {
             return self.handle_filter_key(key);
         }
 
+        // A Ctrl chord, not Ctrl held: AltGr arrives as Ctrl+Alt.
+        if textline::is_ctrl_chord(key.modifiers) {
+            return match key.key {
+                Key::F => {
+                    self.filter_focused = true;
+                    EventResult::Consumed
+                }
+                Key::R => {
+                    self.cycle_refresh_interval();
+                    EventResult::Consumed
+                }
+                _ => EventResult::Ignored,
+            };
+        }
+        // Every other key is taken plain, nothing held but Shift: a chord with
+        // Alt or the Windows key is the window's or the desktop's and arrives
+        // carrying its key -- Alt+Shift+Tab, the desktop's, changed the tab,
+        // and Alt+Escape cleared the filter.
+        if !textline::is_plain(key.modifiers) {
+            return EventResult::Ignored;
+        }
+
         match key.key {
             // Tab cycling
             // One arm, and the digit-to-tab relation lives in `Tab::from_digit`
@@ -1183,14 +1205,6 @@ impl SysMonitorState {
             Key::F5 => {
                 self.refresh();
                 self.status_message = "Refreshed".to_string();
-                EventResult::Consumed
-            }
-            Key::F if key.modifiers.ctrl => {
-                self.filter_focused = true;
-                EventResult::Consumed
-            }
-            Key::R if key.modifiers.ctrl => {
-                self.cycle_refresh_interval();
                 EventResult::Consumed
             }
             // Navigation
@@ -1241,17 +1255,22 @@ impl SysMonitorState {
     }
 
     /// Handle keyboard input when the filter box is focused.
+    ///
+    /// Its own keys are plain, and it types only what was typed: a command
+    /// arrives carrying its letter, so Alt+X put an `x` in the filter.
+    /// Backspace is refused only to Alt and the Windows key.
     fn handle_filter_key(&mut self, key: &KeyEvent) -> EventResult {
         match key.key {
-            Key::Escape | Key::Enter => {
+            Key::Escape | Key::Enter if textline::is_plain(key.modifiers) => {
                 self.filter_focused = false;
                 EventResult::Consumed
             }
-            Key::Backspace => {
+            Key::Backspace if !textline::is_alt_or_windows_chord(key.modifiers) => {
                 self.filter_text.pop();
                 self.rebuild_visible_list();
                 EventResult::Consumed
             }
+            _ if !textline::types_into_field(key) => EventResult::Consumed,
             _ => {
                 let allowed: String = key
                     .typed()
@@ -3677,6 +3696,90 @@ mod tests {
             m.cpu_history.len() > before || before == m.cpu_history.capacity(),
             "three refreshes added no samples (was {before}, now {})",
             m.cpu_history.len()
+        );
+    }
+
+    /// **A key held with Alt or the Windows key is not the monitor's, and
+    /// AltGr is not Ctrl**: each such chord is the window's or the desktop's
+    /// and arrives carrying its key -- Alt+Shift+Tab, the desktop's, changed
+    /// the tab, Alt+End moved the selection, Alt+Escape cleared the filter
+    /// and Alt+X typed an `x` into it; and AltGr+F focused the filter as
+    /// Ctrl+F does.
+    ///
+    /// Each key is asserted as it is pressed. Delete is left out: it sends a
+    /// signal.
+    #[test]
+    fn a_chord_is_neither_a_monitor_key_nor_typing() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let shift_alt = Modifiers {
+            shift: true,
+            ..Modifiers::alt()
+        };
+        let chord = |k: Key, text: &str, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: text.to_owned(),
+            })
+        };
+        let mut m = running();
+        m.filter_text = String::from("a");
+        m.rebuild_visible_list();
+        m.selected_index = Some(0);
+        let state = |m: &SysMonitorState| {
+            (
+                (m.active_tab, m.selected_index, m.scroll_offset),
+                (
+                    m.filter_text.clone(),
+                    m.filter_focused,
+                    m.context_menu.is_some(),
+                ),
+                (m.refresh_interval, m.status_message.clone()),
+            )
+        };
+        let before = state(&m);
+        for held in [Modifiers::alt(), Modifiers::super_key(), altgr, shift_alt] {
+            for k in [
+                Key::Tab,
+                Key::Num2,
+                Key::F5,
+                Key::PageDown,
+                Key::End,
+                Key::Down,
+                Key::Escape,
+                Key::F,
+                Key::R,
+            ] {
+                assert_eq!(
+                    m.handle_event(&chord(k, "", held)),
+                    EventResult::Ignored,
+                    "{held:?} {k:?} was taken"
+                );
+                assert_eq!(state(&m), before, "{held:?} {k:?} changed the monitor");
+            }
+        }
+
+        // The filter types what was typed, AltGr's `@` among it.
+        m.handle_event(&chord(Key::F, "f", Modifiers::ctrl()));
+        assert!(m.filter_focused, "control: Ctrl+F reaches the filter");
+        m.handle_event(&chord(Key::X, "x", Modifiers::alt()));
+        m.handle_event(&chord(Key::X, "x", Modifiers::super_key()));
+        m.handle_event(&chord(Key::F, "f", Modifiers::ctrl()));
+        m.handle_event(&chord(Key::Q, "@", altgr));
+        m.handle_event(&chord(Key::Backspace, "", Modifiers::alt()));
+        m.handle_event(&chord(Key::Enter, "", Modifiers::alt()));
+        m.handle_event(&chord(Key::Escape, "", Modifiers::super_key()));
+        assert_eq!(
+            m.filter_text, "a@",
+            "the filter typed a command's letter, or lost AltGr's"
+        );
+        assert!(
+            m.filter_focused,
+            "a chorded Enter or Escape left the filter"
         );
     }
 

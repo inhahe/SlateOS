@@ -37,6 +37,54 @@ MUTATIONS = [
         "        ((self.content.h - 60.0) / rows).clamp(18.0, 34.0)",
         [SOUND],
     ),
+    (
+        "the task name refuses what AltGr types",
+        "                if !textline::types_into_field(key) {",
+        "                if !textline::types_into_field(key) || key.modifiers.ctrl {",
+        ["the_task_name_takes_altgr_letters_and_no_commands_letter"],
+    ),
+    (
+        "the task name types a command's letter",
+        "                if !textline::types_into_field(key) {",
+        "                if !key.types_text() {",
+        ["the_task_name_takes_altgr_letters_and_no_commands_letter"],
+    ),
+    (
+        "a key held with Ctrl, Alt or the Windows key is a bare key",
+        "        if key.modifiers.ctrl || key.modifiers.alt || key.modifiers.super_key {",
+        "        if false {",
+        ["a_key_held_with_ctrl_alt_or_the_windows_key_is_no_bare_key"],
+    ),
+    (
+        "a key held with Ctrl is a bare key",
+        "        if key.modifiers.ctrl || key.modifiers.alt || key.modifiers.super_key {",
+        "        if key.modifiers.alt || key.modifiers.super_key {",
+        ["a_key_held_with_ctrl_alt_or_the_windows_key_is_no_bare_key"],
+    ),
+    (
+        "a key held with Alt is a bare key",
+        "        if key.modifiers.ctrl || key.modifiers.alt || key.modifiers.super_key {",
+        "        if key.modifiers.ctrl || key.modifiers.super_key {",
+        ["a_key_held_with_ctrl_alt_or_the_windows_key_is_no_bare_key"],
+    ),
+    (
+        "a key held with the Windows key is a bare key",
+        "        if key.modifiers.ctrl || key.modifiers.alt || key.modifiers.super_key {",
+        "        if key.modifiers.ctrl || key.modifiers.alt {",
+        ["a_key_held_with_ctrl_alt_or_the_windows_key_is_no_bare_key"],
+    ),
+    (
+        "Ctrl+Home and Ctrl+End are not the log's",
+        "            && let Some(movement) = ListKey::of(key)",
+        "            && !key.modifiers.ctrl\n            && let Some(movement) = ListKey::of(key)",
+        ["ctrl_home_and_ctrl_end_are_the_ends_of_the_log"],
+    ),
+    (
+        "End does not reach the bottom of the log",
+        "                ListKey::Last => self.log_scroll = self.max_log_scroll(),",
+        "                ListKey::Last => {}",
+        ["ctrl_home_and_ctrl_end_are_the_ends_of_the_log", "the_page_keys_move_a_windowful"],
+    ),
 ]
 
 if __name__ == "__main__":

@@ -1105,8 +1105,10 @@ impl TicTacToe {
                     r.y + r.h / 2.0,
                     mark.symbol(),
                     size,
+                    // Moved for the lit cell: under a dark theme whose hues
+                    // are deep, the page's shade was 2.5:1 on it.
                     if winning {
-                        c.chrome.even
+                        Ink::on(c.chrome.even, &[c.chrome.lit]).at(size, true)
                     } else {
                         mark.color(c)
                     },
@@ -1547,26 +1549,6 @@ mod tests {
         }
     }
 
-    /// A light palette whose hues are the dark theme's pastels, in either
-    /// surface look: a theme a user can put together, whose hues are too
-    /// pale to read as they are, so that only a word in the palette's ink of
-    /// a hue reads. The stock light palette's hues are dark enough that a
-    /// raw one would pass.
-    fn pale_light(cards: bool) -> Palette {
-        let mut p = palette(true, cards);
-        let dark = Palette::for_mode(false);
-        p.blue = dark.blue;
-        p.green = dark.green;
-        p.red = dark.red;
-        p.yellow = dark.yellow;
-        p.peach = dark.peach;
-        p.mauve = dark.mauve;
-        p.teal = dark.teal;
-        p.lavender = dark.lavender;
-        p.sapphire = dark.sapphire;
-        p
-    }
-
     /// **The banner and the help sheet each have a ground of their own**,
     /// the toolkit's panel, in either look: under the bordered look a plain
     /// card has no fill, and their words would sit on the marks.
@@ -1635,19 +1617,7 @@ mod tests {
     #[test]
     fn every_text_reads_on_what_is_under_it_in_either_theme() {
         let mut bad = Vec::new();
-        let looks = LOOKS
-            .iter()
-            .map(|&(light, cards)| {
-                (
-                    format!("light: {light}, cards: {cards}"),
-                    palette(light, cards),
-                )
-            })
-            .chain(
-                [false, true]
-                    .map(|cards| (format!("pale light, cards: {cards}"), pale_light(cards))),
-            );
-        for (look, p) in looks {
+        for (look, p) in gamechrome::legibility::looks() {
             let off = guitk::button::paint(
                 &p,
                 guitk::button::Kind::Plain,

@@ -1534,12 +1534,20 @@ impl App {
         // chord nobody bound quietly raised the level floor. A chord means
         // something here or nothing at all, and the same thing while the
         // search box has the keyboard -- where `Ctrl+R` is exactly what
-        // someone typing a pattern reaches for.
-        if key.modifiers.ctrl {
+        // someone typing a pattern reaches for. Ctrl without Alt: AltGr
+        // arrives as Ctrl+Alt and types a letter -- `ł` is AltGr+L on a
+        // Polish keyboard -- which is no chord, and goes to the search box.
+        if textline::is_ctrl_chord(key.modifiers) {
             return self.handle_chord(key);
         }
         if self.search_focused {
             return self.handle_key_search(key);
+        }
+        // Any other key held with Alt or the Windows key is not this
+        // window's: the Windows key's are the desktop's, and Alt+W is not
+        // the Warn floor any more than Ctrl+W is.
+        if key.modifiers.alt || key.modifiers.super_key {
+            return EventResult::Ignored;
         }
         match key.key {
             // Only this entry's source, or every source again.
@@ -1652,10 +1660,12 @@ impl App {
                 EventResult::Consumed
             }
             _ => {
-                if key.text.is_empty() || key.modifiers.ctrl {
+                // What AltGr types goes in; a command's letter, which it
+                // carries as text, does not (`textline::types_into_field`).
+                if !textline::types_into_field(key) {
                     return EventResult::Ignored;
                 }
-                self.filter.search_query.push_str(&key.text);
+                self.filter.search_query.extend(key.typed());
                 self.update_search();
                 self.reanchor_selection();
                 EventResult::Consumed
@@ -4264,6 +4274,90 @@ mod tests {
         // And now the same key is a shortcut again.
         app.handle_event(&press(Key::W));
         assert_eq!(app.filter.min_level, LogLevel::Warn);
+    }
+
+    fn held(k: Key, modifiers: Modifiers, text: &str) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        })
+    }
+
+    /// Ctrl+Alt, as Windows and a remote client on it report `AltGr`.
+    const ALTGR: Modifiers = Modifiers {
+        shift: false,
+        ctrl: true,
+        alt: true,
+        super_key: false,
+    };
+
+    /// **`AltGr` types into the search box and runs no chord.** `AltGr`
+    /// arrives as Ctrl+Alt -- `ł` is `AltGr`+L and `ś` `AltGr`+S on a Polish
+    /// keyboard, `|` `AltGr`+W on a Hungarian one -- and every key held with
+    /// Ctrl went to the chords: `AltGr`+S hid the sources, `AltGr`+L the line
+    /// numbers, `AltGr`+W closed the tab, and the search box saw none of
+    /// them.
+    #[test]
+    fn altgr_types_into_the_search_box_and_runs_no_chord() {
+        let mut app = App::with_sample();
+        let tabs = app.files.len();
+        let shown = (app.show_source, app.show_line_numbers);
+        app.handle_event(&press(Key::Slash));
+        for (k, text) in [(Key::L, "\u{142}"), (Key::S, "\u{15b}"), (Key::W, "|")] {
+            assert_eq!(
+                app.handle_event(&held(k, ALTGR, text)),
+                EventResult::Consumed,
+                "AltGr+{k:?} was not typed"
+            );
+        }
+        assert_eq!(app.filter.search_query, "\u{142}\u{15b}|");
+        assert_eq!(app.files.len(), tabs, "AltGr+W closed a tab");
+        assert_eq!(
+            (app.show_source, app.show_line_numbers),
+            shown,
+            "AltGr ran a display chord"
+        );
+        // Outside the box it is nothing at all.
+        app.handle_event(&press(Key::Enter));
+        assert_eq!(
+            app.handle_event(&held(Key::W, ALTGR, "|")),
+            EventResult::Ignored
+        );
+        assert_eq!(app.files.len(), tabs, "AltGr+W closed a tab");
+    }
+
+    /// **A command types nothing into the search box, and a key held with
+    /// Alt or the Windows key is no shortcut.** A command carries its letter
+    /// as text on a real machine -- Ctrl+K arrives as `k`, Alt+F as `f` --
+    /// and the box typed Alt's and the Windows key's; outside it, Alt+W and
+    /// Windows+W raised the floor to Warn, as W does.
+    #[test]
+    fn a_command_types_nothing_and_alt_or_windows_is_no_shortcut() {
+        let mut app = App::with_sample();
+        let floor = app.filter.min_level;
+        assert_ne!(floor, LogLevel::Warn, "the test needs W to move the floor");
+        for modifiers in [Modifiers::alt(), Modifiers::super_key()] {
+            assert_eq!(
+                app.handle_event(&held(Key::W, modifiers, "w")),
+                EventResult::Ignored,
+                "{modifiers:?}+W"
+            );
+            assert_eq!(
+                app.filter.min_level, floor,
+                "{modifiers:?}+W moved the floor"
+            );
+        }
+        app.handle_event(&press(Key::Slash));
+        for (k, modifiers, text) in [
+            (Key::K, Modifiers::ctrl(), "k"),
+            (Key::F, Modifiers::alt(), "f"),
+            (Key::E, Modifiers::super_key(), "e"),
+        ] {
+            app.handle_event(&held(k, modifiers, text));
+        }
+        assert_eq!(app.filter.search_query, "", "a command's letter was typed");
     }
 
     #[test]

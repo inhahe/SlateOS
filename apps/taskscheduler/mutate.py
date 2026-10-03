@@ -268,7 +268,7 @@ MUTATIONS = [
         "                    x: PADDING,\n"
         "                    w: width - PADDING * 2.0,\n"
         "                    size: FONT_SIZE_SMALL,\n"
-        "                    color: COLOR_SUBTEXT,\n"
+        "                    color: self.palette.subtext0,\n"
         "                    weight: FontWeightHint::Regular,\n"
         "                },\n"
         "                format!(\"{hidden} more\"),\n"
@@ -291,7 +291,7 @@ MUTATIONS = [
         "                    x: PADDING,\n"
         "                    w: width - PADDING * 2.0,\n"
         "                    size: FONT_SIZE_SMALL,\n"
-        "                    color: COLOR_SUBTEXT,\n"
+        "                    color: self.palette.subtext0,\n"
         "                    weight: FontWeightHint::Regular,\n"
         "                },\n"
         "                format!(\"{hidden} more\"),\n"
@@ -324,7 +324,7 @@ MUTATIONS = [
         "                x: PADDING,\n"
         "                w: width - PADDING * 2.0,\n"
         "                size: FONT_SIZE_SMALL,\n"
-        "                color: COLOR_YELLOW,\n"
+        "                color: self.palette.yellow,\n"
         "                weight: FontWeightHint::Regular,\n"
         "            },\n"
         "            message.to_string(),\n"
@@ -333,7 +333,7 @@ MUTATIONS = [
         "            x: PADDING,\n"
         "            y: band.y + (bar_h - FONT_SIZE_SMALL) / 2.0,\n"
         "            text: message.to_string(),\n"
-        "            color: COLOR_YELLOW,\n"
+        "            color: self.palette.yellow,\n"
         "            font_size: FONT_SIZE_SMALL,\n"
         "            font_weight: FontWeightHint::Regular,\n"
         "            max_width: Some(width - PADDING * 2.0),\n"
@@ -436,6 +436,108 @@ MUTATIONS = [
         "            (centre_line(rect, FONT_SIZE), Some((text_x, rect.w)))\n"
         "        {",
         CONTAINMENT,
+    ),
+    (
+        "the form refuses what AltGr types",
+        "                if !textline::types_into_field(key) {",
+        "                if !textline::types_into_field(key) || key.modifiers.ctrl {",
+        ["the_form_takes_altgr_letters_and_no_commands_letter"],
+    ),
+    (
+        "the form types a command's letter",
+        "                if !textline::types_into_field(key) {",
+        "                if !key.types_text() {",
+        ["the_form_takes_altgr_letters_and_no_commands_letter"],
+    ),
+    (
+        "a key held with Alt or the Windows key is the main window's",
+        "        if key.modifiers.alt || key.modifiers.super_key {\n            return false;\n        }\n        if let Some(movement) = ListKey::of(key) {",
+        "        if let Some(movement) = ListKey::of(key) {",
+        ["a_key_held_with_alt_or_the_windows_key_is_not_the_main_windows"],
+    ),
+    (
+        "a key held with the Windows key is the main window's",
+        "        if key.modifiers.alt || key.modifiers.super_key {\n            return false;\n        }\n        if let Some(movement) = ListKey::of(key) {",
+        "        if key.modifiers.alt {\n            return false;\n        }\n        if let Some(movement) = ListKey::of(key) {",
+        ["a_key_held_with_alt_or_the_windows_key_is_not_the_main_windows"],
+    ),
+    (
+        'the lists read no list key',
+        '        if let Some(movement) = ListKey::of(key) {',
+        '        if let Some(movement) = ListKey::of(key).filter(|_| false) {',
+        ['the_task_list_moves_as_every_list_does', 'the_history_scrolls_with_the_list_keys'],
+    ),
+    (
+        "the history takes a list key as the task list's",
+        '        if self.tab == UiTab::History {',
+        '        if false {',
+        ['the_history_scrolls_with_the_list_keys'],
+    ),
+    (
+        'Up does not scroll the history',
+        '                ListKey::Previous => from.saturating_sub(1),',
+        '                ListKey::Previous => from,',
+        ['the_history_scrolls_with_the_list_keys'],
+    ),
+    (
+        'Down does not scroll the history',
+        '                ListKey::Next => from.saturating_add(1).min(last_top),',
+        '                ListKey::Next => from,',
+        ['the_history_scrolls_with_the_list_keys'],
+    ),
+    (
+        'the history scrolls past its end',
+        '                ListKey::Next => from.saturating_add(1).min(last_top),',
+        '                ListKey::Next => from.saturating_add(1),',
+        ['the_history_scrolls_with_the_list_keys'],
+    ),
+    (
+        'Page Up scrolls the history one row',
+        '                ListKey::PageUp => from.saturating_sub(page),',
+        '                ListKey::PageUp => from.saturating_sub(1),',
+        ['the_history_scrolls_with_the_list_keys'],
+    ),
+    (
+        'Page Down scrolls the history one row',
+        '                ListKey::PageDown => from.saturating_add(page).min(last_top),',
+        '                ListKey::PageDown => from.saturating_add(1).min(last_top),',
+        ['the_history_scrolls_with_the_list_keys'],
+    ),
+    (
+        "Home does not reach the history's top",
+        '                ListKey::First => 0,',
+        '                ListKey::First => from,',
+        ['the_history_scrolls_with_the_list_keys'],
+    ),
+    (
+        "End does not reach the history's end",
+        '                ListKey::Last => last_top,',
+        '                ListKey::Last => from,',
+        ['the_history_scrolls_with_the_list_keys'],
+    ),
+    (
+        'a page of either list is one row',
+        '        let page = self.list_capacity();',
+        '        let page = 1;',
+        ['the_task_list_moves_as_every_list_does', 'the_history_scrolls_with_the_list_keys'],
+    ),
+    (
+        'a page counts rows the list does not show',
+        '        scroll_window::capacity(ROW_HEIGHT, content.h - ROW_HEIGHT - LIST_MORE_HEIGHT)\n',
+        '        scroll_window::capacity(ROW_HEIGHT, content.h)\n',
+        ['the_task_list_moves_as_every_list_does'],
+    ),
+    (
+        'a task chosen from the keyboard is not brought on screen',
+        '        self.reveal_row(next);\n        changed ||',
+        '        changed ||',
+        ['the_task_list_moves_as_every_list_does'],
+    ),
+    (
+        'bringing the chosen task on screen is not a change',
+        '        changed || scrolled != self.task_list_scroll',
+        '        changed',
+        ['the_task_list_moves_as_every_list_does'],
     ),
 ]
 

@@ -3314,25 +3314,37 @@ fn handle_key_event(state: &mut DeviceManagerState, key: &KeyEvent) -> EventResu
         return EventResult::Ignored;
     }
 
+    // Every key but a Ctrl chord and what the search types is taken plain: a
+    // chord with Alt or the Windows key is the window's or the desktop's and
+    // arrives carrying its key -- Alt+Delete asked to uninstall the device.
+    let plain = textline::is_plain(key.modifiers);
+
     // Above the search box's branch, which takes the keyboard and returns.
     // Placed after it, the card could be raised from the tree and then not
     // dismissed while the search had focus.
-    if key.key == Key::F1 {
+    if key.key == Key::F1 && plain {
         state.show_help = !state.show_help;
         return EventResult::Consumed;
     }
     if state.show_help {
         // Modal. Delete uninstalls the selected device, and doing that from
         // behind a list somebody is reading is the reason nothing passes.
-        if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
+        if plain && matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
             state.show_help = false;
         }
         return EventResult::Consumed;
     }
 
-    // Search bar text input
+    // Search bar text input: what a key typed, AltGr's among it, and not a
+    // command's letter, which a chord carries -- Alt+X typed an `x`.
     if state.search_focused {
+        if textline::types_into_field(key) {
+            state.search_query.extend(key.typed());
+            state.apply_search_filter();
+            return EventResult::Consumed;
+        }
         match key.key {
+            _ if !plain => {}
             Key::Escape => {
                 state.search_focused = false;
                 return EventResult::Consumed;
@@ -3346,19 +3358,14 @@ fn handle_key_event(state: &mut DeviceManagerState, key: &KeyEvent) -> EventResu
                 state.search_focused = false;
                 return EventResult::Consumed;
             }
-            _ => {
-                if key.types_text() {
-                    state.search_query.extend(key.typed());
-                    state.apply_search_filter();
-                    return EventResult::Consumed;
-                }
-            }
+            _ => {}
         }
         return EventResult::Consumed;
     }
 
-    // Global shortcuts
-    if key.modifiers.ctrl {
+    // Global shortcuts, as Ctrl chords: AltGr arrives as Ctrl+Alt and types,
+    // and AltGr+E -- a Polish `ę` -- exported the report.
+    if textline::is_ctrl_chord(key.modifiers) {
         match key.key {
             Key::F => {
                 state.search_focused = true;
@@ -3374,6 +3381,9 @@ fn handle_key_event(state: &mut DeviceManagerState, key: &KeyEvent) -> EventResu
             }
             _ => {}
         }
+    }
+    if !plain {
+        return EventResult::Ignored;
     }
 
     match key.key {
@@ -3770,6 +3780,61 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **A chord is neither a key of the window nor typing, and AltGr types**:
+    /// Alt+Delete asked to uninstall the selected device, Alt+Tab-like
+    /// chords changed the tab, AltGr+E -- a Polish `ę` -- exported the
+    /// report, and Alt+X typed an `x` into the search.
+    #[test]
+    fn a_chord_is_neither_a_key_of_the_window_nor_typing() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let key = |k: Key, text: &str, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: text.to_owned(),
+            })
+        };
+        let mut state = DeviceManagerState::new();
+        if !state.tree_nodes.is_empty() {
+            state.select_tree_node(0);
+        }
+        let (tab, selected) = (state.active_tab, state.selected_tree_index);
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for k in [Key::Delete, Key::Tab, Key::Down, Key::E, Key::F1] {
+                handle_event(&mut state, &key(k, "", m));
+            }
+        }
+        assert!(
+            state.notice.is_none(),
+            "a chord asked to uninstall: {:?}",
+            state.notice
+        );
+        assert_eq!(state.active_tab, tab, "a chord changed the tab");
+        assert_eq!(
+            state.selected_tree_index, selected,
+            "a chord moved the selection"
+        );
+        assert!(!state.picker.is_open(), "AltGr+E exported the report");
+        assert!(!state.show_help, "a chord raised the keys");
+
+        // The search types what a key typed; its own keys are plain.
+        handle_event(&mut state, &key(Key::F, "f", Modifiers::ctrl()));
+        assert!(state.search_focused, "control: Ctrl+F searches");
+        handle_event(&mut state, &key(Key::X, "x", Modifiers::alt()));
+        handle_event(&mut state, &key(Key::X, "x", Modifiers::super_key()));
+        handle_event(&mut state, &key(Key::Escape, "", Modifiers::alt()));
+        handle_event(&mut state, &key(Key::E, "ę", altgr));
+        assert!(state.search_focused, "Alt+Escape left the search");
+        assert_eq!(
+            state.search_query, "ę",
+            "the search typed a command or lost AltGr's ę"
+        );
     }
 
     /// **The card reaches the window, and nothing acts behind it.**

@@ -8,6 +8,8 @@ edition = "2024"
 gamechrome = { path = "../gamechrome" }
 guitk = { path = "../../gui/toolkit" }
 oswindow = { path = "../../gui/window" }
+# The undo history: the toolkit's tree, kept of whole games (C-Q24).
+statehistory = { path = "../statehistory" }
 
 [dev-dependencies]
 # `palette_check`: the window is drawn from the palette.

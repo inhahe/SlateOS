@@ -331,6 +331,12 @@ MUTATIONS = [
         "        let col = here.rem_euclid(side).saturating_add(dx);",
         ["an_arrow_at_the_edge_is_a_wall"],
     ),
+    (
+        "the winning line's marks are the page's shade on their lit cells",
+        "                        Ink::on(c.chrome.even, &[c.chrome.lit]).at(size, true)",
+        "                        c.chrome.even",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
 ]
 
 if __name__ == "__main__":

@@ -37,6 +37,7 @@ use guitk::style::CornerRadii;
 use guitk::text::{self, TextCursor};
 use guitk::textarea::{self, TextArea};
 use guitk::textinput::KeyEdit;
+use guitk::undo::{Travel, UndoHistory};
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 
@@ -352,64 +353,11 @@ pub enum EditAction {
     },
 }
 
-/// Undo/redo history for a note's text.
-#[derive(Clone, Debug)]
-pub struct UndoHistory {
-    undo_stack: Vec<EditAction>,
-    redo_stack: Vec<EditAction>,
-    max_depth: usize,
-}
-
-impl UndoHistory {
-    pub fn new(max_depth: usize) -> Self {
-        Self {
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
-            max_depth,
-        }
-    }
-
-    pub fn push(&mut self, action: EditAction) {
-        self.redo_stack.clear();
-        self.undo_stack.push(action);
-        if self.undo_stack.len() > self.max_depth {
-            self.undo_stack.remove(0);
-        }
-    }
-
-    pub fn can_undo(&self) -> bool {
-        !self.undo_stack.is_empty()
-    }
-
-    pub fn can_redo(&self) -> bool {
-        !self.redo_stack.is_empty()
-    }
-
-    pub fn pop_undo(&mut self) -> Option<EditAction> {
-        let action = self.undo_stack.pop()?;
-        self.redo_stack.push(action.clone());
-        Some(action)
-    }
-
-    pub fn pop_redo(&mut self) -> Option<EditAction> {
-        let action = self.redo_stack.pop()?;
-        self.undo_stack.push(action.clone());
-        Some(action)
-    }
-
-    pub fn clear(&mut self) {
-        self.undo_stack.clear();
-        self.redo_stack.clear();
-    }
-
-    pub fn undo_count(&self) -> usize {
-        self.undo_stack.len()
-    }
-
-    pub fn redo_count(&self) -> usize {
-        self.redo_stack.len()
-    }
-}
+/// How many edits each note's history keeps.
+const UNDO_LIMIT: core::num::NonZeroUsize = match core::num::NonZeroUsize::new(100) {
+    Some(limit) => limit,
+    None => core::num::NonZeroUsize::MIN,
+};
 
 // ============================================================================
 // Note model
@@ -419,7 +367,7 @@ impl UndoHistory {
 pub type NoteId = u64;
 
 /// A sticky note.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Note {
     pub id: NoteId,
     pub title: String,
@@ -436,7 +384,10 @@ pub struct Note {
     pub font_size: FontSizePreset,
     pub created_at: u64,
     pub modified_at: u64,
-    pub undo_history: UndoHistory,
+    /// The note's edits, as a tree: an edit after an undo keeps what was
+    /// undone as a branch, reached with Alt+Z (C-Q24,
+    /// `design-decisions.md` §1416).
+    pub undo_history: UndoHistory<EditAction>,
 }
 
 impl Note {
@@ -457,7 +408,7 @@ impl Note {
             font_size: FontSizePreset::Medium,
             created_at: 0,
             modified_at: 0,
-            undo_history: UndoHistory::new(100),
+            undo_history: UndoHistory::new(UNDO_LIMIT),
         }
     }
 
@@ -558,7 +509,8 @@ impl Note {
             return;
         }
         let new = self.body.clone();
-        self.undo_history.push(EditAction::ReplaceBody { old, new });
+        self.undo_history
+            .record(EditAction::ReplaceBody { old, new });
     }
 
     /// Set the body from plain text, parsing bullet/checkbox markers.
@@ -602,7 +554,7 @@ impl Note {
             let col = Self::snap_col(&span.text, col);
             span.text.insert(col, ch);
             self.undo_history
-                .push(EditAction::InsertChar { line, col, ch });
+                .record(EditAction::InsertChar { line, col, ch });
         }
     }
 
@@ -620,7 +572,7 @@ impl Note {
             let col = Self::snap_col(&span.text, col);
             let ch = span.text.remove(col);
             self.undo_history
-                .push(EditAction::DeleteChar { line, col, ch });
+                .record(EditAction::DeleteChar { line, col, ch });
             return Some(ch);
         }
         None
@@ -629,7 +581,7 @@ impl Note {
     /// Insert a new line at the given index.
     pub fn insert_line(&mut self, index: usize, content: RichLine) {
         let idx = index.min(self.body.len());
-        self.undo_history.push(EditAction::InsertLine {
+        self.undo_history.record(EditAction::InsertLine {
             line: idx,
             content: content.clone(),
         });
@@ -640,7 +592,7 @@ impl Note {
     pub fn delete_line(&mut self, index: usize) -> Option<RichLine> {
         if index < self.body.len() && self.body.len() > 1 {
             let removed = self.body.remove(index);
-            self.undo_history.push(EditAction::DeleteLine {
+            self.undo_history.record(EditAction::DeleteLine {
                 line: index,
                 content: removed.clone(),
             });
@@ -661,12 +613,12 @@ impl Note {
             return;
         }
         let new = self.title.clone();
-        self.undo_history.push(EditAction::SetTitle { old, new });
+        self.undo_history.record(EditAction::SetTitle { old, new });
     }
 
     /// Undo the most recent recorded edit. Returns whether anything moved.
     pub fn undo(&mut self) -> bool {
-        match self.undo_history.pop_undo() {
+        match self.undo_history.undo() {
             Some(action) => {
                 self.revert(&action);
                 true
@@ -675,9 +627,10 @@ impl Note {
         }
     }
 
-    /// Redo the most recently undone edit. Returns whether anything moved.
+    /// Redo an edit undone, on the branch the note is on. Returns whether
+    /// anything moved.
     pub fn redo(&mut self) -> bool {
-        match self.undo_history.pop_redo() {
+        match self.undo_history.redo() {
             Some(action) => {
                 self.replay(&action);
                 true
@@ -686,12 +639,38 @@ impl Note {
         }
     }
 
+    /// Go to the note as it was before this version was first reached, on
+    /// whichever branch -- Alt+Z. Returns whether anything moved.
+    pub fn earlier(&mut self) -> bool {
+        let steps = self.undo_history.earlier();
+        self.travel(steps)
+    }
+
+    /// Go to the version of the note first reached after this one, on
+    /// whichever branch -- Alt+Shift+Z. Returns whether anything moved.
+    pub fn later(&mut self) -> bool {
+        let steps = self.undo_history.later();
+        self.travel(steps)
+    }
+
+    /// Take the steps a journey through the history hands back, in order.
+    fn travel(&mut self, steps: Vec<Travel<EditAction>>) -> bool {
+        let moved = !steps.is_empty();
+        for step in steps {
+            match step {
+                Travel::Undo(action) => self.revert(&action),
+                Travel::Redo(action) => self.replay(&action),
+            }
+        }
+        moved
+    }
+
     /// Apply an action's inverse **without recording it**.
     ///
     /// The recording methods above (`insert_char` and friends) cannot be
-    /// reused here: each of them pushes onto the undo stack, and
-    /// [`UndoHistory::push`] clears the redo stack — so an undo written in
-    /// terms of them would erase the redo it just created and then queue
+    /// reused here: each of them records a new edit, which starts a branch
+    /// of the history where the undo was to walk it -- so an undo written in
+    /// terms of them would leave the redo it should make behind and then queue
     /// itself to be undone again. That is why this walks the enum by hand.
     fn revert(&mut self, action: &EditAction) {
         match action {
@@ -916,7 +895,7 @@ pub enum DragState {
 // ============================================================================
 
 /// The core data store for all sticky notes.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct NoteStore {
     notes: Vec<Note>,
     next_id: NoteId,
@@ -2088,7 +2067,11 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+N", "A new note"),
     ("Ctrl+S", "Save"),
     ("Ctrl+E", "Export"),
-    ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
+    ("Ctrl+Z / Ctrl+Y", "Undo / redo; Ctrl+Shift+Z redoes too"),
+    (
+        "Alt+Z / Alt+Shift+Z",
+        "The note before / after this, on any branch",
+    ),
     // The text field's own keys. The toolkit's text area answers them and
     // draws nothing, so the application whose field it is names them
     // (scripts/key-survey-answered.txt, `textarea`); this one checks a paste
@@ -2927,6 +2910,7 @@ impl StickyNotesApp {
             return;
         };
         if note.title == before {
+            self.title_before = before;
             return;
         }
         // `#word` in a title becomes a tag and leaves the title. The store has
@@ -2948,6 +2932,12 @@ impl StickyNotesApp {
         for tag in found {
             note.add_tag(&tag);
         }
+        // The title stays open, as the body's writing does: what the next
+        // commit compares against is the title this one recorded. Taking it
+        // and leaving it empty made the next -- a second Ctrl+Z, a save --
+        // record the title as typed over nothing, and undoing that blanked
+        // it.
+        self.title_before = note.title.clone();
         self.store.mark_dirty();
     }
 
@@ -3013,6 +3003,18 @@ impl StickyNotesApp {
             if let Some(note) = self.store.get_note(id) {
                 self.body_before = note.body.clone();
             }
+        }
+    }
+
+    /// [`refill_body`](Self::refill_body) for a title being typed, after the
+    /// history moved its note: the next commit compares against the title as
+    /// the move left it, or it would record the move as an edit of its own
+    /// -- and, as a new edit does, leave the redo behind.
+    fn refill_title(&mut self) {
+        if let Some(Focus::Title(id)) = self.focus
+            && let Some(note) = self.store.get_note(id)
+        {
+            self.title_before = note.title.clone();
         }
     }
 
@@ -3093,28 +3095,38 @@ impl StickyNotesApp {
     }
 
     fn undo_active(&mut self) -> Action {
+        self.step_active(Note::undo)
+    }
+
+    fn redo_active(&mut self) -> Action {
+        self.step_active(Note::redo)
+    }
+
+    /// Alt+Z: the active note as it was before this version, on whichever
+    /// branch.
+    fn earlier_active(&mut self) -> Action {
+        self.step_active(Note::earlier)
+    }
+
+    /// Alt+Shift+Z: the version of the active note reached after this one.
+    fn later_active(&mut self) -> Action {
+        self.step_active(Note::later)
+    }
+
+    /// Move the active note through its history with `step`, after
+    /// recording what is being typed into it -- redo too, which did not: a
+    /// title being typed is the newest edit, and a redo played over it put
+    /// the redone title where the typing was, and leaving the title then
+    /// recorded that redone title a second time, as an edit of its own.
+    fn step_active(&mut self, step: fn(&mut Note) -> bool) -> Action {
         self.commit_focus();
         let Some(id) = self.store.active_note() else {
             return Action::None;
         };
-        let undone = self.store.get_note_mut(id).is_some_and(Note::undo);
-        if undone {
+        let moved = self.store.get_note_mut(id).is_some_and(step);
+        if moved {
             self.refill_body();
-            self.clamp_caret();
-            self.store.mark_dirty();
-            Action::Redraw
-        } else {
-            Action::None
-        }
-    }
-
-    fn redo_active(&mut self) -> Action {
-        let Some(id) = self.store.active_note() else {
-            return Action::None;
-        };
-        let redone = self.store.get_note_mut(id).is_some_and(Note::redo);
-        if redone {
-            self.refill_body();
+            self.refill_title();
             self.clamp_caret();
             self.store.mark_dirty();
             Action::Redraw
@@ -3479,7 +3491,21 @@ impl StickyNotesApp {
             return action;
         }
 
-        if m.ctrl && !m.alt {
+        // Alt+Z and Alt+Shift+Z: every version of the note there has been,
+        // in the order each was made -- the way back to a branch undone out
+        // of. Alt alone: Ctrl+Alt is AltGr, and Windows+ keys the desktop's.
+        if event.key == Key::Z && m.alt && !m.ctrl && !m.super_key {
+            return if m.shift {
+                self.later_active()
+            } else {
+                self.earlier_active()
+            };
+        }
+
+        // Ctrl without Alt, as AltGr arrives as Ctrl+Alt; and without the
+        // Windows key, whose chords are the desktop's -- Ctrl+Windows+Q is
+        // no quit.
+        if textline::is_ctrl_chord(m) {
             let canvas = self.canvas_rect(size.0, size.1);
             return match event.key {
                 Key::Q => self.quit_requested(),
@@ -3495,6 +3521,8 @@ impl StickyNotesApp {
                     self.commit_focus();
                     self.export()
                 }
+                // Ctrl+Shift+Z redoes, as Ctrl+Y does.
+                Key::Z if m.shift => self.redo_active(),
                 Key::Z => self.undo_active(),
                 Key::Y => self.redo_active(),
                 Key::F => {
@@ -3513,6 +3541,16 @@ impl StickyNotesApp {
                 Key::L => self.cycle_line_kind(),
                 _ => Action::None,
             };
+        }
+
+        // What AltGr types goes into the title or the search. It arrives as
+        // Ctrl+Alt -- `ż` is AltGr+Z on a Polish keyboard -- and the guard
+        // below would take it for a chord. A command's letter, which it
+        // carries as text, does not (`textline::types_into_field`).
+        if let Some(focus @ (Focus::Title(_) | Focus::Search)) = self.focus
+            && textline::types_into_field(event)
+        {
+            return self.type_into(focus, event, size);
         }
 
         // A bare key must stay bare: Alt-Tab and the Super menu belong to the
@@ -4484,93 +4522,57 @@ mod tests {
         assert_eq!(note.body.len(), 1);
     }
 
-    // -- Undo/redo system ----------------------------------------------------
+    // -- Undo/redo system: a tree, walked with Alt+Z (C-Q24) -----------------
 
     #[test]
-    fn test_undo_history_push_and_pop() {
-        let mut h = UndoHistory::new(10);
-        h.push(EditAction::InsertChar {
-            line: 0,
-            col: 0,
-            ch: 'a',
-        });
-        assert!(h.can_undo());
-        assert!(!h.can_redo());
-        let action = h.pop_undo();
-        assert!(action.is_some());
-        assert!(h.can_redo());
-        assert!(!h.can_undo());
+    fn a_note_undoes_and_redoes_an_edit() {
+        let mut note = Note::new(1, 0.0, 0.0);
+        assert!(!note.undo(), "a fresh note has nothing to undo");
+        note.insert_char(0, 0, 'a');
+        assert!(note.undo_history.can_undo());
+        assert!(note.undo());
+        assert_eq!(note.body_text(), "");
+        assert!(note.undo_history.can_redo());
+        assert!(note.redo());
+        assert_eq!(note.body_text(), "a");
+        assert!(!note.redo());
     }
 
+    /// **An edit made after an undo starts a branch, and the undone one is
+    /// kept**: redo follows the new branch, and `earlier` walks back through
+    /// every version of the note, in the order each was made; `later` comes
+    /// forward again.
     #[test]
-    fn test_undo_history_redo() {
-        let mut h = UndoHistory::new(10);
-        h.push(EditAction::InsertChar {
-            line: 0,
-            col: 0,
-            ch: 'a',
-        });
-        h.pop_undo();
-        let action = h.pop_redo();
-        assert!(action.is_some());
-        assert!(h.can_undo());
+    fn a_note_edit_after_an_undo_keeps_the_undone_one_reachable() {
+        let mut note = Note::new(1, 0.0, 0.0);
+        note.insert_char(0, 0, 'a');
+        assert!(note.undo());
+        note.insert_char(0, 0, 'b');
+        assert!(!note.redo(), "redo went onto the branch left");
+        assert!(note.earlier());
+        assert_eq!(note.body_text(), "a", "the undone edit was lost");
+        assert!(note.earlier());
+        assert_eq!(note.body_text(), "");
+        assert!(!note.earlier(), "before the first version");
+        assert!(note.later());
+        assert!(note.later());
+        assert_eq!(note.body_text(), "b");
+        assert!(!note.later(), "past the newest version");
     }
 
+    /// A note keeps its last hundred edits and drops the oldest.
     #[test]
-    fn test_undo_history_push_clears_redo() {
-        let mut h = UndoHistory::new(10);
-        h.push(EditAction::InsertChar {
-            line: 0,
-            col: 0,
-            ch: 'a',
-        });
-        h.pop_undo();
-        assert!(h.can_redo());
-        h.push(EditAction::InsertChar {
-            line: 0,
-            col: 0,
-            ch: 'b',
-        });
-        assert!(!h.can_redo());
-    }
-
-    #[test]
-    fn test_undo_history_max_depth() {
-        let mut h = UndoHistory::new(3);
-        h.push(EditAction::InsertChar {
-            line: 0,
-            col: 0,
-            ch: 'a',
-        });
-        h.push(EditAction::InsertChar {
-            line: 0,
-            col: 1,
-            ch: 'b',
-        });
-        h.push(EditAction::InsertChar {
-            line: 0,
-            col: 2,
-            ch: 'c',
-        });
-        h.push(EditAction::InsertChar {
-            line: 0,
-            col: 3,
-            ch: 'd',
-        });
-        assert_eq!(h.undo_count(), 3);
-    }
-
-    #[test]
-    fn test_undo_history_clear() {
-        let mut h = UndoHistory::new(10);
-        h.push(EditAction::InsertChar {
-            line: 0,
-            col: 0,
-            ch: 'x',
-        });
-        h.clear();
-        assert!(!h.can_undo());
-        assert!(!h.can_redo());
+    fn a_note_keeps_its_last_hundred_edits() {
+        let mut note = Note::new(1, 0.0, 0.0);
+        for col in 0..110 {
+            note.insert_char(0, col, 'x');
+        }
+        let mut undone = 0;
+        while undone <= 100 && note.undo() {
+            undone += 1;
+        }
+        assert_eq!(undone, 100);
+        assert_eq!(note.body_text(), "x".repeat(10));
     }
 
     // -- NoteStore CRUD ------------------------------------------------------
@@ -5661,6 +5663,91 @@ mod tests {
         assert_eq!(app.store.all_tags(), vec![String::from("shopping")]);
     }
 
+    fn held(key: Key, modifiers: Modifiers, text: &str) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        }
+    }
+
+    /// Ctrl+Alt, as Windows and a remote client on it report AltGr.
+    const ALTGR: Modifiers = Modifiers {
+        shift: false,
+        ctrl: true,
+        alt: true,
+        super_key: false,
+    };
+
+    /// **A title and the search take what AltGr types, and no command's
+    /// letter.** AltGr arrives as Ctrl+Alt -- `ż` is AltGr+Z on a Polish
+    /// keyboard -- and the guard that keeps a bare key bare took it for a
+    /// chord before either field saw it. A command carries its letter as
+    /// text on a real machine, and types none of it.
+    #[test]
+    fn a_title_and_the_search_take_altgr_letters_and_no_commands_letter() {
+        let commands = [
+            (Key::K, Modifiers::ctrl(), "k"),
+            (Key::F, Modifiers::alt(), "f"),
+            (Key::E, Modifiers::super_key(), "e"),
+        ];
+        let (mut app, id) = app_with_note();
+        if let Some(note) = app.store.get_note_mut(id) {
+            note.title.clear();
+        }
+        app.focus = Some(Focus::Title(id));
+        app.title_before = String::new();
+        app.caret = (0, 0);
+        assert_eq!(
+            probe::key(&mut app, &held(Key::Z, ALTGR, "\u{17c}")),
+            Action::Redraw,
+            "AltGr+Z was refused by the title"
+        );
+        for (key, modifiers, text) in commands {
+            assert_eq!(
+                probe::key(&mut app, &held(key, modifiers, text)),
+                Action::None,
+                "{modifiers:?}+{key:?} went into the title"
+            );
+        }
+        assert_eq!(
+            app.store.get_note(id).map(|n| n.title.clone()).as_deref(),
+            Some("\u{17c}")
+        );
+
+        app.focus = Some(Focus::Search);
+        app.caret = (0, 0);
+        assert_eq!(
+            probe::key(&mut app, &held(Key::Z, ALTGR, "\u{17c}")),
+            Action::Redraw,
+            "AltGr+Z was refused by the search"
+        );
+        for (key, modifiers, text) in commands {
+            assert_eq!(
+                probe::key(&mut app, &held(key, modifiers, text)),
+                Action::None,
+                "{modifiers:?}+{key:?} went into the search"
+            );
+        }
+        assert_eq!(app.store.search_query(), "\u{17c}");
+    }
+
+    /// **Ctrl held with the Windows key is no chord of the program's:**
+    /// Ctrl+Windows+Q is the desktop's, and quit.
+    #[test]
+    fn ctrl_with_the_windows_key_is_no_chord() {
+        let (mut app, _) = app_with_note();
+        let windows_ctrl = Modifiers {
+            super_key: true,
+            ..Modifiers::ctrl()
+        };
+        assert_eq!(
+            probe::key(&mut app, &probe::press_with(Key::Q, windows_ctrl)),
+            Action::None
+        );
+    }
+
     #[test]
     fn a_whole_title_edit_is_one_undo() {
         let (mut app, id) = app_with_note();
@@ -5889,6 +5976,221 @@ mod tests {
             assert_eq!(probe::key(&mut app, &event), Action::None);
             assert_eq!(app.store.total_count(), 0, "{modifiers:?} made a note");
         }
+    }
+
+    // -- The note's history from the keyboard (C-Q24) ------------------------
+
+    fn alt_z(shift: bool) -> KeyEvent {
+        probe::press_with(
+            Key::Z,
+            Modifiers {
+                alt: true,
+                shift,
+                ..Modifiers::NONE
+            },
+        )
+    }
+
+    /// A note, active, with nothing being typed: an `a` written, undone, and
+    /// a `b` written instead -- a branch left behind.
+    fn app_with_a_branch() -> (StickyNotesApp, NoteId) {
+        let (mut app, id) = app_with_note();
+        app.store.set_active(Some(id));
+        if let Some(note) = app.store.get_note_mut(id) {
+            note.insert_char(0, 0, 'a');
+            note.undo();
+            note.insert_char(0, 0, 'b');
+        }
+        (app, id)
+    }
+
+    /// **Alt+Z walks the active note's history across its branches**, in
+    /// the order each version was made, and marks the notes changed;
+    /// Alt+Shift+Z comes forward again.
+    #[test]
+    fn alt_z_walks_the_active_notes_history() {
+        let (mut app, id) = app_with_a_branch();
+        app.store.mark_clean();
+        assert_eq!(probe::key(&mut app, &alt_z(false)), Action::Redraw);
+        assert_eq!(text_of(&app, id), "a", "the undone edit was lost");
+        assert!(app.store.is_dirty(), "a journey did not mark the notes");
+        probe::key(&mut app, &alt_z(false));
+        assert_eq!(text_of(&app, id), "");
+        probe::key(&mut app, &alt_z(true));
+        probe::key(&mut app, &alt_z(true));
+        assert_eq!(text_of(&app, id), "b");
+        assert_eq!(
+            probe::key(&mut app, &alt_z(true)),
+            Action::None,
+            "past the newest version"
+        );
+    }
+
+    /// **Ctrl+Shift+Z redoes**, as Ctrl+Y does. It undid.
+    #[test]
+    fn ctrl_shift_z_redoes() {
+        let (mut app, id) = app_with_note();
+        app.store.set_active(Some(id));
+        if let Some(note) = app.store.get_note_mut(id) {
+            note.insert_char(0, 0, 'a');
+        }
+        probe::key(&mut app, &probe::ctrl(Key::Z));
+        assert_eq!(text_of(&app, id), "");
+        let ctrl_shift = Modifiers {
+            ctrl: true,
+            shift: true,
+            ..Modifiers::NONE
+        };
+        assert_eq!(
+            probe::key(&mut app, &probe::press_with(Key::Z, ctrl_shift)),
+            Action::Redraw
+        );
+        assert_eq!(text_of(&app, id), "a");
+    }
+
+    /// **AltGr+Z and Windows+Alt+Z walk nothing.** AltGr arrives as
+    /// Ctrl+Alt and types a letter -- ż on a Polish keyboard -- and a key
+    /// held with the Windows key is the desktop's.
+    #[test]
+    fn altgr_z_and_windows_alt_z_walk_nothing() {
+        for modifiers in [
+            Modifiers {
+                ctrl: true,
+                alt: true,
+                ..Modifiers::NONE
+            },
+            Modifiers {
+                alt: true,
+                super_key: true,
+                ..Modifiers::NONE
+            },
+        ] {
+            let (mut app, id) = app_with_a_branch();
+            probe::key(&mut app, &probe::press_with(Key::Z, modifiers));
+            assert_eq!(text_of(&app, id), "b", "{modifiers:?}+Z moved the note");
+        }
+    }
+
+    /// **Redo keeps a title being typed.** The typing is the newest edit:
+    /// recorded first, as undo records it, it leaves nothing to redo past it,
+    /// and one undo takes it back. Redo used to play the next step over it.
+    #[test]
+    fn redo_keeps_a_title_being_typed() {
+        let (mut app, id) = app_with_note();
+        app.store.set_active(Some(id));
+        let title = |app: &StickyNotesApp| app.store.get_note(id).map(|n| n.title.clone());
+        // A name given and taken back, so there is a redo to be had.
+        if let Some(note) = app.store.get_note_mut(id) {
+            note.title = String::from("Groceries");
+            note.commit_title(String::from("New Note"));
+            note.undo();
+        }
+        app.focus = Some(Focus::Title(id));
+        app.title_before = String::from("New Note");
+        app.caret = (0, app.title_before.len());
+        probe::type_str(&mut app, "!");
+        assert_eq!(title(&app).as_deref(), Some("New Note!"));
+        probe::key(&mut app, &probe::ctrl(Key::Y));
+        assert_eq!(
+            title(&app).as_deref(),
+            Some("New Note!"),
+            "redo wrote over the typing"
+        );
+        probe::key(&mut app, &probe::ctrl(Key::Z));
+        assert_eq!(title(&app).as_deref(), Some("New Note"));
+    }
+
+    /// Put the caret at the end of note `id`'s title, as a click there does.
+    fn typing_the_title(app: &mut StickyNotesApp, id: NoteId) {
+        app.store.set_active(Some(id));
+        app.focus = Some(Focus::Title(id));
+        app.title_before = app
+            .store
+            .get_note(id)
+            .map(|n| n.title.clone())
+            .expect("a title");
+        app.caret = (0, app.title_before.len());
+    }
+
+    /// **A second Ctrl+Z while typing a title does not blank it.** The first
+    /// records the typing and takes it back; the second has nothing left to
+    /// take. The title's starting point was emptied by the first, and the
+    /// second recorded the title as typed over nothing, then undid that.
+    #[test]
+    fn a_second_undo_while_typing_a_title_does_not_blank_it() {
+        let (mut app, id) = app_with_note();
+        typing_the_title(&mut app, id);
+        probe::type_str(&mut app, "!");
+        probe::key(&mut app, &probe::ctrl(Key::Z));
+        let title = |app: &StickyNotesApp| app.store.get_note(id).map(|n| n.title.clone());
+        assert_eq!(title(&app).as_deref(), Some("New Note"));
+        assert_eq!(
+            probe::key(&mut app, &probe::ctrl(Key::Z)),
+            Action::None,
+            "a second undo found something to take back"
+        );
+        assert_eq!(
+            title(&app).as_deref(),
+            Some("New Note"),
+            "the title was blanked"
+        );
+    }
+
+    /// **A save while a title is being typed records the typing once.** The
+    /// save records what has been typed and the title stays open; what is
+    /// typed after is recorded against the saved title, so one undo takes
+    /// back only that -- not everything, to nothing, as it did when the save
+    /// emptied the title's starting point.
+    #[test]
+    fn a_save_while_typing_a_title_keeps_its_starting_point() {
+        let (mut app, id) = app_with_note();
+        typing_the_title(&mut app, id);
+        probe::type_str(&mut app, "!");
+        probe::key(&mut app, &probe::ctrl(Key::S));
+        probe::type_str(&mut app, "?");
+        probe::key(&mut app, &probe::press(Key::Escape));
+        probe::key(&mut app, &probe::ctrl(Key::Z));
+        assert_eq!(
+            app.store.get_note(id).map(|n| n.title.clone()).as_deref(),
+            Some("New Note!"),
+            "the typing after the save was recorded as typed over nothing"
+        );
+    }
+
+    /// **An undo with nothing yet typed keeps the title's starting point**,
+    /// so what is typed after it is recorded as typed over the title, and one
+    /// undo takes it back to the title rather than to nothing.
+    #[test]
+    fn an_undo_with_nothing_typed_keeps_the_titles_starting_point() {
+        let (mut app, id) = app_with_note();
+        typing_the_title(&mut app, id);
+        assert_eq!(probe::key(&mut app, &probe::ctrl(Key::Z)), Action::None);
+        probe::type_str(&mut app, "!");
+        probe::key(&mut app, &probe::press(Key::Escape));
+        probe::key(&mut app, &probe::ctrl(Key::Z));
+        assert_eq!(
+            app.store.get_note(id).map(|n| n.title.clone()).as_deref(),
+            Some("New Note"),
+            "the typing was recorded as typed over nothing"
+        );
+    }
+
+    /// **Leaving a title after undoing its typing keeps the redo.** The undo
+    /// moved the title; leaving compares against where the undo left it, so
+    /// the undo is not recorded again as an edit, which would leave the redo
+    /// behind on a branch of its own.
+    #[test]
+    fn leaving_a_title_after_undoing_its_typing_keeps_the_redo() {
+        let (mut app, id) = app_with_note();
+        typing_the_title(&mut app, id);
+        probe::type_str(&mut app, "!");
+        probe::key(&mut app, &probe::ctrl(Key::Z));
+        probe::key(&mut app, &probe::press(Key::Escape));
+        assert_eq!(probe::key(&mut app, &probe::ctrl(Key::Y)), Action::Redraw);
+        assert_eq!(
+            app.store.get_note(id).map(|n| n.title.clone()).as_deref(),
+            Some("New Note!")
+        );
     }
 
     #[test]
@@ -6193,15 +6495,18 @@ mod tests {
     fn opening_a_note_and_leaving_it_changes_nothing() {
         let (mut app, id) = app_with_note();
         write_in_note(&mut app, id, "- dash");
-        let steps = app.store.get_note(id).map(|n| n.undo_history.undo_count());
+        // The text was put there unrecorded, so the history is empty: any
+        // step at all is one the opening made.
+        let can_undo = |app: &StickyNotesApp| {
+            app.store
+                .get_note(id)
+                .is_some_and(|n| n.undo_history.can_undo())
+        };
+        assert!(!can_undo(&app), "the note had a step before it was opened");
         probe::key(&mut app, &probe::press(Key::Right));
         probe::key(&mut app, &probe::press(Key::Escape));
         assert_eq!(text_of(&app, id), "* dash");
-        assert_eq!(
-            app.store.get_note(id).map(|n| n.undo_history.undo_count()),
-            steps,
-            "an untouched note gained an undo step"
-        );
+        assert!(!can_undo(&app), "an untouched note gained an undo step");
     }
 
     /// The caret is as wide as the user asked for.

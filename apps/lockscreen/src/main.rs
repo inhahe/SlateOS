@@ -540,6 +540,17 @@ impl LockScreenConfig {
         }
         config
     }
+
+    /// The settings `lockscreen.yaml` holds, read again from `doc` over the
+    /// rest of this configuration: what an announcement that the file changed
+    /// asks for. The clock's two come from the file as at startup -- a file
+    /// deleted reads as their defaults -- and the rest, which the file does
+    /// not hold, stay as they are.
+    pub fn reread(&mut self, doc: &yamldoc::Document) {
+        let fresh = Self::from_settings(doc);
+        self.show_clock_seconds = fresh.show_clock_seconds;
+        self.show_date = fresh.show_date;
+    }
 }
 
 impl Default for LockScreenConfig {
@@ -1314,6 +1325,14 @@ impl LockScreen {
             Event::Resize { width, height } => {
                 self.screen_width = *width as f32;
                 self.screen_height = *height as f32;
+                EventResult::Consumed
+            }
+            // The Settings program saved the clock's settings -- or another
+            // copy of this screen did, or someone edited the file -- and the
+            // desktop says so (`design-decisions.md` §1418, §1434). Read at
+            // startup only, the change waited for the next lock.
+            Event::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {
+                self.config.reread(&settingsfile::load(CONFIG_NAME));
                 EventResult::Consumed
             }
             _ => EventResult::Ignored,
@@ -2330,6 +2349,62 @@ mod tests {
             modifiers: Modifiers::NONE,
             text: String::new(),
         })
+    }
+
+    /// **A changed settings file is read again when the desktop says so.**
+    /// The Settings program saves `lockscreen.yaml` and the desktop announces
+    /// it; the clock was read at startup only, so the change waited for the
+    /// next lock. Another program's file, and the desktop's own, are not this
+    /// screen's; and a file deleted reads as the defaults.
+    #[test]
+    fn a_changed_settings_file_is_read_again_when_announced() {
+        settingsfile::testing::with_scratch_config("lockscreen-reread", |dir| {
+            let mut ls = single_user_lockscreen();
+            assert!(
+                !ls.config.show_clock_seconds,
+                "the default shows no seconds"
+            );
+            let folder = dir.join("slateos");
+            std::fs::create_dir_all(&folder).expect("the settings folder");
+            let file = folder.join("lockscreen.yaml");
+            std::fs::write(&file, "clock:\n  seconds: true\n  date: false\n")
+                .expect("the settings file");
+            let announce = |name: &[u8]| Event::SettingsChanged {
+                group: guitk::event::SettingsGroup::Program(
+                    guitk::event::SettingsName::new(name).expect("a settings name"),
+                ),
+            };
+
+            assert_eq!(ls.handle_event(&announce(b"notes")), EventResult::Ignored);
+            let desktop = Event::SettingsChanged {
+                group: guitk::event::SettingsGroup::Appearance,
+            };
+            assert_eq!(ls.handle_event(&desktop), EventResult::Ignored);
+            assert!(
+                !ls.config.show_clock_seconds,
+                "another file was read as this one"
+            );
+
+            assert_eq!(
+                ls.handle_event(&announce(b"lockscreen")),
+                EventResult::Consumed
+            );
+            assert!(ls.config.show_clock_seconds, "the seconds were not read");
+            assert!(!ls.config.show_date, "the date was not read");
+            assert_eq!(
+                ls.config.wallpaper_tint_alpha,
+                LockScreenConfig::default().wallpaper_tint_alpha,
+                "a setting the file does not hold was changed"
+            );
+
+            std::fs::remove_file(&file).expect("delete the file");
+            ls.handle_event(&announce(b"lockscreen"));
+            assert!(
+                !ls.config.show_clock_seconds,
+                "a deleted file kept its seconds"
+            );
+            assert!(ls.config.show_date, "a deleted file kept its date");
+        });
     }
 
     fn single_user_lockscreen() -> LockScreen {

@@ -202,6 +202,78 @@ MAIN = [
         "                    if false {",
         [BUTTON],
     ),
+    (
+        'an announced theme is not read',
+        '            Event::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {',
+        '            Event::SettingsChanged { group } if false && group.file_name() == CONFIG_NAME => {',
+        ['the_theme_chosen_in_one_window_reaches_the_others'],
+    ),
+    (
+        "every program's announcement is read as the reader's",
+        '            Event::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {',
+        '            Event::SettingsChanged { group } if !group.file_name().is_empty() => {',
+        ['the_theme_chosen_in_one_window_reaches_the_others'],
+    ),
+    (
+        'a reader that keeps nothing follows the file',
+        '        if !self.keeps_settings {\n            return false;\n        }\n        let (theme, problem)',
+        '        let (theme, problem)',
+        ['a_reader_a_test_builds_follows_no_theme'],
+    ),
+    (
+        'a re-read keeps the theme it had',
+        '        let mut changed = std::mem::replace(&mut self.theme, theme) != theme;',
+        '        let mut changed = self.theme != theme;',
+        ['the_theme_chosen_in_one_window_reaches_the_others'],
+    ),
+    (
+        'a theme written by hand that the reader does not know is not said',
+        '            changed |= self.status != problem;\n            self.status = problem;',
+        '            changed |= self.status != problem;',
+        ['the_theme_chosen_in_one_window_reaches_the_others'],
+    ),
+    (
+        'a re-read says it changed nothing',
+        '        changed\n    }\n\n    /// Get current theme colors.',
+        '        changed && false\n    }\n\n    /// Get current theme colors.',
+        ['the_theme_chosen_in_one_window_reaches_the_others'],
+    ),
+    (
+        'a re-read always says it changed',
+        '        changed\n    }\n\n    /// Get current theme colors.',
+        '        changed || true\n    }\n\n    /// Get current theme colors.',
+        ['the_theme_chosen_in_one_window_reaches_the_others'],
+    ),
+    (
+        'a chord raises the keys',
+        '        if event.key == Key::F1 && plain {',
+        '        if event.key == Key::F1 {',
+        ['a_chord_is_neither_a_readers_key_nor_typing'],
+    ),
+    (
+        'a chord answers the question before a book is removed',
+        '                _ if !plain => {}\n',
+        '',
+        ['a_chord_is_neither_a_readers_key_nor_typing'],
+    ),
+    (
+        'AltGr is taken for Ctrl',
+        '        if textline::is_ctrl_chord(event.modifiers) {',
+        '        if event.modifiers.ctrl {',
+        ['a_chord_is_neither_a_readers_key_nor_typing'],
+    ),
+    (
+        "a command's letter is typed into the search",
+        '&& textline::types_into_field(event)',
+        '&& event.types_text()',
+        ['a_chord_is_neither_a_readers_key_nor_typing'],
+    ),
+    (
+        'a chord works the reader',
+        '        if !plain {\n            return false;\n        }\n',
+        '',
+        ['a_chord_is_neither_a_readers_key_nor_typing'],
+    ),
 ]
 
 TABLES = {

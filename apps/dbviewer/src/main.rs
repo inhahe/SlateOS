@@ -5574,25 +5574,32 @@ impl DbViewerApp {
 
     /// Route a keystroke to whatever has the keyboard.
     fn handle_key(&mut self, event: &KeyEvent) {
+        // First: every key comes down and goes back up, and F1's release
+        // toggled the list off again as soon as its press had raised it.
+        if !event.pressed {
+            return;
+        }
+        // Every key but what is typed is taken plain: a chord with Ctrl, Alt
+        // or the Windows key is the window's or the desktop's and arrives
+        // carrying its key -- Alt+N opened a tab and Alt+Enter ran the query.
+        let plain = textline::is_plain(event.modifiers);
         // Ahead of the text handling below: `F1` is not a character, and a
         // reader with the editor focused still wants the keys.
-        if event.key == Key::F1 {
+        if event.key == Key::F1 && plain {
             self.show_help = !self.show_help;
             return;
         }
         if self.show_help {
             // Modal. Letting keys through would mean running a query you
             // cannot see.
-            if matches!(event.key, Key::Escape | Key::Enter | Key::F1) {
+            if plain && matches!(event.key, Key::Escape | Key::Enter | Key::F1) {
                 self.show_help = false;
             }
             return;
         }
 
-        if !event.pressed {
-            return;
-        }
         match event.key {
+            _ if !plain => {}
             Key::Escape => {
                 self.focus = Focus::None;
                 self.status = String::from("Keyboard released");
@@ -5629,17 +5636,20 @@ impl DbViewerApp {
         // layout produced, shift and dead keys included; deriving a character
         // from the key code instead is what makes a `*` impossible to type on
         // any layout but the one the table was written for -- and `SELECT *` is
-        // the first query anybody types.
-        let typed = event.text.clone();
-        if !typed.is_empty()
-            && !typed.chars().any(char::is_control)
+        // the first query anybody types. Typed, not a command's letter, which
+        // a chord carries: Alt+S typed an `s` into the query. AltGr's
+        // characters are typed.
+        if textline::types_into_field(event)
             && let Some(text) = self.focused_text()
         {
-            text.push_str(&typed);
+            text.push_str(&event.text);
             return;
         }
 
-        // Nothing has the keyboard, so letters are shortcuts.
+        // Nothing has the keyboard, so letters are shortcuts -- plain ones.
+        if !plain {
+            return;
+        }
         match event.key {
             Key::N => self.activate(Target::NewTab),
             Key::F => self.activate(Target::ToggleFilterBuilder),
@@ -5885,6 +5895,70 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **F1 raises the list of keys, down and up**: its release toggled the
+    /// list off as soon as the press had raised it, so on a real keyboard it
+    /// never showed. **A chord is neither a shortcut nor typing, and AltGr
+    /// types**: Alt+N opened a tab, Alt+Enter ran the query, Alt+Escape let
+    /// go of the editor, and Alt+S typed an `s` into the query.
+    #[test]
+    fn f1_raises_the_keys_and_a_chord_is_neither_a_shortcut_nor_typing() {
+        use guitk::event::Modifiers;
+        let size = (WINDOW_WIDTH, WINDOW_HEIGHT);
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let key = |k: Key, text: &str, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: text.to_owned(),
+            })
+        };
+        let mut app = DbViewerApp::new();
+        app.handle_event(&Event::Key(probe::press(Key::F1)), size);
+        app.handle_event(&Event::Key(probe::release(Key::F1)), size);
+        assert!(app.show_help, "F1's release put the list away again");
+        app.handle_event(&Event::Key(probe::press(Key::Escape)), size);
+        assert!(!app.show_help, "control: Escape closes the list");
+
+        // The editor has the keys to start with.
+        assert_eq!(app.focus, Focus::Editor);
+        let query = app.sql_input.clone();
+        let ran = app.query_result.is_some();
+        for m in [Modifiers::alt(), Modifiers::ctrl(), Modifiers::super_key()] {
+            app.handle_event(&key(Key::S, "s", m), size);
+            app.handle_event(&key(Key::Enter, "", m), size);
+            app.handle_event(&key(Key::Escape, "", m), size);
+            app.handle_event(&key(Key::F1, "", m), size);
+        }
+        assert_eq!(app.sql_input, query, "a command's letter was typed");
+        assert_eq!(app.query_result.is_some(), ran, "a chord ran the query");
+        assert_eq!(app.focus, Focus::Editor, "a chord let go of the editor");
+        assert!(!app.show_help, "a chord raised the list");
+        app.handle_event(&key(Key::E, "€", altgr), size);
+        assert_eq!(
+            app.sql_input,
+            format!("{query}€"),
+            "AltGr's € was not typed"
+        );
+
+        // Nothing has the keys: the letters are shortcuts, plain ones.
+        app.handle_event(&Event::Key(probe::press(Key::Escape)), size);
+        assert_eq!(app.focus, Focus::None);
+        let tabs = app.tabs.len();
+        for m in [
+            Modifiers::alt(),
+            Modifiers::super_key(),
+            altgr,
+            Modifiers::ctrl(),
+        ] {
+            app.handle_event(&key(Key::N, "n", m), size);
+        }
+        assert_eq!(app.tabs.len(), tabs, "a chord opened a tab");
     }
 
     /// **The shortcut list reaches the window, and nothing acts behind it.**

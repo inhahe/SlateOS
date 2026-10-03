@@ -25,6 +25,8 @@ settingsfile = { path = "../../gui/settingsfile" }
 # files' four escapes.
 textfmt = { path = "../../textfmt" }
 
+# `is_plain`, `is_ctrl_chord`, `types_into_field`: a chord is neither a key of the window nor typing.
+textline = { path = "../textline" }
 # "Your boards could not be saved -- close anyway?", asked the way every
 # editor here asks it.
 unsaved = { path = "../unsaved" }

@@ -7075,6 +7075,19 @@ fn build_render_tree(state: &AppState) -> RenderTree {
 
 /// Keys while the new-entry form is up.
 fn handle_new_entry_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
+    // What a key typed goes into the field -- AltGr's characters among it,
+    // and not a command's letter, which a chord carries as text: Ctrl+L
+    // typed an `l` into a password. The form's own keys are taken plain.
+    if textline::types_into_field(key) {
+        let typed: String = key.typed().collect();
+        if let Some(form) = state.new_entry.as_mut() {
+            form.type_text(&typed);
+        }
+        return EventResult::Consumed;
+    }
+    if !textline::is_plain(key.modifiers) {
+        return EventResult::Ignored;
+    }
     match key.key {
         Key::Escape => {
             cancel_new_entry(state);
@@ -7107,19 +7120,7 @@ fn handle_new_entry_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
                 EventResult::Ignored
             }
         }
-        _ => {
-            if !key.types_text() {
-                return EventResult::Ignored;
-            }
-            let typed: String = key.typed().collect();
-            if typed.is_empty() {
-                return EventResult::Ignored;
-            }
-            if let Some(form) = state.new_entry.as_mut() {
-                form.type_text(&typed);
-            }
-            EventResult::Consumed
-        }
+        _ => EventResult::Ignored,
     }
 }
 
@@ -7317,6 +7318,23 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
             Gate::Unlock => None,
             // Nothing to type into and nothing to do: the file is left alone.
             Gate::Unreadable(_) => return EventResult::Consumed,
+            // What a key typed goes into the password -- AltGr's characters
+            // among it (Polish `ł` is AltGr+L), and not a command's letter,
+            // which a chord carries as text: Ctrl+V typed a `v` into the
+            // master password. The form's own keys are taken plain.
+            Gate::Create(form) if textline::types_into_field(key) => {
+                let field = if form.confirming {
+                    &mut form.confirm
+                } else {
+                    &mut form.password
+                };
+                field.extend(key.typed());
+                form.error = None;
+                Some(false)
+            }
+            Gate::Create(_) if !textline::is_plain(key.modifiers) => {
+                return EventResult::Ignored;
+            }
             Gate::Create(form) => Some(match key.key {
                 Key::Enter if form.confirming => true,
                 Key::Enter | Key::Tab => {
@@ -7337,19 +7355,7 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
                     *form = NewVault::default();
                     false
                 }
-                _ => {
-                    if !key.types_text() {
-                        return EventResult::Ignored;
-                    }
-                    let field = if form.confirming {
-                        &mut form.confirm
-                    } else {
-                        &mut form.password
-                    };
-                    field.extend(key.typed());
-                    form.error = None;
-                    false
-                }
+                _ => return EventResult::Ignored,
             }),
         };
         if let Some(create) = create {
@@ -7357,6 +7363,15 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
                 create_vault(state);
             }
             return EventResult::Consumed;
+        }
+        // The master password, as the new vault's is typed.
+        if textline::types_into_field(key) {
+            state.master_input.extend(key.typed());
+            state.unlock_failed = false;
+            return EventResult::Consumed;
+        }
+        if !textline::is_plain(key.modifiers) {
+            return EventResult::Ignored;
         }
         match key.key {
             Key::Enter => attempt_unlock(state),
@@ -7368,13 +7383,7 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
                 state.master_input.clear();
                 state.unlock_failed = false;
             }
-            _ => {
-                if !key.types_text() {
-                    return EventResult::Ignored;
-                }
-                state.master_input.extend(key.typed());
-                state.unlock_failed = false;
-            }
+            _ => return EventResult::Ignored,
         }
         return EventResult::Consumed;
     }
@@ -7400,29 +7409,41 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
         return EventResult::Consumed;
     }
 
-    // Main app key handling
+    // Main app key handling. The four shortcuts are Ctrl chords, not Ctrl
+    // held: AltGr arrives as Ctrl+Alt, and AltGr+L -- a Polish `ł`, typed
+    // into the search -- locked the vault. What a key types goes into the
+    // search, and not a command's letter; the list's keys are taken plain,
+    // so Alt+Delete does not ask to delete an entry.
+    let chord = textline::is_ctrl_chord(key.modifiers);
     let result = match key.key {
-        Key::L if key.modifiers.ctrl => {
+        Key::L if chord => {
             state.lock_vault();
             EventResult::Consumed
         }
-        Key::F if key.modifiers.ctrl => {
+        Key::F if chord => {
             // Focus search (toggle)
             state.search_query.clear();
             state.refresh_filter();
             state.clamp_scroll();
             EventResult::Consumed
         }
-        Key::G if key.modifiers.ctrl => {
+        Key::G if chord => {
             state.detail_view = DetailView::PasswordGenerator;
             regenerate_password(state);
             EventResult::Consumed
         }
         // A plain letter goes to the search box, so editing is Ctrl+E.
-        Key::E if key.modifiers.ctrl => {
+        Key::E if chord => {
             open_edit_entry(state);
             EventResult::Consumed
         }
+        _ if textline::types_into_field(key) => {
+            state.search_query.extend(key.typed());
+            state.refresh_filter();
+            state.clamp_scroll();
+            EventResult::Consumed
+        }
+        _ if !textline::is_plain(key.modifiers) => EventResult::Ignored,
         Key::Delete if state.selected_entry_id.is_some() => {
             ask_delete(state);
             EventResult::Consumed
@@ -7456,16 +7477,7 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
             state.clamp_scroll();
             EventResult::Consumed
         }
-        _ => {
-            // Text input for search
-            if !key.types_text() {
-                return EventResult::Ignored;
-            }
-            state.search_query.extend(key.typed());
-            state.refresh_filter();
-            state.clamp_scroll();
-            EventResult::Consumed
-        }
+        _ => EventResult::Ignored,
     };
 
     // Only a keystroke the app acted on postpones the auto-lock. A modifier
@@ -7483,15 +7495,17 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
 /// there invites reading it as the new ones' output -- the same reason the
 /// kind keys in `apps/passwordgen` produce immediately.
 fn generator_key(state: &mut AppState, key: &KeyEvent) -> bool {
-    let ctrl = key.modifiers.ctrl;
+    // Ctrl chords, not Ctrl held: AltGr arrives as Ctrl+Alt and types.
+    let ctrl = textline::is_ctrl_chord(key.modifiers);
     if ctrl && key.key == Key::M {
         state.password_generator.mode = state.password_generator.mode.next();
         regenerate_password(state);
         return true;
     }
 
-    // Length, on the arrows, because the control drawn for it is a slider.
-    if !ctrl && matches!(key.key, Key::Left | Key::Right) {
+    // Length, on the arrows, because the control drawn for it is a slider --
+    // plain arrows: a chord with Alt or the Windows key is not the panel's.
+    if textline::is_plain(key.modifiers) && matches!(key.key, Key::Left | Key::Right) {
         let len = state.password_generator.length;
         let next = if key.key == Key::Left {
             len.saturating_sub(1)
@@ -7823,7 +7837,18 @@ fn dialog_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
         Delete(u64),
         Nothing,
     }
+    // What a key types goes into the password being asked for -- not a
+    // command's letter -- and the dialog's own keys are taken plain: Alt+Enter
+    // answered "delete this entry?" with yes.
     let then = match (&mut state.dialog, key.key) {
+        (Some(VaultDialog::RestorePassword { input, error, .. }), _)
+            if textline::types_into_field(key) =>
+        {
+            input.extend(key.typed());
+            *error = None;
+            Then::Nothing
+        }
+        _ if !textline::is_plain(key.modifiers) => Then::Nothing,
         (_, Key::Escape) => Then::Close,
         (Some(VaultDialog::ExportWarning), Key::Enter) => Then::Export,
         (Some(VaultDialog::RestorePassword { .. }), Key::Enter) => Then::Open,
@@ -7831,11 +7856,6 @@ fn dialog_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
         (Some(VaultDialog::DeleteConfirm { id }), Key::Enter) => Then::Delete(*id),
         (Some(VaultDialog::RestorePassword { input, error, .. }), Key::Backspace) => {
             input.pop();
-            *error = None;
-            Then::Nothing
-        }
-        (Some(VaultDialog::RestorePassword { input, error, .. }), _) if key.types_text() => {
-            input.extend(key.typed());
             *error = None;
             Then::Nothing
         }
@@ -7919,11 +7939,13 @@ impl App for AppState {
 
     fn on_event(&mut self, event: &Event) -> Response {
         // Ctrl+Q closes the window. Ctrl+L is *not* a close -- it locks the
-        // vault, which is the point of having it.
+        // vault, which is the point of having it. A Ctrl chord, not Ctrl
+        // held: AltGr+Q -- Ctrl+Alt -- is a German `@`, typed into a user
+        // name, and closed the window.
         if let Event::Key(key) = event
             && key.pressed
             && key.key == Key::Q
-            && key.modifiers.ctrl
+            && textline::is_ctrl_chord(key.modifiers)
         {
             return Response::Exit;
         }
@@ -9134,6 +9156,8 @@ mod tests {
             "a,b",
             "say \"hi\"",
             "\"",
+            "\"\"",
+            "nul\0inside",
             "line\nbreak",
             "cr\rand\r\ncrlf",
             " leading and trailing ",
@@ -10978,6 +11002,173 @@ mod tests {
         state
     }
 
+    /// **A chord is neither a vault key nor typing, and AltGr types** -- in
+    /// the program where a stray letter is a password that opens nothing:
+    ///
+    /// - the master password, an entry's fields and the search took a
+    ///   command's letter, which a chord carries as text: Ctrl+V typed a
+    ///   `v` into the master password, Ctrl+L an `l` into an entry;
+    /// - AltGr+L, a Polish `ł`, locked the vault rather than typing, and
+    ///   AltGr+Q, a German `@`, closed the window;
+    /// - Alt+Enter answered "delete this entry?" with yes, and tried the
+    ///   master password.
+    #[test]
+    fn a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let key = |key: Key, text: &str, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key,
+                pressed: true,
+                modifiers,
+                text: text.to_owned(),
+            })
+        };
+        let commands = [
+            (Key::V, "v", Modifiers::ctrl()),
+            (Key::X, "x", Modifiers::alt()),
+            (Key::X, "x", Modifiers::super_key()),
+        ];
+
+        // The lock screen.
+        let mut state = AppState::for_test();
+        for (k, text, m) in commands {
+            handle_event(&mut state, &key(k, text, m));
+        }
+        assert_eq!(
+            state.master_input, "",
+            "a command's letter went into the master password"
+        );
+        handle_event(&mut state, &key(Key::L, "ł", altgr));
+        assert_eq!(state.master_input, "ł", "AltGr's ł was not typed");
+        handle_event(&mut state, &key(Key::Enter, "", Modifiers::alt()));
+        assert!(!state.unlock_failed, "Alt+Enter tried the master password");
+
+        // A new vault's master password, the same.
+        let mut state = AppState::for_test();
+        state.gate = Gate::Create(NewVault::default());
+        for (k, text, m) in commands {
+            handle_event(&mut state, &key(k, text, m));
+        }
+        handle_event(&mut state, &key(Key::Tab, "", Modifiers::alt()));
+        handle_event(&mut state, &key(Key::L, "ł", altgr));
+        let Gate::Create(form) = &state.gate else {
+            panic!("the new-vault form went away");
+        };
+        assert_eq!(
+            form.password, "ł",
+            "the new password typed a command or lost AltGr's ł"
+        );
+        assert!(!form.confirming, "Alt+Tab moved to the second field");
+
+        // Past it: AltGr+L types into the search and does not lock.
+        let mut state = unlocked_app();
+        handle_event(&mut state, &key(Key::L, "ł", altgr));
+        assert!(state.vault.is_unlocked(), "AltGr+L locked the vault");
+        handle_event(&mut state, &key(Key::W, "w", Modifiers::alt()));
+        assert_eq!(
+            state.search_query, "ł",
+            "the search typed a command or lost AltGr's ł"
+        );
+        assert!(
+            !matches!(state.on_event(&key(Key::Q, "@", altgr)), Response::Exit),
+            "AltGr+Q closed the window"
+        );
+
+        // An entry's field.
+        let mut state = unlocked_app();
+        press(&mut state, Target::Add);
+        for (k, text, m) in commands {
+            handle_event(&mut state, &key(k, text, m));
+        }
+        handle_event(&mut state, &key(Key::L, "l", Modifiers::ctrl()));
+        handle_event(&mut state, &key(Key::L, "ł", altgr));
+        let typed = state
+            .new_entry
+            .as_ref()
+            .and_then(|form| form.values.get(form.focused).cloned());
+        assert_eq!(
+            typed.as_deref(),
+            Some("ł"),
+            "the field typed a command or lost AltGr's ł"
+        );
+        handle_event(&mut state, &key(Key::Escape, "", Modifiers::alt()));
+        assert!(state.new_entry.is_some(), "Alt+Escape threw the form away");
+
+        // The generator panel: its Ctrl+M is a Ctrl chord, its arrows plain.
+        let mut state = unlocked_app();
+        handle_event(&mut state, &key(Key::G, "g", Modifiers::ctrl()));
+        assert_eq!(state.detail_view, DetailView::PasswordGenerator);
+        let (mode, length) = (
+            state.password_generator.mode,
+            state.password_generator.length,
+        );
+        handle_event(&mut state, &key(Key::M, "", altgr));
+        handle_event(&mut state, &key(Key::Right, "", Modifiers::alt()));
+        handle_event(&mut state, &key(Key::Right, "", Modifiers::super_key()));
+        assert_eq!(
+            state.password_generator.mode, mode,
+            "AltGr+M changed the mode"
+        );
+        assert_eq!(
+            state.password_generator.length, length,
+            "a chord moved the length"
+        );
+
+        // The list: Alt+Delete does not ask to delete.
+        let mut state = state_with_login();
+        let id = state.selected_entry_id.expect("the new login is selected");
+        handle_event(&mut state, &key(Key::Delete, "", Modifiers::alt()));
+        assert!(
+            state.dialog.is_none(),
+            "Alt+Delete asked to delete the entry"
+        );
+
+        // A backup's password, asked for in a dialog, types as the others.
+        state.dialog = Some(VaultDialog::RestorePassword {
+            path: std::path::PathBuf::from("backup.vault"),
+            backup: Box::new(unlocked_vault()),
+            input: String::new(),
+            error: None,
+        });
+        for (k, text, m) in commands {
+            handle_event(&mut state, &key(k, text, m));
+        }
+        handle_event(&mut state, &key(Key::L, "ł", altgr));
+        let Some(VaultDialog::RestorePassword { input, .. }) = &state.dialog else {
+            panic!("a chord closed the dialog");
+        };
+        assert_eq!(
+            input, "ł",
+            "the backup's password typed a command or lost AltGr's ł"
+        );
+
+        // "Delete this entry?" -- asked by a plain Delete -- is answered by a
+        // plain Enter only.
+        state.dialog = None;
+        handle_event(&mut state, &key(Key::Delete, "", Modifiers::NONE));
+        assert!(
+            matches!(state.dialog, Some(VaultDialog::DeleteConfirm { .. })),
+            "control: Delete asks"
+        );
+        for m in [
+            Modifiers::alt(),
+            Modifiers::super_key(),
+            altgr,
+            Modifiers::ctrl(),
+        ] {
+            handle_event(&mut state, &key(Key::Enter, "", m));
+        }
+        assert!(
+            state.vault.get_entry(id).is_some(),
+            "a chord deleted the entry"
+        );
+        assert!(state.dialog.is_some(), "a chord answered the question");
+    }
+
     /// **A Copy press says nothing was copied, and why** -- where it said
     /// "Copied Password -- clears in 30s" over a clipboard only this program
     /// could read, so the user pasted nothing elsewhere and could not tell
@@ -11594,7 +11785,7 @@ mod tests {
     #[test]
     fn the_contents_keep_every_character_of_every_field() {
         let mut vault = unlocked_vault();
-        let odd = "tab\there\nline\rreturn\\slash \u{e9}\u{1F512} ,\"quoted\"; = + -";
+        let odd = "tab\there\nline\rreturn\\slash \u{e9}\u{1F512} ,\"quoted\"; = + - nul\0";
         let folder = vault.add_folder(odd);
         let mut login = LoginData::new(odd, odd, odd);
         login.url = odd.to_string();

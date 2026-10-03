@@ -165,6 +165,110 @@ MUTATIONS = [
         "                .map_or(0, |_| 0),",
         ["the_history_says_when"],
     ),
+    # -- the renames as a tree, and the keys (C-Q24, §1416) ----------------------
+    (
+        "a journey takes its steps the wrong way",
+        "                Travel::Undo(record) => self.put_back(record),",
+        "                Travel::Undo(record) => self.do_again(record),",
+        ["a_rename_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"],
+    ),
+    (
+        "Alt+Z goes forward in time",
+        "        let steps = self.undo.earlier();",
+        "        let steps = self.undo.later();",
+        ["a_rename_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"],
+    ),
+    (
+        "an undo that renamed nothing is left undone",
+        "            let _ = self.undo.redo();",
+        "",
+        ["an_undo_that_renames_nothing_can_be_tried_again"],
+    ),
+    (
+        "a redo that renamed nothing is left redone",
+        "            let _ = self.undo.undo();",
+        "",
+        ["a_redo_that_renames_nothing_can_be_tried_again"],
+    ),
+    (
+        "a journey goes on through a folder changed outside",
+        "            if done == 0 || !failures.is_empty() {",
+        "            if false {",
+        ["a_journey_through_a_folder_changed_outside_clears_the_history_and_says_so"],
+    ),
+    (
+        "a history that no longer matches the files is kept",
+        "                self.undo.clear();\n                let why",
+        "                let why",
+        ["a_journey_through_a_folder_changed_outside_clears_the_history_and_says_so"],
+    ),
+    (
+        "Alt+Z is not a key",
+        "            Key::Z if alt => {",
+        "            Key::Z if false && alt => {",
+        ["a_rename_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"],
+    ),
+    (
+        "Alt+Shift+Z goes back as Alt+Z does",
+        "                    self.later();",
+        "                    self.earlier();",
+        ["a_rename_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"],
+    ),
+    (
+        "Ctrl+Shift+Z undoes",
+        "            Key::Z if ctrl && key.modifiers.shift => self.redo_key(),\n",
+        "",
+        ["ctrl_shift_z_redoes"],
+    ),
+    # -- a rename never replaces a file (2026-09-28) -----------------------------
+    (
+        "a rename that can never go is taken for a cycle",
+        "        if !stuck.is_empty() {\n            refused.extend(stuck);\n            continue;\n        }",
+        "        pending.extend(stuck);",
+        ["a_rename_onto_a_name_a_file_keeps_is_refused_not_looped_on"],
+    ),
+    (
+        "a refusal breaks a link it need not",
+        "            refused.extend(stuck);\n            continue;",
+        "            refused.extend(stuck);",
+        ["a_chain_ending_on_a_kept_name_is_refused_whole"],
+    ),
+    (
+        "a plan is made from the list alone",
+        "        let plan = rename_plan(&self.names_on_disk(), renames);",
+        "        let plan = rename_plan(&self.current_names(), renames);",
+        ["a_swap_goes_round_a_file_left_under_the_temporary_name"],
+    ),
+    (
+        "a rename replaces what is at the name",
+        "    match coreutils::rename::noreplace(from, to) {",
+        "    match std::fs::rename(from, to) {",
+        ["a_rename_refuses_a_file_already_at_the_name"],
+    ),
+    (
+        "a case-only rename is refused as a clash",
+        "        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && only_case_differs(from, to) => {",
+        "        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && false => {",
+        ["a_rename_that_changes_only_case_goes_through"],
+    ),
+    (
+        "a refused rename is not said",
+        "        let mut failures: Vec<String> = plan\n            .refused",
+        "        let mut failures: Vec<String> = Vec::new();\n        let _said: Vec<String> = plan\n            .refused",
+        ["an_undo_onto_a_name_taken_since_leaves_both_files"],
+    ),
+    (
+        "AltGr is taken for Ctrl in the list",
+        "        let ctrl = key.modifiers.ctrl && !key.modifiers.alt;",
+        "        let ctrl = key.modifiers.ctrl;",
+        ["altgr_z_does_not_undo_a_rename"],
+    ),
+    (
+        "AltGr is taken for Ctrl in a box",
+        "    let ctrl = key.modifiers.ctrl && !key.modifiers.alt;\n    match key.key {",
+        "    let ctrl = key.modifiers.ctrl;\n    match key.key {",
+        ["an_altgr_letter_is_typed_into_a_box"],
+    ),
 ]
 
 if __name__ == "__main__":

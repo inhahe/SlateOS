@@ -13,6 +13,8 @@ oswindow = { path = "../../gui/window" }
 # A saved history replaces a file the user chose, and `fs::write`
 # truncates the target before writing it.
 safeio = { path = "../safeio" }
+# `is_plain`, `is_ctrl_chord`, `types_into_field`: a chord is neither a key of the list nor typing.
+textline = { path = "../textline" }
 
 [lints]
 workspace = true

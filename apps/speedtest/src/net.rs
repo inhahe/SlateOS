@@ -454,11 +454,11 @@ pub(crate) mod fake {
     )]
 
     use super::UPLOAD_BODY;
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
+    use std::io::{self, Read, Write};
+    use std::net::{TcpListener, TcpStream};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     /// A test server on a loopback port: answers a GET with `body_len` bytes
     /// and a POST by reading its body and saying how much came, and counts
@@ -468,6 +468,38 @@ pub(crate) mod fake {
         pub gets: Arc<AtomicUsize>,
         pub posts: Arc<AtomicUsize>,
         pub heads: Arc<Mutex<Vec<String>>>,
+    }
+
+    /// How long one read waits before looking at the clock again.
+    pub const READ_SLICE: Duration = Duration::from_millis(100);
+    /// How long a connection may go quiet before the server gives up on it.
+    ///
+    /// A pause is not the end of an upload. This server once stopped at the
+    /// first read that waited five seconds, answered, and closed with the rest
+    /// of the body unread, so the client's next write was refused (Windows:
+    /// "forcibly closed", os error 10054). On a machine busy enough to keep
+    /// the client off the processor for five seconds -- a workspace test run
+    /// -- that failed tests which were right.
+    pub const PATIENCE: Duration = Duration::from_mins(2);
+
+    /// `stream.read`, waiting out any number of [`READ_SLICE`]s with nothing
+    /// to read until `deadline`: `Ok(0)` is the other side gone, an error a
+    /// real one or the deadline passed.
+    fn read_patiently(
+        stream: &mut TcpStream,
+        buf: &mut [u8],
+        deadline: Instant,
+    ) -> io::Result<usize> {
+        loop {
+            match stream.read(buf) {
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) && Instant::now() < deadline => {}
+                other => return other,
+            }
+        }
     }
 
     pub fn server(status: &'static str, body_len: usize) -> Server {
@@ -482,11 +514,12 @@ pub(crate) mod fake {
                 let Ok(mut stream) = stream else { continue };
                 let (g, p, h) = (Arc::clone(&g), Arc::clone(&p), Arc::clone(&h));
                 std::thread::spawn(move || {
-                    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                    let _ = stream.set_read_timeout(Some(READ_SLICE));
+                    let deadline = Instant::now() + PATIENCE;
                     let mut head = Vec::new();
                     let mut byte = [0_u8; 1];
                     while !head.ends_with(b"\r\n\r\n") {
-                        match stream.read(&mut byte) {
+                        match read_patiently(&mut stream, &mut byte, deadline) {
                             Ok(1) => head.push(byte[0]),
                             _ => return, // a latency probe: connected, then gone
                         }
@@ -510,7 +543,7 @@ pub(crate) mod fake {
                         p.fetch_add(1, Ordering::SeqCst);
                         let mut got = 0_usize;
                         let mut buf = vec![0_u8; 65536];
-                        while let Ok(n) = stream.read(&mut buf) {
+                        while let Ok(n) = read_patiently(&mut stream, &mut buf, deadline) {
                             if n == 0 {
                                 break;
                             }
@@ -681,6 +714,37 @@ mod tests {
         let sent = AtomicU64::new(0);
         upload_once(addr, &ep, &never, &sent).unwrap();
         assert_eq!(sent.load(Ordering::Relaxed), UPLOAD_BODY);
+    }
+
+    /// **The test server waits out a client that goes quiet mid-upload**:
+    /// it took the first read that waited as the end of the body, answered,
+    /// and closed with the rest unread, so on a busy machine the upload
+    /// broke ("forcibly closed", os error 10054) in a test that was right.
+    /// Two pauses of three read slices each, and the whole body is taken.
+    #[test]
+    fn the_test_server_waits_out_a_client_that_goes_quiet() {
+        use std::net::TcpStream;
+        let srv = server("200 OK", 0);
+        let mut stream = TcpStream::connect(("127.0.0.1", srv.port)).unwrap();
+        // A server that never answers fails the test rather than hanging it.
+        stream
+            .set_read_timeout(Some(super::fake::PATIENCE + Duration::from_secs(10)))
+            .unwrap();
+        let pause = super::fake::READ_SLICE * 3;
+        stream
+            .write_all(
+                format!("POST /upload HTTP/1.1\r\nContent-Length: {UPLOAD_BODY}\r\n\r\n")
+                    .as_bytes(),
+            )
+            .unwrap();
+        std::thread::sleep(pause);
+        let half = vec![7_u8; usize::try_from(UPLOAD_BODY / 2).unwrap()];
+        stream.write_all(&half).unwrap();
+        std::thread::sleep(pause);
+        stream.write_all(&half).unwrap();
+        let mut answer = [0_u8; 15];
+        stream.read_exact(&mut answer).unwrap();
+        assert_eq!(&answer, b"HTTP/1.1 200 OK", "the server gave up on a pause");
     }
 
     /// A probe that cannot connect is reported as failed, not timed -- and

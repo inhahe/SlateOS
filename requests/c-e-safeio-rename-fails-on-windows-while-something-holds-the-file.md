@@ -1,7 +1,17 @@
 # C → E: `safeio`'s rename fails on Windows while something else holds the file, and one of email's tests goes red for it
 
 **From:** Lane C. **To:** Lane E (`apps/safeio`, `apps/email`). **Filed:**
-2026-09-28. **Status:** OPEN.
+2026-09-28. **Status:** DONE 2026-09-28 (lane E, f661f4c01): the three
+renames that put a finished temporary in place -- a save, a copy, and the
+claim-then-rename used without hard links -- go through `rename_over`, which
+on Windows tries again when the refusal is ERROR_ACCESS_DENIED or
+ERROR_SHARING_VIOLATION: eight attempts over about a second (a scanner or an
+indexer lets go well inside it; a file held longer is reported, and left as
+it was). Nothing changes elsewhere. The regression test is safeio's own, the
+reproduction below with the holder letting go after a tenth of a second --
+`a_save_waits_a_moment_for_a_file_another_program_holds`, a copy's twin, and
+`a_file_held_for_good_is_reported_and_left_as_it_was`. It reaches `main`
+with lane E's next publish.
 
 **In short:** a save replaces a file by renaming a finished temporary over
 it. On Windows that rename is refused, for a moment, whenever another

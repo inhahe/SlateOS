@@ -76,6 +76,78 @@ MAIN = [
         "                    &ArchiveFormat::patterns_where(|_| true),",
         [DIALOGS],
     ),
+    (
+        'a folder chosen in the pane is not shown',
+        '                    if folder != self.current_dir {\n                        self.navigate_to(&folder);\n                    }\n',
+        '',
+        ['a_click_on_a_folder_shows_it', 'f6_gives_the_folder_pane_the_keys'],
+    ),
+    (
+        'a folder shown from elsewhere is not chosen in the pane',
+        '        self.list_scroll_y = 0.0;\n        self.show_dir_in_tree();\n    }\n',
+        '        self.list_scroll_y = 0.0;\n    }\n',
+        ['a_folder_shown_another_way_is_chosen_in_the_pane'],
+    ),
+    (
+        'Back does not keep the pane in step',
+        '        self.nav_position = prev;\n        self.current_dir = dir;\n        self.list_scroll_y = 0.0;\n        self.show_dir_in_tree();\n',
+        '        self.nav_position = prev;\n        self.current_dir = dir;\n        self.list_scroll_y = 0.0;\n',
+        ['a_folder_shown_another_way_is_chosen_in_the_pane'],
+    ),
+    (
+        'Forward does not keep the pane in step',
+        '        self.nav_position = next;\n        self.current_dir = dir;\n        self.list_scroll_y = 0.0;\n        self.show_dir_in_tree();\n',
+        '        self.nav_position = next;\n        self.current_dir = dir;\n        self.list_scroll_y = 0.0;\n',
+        ['a_folder_shown_another_way_is_chosen_in_the_pane'],
+    ),
+    (
+        'F6 does not give the pane the keys',
+        '        if key.key == Key::F6 && self.sidebar_visible && self.archive.is_some() {',
+        '        if false {',
+        ['f6_gives_the_folder_pane_the_keys'],
+    ),
+    (
+        'the pane with the keys does not hear them',
+        '        if self.tree_has_keys && self.sidebar_visible && Self::moves_in_tree(key) {',
+        '        if false {',
+        ['f6_gives_the_folder_pane_the_keys'],
+    ),
+    (
+        'a click on the pane does not give it the keys',
+        '            self.tree_has_keys = true;\n            let press = MouseEvent {',
+        '            let press = MouseEvent {',
+        ['a_click_on_a_folder_shows_it'],
+    ),
+    (
+        'the wheel over the pane scrolls the list',
+        '        if self.over_tree(mouse.x, mouse.y, size) {\n            let before = self.tree.first_visible();',
+        '        if false {\n            let before = self.tree.first_visible();',
+        ['the_wheel_over_the_folder_pane_scrolls_it'],
+    ),
+    (
+        "a folder's folders are someone else's",
+        '            node = node.children.iter().find(|child| &child.name == name)?;',
+        '            node = node.children.first()?;',
+        ['the_folders_are_read_by_name_under_the_archive'],
+    ),
+    (
+        "the archive's own row is not at the top",
+        '            return Some(vec![folder_item(self.0, String::new())]);',
+        '            return Some(Vec::new());',
+        ['the_folders_are_read_by_name_under_the_archive', 'a_folders_arrow_opens_it_without_showing_it'],
+    ),
+    (
+        'a folder with folders in it has no arrow',
+        '    let item = if node.children.is_empty() {',
+        '    let item = if true {',
+        ['a_folders_arrow_opens_it_without_showing_it'],
+    ),
+    (
+        'the pane is not drawn in the window',
+        '        state.tree.draw(&state.palette, frame, |_| Target::Tree);\n',
+        '',
+        ['a_folders_arrow_opens_it_without_showing_it', 'a_click_on_a_folder_shows_it'],
+    ),
 ]
 
 BACKEND = [

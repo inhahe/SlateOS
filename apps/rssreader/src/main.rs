@@ -3428,7 +3428,9 @@ impl RssReaderApp {
             return self.handle_prompt_key(key);
         }
 
-        if key.modifiers.ctrl {
+        // A Ctrl chord, not Ctrl held: AltGr arrives as Ctrl+Alt, and
+        // AltGr+A -- a Polish `ą` -- marked every article read.
+        if textline::is_ctrl_chord(key.modifiers) {
             return match key.key {
                 Key::F => {
                     self.search_active = true;
@@ -3461,6 +3463,14 @@ impl RssReaderApp {
                 }
                 _ => EventResult::Ignored,
             };
+        }
+
+        // Every other binding is on a key, taken plain -- nothing held but
+        // Shift. A chord with Alt or the Windows key is the window's or the
+        // desktop's, and arrives carrying its key: Alt+D asked to remove a
+        // feed, Alt+R marked an article read and Alt+Tab changed the pane.
+        if !textline::is_plain(key.modifiers) {
+            return EventResult::Ignored;
         }
 
         match key.key {
@@ -3685,24 +3695,32 @@ impl RssReaderApp {
     }
 
     /// Keys while the search box is open.
+    ///
+    /// Its own keys are plain, and it types only what was typed: a command
+    /// arrives carrying its letter, so Alt+X put an `x` in the query and
+    /// Ctrl+F, pressed again, an `f`. AltGr types.
     fn handle_search_key(&mut self, key: &KeyEvent) -> EventResult {
+        let plain = textline::is_plain(key.modifiers);
         match key.key {
-            Key::Escape => {
+            Key::Escape if plain => {
                 self.search_active = false;
                 self.search_query.clear();
                 self.search_results.clear();
                 EventResult::Consumed
             }
-            Key::Enter => {
+            Key::Enter if plain => {
                 self.search_active = false;
                 EventResult::Consumed
             }
-            Key::Backspace => {
+            Key::Backspace if !textline::is_alt_or_windows_chord(key.modifiers) => {
                 self.search_query.pop();
                 self.perform_search();
                 EventResult::Consumed
             }
             _ => {
+                if !textline::types_into_field(key) {
+                    return EventResult::Ignored;
+                }
                 let typed: String = key.typed().collect();
                 if typed.is_empty() {
                     return EventResult::Ignored;
@@ -3739,6 +3757,11 @@ impl RssReaderApp {
         // Whatever happens, the question comes down: a prompt that survives a
         // keypress it did not understand is one you cannot get out of.
         self.prompt = None;
+        // But only a plain key answers it: Alt+Y, a chord of the window's
+        // arriving carrying its key, removed the feed, and Alt+1 filed one.
+        if !textline::is_plain(key.modifiers) {
+            return EventResult::Consumed;
+        }
         match prompt {
             Prompt::RemoveFeed(id) => {
                 // Only `Y`. A destructive answer should not be reachable by
@@ -3829,21 +3852,27 @@ impl RssReaderApp {
     /// "Books" must not hide the sidebar on its `b` and cycle the sort order
     /// on its `o`.
     fn handle_text_entry_key(&mut self, key: &KeyEvent) -> EventResult {
+        // As the search box: its own keys plain, and only typing typed --
+        // Alt+X put an `x` in a feed's name. AltGr types.
+        let plain = textline::is_plain(key.modifiers);
         match key.key {
-            Key::Escape => {
+            Key::Escape if plain => {
                 self.text_entry = None;
                 self.text_buffer.clear();
                 EventResult::Consumed
             }
-            Key::Enter => {
+            Key::Enter if plain => {
                 self.commit_text_entry();
                 EventResult::Consumed
             }
-            Key::Backspace => {
+            Key::Backspace if !textline::is_alt_or_windows_chord(key.modifiers) => {
                 self.text_buffer.pop();
                 EventResult::Consumed
             }
             _ => {
+                if !textline::types_into_field(key) {
+                    return EventResult::Ignored;
+                }
                 let typed: String = key.typed().collect();
                 if typed.is_empty() {
                     return EventResult::Ignored;
@@ -6790,6 +6819,136 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// **A chord is neither a reader key nor typing, and AltGr+A is not
+    /// Ctrl+A**: a chord with Alt or the Windows key is the window's or the
+    /// desktop's and arrives carrying its key -- Alt+D asked to remove a feed,
+    /// Alt+Y then removed it, Alt+1 filed one into a folder, and Alt+X typed
+    /// an `x` into the search; and AltGr+A, a Polish `ą`, marked every article
+    /// read as Ctrl+A does.
+    ///
+    /// Each key is asserted as it is pressed: the toggles go round.
+    #[test]
+    fn a_chord_is_neither_a_reader_key_nor_typing() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let key = |k: Key, text: &str, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: text.to_owned(),
+            })
+        };
+        let mut app = app();
+        let feed = app.feeds.first().map(|f| f.id).expect("control: a feed");
+        app.sidebar_selection = SidebarSelection::Feed(feed);
+        let state = |app: &RssReaderApp| {
+            (
+                app.articles
+                    .iter()
+                    .map(|a| (a.is_read, a.is_starred))
+                    .collect::<Vec<_>>(),
+                app.feeds
+                    .iter()
+                    .map(|f| (f.id, f.folder_id))
+                    .collect::<Vec<_>>(),
+                app.folders.len(),
+                (
+                    app.selected_article_index,
+                    app.active_pane,
+                    app.sidebar_selection,
+                    app.filter_mode,
+                    app.sort_order,
+                ),
+                (app.show_help, app.show_feed_health, app.sidebar_visible),
+                (
+                    app.search_active,
+                    app.text_entry.is_some(),
+                    app.prompt.is_some(),
+                    app.picker.is_open(),
+                ),
+            )
+        };
+        let before = state(&app);
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for k in [
+                Key::D,
+                Key::V,
+                Key::A,
+                Key::N,
+                Key::R,
+                Key::M,
+                Key::S,
+                Key::Enter,
+                Key::Space,
+                Key::Num2,
+                Key::H,
+                Key::F1,
+                Key::Slash,
+                Key::B,
+                Key::O,
+                Key::F,
+                Key::Tab,
+                Key::J,
+                Key::Down,
+            ] {
+                assert_eq!(
+                    app.handle_event(&key(k, "", m)),
+                    EventResult::Ignored,
+                    "{m:?} {k:?} was taken"
+                );
+                assert_eq!(state(&app), before, "{m:?} {k:?} changed the reader");
+            }
+        }
+
+        // A question waiting on one key comes down for a chord, as for any
+        // key, and is not answered by it.
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            app.handle_event(&press(Key::D));
+            assert!(app.prompt.is_some(), "control: D asks");
+            app.handle_event(&key(Key::Y, "y", m));
+            assert!(app.prompt.is_none(), "{m:?} Y left the question up");
+            app.handle_event(&press(Key::V));
+            assert!(app.prompt.is_some(), "control: V asks where");
+            app.handle_event(&key(Key::Num1, "1", m));
+            assert_eq!(state(&app), before, "{m:?} answered the question");
+        }
+
+        // The search types what was typed, and AltGr's letters among it.
+        app.handle_event(&key(Key::F, "f", Modifiers::ctrl()));
+        assert!(app.search_active, "control: Ctrl+F opens the search");
+        app.handle_event(&key(Key::F, "f", Modifiers::ctrl()));
+        app.handle_event(&key(Key::X, "x", Modifiers::alt()));
+        app.handle_event(&key(Key::X, "x", Modifiers::super_key()));
+        app.handle_event(&key(Key::S, "ś", altgr));
+        app.handle_event(&key(Key::Backspace, "", Modifiers::alt()));
+        app.handle_event(&key(Key::Enter, "", Modifiers::alt()));
+        app.handle_event(&key(Key::Escape, "", Modifiers::alt()));
+        assert_eq!(
+            app.search_query, "ś",
+            "the search typed a command's letter, or lost AltGr's"
+        );
+        assert!(app.search_active, "a chorded Enter or Escape closed it");
+        app.handle_event(&press(Key::Escape));
+
+        // As does the prompt for a name.
+        app.handle_event(&press(Key::A));
+        assert!(app.text_entry.is_some(), "control: A asks for an address");
+        app.handle_event(&key(Key::X, "x", Modifiers::alt()));
+        app.handle_event(&key(Key::S, "ś", altgr));
+        app.handle_event(&key(Key::Backspace, "", Modifiers::alt()));
+        app.handle_event(&key(Key::Enter, "", Modifiers::alt()));
+        app.handle_event(&key(Key::Escape, "", Modifiers::alt()));
+        assert_eq!(app.text_buffer, "ś", "the prompt typed a command's letter");
+        assert!(
+            app.text_entry.is_some(),
+            "a chorded Enter or Escape closed it"
+        );
     }
 
     /// `A` subscribes to a feed by address.

@@ -1,7 +1,9 @@
 //! Slate OS App Launcher
 //!
 //! A Spotlight/Alfred-style application launcher providing:
-//! - As-you-type fuzzy search across installed applications and system commands
+//! - As-you-type fuzzy search across installed applications and system commands:
+//!   the installed programs' desktop entries, read as the start menu reads them,
+//!   and the launcher's own list for what no entry names
 //! - Frecency-based ranking (combines match quality with launch frequency/recency)
 //! - Keyboard-driven navigation (arrows, Enter to launch, Escape to dismiss)
 //! - Catppuccin Mocha dark theme with a centered floating dialog
@@ -10,18 +12,14 @@
 
 use appearance::Palette;
 use appearance::Surface;
-#[allow(unused_imports)]
 use guitk::color::Color;
-#[allow(unused_imports)]
-use guitk::event::{
-    Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
-};
-#[allow(unused_imports)]
+use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
-#[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::text;
 use oswindow::app::Response;
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -203,6 +201,9 @@ pub struct AppEntry {
     pub category: Category,
     /// Cumulative launch count (for frecency scoring).
     pub launch_count: u32,
+    /// The directory to start it in, when its desktop entry says (`Path`):
+    /// a program ported from elsewhere may find its own files by it.
+    pub dir: Option<PathBuf>,
 }
 
 // ============================================================================
@@ -312,11 +313,13 @@ fn frecency_bonus(
 // Launcher action (returned from event handling)
 // ============================================================================
 
-/// A program to start: its path, and its arguments, each one whole.
+/// A program to start: its path, and its arguments, each one whole -- and
+/// the directory to start it in, when it has one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LaunchCommand {
     pub path: String,
     pub args: Vec<String>,
+    pub dir: Option<PathBuf>,
 }
 
 impl std::fmt::Display for LaunchCommand {
@@ -338,6 +341,7 @@ impl AppEntry {
         LaunchCommand {
             path: self.executable_path.clone(),
             args: self.args.clone(),
+            dir: self.dir.clone(),
         }
     }
 
@@ -352,6 +356,158 @@ impl AppEntry {
             key.push_str(arg);
         }
         key
+    }
+}
+
+// ============================================================================
+// Installed programs
+// ============================================================================
+
+/// The terminal a program whose entry says `Terminal=true` is started inside,
+/// as the start menu starts one: `terminal -e program args...`.
+const TERMINAL: &str = "/usr/bin/terminal";
+
+impl AppEntry {
+    /// The launcher's entry for an installed program's desktop entry, or
+    /// `None` for one it cannot start: an entry with no `Exec` is started by
+    /// D-Bus activation, which this system has not got.
+    ///
+    /// Also `None` for a command line that is not text. It always is: every
+    /// piece of it comes from the entry, which is UTF-8 by the specification,
+    /// and no file is being opened to add a path of bytes. Were it not, it
+    /// would be refused rather than made text by guessing at its bytes.
+    fn from_desktop(app: &desktopentry::App) -> Option<Self> {
+        let exec = app.exec.as_ref()?;
+        let invocation = desktopentry::Invocation {
+            icon: app.icon.as_deref(),
+            name: &app.name,
+            location: None,
+        };
+        let line: Vec<String> = exec
+            .command_lines(&[], &invocation)
+            .into_iter()
+            .next()?
+            .into_iter()
+            .map(OsString::into_string)
+            .collect::<Result<_, _>>()
+            .ok()?;
+        let mut line = line.into_iter();
+        let program = line.next()?;
+        let (executable_path, args) = if app.terminal {
+            let mut args = vec![String::from("-e"), program];
+            args.extend(line);
+            (String::from(TERMINAL), args)
+        } else {
+            (program, line.collect())
+        };
+        use desktopentry::menu::Category as Folder;
+        Some(Self {
+            name: app.name.clone(),
+            // A comment says what it does; a generic name says what it is.
+            // Either is a better second line than nothing.
+            description: app
+                .comment
+                .clone()
+                .or_else(|| app.generic_name.clone())
+                .unwrap_or_default(),
+            executable_path,
+            args,
+            keywords: app.keywords.clone(),
+            category: match Folder::of(&app.categories) {
+                Folder::Settings => Category::Setting,
+                Folder::System => Category::System,
+                _ => Category::Application,
+            },
+            launch_count: 0,
+            dir: app.path.as_ref().map(PathBuf::from),
+        })
+    }
+
+    /// The program this entry is: its own, or -- for one started in a
+    /// terminal, as [`AppEntry::from_desktop`] wraps it -- the one inside.
+    /// Without it an installed terminal program would stand for the
+    /// terminal, and take the terminal's own row.
+    fn program(&self) -> &str {
+        if self.executable_path == TERMINAL
+            && self.args.first().is_some_and(|flag| flag == "-e")
+            && let Some(inner) = self.args.get(1)
+        {
+            return inner;
+        }
+        &self.executable_path
+    }
+}
+
+/// The installed programs a menu lists, read from the desktop entries under
+/// `dirs` as the start menu reads them (`gui/desktop`'s
+/// `refresh_installed_apps`): the entries `shows_in_menu` shows -- not
+/// `NoDisplay`, not `Hidden`, not for another desktop -- whose `TryExec`
+/// program is on `path_var`, and which can be started.
+///
+/// The files that could not be used are not reported here: the start menu
+/// reads the same files and reports each once, and the launcher is opened
+/// many times a day.
+fn installed_programs(
+    dirs: &desktopentry::scan::DataDirs,
+    locale: Option<&desktopentry::Locale>,
+    path_var: Option<&OsStr>,
+) -> Vec<AppEntry> {
+    let scan = desktopentry::scan::scan(dirs);
+    let (apps, _unusable) = desktopentry::scan::apps(&scan, locale);
+    apps.iter()
+        .filter(|app| desktopentry::menu::shows_in_menu(app, &[desktopentry::menu::DESKTOP_NAME]))
+        .filter(|app| {
+            app.try_exec
+                .as_deref()
+                .is_none_or(|program| desktopentry::scan::program_exists(program, path_var))
+        })
+        .filter_map(AppEntry::from_desktop)
+        .collect()
+}
+
+/// Every program the launcher offers: its own list, each row replaced in
+/// place by the installed entry for the same program, then the installed
+/// programs its list does not name, by name.
+///
+/// The rule the start menu keeps (`DesktopShell::set_installed_apps`), so
+/// the two list the same programs: an entry is the one the program ships,
+/// with its own name and command line, and the launcher's own rows stay for
+/// what no entry names -- a machine with none installed still has a
+/// launcher. In place, because the list's order is the order the first page
+/// shows before anything is typed. A row that starts its program with
+/// arguments -- one of Settings' pages -- is not replaced: an entry for the
+/// program says nothing about the page.
+fn programs(mut installed: Vec<AppEntry>) -> Vec<AppEntry> {
+    installed.sort_by(by_name);
+    let file_name = |program: &str| Path::new(program).file_name().map(OsStr::to_os_string);
+    let mut list = Vec::with_capacity(installed.len());
+    for own in builtin_app_database() {
+        let named = file_name(&own.executable_path);
+        let installed_as = if own.args.is_empty() {
+            installed
+                .iter()
+                .position(|app| named.is_some() && file_name(app.program()) == named)
+        } else {
+            None
+        };
+        match installed_as {
+            Some(at) => list.push(installed.remove(at)),
+            None => list.push(own),
+        }
+    }
+    list.extend(installed);
+    list
+}
+
+/// Where installed programs' desktop entries are looked for: the
+/// environment's data directories -- and in this crate's tests none, so a
+/// test's launcher is the built-in list on every machine rather than
+/// whatever the machine running the tests has installed.
+fn default_app_dirs() -> desktopentry::scan::DataDirs {
+    if cfg!(test) {
+        desktopentry::scan::DataDirs::new(Vec::new())
+    } else {
+        desktopentry::scan::DataDirs::from_env(|name| std::env::var_os(name))
     }
 }
 
@@ -424,9 +580,35 @@ pub struct LauncherState {
 }
 
 impl LauncherState {
-    /// Create a new launcher with the built-in app database.
+    /// Create a new launcher with the programs installed here
+    /// ([`installed_programs`]) and its own list for the rest.
     pub fn new(viewport_width: f32, viewport_height: f32) -> Self {
-        let apps = builtin_app_database();
+        let locale = desktopentry::Locale::from_env(|name| std::env::var(name).ok());
+        let path_var = std::env::var_os("PATH");
+        Self::over(
+            viewport_width,
+            viewport_height,
+            &default_app_dirs(),
+            locale.as_ref(),
+            path_var.as_deref(),
+        )
+    }
+
+    /// A launcher over the programs installed under `dirs`, read in `locale`
+    /// with `path_var` as `PATH`, and its own list for the rest.
+    fn over(
+        viewport_width: f32,
+        viewport_height: f32,
+        dirs: &desktopentry::scan::DataDirs,
+        locale: Option<&desktopentry::Locale>,
+        path_var: Option<&OsStr>,
+    ) -> Self {
+        let installed = installed_programs(dirs, locale, path_var);
+        Self::with_apps(viewport_width, viewport_height, programs(installed))
+    }
+
+    /// A launcher offering `apps`.
+    fn with_apps(viewport_width: f32, viewport_height: f32, apps: Vec<AppEntry>) -> Self {
         let mut state = Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             caret_width: guitk::textedit::CARET_WIDTH,
@@ -607,6 +789,46 @@ impl LauncherState {
             return LauncherAction::None;
         }
 
+        // Ctrl+1..8: launch Nth result directly. A Ctrl chord, not Ctrl held:
+        // AltGr arrives as Ctrl+Alt and types, and AltGr+1 launched the first
+        // program on a layout where it types `~`.
+        if textline::is_ctrl_chord(event.modifiers) {
+            let idx = match event.key {
+                Key::Num1 => 0,
+                Key::Num2 => 1,
+                Key::Num3 => 2,
+                Key::Num4 => 3,
+                Key::Num5 => 4,
+                Key::Num6 => 5,
+                Key::Num7 => 6,
+                Key::Num8 => 7,
+                _ => return LauncherAction::None,
+            };
+            if idx < self.results.len() {
+                self.selected_index = idx;
+                return self.launch_selected();
+            }
+            return LauncherAction::None;
+        }
+
+        // Text input: what a key typed, AltGr's among it, and not a command's
+        // letter, which a chord carries -- Ctrl+X typed an `x` into the query.
+        if textline::types_into_field(event) {
+            for ch in event.typed() {
+                self.query.insert(self.cursor, ch);
+                self.cursor = self.cursor.saturating_add(ch.len_utf8());
+            }
+            self.selected_index = 0;
+            self.update_results();
+            return LauncherAction::None;
+        }
+
+        // The box's own keys are plain: Alt+Enter launched the selection and
+        // Alt+Escape put the launcher away.
+        if !textline::is_plain(event.modifiers) {
+            return LauncherAction::None;
+        }
+
         match event.key {
             Key::Escape => {
                 self.hide();
@@ -702,46 +924,7 @@ impl LauncherState {
                 return LauncherAction::None;
             }
 
-            // Ctrl+1..8: launch Nth result directly
-            Key::Num1
-            | Key::Num2
-            | Key::Num3
-            | Key::Num4
-            | Key::Num5
-            | Key::Num6
-            | Key::Num7
-            | Key::Num8
-                if event.modifiers.ctrl =>
-            {
-                let idx = match event.key {
-                    Key::Num1 => 0,
-                    Key::Num2 => 1,
-                    Key::Num3 => 2,
-                    Key::Num4 => 3,
-                    Key::Num5 => 4,
-                    Key::Num6 => 5,
-                    Key::Num7 => 6,
-                    Key::Num8 => 7,
-                    _ => return LauncherAction::None,
-                };
-                if idx < self.results.len() {
-                    self.selected_index = idx;
-                    return self.launch_selected();
-                }
-                return LauncherAction::None;
-            }
-
             _ => {}
-        }
-
-        // Text input: if the event carries a printable character, insert it
-        if event.types_text() {
-            for ch in event.typed() {
-                self.query.insert(self.cursor, ch);
-                self.cursor = self.cursor.saturating_add(ch.len_utf8());
-            }
-            self.selected_index = 0;
-            self.update_results();
         }
 
         LauncherAction::None
@@ -1169,140 +1352,51 @@ impl LauncherState {
 // Built-in application database
 // ============================================================================
 
-/// The default set of launchable apps and system commands.
 /// The power utility, `userspace/powerctl`: `powerctl shutdown`, `reboot`,
 /// `suspend`, `hibernate`. The desktop shell runs the same path.
 const POWERCTL: &str = "/bin/powerctl";
 
+/// Every item the launcher offers before anything is installed: SlateOS's own
+/// programs, then what it offers that is not a program.
 fn builtin_app_database() -> Vec<AppEntry> {
+    let mut list = built_in_programs();
+    list.extend(commands());
+    list
+}
+
+/// SlateOS's own programs, from the one list of programs
+/// (`programs::built_in`, design-decisions §1425) -- the list the start menu
+/// reads, so the two offer the same programs, started the same way. In name
+/// order, the order the first page shows them before anything is typed.
+///
+/// Until 2026-09-29 the launcher kept ten of its own: a second copy beside the
+/// start menu's, which agreed with it only because lane C built the library
+/// from the copies (`requests/c-e-read-the-one-list-of-programs.md`), and which
+/// had not heard of the archive manager, the calendar, the hex editor, the PDF
+/// viewer or the video player.
+fn built_in_programs() -> Vec<AppEntry> {
+    let mut list: Vec<AppEntry> = ::programs::built_in(None)
+        .iter()
+        .filter_map(AppEntry::from_desktop)
+        .collect();
+    list.sort_by(by_name);
+    list
+}
+
+/// The order programs are listed in: by name, whatever its case, then by the
+/// program -- the start menu's order (`DesktopShell::set_installed_apps`).
+fn by_name(a: &AppEntry, b: &AppEntry) -> std::cmp::Ordering {
+    a.name
+        .to_lowercase()
+        .cmp(&b.name.to_lowercase())
+        .then_with(|| a.executable_path.cmp(&b.executable_path))
+}
+
+/// What the launcher offers that is not a program: the power actions, the
+/// lock and Settings' pages -- things to do, which no desktop entry describes
+/// and the one list of programs does not hold.
+fn commands() -> Vec<AppEntry> {
     vec![
-        // Applications
-        AppEntry {
-            name: "Terminal".to_string(),
-            description: "Command-line terminal emulator".to_string(),
-            executable_path: "/usr/bin/terminal".to_string(),
-            args: Vec::new(),
-            keywords: vec![
-                "shell".into(),
-                "console".into(),
-                "bash".into(),
-                "cli".into(),
-            ],
-            category: Category::Application,
-            launch_count: 0,
-        },
-        AppEntry {
-            name: "Text Editor".to_string(),
-            description: "Plain text and code editor".to_string(),
-            executable_path: "/usr/bin/editor".to_string(),
-            args: Vec::new(),
-            keywords: vec![
-                "edit".into(),
-                "code".into(),
-                "write".into(),
-                "notepad".into(),
-            ],
-            category: Category::Application,
-            launch_count: 0,
-        },
-        AppEntry {
-            name: "File Explorer".to_string(),
-            description: "Browse and manage files".to_string(),
-            executable_path: "/usr/bin/explorer".to_string(),
-            args: Vec::new(),
-            keywords: vec![
-                "files".into(),
-                "browse".into(),
-                "folder".into(),
-                "directory".into(),
-            ],
-            category: Category::Application,
-            launch_count: 0,
-        },
-        AppEntry {
-            name: "Calculator".to_string(),
-            description: "Scientific calculator".to_string(),
-            executable_path: "/usr/bin/calculator".to_string(),
-            args: Vec::new(),
-            keywords: vec!["math".into(), "calc".into(), "compute".into()],
-            category: Category::Application,
-            launch_count: 0,
-        },
-        AppEntry {
-            name: "Settings".to_string(),
-            description: "System preferences and configuration".to_string(),
-            executable_path: "/usr/bin/settings".to_string(),
-            args: Vec::new(),
-            keywords: vec!["config".into(), "preferences".into(), "options".into()],
-            category: Category::Setting,
-            launch_count: 0,
-        },
-        AppEntry {
-            name: "System Info".to_string(),
-            description: "Hardware and OS information".to_string(),
-            executable_path: "/usr/bin/sysinfo".to_string(),
-            args: Vec::new(),
-            keywords: vec![
-                "hardware".into(),
-                "info".into(),
-                "about".into(),
-                "specs".into(),
-            ],
-            category: Category::Application,
-            launch_count: 0,
-        },
-        AppEntry {
-            name: "Process Explorer".to_string(),
-            description: "View and manage running processes".to_string(),
-            executable_path: "/usr/bin/procexplorer".to_string(),
-            args: Vec::new(),
-            keywords: vec![
-                "task".into(),
-                "manager".into(),
-                "processes".into(),
-                "kill".into(),
-            ],
-            category: Category::Application,
-            launch_count: 0,
-        },
-        AppEntry {
-            name: "Image Viewer".to_string(),
-            description: "View images and photos".to_string(),
-            executable_path: "/usr/bin/imageviewer".to_string(),
-            args: Vec::new(),
-            keywords: vec![
-                "photo".into(),
-                "picture".into(),
-                "gallery".into(),
-                "png".into(),
-                "jpg".into(),
-            ],
-            category: Category::Application,
-            launch_count: 0,
-        },
-        AppEntry {
-            name: "Music Player".to_string(),
-            description: "Play music and audio files".to_string(),
-            executable_path: "/usr/bin/musicplayer".to_string(),
-            args: Vec::new(),
-            keywords: vec!["audio".into(), "song".into(), "mp3".into(), "media".into()],
-            category: Category::Application,
-            launch_count: 0,
-        },
-        AppEntry {
-            name: "Screenshot".to_string(),
-            description: "Capture screen area or window".to_string(),
-            executable_path: "/usr/bin/screenshot".to_string(),
-            args: Vec::new(),
-            keywords: vec![
-                "capture".into(),
-                "snip".into(),
-                "screen".into(),
-                "grab".into(),
-            ],
-            category: Category::Application,
-            launch_count: 0,
-        },
         // System commands
         // Power, through `powerctl` -- the program SlateOS has for it, and
         // what the start menu's power menu runs (lane C's request
@@ -1317,6 +1411,7 @@ fn builtin_app_database() -> Vec<AppEntry> {
             keywords: vec!["power".into(), "off".into(), "halt".into()],
             category: Category::System,
             launch_count: 0,
+            dir: None,
         },
         AppEntry {
             name: "Restart".to_string(),
@@ -1326,6 +1421,7 @@ fn builtin_app_database() -> Vec<AppEntry> {
             keywords: vec!["reboot".into(), "reset".into()],
             category: Category::System,
             launch_count: 0,
+            dir: None,
         },
         AppEntry {
             name: "Sleep".to_string(),
@@ -1335,6 +1431,7 @@ fn builtin_app_database() -> Vec<AppEntry> {
             keywords: vec!["suspend".into(), "standby".into()],
             category: Category::System,
             launch_count: 0,
+            dir: None,
         },
         AppEntry {
             name: "Hibernate".to_string(),
@@ -1344,6 +1441,7 @@ fn builtin_app_database() -> Vec<AppEntry> {
             keywords: vec!["hibernate".into(), "power".into()],
             category: Category::System,
             launch_count: 0,
+            dir: None,
         },
         AppEntry {
             name: "Lock".to_string(),
@@ -1353,6 +1451,7 @@ fn builtin_app_database() -> Vec<AppEntry> {
             keywords: vec!["lock".into(), "secure".into(), "away".into()],
             category: Category::System,
             launch_count: 0,
+            dir: None,
         },
         // No "Log out": ending the session is the desktop shell's, which
         // returns to its own sign-in screen, and a separate program has no
@@ -1371,6 +1470,7 @@ fn builtin_app_database() -> Vec<AppEntry> {
             ],
             category: Category::Setting,
             launch_count: 0,
+            dir: None,
         },
         AppEntry {
             name: "Network Settings".to_string(),
@@ -1385,6 +1485,7 @@ fn builtin_app_database() -> Vec<AppEntry> {
             ],
             category: Category::Setting,
             launch_count: 0,
+            dir: None,
         },
         AppEntry {
             name: "Sound Settings".to_string(),
@@ -1399,6 +1500,7 @@ fn builtin_app_database() -> Vec<AppEntry> {
             ],
             category: Category::Setting,
             launch_count: 0,
+            dir: None,
         },
     ]
 }
@@ -1441,8 +1543,12 @@ const DEFAULT_VIEWPORT: (u32, u32) = (1920, 1080);
 /// and holding the dialog open until the program exits would make the launcher
 /// behave like a terminal.
 fn spawn_program(command: &LaunchCommand) -> Result<(), String> {
-    std::process::Command::new(&command.path)
-        .args(&command.args)
+    let mut start = std::process::Command::new(&command.path);
+    start.args(&command.args);
+    if let Some(dir) = &command.dir {
+        start.current_dir(dir);
+    }
+    start
         .spawn()
         .map(|_child| ())
         .map_err(|err| err.to_string())
@@ -1559,6 +1665,7 @@ mod tests {
     #![allow(clippy::float_cmp)]
 
     use super::*;
+    use guitk::event::Modifiers;
 
     /// The caret has to sit where the query text ends, and the query is drawn
     /// in the *proportional* UI face. It used to be placed at
@@ -1795,6 +1902,7 @@ mod tests {
             keywords: vec![],
             category: Category::Application,
             launch_count: 0,
+            dir: None,
         };
         // "term" matches name strongly
         let score = search_score("term", &entry);
@@ -1812,6 +1920,7 @@ mod tests {
             keywords: vec!["shell".into(), "console".into()],
             category: Category::Application,
             launch_count: 0,
+            dir: None,
         };
         let score = search_score("shell", &entry);
         assert!(score.is_some(), "Should match via keyword");
@@ -1827,6 +1936,7 @@ mod tests {
             keywords: vec!["math".into()],
             category: Category::Application,
             launch_count: 0,
+            dir: None,
         };
         let score = search_score("terminal", &entry);
         assert!(score.is_none(), "Unrelated query should not match");
@@ -2021,6 +2131,47 @@ mod tests {
             "each of the first eight rows should name the key that launches it"
         );
         assert_eq!(hints.first().map(String::as_str), Some("Ctrl+1"));
+    }
+
+    /// **A chord is neither a launcher key nor typing, and AltGr types**:
+    /// Alt+Enter launched the selection and Alt+Escape put the launcher away,
+    /// each chord arriving carrying its key; Ctrl+X typed an `x` into the
+    /// query; and AltGr+1 -- Ctrl+Alt, which types -- launched the first
+    /// result as Ctrl+1 does.
+    #[test]
+    fn a_chord_is_neither_a_launcher_key_nor_typing() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let key = |k: Key, text: &str, modifiers: Modifiers| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        };
+        let mut launcher = LauncherState::new(1920.0, 1080.0);
+        launcher.show();
+        for (k, text, m) in [
+            (Key::Enter, "", Modifiers::alt()),
+            (Key::Escape, "", Modifiers::alt()),
+            (Key::Escape, "", Modifiers::super_key()),
+            (Key::Num1, "", altgr),
+            (Key::Down, "", Modifiers::alt()),
+            (Key::X, "x", Modifiers::ctrl()),
+            (Key::X, "x", Modifiers::alt()),
+        ] {
+            assert_eq!(
+                launcher.handle_key(&key(k, text, m)),
+                LauncherAction::None,
+                "{m:?} {k:?} {text:?} was taken"
+            );
+        }
+        assert!(launcher.visible, "a chord put the launcher away");
+        assert_eq!(launcher.selected_index, 0, "a chord moved the selection");
+        assert_eq!(launcher.query, "", "a command's letter was typed");
+        launcher.handle_key(&key(Key::S, "ś", altgr));
+        assert_eq!(launcher.query, "ś", "AltGr's ś was not typed");
     }
 
     #[test]
@@ -2527,6 +2678,7 @@ mod tests {
         let command = LaunchCommand {
             path: missing.clone(),
             args: Vec::new(),
+            dir: None,
         };
         let reason = spawn_program(&command).expect_err("that path is not a program");
         launcher.report_launch_failure(&command.to_string(), &reason);
@@ -2731,5 +2883,348 @@ mod tests {
             entry_named(&launcher, "Terminal").command_key(),
             "/usr/bin/terminal"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // The installed programs (C-Q17, design-decisions §1423)
+    // ------------------------------------------------------------------
+
+    /// A data directory holding these desktop entries, by file name.
+    fn installed(entries: &[(&str, &str)]) -> scratchdir::ScratchDir {
+        let dir = scratchdir::ScratchDir::new("launcher-apps");
+        let apps = dir.dir().join("applications");
+        std::fs::create_dir_all(&apps).unwrap();
+        for (name, text) in entries {
+            std::fs::write(apps.join(name), text).unwrap();
+        }
+        dir
+    }
+
+    /// A launcher shown over the programs installed in `dir`, with `PATH`
+    /// as `path_var`.
+    fn launcher_over(dir: &scratchdir::ScratchDir, path_var: Option<&OsStr>) -> LauncherState {
+        let dirs = desktopentry::scan::DataDirs::new(vec![dir.dir().to_path_buf()]);
+        let mut launcher = LauncherState::over(1280.0, 800.0, &dirs, None, path_var);
+        launcher.show();
+        launcher
+    }
+
+    /// Type `text` into the search box.
+    fn type_query(launcher: &mut LauncherState, text: &str) {
+        for ch in text.chars() {
+            launcher.handle_key(&KeyEvent {
+                key: Key::A,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: ch.to_string(),
+            });
+        }
+    }
+
+    /// What Enter starts.
+    fn enter(launcher: &mut LauncherState) -> LaunchCommand {
+        match launcher.handle_key(&KeyEvent {
+            key: Key::Enter,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }) {
+            LauncherAction::Launch(command) => command,
+            other => panic!("Enter started nothing: {other:?}"),
+        }
+    }
+
+    fn names(launcher: &LauncherState) -> Vec<String> {
+        launcher.apps.iter().map(|e| e.name.clone()).collect()
+    }
+
+    fn builtin_names() -> Vec<String> {
+        builtin_app_database().into_iter().map(|e| e.name).collect()
+    }
+
+    const SKETCH: &str = "[Desktop Entry]\nType=Application\nName=Sketch\n\
+                          Comment=Draw and paint\nExec=sketch --new %U\n\
+                          Keywords=draw;paint;\nCategories=Graphics;\n";
+
+    /// **A program installed here is offered, and started by its entry's
+    /// command line**, found by its name and by the words its entry gives.
+    /// The launcher kept its own list of what might be installed, so a
+    /// program installed later could not be launched from it at all.
+    #[test]
+    fn an_installed_program_is_offered_and_started_by_its_entry() {
+        let dir = installed(&[("org.example.Sketch.desktop", SKETCH)]);
+        let mut launcher = launcher_over(&dir, None);
+        type_query(&mut launcher, "sketch");
+        assert_eq!(
+            enter(&mut launcher),
+            LaunchCommand {
+                path: String::from("sketch"),
+                args: vec![String::from("--new")],
+                dir: None,
+            }
+        );
+        let entry = entry_named(&launcher, "Sketch");
+        assert_eq!(entry.description, "Draw and paint");
+        assert_eq!(entry.category, Category::Application);
+
+        let mut launcher = launcher_over(&dir, None);
+        type_query(&mut launcher, "paint");
+        assert_eq!(
+            enter(&mut launcher).path,
+            "sketch",
+            "its keywords are not searched"
+        );
+    }
+
+    /// **An installed entry takes the row of the program it names, in
+    /// place**, so the first page before anything is typed does not change
+    /// its order -- and the launcher's own row for it goes, rather than the
+    /// program being listed twice.
+    #[test]
+    fn an_installed_entry_takes_its_programs_row_in_place() {
+        let dir = installed(&[(
+            "org.slateos.Calculator.desktop",
+            "[Desktop Entry]\nType=Application\nName=Calc Pro\nExec=/usr/bin/calculator --scientific\n",
+        )]);
+        let launcher = launcher_over(&dir, None);
+        let mut expected = builtin_names();
+        let at = expected.iter().position(|n| n == "Calculator").unwrap();
+        expected[at] = String::from("Calc Pro");
+        assert_eq!(names(&launcher), expected);
+        let entry = entry_named(&launcher, "Calc Pro");
+        assert_eq!(entry.executable_path, "/usr/bin/calculator");
+        assert_eq!(entry.args, ["--scientific"]);
+    }
+
+    /// **A program's pages stay when the program is installed**: an entry
+    /// for Settings says nothing about its Display page.
+    #[test]
+    fn the_rows_that_open_a_programs_pages_stay_when_it_is_installed() {
+        let dir = installed(&[(
+            "org.slateos.Settings.desktop",
+            "[Desktop Entry]\nType=Application\nName=System Settings\nExec=settings\n\
+             Categories=Settings;\n",
+        )]);
+        let launcher = launcher_over(&dir, None);
+        let names = names(&launcher);
+        assert!(!names.contains(&String::from("Settings")), "listed twice");
+        for page in [
+            "System Settings",
+            "Display Settings",
+            "Network Settings",
+            "Sound Settings",
+        ] {
+            assert!(
+                names.contains(&String::from(page)),
+                "{page} is gone: {names:?}"
+            );
+        }
+        assert_eq!(
+            entry_named(&launcher, "System Settings").category,
+            Category::Setting
+        );
+    }
+
+    /// **What a menu would not show is not offered**: an entry kept out of
+    /// menus, deleted, for another desktop, whose program is not installed,
+    /// or not a program at all.
+    #[test]
+    fn what_a_menu_would_not_show_is_not_offered() {
+        let program = |extra: &str| {
+            format!("[Desktop Entry]\nType=Application\nName=Hidden one\nExec=hidden\n{extra}\n")
+        };
+        for extra in [
+            "NoDisplay=true",
+            "Hidden=true",
+            "OnlyShowIn=GNOME;",
+            "NotShowIn=SlateOS;",
+            "TryExec=definitely-not-installed-anywhere",
+        ] {
+            let dir = installed(&[("hidden.desktop", &program(extra))]);
+            let launcher = launcher_over(&dir, None);
+            assert_eq!(names(&launcher), builtin_names(), "{extra} was offered");
+        }
+        let dir = installed(&[(
+            "site.desktop",
+            "[Desktop Entry]\nType=Link\nName=A website\nURL=https://example.org/\n",
+        )]);
+        assert_eq!(
+            names(&launcher_over(&dir, None)),
+            builtin_names(),
+            "a link was offered"
+        );
+        // A TryExec that is on PATH is shown.
+        let dir = installed(&[("sketch.desktop", &format!("{SKETCH}TryExec=sketch\n"))]);
+        let bin = dir.dir().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        // The name as the entry gives it, which is what `program_exists`
+        // looks for on `PATH`.
+        let program = bin.join("sketch");
+        std::fs::write(&program, b"").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let launcher = launcher_over(&dir, Some(bin.as_os_str()));
+        assert!(
+            names(&launcher).contains(&String::from("Sketch")),
+            "TryExec on PATH hid it"
+        );
+    }
+
+    /// **A program that runs in a terminal is started inside one**, and
+    /// does not take the terminal's own row.
+    #[test]
+    fn a_terminal_program_is_started_in_the_terminal() {
+        let dir = installed(&[(
+            "htop.desktop",
+            "[Desktop Entry]\nType=Application\nName=htop\nExec=htop -d 5\nTerminal=true\n\
+             Categories=System;\n",
+        )]);
+        let mut launcher = launcher_over(&dir, None);
+        assert!(
+            names(&launcher).contains(&String::from("Terminal")),
+            "it took the terminal's row"
+        );
+        type_query(&mut launcher, "htop");
+        let command = enter(&mut launcher);
+        assert_eq!(command.path, TERMINAL);
+        assert_eq!(command.args, ["-e", "htop", "-d", "5"]);
+        assert_eq!(entry_named(&launcher, "htop").category, Category::System);
+    }
+
+    /// **An entry's working directory is where its program starts** --
+    /// `Path`, which a program ported from elsewhere may find its own files
+    /// by.
+    #[test]
+    fn an_entrys_working_directory_is_where_it_starts() {
+        let dir = installed(&[(
+            "game.desktop",
+            "[Desktop Entry]\nType=Application\nName=Old Game\nExec=./game\nPath=/opt/oldgame\n",
+        )]);
+        let mut launcher = launcher_over(&dir, None);
+        type_query(&mut launcher, "old game");
+        assert_eq!(
+            enter(&mut launcher).dir,
+            Some(PathBuf::from("/opt/oldgame"))
+        );
+    }
+
+    /// **The programs the launcher's own list does not name follow it, by
+    /// name** -- after the first page, which is the list's own order.
+    #[test]
+    fn the_programs_its_list_does_not_name_follow_it_by_name() {
+        let entry = |name: &str, exec: &str| {
+            format!("[Desktop Entry]\nType=Application\nName={name}\nExec={exec}\n")
+        };
+        // Found in file order, and started by commands in another order
+        // again: only the names, read without regard to case, give the one
+        // expected.
+        let dir = installed(&[
+            ("1.desktop", &entry("Zebra", "a-zebra")),
+            ("2.desktop", &entry("mole", "m-mole")),
+            ("3.desktop", &entry("Aardvark", "z-aardvark")),
+        ]);
+        let names = names(&launcher_over(&dir, None));
+        let mut expected = builtin_names();
+        expected.extend(["Aardvark", "mole", "Zebra"].map(String::from));
+        assert_eq!(names, expected);
+    }
+
+    /// **A program is started in its entry's directory**: one that does not
+    /// exist is refused, rather than the program started somewhere else.
+    #[test]
+    fn a_program_is_started_in_its_entrys_directory() {
+        let dir = scratchdir::ScratchDir::new("launcher-dir");
+        // A program that exists and ends at once: this test binary, asked
+        // only to list its tests.
+        let program = std::env::current_exe().unwrap();
+        let command = LaunchCommand {
+            path: program.to_str().unwrap().to_owned(),
+            args: vec![String::from("--list")],
+            dir: Some(dir.dir().join("not-made")),
+        };
+        assert!(
+            spawn_program(&command).is_err(),
+            "it was started somewhere other than its entry's directory"
+        );
+    }
+
+    /// **The programs the launcher offers are the one list's**
+    /// (`programs::built_in`, design-decisions §1425), each started as its
+    /// entry says, and every one of them -- the archive manager, the
+    /// calendar, the hex editor, the PDF and video players included, which
+    /// the launcher's own copy had not heard of. What it offers beside them
+    /// is its commands, none of which is a program the list holds.
+    #[test]
+    fn the_launcher_offers_the_one_list_of_programs() {
+        let launcher = LauncherState::new(1280.0, 800.0);
+        let library: Vec<AppEntry> = ::programs::built_in(None)
+            .iter()
+            .filter_map(AppEntry::from_desktop)
+            .collect();
+        assert!(
+            library.len() >= 15,
+            "the library has {} programs",
+            library.len()
+        );
+        for program in &library {
+            let offered = entry_named(&launcher, &program.name);
+            assert_eq!(
+                offered.executable_path, program.executable_path,
+                "{}",
+                program.name
+            );
+            assert_eq!(offered.args, program.args, "{}", program.name);
+        }
+        for name in [
+            "Archive Manager",
+            "Calendar",
+            "Hex Editor",
+            "PDF Viewer",
+            "Video Player",
+        ] {
+            assert!(
+                library.iter().any(|p| p.name == name),
+                "{name} is not in the library: {:?}",
+                library.iter().map(|p| &p.name).collect::<Vec<_>>()
+            );
+        }
+        let commands = commands();
+        assert_eq!(
+            launcher.apps.len(),
+            library.len() + commands.len(),
+            "the launcher offers something that is neither"
+        );
+        // The programs first, in name order: the first page before anything
+        // is typed.
+        let first: Vec<String> = launcher
+            .apps
+            .iter()
+            .take(library.len())
+            .map(|a| a.name.to_lowercase())
+            .collect();
+        assert!(
+            first.windows(2).all(|w| w[0] <= w[1]),
+            "the programs are not in name order: {first:?}"
+        );
+        for command in &commands {
+            assert!(
+                !library.iter().any(|p| p.name == command.name),
+                "{} is both a program and a command",
+                command.name
+            );
+        }
+    }
+
+    /// With nothing installed the launcher is its own list, in its order --
+    /// what every test above compares with, and what a machine with no
+    /// entries still gets.
+    #[test]
+    fn with_nothing_installed_the_launcher_is_its_own_list() {
+        assert_eq!(names(&LauncherState::new(1280.0, 800.0)), builtin_names());
+        let dir = installed(&[]);
+        assert_eq!(names(&launcher_over(&dir, None)), builtin_names());
     }
 }

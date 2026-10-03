@@ -2261,24 +2261,31 @@ impl PodcastApp {
     }
 
     fn handle_key(&mut self, event: &KeyEvent) -> bool {
+        // The named keys are taken plain, nothing held but Shift, and the
+        // letters by the character typed: a chord with Alt or the Windows key
+        // is the window's or the desktop's and arrives carrying its letter --
+        // Alt+D started a download and Alt+Space played.
+        let plain = textline::is_plain(event.modifiers);
         // Above the Ctrl branch, which returns for every chord, and above the
         // typed path, which claims every unmodified letter.
-        if event.key == Key::F1 || (event.key == Key::Slash && event.modifiers.shift) {
+        if plain && (event.key == Key::F1 || (event.key == Key::Slash && event.modifiers.shift)) {
             self.show_help = !self.show_help;
             return true;
         }
         if self.show_help {
             // Modal. D starts a download and Space starts playing; neither
             // should happen from behind a list somebody is reading.
-            if matches!(event.key, Key::Escape | Key::Enter | Key::F1) {
+            if plain && matches!(event.key, Key::Escape | Key::Enter | Key::F1) {
                 self.show_help = false;
             }
             return true;
         }
 
         // Before anything else: Space plays, and a guard arm placed after a
-        // bare `Key::S` would never be reached.
-        if event.modifiers.ctrl {
+        // bare `Key::S` would never be reached. A Ctrl chord, not Ctrl held:
+        // AltGr arrives as Ctrl+Alt and types, and AltGr+S -- a Polish `ś` --
+        // opened the save dialog.
+        if textline::is_ctrl_chord(event.modifiers) {
             match event.key {
                 Key::S => {
                     self.open_file_dialog(true);
@@ -2290,6 +2297,11 @@ impl PodcastApp {
                 }
                 _ => return false,
             }
+        }
+        // Held with anything else, a key is its letter only if it typed one
+        // -- AltGr's, which counts by what it types -- and never a named key.
+        if !plain {
+            return textline::types_into_field(event) && self.handle_typed(event);
         }
         match event.key {
             // Playback. Space is the one key every player in the world binds.
@@ -6756,6 +6768,50 @@ mod tests {
 
     /// One podcast with `n` episodes, selected, so the content area draws the
     /// episode list rather than a placeholder view.
+    /// **A chord is neither a player key nor its letter, and AltGr is not
+    /// Ctrl**: Alt+A turned auto-play off and Alt+S stepped the speed, each
+    /// chord carrying its letter, and Windows+Space played; AltGr+S -- a
+    /// Polish `ś` -- opened the save dialog as Ctrl+S does.
+    #[test]
+    fn a_chord_is_neither_a_player_key_nor_its_letter() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let key = |k: Key, text: &str, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: text.to_owned(),
+            })
+        };
+        let mut app = app_with_episodes(3);
+        app.move_episode_selection(1);
+        let (auto, speed) = (app.auto_play_next, app.playback_speed);
+        for (k, text, m) in [
+            (Key::A, "a", Modifiers::alt()),
+            (Key::S, "s", Modifiers::alt()),
+            (Key::D, "d", Modifiers::super_key()),
+            (Key::Space, " ", Modifiers::super_key()),
+            (Key::Down, "", Modifiers::alt()),
+            (Key::S, "ś", altgr),
+            (Key::F1, "", Modifiers::alt()),
+        ] {
+            assert!(
+                !app.handle_event(&key(k, text, m)),
+                "{m:?} {k:?} {text:?} was taken"
+            );
+        }
+        assert_eq!(app.auto_play_next, auto, "a chord turned auto-play over");
+        assert_eq!(app.playback_speed, speed, "a chord stepped the speed");
+        assert_eq!(app.player_state, PlayerState::Stopped, "a chord played");
+        assert!(!app.picker.is_open(), "AltGr+S opened the save dialog");
+        assert!(!app.show_help, "a chord raised the keys");
+        assert!(app.handle_event(&key(Key::A, "a", Modifiers::NONE)));
+        assert_ne!(app.auto_play_next, auto, "A no longer turns auto-play over");
+    }
+
     fn app_with_episodes(n: usize) -> PodcastApp {
         let mut app = PodcastApp::with_sample_data(1100.0, 600.0);
         drop_sample_data(&mut app);

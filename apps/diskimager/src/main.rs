@@ -2453,7 +2453,48 @@ impl DiskImagerApp {
             return result;
         }
 
-        // Tab switching
+        // Tab switching and opening an image: Ctrl chords, not Ctrl held --
+        // AltGr arrives as Ctrl+Alt and types.
+        if textline::is_ctrl_chord(key.modifiers) {
+            return match key.key {
+                Key::Num1 => {
+                    self.active_tab = MainTab::Write;
+                    EventResult::Consumed
+                }
+                Key::Num2 => {
+                    self.active_tab = MainTab::Create;
+                    EventResult::Consumed
+                }
+                Key::Num3 => {
+                    self.active_tab = MainTab::Browse;
+                    EventResult::Consumed
+                }
+                Key::Num4 => {
+                    self.active_tab = MainTab::Verify;
+                    EventResult::Consumed
+                }
+                // The one way into `load_image`. Opens on the directory the
+                // last image came from, so a user working through a folder of
+                // images does not start at the root every time.
+                Key::O => {
+                    let start = self
+                        .loaded_image
+                        .as_ref()
+                        .map(|img| parent_directory(&img.path))
+                        .unwrap_or_else(|| PathBuf::from("."));
+                    self.open_image_dialog(&start);
+                    EventResult::Consumed
+                }
+                _ => EventResult::Ignored,
+            };
+        }
+        // Every other key is taken plain: a chord with Alt or the Windows key
+        // is the window's or the desktop's and arrives carrying its key --
+        // Alt+V turned verification off, and Alt+Escape cancelled a write.
+        if !textline::is_plain(key.modifiers) {
+            return EventResult::Ignored;
+        }
+
         // Two checkboxes this window draws and could not tick, and the
         // shortcut list that names them. `verify_after_write` was `true` and
         // `compress` was `false`, both with no writer anywhere, and both are
@@ -2468,7 +2509,7 @@ impl DiskImagerApp {
                 self.show_help = false;
                 return EventResult::Consumed;
             }
-            Key::V if !key.modifiers.ctrl => {
+            Key::V => {
                 self.write_options.verify_after_write = !self.write_options.verify_after_write;
                 return EventResult::Consumed;
             }
@@ -2477,49 +2518,15 @@ impl DiskImagerApp {
             // `Sha256` at construction with no writer -- so the other two
             // could not be chosen, and a download published with an MD5 could
             // not be checked against it by this program.
-            Key::H if !key.modifiers.ctrl => {
+            Key::H => {
                 self.hash_algorithm = self.hash_algorithm.next();
                 return EventResult::Consumed;
             }
-            Key::C if !key.modifiers.ctrl => {
+            Key::C => {
                 self.create_options.compress = !self.create_options.compress;
                 return EventResult::Consumed;
             }
             _ => {}
-        }
-
-        if key.modifiers.ctrl {
-            match key.key {
-                Key::Num1 => {
-                    self.active_tab = MainTab::Write;
-                    return EventResult::Consumed;
-                }
-                Key::Num2 => {
-                    self.active_tab = MainTab::Create;
-                    return EventResult::Consumed;
-                }
-                Key::Num3 => {
-                    self.active_tab = MainTab::Browse;
-                    return EventResult::Consumed;
-                }
-                Key::Num4 => {
-                    self.active_tab = MainTab::Verify;
-                    return EventResult::Consumed;
-                }
-                // The one way into `load_image`. Opens on the directory the
-                // last image came from, so a user working through a folder of
-                // images does not start at the root every time.
-                Key::O => {
-                    let start = self
-                        .loaded_image
-                        .as_ref()
-                        .map(|img| parent_directory(&img.path))
-                        .unwrap_or_else(|| PathBuf::from("."));
-                    self.open_image_dialog(&start);
-                    return EventResult::Consumed;
-                }
-                _ => {}
-            }
         }
 
         // Cancel operation
@@ -6637,6 +6644,56 @@ mod tests {
             modifiers: Modifiers::NONE,
             text: String::new(),
         })
+    }
+
+    /// **A key held with Alt or the Windows key is not the window's, and
+    /// AltGr is not Ctrl**: Alt+V turned verification off and Alt+C turned
+    /// compression on, each chord arriving carrying its key, and AltGr+2 --
+    /// Ctrl+Alt, which types -- changed the tab as Ctrl+2 does.
+    #[test]
+    fn a_key_held_with_a_modifier_is_not_the_windows_and_altgr_is_not_ctrl() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let mut app = DiskImagerApp::new();
+        let before = (
+            app.write_options.verify_after_write,
+            app.create_options.compress,
+            app.hash_algorithm,
+            app.active_tab,
+            app.selected_drive_index,
+        );
+        for held in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for k in [Key::V, Key::C, Key::H, Key::Num2, Key::Down, Key::F1] {
+                let ev = Event::Key(KeyEvent {
+                    key: k,
+                    pressed: true,
+                    modifiers: held,
+                    text: String::new(),
+                });
+                assert_eq!(
+                    app.handle_event(&ev),
+                    EventResult::Ignored,
+                    "{held:?} {k:?} was taken"
+                );
+            }
+        }
+        let after = (
+            app.write_options.verify_after_write,
+            app.create_options.compress,
+            app.hash_algorithm,
+            app.active_tab,
+            app.selected_drive_index,
+        );
+        assert_eq!(after, before, "a chord changed the window");
+        assert!(!app.show_help, "a chord raised the keys");
+        app.handle_event(&press_ctrl(Key::Num2));
+        assert_eq!(
+            app.active_tab,
+            MainTab::Create,
+            "Ctrl+2 no longer changes the tab"
+        );
     }
 
     /// A key press with Ctrl held.

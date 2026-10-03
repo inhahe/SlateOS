@@ -71,7 +71,7 @@
 //!    `#![allow(dead_code)]` and nine more crate-wide allows. All ten are
 //!    gone, and with them `spawn_tile_at` and `is_full`, which nothing called.
 
-use gamechrome::{Chrome, Ink};
+use gamechrome::{Chrome, HistoryKey, Ink, help};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
@@ -83,6 +83,7 @@ use guitk::style::CornerRadii;
 use guitk::surface::Surface;
 use guitk::text;
 use oswindow::app::{self, App, Response};
+use statehistory::StateHistory;
 use std::process::ExitCode;
 
 /// The tiles' own colours, by value: a player reads a tile's size by its
@@ -163,6 +164,11 @@ const WIN_TILE: u32 = 2048;
 /// of moves; the oldest entry falls off the end rather than the newest, so
 /// what you can always undo is what you just did.
 const MAX_UNDO: usize = 50;
+/// [`MAX_UNDO`] as the history takes it.
+const UNDO_LIMIT: core::num::NonZeroUsize = match core::num::NonZeroUsize::new(MAX_UNDO) {
+    Some(limit) => limit,
+    None => core::num::NonZeroUsize::MIN,
+};
 
 /// One time in ten a new tile is a 4 rather than a 2. The original game's
 /// number, and the reason a board fills faster than doubling alone explains.
@@ -194,16 +200,41 @@ const FALLBACK_SEED: u64 = 0x3230_3438_4741_4D45;
 // is exactly uniform rather than merely unbiased in its high bits.
 
 const HELP_TITLE: &str = "How to play";
-const HELP_ROWS: [(&str, &str); 8] = [
+/// The keys this game answers, drawn on the sheet above [`RULES`].
+///
+/// Apart from the rows that are not keys -- the pointer's, and the rule --
+/// so that `every_advertised_key_does_something` can press every row it has,
+/// rather than being taught to skip rows it cannot read (as towers' sheet was
+/// split). Esc has a row of its own: it closes the sheet and does not open it.
+const SHORTCUTS: [(&str, &str); 8] = [
     ("Arrows / WASD", "Slide every tile that way"),
-    ("Click < ^ v >", "The same, with a pointer"),
     ("U / Ctrl+Z", "Take back the last move"),
+    ("Ctrl+Y / Ctrl+Shift+Z", "Make it again"),
+    (
+        "Alt+Z / Alt+Shift+Z",
+        "The board before / after, any branch",
+    ),
     ("N / R", "Start a new game"),
     ("C / Enter", "Keep playing after winning"),
-    ("H / Esc", "Show or hide this sheet"),
-    ("", ""),
+    ("F1 / ? / H", "Show or hide this sheet"),
+    ("Esc", "Hide it"),
+];
+
+/// What the sheet says that is not a key, drawn below [`SHORTCUTS`] after a
+/// gap: the pointer's way to slide, and the one rule.
+const RULES: [(&str, &str); 2] = [
+    ("Click < ^ v >", "Slide the tiles with a pointer"),
     ("Two tiles alike", "merge into one of twice the value"),
 ];
+
+/// Every row of the sheet as it is drawn: the keys, a gap, what is not a key.
+fn sheet_rows() -> impl Iterator<Item = (&'static str, &'static str)> {
+    SHORTCUTS
+        .iter()
+        .copied()
+        .chain(std::iter::once(("", "")))
+        .chain(RULES.iter().copied())
+}
 
 /// The smallest font size the renderer will honour, in pixels.
 ///
@@ -544,6 +575,12 @@ pub enum Intent {
     Move(Direction),
     NewGame,
     Undo,
+    /// Make again the move last taken back: Ctrl+Y or Ctrl+Shift+Z.
+    Redo,
+    /// The board reached just before this one, on any branch: Alt+Z.
+    Earlier,
+    /// The board reached just after this one: Alt+Shift+Z.
+    Later,
     Continue,
     ToggleHelp,
     CloseHelp,
@@ -890,7 +927,10 @@ fn button(
 pub struct Game2048 {
     board: Board,
     rng: SeededRng,
-    undo_stack: Vec<UndoEntry>,
+    /// Every board there has been this game, as a tree: a move made after an
+    /// undo keeps the boards undone as a branch, reached with Alt+Z (C-Q24,
+    /// `design-decisions.md` §1416).
+    history: StateHistory<UndoEntry>,
     show_help: bool,
     /// The size the last frame was drawn at, which is the size the next click
     /// is read against.
@@ -914,7 +954,7 @@ impl Game2048 {
         let mut app = Self {
             board: Board::new(),
             rng,
-            undo_stack: Vec::new(),
+            history: StateHistory::new(UNDO_LIMIT),
             show_help: false,
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
@@ -934,8 +974,8 @@ impl Game2048 {
         &self.board
     }
 
-    pub fn undo_depth(&self) -> usize {
-        self.undo_stack.len()
+    pub fn can_undo(&self) -> bool {
+        self.history.can_undo()
     }
 
     pub fn help_is_open(&self) -> bool {
@@ -946,19 +986,44 @@ impl Game2048 {
         let best = self.board.best_score;
         self.board = Board::new();
         self.board.best_score = best;
-        self.undo_stack.clear();
+        self.history.clear();
         self.deal();
     }
 
-    fn push_undo(&mut self, entry: UndoEntry) {
-        self.undo_stack.push(entry);
-        if self.undo_stack.len() > MAX_UNDO {
-            self.undo_stack.remove(0);
-        }
+    /// Take back the last move. Returns whether there was one.
+    pub fn undo(&mut self) -> bool {
+        let now = UndoEntry::of(&self.board);
+        let then = self.history.undo(now);
+        self.put_back(then)
     }
 
-    pub fn undo(&mut self) -> bool {
-        match self.undo_stack.pop() {
+    /// Make again the move last taken back, on the branch the game is on --
+    /// the tile it spawned included. Returns whether there was one.
+    pub fn redo(&mut self) -> bool {
+        let now = UndoEntry::of(&self.board);
+        let then = self.history.redo(now);
+        self.put_back(then)
+    }
+
+    /// The board reached just before this one, on whichever branch -- Alt+Z.
+    /// Returns whether there was one.
+    pub fn earlier(&mut self) -> bool {
+        let now = UndoEntry::of(&self.board);
+        let then = self.history.earlier(now);
+        self.put_back(then)
+    }
+
+    /// The board reached just after this one -- Alt+Shift+Z. Returns whether
+    /// there was one.
+    pub fn later(&mut self) -> bool {
+        let now = UndoEntry::of(&self.board);
+        let then = self.history.later(now);
+        self.put_back(then)
+    }
+
+    /// Put the board the history handed back in place, if it handed one.
+    fn put_back(&mut self, entry: Option<UndoEntry>) -> bool {
+        match entry {
             Some(entry) => {
                 entry.restore(&mut self.board);
                 true
@@ -990,7 +1055,7 @@ impl Game2048 {
         if !self.board.apply_move(dir) {
             return false;
         }
-        self.push_undo(before);
+        self.history.begin(before);
         self.board.spawn_tile(&mut self.rng);
         if self.board.status == GameStatus::Playing && self.board.has_won() {
             self.board.status = GameStatus::Won;
@@ -1077,6 +1142,27 @@ impl Game2048 {
             }
             Intent::Undo => {
                 if self.undo() {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            Intent::Redo => {
+                if self.redo() {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            Intent::Earlier => {
+                if self.earlier() {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            Intent::Later => {
+                if self.later() {
                     EventResult::Consumed
                 } else {
                     EventResult::Ignored
@@ -1227,12 +1313,15 @@ impl Game2048 {
             Ink::on(c.chrome.dim, &[c.chrome.raised]).at(l.small.min(cap_h * 0.8), false),
             FontWeightHint::Regular,
         );
+        // The value too: under a theme whose text is only as dark as the
+        // page needs, the page's text was 3.6:1 on the box, drawn small.
+        let value_size = (l.font * 1.1).min((r.h - cap_h) * 0.8);
         centred(
             f,
             Rect::new(r.x, r.y + cap_h, r.w, r.h - cap_h),
             &value.to_string(),
-            (l.font * 1.1).min((r.h - cap_h) * 0.8),
-            c.chrome.text,
+            value_size,
+            Ink::on(c.chrome.text, &[c.chrome.raised]).at(value_size, true),
             FontWeightHint::Bold,
         );
     }
@@ -1301,7 +1390,7 @@ impl Game2048 {
     fn draw_footer(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         let entries = [
             (Target::NewGame, "New game", true),
-            (Target::Undo, "Undo", !self.undo_stack.is_empty()),
+            (Target::Undo, "Undo", self.history.can_undo()),
             (Target::Help, "Help", true),
         ];
         for (i, &(target, body, live)) in entries.iter().enumerate() {
@@ -1413,14 +1502,14 @@ impl Game2048 {
         // last row's band, written across the last row and -- because it was
         // placed from the sheet's bottom edge rather than from the ladder --
         // hanging below the sheet, and in a short window below the window.
-        let rows = HELP_ROWS.len() as f32;
+        let rows = sheet_rows().count() as f32;
         let body_h = (h.h - head_h - l.pad * 2.0).max(0.0);
         let step = body_h / (rows + 1.0);
         // Sized to the band it is written in, not to the sheet: a row taller
         // than its own band overwrites the row beneath it.
         let size = l.small.min(step * 0.7);
         let key_w = (h.w * 0.42).max(0.0);
-        for (i, &(key, meaning)) in HELP_ROWS.iter().enumerate() {
+        for (i, (key, meaning)) in sheet_rows().enumerate() {
             let y = h.y + head_h + l.pad + i as f32 * step;
             label(
                 f,
@@ -1466,13 +1555,27 @@ impl Default for Game2048 {
 /// A free function rather than a method, so the mapping can be read and tested
 /// without a game to read it against.
 pub fn key_intent(ev: &KeyEvent) -> Option<Intent> {
-    if ev.key == Key::Z && ev.modifiers.ctrl {
-        return Some(Intent::Undo);
+    // The history's keys, read as every game reads them (C-Q24): Ctrl+Z,
+    // Ctrl+Y or Ctrl+Shift+Z, Alt+Z and Alt+Shift+Z. Ctrl+Z was read here as
+    // any Z with Ctrl down -- AltGr+Z, which types ż, and Ctrl+Shift+Z too.
+    if let Some(key) = HistoryKey::of(ev) {
+        return Some(match key {
+            HistoryKey::Undo => Intent::Undo,
+            HistoryKey::Redo => Intent::Redo,
+            HistoryKey::Earlier => Intent::Earlier,
+            HistoryKey::Later => Intent::Later,
+        });
     }
-    // Ctrl and Alt combinations belong to the window, not to the board: a
-    // Ctrl+Left that slides the tiles is a Ctrl+Left the desktop cannot have.
-    if ev.modifiers.ctrl || ev.modifiers.alt {
+    // Ctrl, Alt and Windows-key combinations belong to the window and the
+    // desktop, not to the board: a Ctrl+Left that slides the tiles is a
+    // Ctrl+Left the desktop cannot have, and Windows+W no less.
+    if ev.modifiers.ctrl || ev.modifiers.alt || ev.modifiers.super_key {
         return None;
+    }
+    // F1 and `?` raise the sheet, as in every program; H, which this game
+    // had first, still does.
+    if help::raises(ev) {
+        return Some(Intent::ToggleHelp);
     }
     match ev.key {
         Key::Up | Key::W => Some(Intent::Move(Direction::Up)),
@@ -1681,8 +1784,7 @@ mod tests {
     #[test]
     fn every_text_reads_on_what_is_under_it_in_either_theme() {
         let mut bad = Vec::new();
-        for (light, cards) in LOOKS {
-            let p = palette(light, cards);
+        for (look, p) in gamechrome::legibility::looks() {
             // A switched-off button's label is exempt, as WCAG exempts an
             // inactive control: the pad once the game is over, Undo with
             // nothing to take back. They sit on the page.
@@ -1701,7 +1803,7 @@ mod tests {
             for (what, f) in every_look(&p) {
                 for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
                     bad.push(format!(
-                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        "{what}, {look}: {:?} {:.2}:1 on {:?}",
                         r.text,
                         r.ratio(),
                         r.ground
@@ -1813,7 +1915,7 @@ mod tests {
     fn playing(rows: [[u32; GRID_SIZE]; GRID_SIZE]) -> Game2048 {
         let mut app = game();
         app.board = bare(rows);
-        app.undo_stack.clear();
+        app.history.clear();
         app
     }
 
@@ -2481,13 +2583,13 @@ mod tests {
             [16, 32, 64, 128],
         ]);
         assert!(!app.make_move(Direction::Left));
-        assert_eq!(app.undo_depth(), 0, "a refused move went into the history");
+        assert!(!app.can_undo(), "a refused move went into the history");
     }
 
     #[test]
     fn an_undo_with_nothing_behind_it_is_refused_rather_than_pretended() {
         let mut app = playing([[2, 0, 0, 0], [0; 4], [0; 4], [0; 4]]);
-        assert_eq!(app.undo_depth(), 0);
+        assert!(!app.can_undo());
         assert!(!app.undo(), "an empty history claimed to undo something");
         assert_eq!(app.apply(Intent::Undo), EventResult::Ignored);
     }
@@ -2525,16 +2627,17 @@ mod tests {
             };
             assert!(app.make_move(dir), "nudge {i} did not move");
         }
+
+        // Counted by undoing: the history is a tree, and keeps no count.
+        let mut undone = 0;
+        while undone <= CAP && app.undo() {
+            undone += 1;
+        }
         assert_eq!(
-            app.undo_depth(),
-            CAP,
+            undone, CAP,
             "the history is not the depth it is supposed to keep"
         );
-
-        for _ in 0..CAP {
-            app.undo();
-        }
-        assert_eq!(app.undo_depth(), 0, "the history would not empty");
+        assert!(!app.can_undo(), "the history would not empty");
         assert_eq!(
             app.board.score(),
             after_merge,
@@ -2542,13 +2645,135 @@ mod tests {
         );
     }
 
+    // ── The history: a tree, walked with Alt+Z (C-Q24) ────────────────────
+
+    fn held(app: &mut Game2048, key: Key, ctrl: bool, alt: bool, shift: bool) -> EventResult {
+        let modifiers = guitk::event::Modifiers {
+            ctrl,
+            alt,
+            shift,
+            super_key: false,
+        };
+        handle_event(app, &Event::Key(probe::press_with(key, modifiers)))
+    }
+
+    /// **A move made after an undo starts a branch, and the undone one is
+    /// kept**: redo follows the new branch, and Alt+Z walks back through
+    /// every board there has been, in the order each was reached;
+    /// Alt+Shift+Z comes forward again.
+    #[test]
+    fn a_move_after_an_undo_keeps_the_undone_board_reachable_with_alt_z() {
+        let mut app = playing([[2, 0, 0, 0], [0; 4], [0; 4], [0; 4]]);
+        let start = app.board.grid;
+        assert!(app.make_move(Direction::Right));
+        let went_right = app.board.grid;
+        assert!(app.undo());
+        assert!(app.make_move(Direction::Down));
+        let went_down = app.board.grid;
+        assert!(!app.redo(), "redo went onto the branch left");
+        assert_eq!(
+            held(&mut app, Key::Z, false, true, false),
+            EventResult::Consumed
+        );
+        assert_eq!(app.board.grid, went_right, "the board undone was lost");
+        held(&mut app, Key::Z, false, true, false);
+        assert_eq!(app.board.grid, start);
+        held(&mut app, Key::Z, false, true, true);
+        held(&mut app, Key::Z, false, true, true);
+        assert_eq!(app.board.grid, went_down);
+        assert_eq!(
+            held(&mut app, Key::Z, false, true, true),
+            EventResult::Ignored,
+            "past the newest board"
+        );
+    }
+
+    /// **Ctrl+Y and Ctrl+Shift+Z make the move again**, the tile it spawned
+    /// included. There was no redo at all, and Ctrl+Shift+Z undid.
+    #[test]
+    fn ctrl_y_and_ctrl_shift_z_redo() {
+        let mut app = playing([[2, 0, 0, 0], [0; 4], [0; 4], [0; 4]]);
+        assert!(app.make_move(Direction::Right));
+        let after = app.board.grid;
+        held(&mut app, Key::Z, true, false, false);
+        assert_ne!(app.board.grid, after, "Ctrl+Z did not undo");
+        assert_eq!(
+            held(&mut app, Key::Y, true, false, false),
+            EventResult::Consumed
+        );
+        assert_eq!(app.board.grid, after, "Ctrl+Y did not redo");
+        held(&mut app, Key::Z, true, false, false);
+        assert_eq!(
+            held(&mut app, Key::Z, true, false, true),
+            EventResult::Consumed
+        );
+        assert_eq!(app.board.grid, after, "Ctrl+Shift+Z did not redo");
+    }
+
+    /// **AltGr+Z and Windows+Alt+Z move nothing, and no key held with the
+    /// Windows key slides the tiles.** AltGr arrives as Ctrl+Alt and types a
+    /// letter; the Windows key's combinations are the desktop's.
+    #[test]
+    fn altgr_and_the_windows_key_are_not_the_boards() {
+        let mut app = playing([[2, 0, 0, 0], [0; 4], [0; 4], [0; 4]]);
+        assert!(app.make_move(Direction::Right));
+        let after = app.board.grid;
+        let altgr = guitk::event::Modifiers {
+            ctrl: true,
+            alt: true,
+            shift: false,
+            super_key: false,
+        };
+        let windows_alt = guitk::event::Modifiers {
+            ctrl: false,
+            alt: true,
+            shift: false,
+            super_key: true,
+        };
+        for modifiers in [altgr, windows_alt] {
+            handle_event(&mut app, &Event::Key(probe::press_with(Key::Z, modifiers)));
+            assert_eq!(app.board.grid, after, "{modifiers:?}+Z moved the board");
+        }
+        let windows = guitk::event::Modifiers {
+            ctrl: false,
+            alt: false,
+            shift: false,
+            super_key: true,
+        };
+        assert_eq!(key_intent(&probe::press_with(Key::Left, windows)), None);
+        assert_eq!(key_intent(&probe::press_with(Key::W, windows)), None);
+    }
+
+    /// **Keeping going after a won board was redone survives an undo.** The
+    /// history once took a move's `before` from the board a redo had left --
+    /// won, and waiting to be told to keep going -- so undoing the first move
+    /// after "keep going" asked again.
+    #[test]
+    fn keeping_going_after_a_redone_win_survives_an_undo() {
+        let mut app = playing([[1024, 1024, 0, 0], [0; 4], [0; 4], [0; 4]]);
+        assert!(app.make_move(Direction::Left));
+        assert_eq!(app.board.status(), GameStatus::Won);
+        assert!(app.undo());
+        assert!(app.redo());
+        assert_eq!(app.board.status(), GameStatus::Won);
+        assert!(app.continue_after_win());
+        assert_eq!(app.board.status(), GameStatus::WonContinuing);
+        assert!(app.make_move(Direction::Right) || app.make_move(Direction::Down));
+        assert!(app.undo());
+        assert_eq!(
+            app.board.status(),
+            GameStatus::WonContinuing,
+            "the undo asked again whether to keep going"
+        );
+    }
+
     #[test]
     fn a_new_game_throws_the_history_away_and_keeps_the_best_score() {
         let mut app = playing([[2, 2, 0, 0], [0; 4], [0; 4], [0; 4]]);
         app.make_move(Direction::Left);
-        assert_eq!(app.undo_depth(), 1);
+        assert!(app.can_undo());
         app.new_game();
-        assert_eq!(app.undo_depth(), 0, "the old game could still be undone");
+        assert!(!app.can_undo(), "the old game could still be undone");
         assert_eq!(app.board.score(), 0, "the new game started with a score");
         assert_eq!(app.board.moves(), 0, "the new game started with moves");
         assert_eq!(app.board.status(), GameStatus::Playing);
@@ -2589,6 +2814,7 @@ mod tests {
             (Key::R, Intent::NewGame),
             (Key::C, Intent::Continue),
             (Key::Enter, Intent::Continue),
+            (Key::F1, Intent::ToggleHelp),
             (Key::H, Intent::ToggleHelp),
             (Key::Escape, Intent::CloseHelp),
         ];
@@ -2599,6 +2825,26 @@ mod tests {
                 "{key:?} does not do what the help sheet says"
             );
         }
+    }
+
+    /// **F1 and `?` raise the sheet**, as they do in every program, beside
+    /// the H this game had first; not with Alt or the Windows key held.
+    #[test]
+    fn f1_and_a_question_mark_raise_the_sheet_as_h_does() {
+        let shift = guitk::event::Modifiers::shift();
+        let alt = guitk::event::Modifiers::alt();
+        assert_eq!(
+            key_intent(&probe::press_with(Key::Slash, shift)),
+            Some(Intent::ToggleHelp)
+        );
+        assert_eq!(key_intent(&probe::press_with(Key::F1, alt)), None);
+        assert_eq!(
+            key_intent(&probe::press_with(
+                Key::F1,
+                guitk::event::Modifiers::super_key()
+            )),
+            None
+        );
     }
 
     #[test]
@@ -3404,10 +3650,10 @@ mod tests {
         let mut app = playing([[2, 2, 0, 0], [0; 4], [0; 4], [0; 4]]);
         app.resize(WINDOW_WIDTH, WINDOW_HEIGHT);
         app.make_move(Direction::Left);
-        assert_eq!(app.undo_depth(), 1);
+        assert!(app.can_undo());
 
         assert_eq!(click_on(&mut app, Target::Undo), EventResult::Consumed);
-        assert_eq!(app.undo_depth(), 0, "the undo button did not undo");
+        assert!(!app.can_undo(), "the undo button did not undo");
 
         assert_eq!(click_on(&mut app, Target::Help), EventResult::Consumed);
         assert!(app.help_is_open(), "the help button did not open the help");
@@ -3798,13 +4044,62 @@ mod tests {
         }
     }
 
+    /// Games chosen so that between them every key on the sheet has work: a
+    /// board mid-game, a move made (the take-backs), one taken back (the
+    /// replays), a game just won (keep playing), and one with the sheet up
+    /// (Esc).
+    fn sheet_states() -> Vec<Game2048> {
+        let board = [[2, 2, 0, 0], [4, 0, 0, 0], [0; 4], [0, 0, 0, 8]];
+        let fresh = playing(board);
+        let mut moved = playing(board);
+        assert!(moved.make_move(Direction::Left), "the fixture did not move");
+        let mut undone = playing(board);
+        assert!(undone.make_move(Direction::Left));
+        assert_eq!(press(&mut undone, Key::U), EventResult::Consumed);
+        let mut won = playing([[1024, 1024, 0, 0], [0; 4], [0; 4], [0; 4]]);
+        won.make_move(Direction::Left);
+        assert_eq!(
+            won.board.status(),
+            GameStatus::Won,
+            "the fixture did not win"
+        );
+        let mut sheet = playing(board);
+        sheet.show_help = true;
+        vec![fresh, moved, undone, won, sheet]
+    }
+
+    /// **Every key the sheet advertises is one this game answers.**
+    ///
+    /// Read with `guitk::shortcut` and pressed, against games on which each
+    /// has work. Only `SHORTCUTS` is read: `RULES` names no keys, and is a
+    /// list of its own for that reason -- a check that skipped the rows it
+    /// could not read is how a dead key hides.
+    #[test]
+    fn every_advertised_key_does_something() {
+        let mut checked = 0usize;
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = sheet_states()
+                    .iter_mut()
+                    .any(|g| handle_event(g, &Event::Key(stroke.clone())) == EventResult::Consumed);
+                assert!(
+                    answered,
+                    "the sheet advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+                checked = checked.saturating_add(1);
+            }
+        }
+        assert!(checked >= 22, "only {checked} keystrokes were checked");
+    }
+
     #[test]
     fn the_help_sheet_names_every_control_the_game_has() {
         let mut app = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
         app.show_help = true;
         let joined = texts(&app.frame(WINDOW_WIDTH, WINDOW_HEIGHT)).join(" ");
         assert!(joined.contains(HELP_TITLE));
-        for (key, _) in HELP_ROWS {
+        for (key, _) in sheet_rows() {
             if !key.is_empty() {
                 assert!(joined.contains(key), "the sheet does not mention {key:?}");
             }
@@ -3889,7 +4184,7 @@ mod tests {
                 .1
         };
         let mut previous = f32::NEG_INFINITY;
-        for &(key, meaning) in &HELP_ROWS {
+        for (key, meaning) in sheet_rows() {
             // The blank row is a gap between the controls and the closing
             // remark, and a gap is drawn by drawing nothing: `label` refuses
             // an empty body, so there is no box to find and none to compare.

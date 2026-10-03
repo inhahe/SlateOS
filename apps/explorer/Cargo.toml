@@ -12,6 +12,13 @@ pathtext = { path = "../pathtext" }
 # the associations, so it reads them through the shared model rather than
 # spelling the group name and key path itself. See gui/associations/src/lib.rs.
 associations = { path = "../../gui/associations" }
+# The programs SlateOS knows, what each opens and what opens a type before a
+# person chooses (C-Q20, design-decisions §1425): opening a file nobody chose
+# a program for, and Open With.
+programs = { path = "../../gui/programs" }
+# The installed programs' desktop entries, read as the start menu reads them,
+# and the command line an entry starts its program with on a file.
+desktopentry = { path = "../../gui/desktopentry" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
@@ -20,6 +27,8 @@ guitk = { path = "../../gui/toolkit" }
 # explorer reads which program opens a kind of file and never writes it, since
 # that choice belongs to the File Associations program.
 settingsfile = { path = "../../gui/settingsfile" }
+# `is_plain`, `is_ctrl_chord`, `is_alt_or_windows_chord`: a chord is neither the file list's key nor typed into the path.
+textline = { path = "../textline" }
 yamldoc = { path = "../../yamldoc" }
 textfind = { path = "../../textfind" }
 # The thumbnailer reads BMP, PNG, GIF and JPEG headers at offsets the file

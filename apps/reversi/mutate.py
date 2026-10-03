@@ -622,8 +622,8 @@ MUTATIONS = [
     ),
     (
         "a key release is acted on as though it were a press",
-        "        Event::Key(KeyEvent {\n            key, pressed: true, ..\n        }) => app.handle_key(*key),",
-        "        Event::Key(KeyEvent { key, .. }) => app.handle_key(*key),",
+        "        Event::Key(KeyEvent {\n            key,\n            pressed: true,\n            modifiers,\n            ..\n        }) if textline::is_plain(*modifiers) => app.handle_key(*key),",
+        "        Event::Key(KeyEvent { key, modifiers, .. }) if textline::is_plain(*modifiers) => app.handle_key(*key),",
         ["a_key_arriving_at_the_window_reaches_the_game"],
     ),
     (
@@ -727,6 +727,24 @@ MUTATIONS = [
         "        let read = |ink: Color| gamechrome::Ink::on(ink, &[c.chrome.raised]).small;",
         "        let read = |ink: Color| ink;",
         ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the score bar's counts are the page's text on its track",
+        "c.chrome.on(c.chrome.lit).text",
+        "c.chrome.text",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "a chord works the game's keys",
+        '        }) if textline::is_plain(*modifiers) => app.handle_key(*key),',
+        '        }) => app.handle_key(*key),',
+        ['a_key_held_with_a_modifier_is_not_the_games'],
+    ),
+    (
+        'a chorded Escape closes the game',
+        '            }) if textline::is_plain(*modifiers)\n        ) {',
+        '            })\n        ) {',
+        ['a_key_held_with_a_modifier_is_not_the_games'],
     ),
 ]
 

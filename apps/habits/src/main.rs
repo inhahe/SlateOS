@@ -424,7 +424,7 @@ impl Frequency {
 
 // ── Habit ───────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct Habit {
     /// What the habit is kept under. It was taken out when nothing was kept
     /// ("there is no identity to preserve across a restart"); there is now.
@@ -937,6 +937,55 @@ impl HabitTrackerApp {
             self.next_id = self.next_id.max(id.saturating_add(1));
             self.habits.push(habit);
         }
+    }
+
+    /// Read the habits again after the desktop said `habits.yaml` changed --
+    /// a check-in in another window, or a hand edit (§1418, §1434).
+    ///
+    /// The lists are rebuilt, so the three places that point into them follow
+    /// their habit by id rather than by place: the selection (into the list
+    /// the screen shows), the heat map's habit, and a delete waiting on its
+    /// `Y`. One whose habit has gone is let go -- the delete above all, which
+    /// must not fall on whichever habit took its place. A tracker that keeps
+    /// nothing, as a test's does not, reads nothing. Whether anything changed.
+    fn reread_habits(&mut self) -> bool {
+        if !self.persist {
+            return false;
+        }
+        let shown = |app: &Self| {
+            if app.screen == Screen::Archive {
+                app.archived_habits()
+            } else {
+                app.active_habits()
+            }
+        };
+        let id_in = |app: &Self, list: &[usize], i: usize| {
+            list.get(i).and_then(|&h| app.habits.get(h)).map(|h| h.id)
+        };
+        let selected = id_in(self, &shown(self), self.selected_habit);
+        let heatmap = id_in(self, &self.active_habits(), self.heatmap_habit_idx);
+        let deleting = self
+            .pending_delete
+            .and_then(|i| self.habits.get(i))
+            .map(|h| h.id);
+        let before = std::mem::take(&mut self.habits);
+
+        self.load_habits(&settingsfile::load(CONFIG_NAME));
+
+        let place = |app: &Self, list: &[usize], id: Option<u64>| {
+            id.and_then(|id| {
+                list.iter()
+                    .position(|&h| app.habits.get(h).is_some_and(|x| x.id == id))
+            })
+        };
+        let now_shown = shown(self);
+        self.selected_habit = place(self, &now_shown, selected)
+            .unwrap_or_else(|| self.selected_habit.min(now_shown.len().saturating_sub(1)));
+        let active = self.active_habits();
+        self.heatmap_habit_idx = place(self, &active, heatmap)
+            .unwrap_or_else(|| self.heatmap_habit_idx.min(active.len().saturating_sub(1)));
+        self.pending_delete = deleting.and_then(|id| self.habits.iter().position(|h| h.id == id));
+        before != self.habits
     }
 
     /// The tracker the window opens: the user's habits, and every change kept.
@@ -1499,6 +1548,12 @@ impl HabitTrackerApp {
                 true
             }
             Event::Mouse(mouse) => self.handle_mouse(mouse),
+            // The habits on disk changed and the desktop says so: another
+            // window's check-in reaches this one. Read at startup only, two
+            // windows each kept their own and the last to write won.
+            Event::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {
+                self.reread_habits()
+            }
             _ => false,
         }
     }
@@ -5937,6 +5992,90 @@ mod tests {
         ] {
             assert_eq!(Date::from_iso(bad), None, "{bad:?}");
         }
+    }
+
+    /// **A change in another window reaches this one**, when the desktop says
+    /// `habits.yaml` changed (§1434) -- two windows each kept their own, and
+    /// the last to write won. The selection and a delete waiting on its `Y`
+    /// follow their habit by id when the list shifts under them, and a delete
+    /// whose habit has gone is let go rather than falling on the next one.
+    #[test]
+    fn a_change_in_another_window_reaches_this_one_and_the_selection_follows_its_habit() {
+        settingsfile::testing::with_scratch_config("habits-reread", |_| {
+            let announce = |name: &[u8]| Event::SettingsChanged {
+                group: guitk::event::SettingsGroup::Program(
+                    guitk::event::SettingsName::new(name).expect("a settings name"),
+                ),
+            };
+            let mut first = HabitTrackerApp::from_settings();
+            first.today = FIXTURE_DAY;
+            for name in ["Read", "Stretch", "Walk"] {
+                first.create_name = String::from(name);
+                first.create_habit();
+            }
+            let mut second = HabitTrackerApp::from_settings();
+            second.today = FIXTURE_DAY;
+            assert_eq!(second.habits.len(), 3);
+            // "Stretch" selected, and a delete of "Walk" waiting on its Y: when
+            // "Read" goes, each moves up one place, and staying where it was
+            // would land on the wrong habit or on nothing.
+            second.selected_habit = 1;
+            second.ask_to_delete(2);
+
+            // The first window deletes "Read", and checks in on "Walk".
+            first.ask_to_delete(0);
+            first.handle_key("y", false, false);
+            first.selected_habit = 1;
+            first.selected_day_col = 0;
+            first.toggle_check_in_selected();
+
+            assert!(!second.handle_event(&announce(b"notes")));
+            assert_eq!(second.habits.len(), 3, "another program's file was read");
+            assert!(second.handle_event(&announce(b"habits")));
+            assert_eq!(second.habits.len(), 2, "the delete did not reach it");
+            let selected = second.active_habits()[second.selected_habit];
+            assert_eq!(
+                second.habits[selected].name, "Stretch",
+                "the selection lost its habit"
+            );
+            assert_eq!(
+                second
+                    .pending_delete
+                    .map(|i| second.habits[i].name.as_str()),
+                Some("Walk"),
+                "the waiting delete lost its habit"
+            );
+            let walk = second
+                .habits
+                .iter()
+                .find(|h| h.name == "Walk")
+                .expect("Walk is still there");
+            assert_eq!(
+                walk.check_ins,
+                vec![FIXTURE_DAY],
+                "the check-in did not reach it"
+            );
+
+            // "Walk" goes in the first window: the delete is let go.
+            first.ask_to_delete(1);
+            first.handle_key("y", false, false);
+            second.handle_event(&announce(b"habits"));
+            assert_eq!(
+                second.pending_delete, None,
+                "a delete fell on another habit"
+            );
+
+            assert!(
+                !first.handle_event(&announce(b"habits")),
+                "a window's own save, announced back, changed what it shows"
+            );
+            let mut quiet = HabitTrackerApp::new();
+            assert!(!quiet.handle_event(&announce(b"habits")));
+            assert!(
+                quiet.habits.is_empty(),
+                "a tracker that keeps nothing read the file"
+            );
+        });
     }
 
     /// Habits, their check-ins, and archiving survive the window closing.

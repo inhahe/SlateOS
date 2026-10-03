@@ -1488,6 +1488,14 @@ fn handle_mouse(state: &mut StopwatchApp, mouse: &MouseEvent) -> EventResult {
 /// The one event body, shared by the window and the probe.
 pub fn handle_event(state: &mut StopwatchApp, event: &Event) -> EventResult {
     match event {
+        // Every key here is bound as itself, with nothing held but Shift: a
+        // key held with Ctrl, Alt or the Windows key is a chord -- the
+        // window's or the desktop's, the stopwatch has none -- and it
+        // arrives carrying its key, so Alt+R reset a running watch as R
+        // does. AltGr is Ctrl+Alt, and AltGr+R types a character, not R.
+        Event::Key(key) if key.pressed && !textline::is_plain(key.modifiers) => {
+            EventResult::Ignored
+        }
         Event::Key(key) if key.pressed => match handle_help_key(state, key) {
             Some(answered) => answered,
             None => match state.view {
@@ -2312,6 +2320,50 @@ mod tests {
         press(&mut app, Key::R);
         assert_eq!(app.state, TimerState::Stopped);
         assert_eq!(app.elapsed_ms, 0);
+    }
+
+    /// **A key held with Ctrl, Alt or the Windows key is not the stopwatch's**:
+    /// Alt+R reset a running watch, the chord arriving carrying its key.
+    /// AltGr+R, Ctrl+Alt, types a character on some layouts and is not R.
+    #[test]
+    fn a_key_held_with_a_modifier_is_not_the_stopwatchs() {
+        for (held, name) in [
+            (Modifiers::ctrl(), "Ctrl"),
+            (Modifiers::alt(), "Alt"),
+            (Modifiers::super_key(), "Windows"),
+            (
+                Modifiers {
+                    alt: true,
+                    ..Modifiers::ctrl()
+                },
+                "AltGr",
+            ),
+        ] {
+            let mut app = sample();
+            app.start();
+            app.elapsed_ms = 5000;
+            for key in [Key::R, Key::L, Key::Space, Key::F1] {
+                assert_eq!(
+                    probe::key(&mut app, &probe::press_with(key, held)),
+                    EventResult::Ignored,
+                    "{name}+{key:?} was taken"
+                );
+            }
+            assert_eq!(
+                app.state,
+                TimerState::Running,
+                "{name}+R or Space stopped it"
+            );
+            assert_eq!(app.elapsed_ms, 5000, "{name}+R reset it");
+            assert!(app.laps.is_empty(), "{name}+L lapped");
+            assert!(!app.show_help, "{name}+F1 raised the keys");
+        }
+        // Shift is not a chord: Shift+R still resets.
+        let mut app = sample();
+        app.start();
+        app.elapsed_ms = 5000;
+        probe::key(&mut app, &probe::press_with(Key::R, Modifiers::shift()));
+        assert_eq!(app.elapsed_ms, 0, "Shift+R did not reset");
     }
 
     #[test]

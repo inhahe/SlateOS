@@ -2913,6 +2913,28 @@ impl RemindersApp {
         if self.choosing_snooze {
             return self.handle_snooze_key(key);
         }
+        // Ctrl's chords are Ctrl+O and Ctrl+S, and only those. A Ctrl chord,
+        // not Ctrl held: AltGr arrives as Ctrl+Alt.
+        if textline::is_ctrl_chord(key.modifiers) {
+            return match key.key {
+                Key::S => {
+                    self.open_file_dialog(true);
+                    EventResult::Consumed
+                }
+                Key::O => {
+                    self.open_file_dialog(false);
+                    EventResult::Consumed
+                }
+                _ => EventResult::Ignored,
+            };
+        }
+        // Every other binding is on a key, taken plain -- nothing held but
+        // Shift. A chord with Alt or the Windows key is the window's or the
+        // desktop's, and arrives carrying its key: Alt+S re-sorted the list,
+        // Alt+Delete asked to delete a reminder and Alt+Space completed one.
+        if !textline::is_plain(key.modifiers) {
+            return EventResult::Ignored;
+        }
         // Shift and a digit ticks that step of the selected reminder: before
         // the digits' own arms, which are the views.
         if key.modifiers.shift
@@ -2925,11 +2947,11 @@ impl RemindersApp {
             };
         }
         match key.key {
-            Key::N if !key.modifiers.ctrl => {
+            Key::N => {
                 self.open_new_task();
                 EventResult::Consumed
             }
-            Key::E if !key.modifiers.ctrl => match self.selected_task_id {
+            Key::E => match self.selected_task_id {
                 Some(id) if self.store.get(id).is_some() => {
                     self.open_edit_task(id);
                     EventResult::Consumed
@@ -2948,18 +2970,6 @@ impl RemindersApp {
             Key::Num3 => self.set_view(ViewFilter::All),
             Key::Num4 => self.set_view(ViewFilter::Overdue),
             Key::Num5 => self.set_view(ViewFilter::Completed),
-            // `Key::S if ctrl` must come first: a guard arm that sorts
-            // rather than saves would make Ctrl+S reorder the list.
-            // `Key::S if ctrl` must come first: a guard arm that sorts
-            // rather than saves would make Ctrl+S reorder the list.
-            Key::S if key.modifiers.ctrl => {
-                self.open_file_dialog(true);
-                EventResult::Consumed
-            }
-            Key::O if key.modifiers.ctrl => {
-                self.open_file_dialog(false);
-                EventResult::Consumed
-            }
             Key::S => {
                 self.cycle_sort();
                 EventResult::Consumed
@@ -3021,26 +3031,33 @@ impl RemindersApp {
         let Some(form) = self.form.as_mut() else {
             return EventResult::Ignored;
         };
+        // The form's own keys are plain, nothing held but Shift: Alt+Tab is
+        // the desktop's window switcher, and moved between the fields; Alt+
+        // Enter saved and Alt+Delete took a step off. In a field typed into,
+        // a chord goes on to the field, which knows a command from typing;
+        // in one that is not, a chord does nothing.
+        let plain = textline::is_plain(key.modifiers);
         match key.key {
-            Key::Tab => {
+            Key::Tab if plain => {
                 let all = TaskField::ALL;
                 let at = all.iter().position(|f| *f == field).unwrap_or(0);
                 let next = step_index(at, all.len(), !key.modifiers.shift);
                 self.form_field = all.get(next).copied().unwrap_or(field);
                 EventResult::Consumed
             }
-            Key::Enter => {
+            Key::Enter if plain => {
                 if field == TaskField::NewStep && form.add_step() {
                     return EventResult::Consumed;
                 }
                 self.save_form();
                 EventResult::Consumed
             }
-            Key::Escape => {
+            Key::Escape if plain => {
                 self.form = None;
                 self.form_error = None;
                 EventResult::Consumed
             }
+            _ if !plain && !field.is_text() => EventResult::Ignored,
             Key::Up | Key::Down if field == TaskField::Steps => {
                 let len = form.steps.len();
                 if len == 0 {
@@ -3103,14 +3120,19 @@ impl RemindersApp {
     /// Keys while "Delete this reminder?" is up: Enter or Y deletes it,
     /// Escape or N keeps it, and every other key is swallowed -- a key that
     /// reached the list would be acted on under a question not yet answered.
+    ///
+    /// Answered by plain keys only: Alt+Y and Alt+Enter, each a chord of the
+    /// window's arriving carrying its key, deleted the reminder.
     fn handle_confirm_key(&mut self, key: &KeyEvent) -> EventResult {
         let Some(id) = self.pending_delete else {
             return EventResult::Ignored;
         };
-        match key.key {
-            Key::Enter | Key::Y => self.delete_task(id),
-            Key::Escape | Key::N => self.pending_delete = None,
-            _ => {}
+        if textline::is_plain(key.modifiers) {
+            match key.key {
+                Key::Enter | Key::Y => self.delete_task(id),
+                Key::Escape | Key::N => self.pending_delete = None,
+                _ => {}
+            }
         }
         EventResult::Consumed
     }
@@ -3191,7 +3213,14 @@ impl RemindersApp {
     }
 
     /// Answering the snooze prompt.
+    ///
+    /// A chord neither answers it nor puts it away: Alt+1 is not 1, and a
+    /// chord of the window's or the desktop's, arriving carrying its key,
+    /// snoozed the reminder.
     fn handle_snooze_key(&mut self, key: &KeyEvent) -> EventResult {
+        if !textline::is_plain(key.modifiers) {
+            return EventResult::Ignored;
+        }
         let duration = match key.key {
             Key::Num1 => Some(SnoozeDuration::Minutes5),
             Key::Num2 => Some(SnoozeDuration::Minutes15),
@@ -5534,6 +5563,150 @@ mod tests {
     fn a_key_the_app_has_no_use_for_is_not_consumed() {
         let mut app = populated();
         assert_eq!(app.handle_event(&press(Key::F9)), EventResult::Ignored);
+    }
+
+    /// **A key held with Alt or the Windows key is not the list's, and
+    /// AltGr+S is not Ctrl+S**: each such chord is the window's or the desktop's and
+    /// arrives carrying its key -- Alt+S re-sorted the list, Alt+Delete asked
+    /// to delete a reminder, Alt+Y then answered yes, Alt+1 snoozed one from
+    /// the snooze prompt and Alt+Tab walked the form's fields; and AltGr+S --
+    /// a Polish `ś` -- opened the save dialog as Ctrl+S does.
+    ///
+    /// Each key is asserted as it is pressed: the toggles go round, so B
+    /// twice would end where it began.
+    #[test]
+    fn a_chord_is_not_a_reminders_key_and_altgr_is_not_ctrl() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let key = |k: Key, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: String::new(),
+            })
+        };
+        let mut app = populated();
+        let id = app.selected_task_id.expect("control: a selection");
+        app.store.add_subtask(id, "Step 1");
+        app.store.add_subtask(id, "Step 2");
+        let shift_alt = Modifiers {
+            shift: true,
+            ..Modifiers::alt()
+        };
+        let state = |app: &RemindersApp| {
+            (
+                app.sort_mode,
+                app.view,
+                app.selected_task_id,
+                app.store.get(id).map(|t| t.completed),
+                app.store
+                    .get(id)
+                    .map(|t| t.subtasks.iter().map(|s| s.completed).collect::<Vec<_>>()),
+                (
+                    app.sidebar_visible,
+                    app.detail_visible,
+                    app.show_completed_subtasks,
+                    app.show_help,
+                ),
+            )
+        };
+        let before = state(&app);
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr, shift_alt] {
+            for k in [
+                Key::S,
+                Key::O,
+                Key::Delete,
+                Key::Space,
+                Key::Enter,
+                Key::N,
+                Key::E,
+                Key::Z,
+                Key::B,
+                Key::D,
+                Key::C,
+                Key::F1,
+                Key::Num1,
+                Key::Num2,
+                Key::Down,
+            ] {
+                assert_eq!(
+                    app.handle_event(&key(k, m)),
+                    EventResult::Ignored,
+                    "{m:?} {k:?} was taken"
+                );
+                assert_eq!(state(&app), before, "{m:?} {k:?} changed the list");
+                assert!(app.pending_delete.is_none(), "{m:?} {k:?} asked to delete");
+                assert!(app.form.is_none(), "{m:?} {k:?} opened the form");
+                assert!(!app.choosing_snooze, "{m:?} {k:?} asked how long to snooze");
+                assert!(!app.picker.is_open(), "{m:?} {k:?} opened a file dialog");
+            }
+        }
+
+        // The question before a delete answers plain keys only.
+        assert_eq!(app.handle_event(&press(Key::Delete)), EventResult::Consumed);
+        for k in [Key::Y, Key::Enter, Key::N, Key::Escape] {
+            for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+                app.handle_event(&key(k, m));
+                assert!(app.store.get(id).is_some(), "{m:?} {k:?} deleted it");
+                assert_eq!(app.pending_delete, Some(id), "{m:?} {k:?} answered");
+            }
+        }
+        app.handle_event(&press(Key::N));
+        assert!(app.pending_delete.is_none(), "control: N keeps it");
+
+        // So does the snooze prompt, and a chord does not put it away.
+        app.handle_event(&press(Key::Z));
+        assert!(app.choosing_snooze, "control: Z asks how long");
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            assert_eq!(app.handle_event(&key(Key::Num1, m)), EventResult::Ignored);
+            assert!(app.choosing_snooze, "{m:?} 1 put the prompt away");
+            assert_eq!(
+                app.store.get(id).and_then(|t| t.snoozed_until),
+                None,
+                "{m:?} 1 snoozed it"
+            );
+        }
+        app.handle_event(&press(Key::Num1));
+        assert!(app.store.get(id).and_then(|t| t.snoozed_until).is_some());
+
+        // The form's keys are plain too.
+        app.open_edit_task(id);
+        let walk = |app: &mut RemindersApp, k: Key, m: Modifiers| app.handle_event(&key(k, m));
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            app.form_field = TaskField::Title;
+            walk(&mut app, Key::Tab, m);
+            assert_eq!(app.form_field, TaskField::Title, "{m:?} Tab moved on");
+            walk(&mut app, Key::Enter, m);
+            walk(&mut app, Key::Escape, m);
+            assert!(app.form.is_some(), "{m:?} Enter or Escape closed the form");
+
+            app.form_field = TaskField::Steps;
+            for k in [Key::Down, Key::Space, Key::Delete] {
+                assert_eq!(walk(&mut app, k, m), EventResult::Ignored);
+                let form = app.form.as_ref().expect("control: the form is up");
+                assert_eq!(form.step_at, 0, "{m:?} {k:?} chose another step");
+                assert_eq!(form.steps.len(), 2, "{m:?} {k:?} took a step off");
+                assert!(
+                    form.steps.iter().all(|s| !s.completed),
+                    "{m:?} {k:?} ticked a step"
+                );
+            }
+
+            app.form_field = TaskField::Priority;
+            let priority = app.form.as_ref().map(|f| f.priority);
+            assert_eq!(walk(&mut app, Key::Right, m), EventResult::Ignored);
+            assert_eq!(
+                app.form.as_ref().map(|f| f.priority),
+                priority,
+                "{m:?} Right stepped the priority"
+            );
+        }
+        app.form_field = TaskField::Title;
+        walk(&mut app, Key::Tab, Modifiers::NONE);
+        assert_ne!(app.form_field, TaskField::Title, "control: Tab moves on");
     }
 
     #[test]

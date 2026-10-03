@@ -165,8 +165,8 @@ MUTATIONS = [
     # -- what is painted -----------------------------------------------------
     (
         "only the toolbar is filled, leaving the rest of the window bare",
-        "        f.push(fill(l.window, BASE, 0.0));",
-        "        f.push(fill(l.toolbar, BASE, 0.0));",
+        "        f.push(fill(l.window, self.palette.base, 0.0));",
+        "        f.push(fill(l.toolbar, self.palette.base, 0.0));",
         ["the_window_is_painted_edge_to_edge_at_every_size"],
     ),
     (
@@ -292,7 +292,8 @@ MUTATIONS = [
         "            f.hit(Target::Execute, btn);",
         [
             "the_filters_button_shows_and_hides_the_builder",
-            "export_puts_the_table_in_the_editor_and_import_reads_it_back",
+            "exporting_opens_a_picker_and_does_not_eat_the_query",
+            "importing_opens_a_picker",
         ],
     ),
     (
@@ -407,16 +408,15 @@ MUTATIONS = [
     ),
     (
         "an import reads the file and leaves the old table on the screen",
-        "                        self.select_table(&name);\n"
-        '                        format!("Imported {name}")',
-        '                        format!("Imported {name}")',
-        ["export_puts_the_table_in_the_editor_and_import_reads_it_back"],
+        "                self.select_table(&name);\n                let rows = self\n",
+        "                let rows = self\n",
+        ["a_table_survives_a_write_and_a_read"],
     ),
     (
-        "an export is thrown away rather than put where it can be seen",
-        "            Target::Export(format) => match self.export_current_table(format) {",
-        "            Target::Export(format) => match self.export_current_table(format).filter(|_| false) {",
-        ["export_puts_the_table_in_the_editor_and_import_reads_it_back"],
+        "an export opens no picker, so there is nowhere for it to go",
+        "                    self.open_file_dialog(FileIntent::Export(format));\n",
+        "",
+        ["exporting_opens_a_picker_and_does_not_eat_the_query"],
     ),
     # -- the entry points the platform calls ---------------------------------
     (
@@ -451,6 +451,36 @@ MUTATIONS = [
         "        // other time. There is no clock on the screen to keep.\n        None",
         "        Some(Duration::from_millis(16))",
         ["the_window_says_what_it_is"],
+    ),
+    (
+        'a release is a keystroke',
+        '        if !event.pressed {\n            return;\n        }\n        // Every key but what is typed is taken plain',
+        '        // Every key but what is typed is taken plain',
+        ['f1_raises_the_keys_and_a_chord_is_neither_a_shortcut_nor_typing'],
+    ),
+    (
+        'a chord raises the keys',
+        '        if event.key == Key::F1 && plain {',
+        '        if event.key == Key::F1 {',
+        ['f1_raises_the_keys_and_a_chord_is_neither_a_shortcut_nor_typing'],
+    ),
+    (
+        'a chord works Escape, Tab, Backspace and Enter',
+        '            _ if !plain => {}\n',
+        '',
+        ['f1_raises_the_keys_and_a_chord_is_neither_a_shortcut_nor_typing'],
+    ),
+    (
+        "a command's letter is typed",
+        '        if textline::types_into_field(event)',
+        '        if event.types_text()',
+        ['f1_raises_the_keys_and_a_chord_is_neither_a_shortcut_nor_typing'],
+    ),
+    (
+        'a chord works the letter shortcuts',
+        '        if !plain {\n            return;\n        }\n        match event.key {\n            Key::N =>',
+        '        match event.key {\n            Key::N =>',
+        ['f1_raises_the_keys_and_a_chord_is_neither_a_shortcut_nor_typing'],
     ),
 ]
 

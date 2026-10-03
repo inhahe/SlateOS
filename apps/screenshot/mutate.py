@@ -216,6 +216,72 @@ MUTATIONS += [
         "                return Err(format!(\n                    \"{} is not a capture mode;",
         ["a_mistyped_flag_captures_nothing"],
     ),
+    (
+        'a chord raises the list of keys',
+        '        if plain && (event.key == Key::F1 || (event.key == Key::Slash && event.modifiers.shift)) {',
+        '        if event.key == Key::F1 || (event.key == Key::Slash && event.modifiers.shift) {',
+        ['a_chord_is_not_a_capture_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'a chorded Escape puts the list of keys away',
+        '            if plain && matches!(event.key, Key::Escape | Key::Enter) {',
+        '            if matches!(event.key, Key::Escape | Key::Enter) {',
+        ['a_chord_is_not_a_capture_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        "Windows+PrintScreen is the capture tool's",
+        '        if event.key == Key::PrintScreen && event.modifiers.super_key {\n            return false;\n        }\n',
+        '',
+        ['a_chord_is_not_a_capture_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        "a chord works the menu's keys",
+        '        if event.key != Key::PrintScreen && !textline::is_plain(event.modifiers) {',
+        '        if event.key != Key::PrintScreen && event.modifiers.shift && !event.modifiers.shift {',
+        ['a_chord_is_not_a_capture_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'a chorded Escape cancels the region',
+        '        if event.key == Key::Escape && textline::is_plain(event.modifiers) {\n            self.region_selector.cancel();',
+        '        if event.key == Key::Escape {\n            self.region_selector.cancel();',
+        ['a_chord_is_not_a_capture_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'a chorded Escape stops the countdown',
+        '        if event.key == Key::Escape && textline::is_plain(event.modifiers) {\n            self.countdown_remaining = 0;',
+        '        if event.key == Key::Escape {\n            self.countdown_remaining = 0;',
+        ['a_chord_is_not_a_capture_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'AltGr is taken for Ctrl on a picture',
+        '        if textline::is_ctrl_chord(event.modifiers) {\n            return match event.key {',
+        '        if event.modifiers.ctrl {\n            return match event.key {',
+        ['a_chord_is_not_a_capture_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'a chorded Escape throws the picture away',
+        '            Key::Escape if plain => {\n                self.discard_current();',
+        '            Key::Escape => {\n                self.discard_current();',
+        ['a_chord_is_not_a_capture_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'a chord picks an annotation tool',
+        '            Key::Num1 if plain => {',
+        '            Key::Num1 => {',
+        ['a_chord_is_not_a_capture_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        "a command's letter is typed into the annotation",
+        '                    if textline::types_into_field(event) {',
+        '                    if event.types_text() {',
+        ['a_chord_is_not_a_capture_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'Alt+Backspace deletes from the annotation',
+        '                        && !textline::is_alt_or_windows_chord(event.modifiers)\n',
+        '',
+        ['a_chord_is_not_a_capture_key_and_altgr_is_not_ctrl'],
+    ),
 ]
 
 if __name__ == "__main__":

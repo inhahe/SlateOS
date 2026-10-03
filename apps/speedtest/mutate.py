@@ -155,6 +155,36 @@ MAIN = [
         "            .filter(|s| s.elapsed_secs >= 0.0)",
         [SUSTAINED],
     ),
+    (
+        'a chord raises the list of keys',
+        '        if key.key == Key::F1 && plain {',
+        '        if key.key == Key::F1 {',
+        ['a_chord_is_not_a_speed_test_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'a chorded Escape puts the list of keys away',
+        '            if plain && matches!(key.key, Key::Escape | Key::Enter) {',
+        '            if matches!(key.key, Key::Escape | Key::Enter) {',
+        ['a_chord_is_not_a_speed_test_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'AltGr is taken for Ctrl in the window',
+        '        if textline::is_ctrl_chord(key.modifiers) {\n            return match key.key {\n                Key::E => {',
+        '        if key.modifiers.ctrl {\n            return match key.key {\n                Key::E => {',
+        ['a_chord_is_not_a_speed_test_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        "a chord works the window's keys",
+        '        if !plain {\n            return EventResult::Ignored;\n        }\n',
+        '',
+        ['a_chord_is_not_a_speed_test_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'AltGr+Q closes the window',
+        '            && textline::is_ctrl_chord(key.modifiers)\n        {',
+        '            && key.modifiers.ctrl\n        {',
+        ['a_chord_is_not_a_speed_test_key_and_altgr_is_not_ctrl'],
+    ),
 ]
 
 TABLES = {

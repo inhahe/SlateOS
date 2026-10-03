@@ -15,7 +15,8 @@
 //! - Templates: blank, flowchart, org chart, UML class diagram, network diagram,
 //!   mind map, ER diagram
 //! - Export to SVG text and JSON serialization
-//! - Undo/redo stack
+//! - Undo/redo, kept as a tree: Alt+Z reaches what an edit after an undo
+//!   would have lost
 //! - Copy/paste/duplicate
 //! - Multi-select with selection rectangle
 //! - Canvas with infinite scroll
@@ -53,11 +54,11 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
+use statehistory::StateHistory;
+use std::num::NonZeroUsize;
 use std::process::ExitCode;
 use std::time::Duration;
 use unsaved::{Choice, Question};
-
-use std::collections::VecDeque;
 
 // ============================================================================
 // Catppuccin Mocha theme constants
@@ -90,6 +91,11 @@ const MAX_ZOOM: f32 = 4.0;
 const DEFAULT_ZOOM: f32 = 1.0;
 /// Maximum undo/redo steps.
 const MAX_UNDO: usize = 100;
+/// [`MAX_UNDO`] as the history takes it.
+const UNDO_LIMIT: NonZeroUsize = match NonZeroUsize::new(MAX_UNDO) {
+    Some(limit) => limit,
+    None => NonZeroUsize::MIN,
+};
 /// Where the status bar's note on the last save, open or export begins,
 /// clear of the counts before it.
 const STATUS_NOTE_X: f32 = 320.0;
@@ -661,75 +667,14 @@ impl Selection {
 // Undo / Redo
 // ============================================================================
 
-/// A snapshot of the diagram state for undo/redo.
+/// The diagram as it stood at one point in its history: what an undo puts
+/// back whole.
 #[derive(Clone, Debug)]
 struct DiagramSnapshot {
     nodes: Vec<DiagramNode>,
     edges: Vec<DiagramEdge>,
     layers: Vec<Layer>,
     groups: Vec<Group>,
-}
-
-/// Undo/redo manager with a fixed-size stack.
-#[derive(Debug)]
-struct UndoManager {
-    undo_stack: VecDeque<DiagramSnapshot>,
-    redo_stack: Vec<DiagramSnapshot>,
-    max_steps: usize,
-}
-
-impl UndoManager {
-    fn new(max_steps: usize) -> Self {
-        Self {
-            undo_stack: VecDeque::with_capacity(max_steps),
-            redo_stack: Vec::new(),
-            max_steps,
-        }
-    }
-
-    /// Save a snapshot before making a change.
-    fn save(&mut self, snapshot: DiagramSnapshot) {
-        if self.undo_stack.len() >= self.max_steps {
-            self.undo_stack.pop_front();
-        }
-        self.undo_stack.push_back(snapshot);
-        self.redo_stack.clear();
-    }
-
-    /// Undo: pop from undo, push current to redo, return the old state.
-    fn undo(&mut self, current: DiagramSnapshot) -> Option<DiagramSnapshot> {
-        let prev = self.undo_stack.pop_back()?;
-        self.redo_stack.push(current);
-        Some(prev)
-    }
-
-    /// Redo: pop from redo, push current to undo, return the newer state.
-    fn redo(&mut self, current: DiagramSnapshot) -> Option<DiagramSnapshot> {
-        let next = self.redo_stack.pop()?;
-        self.undo_stack.push_back(current);
-        Some(next)
-    }
-
-    /// Whether there is anything to undo.
-    ///
-    /// This was `#[cfg(test)]` until the app grew a keyboard: a predicate the
-    /// UI needs in order to answer "nothing happened" is not a test helper.
-    fn can_undo(&self) -> bool {
-        !self.undo_stack.is_empty()
-    }
-
-    /// Whether there is anything to redo.
-    fn can_redo(&self) -> bool {
-        !self.redo_stack.is_empty()
-    }
-
-    fn undo_count(&self) -> usize {
-        self.undo_stack.len()
-    }
-
-    fn redo_count(&self) -> usize {
-        self.redo_stack.len()
-    }
 }
 
 // ============================================================================
@@ -768,7 +713,11 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("P", "Show or hide the properties panel"),
     ("= / -", "Zoom in / out"),
     ("Ctrl+0", "Back to actual size"),
-    ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
+    ("Ctrl+Z / Ctrl+Y", "Undo / redo; Ctrl+Shift+Z redoes too"),
+    (
+        "Alt+Z / Alt+Shift+Z",
+        "The diagram before / after this, on any branch",
+    ),
     ("Ctrl+S / Ctrl+Shift+S", "Save / save as a new file"),
     ("Ctrl+O", "Open a diagram"),
     ("Ctrl+E", "Export as SVG, or JSON"),
@@ -831,8 +780,13 @@ pub struct DiagramApp {
     pub drag_from: Option<(f32, f32)>,
     /// ID generator.
     id_gen: IdGen,
-    /// Undo/redo manager.
-    undo: UndoManager,
+    /// Every diagram there has been since this one was begun or opened, as
+    /// a tree: an edit after an undo keeps what was undone as a branch,
+    /// reached with Alt+Z (C-Q24, `design-decisions.md` §1416). Ctrl+Z and
+    /// Ctrl+Y go back and forth along the branch the diagram is on; Alt+Z
+    /// and Alt+Shift+Z walk every diagram there has been, in the order each
+    /// was made.
+    undo: StateHistory<DiagramSnapshot>,
     /// Clipboard.
     clipboard: Clipboard,
     /// Whether to show the properties panel.
@@ -942,7 +896,7 @@ impl DiagramApp {
             pan_y: 0.0,
             active_layer_id: default_layer_id,
             id_gen,
-            undo: UndoManager::new(MAX_UNDO),
+            undo: StateHistory::new(UNDO_LIMIT),
             drag_from: None,
             clipboard: Clipboard::default(),
             show_properties: true,
@@ -983,27 +937,51 @@ impl DiagramApp {
     /// that it has changed since it was saved. Every change calls this first.
     fn save_undo(&mut self) {
         let snap = self.snapshot();
-        self.undo.save(snap);
+        self.undo.begin(snap);
         self.dirty = true;
     }
 
-    /// Undo the last change.
-    pub fn undo(&mut self) {
+    /// Undo the last change. Returns whether there was one.
+    pub fn undo(&mut self) -> bool {
         let current = self.snapshot();
-        if let Some(prev) = self.undo.undo(current) {
-            self.restore_snapshot(prev);
-            // Undoing past a save leaves a diagram the file does not hold.
-            self.dirty = true;
-        }
+        let prev = self.undo.undo(current);
+        self.put_back(prev)
     }
 
-    /// Redo a previously undone change.
-    pub fn redo(&mut self) {
+    /// Redo a change undone, on the branch the diagram is on. Returns
+    /// whether there was one.
+    pub fn redo(&mut self) -> bool {
         let current = self.snapshot();
-        if let Some(next) = self.undo.redo(current) {
-            self.restore_snapshot(next);
-            self.dirty = true;
-        }
+        let next = self.undo.redo(current);
+        self.put_back(next)
+    }
+
+    /// Go to the diagram as it was before this one was first reached, on
+    /// whichever branch -- Alt+Z. Returns whether there was one.
+    pub fn earlier(&mut self) -> bool {
+        let current = self.snapshot();
+        let earlier = self.undo.earlier(current);
+        self.put_back(earlier)
+    }
+
+    /// Go to the diagram first reached after this one, on whichever
+    /// branch -- Alt+Shift+Z. Returns whether there was one.
+    pub fn later(&mut self) -> bool {
+        let current = self.snapshot();
+        let later = self.undo.later(current);
+        self.put_back(later)
+    }
+
+    /// Put the diagram the history handed back in place, if it handed one
+    /// back.
+    fn put_back(&mut self, snapshot: Option<DiagramSnapshot>) -> bool {
+        let Some(snapshot) = snapshot else {
+            return false;
+        };
+        self.restore_snapshot(snapshot);
+        // Undoing past a save leaves a diagram the file does not hold.
+        self.dirty = true;
+        true
     }
 
     // ========================================================================
@@ -1125,10 +1103,14 @@ impl DiagramApp {
                 EventResult::Consumed
             }
             _ => {
-                if key.text.is_empty() || key.modifiers.ctrl {
+                // AltGr arrives as Ctrl+Alt and types -- Polish `ż` is
+                // AltGr+Z. A command carries its letter as text and types
+                // none of it: Ctrl or Alt on its own, the Windows key. Nor
+                // does a control character: Tab's `\t` is no part of a name.
+                if !textline::types_into_field(key) {
                     return EventResult::Ignored;
                 }
-                buf.push_str(&key.text);
+                buf.extend(key.typed());
                 self.editing = Some((target, buf));
                 EventResult::Consumed
             }
@@ -2276,7 +2258,7 @@ impl DiagramApp {
                 // New ids go past every id the file used, so nothing added
                 // later can take the name of something already there.
                 self.id_gen = IdGen::new(highest.saturating_add(1));
-                self.undo = UndoManager::new(MAX_UNDO);
+                self.undo.clear();
                 self.selection.clear();
                 self.editing = None;
                 self.edge_source = None;
@@ -2660,7 +2642,29 @@ impl DiagramApp {
         }
 
         let ctrl = key.modifiers.ctrl;
+        let moved = |did: bool| {
+            if did {
+                EventResult::Consumed
+            } else {
+                EventResult::Ignored
+            }
+        };
         match key.key {
+            // Alt+Z and Alt+Shift+Z: every diagram there has been, in the
+            // order each was made -- the way back to a branch undone out of.
+            Key::Z if key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key => {
+                moved(if key.modifiers.shift {
+                    self.later()
+                } else {
+                    self.earlier()
+                })
+            }
+            // Any other key held with Alt or the Windows key is not this
+            // window's: Windows+ keys are the desktop's, and AltGr -- which
+            // arrives as Ctrl+Alt -- types a letter (Polish AltGr+Z is ż),
+            // which is no chord and must not be taken for the tool on its
+            // plain key either.
+            _ if key.modifiers.alt || key.modifiers.super_key => EventResult::Ignored,
             Key::S if ctrl => {
                 if key.modifiers.shift {
                     self.ask_where_to_save(PickerFor::Save);
@@ -2679,20 +2683,10 @@ impl DiagramApp {
                 self.open_save_dialog();
                 EventResult::Consumed
             }
-            Key::Z if ctrl => {
-                if !self.undo.can_undo() {
-                    return EventResult::Ignored;
-                }
-                self.undo();
-                EventResult::Consumed
-            }
-            Key::Y if ctrl => {
-                if !self.undo.can_redo() {
-                    return EventResult::Ignored;
-                }
-                self.redo();
-                EventResult::Consumed
-            }
+            // Ctrl+Shift+Z redoes, as Ctrl+Y does.
+            Key::Z if ctrl && key.modifiers.shift => moved(self.redo()),
+            Key::Z if ctrl => moved(self.undo()),
+            Key::Y if ctrl => moved(self.redo()),
             // Naming the selected box or arrow. F2 is the conventional
             // rename key; Enter is what opens a thing.
             Key::F2 | Key::Enter => self.begin_labelling(),
@@ -3030,11 +3024,13 @@ impl DiagramApp {
             overflow: TextOverflow::Ellipsis,
         });
 
-        // Undo/Redo indicators.
+        // Whether undo and redo can go. The history is a tree and keeps no
+        // count of how far (requests/e-c-undohistory-could-say-how-far-undo-
+        // and-redo-go.md).
         let undo_text = format!(
-            "Undo:{} Redo:{}",
-            self.undo.undo_count(),
-            self.undo.redo_count()
+            "Undo: {} Redo: {}",
+            if self.undo.can_undo() { "yes" } else { "no" },
+            if self.undo.can_redo() { "yes" } else { "no" }
         );
         cmds.push(RenderCommand::Text {
             x: self.window_w - 160.0,
@@ -4929,6 +4925,28 @@ mod tests {
         drop(std::fs::remove_dir_all(&dir));
     }
 
+    /// **An opened diagram's history starts with it.** An undo reaching back
+    /// into the diagram open before would put that one under the opened
+    /// file's name, for Ctrl+S to write over the file.
+    #[test]
+    fn an_opened_diagram_cannot_be_undone_into_the_one_before() {
+        let dir = scratch("history");
+        let path = dir.join("opened.diagram");
+        rich().write_native(&path);
+        let mut app = DiagramApp::new(1280.0, 800.0);
+        app.add_node(NodeShape::Circle, 0.0, 0.0);
+        app.read_native(&path);
+        let opened = describe(&app);
+        assert!(!app.undo(), "undo reached the diagram before");
+        assert_eq!(
+            app.handle_event(&alt_z(false)),
+            EventResult::Ignored,
+            "Alt+Z reached the diagram before"
+        );
+        assert_eq!(describe(&app), opened);
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
     /// A file this cannot read as a diagram is refused, and the diagram open
     /// stays as it was.
     #[test]
@@ -5242,6 +5260,59 @@ mod tests {
         assert!(node.label.ends_with("Pay"), "the label is {:?}", node.label);
     }
 
+    /// **A label takes what AltGr types, and no command's letter.** AltGr
+    /// arrives as Ctrl+Alt -- `ż` is AltGr+Z on a Polish keyboard -- and was
+    /// refused with every key held with Ctrl. A command carries its letter
+    /// as text on a real machine (Ctrl+K arrives as `k`, Alt+F as `f`), and
+    /// Alt's and the Windows key's were typed; so was Tab's `\t`.
+    #[test]
+    fn a_label_takes_altgr_letters_and_no_commands_letter() {
+        let mut app = DiagramApp::new(800.0, 600.0);
+        let id = app.add_node(NodeShape::Rectangle, 100.0, 100.0);
+        app.selection.nodes = vec![id];
+        let before = app
+            .nodes
+            .iter()
+            .find(|n| n.id == id)
+            .expect("the node")
+            .label
+            .clone();
+        app.handle_event(&press(Key::F2));
+        let held = |key: Key, modifiers: Modifiers, text: &str| {
+            Event::Key(KeyEvent {
+                key,
+                pressed: true,
+                modifiers,
+                text: text.to_owned(),
+            })
+        };
+        let altgr = Modifiers {
+            ctrl: true,
+            alt: true,
+            ..Modifiers::NONE
+        };
+        assert_eq!(
+            app.handle_event(&held(Key::Z, altgr, "\u{17c}")),
+            EventResult::Consumed,
+            "AltGr+Z was refused"
+        );
+        for (key, modifiers, text) in [
+            (Key::K, Modifiers::ctrl(), "k"),
+            (Key::F, Modifiers::alt(), "f"),
+            (Key::E, Modifiers::super_key(), "e"),
+            (Key::Tab, Modifiers::NONE, "\t"),
+        ] {
+            assert_eq!(
+                app.handle_event(&held(key, modifiers, text)),
+                EventResult::Ignored,
+                "{modifiers:?}+{key:?} was typed"
+            );
+        }
+        app.handle_event(&press(Key::Enter));
+        let node = app.nodes.iter().find(|n| n.id == id).expect("the node");
+        assert_eq!(node.label, format!("{before}\u{17c}"));
+    }
+
     /// The status bar says the app is labelling, and how to stop.
     ///
     /// `Backspace` means something else in this mode -- a character rather
@@ -5391,7 +5462,8 @@ mod tests {
         let mut drawn = DiagramApp::new(1000.0, 700.0);
         drawn.handle_event(&press(Key::R));
 
-        // ...and something done, so undo has work; then undone, so redo does.
+        // ...and something done, so undo has work (and Alt+Z, on `drawn`);
+        // then undone, so redo does (and Alt+Shift+Z).
         let mut undone = DiagramApp::new(1000.0, 700.0);
         undone.handle_event(&press(Key::R));
         undone.handle_event(&press_ctrl(Key::Z));
@@ -6149,60 +6221,175 @@ mod tests {
         assert!(s.has_edge(10));
     }
 
-    // ---- UndoManager tests -------------------------------------------------
+    // ---- The history: a tree, walked with Alt+Z (C-Q24) --------------------
 
-    #[test]
-    fn test_undo_manager_basic() {
-        let mut mgr = UndoManager::new(10);
-        assert!(!mgr.can_undo());
-        assert!(!mgr.can_redo());
-
-        let snap1 = DiagramSnapshot {
-            nodes: vec![],
-            edges: vec![],
-            layers: vec![],
-            groups: vec![],
-        };
-        mgr.save(snap1);
-        assert!(mgr.can_undo());
+    fn with_modifiers(key: Key, modifiers: Modifiers) -> Event {
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
     }
 
-    #[test]
-    fn test_undo_redo_cycle() {
-        let mut mgr = UndoManager::new(10);
-        let empty = DiagramSnapshot {
-            nodes: vec![],
-            edges: vec![],
-            layers: vec![],
-            groups: vec![],
-        };
-        mgr.save(empty.clone());
-        mgr.save(empty.clone());
-        assert_eq!(mgr.undo_count(), 2);
-
-        let current = empty.clone();
-        let _prev = mgr.undo(current);
-        assert_eq!(mgr.undo_count(), 1);
-        assert!(mgr.can_redo());
-
-        let current2 = empty.clone();
-        let _next = mgr.redo(current2);
-        assert!(!mgr.can_redo());
+    fn alt_z(shift: bool) -> Event {
+        with_modifiers(
+            Key::Z,
+            Modifiers {
+                alt: true,
+                shift,
+                ..Modifiers::NONE
+            },
+        )
     }
 
+    fn shapes(app: &DiagramApp) -> Vec<NodeShape> {
+        app.nodes.iter().map(|n| n.shape).collect()
+    }
+
+    /// **An edit made after an undo starts a branch, and the undone one is
+    /// kept**: redo follows the new branch, and Alt+Z walks back through
+    /// every diagram there has been, in the order each was made, marking it
+    /// changed; Alt+Shift+Z comes forward again.
     #[test]
-    fn test_undo_max_steps() {
-        let mut mgr = UndoManager::new(3);
-        let snap = DiagramSnapshot {
-            nodes: vec![],
-            edges: vec![],
-            layers: vec![],
-            groups: vec![],
+    fn an_edit_after_an_undo_keeps_the_undone_diagram_reachable_with_alt_z() {
+        let mut app = DiagramApp::new(1000.0, 700.0);
+        app.add_node(NodeShape::Rectangle, 0.0, 0.0);
+        assert!(app.undo());
+        assert!(app.nodes.is_empty());
+        app.add_node(NodeShape::Circle, 50.0, 50.0);
+        assert!(!app.redo(), "redo went onto the branch left");
+        app.dirty = false;
+        assert_eq!(app.handle_event(&alt_z(false)), EventResult::Consumed);
+        assert_eq!(
+            shapes(&app),
+            [NodeShape::Rectangle],
+            "the undone diagram was lost"
+        );
+        assert!(app.dirty, "a journey did not mark the diagram changed");
+        app.handle_event(&alt_z(false));
+        assert!(app.nodes.is_empty());
+        app.handle_event(&alt_z(true));
+        app.handle_event(&alt_z(true));
+        assert_eq!(shapes(&app), [NodeShape::Circle]);
+        assert_eq!(
+            app.handle_event(&alt_z(true)),
+            EventResult::Ignored,
+            "past the newest diagram"
+        );
+    }
+
+    /// **Ctrl+Shift+Z redoes**, as Ctrl+Y does.
+    #[test]
+    fn ctrl_shift_z_redoes() {
+        let mut app = DiagramApp::new(1000.0, 700.0);
+        app.add_node(NodeShape::Rectangle, 0.0, 0.0);
+        app.handle_event(&press_ctrl(Key::Z));
+        assert!(app.nodes.is_empty());
+        let ctrl_shift = Modifiers {
+            ctrl: true,
+            shift: true,
+            ..Modifiers::NONE
         };
-        for _ in 0..10 {
-            mgr.save(snap.clone());
+        assert_eq!(
+            app.handle_event(&with_modifiers(Key::Z, ctrl_shift)),
+            EventResult::Consumed
+        );
+        assert_eq!(shapes(&app), [NodeShape::Rectangle]);
+    }
+
+    /// **AltGr is not Ctrl.** It arrives as Ctrl+Alt; what it types -- ż on
+    /// a Polish keyboard -- is not a chord, so AltGr+Z undoes nothing.
+    #[test]
+    fn altgr_z_does_not_undo() {
+        let mut app = DiagramApp::new(1000.0, 700.0);
+        app.add_node(NodeShape::Rectangle, 0.0, 0.0);
+        let altgr = Modifiers {
+            ctrl: true,
+            alt: true,
+            ..Modifiers::NONE
+        };
+        app.handle_event(&with_modifiers(Key::Z, altgr));
+        assert_eq!(shapes(&app), [NodeShape::Rectangle], "AltGr+Z undid");
+    }
+
+    /// **A key held with AltGr, Alt or the Windows key is no shortcut
+    /// here.** R adds a box; AltGr+R (Ctrl+Alt+R, a letter on some layouts),
+    /// Alt+R and Windows+R must not.
+    #[test]
+    fn a_key_held_with_altgr_alt_or_the_windows_key_is_no_shortcut() {
+        for modifiers in [
+            Modifiers {
+                ctrl: true,
+                alt: true,
+                ..Modifiers::NONE
+            },
+            Modifiers {
+                alt: true,
+                ..Modifiers::NONE
+            },
+            Modifiers {
+                super_key: true,
+                ..Modifiers::NONE
+            },
+        ] {
+            let mut app = DiagramApp::new(1000.0, 700.0);
+            assert_eq!(
+                app.handle_event(&with_modifiers(Key::R, modifiers)),
+                EventResult::Ignored,
+                "{modifiers:?}"
+            );
+            assert!(app.nodes.is_empty(), "{modifiers:?}+R added a box");
         }
-        assert_eq!(mgr.undo_count(), 3);
+    }
+
+    /// **Alt+Z held with the Windows key is the desktop's**, not a journey.
+    #[test]
+    fn alt_z_with_the_windows_key_goes_nowhere() {
+        let mut app = DiagramApp::new(1000.0, 700.0);
+        app.add_node(NodeShape::Rectangle, 0.0, 0.0);
+        let super_alt = Modifiers {
+            alt: true,
+            super_key: true,
+            ..Modifiers::NONE
+        };
+        app.handle_event(&with_modifiers(Key::Z, super_alt));
+        assert_eq!(
+            shapes(&app),
+            [NodeShape::Rectangle],
+            "Super+Alt+Z went back"
+        );
+    }
+
+    /// The toolbar says whether undo and redo can go.
+    #[test]
+    fn the_toolbar_says_whether_undo_and_redo_can_go() {
+        let mut app = DiagramApp::new(1000.0, 700.0);
+        assert!(drawn_help_text(&app).contains("Undo: no Redo: no"));
+        app.add_node(NodeShape::Rectangle, 0.0, 0.0);
+        assert!(drawn_help_text(&app).contains("Undo: yes Redo: no"));
+        app.undo();
+        assert!(drawn_help_text(&app).contains("Undo: no Redo: yes"));
+    }
+
+    /// **The history keeps the last hundred edits** and drops the oldest:
+    /// each holds a whole diagram.
+    #[test]
+    fn the_history_keeps_the_last_hundred_edits() {
+        let mut app = DiagramApp::new(1000.0, 700.0);
+        for i in 0..110_u16 {
+            app.add_node(NodeShape::Rectangle, f32::from(i), 0.0);
+        }
+        let mut undone = 0;
+        while undone <= MAX_UNDO && app.undo() {
+            undone += 1;
+        }
+        assert_eq!(undone, MAX_UNDO);
+        assert_eq!(
+            app.nodes.len(),
+            10,
+            "not the diagram before the oldest edit kept"
+        );
     }
 
     // ---- Clipboard tests ---------------------------------------------------

@@ -469,6 +469,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/test-src-digest.py` | Regression tests for `scripts/src_digest.py`. |
 | `scripts/test-srcload.py` | Regression tests for `scripts/srcload.py`. |
 | `scripts/test-straddle-check.py` | Regression tests for `scripts/straddle-check.py`. |
+| `scripts/test-verify_mutations.py` | Regression tests for `scripts/verify_mutations.py`. |
 | `scripts/test-worktree.sh` | Self-test for `slate_ensure_src` in scripts/lib/worktree.sh. |
 | `scripts/time-diff.sh` | Differential test: our `time` against GNU Time 1.9's `/usr/bin/time`. |
 | `scripts/timeout-diff.sh` | Differential test: our `timeout` against GNU coreutils 9.4's. |
@@ -489,7 +490,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/util-linux-extra.sh` | Unpacks Ubuntu's util-linux-extra and rfkill packages, without root, as harness references. |
 | `scripts/util-linux-source.sh` | Fetches util-linux 2.39.3's source and test data, for harnesses that need them. |
 | `scripts/uu-diff.sh` | Differential test: our `uuencode` and `uudecode` against GNU sharutils 4.15.2's. |
-| `scripts/verify_mutations.py` | Check a `mutate.py` table against the source it claims to break. |
+| `scripts/verify_mutations.py` | Check `mutate.py` tables against the source they claim to break. |
 | `scripts/w-diff.sh` | Differential test: our `w` against procps-ng 4.0.4's, built as SlateOS's |
 | `scripts/wc-diff.sh` | Differential test: our wc against GNU wc. |
 | `scripts/wdog-nmi-soak.sh` | wdog-nmi-soak.sh — DIAGNOSTIC (throwaway): boot repeatedly under the |
@@ -505,4 +506,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_495 scripts._
+_496 scripts._

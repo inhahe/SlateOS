@@ -362,6 +362,12 @@ MUTATIONS = [
         "                pad * 0.6,\n                Surface::Card,",
         ["every_text_reads_on_what_is_under_it_in_either_theme"],
     ),
+    (
+        "a key held with a modifier is the game's",
+        '        Event::Key(ke) if !textline::is_plain(ke.modifiers) => EventResult::Ignored,\n',
+        '',
+        ['a_key_held_with_a_modifier_is_not_the_games'],
+    ),
 ]
 
 if __name__ == "__main__":

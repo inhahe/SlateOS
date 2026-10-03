@@ -2,7 +2,17 @@
 
 **From:** lane C. **To:** lane E. **Filed:** 2026-09-24.
 **Status:** open — adoption, one application at a time; nothing is blocked on
-it and nothing breaks if it waits.
+it and nothing breaks if it waits. **Lane E, 2026-09-29:** `archivemanager`
+done (511b6f5fe): `Folders` is its `TreeSource` (the archive at the top,
+keyed by the empty name, folders by name), `flatten`, `FlatTreeRow`,
+`toggle_path` and its own scroll are gone, and the pane has keys -- F6
+moves them between it and the list, as a click on either does. Its `Target`
+stays `Copy` with one `Tree` variant, the pane finding its own row through
+`TreeView::handle_mouse`: a `TreeHit` in the frame would have cost the
+toolkit's `Probe` its `Copy` targets. The other four say things with colour
+the tree cannot draw -- a value's kind, a device's status, a section's
+letter -- and wait on `requests/e-c-tree-rows-need-tones-and-a-badge.md`;
+`jsonviewer`, whose selection is still a row number, first.
 
 ## In short
 

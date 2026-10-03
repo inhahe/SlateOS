@@ -38,6 +38,7 @@ use guitk::wheel;
 use inputsettings::{InputFile, MAX_DOUBLE_CLICK_MS, MIN_DOUBLE_CLICK_MS};
 use oswindow::app::{Reloads, Response};
 use pathtext::ShowPath;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 // ============================================================================
@@ -172,6 +173,7 @@ impl SettingsCategory {
                 SettingsPage::Notifications,
                 SettingsPage::DateTime,
                 SettingsPage::Power,
+                SettingsPage::About,
             ],
             Self::Network => &[
                 SettingsPage::NetworkStatus,
@@ -219,6 +221,8 @@ pub enum SettingsPage {
     Notifications,
     DateTime,
     Power,
+    /// The system, and the notices of the code others wrote that it carries.
+    About,
     // Network
     NetworkStatus,
     WiFi,
@@ -274,6 +278,7 @@ impl SettingsPage {
             Self::Notifications => "notifications",
             Self::DateTime => "date-time",
             Self::Power => "power",
+            Self::About => "about",
             Self::NetworkStatus => "network-status",
             Self::WiFi => "wifi",
             Self::Ethernet => "ethernet",
@@ -323,6 +328,7 @@ impl SettingsPage {
             Self::Notifications => "Notifications",
             Self::DateTime => "Date & Time",
             Self::Power => "Power",
+            Self::About => "About",
             Self::NetworkStatus => "Status",
             Self::WiFi => "Wi-Fi",
             Self::Ethernet => "Ethernet",
@@ -710,11 +716,40 @@ pub struct SettingsState {
     /// is the same moment `apps/explorer` re-reads it: neither program caches
     /// an association across the action that uses it.
     default_apps: Vec<associations::Association>,
+    /// The calendar's events, as read on entering the Colors page or when
+    /// asked to look again: what the accent's warning checks (§1424).
+    calendar_events: Vec<calendarstore::CalendarEvent>,
+    /// Why the calendar's events could not be read, or what came of the
+    /// last press that started the calendar.
+    calendar_note: Option<String>,
+    /// Starts another program -- the calendar, at an event's colour. The
+    /// tests stand in for it, so none of them starts a program.
+    starter: fn(&str, &[&str]) -> std::io::Result<()>,
     /// What each offered category resolves to, alongside the raw list.
     ///
     /// Computed when the associations are, from the same document, so the two
     /// halves of the page cannot disagree about what is on disk.
     default_app_categories: Vec<(&'static str, associations::CategoryDefault)>,
+    /// The program that does each job (`programs::Role`), by its name, or
+    /// `None` when no program here can: refreshed with the associations.
+    default_roles: Vec<(programs::Role, Option<String>)>,
+    /// The zone this machine is in (`datetimesettings::system_zone`), read
+    /// with the clock's settings rather than per frame, for the Wallpaper
+    /// page's "up now".
+    system_zone: datetimesettings::Tz,
+    /// Where the third-party notices are read from: `/usr/share/licenses`
+    /// (`notices::SYSTEM_DIR`), which a test points elsewhere.
+    notices_dir: PathBuf,
+    /// The notices, as read on entering the About page: `None` until then.
+    notices: Option<NoticesShown>,
+    /// The notice whose texts are open on the About page, and the texts, as
+    /// read when it was opened -- not before: forty licences are not needed
+    /// to draw a list of forty names.
+    open_notice: Option<(usize, Vec<OpenText>)>,
+    /// Where installed programs' desktop entries are looked for: the
+    /// environment's data directories, which `main` sets -- none otherwise,
+    /// so a test's page names SlateOS's own programs on every machine.
+    app_dirs: desktopentry::scan::DataDirs,
     /// Every font family installed here, for the Fonts page's picker.
     ///
     /// Held rather than asked for while drawing: `available_families` walks
@@ -884,6 +919,10 @@ pub enum DropdownId {
     /// `available_families`, which is how it declines to make that decision on
     /// the user's behalf.
     MonoFont,
+    /// When the morning picture goes up.
+    DayWallpaperFrom,
+    /// When the evening picture goes up.
+    NightWallpaperFrom,
 }
 
 impl DropdownId {
@@ -1161,6 +1200,46 @@ impl SettingsState {
             .iter()
             .map(|c| (c.name, associations::category_default(&doc, c)))
             .collect();
+        let known = known_programs(&self.app_dirs);
+        self.default_roles = programs::Role::ALL
+            .iter()
+            .map(|&role| (role, role.filled_by(&known).map(|app| app.name.clone())))
+            .collect();
+    }
+
+    /// Read the calendar's events again, for the accent's warning.
+    fn refresh_calendar_events(&mut self) {
+        self.calendar_note = None;
+        match read_calendar_events() {
+            Ok(events) => self.calendar_events = events,
+            Err(why) => {
+                self.calendar_events.clear();
+                self.calendar_note = Some(format!(
+                    "The calendar's events could not be read ({why}), so none is checked \
+                     against the accent."
+                ));
+            }
+        }
+    }
+
+    /// The calendar's events whose dots the accent in force hides: the one
+    /// test the calendar's own colour warning asks (`hard_to_tell_apart`,
+    /// design-decisions §1424), in the palette the calendar draws in.
+    fn events_the_accent_hides(&self) -> Vec<&calendarstore::CalendarEvent> {
+        let pal = self.palette();
+        self.calendar_events
+            .iter()
+            .filter(|e| appearance::hard_to_tell_apart(e.effective_color(&pal), pal.accent))
+            .collect()
+    }
+
+    /// Start the calendar with `args`, saying under the warning what came
+    /// of it -- as the file manager does when it opens a file.
+    fn start_calendar(&mut self, args: &[&str], what: &str) {
+        self.calendar_note = Some(match (self.starter)(CALENDAR, args) {
+            Ok(()) => format!("Opening {what} in the calendar."),
+            Err(e) => format!("Could not start the calendar ({CALENDAR}): {e}"),
+        });
     }
 
     /// Move to `page`, doing whatever entering a page requires.
@@ -1176,8 +1255,18 @@ impl SettingsState {
         if page == SettingsPage::DefaultApps {
             self.refresh_default_apps();
         }
+        // The calendar's events, which another program keeps: read on
+        // entry, so the accent's warning names the events there are now.
+        if page == SettingsPage::Colors {
+            self.refresh_calendar_events();
+        }
         if page == SettingsPage::Themes {
             self.refresh_themes();
+        }
+        // The notices, read on entry: a list is cheap, and the page shows
+        // what is installed now.
+        if page == SettingsPage::About {
+            self.refresh_notices();
         }
     }
 
@@ -1377,6 +1466,8 @@ impl SettingsState {
                         self.appearance.settings.login_background =
                             appearance::LoginBackground::CustomImage(path);
                     }
+                    PickerPurpose::DayWallpaper => self.set_scheduled_picture(true, path),
+                    PickerPurpose::NightWallpaper => self.set_scheduled_picture(false, path),
                 }
             }
             DialogAction::Cancelled => self.dialog = None,
@@ -1436,6 +1527,56 @@ impl SettingsState {
     /// Read the user's saved clock settings, for the Date & Time page.
     pub fn load_datetime(&mut self) {
         self.datetime = datetimesettings::DateTimeFile::load();
+        self.system_zone = datetimesettings::system_zone();
+    }
+
+    /// Read the settings file called `name` again after the desktop said it
+    /// changed -- set in the desktop's own panels, in another Settings window,
+    /// by the program it belongs to, or by hand (§1418, §1434). Only that
+    /// file: a file this window does not show is not read.
+    ///
+    /// Each file is saved whole, from the copy read here. Read at startup
+    /// only, that copy went stale, and the next change on any of its pages
+    /// wrote it over whatever had changed meanwhile.
+    ///
+    /// Nothing is written and nothing is flagged for the compositor: this is
+    /// the file's news, not the user's change, and writing it back would race
+    /// whoever wrote it. Whether anything this window shows changed.
+    fn reread(&mut self, name: &str) -> bool {
+        if name == appearance::CONFIG_NAME {
+            let before = self.appearance.settings.clone();
+            self.load_appearance();
+            before != self.appearance.settings
+        } else if name == inputsettings::CONFIG_NAME {
+            let before = self.input.settings.clone();
+            self.load_input();
+            before != self.input.settings
+        } else if name == notifsettings::CONFIG_NAME {
+            let before = self.notif.settings.clone();
+            self.load_notifications();
+            before != self.notif.settings
+        } else if name == datetimesettings::CONFIG_NAME {
+            let before = self.datetime.settings.clone();
+            self.load_datetime();
+            before != self.datetime.settings
+        } else if name == lockscreen::CONFIG_NAME {
+            let before = self.lock_after_minutes;
+            self.lock_after_minutes = lockscreen::stored_minutes();
+            before != self.lock_after_minutes
+        } else if name == lockscreen::CLOCK_CONFIG {
+            let before = (self.lock_clock_seconds, self.lock_clock_date);
+            (self.lock_clock_seconds, self.lock_clock_date) = lockscreen::stored_clock();
+            before != (self.lock_clock_seconds, self.lock_clock_date)
+        } else if name == associations::CONFIG_NAME {
+            let before = (
+                std::mem::take(&mut self.default_apps),
+                std::mem::take(&mut self.default_app_categories),
+            );
+            self.refresh_default_apps();
+            before.0 != self.default_apps || before.1 != self.default_app_categories
+        } else {
+            false
+        }
     }
 
     /// Read the machine's real accounts from the system account database.
@@ -1662,7 +1803,16 @@ impl SettingsState {
             // filled by `refresh_default_apps`, from `main` and on entry to
             // the page.
             default_apps: Vec::new(),
+            calendar_events: Vec::new(),
+            calendar_note: None,
+            starter: start_program,
             default_app_categories: Vec::new(),
+            default_roles: Vec::new(),
+            app_dirs: desktopentry::scan::DataDirs::new(Vec::new()),
+            system_zone: datetimesettings::Tz::utc(),
+            notices_dir: PathBuf::from(notices::SYSTEM_DIR),
+            notices: None,
+            open_notice: None,
             // Empty for the same reason as `default_apps`: enumerating
             // installed fonts is I/O, and this constructor does none.
             font_families: Vec::new(),
@@ -1994,6 +2144,54 @@ fn button_width(label: &str) -> f32 {
 fn render_button(tree: &mut RenderTree, pal: &Palette, x: f32, y: f32, label: &str, color: Color) {
     fill_rounded(tree, x, y, button_width(label), BUTTON_HEIGHT, color, 6.0);
     tree.text(x + 12.0, y + 8.0, label, pal.crust, 13.0);
+}
+
+/// Where the calendar is: the desktop starts programs by their path under
+/// `/usr/bin` (`gui/desktop/src/launcher.rs`).
+const CALENDAR: &str = "/usr/bin/calendar";
+
+/// How many of the events an accent hides are named, each with its button;
+/// past that, one button opens the calendar.
+const CLASHES_LISTED: usize = 5;
+
+/// Start `program` with `args` and leave it running -- what a press that
+/// opens another program does.
+fn start_program(program: &str, args: &[&str]) -> std::io::Result<()> {
+    std::process::Command::new(program)
+        .args(args)
+        .spawn()
+        .map(drop)
+}
+
+/// The calendar's events, for the accent's warning: none when there is no
+/// calendar yet.
+///
+/// # Errors
+///
+/// Why the calendar could not be read -- `calendarstore::load`'s reason.
+fn read_calendar_events() -> Result<Vec<calendarstore::CalendarEvent>, String> {
+    let Some(path) = calendarstore::events_path() else {
+        return Ok(Vec::new());
+    };
+    // A test reads only a scratch calendar. One outside the temporary
+    // directory is the developer's own, and what it holds would change what
+    // the Colors page draws from one machine to the next.
+    #[cfg(test)]
+    if !path.starts_with(std::env::temp_dir()) {
+        return Ok(Vec::new());
+    }
+    calendarstore::load(&path)
+}
+
+/// `text` cut to `max` characters, the cut marked with an ellipsis.
+fn elided(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        text.to_owned()
+    } else {
+        let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
+        out.push('\u{2026}');
+        out
+    }
 }
 
 /// Draw a push button that has nothing behind it: dimmed fill, muted label.
@@ -2692,6 +2890,20 @@ enum ButtonId {
     ClearRotation,
     /// Remove the `n`-th world clock.
     RemoveClock(usize),
+    /// Open the calendar at event `id`'s colour, which the accent hides.
+    EventColour(u64),
+    /// Open the calendar, when more events clash than are listed.
+    OpenCalendar,
+    /// Read the calendar's events again.
+    LookAgain,
+    /// Open or close the `n`-th third-party notice on the About page.
+    Notice(usize),
+    /// Choose the picture up from the morning.
+    ChooseDayWallpaper,
+    /// Choose the picture up from the evening.
+    ChooseNightWallpaper,
+    /// Stop changing the picture by the time of day.
+    ClearSchedule,
 }
 
 /// How long a rotation leaves each picture up, in seconds.
@@ -2784,6 +2996,10 @@ enum PickerPurpose {
     Wallpaper,
     RotationFolder,
     LoginImage,
+    /// The picture up from the morning, by time of day.
+    DayWallpaper,
+    /// The picture up from the evening, by time of day.
+    NightWallpaper,
 }
 
 /// What a click on a page landed on.
@@ -3579,6 +3795,7 @@ impl SettingsState {
             SettingsPage::Proxy => self.build_proxy_page(sink),
             SettingsPage::DynamicDns => Self::build_dyndns_page(sink, &self.palette()),
             SettingsPage::DefaultApps => self.build_default_apps_page(sink),
+            SettingsPage::About => self.build_about_page(sink),
             SettingsPage::Fonts => self.build_fonts_page(sink),
             SettingsPage::LockScreen => self.build_lockscreen_page(sink),
             SettingsPage::UserAccounts | SettingsPage::LoginOptions => {
@@ -3927,6 +4144,10 @@ impl SettingsState {
     /// page below refuses in its own words.
     fn build_wallpaper_page<S: PageSink>(&self, s: &mut S) {
         s.section("Desktop Picture");
+        // Pictures by time of day are the wallpaper while they are set (lane
+        // C's `wallpaper_schedule`): the picture and the rotation each say
+        // so, rather than read as what the desktop shows.
+        let scheduled = !self.appearance.settings.wallpaper_schedule.is_empty();
 
         match self.appearance.settings.wallpaper.as_deref() {
             Some(path) => {
@@ -3934,7 +4155,14 @@ impl SettingsState {
                 // heading, and a label is text by definition. The path itself
                 // is held exactly; nothing is rebuilt from this string.
                 s.note(&path.shown().to_string(), 28.0);
+                if scheduled {
+                    s.note(
+                        "Not shown while there are pictures by time of day, below.",
+                        28.0,
+                    );
+                }
             }
+            None if scheduled => s.note("No picture.", 28.0),
             None => {
                 s.note(
                     "No picture. The desktop is the plain background, which follows your theme.",
@@ -3951,9 +4179,20 @@ impl SettingsState {
             Some(RowHit::Press(ButtonId::ChooseWallpaper)),
         );
 
+        self.build_wallpaper_schedule(s);
+
         s.section("Rotation");
         match self.appearance.settings.wallpaper_folder.as_deref() {
-            Some(folder) => s.note(&folder.shown().to_string(), 28.0),
+            Some(folder) => {
+                s.note(&folder.shown().to_string(), 28.0);
+                if scheduled {
+                    s.note(
+                        "Not shown while there are pictures by time of day, above.",
+                        28.0,
+                    );
+                }
+            }
+            None if scheduled => s.note("No folder.", 28.0),
             None => s.note(
                 "No folder. The desktop shows the single picture above.",
                 28.0,
@@ -4369,6 +4608,51 @@ impl SettingsState {
         #[allow(clippy::cast_precision_loss)]
         let grid_rows = presets.len().saturating_add(1).div_ceil(SWATCH_COLS) as f32;
         s.advance(grid_rows * (SWATCH_SIZE + SWATCH_SPACING));
+
+        // An accent that hides events' dots, said with the events it hides
+        // and a way straight to each (§1424, the operator's answer to C-Q19
+        // -- warn, never refuse): the accent is kept as chosen.
+        let hidden = self.events_the_accent_hides();
+        if !hidden.is_empty() {
+            let warn = pal.ink(pal.peach);
+            let head = match hidden.len() {
+                1 => String::from("This accent is close to an event's colour in your calendar."),
+                n => format!("This accent is close to {n} events' colours in your calendar."),
+            };
+            s.draw(move |tree, x, y| tree.text(x, y + 4.0, &head, warn, 13.0));
+            s.advance(22.0);
+            s.note(
+                "Their dots can vanish into today's circle. Change an event's colour, or choose another accent.",
+                26.0,
+            );
+            for event in hidden.iter().take(CLASHES_LISTED) {
+                let name = format!("{} ({})", elided(&event.title, 36), event.category.label());
+                s.button_row(
+                    &name,
+                    "Change colour",
+                    pal.accent,
+                    Some(RowHit::Press(ButtonId::EventColour(event.id))),
+                );
+            }
+            if hidden.len() > CLASHES_LISTED {
+                let more = format!("And {} more", hidden.len().saturating_sub(CLASHES_LISTED));
+                s.button_row(
+                    &more,
+                    "Open calendar",
+                    pal.accent,
+                    Some(RowHit::Press(ButtonId::OpenCalendar)),
+                );
+            }
+            s.button_row(
+                "Changed any?",
+                "Look again",
+                pal.accent,
+                Some(RowHit::Press(ButtonId::LookAgain)),
+            );
+        }
+        if let Some(note) = &self.calendar_note {
+            s.note(note, 26.0);
+        }
         s.gap();
 
         s.section("Preview");
@@ -5178,6 +5462,23 @@ impl SettingsState {
     fn build_default_apps_page<S: PageSink>(&self, s: &mut S) {
         let pal = self.palette();
 
+        // Every job, from the one list of them (`programs::Role`, C-Q20):
+        // what does it here, or that nothing does -- "no web browser is
+        // installed" is an answer, where leaving the job out would hide the
+        // question.
+        s.section("For each job");
+        for (role, program) in &self.default_roles {
+            match program {
+                Some(name) => s.value_row(role.label(), name, pal.text),
+                None => s.value_row(role.label(), "None installed", pal.subtext0),
+            }
+        }
+        s.note(
+            "The program SlateOS uses for each job: its own, or one installed here that does it. The programs chosen for kinds of file are below.",
+            28.0,
+        );
+        s.gap();
+
         s.section("By kind");
         for (name, state) in &self.default_app_categories {
             match state {
@@ -5223,6 +5524,256 @@ impl SettingsState {
             "These are the programs the file manager runs when you open a file of each kind. They are set in the File Associations application; this page reports what is set now.",
             44.0,
         );
+    }
+
+    /// A picture by time of day: one up from the morning, one from the
+    /// evening (`AppearanceSettings::wallpaper_schedule`, lane C's
+    /// `c-e-day-and-night-wallpapers-need-a-place-in-settings`).
+    ///
+    /// Choosing either picture sets it at its time, 06:00 or 18:00, which a
+    /// dropdown then moves; Clear stops it. A schedule is the wallpaper --
+    /// it wins over the picture and the rotation -- so the section says so
+    /// while one is set, and which picture is up now. A schedule written by
+    /// hand with more than two pictures is listed as it is, with Clear: this
+    /// page sets two.
+    fn build_wallpaper_schedule<S: PageSink>(&self, s: &mut S) {
+        let pal = self.palette();
+        let schedule = &self.appearance.settings.wallpaper_schedule;
+        s.section("By time of day");
+        let Some((day, night)) = day_and_night(schedule) else {
+            for entry in schedule {
+                s.value_row(
+                    &format!("From {}", notifsettings::format_hm(entry.from)),
+                    &entry.image.shown().to_string(),
+                    pal.text,
+                );
+            }
+            s.note(
+                "These pictures by time of day were written into appearance.yaml. This page sets a morning and an evening picture; Clear starts again.",
+                28.0,
+            );
+            s.button_row(
+                "",
+                "Clear",
+                pal.subtext0,
+                Some(RowHit::Press(ButtonId::ClearSchedule)),
+            );
+            return;
+        };
+        for (name, entry, choose, from) in [
+            (
+                "Daytime picture",
+                day,
+                ButtonId::ChooseDayWallpaper,
+                DropdownId::DayWallpaperFrom,
+            ),
+            (
+                "Evening picture",
+                night,
+                ButtonId::ChooseNightWallpaper,
+                DropdownId::NightWallpaperFrom,
+            ),
+        ] {
+            let label = match entry {
+                Some(entry) => format!("{name}: {}", entry.image.shown()),
+                None => name.to_string(),
+            };
+            s.button_row(&label, "Choose...", pal.accent, Some(RowHit::Press(choose)));
+            if let Some(entry) = entry {
+                s.dropdown_row("Up from", from, &notifsettings::format_hm(entry.from));
+            }
+        }
+        if schedule.is_empty() {
+            s.note(
+                "Choose a picture for the morning, the evening, or both, and the desktop changes it at those times.",
+                28.0,
+            );
+            return;
+        }
+        let now = self.scheduled_up_at(datetimesettings::clock::now_utc_secs());
+        s.note(
+            &format!(
+                "While these are set they are the wallpaper, in place of the picture above and the rotation below.{}",
+                now.map_or_else(String::new, |up| format!(" Up now: {up}."))
+            ),
+            28.0,
+        );
+        s.button_row(
+            "Stop changing by time of day",
+            "Clear",
+            pal.subtext0,
+            Some(RowHit::Press(ButtonId::ClearSchedule)),
+        );
+    }
+
+    /// The scheduled picture up at `utc_secs`, by this machine's time of day:
+    /// the zone the Date & Time page chose, or the system's.
+    fn scheduled_up_at(&self, utc_secs: u64) -> Option<String> {
+        self.appearance
+            .settings
+            .scheduled_wallpaper_at(utc_secs, self.datetime.settings.rule(self.system_zone))
+            .map(|path| path.shown().to_string())
+    }
+
+    /// Choose the picture up from the morning or from the evening.
+    fn open_schedule_dialog(&mut self, day: bool) {
+        let start = day_and_night(&self.appearance.settings.wallpaper_schedule)
+            .and_then(|(d, n)| if day { d } else { n })
+            .map(|entry| entry.image.clone())
+            .or_else(|| self.appearance.settings.wallpaper.clone());
+        let purpose = if day {
+            PickerPurpose::DayWallpaper
+        } else {
+            PickerPurpose::NightWallpaper
+        };
+        self.open_picture_dialog(purpose, start.as_deref());
+    }
+
+    /// Make `image` the morning or the evening picture: the one there is,
+    /// with its time kept, or a new one at 06:00 or 18:00.
+    fn set_scheduled_picture(&mut self, day: bool, image: PathBuf) {
+        let schedule = &mut self.appearance.settings.wallpaper_schedule;
+        let at = match day_and_night(schedule) {
+            Some((d, n)) => {
+                let entry = if day { d } else { n };
+                entry.and_then(|e| schedule.iter().position(|x| x == e))
+            }
+            // A hand-written schedule is not this page's to edit piecemeal.
+            None => return,
+        };
+        match at.and_then(|i| schedule.get_mut(i)) {
+            Some(entry) => entry.image = image,
+            None => {
+                let from = if day { DAY_FROM } else { NIGHT_FROM };
+                schedule.push(appearance::ScheduledWallpaper { from, image });
+                schedule.sort_by_key(|entry| entry.from);
+            }
+        }
+    }
+
+    /// The times the morning or the evening picture may go up from: every
+    /// half hour on its own side of the other's time, so the morning one
+    /// stays the earlier.
+    ///
+    /// A picture on its own keeps to its half of the day instead. Which half
+    /// it is in is what says which of the two it is (`day_and_night`), so an
+    /// evening picture moved to 09:00 would have become the morning's, its
+    /// row changing places under the pointer.
+    fn schedule_time_choices(&self, day: bool) -> Vec<notifsettings::TimeOfDay> {
+        let Some((d, n)) = day_and_night(&self.appearance.settings.wallpaper_schedule) else {
+            return Vec::new();
+        };
+        let (Some(this), other) = (if day { (d, n) } else { (n, d) }) else {
+            return Vec::new();
+        };
+        Self::time_choices(this.from)
+            .into_iter()
+            .filter(|t| match other {
+                Some(other) if day => *t < other.from,
+                Some(other) => *t > other.from,
+                None => (t.hour() < NOON_HOUR) == day,
+            })
+            .collect()
+    }
+
+    /// The system, and the notices of the code others wrote that it carries
+    /// (design-decisions §1433; §815 puts a screen you open in Settings).
+    ///
+    /// Each notice is a row naming the component and its licence, with its
+    /// attribution -- a sentence its licence requires to be shown, word for
+    /// word -- as a line of its own under it, not folded into a text only
+    /// someone who opened it would see. A notice's texts are read when it is
+    /// opened. With nothing installed the page says so, rather than showing
+    /// an empty list that would read as "this system carries no one else's
+    /// code".
+    fn build_about_page<S: PageSink>(&self, s: &mut S) {
+        let pal = self.palette();
+        s.section("SlateOS");
+        s.note(
+            "SlateOS carries software that other people wrote. Their licences ask that these notices go with it, and here they are.",
+            28.0,
+        );
+        s.gap();
+        s.section("Software from others");
+        match &self.notices {
+            None | Some(NoticesShown::NotInstalled) => s.note(
+                "The licence notices are not installed on this system.",
+                20.0,
+            ),
+            Some(NoticesShown::Failed(why)) => {
+                s.value_row("Could not be read", why, pal.peach);
+            }
+            Some(NoticesShown::Loaded(list)) => {
+                for (index, notice) in list.iter().enumerate() {
+                    let open = self.open_notice.as_ref().is_some_and(|(i, _)| *i == index);
+                    s.button_row(
+                        &notice.title(),
+                        if open { "Hide licence" } else { "Show licence" },
+                        pal.text,
+                        Some(RowHit::Press(ButtonId::Notice(index))),
+                    );
+                    s.value_row("Licence", &notice.licence, pal.subtext0);
+                    if let Some(attribution) = &notice.attribution {
+                        s.note(attribution, 20.0);
+                    }
+                    if let Some((_, texts)) = self.open_notice.as_ref().filter(|_| open) {
+                        for text in texts {
+                            s.section(&text.name);
+                            match &text.shown {
+                                Ok(body) => {
+                                    for line in body.lines() {
+                                        let line = line.to_string();
+                                        let colour = pal.subtext0;
+                                        s.draw(move |tree, x, y| {
+                                            tree.text(x, y, &line, colour, 11.0);
+                                        });
+                                        s.advance(15.0);
+                                    }
+                                }
+                                Err(why) => s.value_row("Could not be read", why, pal.peach),
+                            }
+                        }
+                    }
+                    s.gap();
+                }
+            }
+        }
+    }
+
+    /// Read the notices again, closing any that was open.
+    fn refresh_notices(&mut self) {
+        self.open_notice = None;
+        self.notices = Some(match notices::load(&self.notices_dir) {
+            Ok(list) => NoticesShown::Loaded(list),
+            Err(notices::NoticesError::NotInstalled { .. }) => NoticesShown::NotInstalled,
+            Err(other) => NoticesShown::Failed(other.to_string()),
+        });
+    }
+
+    /// Open the notice at `index`, reading its texts now, or close it.
+    fn toggle_notice(&mut self, index: usize) {
+        if self.open_notice.as_ref().is_some_and(|(i, _)| *i == index) {
+            self.open_notice = None;
+            return;
+        }
+        let Some(NoticesShown::Loaded(list)) = &self.notices else {
+            return;
+        };
+        let Some(notice) = list.get(index) else {
+            return;
+        };
+        let texts = notice
+            .texts
+            .iter()
+            .map(|text| OpenText {
+                name: text.name.clone(),
+                shown: text
+                    .read()
+                    .map(|bytes| shown_as_text(&bytes))
+                    .map_err(|e| e.to_string()),
+            })
+            .collect();
+        self.open_notice = Some((index, texts));
     }
 
     fn build_dyndns_page<S: PageSink>(s: &mut S, pal: &Palette) {
@@ -5478,7 +6029,7 @@ impl SettingsState {
                 } else {
                     window.end()
                 };
-                let choices = Self::quiet_time_choices(current);
+                let choices = Self::time_choices(current);
                 let at = choices.iter().position(|t| *t == current).unwrap_or(0);
                 (
                     choices
@@ -5531,6 +6082,23 @@ impl SettingsState {
                     .position(|t| t.id.as_os_str() == self.appearance.settings.icon_theme.id())
                     .unwrap_or(0);
                 (items, at)
+            }
+            DropdownId::DayWallpaperFrom | DropdownId::NightWallpaperFrom => {
+                let day = dropdown_id == DropdownId::DayWallpaperFrom;
+                let current = day_and_night(&self.appearance.settings.wallpaper_schedule)
+                    .and_then(|(d, n)| if day { d } else { n })
+                    .map(|entry| entry.from);
+                let choices = self.schedule_time_choices(day);
+                let at = current
+                    .and_then(|c| choices.iter().position(|t| *t == c))
+                    .unwrap_or(0);
+                (
+                    choices
+                        .iter()
+                        .map(|t| notifsettings::format_hm(*t))
+                        .collect(),
+                    at,
+                )
             }
             DropdownId::AutoLightFrom | DropdownId::AutoDarkFrom => {
                 let (current, other) = self.auto_hour_ends(dropdown_id);
@@ -5847,6 +6415,17 @@ impl SettingsState {
     /// click, and — because each save schedules a notification — would have the
     /// compositor re-read its colours every time a slider moved.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // A settings file changed and the desktop says so. Answered ahead of
+        // the snapshot, so a file read again is not taken for the user's
+        // change and written straight back over whoever wrote it -- and ahead
+        // of the dialogs, which would otherwise be handed it while they are up.
+        if let Event::SettingsChanged { group } = event {
+            return if self.reread(group.file_name()) {
+                EventResult::Consumed
+            } else {
+                EventResult::Ignored
+            };
+        }
         let before = self.snapshot();
         let result = self.dispatch_event(event);
         let changed = self.changed_since(&before);
@@ -6379,6 +6958,26 @@ impl SettingsState {
             RowHit::Press(ButtonId::ClearRotation) => {
                 self.appearance.settings.wallpaper_folder = None;
             }
+            RowHit::Press(ButtonId::EventColour(id)) => {
+                let what = self
+                    .calendar_events
+                    .iter()
+                    .find(|e| e.id == id)
+                    .map_or_else(
+                        || format!("event {id}"),
+                        |e| format!("\u{201c}{}\u{201d}", e.title),
+                    );
+                let id = id.to_string();
+                self.start_calendar(&["--event-colour", &id], &what);
+            }
+            RowHit::Press(ButtonId::OpenCalendar) => self.start_calendar(&[], "your events"),
+            RowHit::Press(ButtonId::LookAgain) => self.refresh_calendar_events(),
+            RowHit::Press(ButtonId::Notice(index)) => self.toggle_notice(index),
+            RowHit::Press(ButtonId::ChooseDayWallpaper) => self.open_schedule_dialog(true),
+            RowHit::Press(ButtonId::ChooseNightWallpaper) => self.open_schedule_dialog(false),
+            RowHit::Press(ButtonId::ClearSchedule) => {
+                self.appearance.settings.wallpaper_schedule.clear();
+            }
         }
     }
 
@@ -6572,13 +7171,13 @@ impl SettingsState {
         current: notifsettings::TimeOfDay,
         other: notifsettings::TimeOfDay,
     ) -> Vec<notifsettings::TimeOfDay> {
-        Self::quiet_time_choices(current)
+        Self::time_choices(current)
             .into_iter()
             .filter(|t| *t != other)
             .collect()
     }
 
-    fn quiet_time_choices(current: notifsettings::TimeOfDay) -> Vec<notifsettings::TimeOfDay> {
+    fn time_choices(current: notifsettings::TimeOfDay) -> Vec<notifsettings::TimeOfDay> {
         let mut times: Vec<notifsettings::TimeOfDay> = (0..48)
             .filter_map(|half| {
                 notifsettings::TimeOfDay::new(half / 2, if half % 2 == 0 { 0 } else { 30 })
@@ -6700,6 +7299,20 @@ impl SettingsState {
                         };
                 }
             }
+            DropdownId::DayWallpaperFrom | DropdownId::NightWallpaperFrom => {
+                let day = dropdown_id == DropdownId::DayWallpaperFrom;
+                let chosen = self.schedule_time_choices(day).get(index).copied();
+                let schedule = &mut self.appearance.settings.wallpaper_schedule;
+                let at = day_and_night(schedule)
+                    .and_then(|(d, n)| if day { d } else { n })
+                    .and_then(|entry| schedule.iter().position(|x| x == entry));
+                // No re-sort: the choices keep each picture on its own side
+                // of the other (`schedule_time_choices`), so the order holds.
+                if let (Some(chosen), Some(entry)) = (chosen, at.and_then(|i| schedule.get_mut(i)))
+                {
+                    entry.from = chosen;
+                }
+            }
             DropdownId::AutoLightFrom | DropdownId::AutoDarkFrom => {
                 let hours = self.appearance.settings.auto_light_hours;
                 let (current, other) = self.auto_hour_ends(dropdown_id);
@@ -6716,7 +7329,7 @@ impl SettingsState {
                 let window = self.notif.settings.quiet_hours.window;
                 let start = dropdown_id == DropdownId::QuietStart;
                 let current = if start { window.start() } else { window.end() };
-                if let Some(chosen) = Self::quiet_time_choices(current).get(index) {
+                if let Some(chosen) = Self::time_choices(current).get(index) {
                     self.notif.settings.quiet_hours.window = if start {
                         notifsettings::DailyWindow::new(*chosen, window.end())
                     } else {
@@ -6975,6 +7588,94 @@ impl oswindow::app::App for SettingsState {
     }
 }
 
+/// The programs this machine has, for the Default Apps page's jobs: those
+/// installed here, read as the start menu reads them, with SlateOS's own
+/// (`programs::built_in`) behind them -- an installed entry with the same id
+/// replaces SlateOS's. Installed first, because `Role::filled_by` takes the
+/// first program that does a job when no built-in default names one.
+fn known_programs(dirs: &desktopentry::scan::DataDirs) -> Vec<desktopentry::App> {
+    let scan = desktopentry::scan::scan(dirs);
+    let (mut list, _unusable) = desktopentry::scan::apps(&scan, None);
+    let installed: Vec<String> = list.iter().map(|app| app.id.clone()).collect();
+    list.extend(
+        programs::built_in(None)
+            .into_iter()
+            .filter(|own| !installed.contains(&own.id)),
+    );
+    list
+}
+
+/// When a new morning picture goes up: 06:00, as lane C's schedule has it.
+const DAY_FROM: notifsettings::TimeOfDay = match notifsettings::TimeOfDay::from_minutes(6 * 60) {
+    Some(t) => t,
+    None => notifsettings::TimeOfDay::MIDNIGHT,
+};
+/// When a new evening picture goes up: 18:00.
+const NIGHT_FROM: notifsettings::TimeOfDay = match notifsettings::TimeOfDay::from_minutes(18 * 60) {
+    Some(t) => t,
+    None => notifsettings::TimeOfDay::MIDNIGHT,
+};
+
+/// The hour that splits the day between the morning picture and the
+/// evening one, when only one of them is set.
+const NOON_HOUR: u8 = 12;
+
+/// A schedule as the Wallpaper page sets it: the morning picture and the
+/// evening one, either of them absent. Two entries are the earlier and the
+/// later; one is the morning's if it goes up before noon. `None` for a
+/// schedule of more than two, which was written by hand.
+fn day_and_night(
+    schedule: &[appearance::ScheduledWallpaper],
+) -> Option<(
+    Option<&appearance::ScheduledWallpaper>,
+    Option<&appearance::ScheduledWallpaper>,
+)> {
+    match schedule {
+        [] => Some((None, None)),
+        [one] if one.from.hour() < NOON_HOUR => Some((Some(one), None)),
+        [one] => Some((None, Some(one))),
+        [day, night] => Some((Some(day), Some(night))),
+        _ => None,
+    }
+}
+
+/// What the About page has of the third-party notices.
+#[derive(Debug)]
+enum NoticesShown {
+    /// The system was built without them: said, never an empty list.
+    NotInstalled,
+    /// They are there and could not be read: the reason.
+    Failed(String),
+    /// Every notice, in the index's order.
+    Loaded(Vec<notices::Notice>),
+}
+
+/// One licence text of the notice open on the About page.
+#[derive(Debug)]
+struct OpenText {
+    /// The file's name, which tells two texts of one notice apart.
+    name: String,
+    /// The text as shown ([`shown_as_text`]), or why it could not be read.
+    shown: Result<String, String>,
+}
+
+/// A licence text as the page shows it: its words as they are, and a byte
+/// that is not UTF-8 written as `\xNN` -- visible, where dropping it or
+/// replacing it would show a text its authors did not write. Nobody's text
+/// here needs it today; a file that ever does is shown honestly.
+fn shown_as_text(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len());
+    for chunk in bytes.utf8_chunks() {
+        out.push_str(chunk.valid());
+        for byte in chunk.invalid() {
+            // Writing to a `String` cannot fail.
+            let _ = write!(out, "\\x{byte:02X}");
+        }
+    }
+    out
+}
+
 /// The page `settings --page <name>` asks for, or `None` for no arguments.
 ///
 /// Anything else is refused by name, with the list of pages -- the rule the
@@ -7061,6 +7762,9 @@ fn main() -> ExitCode {
     // the Accounts page says rather than drawing a blank panel.
     state.load_user_accounts();
 
+    // Where installed programs' entries are, for the Default Apps page's
+    // jobs: the environment's data directories, as the start menu reads them.
+    state.app_dirs = desktopentry::scan::DataDirs::from_env(|name| std::env::var_os(name));
     // The file associations, so the Default Apps page is right even if it is
     // the first page shown. Entering the page re-reads them; this is only the
     // case that entry never happens because the page is already open.
@@ -7270,14 +7974,380 @@ mod tests {
         });
     }
 
-    /// The Fonts page names the font actually being drawn with.
-    ///
-    /// The "in use" row is the whole point of the page rather than a
-    /// decoration beside the picker. A configured family that this machine
-    /// does not have is silently ignored by the toolkit -- correctly, since
-    /// losing every glyph to a bad setting is worse -- so the setting alone
-    /// cannot tell the user why choosing a font changed nothing. Asserting
-    /// only that a picker exists would pass on a page that promised a font
+    /// **The Default Apps page names the program for every job**
+    /// (`programs::Role::ALL`, C-Q20's step 3): SlateOS's own where one does
+    /// it, and "None installed" where none does -- a question the page
+    /// answers rather than hides.
+    #[test]
+    fn the_default_apps_page_names_the_program_for_every_job() {
+        settingsfile::testing::with_scratch_config("settings-roles", |_root| {
+            let mut app = SettingsState::new();
+            app.go_to_page(SettingsPage::DefaultApps);
+            let text = format!("{:?}", app.render_tree());
+            for role in programs::Role::ALL {
+                assert!(
+                    text.contains(role.label()),
+                    "{} is not listed",
+                    role.label()
+                );
+            }
+            assert_eq!(app.default_roles.len(), programs::Role::ALL.len());
+            let doing = |role: programs::Role| {
+                app.default_roles
+                    .iter()
+                    .find(|(r, _)| *r == role)
+                    .and_then(|(_, program)| program.clone())
+            };
+            assert_eq!(
+                doing(programs::Role::TextEditor).as_deref(),
+                Some("Text Editor")
+            );
+            assert_eq!(doing(programs::Role::Terminal).as_deref(), Some("Terminal"));
+            assert_eq!(
+                doing(programs::Role::WebBrowser),
+                None,
+                "SlateOS has no web browser"
+            );
+            assert!(
+                text.contains("None installed"),
+                "a job nothing does was not said"
+            );
+        });
+    }
+
+    /// **A program installed here does the job its entry claims** -- a web
+    /// browser, which SlateOS has none of -- read from the data directories
+    /// as the start menu reads them, and it goes before SlateOS's own.
+    #[test]
+    fn an_installed_program_does_the_job_its_entry_claims() {
+        settingsfile::testing::with_scratch_config("settings-roles-installed", |root| {
+            let share = root.join("share");
+            let apps = share.join("applications");
+            std::fs::create_dir_all(&apps).expect("make the applications folder");
+            std::fs::write(
+                apps.join("org.example.Browser.desktop"),
+                "[Desktop Entry]\nType=Application\nName=Example Browser\nExec=browser %u\n\
+                 MimeType=x-scheme-handler/http;text/html;\n",
+            )
+            .expect("write the entry");
+            let mut app = SettingsState::new();
+            app.app_dirs = desktopentry::scan::DataDirs::new(vec![share]);
+            app.go_to_page(SettingsPage::DefaultApps);
+            let text = format!("{:?}", app.render_tree());
+            assert!(
+                text.contains("Example Browser"),
+                "the installed browser was not named"
+            );
+            let browser = app
+                .default_roles
+                .iter()
+                .find(|(r, _)| *r == programs::Role::WebBrowser)
+                .and_then(|(_, program)| program.clone());
+            assert_eq!(browser.as_deref(), Some("Example Browser"));
+        });
+    }
+
+    /// The small bundle `gui/notices` tests against: three notices, one with
+    /// an attribution.
+    fn notices_fixture() -> PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../gui/notices/tests/fixtures/bundle")
+    }
+
+    /// **The About page lists the third-party notices**, each by name and
+    /// licence, libjpeg-turbo's attribution word for word on a line of its
+    /// own; opening one reads its text and shows it, and a second press puts
+    /// it away (lane C's `c-e-show-the-third-party-notices`, §1433).
+    #[test]
+    fn the_about_page_lists_the_notices_and_opens_one() {
+        settingsfile::testing::with_scratch_config("settings-about", |_root| {
+            let mut app = SettingsState::new();
+            app.notices_dir = notices_fixture();
+            app.go_to_page(SettingsPage::About);
+            let text = format!("{:?}", app.render_tree());
+            for want in [
+                "cfg-if 1.0.5",
+                "libjpeg-turbo 3.1.1",
+                "spin 0.9.8",
+                "MIT OR Apache-2.0",
+                "IJG AND BSD-3-Clause AND Zlib",
+                "This software is based in part on the work of the Independent JPEG Group.",
+            ] {
+                assert!(text.contains(want), "{want:?} is not on the page");
+            }
+            assert!(
+                app.open_notice.is_none(),
+                "a text was read before anybody opened it"
+            );
+            assert!(!text.contains("spin MIT text"));
+
+            let press = |app: &mut SettingsState| {
+                let (x, y) = center_of(app, RowHit::Press(ButtonId::Notice(2)))
+                    .expect("spin's button is drawn");
+                app.handle_event(&Event::Mouse(MouseEvent {
+                    x,
+                    y,
+                    kind: MouseEventKind::Press(MouseButton::Left),
+                }));
+            };
+            press(&mut app);
+            let text = format!("{:?}", app.render_tree());
+            assert!(
+                text.contains("spin MIT text"),
+                "the opened text is not shown"
+            );
+            assert!(text.contains("Hide licence"));
+            press(&mut app);
+            let text = format!("{:?}", app.render_tree());
+            assert!(!text.contains("spin MIT text"), "the text stayed open");
+        });
+    }
+
+    /// **With no notices installed, the page says so**, rather than showing an
+    /// empty list -- which would read as "this system carries no one else's
+    /// code".
+    #[test]
+    fn the_about_page_says_when_the_notices_are_not_installed() {
+        settingsfile::testing::with_scratch_config("settings-about-none", |root| {
+            let mut app = SettingsState::new();
+            app.notices_dir = root.join("licenses");
+            app.go_to_page(SettingsPage::About);
+            let text = format!("{:?}", app.render_tree());
+            assert!(
+                text.contains("The licence notices are not installed on this system."),
+                "{text}"
+            );
+        });
+    }
+
+    /// **A byte that is not UTF-8 is shown, escaped** -- not dropped, and not
+    /// replaced with a character its authors did not write.
+    #[test]
+    fn a_licence_byte_that_is_not_utf8_is_shown_escaped() {
+        assert_eq!(shown_as_text(b"caf\xE9 ok"), "caf\\xE9 ok");
+        assert_eq!(shown_as_text("na\u{ef}ve".as_bytes()), "na\u{ef}ve");
+        assert_eq!(shown_as_text(b"\xFF\xFE"), "\\xFF\\xFE");
+    }
+
+    /// The About page is where `settings --page about` lands, under System.
+    #[test]
+    fn the_about_page_is_named_about_and_listed_under_system() {
+        assert_eq!(SettingsPage::from_name("about"), Some(SettingsPage::About));
+        assert_eq!(SettingsPage::About.category(), SettingsCategory::System);
+    }
+
+    /// Press the control `what` names on the page, as a click does.
+    fn press_row(state: &mut SettingsState, what: RowHit) {
+        let (x, y) = center_of(state, what).unwrap_or_else(|| panic!("{what:?} is not drawn"));
+        state.dispatch_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+    }
+
+    /// **A morning and an evening picture are chosen on the Wallpaper page**
+    /// (lane C's `c-e-day-and-night-wallpapers-need-a-place-in-settings`):
+    /// each with its own Choose, up from 06:00 and 18:00, each moved by its
+    /// dropdown on its own side of the other, and Clear stops them. It could
+    /// be set only by editing `appearance.yaml`.
+    #[test]
+    fn a_morning_and_an_evening_picture_are_chosen_on_the_wallpaper_page() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Wallpaper;
+        let schedule = |state: &SettingsState| -> Vec<(String, PathBuf)> {
+            state
+                .appearance
+                .settings
+                .wallpaper_schedule
+                .iter()
+                .map(|e| (notifsettings::format_hm(e.from), e.image.clone()))
+                .collect()
+        };
+
+        press_row(&mut state, RowHit::Press(ButtonId::ChooseNightWallpaper));
+        assert!(state.dialog.is_some(), "no picker appeared");
+        assert!(
+            state.apply_dialog_answer(DialogAction::Selected(PathBuf::from("/pics/night.jpg")))
+        );
+        assert_eq!(
+            schedule(&state),
+            [(String::from("18:00"), PathBuf::from("/pics/night.jpg"))]
+        );
+        // On its own, the evening picture keeps to the afternoon and the
+        // evening: before noon it would be the morning's.
+        state.show_dropdown(DropdownId::NightWallpaperFrom);
+        let items = state.dropdown_layout().expect("a layout").items;
+        assert!(items.contains(&String::from("12:00")), "{items:?}");
+        assert!(
+            !items.contains(&String::from("11:30")),
+            "a lone evening picture is offered the morning"
+        );
+        state.handle_event(&key_press(Key::Escape));
+
+        press_row(&mut state, RowHit::Press(ButtonId::ChooseDayWallpaper));
+        assert!(state.apply_dialog_answer(DialogAction::Selected(PathBuf::from("/pics/day.jpg"))));
+        assert_eq!(
+            schedule(&state),
+            [
+                (String::from("06:00"), PathBuf::from("/pics/day.jpg")),
+                (String::from("18:00"), PathBuf::from("/pics/night.jpg")),
+            ]
+        );
+        let text = format!("{:?}", state.render_tree());
+        assert!(text.contains("Daytime picture: /pics/day.jpg"), "{text}");
+        assert!(text.contains("Up now:"), "the picture up now is not said");
+
+        state.show_dropdown(DropdownId::DayWallpaperFrom);
+        let items = state.dropdown_layout().expect("a layout").items;
+        assert!(
+            !items.contains(&String::from("18:00")),
+            "the evening's time is offered for the morning"
+        );
+        assert!(
+            !items.contains(&String::from("19:00")),
+            "a time after the evening is offered for the morning"
+        );
+        let at = items
+            .iter()
+            .position(|t| t == "07:30")
+            .expect("07:30 is offered");
+        state.apply_dropdown_selection(at);
+        state.show_dropdown(DropdownId::NightWallpaperFrom);
+        let items = state.dropdown_layout().expect("a layout").items;
+        assert!(
+            !items.contains(&String::from("07:00")),
+            "a time before the morning is offered for the evening"
+        );
+        state.handle_event(&key_press(Key::Escape));
+        assert!(
+            state.dropdown_layout().is_none(),
+            "Escape left the dropdown open"
+        );
+
+        // A new morning picture keeps the morning's time.
+        press_row(&mut state, RowHit::Press(ButtonId::ChooseDayWallpaper));
+        state.apply_dialog_answer(DialogAction::Selected(PathBuf::from("/pics/dawn.jpg")));
+        assert_eq!(
+            schedule(&state),
+            [
+                (String::from("07:30"), PathBuf::from("/pics/dawn.jpg")),
+                (String::from("18:00"), PathBuf::from("/pics/night.jpg")),
+            ]
+        );
+
+        press_row(&mut state, RowHit::Press(ButtonId::ClearSchedule));
+        assert!(schedule(&state).is_empty(), "Clear left the schedule");
+    }
+
+    /// **A schedule written by hand is shown as it is**, with Clear; the page
+    /// sets two pictures and does not edit one of three piecemeal.
+    #[test]
+    fn a_schedule_of_more_than_two_pictures_is_listed_as_it_is() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Wallpaper;
+        for (minutes, name) in [(360, "a.jpg"), (720, "b.jpg"), (1080, "c.jpg")] {
+            state
+                .appearance
+                .settings
+                .wallpaper_schedule
+                .push(appearance::ScheduledWallpaper {
+                    from: notifsettings::TimeOfDay::from_minutes(minutes).expect("a time"),
+                    image: PathBuf::from(name),
+                });
+        }
+        let text = format!("{:?}", state.render_tree());
+        assert!(text.contains("From 12:00"), "{text}");
+        assert!(center_of(&state, RowHit::Press(ButtonId::ChooseDayWallpaper)).is_none());
+        state.set_scheduled_picture(true, PathBuf::from("x.jpg"));
+        assert_eq!(
+            state.appearance.settings.wallpaper_schedule.len(),
+            3,
+            "a hand-written schedule was edited"
+        );
+        press_row(&mut state, RowHit::Press(ButtonId::ClearSchedule));
+        assert!(state.appearance.settings.wallpaper_schedule.is_empty());
+    }
+
+    /// **The picture up now is the one for this machine's time of day**: at
+    /// noon UTC it is the morning's in UTC and the evening's twelve hours
+    /// ahead, where it is midnight.
+    #[test]
+    fn the_picture_up_now_is_the_one_for_this_machines_time_of_day() {
+        let mut state = SettingsState::new();
+        for (from, image) in [(DAY_FROM, "/pics/day.jpg"), (NIGHT_FROM, "/pics/night.jpg")] {
+            state
+                .appearance
+                .settings
+                .wallpaper_schedule
+                .push(appearance::ScheduledWallpaper {
+                    from,
+                    image: PathBuf::from(image),
+                });
+        }
+        let noon_utc = 12 * 3600;
+        state.system_zone = datetimesettings::Tz::utc();
+        assert_eq!(
+            state.scheduled_up_at(noon_utc).as_deref(),
+            Some("/pics/day.jpg")
+        );
+        state.system_zone = datetimesettings::Tz::parse(b"NZST-12").expect("a zone");
+        assert_eq!(
+            state.scheduled_up_at(noon_utc).as_deref(),
+            Some("/pics/night.jpg"),
+            "the machine's zone is not what the picture goes by"
+        );
+    }
+
+    /// **The picture and the rotation say so while a schedule hides them**:
+    /// pictures by time of day are the wallpaper while they are set, and
+    /// "No folder. The desktop shows the single picture above." was then
+    /// untrue. Without a schedule each reads as it did.
+    #[test]
+    fn the_picture_and_the_rotation_say_when_a_schedule_hides_them() {
+        let hidden_above = "Not shown while there are pictures by time of day, above.";
+        let hidden_below = "Not shown while there are pictures by time of day, below.";
+        let single = "No folder. The desktop shows the single picture above.";
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Wallpaper;
+        state.appearance.settings.wallpaper = Some(PathBuf::from("/pics/one.jpg"));
+        let text = format!("{:?}", state.render_tree());
+        assert!(text.contains(single), "{text}");
+        assert!(!text.contains(hidden_below) && !text.contains(hidden_above));
+
+        state
+            .appearance
+            .settings
+            .wallpaper_schedule
+            .push(appearance::ScheduledWallpaper {
+                from: DAY_FROM,
+                image: PathBuf::from("/pics/day.jpg"),
+            });
+        let text = format!("{:?}", state.render_tree());
+        assert!(
+            text.contains(hidden_below),
+            "the picture does not say it is hidden"
+        );
+        assert!(
+            !text.contains(single),
+            "the rotation still says the picture is shown"
+        );
+
+        state.appearance.settings.wallpaper_folder = Some(PathBuf::from("/pics/rotation"));
+        let text = format!("{:?}", state.render_tree());
+        assert!(
+            text.contains(hidden_above),
+            "the rotation does not say it is hidden"
+        );
+
+        state.appearance.settings.wallpaper = None;
+        let text = format!("{:?}", state.render_tree());
+        assert!(
+            !text.contains("the plain background"),
+            "no picture reads as the plain background under a schedule"
+        );
+    }
+
     /// The page summarises each kind, and tells the three states apart.
     ///
     /// The Mixed case is the one worth a test: a group with one of its
@@ -7324,6 +8394,14 @@ mod tests {
         });
     }
 
+    /// The Fonts page names the font actually being drawn with.
+    ///
+    /// The "in use" row is the whole point of the page rather than a
+    /// decoration beside the picker. A configured family that this machine
+    /// does not have is silently ignored by the toolkit -- correctly, since
+    /// losing every glyph to a bad setting is worse -- so the setting alone
+    /// cannot tell the user why choosing a font changed nothing. Asserting
+    /// only that a picker exists would pass on a page that promised a font
     /// nothing could load.
     #[test]
     fn the_fonts_page_reports_the_font_actually_in_use() {
@@ -7595,6 +8673,164 @@ mod tests {
             assert!(
                 saved.additional_clocks.iter().all(|c| !c.visible),
                 "the clock's switch did not reach the file"
+            );
+        });
+    }
+
+    /// What the desktop sends every window when `name.yaml` changed.
+    fn announce(name: &str) -> Event {
+        Event::SettingsChanged {
+            group: guitk::event::SettingsGroup::Program(
+                guitk::event::SettingsName::new(name.as_bytes()).expect("a settings name"),
+            ),
+        }
+    }
+
+    /// **A file changed elsewhere is read again, and not written back**
+    /// (§1434). Settings saves `appearance.yaml` whole, from the copy it read
+    /// at startup: a change made meanwhile -- by the desktop's own panel,
+    /// another Settings window, or by hand -- was written over by the next
+    /// change on any Personalization page. Read again when the desktop says
+    /// so, the next change keeps it.
+    ///
+    /// The re-read writes nothing and asks the compositor for nothing: it is
+    /// the file's news, not the user's change. Another file's announcement is
+    /// not this one's.
+    #[test]
+    fn a_file_changed_elsewhere_is_read_again_and_not_written_back() {
+        settingsfile::testing::with_scratch_config("settings-reread", |_| {
+            let mut first = SettingsState::new();
+            first.load_appearance();
+            let mut second = SettingsState::new();
+            second.load_appearance();
+            second.current_page = SettingsPage::Themes;
+
+            // The first window turns the night light on.
+            assert!(!first.appearance.settings.night_light);
+            first.appearance.settings.night_light = true;
+            first.save_appearance();
+
+            assert_eq!(
+                second.handle_event(&announce(inputsettings::CONFIG_NAME)),
+                EventResult::Ignored
+            );
+            assert!(
+                !second.appearance.settings.night_light,
+                "another file's announcement read this one"
+            );
+            assert_eq!(
+                second.handle_event(&announce(appearance::CONFIG_NAME)),
+                EventResult::Consumed
+            );
+            assert!(
+                second.appearance.settings.night_light,
+                "the change did not reach the other window"
+            );
+            assert!(
+                !second.take_appearance_change(),
+                "the file read again was written back"
+            );
+            assert_eq!(
+                second.handle_event(&announce(appearance::CONFIG_NAME)),
+                EventResult::Ignored,
+                "a file read again unchanged changed the window"
+            );
+
+            // The second window's own change keeps the first's.
+            let light = center_of(&second, RowHit::Select(SelectId::ThemeMode, 1))
+                .expect("the Themes page draws its cards");
+            second.handle_event(&Event::Mouse(MouseEvent {
+                x: light.0,
+                y: light.1,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+            let saved = appearance::AppearanceFile::load().settings;
+            assert_eq!(saved.theme_mode, ThemeMode::Light);
+            assert!(
+                saved.night_light,
+                "the other window's change was written over"
+            );
+        });
+    }
+
+    /// **Every file Settings shows is followed**, each by its own
+    /// announcement: the one a change was written to is read, and it alone.
+    #[test]
+    fn every_file_settings_shows_is_read_again_when_it_changes() {
+        settingsfile::testing::with_scratch_config("settings-reread-each", |_| {
+            let mut other = SettingsState::new();
+            other.load_input();
+            other.load_notifications();
+            other.load_datetime();
+            let mut app = SettingsState::new();
+            app.load_input();
+            app.load_notifications();
+            app.load_datetime();
+            app.load_lock_delay();
+            app.refresh_default_apps();
+
+            other.input.settings.mouse.double_click_ms += 100;
+            other.save_input();
+            other.notif.settings.quiet_hours.enabled = !other.notif.settings.quiet_hours.enabled;
+            other.save_notifications();
+            other.datetime.settings.show_seconds = !other.datetime.settings.show_seconds;
+            other.save_datetime();
+            let minutes = lockscreen::CHOICES
+                .iter()
+                .copied()
+                .find(|&m| m != app.lock_after_minutes)
+                .expect("a second delay to choose");
+            lockscreen::store_minutes(minutes).expect("the scratch config is writable");
+            let clock = (!app.lock_clock_seconds, !app.lock_clock_date);
+            lockscreen::store_clock(clock.0, clock.1).expect("the scratch config is writable");
+            let mut doc = settingsfile::load(associations::CONFIG_NAME);
+            doc.set_str(&["associations", "txt"], "/usr/bin/chosen-editor");
+            settingsfile::store(associations::CONFIG_NAME, &doc)
+                .expect("the scratch config is writable");
+
+            // Whether `app` shows what `other` wrote to the file named.
+            type Shows = fn(&SettingsState, &SettingsState) -> bool;
+            let checks: [(&str, Shows); 6] = [
+                (inputsettings::CONFIG_NAME, |a, o| {
+                    a.input.settings == o.input.settings
+                }),
+                (notifsettings::CONFIG_NAME, |a, o| {
+                    a.notif.settings == o.notif.settings
+                }),
+                (datetimesettings::CONFIG_NAME, |a, o| {
+                    a.datetime.settings == o.datetime.settings
+                }),
+                (lockscreen::CONFIG_NAME, |a, _| {
+                    a.lock_after_minutes == lockscreen::stored_minutes()
+                }),
+                (lockscreen::CLOCK_CONFIG, |a, _| {
+                    (a.lock_clock_seconds, a.lock_clock_date) == lockscreen::stored_clock()
+                }),
+                (associations::CONFIG_NAME, |a, _| {
+                    a.default_apps
+                        .iter()
+                        .any(|entry| entry.program == "/usr/bin/chosen-editor")
+                }),
+            ];
+            for (at, &(name, matches)) in checks.iter().enumerate() {
+                assert!(
+                    !matches(&app, &other),
+                    "{name} matched before it was announced: nothing tested"
+                );
+                assert_eq!(
+                    app.handle_event(&announce(name)),
+                    EventResult::Consumed,
+                    "{name}"
+                );
+                for &(later, unread) in checks.iter().skip(at + 1) {
+                    assert!(!unread(&app, &other), "{name}'s announcement read {later}");
+                }
+                assert!(matches(&app, &other), "{name} was not read again");
+            }
+            assert!(!app.take_input_change(), "input.yaml was written back");
+            assert!(
+                !app.take_notifications_change(),
+                "notifications.yaml was written back"
             );
         });
     }
@@ -11993,6 +13229,324 @@ mod tests {
         state.open_on(SettingsPage::WiFi);
         assert_eq!(state.current_page, SettingsPage::WiFi);
         assert_eq!(state.current_category, SettingsCategory::Network);
+    }
+
+    // ── An accent that hides calendar events (C-Q19, §1424) ─────────────
+
+    thread_local! {
+        /// The programs the tests' stand-in starter was asked to start.
+        static STARTED: std::cell::RefCell<Vec<(String, Vec<String>)>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// Record a start instead of making one.
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "the starter's signature: a real start can fail"
+    )]
+    fn record_start(program: &str, args: &[&str]) -> std::io::Result<()> {
+        STARTED.with(|s| {
+            s.borrow_mut().push((
+                program.to_owned(),
+                args.iter().map(|a| (*a).to_owned()).collect(),
+            ));
+        });
+        Ok(())
+    }
+
+    /// A start that fails, as one whose program is not there does.
+    fn refuse_start(_: &str, _: &[&str]) -> std::io::Result<()> {
+        Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+    }
+
+    /// An event on the first of October, in `colour` or its category's.
+    fn calendar_event(
+        id: u64,
+        title: &str,
+        category: calendarstore::EventCategory,
+        colour: Option<Color>,
+    ) -> calendarstore::CalendarEvent {
+        let day = calendarstore::Date::new(2026, 10, 1).unwrap();
+        calendarstore::CalendarEvent {
+            id,
+            title: title.to_owned(),
+            description: String::new(),
+            category,
+            start: calendarstore::DateTime::new(day, calendarstore::Time { hour: 9, minute: 0 }),
+            end: calendarstore::DateTime::new(
+                day,
+                calendarstore::Time {
+                    hour: 10,
+                    minute: 0,
+                },
+            ),
+            all_day: false,
+            recurrence: calendarstore::RecurrenceRule::None,
+            reminder: calendarstore::Reminder::None,
+            location: None,
+            color_override: colour,
+        }
+    }
+
+    /// `events`, kept where the calendar keeps them -- in the scratch
+    /// configuration the test runs in.
+    fn keep_events(events: &[calendarstore::CalendarEvent]) {
+        let path = calendarstore::events_path().expect("a scratch configuration");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, calendarstore::calendar_text(events)).unwrap();
+    }
+
+    /// Settings with a blue accent, starting nothing but recording it.
+    fn blue_settings() -> SettingsState {
+        let mut state = SettingsState::new();
+        state.starter = record_start;
+        state.appearance.settings.accent_color = AccentColor::Blue;
+        state
+    }
+
+    /// A colour of the palette a mark can be told apart from `accent` by.
+    fn apart_from(pal: &Palette, accent: Color) -> Color {
+        [pal.red, pal.green, pal.yellow, pal.peach]
+            .into_iter()
+            .find(|c| !appearance::hard_to_tell_apart(*c, accent))
+            .expect("some hue stands apart from the accent")
+    }
+
+    /// **An accent that hides an event's dot is warned of, the event named,
+    /// with a way straight to its colour** -- the calendar at that event --
+    /// and the accent is kept as chosen.
+    #[test]
+    fn an_accent_that_hides_an_event_names_it_with_a_way_to_its_colour() {
+        appearance::config::testing::with_scratch_config("settings-accent-event", |_| {
+            let mut state = blue_settings();
+            let pal = state.palette();
+            let apart = apart_from(&pal, pal.accent);
+            keep_events(&[
+                calendar_event(
+                    7,
+                    "Dentist",
+                    calendarstore::EventCategory::Health,
+                    Some(pal.accent),
+                ),
+                calendar_event(
+                    8,
+                    "Lunch",
+                    calendarstore::EventCategory::Personal,
+                    Some(apart),
+                ),
+            ]);
+            state.go_to_page(SettingsPage::Colors);
+            let texts = drawn_texts(&state).join(" | ");
+            assert!(
+                texts.contains("This accent is close to an event's colour in your calendar."),
+                "{texts}"
+            );
+            assert!(texts.contains("Dentist (Health)"), "{texts}");
+            assert!(
+                !texts.contains("Lunch"),
+                "an event apart from the accent was named"
+            );
+            let (x, y) = center_of(&state, RowHit::Press(ButtonId::EventColour(7)))
+                .expect("the event has a button");
+            state.handle_click(x, y);
+            STARTED.with(|s| {
+                assert_eq!(
+                    *s.borrow(),
+                    vec![(
+                        CALENDAR.to_owned(),
+                        vec!["--event-colour".to_owned(), "7".to_owned()]
+                    )]
+                );
+            });
+            let texts = drawn_texts(&state).join(" | ");
+            assert!(
+                texts.contains("Opening \u{201c}Dentist\u{201d} in the calendar."),
+                "{texts}"
+            );
+            assert_eq!(state.appearance.settings.accent_color, AccentColor::Blue);
+        });
+    }
+
+    /// **An accent apart from every event's colour warns of none.**
+    #[test]
+    fn an_accent_apart_from_every_event_warns_of_none() {
+        appearance::config::testing::with_scratch_config("settings-accent-none", |_| {
+            let mut state = blue_settings();
+            let pal = state.palette();
+            let apart = apart_from(&pal, pal.accent);
+            keep_events(&[calendar_event(
+                8,
+                "Lunch",
+                calendarstore::EventCategory::Personal,
+                Some(apart),
+            )]);
+            state.go_to_page(SettingsPage::Colors);
+            let texts = drawn_texts(&state).join(" | ");
+            assert!(!texts.contains("close to"), "{texts}");
+            assert!(center_of(&state, RowHit::Press(ButtonId::LookAgain)).is_none());
+        });
+    }
+
+    /// **The events named are exactly those the calendar's own test calls
+    /// hidden**, for every accent the user can pick: one event in each of
+    /// the palette's hues and one in each category's colour.
+    #[test]
+    fn the_events_named_are_the_ones_the_calendars_test_hides() {
+        appearance::config::testing::with_scratch_config("settings-accent-test", |_| {
+            for accent in AccentColor::presets() {
+                let mut state = blue_settings();
+                state.appearance.settings.accent_color = *accent;
+                let pal = state.palette();
+                let hues = [
+                    pal.blue,
+                    pal.sapphire,
+                    pal.sky,
+                    pal.teal,
+                    pal.green,
+                    pal.yellow,
+                    pal.peach,
+                    pal.maroon,
+                    pal.red,
+                    pal.pink,
+                    pal.mauve,
+                    pal.lavender,
+                    pal.flamingo,
+                    pal.rosewater,
+                ];
+                let mut events: Vec<_> = hues
+                    .iter()
+                    .zip(1..)
+                    .map(|(hue, id)| {
+                        calendar_event(id, "hue", calendarstore::EventCategory::Work, Some(*hue))
+                    })
+                    .collect();
+                events.push(calendar_event(
+                    90,
+                    "work",
+                    calendarstore::EventCategory::Work,
+                    None,
+                ));
+                events.push(calendar_event(
+                    91,
+                    "trip",
+                    calendarstore::EventCategory::Travel,
+                    None,
+                ));
+                keep_events(&events);
+                state.go_to_page(SettingsPage::Colors);
+                let named: Vec<u64> = state
+                    .events_the_accent_hides()
+                    .iter()
+                    .map(|e| e.id)
+                    .collect();
+                let hidden: Vec<u64> = events
+                    .iter()
+                    .filter(|e| appearance::hard_to_tell_apart(e.effective_color(&pal), pal.accent))
+                    .map(|e| e.id)
+                    .collect();
+                assert_eq!(named, hidden, "{accent:?}");
+            }
+        });
+    }
+
+    /// **More hidden events than are listed offer the calendar itself.**
+    #[test]
+    fn more_hidden_events_than_are_listed_open_the_calendar() {
+        appearance::config::testing::with_scratch_config("settings-accent-many", |_| {
+            let mut state = blue_settings();
+            let pal = state.palette();
+            let events: Vec<_> = (1..=7)
+                .map(|id| {
+                    calendar_event(
+                        id,
+                        "Standup",
+                        calendarstore::EventCategory::Work,
+                        Some(pal.accent),
+                    )
+                })
+                .collect();
+            keep_events(&events);
+            state.go_to_page(SettingsPage::Colors);
+            let texts = drawn_texts(&state).join(" | ");
+            assert!(texts.contains("close to 7 events' colours"), "{texts}");
+            assert!(texts.contains("And 2 more"), "{texts}");
+            let buttons = (1..=7)
+                .filter(|id| center_of(&state, RowHit::Press(ButtonId::EventColour(*id))).is_some())
+                .count();
+            assert_eq!(buttons, CLASHES_LISTED);
+            let (x, y) = center_of(&state, RowHit::Press(ButtonId::OpenCalendar)).unwrap();
+            state.handle_click(x, y);
+            STARTED.with(|s| assert_eq!(*s.borrow(), vec![(CALENDAR.to_owned(), vec![])]));
+        });
+    }
+
+    /// **Look again reads the calendar again**: an event whose colour was
+    /// changed there drops out of the warning.
+    #[test]
+    fn look_again_reads_the_calendar_again() {
+        appearance::config::testing::with_scratch_config("settings-accent-again", |_| {
+            let mut state = blue_settings();
+            let pal = state.palette();
+            let event = |colour| {
+                calendar_event(
+                    7,
+                    "Dentist",
+                    calendarstore::EventCategory::Health,
+                    Some(colour),
+                )
+            };
+            keep_events(&[event(pal.accent)]);
+            state.go_to_page(SettingsPage::Colors);
+            assert_eq!(state.events_the_accent_hides().len(), 1);
+            keep_events(&[event(apart_from(&pal, pal.accent))]);
+            let (x, y) = center_of(&state, RowHit::Press(ButtonId::LookAgain)).unwrap();
+            state.handle_click(x, y);
+            assert!(state.events_the_accent_hides().is_empty());
+        });
+    }
+
+    /// **A calendar that cannot be read, or will not start, is said so.**
+    #[test]
+    fn a_calendar_that_cannot_be_read_or_started_is_said() {
+        appearance::config::testing::with_scratch_config("settings-accent-broken", |_| {
+            let path = calendarstore::events_path().unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "this is not a calendar\n").unwrap();
+            let mut state = blue_settings();
+            state.go_to_page(SettingsPage::Colors);
+            let texts = drawn_texts(&state).join(" | ");
+            assert!(
+                texts.contains("The calendar's events could not be read"),
+                "{texts}"
+            );
+
+            let pal = state.palette();
+            keep_events(&[calendar_event(
+                7,
+                "Dentist",
+                calendarstore::EventCategory::Health,
+                Some(pal.accent),
+            )]);
+            state.starter = refuse_start;
+            state.go_to_page(SettingsPage::Colors);
+            let (x, y) = center_of(&state, RowHit::Press(ButtonId::EventColour(7))).unwrap();
+            state.handle_click(x, y);
+            let texts = drawn_texts(&state).join(" | ");
+            assert!(
+                texts.contains("Could not start the calendar (/usr/bin/calendar)"),
+                "{texts}"
+            );
+        });
+    }
+
+    /// **A long title is cut, the cut marked**, so a button stays beside it.
+    #[test]
+    fn a_long_title_is_cut_with_an_ellipsis() {
+        assert_eq!(elided("Dentist", 36), "Dentist");
+        let long = "a".repeat(40);
+        let cut = elided(&long, 36);
+        assert_eq!(cut.chars().count(), 36);
+        assert!(cut.ends_with('\u{2026}'));
     }
 }
 

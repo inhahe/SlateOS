@@ -59245,22 +59245,68 @@ mode to validate), in dependency order:**
    (`pci::scan_bus0` + clear bit 2 of the command word); IOMMU translation off
    (SlateOS does not enable it today, so likely a no-op -- confirm); send INIT to
    every other CPU (`apic::send_init_ipi` for each `smp::cpu_apic_id`).
-5. **Trampoline + jump** (integration-only): a position-independent blob copied
-   into a control page (a frame outside dest/sources/tables/page-list), run via
-   its HHDM address (valid in both tables). It copies the page list
-   (src -> dst), loads a minimal GDT + empty IDT, sets CR0=0x8001_0011,
-   CR4 PAE[+LA57], EFER LME+NXE, IA32_PAT=0x0000_0105_0007_0406, zeroes GPRs,
-   sets a 16-byte-aligned stack with a 0 return address, DF+IF clear, loads CR3
-   = `HandoffTables.pml4_phys`, and jumps to `parsed.entry`. (Exact Limine
-   parity: see §1536 and the web-fetched Limine 8.7 handoff in this session.)
-6. **Syscall + capability**: `SYS_POWER_RELOAD` taking `(image_ptr, image_len)`
-   in the caller's address space (caller chooses the image, per the request),
-   gated by a new `power.reload` capability -- NOT implied by `power.reboot`.
-   Dispatch self-test like other syscalls. Lane B's `powerctl reload` calls it.
+4. **Quiesce** -- DONE 2026-10-03 (`kexec::quiesce`, stage 5.5a): cli, IOAPIC
+   mask-all, LAPIC timer stop, PCI bus-master clear, INIT IPIs. `#[allow(dead_code)]`
+   until `execute` calls it.
+6. **Syscall + capability** -- DONE 2026-10-03 (stage 5.6): `SYS_POWER_RELOAD`
+   (1139), `Rights::RELOAD_KERNEL`, gated like secureboot; returns `NotSupported`
+   until `execute` is wired. Dispatch self-test proves the gate.
 
-**Validation gap:** stages 4's page-table build and all of stage 5's quiesce/jump
-can only be exercised by an actual kexec. A boot-test "kexec mode" is needed:
-boot, invoke power.reload into a freshly-staged copy of the same kernel, and
-confirm the second kernel reaches BOOT_OK (a serial marker that says "started by
-kexec"). Until that harness exists, stage 5's quiesce/jump are unverified -- do
-not wire `powerctl reload` to it on `main` until the kexec-mode boot passes.
+**REMAINING: the trampoline + execute + the boot-test harness** (the irreversible
+jump; needs the harness + boot-cycle iteration -- do as one focused unit).
+
+5a. **Trampoline** -- a pure-64-bit `global_asm!` blob (Intel syntax, like
+   idt.rs), `.global kexec_trampoline_start`/`_end`, reached via `extern "C"
+   { static ... : u8 }` to copy `[start,end)`. It is position-independent (all
+   data via `rdi` = params ptr; only RIP-relative within the blob) so it runs
+   from a control frame's HHDM alias -- valid in BOTH tables because both use the
+   same HHDM offset. Register convention / sequence (verified against the
+   web-fetched Limine 8.7 handoff; a long-mode->long-mode jump, no mode switch):
+     - entry: rdi=params(HHDM), old tables active, IF off (quiesce did cli).
+     - cld; r15=params; r14=hhdm; r13=copy_count; r12=copy_list.
+     - copy loop: per CopyOp{src_phys,dst_phys,len} rsi=src+hhdm, rdi=dst+hhdm,
+       rcx=len, `rep movsb`; advance r12 by 24 -- done BEFORE the CR3 switch, via
+       the OLD stack (old tables map it), so the OLD kernel stack must stay valid
+       until then (no stack use between CR3 switch and the new-rsp load).
+     - `lgdt [gdtr_ptr]`; `lidt [idtr_ptr]` (empty IDT, limit 0).
+     - reload DS/ES/FS/GS/SS = 0x30; reload CS = 0x28 via far return
+       (`lea rax,[rip+after]; push 0x28; push rax; retfq`). after-label is in the
+       control frame's HHDM, valid in the new tables too.
+     - `mov cr3, new_cr3` (new tables now active; blob keeps running via HHDM).
+     - `mov rsp, new_stack; sub rsp,8; mov qword[rsp],0` (Limine's 0 ret addr).
+     - `mov rax, new_entry`; zero rbx..r15 (rax=entry survives); `jmp rax`.
+   CR0/CR4/EFER/PAT are LEFT as the running kernel has them -- all valid
+   long-mode state the new kernel re-inits as from a Limine boot; critically
+   EFER.NXE stays set so the handoff tables' NX (bit 63) is honoured. (A future
+   refinement sets them to Limine's exact values for a non-SlateOS image.)
+   GDT = Limine's 7 entries (CS 0x28, data 0x30): null,
+   0x00009B000000FFFF, 0x000093000000FFFF, 0x00CF9B000000FFFF,
+   0x00CF93000000FFFF, 0x00209B0000000000, 0x0000930000000000; GDTR limit 0x37.
+5b. **execute** -- `PreparedHandoff::execute(self) -> KernelError` (returns only
+   on a pre-quiesce failure; on success diverges). Allocate ONE contiguous
+   control region (`frame::alloc_order`, ~order 3 / 128 KiB: holds blob + params
+   + GDT + GDTR + IDTR + a CONTIGUOUS copy_list[count*24] (~44 KB for the real
+   kernel) + a ~64 KB stack at the top). Copy the blob in; fill params (the
+   8 u64 offsets 0x00..0x38: copy_count, copy_list, hhdm, new_cr3=pml4_phys,
+   new_entry, new_stack=region top, gdtr_ptr, idtr_ptr), GDT, GDTR, IDTR,
+   copy_list (flatten staged.copy_ops). Check the control region does NOT overlap
+   dest (it is low, dest high -- fail cleanly if not). Then `quiesce()` and jmp to
+   blob_hhdm with rdi=params_hhdm (`asm!(..., options(noreturn))`). The control
+   region needs no memmap overlay: it is USABLE and free once _start switches to
+   its own stack, before frame::init. On pre-quiesce failure free the control
+   region + self.
+   Then wire `sys_power_reload` to `prepare_handoff` + `execute` (replacing the
+   NotSupported), reading the caller's image with `read_user_vec`.
+5c. **Boot-test kexec mode (the harness)** -- a `kexec.selftest=1` cmdline flag:
+   after the self-tests, main.rs calls `prepare_handoff`+`execute` on the running
+   kernel's OWN image (`boot::kernel_file_address`) instead of halting, printing
+   e.g. "KEXEC: self-reload now". The second kernel boots normally and prints its
+   banner again; `boot-test.sh` (a variant/flag) detects a SECOND banner after
+   that line -> kexec works; a timeout (triple fault/hang) -> fails. Iterate
+   here: each fix is a ~90-min boot, so expect several cycles.
+
+**Validation gap / do not ship:** the trampoline + execute are the ONLY
+unvalidated parts; everything before them (stages 1-5.4 + quiesce helpers +
+the syscall gate) is self-tested and boot-checked. Do NOT wire `powerctl reload`
+to a kexec on `main`, and do NOT leave `sys_power_reload` calling `execute` on a
+published commit, until the kexec-mode boot (5c) passes.

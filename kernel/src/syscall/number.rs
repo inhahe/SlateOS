@@ -4259,6 +4259,17 @@ pub const FS_DIR_ENTRY_SIZE: usize = 264;
 
 // ---------------------------------------------------------------------------
 // Networking syscalls (800–999)
+//
+// The handles `SYS_TCP_CONNECT`, `SYS_TCP_ACCEPT`, `SYS_TCP_BIND` and
+// `SYS_UDP_BIND` return are the caller's (`net::native_socket`, since
+// 2026-10-02): opaque numbers from a counter that never repeats, from 1, and
+// usable only by a process that holds one -- another process naming the same
+// number gets `InvalidHandle`, as does a handle whose socket has ended.
+// A fork, or a spawn passing it on (`fd_handle_type::TCP_SOCKET`/
+// `UDP_SOCKET`), adds a holder; each holder's close, exit or exec drops
+// one; the last closes the socket. Until then a handle was the socket's
+// slot index, which any process with the `Socket` capability could count
+// through and use.
 // ---------------------------------------------------------------------------
 
 /// Open a TCP connection to a remote host.
@@ -4364,7 +4375,9 @@ pub const SYS_UDP_BIND: u64 = 810;
 
 /// Send a UDP datagram.
 ///
-/// `arg0`: socket handle (for source port) OR 0 (use ephemeral port).
+/// `arg0`: the sending socket's handle, whose port is the source port. (Doc
+///         until 2026-10-02 said 0 meant "an ephemeral port"; it never did
+///         -- 0 named slot 0 -- and now names nothing: `InvalidHandle`.)
 /// `arg1`: destination IPv4 address (u32, network byte order).
 /// `arg2`: destination port.
 /// `arg3`: pointer to data buffer.

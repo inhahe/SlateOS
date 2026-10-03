@@ -490,11 +490,11 @@ pub mod fd_handle_type {
     /// same read or write end safely (matching Linux fork() pipe
     /// inheritance).
     pub const PIPE: u8 = 1;
-    /// TCP socket handle.
-    #[allow(dead_code)] // Protocol constant — used when net stack is integrated.
+    /// A kernel TCP connection or listener handle (`net::native_socket`).
+    /// Spawn dups via `native_socket::dup()`, one more holder of the same
+    /// socket, as for a pipe.
     pub const TCP_SOCKET: u8 = 2;
-    /// UDP socket handle.
-    #[allow(dead_code)] // Protocol constant — used when net stack is integrated.
+    /// A kernel UDP socket handle (`net::native_socket`), duped the same way.
     pub const UDP_SOCKET: u8 = 3;
     /// Console I/O (stdin/stdout/stderr virtual handle).
     pub const CONSOLE: u8 = 4;
@@ -545,11 +545,10 @@ pub mod fd_handle_type {
 ///
 /// `CONSOLE` maps to `None` because it is a *virtual* handle — it names "the
 /// console" rather than any refcounted object, so there is nothing to reclaim.
-/// `TCP_SOCKET`/`UDP_SOCKET` also map to `None`, but for a different reason:
-/// the dup loop has no arm for them at all, so no handle of either type can
-/// reach registration.  They are listed explicitly rather than swept into the
-/// wildcard so that adding the missing dup arm forces this decision to be made
-/// again rather than defaulting to "leaks silently".
+/// `TCP_SOCKET`/`UDP_SOCKET` map to `NativeSocket`: since 2026-10-02 the
+/// kernel's own TCP and UDP sockets are counted per holder
+/// (`net::native_socket`), so a spawn can pass one on as it passes a pipe.
+/// Until then the dup loop had no arm for them and refused both types.
 #[must_use]
 const fn ipc_resource_of(handle_type: u8) -> Option<crate::cap::ResourceType> {
     use crate::cap::ResourceType;
@@ -559,7 +558,8 @@ const fn ipc_resource_of(handle_type: u8) -> Option<crate::cap::ResourceType> {
         fd_handle_type::STREAM_SOCKET => Some(ResourceType::StreamSocket),
         fd_handle_type::EVENTFD => Some(ResourceType::EventFd),
         fd_handle_type::PTY => Some(ResourceType::Pty),
-        // CONSOLE: virtual. TCP_SOCKET/UDP_SOCKET: unreachable (no dup arm).
+        fd_handle_type::TCP_SOCKET | fd_handle_type::UDP_SOCKET => Some(ResourceType::NativeSocket),
+        // CONSOLE: virtual.
         _ => None,
     }
 }
@@ -2035,6 +2035,26 @@ fn spawn_process_inner(
                         // `ipc_handles` each appears in.
                         crate::tty::pty::dup(crate::tty::pty::PtyHandle::from_raw(parent_handle))
                             .map(|h| h.raw())
+                    }
+                }
+                fd_handle_type::TCP_SOCKET | fd_handle_type::UDP_SOCKET => {
+                    // A kernel TCP or UDP socket the parent holds: one more
+                    // holder (`net::native_socket`) -- an inetd handing its
+                    // accepted connection to the service it starts. The type
+                    // must say what the handle is: TCP for a connection or a
+                    // listener, UDP for a datagram socket.
+                    use crate::net::native_socket::{self, Kind};
+                    let kind_agrees = match native_socket::kind_of(parent_handle) {
+                        Some(Kind::TcpConnection | Kind::TcpListener) => {
+                            handle_type == fd_handle_type::TCP_SOCKET
+                        }
+                        Some(Kind::Udp) => handle_type == fd_handle_type::UDP_SOCKET,
+                        None => false,
+                    };
+                    if parent_lacks(crate::cap::ResourceType::NativeSocket) || !kind_agrees {
+                        Err(KernelError::InvalidHandle)
+                    } else {
+                        native_socket::dup(parent_handle)
                     }
                 }
                 _ => {

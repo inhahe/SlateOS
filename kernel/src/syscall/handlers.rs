@@ -4379,10 +4379,12 @@ pub fn sys_process_set_exec_close(args: &SyscallArgs) -> SyscallResult {
 /// `Ok(true)` when the handle was closed. `Ok(false)` when it was left open:
 /// - a console handle, which has nothing to release;
 /// - a handle the process does not hold, so the list cannot reach anyone
-///   else's;
-/// - a TCP or UDP socket. Those are not counted per process: a fork shares
-///   one rather than duplicating it, so closing it here would close it for
-///   every holder. It stays open, as it did before this existed.
+///   else's.
+///
+/// A TCP or UDP socket is released like any other: since 2026-10-02 each
+/// holder counts (`net::native_socket`), so the exec drops this process's
+/// hold and the socket ends only if it was the last. Until then a fork
+/// shared one socket rather than holding it, and these stayed open.
 ///
 /// `Err` is the close's own failure.
 ///
@@ -4403,7 +4405,8 @@ pub(crate) fn close_handle_at_exec(
         fd_handle_type::EVENTFD => ResourceType::EventFd,
         fd_handle_type::STREAM_SOCKET => ResourceType::StreamSocket,
         fd_handle_type::PTY => ResourceType::Pty,
-        // CONSOLE, TCP_SOCKET, UDP_SOCKET: see above.
+        fd_handle_type::TCP_SOCKET | fd_handle_type::UDP_SOCKET => ResourceType::NativeSocket,
+        // CONSOLE: see above.
         _ => return Ok(false),
     };
     if !pcb::owns_ipc_handle(pid, resource, handle) {
@@ -4420,6 +4423,12 @@ pub(crate) fn close_handle_at_exec(
         fd_handle_type::EVENTFD => eventfd::close(EventFdHandle::from_raw(handle)),
         fd_handle_type::STREAM_SOCKET => {
             stream_socket::close(StreamSocketHandle::from_raw(handle));
+        }
+        fd_handle_type::TCP_SOCKET | fd_handle_type::UDP_SOCKET => {
+            // An orderly close for the last holder, as `close(2)`. A close
+            // that fails has still let go of the handle, and the exec goes
+            // on, as it does for every other type here.
+            let _ = crate::net::native_socket::release(handle, NativeEnding::Close);
         }
         _ => close_pty_handle(crate::tty::pty::PtyHandle::from_raw(handle)),
     }
@@ -15164,6 +15173,54 @@ pub fn sys_fs_seek_hole(args: &SyscallArgs) -> SyscallResult {
 // Networking handlers (800–999)
 // ---------------------------------------------------------------------------
 
+use crate::net::native_socket::{Ending as NativeEnding, Kind as NativeKind};
+
+/// The slot a native socket handle names, pinned for the call: the caller
+/// must hold the handle (`require_ipc_handle`), and it must be a `kind`
+/// handle whose object is still in its slot (`net::native_socket`).
+/// `InvalidHandle` otherwise, the answer for any handle a process does not
+/// hold.
+///
+/// Until 2026-10-02 these calls took the slot index itself, so any process
+/// with the `Socket` capability could use any socket by counting
+/// (`known-issues` `A-TCP-AND-UDP-SOCKETS-ARE-NOT-COUNTED-PER-PROCESS`).
+fn native_socket_slot(
+    handle: u64,
+    kind: NativeKind,
+) -> Result<crate::net::native_socket::SlotPin, KernelError> {
+    require_ipc_handle(ResourceType::NativeSocket, handle)?;
+    crate::net::native_socket::resolve(handle, kind).ok_or(KernelError::InvalidHandle)
+}
+
+/// Issue a native socket handle for the object a `*_tagged` create call
+/// made, held by the calling process, as the call's result.
+fn issue_native_socket(kind: NativeKind, slot: usize, generation: u32) -> SyscallResult {
+    let handle = crate::net::native_socket::issue(kind, slot, generation);
+    register_for_caller(ResourceType::NativeSocket, handle);
+    #[allow(clippy::cast_possible_wrap)] // a counter from 1; nowhere near 2^63
+    SyscallResult::ok(handle as i64)
+}
+
+/// The calling process lets go of a native socket handle of `kind`: it
+/// stops holding it, and the last holder's release ends the socket as
+/// `ending` says. Another process's handle, or one of another kind, is
+/// `InvalidHandle`.
+fn close_native_socket(handle: u64, kind: NativeKind, ending: NativeEnding) -> SyscallResult {
+    if let Err(e) = require_ipc_handle(ResourceType::NativeSocket, handle) {
+        return SyscallResult::err(e);
+    }
+    if crate::net::native_socket::kind_of(handle) != Some(kind) {
+        return SyscallResult::err(KernelError::InvalidHandle);
+    }
+    if let Some(pid) = caller_pid() {
+        pcb::deregister_ipc_handle(pid, ResourceType::NativeSocket, handle);
+    }
+    match crate::net::native_socket::release(handle, ending) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 /// `SYS_TCP_CONNECT` — open a TCP connection.
 ///
 /// `arg0`: IPv4 address as u32 (network byte order).
@@ -15196,20 +15253,16 @@ pub fn sys_tcp_connect(args: &SyscallArgs) -> SyscallResult {
     if (flags & CONNECT_NONBLOCK) != 0 {
         // Non-blocking connect: return handle immediately in SYN_SENT.
         match crate::net::tcp::connect_start(ns, ip.into(), port) {
-            Ok(handle) =>
-            {
-                #[allow(clippy::cast_possible_wrap)]
-                SyscallResult::ok(handle as i64)
+            Ok((slot, generation)) => {
+                issue_native_socket(NativeKind::TcpConnection, slot, generation)
             }
             Err(e) => SyscallResult::err(e),
         }
     } else {
         // Blocking connect (original behavior).
-        match crate::net::tcp::connect(ns, ip.into(), port) {
-            Ok(handle) =>
-            {
-                #[allow(clippy::cast_possible_wrap)]
-                SyscallResult::ok(handle as i64)
+        match crate::net::tcp::connect_tagged(ns, ip.into(), port) {
+            Ok((slot, generation)) => {
+                issue_native_socket(NativeKind::TcpConnection, slot, generation)
             }
             Err(e) => SyscallResult::err(e),
         }
@@ -15227,7 +15280,12 @@ pub fn sys_tcp_send(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::TcpConnection) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     let len = args.arg2 as usize;
 
     if args.arg1 == 0 && len > 0 {
@@ -15271,7 +15329,12 @@ pub fn sys_tcp_recv(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::TcpConnection) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     let buf_cap = args.arg2 as usize;
     let flags = args.arg3 as u32;
 
@@ -15352,12 +15415,7 @@ pub fn sys_tcp_close(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let handle = args.arg0 as usize;
-
-    match crate::net::tcp::close(handle) {
-        Ok(()) => SyscallResult::ok(0),
-        Err(e) => SyscallResult::err(e),
-    }
+    close_native_socket(args.arg0, NativeKind::TcpConnection, NativeEnding::Close)
 }
 
 /// `SYS_TCP_ABORT` — abort a TCP connection by sending RST.
@@ -15369,12 +15427,9 @@ pub fn sys_tcp_abort(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let handle = args.arg0 as usize;
-
-    match crate::net::tcp::abort(handle) {
-        Ok(()) => SyscallResult::ok(0),
-        Err(e) => SyscallResult::err(e),
-    }
+    // A reset when this is the socket's last holder; another holder keeps
+    // the connection, as `close(2)` with `SO_LINGER` of zero would.
+    close_native_socket(args.arg0, NativeKind::TcpConnection, NativeEnding::Abort)
 }
 
 /// `SYS_TCP_PEER_ADDR` — get the remote peer address of a TCP connection.
@@ -15387,7 +15442,12 @@ pub fn sys_tcp_peer_addr(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::TcpConnection) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
 
     if args.arg1 == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
@@ -15445,12 +15505,8 @@ pub fn sys_tcp_bind(args: &SyscallArgs) -> SyscallResult {
     }
 
     let ns = crate::sched::current_task_net_ns();
-    match crate::net::tcp::bind(ns, port) {
-        Ok(handle) =>
-        {
-            #[allow(clippy::cast_possible_wrap)]
-            SyscallResult::ok(handle as i64)
-        }
+    match crate::net::tcp::bind_tagged(ns, port) {
+        Ok((slot, generation)) => issue_native_socket(NativeKind::TcpListener, slot, generation),
         Err(e) => SyscallResult::err(e),
     }
 }
@@ -15466,22 +15522,24 @@ pub fn sys_tcp_accept(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let listener_handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::TcpListener) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let listener_handle = pin.slot();
     let flags = args.arg1 as u32;
     const ACCEPT_NONBLOCK: u32 = 1;
 
     let result = if (flags & ACCEPT_NONBLOCK) != 0 {
-        crate::net::tcp::try_accept(listener_handle)
+        crate::net::tcp::try_accept_tagged(listener_handle)
     } else {
-        crate::net::tcp::accept(listener_handle)
+        crate::net::tcp::accept_tagged(listener_handle)
     };
+    drop(pin);
 
     match result {
-        Ok(conn_handle) =>
-        {
-            #[allow(clippy::cast_possible_wrap)]
-            SyscallResult::ok(conn_handle as i64)
-        }
+        Ok((slot, generation)) => issue_native_socket(NativeKind::TcpConnection, slot, generation),
         Err(e) => SyscallResult::err(e),
     }
 }
@@ -15495,12 +15553,7 @@ pub fn sys_tcp_close_listener(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let listener_handle = args.arg0 as usize;
-
-    match crate::net::tcp::close_listener(listener_handle) {
-        Ok(()) => SyscallResult::ok(0),
-        Err(e) => SyscallResult::err(e),
-    }
+    close_native_socket(args.arg0, NativeKind::TcpListener, NativeEnding::Close)
 }
 
 /// `SYS_UDP_BIND` — bind a UDP socket to a local port.
@@ -15520,12 +15573,8 @@ pub fn sys_udp_bind(args: &SyscallArgs) -> SyscallResult {
     }
 
     let ns = crate::sched::current_task_net_ns();
-    match crate::net::udp::bind(ns, port) {
-        Ok(handle) =>
-        {
-            #[allow(clippy::cast_possible_wrap)]
-            SyscallResult::ok(handle as i64)
-        }
+    match crate::net::udp::bind_tagged(ns, port) {
+        Ok((slot, generation)) => issue_native_socket(NativeKind::Udp, slot, generation),
         Err(e) => SyscallResult::err(e),
     }
 }
@@ -15545,8 +15594,12 @@ pub fn sys_udp_send(args: &SyscallArgs) -> SyscallResult {
 
     use crate::net::interface::Ipv4Addr;
 
-    #[allow(clippy::cast_possible_truncation)]
-    let _handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::Udp) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     #[allow(clippy::cast_possible_truncation)]
     let dst_ip = Ipv4Addr::from_u32(args.arg1 as u32);
     #[allow(clippy::cast_possible_truncation)]
@@ -15570,7 +15623,7 @@ pub fn sys_udp_send(args: &SyscallArgs) -> SyscallResult {
         };
 
     // Look up the actual bound port from the socket handle.
-    let src_port: u16 = match crate::net::udp::local_port(_handle) {
+    let src_port: u16 = match crate::net::udp::local_port(handle) {
         Some(port) => port,
         None => {
             // Invalid or inactive handle — cannot send.
@@ -15596,7 +15649,12 @@ pub fn sys_udp_recv(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::Udp) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     let buf_cap = args.arg2 as usize;
     // arg4: flags —
     //   bit 1 (0x02) = MSG_PEEK (peek without consuming)
@@ -15686,9 +15744,7 @@ pub fn sys_udp_close(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let handle = args.arg0 as usize;
-    crate::net::udp::close(handle);
-    SyscallResult::ok(0)
+    close_native_socket(args.arg0, NativeKind::Udp, NativeEnding::Close)
 }
 
 /// `SYS_UDP_CONNECT` — set connected peer filter for a UDP socket.
@@ -15703,7 +15759,12 @@ pub fn sys_udp_connect(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::Udp) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     let ip_nbo = args.arg1 as u32;
     let port = args.arg2 as u16;
 
@@ -15716,7 +15777,12 @@ pub fn sys_udp_connect(args: &SyscallArgs) -> SyscallResult {
 
 /// `SYS_UDP_LOCAL_PORT` — query the local port of a UDP socket.
 pub fn sys_udp_local_port(args: &SyscallArgs) -> SyscallResult {
-    let handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::Udp) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     match crate::net::udp::local_port(handle) {
         Some(port) => SyscallResult::ok(port as i64),
         None => SyscallResult::err(KernelError::InvalidArgument),
@@ -15733,7 +15799,12 @@ pub fn sys_udp_mcast_join(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::Udp) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     let group = crate::net::interface::Ipv4Addr::from_u32(args.arg1 as u32);
     match crate::net::udp::join_group(handle, group) {
         Ok(()) => SyscallResult::ok(0),
@@ -15751,7 +15822,12 @@ pub fn sys_udp_mcast_leave(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::Udp) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     let group = crate::net::interface::Ipv4Addr::from_u32(args.arg1 as u32);
     match crate::net::udp::leave_group(handle, group) {
         Ok(()) => SyscallResult::ok(0),
@@ -18300,7 +18376,12 @@ pub fn sys_dns_cache_stats(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns: readiness bitmask (POLLIN=1, POLLOUT=4, POLLERR=8, POLLHUP=16)
 pub fn sys_tcp_poll_status(args: &SyscallArgs) -> SyscallResult {
-    let handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::TcpConnection) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     let status = crate::net::tcp::poll_status(handle);
     SyscallResult::ok(status as i64)
 }
@@ -18311,7 +18392,12 @@ pub fn sys_tcp_poll_status(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns: error code (0=none, 1=refused, 2=reset, 3=timedout).
 pub fn sys_tcp_last_error(args: &SyscallArgs) -> SyscallResult {
-    let handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::TcpConnection) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     let clear = args.arg1 != 0;
     let err = if clear {
         crate::net::tcp::take_last_error(handle)
@@ -18329,8 +18415,17 @@ pub fn sys_tcp_last_error(args: &SyscallArgs) -> SyscallResult {
 /// Returns the local port number (positive u16 range) on success,
 /// or InvalidArgument if the handle is invalid or not active.
 pub fn sys_tcp_local_port(args: &SyscallArgs) -> SyscallResult {
-    let handle = args.arg0 as usize;
     let is_listener = args.arg1 != 0;
+    let kind = if is_listener {
+        NativeKind::TcpListener
+    } else {
+        NativeKind::TcpConnection
+    };
+    let pin = match native_socket_slot(args.arg0, kind) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     let port = if is_listener {
         crate::net::tcp::listener_local_port(handle)
     } else {
@@ -18348,7 +18443,12 @@ pub fn sys_tcp_local_port(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns: 1 if pending connections available, 0 otherwise.
 pub fn sys_tcp_listener_ready(args: &SyscallArgs) -> SyscallResult {
-    let handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::TcpListener) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     let ready = crate::net::tcp::listener_has_pending(handle);
     SyscallResult::ok(if ready { 1 } else { 0 })
 }
@@ -18359,7 +18459,12 @@ pub fn sys_tcp_listener_ready(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns: number of queued datagrams (≥0).
 pub fn sys_udp_rx_ready(args: &SyscallArgs) -> SyscallResult {
-    let handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::Udp) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     let count = crate::net::udp::rx_ready(handle);
     SyscallResult::ok(count as i64)
 }
@@ -18370,7 +18475,12 @@ pub fn sys_udp_rx_ready(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Used for FIONREAD on UDP sockets.
 pub fn sys_udp_rx_front_bytes(args: &SyscallArgs) -> SyscallResult {
-    let handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::Udp) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     let bytes = crate::net::udp::rx_front_bytes(handle);
     SyscallResult::ok(bytes as i64)
 }
@@ -18383,7 +18493,12 @@ pub fn sys_udp_rx_front_bytes(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns 0 on success, writes 48-byte packed info struct.
 pub fn sys_tcp_info(args: &SyscallArgs) -> SyscallResult {
-    let handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::TcpConnection) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     let out_ptr = args.arg1 as usize;
     let buf_len = args.arg2 as usize;
 
@@ -18485,7 +18600,12 @@ pub fn sys_tcp_info(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns 0 on success.
 pub fn sys_tcp_shutdown(args: &SyscallArgs) -> SyscallResult {
-    let handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::TcpConnection) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     let how = args.arg1 as u32;
     if how > 2 {
         return SyscallResult::err(KernelError::InvalidArgument);
@@ -18507,7 +18627,12 @@ pub fn sys_tcp_set_nodelay(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::TcpConnection) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     let nodelay = args.arg1 != 0;
     match crate::net::tcp::set_nodelay(handle, nodelay) {
         Ok(()) => SyscallResult::ok(0),
@@ -18526,7 +18651,12 @@ pub fn sys_tcp_set_keepalive(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::TcpConnection) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     let enabled = args.arg1 != 0;
     match crate::net::tcp::set_keepalive(handle, enabled) {
         Ok(()) => SyscallResult::ok(0),
@@ -18547,7 +18677,12 @@ pub fn sys_tcp_set_keepalive_params(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let handle = args.arg0 as usize;
+    // Possession, and the slot pinned for the call (`net::native_socket`).
+    let pin = match native_socket_slot(args.arg0, NativeKind::TcpConnection) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let handle = pin.slot();
     // Convert seconds to nanoseconds (0 means "use default").
     let idle_secs = args.arg1;
     let interval_secs = args.arg2;

@@ -249,6 +249,9 @@ pub fn init() {
         // The same for Unix-domain sockets: a process holds the ones it
         // makes, and nothing is gated on the type.
         ResourceType::UnixSocket,
+        // And for native TCP and UDP socket handles: held objects; making a
+        // socket is `Socket`'s to allow, which admin has above.
+        ResourceType::NativeSocket,
     ]
     .map(|resource_type| CapGrant {
         resource_type,

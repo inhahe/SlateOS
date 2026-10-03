@@ -97,6 +97,16 @@ pub fn cleanup_handles(handles: &[(ResourceType, u64)]) {
                 // name leading nowhere.
                 unix_socket::close(unix_socket::UnixHandle::from_raw(handle_raw));
             }
+            ResourceType::NativeSocket => {
+                // One holder fewer; the last closes the kernel TCP or UDP
+                // socket in order, as an exit closes every descriptor. A close
+                // that fails has still let go, and the process is gone
+                // either way.
+                let _ = crate::net::native_socket::release(
+                    handle_raw,
+                    crate::net::native_socket::Ending::Close,
+                );
+            }
             ResourceType::MemFd => {
                 memfd::close(memfd::MemFdHandle::from_raw(handle_raw));
             }

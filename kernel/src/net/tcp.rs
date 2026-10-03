@@ -299,6 +299,18 @@ pub enum TcpState {
 struct TcpConnection {
     /// Whether this slot is active.
     active: bool,
+    /// Which object this slot holds: a fresh number each time the slot is
+    /// taken ([`next_generation`]). A native handle records it when issued
+    /// (`net::native_socket`), so it stops naming anything once the slot
+    /// is retired and given to another connection, rather than naming
+    /// that one.
+    generation: u32,
+    /// How many native-handle operations are using this slot now
+    /// (`net::native_socket`). While any is, the slot is not given to a
+    /// new connection, though the one in it may end meanwhile -- so an
+    /// operation can never land on an object it was not issued for.
+    /// Not cleared when the slot is freed, which can happen mid-operation.
+    pins: u32,
     /// Network namespace this connection belongs to.
     /// Connections in different namespaces are fully independent — the
     /// same 4-tuple (local_port, remote_ip, remote_port) can exist in
@@ -519,6 +531,8 @@ impl TcpConnection {
     const fn empty() -> Self {
         Self {
             active: false,
+            generation: 0,
+            pins: 0,
             ns_id: crate::netns::ROOT_NS,
             state: TcpState::Closed,
             local_port: 0,
@@ -621,6 +635,9 @@ static CONNECTIONS: Mutex<[TcpConnection; MAX_CONNECTIONS]> = Mutex::new({
 struct PendingConnection {
     /// Connection handle index in CONNECTIONS table.
     conn_handle: usize,
+    /// The connection's generation when it was queued, which `accept`
+    /// reports so a handle is issued for it and not for a successor.
+    generation: u32,
     /// Whether this slot is used.
     active: bool,
 }
@@ -629,6 +646,7 @@ impl PendingConnection {
     const fn empty() -> Self {
         Self {
             conn_handle: 0,
+            generation: 0,
             active: false,
         }
     }
@@ -638,6 +656,18 @@ impl PendingConnection {
 struct TcpListener {
     /// Whether this listener slot is active.
     active: bool,
+    /// Which object this slot holds: a fresh number each time the slot is
+    /// taken ([`next_generation`]). A native handle records it when issued
+    /// (`net::native_socket`), so it stops naming anything once the slot
+    /// is retired and given to another connection, rather than naming
+    /// that one.
+    generation: u32,
+    /// How many native-handle operations are using this slot now
+    /// (`net::native_socket`). While any is, the slot is not given to a
+    /// new connection, though the one in it may end meanwhile -- so an
+    /// operation can never land on an object it was not issued for.
+    /// Not cleared when the slot is freed, which can happen mid-operation.
+    pins: u32,
     /// Network namespace this listener belongs to.
     /// The same port can be bound in different namespaces.
     ns_id: NetNsId,
@@ -652,6 +682,8 @@ impl TcpListener {
         const EMPTY_PENDING: PendingConnection = PendingConnection::empty();
         Self {
             active: false,
+            generation: 0,
+            pins: 0,
             ns_id: crate::netns::ROOT_NS,
             port: 0,
             backlog: [EMPTY_PENDING; MAX_BACKLOG],
@@ -1441,7 +1473,67 @@ fn send_ack_with_sack(conn: &TcpConnection) -> KernelResult<()> {
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Take a connection slot, recycling the oldest TIME_WAIT one if none is free.
+/// The last generation given to a connection or listener slot.
+static GENERATION: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// A generation for a slot being taken: never 0, which an empty slot has,
+/// and not repeated until the counter wraps, 2^32 takings later.
+fn next_generation() -> u32 {
+    loop {
+        let g = GENERATION
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+            .wrapping_add(1);
+        if g != 0 {
+            return g;
+        }
+    }
+}
+
+/// Hold connection slot `handle` for a native-handle operation, if it still
+/// holds the connection of `generation` (`net::native_socket`): `false` if
+/// it holds another, or none. While held, the slot is not given to a new
+/// connection ([`take_conn_slot`]). Let go with [`unpin_conn`].
+#[must_use]
+pub fn pin_conn(handle: usize, generation: u32) -> bool {
+    let mut conns = CONNECTIONS.lock();
+    match conns.get_mut(handle) {
+        Some(c) if c.active && c.generation == generation => {
+            c.pins = c.pins.saturating_add(1);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Let go of a [`pin_conn`] hold.
+pub fn unpin_conn(handle: usize) {
+    if let Some(c) = CONNECTIONS.lock().get_mut(handle) {
+        c.pins = c.pins.saturating_sub(1);
+    }
+}
+
+/// [`pin_conn`] for listener slot `handle`.
+#[must_use]
+pub fn pin_listener(handle: usize, generation: u32) -> bool {
+    let mut listeners = LISTENERS.lock();
+    match listeners.get_mut(handle) {
+        Some(l) if l.active && l.generation == generation => {
+            l.pins = l.pins.saturating_add(1);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Let go of a [`pin_listener`] hold.
+pub fn unpin_listener(handle: usize) {
+    if let Some(l) = LISTENERS.lock().get_mut(handle) {
+        l.pins = l.pins.saturating_sub(1);
+    }
+}
+
+/// Take a connection slot, recycling the oldest TIME_WAIT one if none is free,
+/// and give it a new generation ([`next_generation`]).
 ///
 /// Returns `OutOfMemory` when every slot is active and none is in TIME_WAIT.
 ///
@@ -1456,7 +1548,16 @@ fn send_ack_with_sack(conn: &TcpConnection) -> KernelResult<()> {
 /// a binding, is both one bounds check instead of six and the reason none
 /// of them can be out of range.
 fn take_conn_slot(conns: &mut [TcpConnection], why: &str) -> KernelResult<usize> {
-    if let Some(idx) = conns.iter().position(|c| !c.active) {
+    let idx = take_conn_slot_index(conns, why)?;
+    let conn = conns.get_mut(idx).ok_or(KernelError::InternalError)?;
+    conn.generation = next_generation();
+    Ok(idx)
+}
+
+/// [`take_conn_slot`]'s choice of slot.
+fn take_conn_slot_index(conns: &mut [TcpConnection], why: &str) -> KernelResult<usize> {
+    // A pinned slot is in use by a native-handle operation even when free.
+    if let Some(idx) = conns.iter().position(|c| !c.active && c.pins == 0) {
         return Ok(idx);
     }
 
@@ -1466,7 +1567,7 @@ fn take_conn_slot(conns: &mut [TcpConnection], why: &str) -> KernelResult<usize>
     let idx = conns
         .iter()
         .enumerate()
-        .filter(|(_, c)| c.active && c.state == TcpState::TimeWait)
+        .filter(|(_, c)| c.active && c.state == TcpState::TimeWait && c.pins == 0)
         .min_by_key(|(_, c)| c.last_activity_ns)
         .map(|(i, _)| i)
         .ok_or(KernelError::OutOfMemory)?;
@@ -1506,12 +1607,22 @@ fn conn_mut(conns: &mut [TcpConnection], handle: usize) -> KernelResult<&mut Tcp
 /// Performs the 3-way handshake (SYN → SYN-ACK → ACK).
 /// Returns a connection handle on success.
 pub fn connect(ns_id: NetNsId, remote_ip: IpAddr, remote_port: u16) -> KernelResult<usize> {
+    connect_tagged(ns_id, remote_ip, remote_port).map(|(handle, _)| handle)
+}
+
+/// [`connect`], with the connection's generation as well, read under the
+/// lock that assigned it: what `net::native_socket` issues a handle for.
+pub fn connect_tagged(
+    ns_id: NetNsId,
+    remote_ip: IpAddr,
+    remote_port: u16,
+) -> KernelResult<(usize, u32)> {
     let isn = generate_isn();
 
     // Find a free slot. If all slots are occupied, try to recycle the
     // oldest TIME_WAIT connection (safest to evict since the connection
     // is fully closed and only waiting to absorb stale duplicate segments).
-    let (handle, local_port) = {
+    let (handle, local_port, generation) = {
         let mut conns = CONNECTIONS.lock();
 
         // Allocate a port that won't conflict with existing connections
@@ -1579,7 +1690,7 @@ pub fn connect(ns_id: NetNsId, remote_ip: IpAddr, remote_port: u16) -> KernelRes
         conn.keepalive_probes_max = KEEPALIVE_PROBES_DEFAULT;
         conn.keepalive_probes_sent = 0;
         conn.last_activity_ns = crate::hrtimer::now_ns();
-        (slot, local_port)
+        (slot, local_port, conn.generation)
     };
 
     // Send SYN with MSS + WScale + Timestamp options (RFC 7323).
@@ -1649,7 +1760,7 @@ pub fn connect(ns_id: NetNsId, remote_ip: IpAddr, remote_port: u16) -> KernelRes
                     remote_ip,
                     remote_port
                 );
-                return Ok(handle);
+                return Ok((handle, generation));
             }
             if state == TcpState::Closed {
                 return Err(KernelError::NotSupported); // Connection refused.
@@ -1687,14 +1798,21 @@ pub fn connect(ns_id: NetNsId, remote_ip: IpAddr, remote_port: u16) -> KernelRes
 /// failure, so applications can use `poll(fd, POLLOUT, -1)` then check
 /// `getsockopt(SO_ERROR)` to distinguish success from failure.
 ///
-/// Returns `(handle, KernelError::WouldBlock)` — the WouldBlock is the
-/// expected "in progress" signal, not an error.  The caller should map
-/// this to EINPROGRESS at the POSIX layer.
-pub fn connect_start(ns_id: NetNsId, remote_ip: IpAddr, remote_port: u16) -> KernelResult<usize> {
+/// Returns at once, with the connection still in `SynSent`: "in progress",
+/// which the POSIX layer reports as EINPROGRESS.
+///
+/// The handle comes with the connection's generation, read under the lock
+/// that assigned it (see [`connect_tagged`]): the native syscall, this
+/// function's one caller, issues a handle for exactly that connection.
+pub fn connect_start(
+    ns_id: NetNsId,
+    remote_ip: IpAddr,
+    remote_port: u16,
+) -> KernelResult<(usize, u32)> {
     let isn = generate_isn();
 
     // Find a free slot (same recycling logic as connect()).
-    let (handle, local_port) = {
+    let (handle, local_port, generation) = {
         let mut conns = CONNECTIONS.lock();
 
         // Allocate a port that won't conflict with existing connections
@@ -1761,7 +1879,7 @@ pub fn connect_start(ns_id: NetNsId, remote_ip: IpAddr, remote_port: u16) -> Ker
         conn.keepalive_probes_max = KEEPALIVE_PROBES_DEFAULT;
         conn.keepalive_probes_sent = 0;
         conn.last_activity_ns = crate::hrtimer::now_ns();
-        (slot, local_port)
+        (slot, local_port, conn.generation)
     };
 
     // Send the initial SYN.
@@ -1785,7 +1903,7 @@ pub fn connect_start(ns_id: NetNsId, remote_ip: IpAddr, remote_port: u16) -> Ker
         handle
     );
 
-    Ok(handle)
+    Ok((handle, generation))
 }
 
 /// Compute the dynamic receive window to advertise to the peer.
@@ -3517,6 +3635,16 @@ pub fn listener_has_pending(listener_handle: usize) -> bool {
 ///   bound to this port.
 /// - `OutOfMemory` — no free listener slots.
 pub fn bind(ns_id: NetNsId, port: u16) -> KernelResult<usize> {
+    bind_tagged(ns_id, port).map(|(handle, _)| handle)
+}
+
+/// [`bind`], with the listener's generation as well (see
+/// [`connect_tagged`]).
+///
+/// # Errors
+///
+/// [`bind`]'s.
+pub fn bind_tagged(ns_id: NetNsId, port: u16) -> KernelResult<(usize, u32)> {
     if port == 0 {
         return Err(KernelError::InvalidArgument);
     }
@@ -3533,19 +3661,22 @@ pub fn bind(ns_id: NetNsId, port: u16) -> KernelResult<usize> {
     // Find a free slot.
     let slot = listeners
         .iter()
-        .position(|l| !l.active)
+        .position(|l| !l.active && l.pins == 0)
         .ok_or(KernelError::OutOfMemory)?;
 
-    listeners[slot].active = true;
-    listeners[slot].ns_id = ns_id;
-    listeners[slot].port = port;
+    let generation = next_generation();
+    let listener = listeners.get_mut(slot).ok_or(KernelError::InternalError)?;
+    listener.active = true;
+    listener.generation = generation;
+    listener.ns_id = ns_id;
+    listener.port = port;
     // Clear backlog.
-    for pending in &mut listeners[slot].backlog {
+    for pending in &mut listener.backlog {
         pending.active = false;
     }
 
     crate::serial_println!("[tcp] Listener bound to port {} (ns {})", port, ns_id);
-    Ok(slot)
+    Ok((slot, generation))
 }
 
 /// Accept an incoming TCP connection on a listener.
@@ -3560,6 +3691,12 @@ pub fn bind(ns_id: NetNsId, port: u16) -> KernelResult<usize> {
 /// - `InvalidArgument` — invalid listener handle.
 /// - `TimedOut` — no connection arrived within the timeout.
 pub fn accept(listener_handle: usize) -> KernelResult<usize> {
+    accept_tagged(listener_handle).map(|(handle, _)| handle)
+}
+
+/// [`accept`], with the accepted connection's generation as well, as its
+/// backlog entry recorded it (see [`connect_tagged`]).
+pub fn accept_tagged(listener_handle: usize) -> KernelResult<(usize, u32)> {
     // Validate the listener exists.
     {
         let listeners = LISTENERS.lock();
@@ -3586,13 +3723,14 @@ pub fn accept(listener_handle: usize) -> KernelResult<usize> {
             if pending.active {
                 // Found one — take it.
                 let conn_handle = pending.conn_handle;
+                let generation = pending.generation;
                 pending.active = false;
                 crate::serial_println!(
                     "[tcp] Accepted connection on port {} → handle {}",
                     listener.port,
                     conn_handle
                 );
-                return Ok(conn_handle);
+                return Ok((conn_handle, generation));
             }
         }
 
@@ -3611,6 +3749,12 @@ pub fn accept(listener_handle: usize) -> KernelResult<usize> {
 /// Returns `Ok(handle)` if a connection is ready, or
 /// `Err(WouldBlock)` if no pending connections.
 pub fn try_accept(listener_handle: usize) -> KernelResult<usize> {
+    try_accept_tagged(listener_handle).map(|(handle, _)| handle)
+}
+
+/// [`try_accept`], with the accepted connection's generation as well (see
+/// [`accept_tagged`]).
+pub fn try_accept_tagged(listener_handle: usize) -> KernelResult<(usize, u32)> {
     let mut listeners = LISTENERS.lock();
     let listener = listeners
         .get_mut(listener_handle)
@@ -3623,7 +3767,7 @@ pub fn try_accept(listener_handle: usize) -> KernelResult<usize> {
         if pending.active {
             let conn_handle = pending.conn_handle;
             pending.active = false;
-            return Ok(conn_handle);
+            return Ok((conn_handle, pending.generation));
         }
     }
 
@@ -3929,7 +4073,7 @@ fn handle_incoming_syn(
 }
 
 /// Place a fully-established connection into its listener's backlog.
-fn enqueue_to_listener(ns_id: NetNsId, local_port: u16, conn_handle: usize) {
+fn enqueue_to_listener(ns_id: NetNsId, local_port: u16, conn_handle: usize, generation: u32) {
     let mut listeners = LISTENERS.lock();
     for listener in listeners.iter_mut() {
         if listener.active && listener.ns_id == ns_id && listener.port == local_port {
@@ -3938,6 +4082,7 @@ fn enqueue_to_listener(ns_id: NetNsId, local_port: u16, conn_handle: usize) {
                 if !pending.active {
                     pending.active = true;
                     pending.conn_handle = conn_handle;
+                    pending.generation = generation;
                     return;
                 }
             }
@@ -4439,10 +4584,11 @@ fn process_tcp_common(
 
                 let local_port = conn.local_port;
                 let conn_ns = conn.ns_id;
+                let generation = conn.generation;
 
                 // Place this connection in the listener's backlog.
                 drop(conns);
-                enqueue_to_listener(conn_ns, local_port, idx);
+                enqueue_to_listener(conn_ns, local_port, idx, generation);
 
                 crate::serial_println!(
                     "[tcp] 3-way handshake complete for {}:{} → port {}",

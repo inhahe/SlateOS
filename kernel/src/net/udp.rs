@@ -112,6 +112,17 @@ struct UdpSocket {
     port: u16,
     /// Whether this slot is in use.
     active: bool,
+    /// Which socket this slot holds: a fresh number each time the slot is
+    /// taken ([`next_generation`]). A native handle records it when issued
+    /// (`net::native_socket`), so it stops naming anything once the slot
+    /// is closed and given to another socket, rather than naming that one.
+    generation: u32,
+    /// How many native-handle operations are using this slot now
+    /// (`net::native_socket`). While any is, the slot is not given to a
+    /// new socket, though the one in it may close meanwhile -- so an
+    /// operation can never land on a socket it was not issued for. Not
+    /// cleared by a close, which can happen mid-operation.
+    pins: u32,
     /// Network namespace this socket belongs to.
     /// Sockets in different namespaces are fully independent — the same
     /// port can be bound in multiple namespaces without conflict.
@@ -142,6 +153,8 @@ impl UdpSocket {
         Self {
             port: 0,
             active: false,
+            generation: 0,
+            pins: 0,
             ns_id: crate::netns::ROOT_NS,
             peer_ip: Ipv4Addr::UNSPECIFIED,
             peer_port: 0,
@@ -409,6 +422,45 @@ fn allocate_ephemeral_port(
     Err(KernelError::OutOfMemory)
 }
 
+/// The last generation given to a socket slot.
+static GENERATION: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// A generation for a slot being taken: never 0, which an empty slot has,
+/// and not repeated until the counter wraps, 2^32 bindings later.
+fn next_generation() -> u32 {
+    loop {
+        let g = GENERATION
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+            .wrapping_add(1);
+        if g != 0 {
+            return g;
+        }
+    }
+}
+
+/// Hold socket slot `handle` for a native-handle operation, if it still
+/// holds the socket of `generation` (`net::native_socket`): `false` if it
+/// holds another, or none. While held, the slot is not given to a new
+/// socket ([`bind`]). Let go with [`unpin`].
+#[must_use]
+pub fn pin(handle: usize, generation: u32) -> bool {
+    let mut sockets = SOCKETS.lock();
+    match sockets.get_mut(handle) {
+        Some(s) if s.active && s.generation == generation => {
+            s.pins = s.pins.saturating_add(1);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Let go of a [`pin`] hold.
+pub fn unpin(handle: usize) {
+    if let Some(s) = SOCKETS.lock().get_mut(handle) {
+        s.pins = s.pins.saturating_sub(1);
+    }
+}
+
 /// Bind a UDP socket to a local port.
 ///
 /// Pass port 0 to auto-assign an ephemeral port from the IANA
@@ -422,6 +474,16 @@ fn allocate_ephemeral_port(
 ///
 /// Returns a socket index (handle) on success.
 pub fn bind(ns_id: NetNsId, port: u16) -> KernelResult<usize> {
+    bind_tagged(ns_id, port).map(|(handle, _)| handle)
+}
+
+/// [`bind`], with the socket's generation as well, read under the lock that
+/// assigned it: what `net::native_socket` issues a handle for.
+///
+/// # Errors
+///
+/// [`bind`]'s.
+pub fn bind_tagged(ns_id: NetNsId, port: u16) -> KernelResult<(usize, u32)> {
     // Drawn before `SOCKETS` is taken, so the RNG's lazy first-use seeding
     // never runs inside a lock the packet-receive path is waiting on.
     let start_offset = if port == 0 {
@@ -444,15 +506,17 @@ pub fn bind(ns_id: NetNsId, port: u16) -> KernelResult<usize> {
         port
     };
 
-    // Find a free slot.
+    // Find a free slot -- not one a native-handle operation still pins.
     for (i, sock) in sockets.iter_mut().enumerate() {
-        if !sock.active {
+        if !sock.active && sock.pins == 0 {
+            let generation = next_generation();
             sock.active = true;
+            sock.generation = generation;
             sock.ns_id = ns_id;
             sock.port = effective_port;
             sock.rx_queue.clear();
             sock.rx_queue_v6.clear();
-            return Ok(i);
+            return Ok((i, generation));
         }
     }
 

@@ -1084,6 +1084,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_unix_sockets()?;
     test_dispatch_priority_doors()?;
     test_dispatch_exec_close()?;
+    test_dispatch_native_socket_possession()?;
     test_dispatch_tioc_and_watch_records()?;
     test_cpu_current()?;
     test_dispatch_shared_anonymous_memory()?;
@@ -3571,6 +3572,129 @@ fn test_dispatch_priority_doors() -> KernelResult<()> {
     Ok(())
 }
 
+/// Native TCP and UDP socket handles are their holders' (`net::native_socket`;
+/// `known-issues` `A-TCP-AND-UDP-SOCKETS-ARE-NOT-COUNTED-PER-PROCESS`):
+///
+/// - a socket a process binds answers that process's calls and nobody
+///   else's: another process naming the same handle gets `InvalidHandle`,
+///   close included, and the socket is untouched;
+/// - a handle of one kind is refused by the other kind's calls;
+/// - a second holder -- what a fork adds -- keeps the socket open through the
+///   first holder's close, and the first holder is refused after it;
+/// - an exec that drops the handle releases the hold, and the last ends the
+///   socket.
+///
+/// Until 2026-10-02 the handle was a slot index any process with the
+/// `Socket` capability could name, and use, by counting.
+fn test_dispatch_native_socket_possession() -> KernelResult<()> {
+    use crate::cap::{ResourceType, Rights};
+    use crate::net::native_socket;
+    use crate::proc::pcb::{self, ProcessId};
+    use crate::proc::spawn::fd_handle_type;
+    use crate::proc::thread::self_test_as_process;
+
+    fn fail(msg: &str, pids: &[ProcessId]) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: native socket handles: {}", msg);
+        for &p in pids {
+            pcb::destroy(p);
+        }
+        Err(KernelError::InternalError)
+    }
+    let args = |arg0: u64| SyscallArgs {
+        arg0,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let refused = i64::from(KernelError::InvalidHandle.code());
+
+    let owner = pcb::create("netsock-owner", 0);
+    let other = pcb::create("netsock-other", 0);
+    let pids = [owner, other];
+    for &p in &pids {
+        if pcb::grant_capability(p, ResourceType::Socket, 0, Rights::READ | Rights::WRITE).is_err()
+        {
+            return fail("could not grant the Socket capability", &pids);
+        }
+    }
+    let call = |pid: ProcessId, nr: u64, handle: u64| {
+        self_test_as_process(pid, || dispatch(nr, &args(handle))).value
+    };
+
+    // The owner binds a UDP socket, on a port nothing else is likely to hold.
+    let Some(h) =
+        (47_700u64..47_740).find_map(|port| u64::try_from(call(owner, SYS_UDP_BIND, port)).ok())
+    else {
+        return fail("could not bind a UDP socket", &pids);
+    };
+    let port = call(owner, SYS_UDP_LOCAL_PORT, h);
+    let stranger_reads = call(other, SYS_UDP_LOCAL_PORT, h);
+    let stranger_closes = call(other, SYS_UDP_CLOSE, h);
+    let untouched = call(owner, SYS_UDP_LOCAL_PORT, h) == port;
+    let wrong_kind = call(owner, SYS_TCP_LOCAL_PORT, h);
+    if port <= 0 {
+        return fail("the owner could not use its own socket", &pids);
+    }
+    if stranger_reads != refused || stranger_closes != refused || !untouched {
+        serial_println!(
+            "[syscall]     another process: local port {}, close {}; the owner's still open: {}",
+            stranger_reads,
+            stranger_closes,
+            untouched
+        );
+        return fail("another process reached the owner's socket", &pids);
+    }
+    if wrong_kind != refused {
+        return fail("a TCP call reached a UDP socket", &pids);
+    }
+
+    // A second holder, as a fork adds one: the first holder's close leaves the
+    // socket open for it, and the first holder can no longer use it.
+    if native_socket::dup(h).is_err() {
+        return fail("could not add a holder", &pids);
+    }
+    pcb::register_ipc_handle(other, ResourceType::NativeSocket, h);
+    let first_close = call(owner, SYS_UDP_CLOSE, h);
+    let owner_after = call(owner, SYS_UDP_LOCAL_PORT, h);
+    let other_after = call(other, SYS_UDP_LOCAL_PORT, h);
+    if first_close != 0 || owner_after != refused || other_after != port {
+        serial_println!(
+            "[syscall]     first close {}; then the first holder reads {}, the second {}",
+            first_close,
+            owner_after,
+            other_after
+        );
+        return fail(
+            "a second holder did not keep the socket through the first's close",
+            &pids,
+        );
+    }
+
+    // The second holder's exec drops the handle: the last hold goes, and the
+    // socket with it.
+    let exec_close = handlers::close_handle_at_exec(other, fd_handle_type::UDP_SOCKET, h);
+    let after_exec = call(other, SYS_UDP_LOCAL_PORT, h);
+    if exec_close != Ok(true) || after_exec != refused || native_socket::kind_of(h).is_some() {
+        serial_println!(
+            "[syscall]     exec close {:?}; then {}",
+            exec_close,
+            after_exec
+        );
+        return fail("an exec did not release the process's hold", &pids);
+    }
+
+    for p in pids {
+        pcb::destroy(p);
+    }
+    serial_println!(
+        "[syscall]   native TCP/UDP socket handles: the holder's alone, of their own kind, \
+         counted per holder, released by an exec: OK"
+    );
+    Ok(())
+}
+
 /// The close-on-exec handles of a native exec
 /// (`requests/b-ad-close-on-exec-does-not-close-on-a-native-exec.md`):
 ///
@@ -3579,8 +3703,8 @@ fn test_dispatch_priority_doors() -> KernelResult<()> {
 /// - the exec takes the list less the handles a kept descriptor names;
 /// - `handlers::close_handle_at_exec` closes a pipe end the process holds
 ///   as `close()` would -- the reader sees end-of-file at once -- and leaves
-///   alone a console handle, a socket, a handle already closed, and another
-///   process's pipe.
+///   alone a console handle, a socket the process does not hold, a handle
+///   already closed, and another process's pipe.
 ///
 /// `exec_process` calls these once the new image is in; that path itself is
 /// a ring-3 fixture's to prove (lane B's step 5).
@@ -3678,8 +3802,8 @@ fn test_dispatch_exec_close() -> KernelResult<()> {
             &pids,
         );
     }
-    // Left alone: a console handle, a socket, a handle already closed, and
-    // another process's pipe.
+    // Left alone: a console handle, a socket the process does not hold, a
+    // handle already closed, and another process's pipe.
     if close(fd_handle_type::CONSOLE, 0) != Ok(false)
         || close(fd_handle_type::TCP_SOCKET, 5) != Ok(false)
         || close(fd_handle_type::PIPE, write_end) != Ok(false)

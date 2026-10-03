@@ -3030,7 +3030,10 @@ mod tests {
             );
             let themes = app.themes.borrow();
             assert_eq!(themes.len(), 2);
-            assert_ne!(themes[0], themes[1], "the old colours were handed over again");
+            assert_ne!(
+                themes[0], themes[1],
+                "the old colours were handed over again"
+            );
         });
     }
 

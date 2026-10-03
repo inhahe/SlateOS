@@ -11421,6 +11421,23 @@ pub(crate) fn teardown_fixture(pid: ProcessId, task_id: TaskId) {
     pcb::destroy(pid);
 }
 
+/// What a fixture that did not finish is doing, for its rung's failure line:
+/// its first thread's state and what it waits on (`/proc/<pid>/wchan`'s
+/// answer). Read before the fixture is torn down, while there is a task to
+/// ask. A run that only says "not a zombie" leaves the next boot to find out
+/// which call it sat in.
+pub(crate) fn unfinished_report(task_id: TaskId) -> alloc::string::String {
+    let wait = crate::sched::wait_of(task_id).map_or_else(
+        || alloc::string::String::from("nothing (no task)"),
+        |w| alloc::format!("{w}"),
+    );
+    alloc::format!(
+        "its thread {:?}, waiting on {}",
+        crate::sched::task_state(task_id),
+        wait
+    )
+}
+
 /// Where lane D lists the C fixtures [`self_test_ctest_generic`] runs:
 /// `services/ctest-generic.list`, staged by `scripts/create-ext4-rootfs.sh`.
 const CTEST_GENERIC_LIST: &str = "/mnt/tests/ctest-generic.list";
@@ -22800,11 +22817,16 @@ pub fn self_test_linux_unix_sockets() -> KernelResult<()> {
     let exe_elf = elf::build_linux_unix_socket_test_elf();
     let argv: &[&[u8]] = &[b"spawn-test-unix-sockets"];
     let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // A File READ capability, for the one plain file the program opens: `/`,
+    // the descriptor that is not a socket. Spawned with none, its open was
+    // refused and the run ended at 0xFA without reaching the ENOTSOCK probes it
+    // was there for (rq42, 2026-10-02).
+    let caps = [(ResourceType::File, 0u64, Rights::READ)];
     let options = SpawnOptions {
         name: "spawn-test-unix-sockets",
         parent: 0,
         priority: DEFAULT_PRIORITY,
-        capabilities: &[],
+        capabilities: &caps,
         fd_map: &[],
         argv,
         envp,
@@ -22827,15 +22849,17 @@ pub fn self_test_linux_unix_sockets() -> KernelResult<()> {
     }
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
+    let unfinished = unfinished_report(result.task_id);
     teardown_fixture(result.pid, result.task_id);
     // Gone already unless a step after the bind failed.
     let _ = crate::fs::Vfs::remove(NODE);
 
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
-            "[spawn]   FAIL: Unix-domain sockets (ring 3) -- not a zombie after {} yields, got {:?}",
+            "[spawn]   FAIL: Unix-domain sockets (ring 3) -- not a zombie after {} yields, got {:?}; {}",
             MAX_YIELDS,
-            state
+            state,
+            unfinished
         );
         return Err(KernelError::InternalError);
     }
@@ -22853,7 +22877,8 @@ pub fn self_test_linux_unix_sockets() -> KernelResult<()> {
              msg_lens, recvmmsg, what it received, MSG_DONTWAIT not EAGAIN, MSG_WAITFORONE, a \
              NULL vector not EFAULT, a bad second entry not answered 1, a directory not \
              ENOTSOCK; 0xFB-0xFD SO_RCVTIMEO: setsockopt, a blocking receive not EAGAIN when \
-             it ran out, a whole second of microseconds not EDOM)",
+             it ran out, a whole second of microseconds not EDOM; 0xFE the directory's own \
+             open)",
             exit_code,
             OK_EXIT
         );
@@ -22914,12 +22939,14 @@ pub fn self_test_linux_scm_rights() -> KernelResult<()> {
     }
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
+    let unfinished = unfinished_report(result.task_id);
     teardown_fixture(result.pid, result.task_id);
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
-            "[spawn]   FAIL: SCM_RIGHTS (ring 3) -- not a zombie after {} yields, got {:?}",
+            "[spawn]   FAIL: SCM_RIGHTS (ring 3) -- not a zombie after {} yields, got {:?}; {}",
             MAX_YIELDS,
-            state
+            state,
+            unfinished
         );
         return Err(KernelError::InternalError);
     }
@@ -23061,8 +23088,9 @@ pub fn self_test_linux_file_flags() -> KernelResult<()> {
 /// `pcb::main_phdr`, `AT_PHDR`): found in a loaded segment, and copied into a
 /// page of their own when no segment holds them.
 ///
-/// - The test ELF of the auxv self-test maps its headers: they are found at
-///   their segment's address plus the bias, and nothing is mapped.
+/// - A test ELF whose segment maps its headers, as a linker's first segment
+///   does (`elf::build_test_elf_mapping_headers`): they are found at their
+///   segment's address plus the bias, and nothing is mapped.
 /// - The hand-built Linux test programs map none (their one segment starts
 ///   after the headers): spawned, the process records the copy at
 ///   [`PHDR_COPY_VADDR`], the page holds exactly the file's table, and the
@@ -23079,10 +23107,10 @@ pub fn self_test_main_phdr() -> KernelResult<()> {
     serial_println!("[spawn] Running program-header placement test...");
 
     // Found: no mapping, the segment's address plus the bias.
-    let mapped = elf::build_test_elf_public();
+    let mapped = elf::build_test_elf_mapping_headers();
     let mapped_elf = elf::ElfFile::parse(&mapped)?;
     let Some(in_segment) = crate::proc::linux_stack::phdr_vaddr(&mapped_elf) else {
-        return fail("the auxv test ELF's headers are not in a segment any more");
+        return fail("the test ELF widened to map its headers has none in a segment");
     };
     // SAFETY: a table a segment holds is answered before the address space
     // is touched, so no address space is needed.

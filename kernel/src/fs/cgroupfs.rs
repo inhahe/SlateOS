@@ -22,7 +22,7 @@
 
 #![allow(dead_code)]
 
-use crate::sync::PreemptSpinMutex as Mutex;
+use crate::sync::Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -112,7 +112,12 @@ struct State {
     ops: u64,
 }
 
-static STATE: Mutex<Option<State>> = Mutex::new(None);
+/// The frontend's view of the groups. Held across the kernel's own cgroup
+/// calls (`with_state`), so the two change together -- which makes it no
+/// leaf, and so the tracked type lockdep watches (design-decisions §975;
+/// until 2026-10-02 a `PreemptSpinMutex`, and the boot's leaf check named
+/// it). Never taken in interrupt context, and no hot path.
+static STATE: Mutex<Option<State>> = Mutex::named(None, b"CGROUPFS");
 static OPS: AtomicU64 = AtomicU64::new(0);
 
 fn with_state<F, R>(f: F) -> KernelResult<R>

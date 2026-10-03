@@ -136,9 +136,12 @@ def exchange(sock: socket.socket, request: bytes) -> tuple[str, list[int], bytes
     return verb, numbers, field
 
 
-def connect(port: int, timeout: float = 30.0) -> socket.socket:
+def connect(port: int, timeout: float = 30.0, reply_timeout: float = 600.0) -> socket.socket:
+    """A connection to the agent's port. `reply_timeout` bounds every wait
+    for the agent's answer after that, so a reply lost on the way (the guest
+    gone, the port stuck) ends in an error rather than a hang."""
     sock = socket.create_connection(("127.0.0.1", port), timeout=timeout)
-    sock.settimeout(None)
+    sock.settimeout(reply_timeout)
     return sock
 
 
@@ -181,7 +184,8 @@ def run(port: int, seconds: int, grants: str, argv: list[str]) -> tuple[int, byt
     """The program's exit code (124 when it ran out of time) and its output."""
     args = [a.encode("utf-8") for a in argv]
     g = grants.encode("ascii")
-    with connect(port) as sock:
+    # The answer comes when the program ends: give it its own limit and more.
+    with connect(port, reply_timeout=seconds + 120.0) as sock:
         verb, numbers, output = exchange(
             sock,
             encode("run", [seconds, len(g), len(args)] + [len(a) for a in args], [g] + args),

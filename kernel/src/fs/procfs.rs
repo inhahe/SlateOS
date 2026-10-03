@@ -77,6 +77,12 @@ impl ProcFs {
     }
 }
 
+/// Root files that are empty on Linux when there is nothing to list, which
+/// the self-test's non-empty check lets be. `locks` is one since 2026-10-01
+/// (`gen_locks`), and the check, never told, stopped the whole procfs battery
+/// at it on its first boot (rq42).
+const EMPTY_WHEN_IDLE: &[&str] = &["locks"];
+
 /// Names of virtual files in the procfs root.
 const ROOT_FILES: &[&str] = &[
     "version",
@@ -15648,9 +15654,11 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // read_file should return non-empty data.
+        // read_file should return non-empty data -- but for a file that is
+        // empty on Linux when there is nothing to list (`EMPTY_WHEN_IDLE`).
+        // Read all the same: an error is still a failure.
         let data = fs.read_file(Path::new(&path))?;
-        if data.is_empty() {
+        if data.is_empty() && !EMPTY_WHEN_IDLE.contains(name) {
             serial_println!("[procfs]   FAIL: read_file {path} returned empty");
             return Err(KernelError::InternalError);
         }

@@ -1327,6 +1327,34 @@ pub fn build_test_elf_public() -> alloc::vec::Vec<u8> {
     build_test_elf()
 }
 
+/// [`build_test_elf_public`] with its one segment widened down to file offset
+/// 0, so that it maps the ELF header and the program headers too, as a
+/// linker's first segment does: the program-header self-test's "found in a
+/// segment" case (`spawn::self_test_main_phdr`). The code stays at the same
+/// address. (`build_test_elf`'s segment starts after the headers, and the
+/// self-test assumed otherwise until its first boot, rq42.)
+#[must_use]
+#[allow(clippy::arithmetic_side_effects)] // offsets and sizes of a 200-byte image
+pub fn build_test_elf_mapping_headers() -> alloc::vec::Vec<u8> {
+    let mut buf = build_test_elf();
+    // The program header is at 64: p_offset +8, p_vaddr +16, p_filesz +32,
+    // p_memsz +40.
+    let read = |b: &[u8], at: usize| {
+        b.get(at..at + 8)
+            .and_then(|s| <[u8; 8]>::try_from(s).ok())
+            .map_or(0, u64::from_le_bytes)
+    };
+    let offset = read(&buf, 64 + 8);
+    let vaddr = read(&buf, 64 + 16);
+    let filesz = read(&buf, 64 + 32);
+    let memsz = read(&buf, 64 + 40);
+    write_u64(&mut buf, 64 + 8, 0);
+    write_u64(&mut buf, 64 + 16, vaddr - offset);
+    write_u64(&mut buf, 64 + 32, filesz + offset);
+    write_u64(&mut buf, 64 + 40, memsz + offset);
+    buf
+}
+
 /// Build a **Linux-ABI** test ELF that exits with `argc` as its status.
 ///
 /// This validates the System V initial-stack wiring end-to-end: the
@@ -2278,8 +2306,8 @@ pub fn build_linux_slate_channel_test_elf() -> alloc::vec::Vec<u8> {
 ///   one sent; recvmmsg(..., 2, MSG_WAITFORONE); 1, else 0xF7
 ///   sendmmsg(d2, NULL, 2)                     ; -EFAULT, else 0xF8
 ///   sendmmsg with the 2nd entry's bytes at 0x10 ; 1 (the first sent), else 0xF9
-///   d = open("/", O_DIRECTORY); sendmmsg(d, ...), getpeername(d, ...)
-///                                             ; -ENOTSOCK both, else 0xFA
+///   d = open("/", O_DIRECTORY)               ; a descriptor, else 0xFE
+///   sendmmsg(d, ...), getpeername(d, ...)     ; -ENOTSOCK both, else 0xFA
 ///   setsockopt(d1, SO_RCVTIMEO, {0, 50000})   ; 0, else 0xFB
 ///   recvfrom(d1, ...) on nothing, blocking    ; -EAGAIN after 50 ms, else 0xFC
 ///   setsockopt(d1, SO_RCVTIMEO, {0, 1000000}) ; -EDOM, else 0xFD
@@ -2908,7 +2936,8 @@ pub fn build_linux_unix_socket_test_elf() -> alloc::vec::Vec<u8> {
     mov_edx_imm(&mut code, 0);
     syscall(&mut code, OPEN);
     test_rax(&mut code);
-    jcc_fail(&mut code, &mut fail_jumps, JS, 0xFA);
+    // Its own code: a refused open is the harness's fault, not the probes'.
+    jcc_fail(&mut code, &mut fail_jumps, JS, 0xFE);
     store_eax(&mut code, FD_DIR);
     mov_edi_mem(&mut code, FD_DIR);
     lea_rsi(&mut code, MMSG);
@@ -9707,8 +9736,12 @@ pub fn build_munmap_abi_test_elf() -> alloc::vec::Vec<u8> {
 /// in-limit length from the same unmapped pointer and must get
 /// `InvalidAddress`: the gate refuses sizes, not everything.
 ///
-/// The handle is bogus on purpose: every answer below is decided before the
-/// handle is looked up, which is itself part of what is pinned.
+/// The channel probes send on a channel the program makes first: a channel
+/// call refuses a handle its caller does not hold before anything else
+/// (`require_ipc_handle`), so a size gate is reached only through a real one.
+/// The UDP probes' handle is bogus on purpose: their answers are decided
+/// before the handle is looked up, which is itself part of what is pinned.
+/// `0x40`: the channel could not be made.
 ///
 /// | Code | Call | Length | Expect |
 /// |---|---|---|---|
@@ -9738,12 +9771,33 @@ pub fn build_sizegate_abi_test_elf() -> alloc::vec::Vec<u8> {
     const EFAULT: i32 = -101;
     const UNMAPPED: u64 = 0x0000_0030_0000_0000;
     const BOGUS_HANDLE: u64 = 0xFFFF_FFF0;
+    /// Stands for the channel endpoint the program made (rbx), in `probe`.
+    const OWN_CHANNEL: u64 = u64::MAX;
     const MAX_MESSAGE: u64 = 64 * 1024;
     const MAX_UDP_PAYLOAD: u64 = 65_535 - 8;
 
     let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
 
+    // A channel of the program's own, its first endpoint kept in rbx: the
+    // channel calls refuse a handle the caller does not hold before they look
+    // at the length (`require_ipc_handle`, since lane F's handle request of
+    // 2026-10-01), so their size gates are reached only through a real one.
+    // Until rq42 these probes used BOGUS_HANDLE, and 0x41 got InvalidHandle.
+    code.extend_from_slice(&[0x31, 0xFF]); // xor edi, edi (flags 0)
+    code.extend_from_slice(&[0xB8, 200, 0x00, 0x00, 0x00]); // mov eax, SYS_CHANNEL_CREATE
+    code.extend_from_slice(&[0x0F, 0x05]); // syscall
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
+    code.extend_from_slice(&[0x79, 0x0D]); // jns +13 -- over the exit block
+    code.push(0xBF); // mov edi, 0x40
+    code.extend_from_slice(&0x40u32.to_le_bytes());
+    code.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]); // mov eax, SYS_EXIT
+    code.extend_from_slice(&[0x0F, 0x05]); // syscall
+    code.push(0xCC); // int3
+    code.extend_from_slice(&[0x48, 0x89, 0xC3]); // mov rbx, rax
+
     /// `syscall(nr, rdi, rsi, rdx, r10, r8)`; if `rax != expect`, `exit(fail)`.
+    /// `rdi` is `regs[0]`, or the channel endpoint in rbx when `regs[0]` is
+    /// `OWN_CHANNEL`.
     fn probe(code: &mut alloc::vec::Vec<u8>, nr: u32, regs: [u64; 5], expect: i32, fail: u32) {
         // movabs rdi / rsi / rdx / r10 / r8, imm64
         for (prefix, value) in [
@@ -9753,6 +9807,10 @@ pub fn build_sizegate_abi_test_elf() -> alloc::vec::Vec<u8> {
             ([0x49, 0xBA], regs[3]),
             ([0x49, 0xB8], regs[4]),
         ] {
+            if prefix == [0x48, 0xBF] && value == OWN_CHANNEL {
+                code.extend_from_slice(&[0x48, 0x89, 0xDF]); // mov rdi, rbx
+                continue;
+            }
             code.extend_from_slice(&prefix);
             code.extend_from_slice(&value.to_le_bytes());
         }
@@ -9773,28 +9831,28 @@ pub fn build_sizegate_abi_test_elf() -> alloc::vec::Vec<u8> {
     probe(
         &mut code,
         201,
-        [BOGUS_HANDLE, UNMAPPED, over, 0, 0],
+        [OWN_CHANNEL, UNMAPPED, over, 0, 0],
         MESSAGE_TOO_LARGE,
         0x41,
     );
     probe(
         &mut code,
         208,
-        [BOGUS_HANDLE, UNMAPPED, over, 0, 0],
+        [OWN_CHANNEL, UNMAPPED, over, 0, 0],
         MESSAGE_TOO_LARGE,
         0x42,
     );
     probe(
         &mut code,
         209,
-        [BOGUS_HANDLE, UNMAPPED, over, 0, 0],
+        [OWN_CHANNEL, UNMAPPED, over, 0, 0],
         MESSAGE_TOO_LARGE,
         0x43,
     );
     probe(
         &mut code,
         206,
-        [BOGUS_HANDLE, UNMAPPED, over, 0, 0],
+        [OWN_CHANNEL, UNMAPPED, over, 0, 0],
         MESSAGE_TOO_LARGE,
         0x44,
     );
@@ -9808,7 +9866,7 @@ pub fn build_sizegate_abi_test_elf() -> alloc::vec::Vec<u8> {
     probe(
         &mut code,
         201,
-        [BOGUS_HANDLE, UNMAPPED, 16, 0, 0],
+        [OWN_CHANNEL, UNMAPPED, 16, 0, 0],
         EFAULT,
         0x46,
     );
@@ -9822,7 +9880,7 @@ pub fn build_sizegate_abi_test_elf() -> alloc::vec::Vec<u8> {
     probe(
         &mut code,
         201,
-        [BOGUS_HANDLE, UNMAPPED, MAX_MESSAGE, 0, 0],
+        [OWN_CHANNEL, UNMAPPED, MAX_MESSAGE, 0, 0],
         EFAULT,
         0x48,
     );

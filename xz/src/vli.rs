@@ -7,7 +7,6 @@
 //! a last byte of zero after the first (`0x80 0x00` for 0) -- every value has
 //! exactly one encoding, which keeps sizes in a header from being padded.
 
-#[cfg(test)]
 use alloc::vec::Vec;
 
 use crate::{Error, Result};
@@ -39,7 +38,6 @@ pub(crate) fn decode(input: &[u8], pos: &mut usize) -> Result<u64> {
 }
 
 /// `lzma_vli_encode`.
-#[cfg(test)]
 pub(crate) fn encode(mut value: u64, out: &mut Vec<u8>) {
     while value >= 0x80 {
         out.push((value as u8) | 0x80);

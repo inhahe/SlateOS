@@ -1,4 +1,4 @@
-# E -> A: the kernel's `xz_compress` writes files nothing can read; the `xz` crate's decoder is ready for a shim
+# E -> A: the kernel's `xz_compress` writes files nothing can read; the `xz` crate is ready for a shim, both ways
 
 **From:** Lane E. **To:** Lane A (`kernel/src/fs/xz.rs`, `fs/fcompress.rs`,
 `kshell.rs`). **Filed:** 2026-10-03. **Status:** OPEN.
@@ -16,10 +16,12 @@ second.
    `fcompress` stores what it writes without reading it back, so after
    `fc algo xz`, every file past those sizes is unreadable from the moment it
    is written. `tar -J` and the shell's `xz` write the same streams.
-2. `xz/` is a root crate now: a port of liblzma 5.2.5's decoder, `no_std` +
-   `alloc`, held to liblzma's own verdicts by its tests. `unxz` can become a
-   shim over it. The switch fixes the decoder faults below, among them a
-   silent short read of concatenated files and damaged data returned as good.
+2. `xz/` is a root crate now: a port of liblzma 5.2.5's decoders and
+   encoders, `no_std` + `alloc`. Its tests hold the decoder to liblzma's own
+   verdicts and the encoder to `xz`'s own bytes. `unxz` and `xz_compress` can
+   both become shims over it. That fixes the compressor above, and the decoder
+   faults below, among them a silent short read of concatenated files and
+   damaged data returned as good.
 
 Everything here was measured, not read off the code. `fs/xz.rs` was built on
 the host in a scratch harness, run against the verdicts in `xz/tests/data`
@@ -57,15 +59,19 @@ it is written. The LZMA data itself is intact -- only the chunk header lies --
 so such a file could be recovered by a decoder that ignores the declared
 compressed size. Nothing reads it today.
 
-**What lane E is doing.** The crate has no encoder yet. Porting liblzma's
-encoder, byte-identical to `xz -6`, is lane E's next task; after it,
-`xz_compress` becomes a shim too. Until then, two suggestions -- your call:
+**The fix is a shim (added 2026-10-03, same day).** The crate now has
+liblzma's encoder: `xz::compress(data, xz::Preset::DEFAULT)` writes exactly
+what `xz -6` writes. Its tests hold it to XZ Utils 5.2.5's output, byte for
+byte, for 136 settings and inputs: every preset and extreme preset over five
+kinds of input, 5 MB of zeros, stored and full chunks, every match finder in
+both modes, `.lzma` and raw LZMA1. It also re-encodes every file in
+`xz/tests/data/made` exactly. Switching `xz_compress` to it fixes the
+compressor. Separately, and still your call:
 
 - have `compress_for_write` decompress what it is about to store, and store
   the file uncompressed if that does not give back the input. That also
   covers the bzip2 compressor's fault 1 from the bzip2 request, and any
-  future compressor fault;
-- or refuse `xz` in `fc algo` and `fc compress` until the shim lands.
+  future compressor fault.
 
 ## 2. The decoder
 
@@ -120,9 +126,9 @@ The faults:
 |---|---|
 | `unxz(data)` | `xz::decompress(data)` (a 256 MiB cap over the whole output), or `decompress_limited(data, cap)`; `decompress_with_info` also says whether a check went unverified |
 | -- | `xz::decompress_lzma(data)` for `.lzma` files; `looks_like_xz`, `looks_like_lzma` |
-| `xz_compress(data)` | not yet -- the encoder port is next (section 1) |
+| `xz_compress(data)` | `xz::compress(data, xz::Preset::DEFAULT)` -- what `xz -6` writes, infallible; `xz::compress_with(data, &XzOptions)` for a check, filters or block size, `xz::compress_lzma` for `.lzma` |
 | `KernelError::CorruptedData` / `NotSupported` | `xz::Error`: cut short, not xz, unsupported, a header's CRC, the check, the index, padding, corrupt data, trailing data, the cap; it has `Display` |
-| `self_test()` | the crate's tests: 20 unit tests, and 8 that hold it to liblzma's verdicts on XZ Utils' 63 files, 26 xz-made files, 4 731 corruptions and every truncation |
+| `self_test()` | the crate's tests: 24 unit tests; 8 that hold the decoder to liblzma's verdicts on XZ Utils' 63 files, 26 xz-made files, 4 731 corruptions and every truncation; and 3 that hold the encoder to `xz`'s bytes |
 
 `sevenz.rs`'s two calls (`lzma_decode` at line 797, `lzma2_decode` at 807)
 map to `xz::lzma1(props, data, Some(size), cap)` and

@@ -26,6 +26,10 @@ SRC = Path(__file__).parent / "src"
 CORPUS = "a_corrupted_file_is_refused_exactly_when_liblzma_refuses_it"
 OWN_FILES = "xz_utils_own_test_files"
 MADE = "files_xz_made"
+# The encoder's: xz's bytes for 136 settings and inputs, and for the files
+# in tests/data/made.
+ENC = "what_xz_writes_for_every_preset_and_setting_is_written_byte_for_byte"
+ENC_MADE = "files_xz_made_are_written_byte_for_byte"
 
 # (name, old, new, [tests that must fail])
 LZMA = [
@@ -157,6 +161,215 @@ ALONE = [
     ),
 ]
 
+# --- the encoder ---------------------------------------------------------------
+
+ENC_RC = [
+    (
+        "a carry out of the range coder is dropped",
+        "out.push(self.cache.wrapping_add(carry));",
+        "out.push(self.cache);",
+        [ENC, ENC_MADE],
+    ),
+]
+
+ENC_PRICE = [
+    (
+        "a price-table entry is off by one",
+        "    16, 16, 16, 15, 15, 15, 14, 14,",
+        "    17, 16, 16, 15, 15, 15, 14, 14,",
+        ["the_price_table_is_price_tablegens", ENC],
+    ),
+    (
+        "direct bits are priced as free",
+        "    bits << BIT_PRICE_SHIFT_BITS",
+        "    bits",
+        [ENC],
+    ),
+    (
+        "a distance slot ignores its second bit",
+        "        (i + i) + ((dist >> (i - 1)) & 1)",
+        "        i + i",
+        ["distance_slots_are_fastposs", ENC, ENC_MADE],
+    ),
+]
+
+ENC_MF = [
+    (
+        "the binary trees search deeper by default",
+        "            16 + nice_len / 2",
+        "            16 + nice_len",
+        [ENC],
+    ),
+    (
+        "the hash chains search deeper by default",
+        "            4 + nice_len / 4",
+        "            4 + nice_len / 2",
+        [ENC],
+    ),
+    (
+        "the four-byte hash ignores the fourth byte",
+        "(t3 ^ (crc(b3) << 5)) & self.hash_mask",
+        "t3 & self.hash_mask",
+        [ENC, ENC_MADE],
+    ),
+    (
+        "a match of nice_len is not extended",
+        "            if len_best == self.nice_len {",
+        "            if false && len_best == self.nice_len {",
+        [ENC],
+    ),
+    (
+        "normalisation leaves the position where it was",
+        "        self.pos = self.pos.wrapping_sub(subvalue);",
+        "",
+        ["normalisation_changes_no_match"],
+    ),
+    (
+        "a hash chain reaches one past the dictionary",
+        "            if depth == 0 || delta >= self.cyclic_size {\n                return count;",
+        "            if depth == 0 || delta > self.cyclic_size {\n                return count;",
+        [ENC],
+    ),
+    (
+        "a tree reaches one past the dictionary",
+        "            if depth == 0 || delta >= self.cyclic_size {\n                self.set_son(ptr0, EMPTY);",
+        "            if depth == 0 || delta > self.cyclic_size {\n                self.set_son(ptr0, EMPTY);",
+        [ENC],
+    ),
+]
+
+ENC_LZMA = [
+    (
+        "the length prices are refreshed after every length",
+        "                if *c == 0 {",
+        "                if true {",
+        [ENC],
+    ),
+    (
+        "the distance price count does not grow",
+        "        self.match_price_count = self.match_price_count.wrapping_add(1);",
+        "",
+        [ENC],
+    ),
+    (
+        "the align price count does not grow",
+        "                self.align_price_count = self.align_price_count.wrapping_add(1);",
+        "",
+        [ENC],
+    ),
+    (
+        "the literal coder ignores the position bits",
+        "((pos & self.lp_mask) << self.lc)",
+        "(0u32 << self.lc)",
+        [ENC],
+    ),
+    (
+        "plain LZMA ends without its marker",
+        "                self.encode_eopm(position);",
+        "",
+        [ENC, ENC_MADE],
+    ),
+    (
+        "an LZMA2 chunk may fill its 64 KiB",
+        ">= u64::from(LZMA2_CHUNK_MAX - LOOP_INPUT_MAX);",
+        ">= u64::from(LZMA2_CHUNK_MAX);",
+        [ENC],
+    ),
+]
+
+ENC_OPTIMUM = [
+    (
+        "a short repeat loses a tie to a literal",
+        "            if short_rep_price <= next.price {",
+        "            if short_rep_price < next.price {",
+        [ENC],
+    ),
+    (
+        "the fast chooser's distance test moves its edge",
+        "    (big_dist >> 7) > small_dist",
+        "    (big_dist >> 7) >= small_dist",
+        [ENC],
+    ),
+    (
+        "a two-byte match far back is taken",
+        "            if len_main == 2 && back_main >= 0x80 {",
+        "            if false && len_main == 2 && back_main >= 0x80 {",
+        [ENC],
+    ),
+    (
+        "distance prices are refreshed after a few matches",
+        "            if self.match_price_count >= 1 << 7 {",
+        "            if self.match_price_count >= 1 << 3 {",
+        [ENC],
+    ),
+    (
+        "align prices are refreshed after every one",
+        "            if self.align_price_count >= ALIGN_SIZE as u32 {",
+        "            if self.align_price_count >= 1 {",
+        [ENC],
+    ),
+    (
+        "a literal then a repeat is not priced",
+        "        if !next_is_literal && match_byte != current_byte {",
+        "        if false {",
+        [ENC],
+    ),
+    (
+        "backward forgets a two-step path",
+        "                if here.prev_2 {\n                    if let Some(o) = self.opt_mut(pos_mem.wrapping_sub(1)) {",
+        "                if false {\n                    if let Some(o) = self.opt_mut(pos_mem.wrapping_sub(1)) {",
+        [ENC],
+    ),
+]
+
+ENC_LZMA2 = [
+    (
+        "a chunk that did not compress is kept compressed",
+        "        if chunk.len() >= uncompressed {",
+        "        if false {",
+        [ENC],
+    ),
+    (
+        "the state is not reset after a stored chunk",
+        "            need_state_reset = true;\n",
+        "",
+        [ENC],
+    ),
+    (
+        "a chunk may take 2 MiB of input and a symbol more",
+        "UNCOMPRESSED_MAX - MATCH_LEN_MAX as usize",
+        "UNCOMPRESSED_MAX",
+        [ENC],
+    ),
+]
+
+ENC_CONTAINER = [
+    (
+        "a block header is not padded",
+        "    let size = (2 + body.len() + 4 + 3) & !3;",
+        "    let size = 2 + body.len() + 4;",
+        [ENC, ENC_MADE],
+    ),
+    (
+        "the index is not padded",
+        "    while out.len().saturating_sub(index_start) % 4 != 0 {",
+        "    while false {",
+        [ENC, ENC_MADE],
+    ),
+    (
+        "an .lzma dictionary size is not rounded up",
+        "    let mut d = opt.dict_size.saturating_sub(1);\n    d |= d >> 2;\n    d |= d >> 3;\n    d |= d >> 4;\n    d |= d >> 8;\n    d |= d >> 16;\n    if d != u32::MAX {\n        d = d.wrapping_add(1);\n    }",
+        "    let d = opt.dict_size;",
+        [ENC],
+    ),
+    (
+        "a branch converter's start offset is not recorded",
+        "                if start == 0 {",
+        "                if true {",
+        [ENC_MADE],
+    ),
+]
+
 if __name__ == "__main__":
     # A filter goes to the tables it names a row of, and only those: the
     # harness refuses a filter that selects nothing.
@@ -168,6 +381,13 @@ if __name__ == "__main__":
         (SRC / "filters.rs", FILTERS),
         (SRC / "vli.rs", VLI),
         (SRC / "alone.rs", ALONE),
+        (SRC / "encode" / "rc.rs", ENC_RC),
+        (SRC / "encode" / "price.rs", ENC_PRICE),
+        (SRC / "encode" / "mf.rs", ENC_MF),
+        (SRC / "encode" / "lzma.rs", ENC_LZMA),
+        (SRC / "encode" / "optimum.rs", ENC_OPTIMUM),
+        (SRC / "encode" / "lzma2.rs", ENC_LZMA2),
+        (SRC / "encode" / "container.rs", ENC_CONTAINER),
     ]
     names = [name for _, rows in tables for name, *_ in rows]
     unmatched = [o for o in only if not any(o in n for n in names)]

@@ -8,6 +8,13 @@
 //! converters. [`decompress_lzma`] reads `.lzma` files; [`lzma1`] and
 //! [`lzma2`] decode the raw streams 7-Zip archives hold.
 //!
+//! [`compress`] writes what `xz -N` writes, byte for byte: liblzma's encoder,
+//! every match finder and both of its choosers, ported with its price
+//! tables, chunk limits and container layout. [`compress_with`] takes `xz`'s
+//! other options (the check, the filters, LZMA2's settings, a block size),
+//! [`compress_lzma`] writes `.lzma`, and [`lzma2_encode`] and
+//! [`lzma1_encode`] raw streams.
+//!
 //! # Provenance
 //!
 //! A port of liblzma from XZ Utils 5.2.5 (the `xz-5.2` tree the `lzma-sys`
@@ -26,6 +33,7 @@
 //! | `common/vli_decoder.c`, `vli_encoder.c`, `vli_size.c` | `vli` |
 //! | `common/filter_common.c`, `delta/`, `simple/` | `filters` |
 //! | `check/check.c`, `crc64_*.c` | `check` (CRC-32 from the `crc32` crate, SHA-256 from `sha2`) |
+//! | the encoders: `lz/lz_encoder*.c`, `lzma/lzma*_encoder*.c`, `rangecoder/range_encoder.h`, `price*`, `common/*_encoder.c` | `encode` (its own table) |
 //!
 //! # Why a port, and why this crate
 //!
@@ -44,7 +52,9 @@
 //! exactly the bytes it declares; a block's sizes must match its header and
 //! the index; a header's CRC is checked before its flags. The tests hold
 //! this to liblzma's own test files (`tests/files` of XZ Utils) and to its
-//! verdict on every one-byte corruption of several streams.
+//! verdict on every one-byte corruption of several streams -- and hold the
+//! encoder to `xz`'s own output, byte for byte, for 139 settings and inputs
+//! and every file in `tests/data/made`.
 //!
 //! # The output limit
 //!
@@ -55,7 +65,7 @@
 //! # No index, anywhere
 //!
 //! As in `deflate` and `bzip2`, nothing is indexed with `[i]` outside the
-//! tests and two constant tables whose index is a masked byte.
+//! tests and a few constant tables whose index is a masked byte.
 
 #![no_std]
 
@@ -65,6 +75,7 @@ use alloc::vec::Vec;
 
 mod alone;
 mod check;
+mod encode;
 mod filters;
 mod lzma;
 mod lzma2;
@@ -72,6 +83,7 @@ mod stream;
 mod vli;
 
 pub use check::Check;
+pub use encode::{LzmaOptions, MatchFinder, Mode, PreFilter, Preset, XzOptions};
 pub use filters::Bcj;
 pub use stream::Info;
 
@@ -193,6 +205,61 @@ pub fn decompress_lzma_limited(data: &[u8], limit: usize) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     alone::decode(data, &mut out, limit)?;
     Ok(out)
+}
+
+/// Compresses `data` as an `.xz` file the way `xz -N` (or `xz -Ne`) does:
+/// CRC-64, LZMA2 at the preset, one block -- byte for byte what XZ Utils
+/// 5.2.5 writes single-threaded.
+#[must_use]
+pub fn compress(data: &[u8], preset: Preset) -> Vec<u8> {
+    encode::xz_preset(data, preset)
+}
+
+/// Compresses `data` as an `.xz` file with chosen options: the check, the
+/// filters before LZMA2, LZMA2's settings and a block size, as `xz`'s
+/// `--check`, `--x86` ..., `--lzma2=` and `--block-size` choose them.
+///
+/// # Errors
+///
+/// [`Error::Unsupported`] for options liblzma refuses: a dictionary outside
+/// 4 KiB to 1.5 GiB, `lc + lp` above 4, a `nice_len` the match finder cannot
+/// use, more than three filters, a delta distance outside 1 to 256, a start
+/// offset off its alignment, a check this crate cannot compute, or a block
+/// size of 0.
+pub fn compress_with(data: &[u8], options: &XzOptions) -> Result<Vec<u8>> {
+    encode::xz(data, options)
+}
+
+/// Compresses `data` as an `.lzma` file (`xz --format=lzma`): its size
+/// recorded as unknown, its end marked.
+///
+/// # Errors
+///
+/// [`Error::Unsupported`] for settings liblzma refuses, as for
+/// [`compress_with`].
+pub fn compress_lzma(data: &[u8], options: &LzmaOptions) -> Result<Vec<u8>> {
+    encode::lzma_alone(data, options)
+}
+
+/// Encodes `data` as a raw LZMA2 stream (`xz --format=raw --lzma2=`), as a
+/// 7z LZMA2 coder stores one; the coder's property byte is
+/// [`LzmaOptions::lzma2_prop`].
+///
+/// # Errors
+///
+/// [`Error::Unsupported`] for settings liblzma refuses.
+pub fn lzma2_encode(data: &[u8], options: &LzmaOptions) -> Result<Vec<u8>> {
+    encode::lzma2_raw(data, options)
+}
+
+/// Encodes `data` as a raw LZMA stream ending in the end-of-payload marker
+/// (`xz --format=raw --lzma1=`), as liblzma's LZMA encoder always ends one.
+///
+/// # Errors
+///
+/// [`Error::Unsupported`] for settings liblzma refuses.
+pub fn lzma1_encode(data: &[u8], options: &LzmaOptions) -> Result<Vec<u8>> {
+    encode::lzma1_raw(data, options)
 }
 
 /// Whether `data` begins like an `.xz` file.

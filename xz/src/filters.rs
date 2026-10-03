@@ -49,7 +49,7 @@ pub enum Bcj {
 impl Bcj {
     /// The alignment a start offset must keep (`simple_coder.c`'s
     /// `alignment`).
-    const fn alignment(self) -> u32 {
+    pub(crate) const fn alignment(self) -> u32 {
         match self {
             Self::X86 => 1,
             Self::ArmThumb => 2,
@@ -161,10 +161,9 @@ fn delta_decode(data: &mut [u8], distance: u32) {
     }
 }
 
-#[cfg(test)]
 /// `delta_encoder.c`'s `copy_and_encode`/`encode_in_place`: each byte has
 /// the byte `distance` before it subtracted.
-fn delta_encode(data: &mut [u8], distance: u32) {
+pub(crate) fn delta_encode(data: &mut [u8], distance: u32) {
     let mut history = [0u8; 256];
     let mut pos = 0u8;
     let distance = usize::try_from(distance).unwrap_or(256);

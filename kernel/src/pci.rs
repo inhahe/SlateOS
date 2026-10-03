@@ -432,6 +432,19 @@ pub fn enable_bus_master(addr: PciAddress) {
     write_command(addr, cmd | CMD_IO_SPACE | CMD_MEMORY_SPACE | CMD_BUS_MASTER);
 }
 
+/// Clear bus mastering for a PCI device, stopping any DMA it is performing.
+///
+/// Used when quiescing the machine for a kexec handoff: a device left bus-
+/// mastering could DMA into memory the new kernel is about to use, through the
+/// old kernel's now-defunct mappings. Clearing the command word's bus-master bit
+/// on every function stops that at the source, without a per-driver shutdown
+/// path (each driver resets its device when the new kernel probes it). I/O and
+/// memory space are left as they were.
+pub fn disable_bus_master(addr: PciAddress) {
+    let cmd = config_read16(addr.bus, addr.device, addr.function, CFG_COMMAND);
+    write_command(addr, cmd & !CMD_BUS_MASTER);
+}
+
 // ---------------------------------------------------------------------------
 // Legacy INTx interrupt control
 // ---------------------------------------------------------------------------

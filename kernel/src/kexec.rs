@@ -1697,6 +1697,67 @@ fn free_frames(frames: &[PhysFrame]) {
 }
 
 // ---------------------------------------------------------------------------
+// Quiesce
+// ---------------------------------------------------------------------------
+
+/// Bring the machine to the state Limine hands a fresh kernel, just before the
+/// jump: interrupts off, no device DMA in flight, no other CPU running, no timer
+/// armed. The new kernel re-initialises every one of these from scratch, so what
+/// matters is only that none of them can touch memory or deliver an interrupt
+/// during the handoff.
+///
+/// This is the irreversible point: after it the running kernel can no longer
+/// service interrupts or schedule, so it must be immediately followed by the jump
+/// into the new image. It is never called from a self-test -- every step would
+/// break the running kernel -- only from the (forthcoming) handoff execution.
+///
+/// # Safety
+///
+/// The caller must jump into the new kernel immediately after this returns: the
+/// machine is left unable to run the old kernel. Only the bootstrap CPU may call
+/// it, and a prepared handoff must be ready.
+#[allow(dead_code)] // called by the handoff execution path, which lands next
+pub unsafe fn quiesce() {
+    // 1. No more interrupts on this CPU.
+    // SAFETY: we are about to hand off; the old kernel will not run again.
+    unsafe { crate::cpu::cli() };
+
+    // 2. Mask every IOAPIC line, so no device interrupt is delivered to the new
+    //    kernel before it has installed its own IDT and re-programmed the IOAPIC.
+    crate::ioapic::mask_all();
+
+    // 3. Stop the LAPIC timer (the one interrupt source the kernel itself arms).
+    // SAFETY: as above; the new kernel re-arms its own timer.
+    unsafe { crate::apic::stop_timer() };
+
+    // 4. Stop all device DMA at the source by clearing bus mastering on every PCI
+    //    function. A device left mastering could DMA through the old kernel's
+    //    mappings into memory the new kernel is using. (Bus 0 only for now: QEMU's
+    //    devices live there; recursing bridges is noted in todo.txt.)
+    for dev in crate::pci::scan_bus0() {
+        crate::pci::disable_bus_master(dev.address);
+    }
+
+    // 5. The IOMMU: SlateOS never enables DMA-remapping translation (the iommu
+    //    module is informational only), so there is no translation to turn off.
+    //    If that changes, clear the translation-enable bit on every unit here, so
+    //    the new kernel's first DMA is not translated through the old tables.
+
+    // 6. Send INIT to every other CPU, leaving each parked waiting for a SIPI --
+    //    exactly the state the firmware leaves them in for the MP request.
+    let self_id = crate::apic::read_id();
+    let count = crate::smp::cpu_count();
+    for i in 0..count {
+        if let Some(apic_id) = crate::smp::cpu_apic_id(i) {
+            if apic_id != self_id {
+                // SAFETY: handing off; the AP will be re-started by the new kernel.
+                unsafe { crate::apic::send_init_ipi(apic_id) };
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 

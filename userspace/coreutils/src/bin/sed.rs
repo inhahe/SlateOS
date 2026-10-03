@@ -14,7 +14,8 @@
 //! | `-E` / `-r` | patterns are Extended regular expressions |
 //! | `-s` | treat the files as separate streams rather than one |
 //! | `-z` | lines are separated by NUL rather than newline |
-//! | `-u`, `-b` | accepted and ignored: nothing here buffers or translates |
+//! | `-u` | flush the output after every line |
+//! | `-b` | accepted and ignored: nothing here translates CR+LF |
 //! | `-l N` | the width `l` wraps at; 0 never wraps, and the default is 70 |
 //! | `--sandbox` | refuse `r`, `R`, `w`, `W` and `s///w` while compiling |
 //! | `--` | end of options; what follows is a file |
@@ -22,8 +23,9 @@
 //! Long options are resolved by [`coreutils::getopt`], so they abbreviate to
 //! any unambiguous prefix as every GNU utility's do: `--expr=p` works and
 //! `--s` is refused as ambiguous between `--silent`, `--sandbox` and
-//! `--separate`. `--posix`, `--debug` and `--follow-symlinks` are accepted and
-//! do nothing yet; see `known-issues.md`.
+//! `--separate`. `--posix` and `--follow-symlinks` are accepted and do nothing
+//! yet, and neither does `POSIXLY_CORRECT` beyond where option parsing stops;
+//! see `known-issues.md` → `TD-B-SED-HAS-NO-POSIX-MODE-AND-NO-FOLLOW-SYMLINKS`.
 //!
 //! Exit status: 0 normally, 1 for a bad script or usage, 2 for an input file
 //! that could not be opened (the rest are still processed), 4 for a failure
@@ -60,20 +62,49 @@
 //! from the *end of the output*, not from that line wherever it appears. That
 //! is why writing goes through [`Out`], which holds a newline back until it
 //! knows something follows it.
+//!
+//! ## Output, and output that fails
+//!
+//! GNU sed checks every write it makes and names the one that failed --
+//! `couldn't write 3 items to stdout: No space left on device`,
+//! `couldn't flush stdout: …`, `couldn't close stdout: Bad file descriptor` --
+//! so which write fails, and how many bytes it carried, is part of its output.
+//! That depends on exactly where glibc's buffer fills and flushes, so standard
+//! output and every `w` file is a [`coreutils::stdio::StdioFile`], which
+//! reproduces glibc's arithmetic, and the places that write hand it the same
+//! pieces GNU's do: a line's text and its separator as two writes, `l` one per
+//! character, an `r` file in 8192-byte pieces, `e`'s output in 4096-byte ones.
+//!
+//! The run ends as GNU's does: every `w` file closed, newest first, then
+//! standard output, the first failure fatal (status 4). A fatal error part-way
+//! through is `exit`, which flushes everything and checks nothing — so what
+//! was written before the failure still arrives, after the message. `-u`
+//! flushes each file after every line, as GNU's does.
+//!
+//! `w /dev/stdout`, `w /dev/stderr` and `w /dev/stdin` are not opened: they
+//! are the process's own streams, each with a separator debt of its own. See
+//! [`WTarget`].
 
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, Read, Seek, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek};
 use std::process;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::quote::{os_bytes, os_from_bytes};
 use coreutils::stdfd;
+use coreutils::stdio::StdioFile;
 use ere::sed::{Named, RecursiveC, control_byte, named_byte};
+
+// The standard descriptors as the process was given them: a closed standard
+// output is what makes GNU sed say `couldn't close stdout`. See `stdfd`.
+coreutils::guard_std_fds!();
 use ere::{Regex, bre};
 
 /// The status for a failure that stops the run where it stands.
@@ -99,17 +130,17 @@ const EXIT_PANIC: i32 = 4;
 /// command set is here too, so it moves only when that is true.
 const SED_FEATURE_LEVEL: &str = "4.9";
 
-/// Print one diagnostic, with sed's pending output delivered first.
+/// Print one diagnostic.
 ///
-/// `error(3)` opens with `fflush (stdout)` so that a complaint about a stream
-/// arrives *after* the bytes already written to it, and
-/// [`coreutils::stdfd::diag_bytes`] does the same for the descriptor-level
-/// buffer every converted utility writes through. sed does not use that buffer
-/// — it writes through `io::stdout()`, a `LineWriter` that holds back a line
-/// with no separator yet, which is exactly what [`Out`] leaves pending at end
-/// of input — so the flush has to be repeated for the buffer sed does use.
+/// Straight to descriptor 2, and *without* delivering sed's own pending
+/// output first. That is GNU sed's behaviour rather than an oversight: its
+/// diagnostics are `fprintf (stderr, ...)` and `panic`, not `error(3)`, and
+/// neither flushes standard output. So with both streams in one file,
+/// `sed p good missing >out 2>&1` puts `can't read missing` *before* the
+/// block-buffered copy of `good` -- measured -- and only `-u`, which flushes
+/// after every line, puts it after. This port used to flush first, and so got
+/// the `-u` order every time.
 fn diag_line(line: &str) {
-    let _ = io::stdout().flush();
     stdfd::diag_line(line);
 }
 
@@ -120,7 +151,6 @@ fn diag_line(line: &str) {
 /// `format!` would render those bytes as U+FFFD, which names a different file
 /// from the one that failed.
 fn diag_path(before: &str, path: &OsStr, after: &str) {
-    let _ = io::stdout().flush();
     let mut line = Vec::from(before.as_bytes());
     line.extend_from_slice(&os_bytes(path));
     line.extend_from_slice(after.as_bytes());
@@ -141,15 +171,20 @@ macro_rules! diag {
 }
 
 /// Report a failure sed cannot continue past, and leave with status 4.
+///
+/// GNU's `panic`: the message, then `exit`, which flushes whatever every
+/// output stream still holds without saying whether it arrived -- so the
+/// output written before the failure still reaches its files, *after* the
+/// message. See [`exit_quietly`].
 fn panic_out(msg: &str) -> ! {
     diag!("sed: {msg}");
-    process::exit(EXIT_PANIC)
+    exit_quietly(EXIT_PANIC)
 }
 
 /// [`panic_out`] for a message that names a file. See [`diag_path`].
 fn panic_path(before: &str, path: &OsStr, after: &str) -> ! {
     diag_path(before, path, after);
-    process::exit(EXIT_PANIC)
+    exit_quietly(EXIT_PANIC)
 }
 
 // ---------------------------------------------------------------- the script
@@ -1911,34 +1946,284 @@ impl Input {
 
 // ---------------------------------------------------------------- the output
 
+/// One of sed's output files: a stdio stream, and the name GNU sed's messages
+/// give it -- `stdout`, or the name the script wrote after `w`.
+struct SedFile {
+    file: StdioFile,
+    name: Vec<u8>,
+}
+
+/// An output file, shared between the place that writes it and the list of
+/// everything open. See [`OPEN`].
+type Shared = Rc<RefCell<SedFile>>;
+
+thread_local! {
+    /// Every output file sed has open, oldest first: glibc's `_IO_list_all`,
+    /// for the one thing that list is for here -- `exit` flushes every stream
+    /// in it. GNU sed's fatal errors are `panic`, which is `exit
+    /// (EXIT_PANIC)`, so output written before the failure still reaches its
+    /// files; reproducing that from deep inside a run needs the streams
+    /// reachable from there. Standard output is the first entry.
+    static OPEN: RefCell<Vec<Shared>> = const { RefCell::new(Vec::new()) };
+
+    /// Standard output, once made: kept apart from [`OPEN`] so that finding
+    /// it never depends on the order things were opened in. The `w` files are
+    /// opened while the script is read, before anything is written, so the
+    /// first entry of [`OPEN`] is a `w` file in any script that has one --
+    /// and taking that for standard output sent `sed 'w out'`'s output into
+    /// `out`.
+    static STDOUT: RefCell<Option<Shared>> = const { RefCell::new(None) };
+}
+
+/// `-u`: every line flushed as it is written. GNU's `unbuffered`, a global
+/// there too.
+static UNBUFFERED: AtomicBool = AtomicBool::new(false);
+
+/// Start an output file and add it to [`OPEN`].
+fn register(file: StdioFile, name: &[u8]) -> Shared {
+    let shared = Rc::new(RefCell::new(SedFile {
+        file,
+        name: name.to_vec(),
+    }));
+    OPEN.with(|open| open.borrow_mut().push(Rc::clone(&shared)));
+    shared
+}
+
+/// Standard output, made on first use and put at the *front* of [`OPEN`]
+/// whenever that is: glibc's `stdout` is on its list of streams from the
+/// start, behind every file opened later, so `exit` flushes it last.
+fn stdout_file() -> Shared {
+    STDOUT.with(|cell| {
+        if let Some(made) = cell.borrow().as_ref() {
+            return Rc::clone(made);
+        }
+        let shared = Rc::new(RefCell::new(SedFile {
+            file: StdioFile::stdout(),
+            name: b"stdout".to_vec(),
+        }));
+        OPEN.with(|open| open.borrow_mut().insert(0, Rc::clone(&shared)));
+        *cell.borrow_mut() = Some(Rc::clone(&shared));
+        shared
+    })
+}
+
+/// glibc's `exit`: every open stream flushed, newest first, and nothing said
+/// about any that fails -- there is no one left to tell. Then the status.
+fn exit_quietly(code: i32) -> ! {
+    OPEN.with(|open| {
+        for f in open.borrow().iter().rev() {
+            if let Ok(mut f) = f.try_borrow_mut() {
+                // Ignored on purpose: this is `exit`'s own flush, which GNU
+                // does not check either; the status is already decided.
+                drop(f.file.flush());
+            }
+        }
+    });
+    process::exit(code)
+}
+
+/// One of GNU sed's fatal output messages, carried up from the write that
+/// failed to where the run ends: `couldn't write 3 items to stdout: No space
+/// left on device`, `couldn't flush stdout: ...`, `couldn't close stdout: ...`.
+#[derive(Debug)]
+struct OutputFailed(Vec<u8>);
+
+impl std::fmt::Display for OutputFailed {
+    /// Not the message: that is bytes -- a `w` file's name need not be text --
+    /// and is printed as bytes, by [`failure_message`]. This is only what the
+    /// `Error` trait asks for.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("sed could not write its output")
+    }
+}
+
+impl std::error::Error for OutputFailed {}
+
+/// Wrap a failed `write(2)` in GNU sed's message for it, keeping the error's
+/// kind -- a reader that left is still recognised as one.
+fn output_failed(what: &str, name: &[u8], reason: &io::Error) -> io::Error {
+    let mut message = what.as_bytes().to_vec();
+    message.extend_from_slice(name);
+    message.extend_from_slice(format!(": {}", strerror(reason)).as_bytes());
+    io::Error::new(reason.kind(), OutputFailed(message))
+}
+
+/// `EBADF`: what a stream answers that cannot be written -- closed, or open
+/// for reading only.
+const EBADF: i32 = 9;
+
+/// The start of `ck_fwrite`'s complaint, with GNU's `ngettext` choice between
+/// "item" and "items".
+fn items(n: usize) -> String {
+    if n == 1 {
+        "couldn't write 1 item to ".to_string()
+    } else {
+        format!("couldn't write {n} items to ")
+    }
+}
+
+/// How many bytes the first of `output_line`'s writes carries: the owed
+/// separator if there is one, else the text if there is any, else the line's
+/// own separator. The first is the one that fails on a stream that cannot be
+/// written, so it is the count GNU's message gives.
+fn first_write(owed: bool, bytes: &[u8]) -> usize {
+    if owed || bytes.is_empty() {
+        1
+    } else {
+        bytes.len()
+    }
+}
+
+/// GNU sed's `ck_fwrite`: write, and name the write if it fails.
+///
+/// The count is the number of bytes this call was given -- GNU writes with
+/// `fwrite (ptr, 1, n, fp)`, so its "items" are bytes -- which is why the
+/// places that write have to hand over the same pieces GNU's do: the text of a
+/// line and its separator are two writes, `l` is one per character, and a file
+/// read by `r` goes in 8192-byte pieces.
+fn ck_fwrite(f: &Shared, data: &[u8]) -> io::Result<()> {
+    let mut f = f.borrow_mut();
+    f.file.clear_error();
+    f.file
+        .write(data)
+        .map_err(|e| output_failed(&items(data.len()), &f.name, &e))
+}
+
+/// GNU sed's `ck_fflush`. A closed descriptor is let pass here, for the close
+/// to report.
+fn ck_fflush(f: &Shared) -> io::Result<()> {
+    let mut f = f.borrow_mut();
+    f.file.clear_error();
+    match f.file.flush() {
+        Err(e) if e.raw_os_error() != Some(EBADF) => {
+            Err(output_failed("couldn't flush ", &f.name, &e))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// GNU sed's `do_ck_fclose`: flush, then close.
+///
+/// One deliberate difference: GNU unlinks a `w` file from its list of open
+/// files *before* flushing it, so a flush that fails at the end of the run is
+/// reported as `couldn't flush <unknown>`. The name is right here, and is what
+/// is printed.
+fn ck_fclose(f: &Shared) -> io::Result<()> {
+    ck_fflush(f)?;
+    let mut f = f.borrow_mut();
+    f.file.clear_error();
+    f.file
+        .close()
+        .map_err(|e| output_failed("couldn't close ", &f.name, &e))
+}
+
+/// GNU sed's `ck_fclose (NULL)`: every `w` file, newest first, then standard
+/// output -- each flushed and closed -- with the first failure fatal.
+///
+/// Run where GNU runs it: at the end of a run, and after `--help`,
+/// `--version` and a usage error. Not after a fatal error, which is `exit`
+/// and checks nothing; see [`exit_quietly`].
+///
+/// # Errors
+///
+/// The first file's failure, worded by [`failure_message`].
+fn close_everything() -> io::Result<()> {
+    let files: Vec<Shared> = OPEN.with(|open| open.borrow().clone());
+    let stdout = stdout_file();
+    for f in files.iter().rev().filter(|f| !Rc::ptr_eq(f, &stdout)) {
+        ck_fclose(f)?;
+    }
+    ck_fclose(&stdout)
+}
+
+/// The text of an output failure: GNU's own sentence when the failure came
+/// from one of the functions above, and the error's own words otherwise.
+fn failure_message(e: &io::Error) -> Vec<u8> {
+    match e
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<OutputFailed>())
+    {
+        Some(OutputFailed(message)) => message.clone(),
+        None => format!("couldn't write: {}", strerror(e)).into_bytes(),
+    }
+}
+
+/// Where an [`Out`] writes: one of sed's output files, or the copy of a file
+/// `-i` builds in memory.
+trait Dest {
+    /// GNU's `ck_fwrite`.
+    fn put(&mut self, data: &[u8]) -> io::Result<()>;
+    /// `fprintf` and the `--debug` trace, whose results GNU never checks: a
+    /// failure here is dropped, and the next checked write starts afresh with
+    /// `clearerr`.
+    fn put_unchecked(&mut self, data: &[u8]);
+    /// GNU's `flush_output`: under `-u`, `ck_fflush` after every line.
+    fn line_done(&mut self) -> io::Result<()>;
+}
+
+impl Dest for Vec<u8> {
+    fn put(&mut self, data: &[u8]) -> io::Result<()> {
+        self.extend_from_slice(data);
+        Ok(())
+    }
+
+    fn put_unchecked(&mut self, data: &[u8]) {
+        self.extend_from_slice(data);
+    }
+
+    fn line_done(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// An [`Out`] onto one of sed's files.
+struct FileDest(Shared);
+
+impl Dest for FileDest {
+    fn put(&mut self, data: &[u8]) -> io::Result<()> {
+        ck_fwrite(&self.0, data)
+    }
+
+    fn put_unchecked(&mut self, data: &[u8]) {
+        // Unchecked, as GNU's `fprintf` is: see the trait.
+        drop(self.0.borrow_mut().file.write(data));
+    }
+
+    fn line_done(&mut self) -> io::Result<()> {
+        if UNBUFFERED.load(AtomicOrdering::Relaxed) {
+            ck_fflush(&self.0)
+        } else {
+            Ok(())
+        }
+    }
+}
+
 /// A sink that holds a missing separator back.
 ///
 /// The input's last line may have no newline, and then the output's last line
 /// must have none either — but any *earlier* copy of that same line does need
 /// one. Deciding at write time is impossible; deciding at the next write is
-/// exactly right, and costs one flag.
+/// exactly right, and costs one flag. GNU's `struct output`, whose
+/// `missing_newline` is this flag.
 struct Out<'a> {
-    w: &'a mut dyn Write,
+    w: &'a mut dyn Dest,
     sep: u8,
     owed: bool,
     /// Where `--debug`'s trace goes, or `None` when there is no trace.
     trace_to: Option<Trace>,
 }
 
-/// Which descriptor a `--debug` trace line is written to.
+/// Which stream a `--debug` trace line is written to.
 ///
 /// Upstream always traces to *standard output*, which is the same place the
 /// edited text goes — except under `-i`, where the text goes to the file and
-/// the trace stays on the terminal. Both are measured, and the distinction has
-/// to be made here rather than by always naming standard output, because the
-/// ordinary case holds a `StdoutLock` for the whole run and a second handle
-/// would interleave against a buffer it does not own.
-#[derive(Clone, Copy)]
+/// the trace stays on the terminal. Both are measured.
+#[derive(Clone)]
 enum Trace {
     /// The same sink the output uses.
     Inline,
     /// Standard output while the output goes elsewhere — `-i`.
-    Stdout,
+    Stdout(Shared),
 }
 
 impl Out<'_> {
@@ -1955,34 +2240,62 @@ impl Out<'_> {
     /// --debug p` emits `a`, then `END-OF-CYCLE:`, and only then the newline the
     /// first `a` was owed. Measured, and routing the trace through `raw` would
     /// quietly move that newline.
-    fn trace(&mut self, bytes: &[u8]) -> io::Result<()> {
-        match self.trace_to {
-            None => Ok(()),
-            Some(Trace::Inline) => self.w.write_all(bytes),
-            Some(Trace::Stdout) => io::stdout().write_all(bytes),
+    ///
+    /// Unchecked, as GNU's `printf` to standard output is: a trace line that
+    /// does not arrive is not what ends a run, so there is nothing to return.
+    fn trace(&mut self, bytes: &[u8]) {
+        match &self.trace_to {
+            None => {}
+            Some(Trace::Inline) => self.w.put_unchecked(bytes),
+            Some(Trace::Stdout(f)) => FileDest(Rc::clone(f)).put_unchecked(bytes),
         }
     }
 
-    fn line(&mut self, bytes: &[u8], sep: bool) -> io::Result<()> {
+    /// GNU's `output_missing_newline`: the separator a previous line held
+    /// back, now that something follows it.
+    fn pay_owed(&mut self) -> io::Result<()> {
         if self.owed {
-            self.w.write_all(&[self.sep])?;
+            self.w.put(&[self.sep])?;
             self.owed = false;
-        }
-        self.w.write_all(bytes)?;
-        if sep {
-            self.w.write_all(&[self.sep])?;
-        } else {
-            self.owed = true;
         }
         Ok(())
     }
 
-    fn raw(&mut self, bytes: &[u8]) -> io::Result<()> {
-        if self.owed {
-            self.w.write_all(&[self.sep])?;
-            self.owed = false;
+    /// GNU's `output_line`: the owed separator, the text, its own separator
+    /// (or the debt of one), and a flush under `-u` -- as separate writes,
+    /// because a failure names the write it was.
+    fn line(&mut self, bytes: &[u8], sep: bool) -> io::Result<()> {
+        self.pay_owed()?;
+        if !bytes.is_empty() {
+            self.w.put(bytes)?;
         }
-        self.w.write_all(bytes)
+        if sep {
+            self.w.put(&[self.sep])?;
+        } else {
+            self.owed = true;
+        }
+        self.w.line_done()
+    }
+
+    /// One checked write, with nothing added. For callers that lay out their
+    /// own pieces -- `l`, `e`, the append queue.
+    fn put(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.w.put(bytes)
+    }
+
+    /// The separator debt paid, then `text` written unchecked, then a flush
+    /// under `-u`: GNU's `=` and `F`, which `fprintf` their output.
+    fn unchecked_line(&mut self, text: &[u8]) -> io::Result<()> {
+        self.pay_owed()?;
+        let mut line = text.to_vec();
+        line.push(self.sep);
+        self.w.put_unchecked(&line);
+        self.w.line_done()
+    }
+
+    /// `flush_output`, for a caller that wrote its own pieces.
+    fn line_done(&mut self) -> io::Result<()> {
+        self.w.line_done()
     }
 }
 
@@ -2068,6 +2381,13 @@ enum Flow {
     },
 }
 
+/// GNU sed's `FREAD_BUFFER_SIZE`: how much of an `r` file goes in one write.
+const FREAD_BUFFER_SIZE: usize = 8192;
+
+/// How much of an `e COMMAND`'s output goes in one write: GNU reads the pipe
+/// into a 4096-byte buffer and writes each bufferful.
+const E_BUFFER_SIZE: usize = 4096;
+
 /// Text queued by `a` or `r`, emitted after the cycle's own output.
 enum Pending {
     File(String),
@@ -2079,14 +2399,33 @@ enum Pending {
 }
 
 /// Where a `w` (or `s///w`) target sends its lines.
+///
+/// GNU sed treats three names specially (`special_files` in its
+/// `compile.c`): they are not opened, but stand for the streams the process
+/// already has. Each is its own `struct output` there, with its own
+/// missing-separator flag -- which is why each [`WFile`] carries one.
 enum WTarget {
-    /// `/dev/stdout` is not opened: it is sed's own output stream, so writing
-    /// it through the same [`Out`] is what keeps `w /dev/stdout` interleaved
-    /// with the pattern space rather than racing it through a second buffer.
+    /// `/dev/stdout`: standard output itself, the same stream and buffer the
+    /// pattern space is printed through -- so `w /dev/stdout` interleaves with
+    /// it rather than racing it through a second buffer -- but with a debt of
+    /// its own. `printf 'a\nb' | sed 'w /dev/stdout'` is `a`, `a`, then `bb`:
+    /// neither copy of the unterminated `b` pays the other's. Under `-i` this
+    /// is still standard output, not the file being edited. All three
+    /// measured; this port used to write it through the main output, which
+    /// put a newline between the `b`s and, under `-i`, put the copies into
+    /// the edited file.
     Stdout,
     /// `/dev/stderr` goes to descriptor 2 with one `write(2)` per line.
     Stderr,
-    File(File),
+    /// `/dev/stdin`: GNU's `stdin` stream, which is open for reading, so the
+    /// first write fails -- `couldn't write 1 item to stdin: Bad file
+    /// descriptor` -- and ends the run. This port used to open the name for
+    /// writing instead, which on Linux re-opens whatever standard input is:
+    /// `sed 'w /dev/stdin' f < g` emptied `g` and wrote `f` into it.
+    Stdin,
+    /// A file of its own, buffered as stdio buffers one, and on [`OPEN`] so
+    /// that the end of the run flushes and closes it.
+    File(Shared),
 }
 
 /// One opened `w` target, with the separator it may still owe.
@@ -2115,8 +2454,9 @@ fn open_wfiles(paths: &[String]) -> Vec<WFile> {
             let target = match path.as_str() {
                 "/dev/stdout" => WTarget::Stdout,
                 "/dev/stderr" => WTarget::Stderr,
+                "/dev/stdin" => WTarget::Stdin,
                 _ => match File::create(path) {
-                    Ok(f) => WTarget::File(f),
+                    Ok(f) => WTarget::File(register(StdioFile::from_file(f), path.as_bytes())),
                     Err(e) => {
                         panic_out(&format!("couldn't open file {path}: {}", strerror(&e)));
                     }
@@ -2281,26 +2621,26 @@ impl<'w> Exec<'w> {
     }
 
     /// One `PATTERN:` trace line, or nothing when there is no trace.
-    fn trace_pattern(&self, out: &mut Out<'_>) -> io::Result<()> {
+    fn trace_pattern(&self, out: &mut Out<'_>) {
         if !out.tracing() {
-            return Ok(());
+            return;
         }
         let mut t = Vec::from(&b"PATTERN: "[..]);
         debug_escape(&self.pattern, &mut t);
         t.push(b'\n');
-        out.trace(&t)
+        out.trace(&t);
     }
 
     /// One `HOLD:` trace line. The tag is padded to the same nine columns every
     /// other tag occupies, which is why it carries four trailing spaces.
-    fn trace_hold(&self, out: &mut Out<'_>) -> io::Result<()> {
+    fn trace_hold(&self, out: &mut Out<'_>) {
         if !out.tracing() {
-            return Ok(());
+            return;
         }
         let mut t = Vec::from(&b"HOLD:    "[..]);
         debug_escape(&self.hold, &mut t);
         t.push(b'\n');
-        out.trace(&t)
+        out.trace(&t);
     }
 
     /// Resolve `//` and record what was tried, so the next `//` can find it.
@@ -2428,7 +2768,6 @@ impl<'w> Exec<'w> {
             return Ok(());
         };
         match &mut w.target {
-            WTarget::Stdout => out.line(bytes, had_sep),
             WTarget::Stderr => {
                 // Assembled and written once, because `write_all` here is one
                 // `write(2)` per call and a line torn into two of them can
@@ -2440,6 +2779,11 @@ impl<'w> Exec<'w> {
                 // `sed 'w /dev/stderr' f 2>&-` and for `2>/dev/full`, and it
                 // can only be 4 here if the failure is visible to the caller.
                 let mut line = Vec::with_capacity(bytes.len().saturating_add(2));
+                // GNU's first write of the three it would make, which is the
+                // one whose failure it reports -- to the descriptor that has
+                // just failed, so nobody reads it; what it decides is the
+                // status.
+                let first = first_write(w.owed, bytes);
                 if w.owed {
                     line.push(sep);
                 }
@@ -2449,10 +2793,31 @@ impl<'w> Exec<'w> {
                 }
                 w.owed = !had_sep;
                 coreutils::stdfd::write_all(2, &line)
+                    .map_err(|e| output_failed(&items(first), b"stderr", &e))
             }
-            WTarget::File(f) => {
+            WTarget::Stdin => {
+                // Nothing at all is written for an empty line that owes no
+                // separator and has none -- GNU's `output_line` skips both
+                // writes -- so that one cannot fail; it only runs up a debt.
+                if !w.owed && bytes.is_empty() && !had_sep {
+                    w.owed = true;
+                    return Ok(());
+                }
+                let refused = io::Error::from_raw_os_error(EBADF);
+                Err(output_failed(
+                    &items(first_write(w.owed, bytes)),
+                    b"stdin",
+                    &refused,
+                ))
+            }
+            WTarget::Stdout | WTarget::File(_) => {
+                let file = match &w.target {
+                    WTarget::File(f) => Rc::clone(f),
+                    _ => stdout_file(),
+                };
+                let mut dest = FileDest(file);
                 let mut o = Out {
-                    w: f,
+                    w: &mut dest,
                     sep,
                     owed: w.owed,
                     // A `w` target is not where a trace goes; this borrows
@@ -2467,10 +2832,23 @@ impl<'w> Exec<'w> {
         }
     }
 
-    fn flush_appends(&mut self, out: &mut Out<'_>) -> io::Result<()> {
+    /// GNU's `dump_append_queue`: the separator a previous line still owes,
+    /// then everything `a`, `r` and `R` queued, then a flush under `-u`.
+    ///
+    /// GNU runs it at the start of the next read, when anything is queued --
+    /// and after `q` whether anything is or not, which is `always`. That is
+    /// how `printf a | sed q` comes out as `a` and a newline, and why queuing a
+    /// file that turns out to be missing still pays the debt: the debt is paid
+    /// on the way in, before anything is known about what follows. Both
+    /// measured; this port used to pay it only when something was written.
+    fn dump_appends(&mut self, out: &mut Out<'_>, always: bool) -> io::Result<()> {
+        if self.appends.is_empty() && !always {
+            return Ok(());
+        }
+        out.pay_owed()?;
         for p in std::mem::take(&mut self.appends) {
             match p {
-                Pending::Raw(t) => out.raw(&t)?,
+                Pending::Raw(t) => out.put(&t)?,
                 Pending::File(path) => {
                     // GNU ignores a file it cannot read here: `r` is an
                     // inclusion, and a missing one is not an error in a script
@@ -2481,15 +2859,17 @@ impl<'w> Exec<'w> {
                     } else {
                         fs::read(&path)
                     };
-                    if let Ok(bytes) = read
-                        && !bytes.is_empty()
-                    {
-                        out.raw(&bytes)?;
+                    if let Ok(bytes) = read {
+                        // `print_file` copies through a buffer of this size,
+                        // one checked write per buffer.
+                        for chunk in bytes.chunks(FREAD_BUFFER_SIZE) {
+                            out.put(chunk)?;
+                        }
                     }
                 }
             }
         }
-        Ok(())
+        out.line_done()
     }
 
     /// Apply one `s` command; returns whether anything was replaced.
@@ -2543,10 +2923,7 @@ impl<'w> Exec<'w> {
                     t.extend_from_slice(hay.get(gs..ge).unwrap_or_default());
                     t.extend_from_slice(b"'\n");
                 }
-                if let Err(err) = sink.trace(&t) {
-                    self.pattern = hay;
-                    return Err(Stop::Io(err));
-                }
+                sink.trace(&t);
             }
             seen = seen.saturating_add(1);
             let replace = if sub.global {
@@ -2580,7 +2957,7 @@ impl<'w> Exec<'w> {
             if out.tracing() {
                 let mut t = Vec::from(&b"COMMAND: "[..]);
                 debug_command_line(cmd, &mut self.indent, &mut t);
-                out.trace(&t)?;
+                out.trace(&t);
             }
             if !self.selected(pc, cmd, input)? {
                 pc = match cmd.act {
@@ -2650,7 +3027,7 @@ impl<'w> Exec<'w> {
                             // A `D` that restarts shows what it kept; one that
                             // falls back to `d` shows nothing, and gets no
                             // `END-OF-CYCLE:` either. Measured.
-                            self.trace_pattern(out)?;
+                            self.trace_pattern(out);
                             Flow::Restart
                         }
                         None => Flow::DeletedQuietly,
@@ -2672,14 +3049,20 @@ impl<'w> Exec<'w> {
                         let bytes = self.pattern.clone();
                         out.line(&bytes, self.had_sep)?;
                     }
-                    self.flush_appends(out)?;
+                    // GNU's `test_eof`: with no line left, `n` reads nothing,
+                    // so it dumps nothing either -- the queue waits for the
+                    // read that finds the input exhausted, after the cycle.
+                    if input.at_end() {
+                        return Ok(Flow::Ended { print: false });
+                    }
+                    self.dump_appends(out, false)?;
                     match input.next_line() {
                         Some(l) => {
                             self.pattern = l.bytes;
                             self.had_sep = l.had_sep;
                             self.file = l.file;
                             self.line_num = self.line_num.saturating_add(1);
-                            self.trace_pattern(out)?;
+                            self.trace_pattern(out);
                         }
                         // No more input: sed stops, and the pattern space has
                         // already been printed by this very command.
@@ -2687,7 +3070,15 @@ impl<'w> Exec<'w> {
                     }
                 }
                 Action::AppendNext => {
-                    self.flush_appends(out)?;
+                    // As for `n`: at the end of input nothing is read, so the
+                    // queue is not dumped here but after the pattern space is
+                    // printed. `printf 'a\n' | sed -e 'a X' -e N` is `a`, then
+                    // `X` -- measured, and this port had them the other way
+                    // round.
+                    if input.at_end() {
+                        return Ok(Flow::Ended { print: true });
+                    }
+                    self.dump_appends(out, false)?;
                     match input.next_line() {
                         Some(l) => {
                             self.pattern.push(out.sep);
@@ -2695,7 +3086,7 @@ impl<'w> Exec<'w> {
                             self.had_sep = l.had_sep;
                             self.file = l.file;
                             self.line_num = self.line_num.saturating_add(1);
-                            self.trace_pattern(out)?;
+                            self.trace_pattern(out);
                         }
                         // GNU prints what it has rather than dropping it, which
                         // is what makes `sed '$!N;s/\n/ /'` join pairs of lines
@@ -2714,9 +3105,10 @@ impl<'w> Exec<'w> {
                     self.pattern.extend_from_slice(&self.hold);
                 }
                 Action::Exchange => std::mem::swap(&mut self.pattern, &mut self.hold),
+                // `fprintf`, which GNU does not check: see [`Out::unchecked_line`].
                 Action::LineNumber => {
                     let n = self.line_num.to_string();
-                    out.line(n.as_bytes(), true)?;
+                    out.unchecked_line(n.as_bytes())?;
                 }
                 // Verbatim, newline and all — not `Pending::Text`, which would
                 // end the line with the output separator. GNU's append queue
@@ -2768,11 +3160,17 @@ impl<'w> Exec<'w> {
                     self.write_wfile_sep(*idx, &bytes, sep, out)?;
                 }
                 Action::List(width) => {
-                    let bytes = list_escape(&self.pattern, *width, out.sep);
+                    // GNU's `do_list`: the debt paid, then one checked write
+                    // per character's rendering and per line break, then `$`
+                    // and the separator -- which a failure's item count shows.
                     // Always with a separator: `l`'s output is a rendering, not
                     // a copy, so it does not inherit the input line's missing
                     // one. `printf ab | sed -n l` ends in `$` *and* a newline.
-                    out.line(&bytes, true)?;
+                    out.pay_owed()?;
+                    let sep = out.sep;
+                    list_walk(&self.pattern, *width, sep, &mut |piece| out.put(piece))?;
+                    out.put(&[sep])?;
+                    out.line_done()?;
                 }
                 Action::Zap => self.pattern.clear(),
                 // Terminated by the output separator, not by a newline: under
@@ -2780,7 +3178,7 @@ impl<'w> Exec<'w> {
                 // does. Measured.
                 Action::FileName => {
                     let name = os_bytes(&self.file).into_owned();
-                    out.line(&name, true)?;
+                    out.unchecked_line(&name)?;
                 }
                 Action::Execute(cmd) => {
                     if cmd.is_empty() {
@@ -2795,7 +3193,13 @@ impl<'w> Exec<'w> {
                         self.pattern = o;
                     } else {
                         let o = shell_capture(cmd);
-                        out.raw(&o)?;
+                        // The debt paid first, then the output in the pieces
+                        // GNU reads the pipe in.
+                        out.pay_owed()?;
+                        for chunk in o.chunks(E_BUFFER_SIZE) {
+                            out.put(chunk)?;
+                        }
+                        out.line_done()?;
                     }
                 }
                 Action::Quit { code, print } => {
@@ -2820,11 +3224,11 @@ impl<'w> Exec<'w> {
                     Action::Subst(_)
                     | Action::Transliterate(_)
                     | Action::GetAppend
-                    | Action::Zap => self.trace_pattern(out)?,
-                    Action::Hold | Action::HoldAppend | Action::Get => self.trace_hold(out)?,
+                    | Action::Zap => self.trace_pattern(out),
+                    Action::Hold | Action::HoldAppend | Action::Get => self.trace_hold(out),
                     Action::Exchange => {
-                        self.trace_pattern(out)?;
-                        self.trace_hold(out)?;
+                        self.trace_pattern(out);
+                        self.trace_hold(out);
                     }
                     _ => {}
                 }
@@ -2864,20 +3268,20 @@ impl<'w> Exec<'w> {
                 t.extend_from_slice(b"' line ");
                 t.extend_from_slice(self.line_num.to_string().as_bytes());
                 t.push(b'\n');
-                out.trace(&t)?;
-                self.trace_pattern(out)?;
+                out.trace(&t);
+                self.trace_pattern(out);
             }
 
             loop {
                 match self.run(cmds, input, out)? {
                     Flow::Normal => {
-                        out.trace(b"END-OF-CYCLE:\n")?;
+                        out.trace(b"END-OF-CYCLE:\n");
                         if !self.suppress {
                             let bytes = std::mem::take(&mut self.pattern);
                             out.line(&bytes, self.had_sep)?;
                             self.pattern = bytes;
                         }
-                        self.flush_appends(out)?;
+                        self.dump_appends(out, false)?;
                         break;
                     }
                     // A deleted cycle is still a completed one, so it gets the
@@ -2885,20 +3289,21 @@ impl<'w> Exec<'w> {
                     // `Flow::Restart` below gets none: `D` starts the script
                     // over on the same cycle rather than ending it.
                     Flow::Deleted => {
-                        out.trace(b"END-OF-CYCLE:\n")?;
-                        self.flush_appends(out)?;
+                        out.trace(b"END-OF-CYCLE:\n");
+                        self.dump_appends(out, false)?;
                         break;
                     }
                     // …and `D` is the exception to that: it ends the cycle the
                     // same way but is not traced as ending one. See
                     // [`Flow::DeletedQuietly`].
                     Flow::DeletedQuietly => {
-                        self.flush_appends(out)?;
+                        self.dump_appends(out, false)?;
                         break;
                     }
-                    Flow::Restart => {
-                        self.flush_appends(out)?;
-                    }
+                    // Nothing is read, so nothing is dumped: GNU's `D` jumps
+                    // back to the start of the script, and the queue waits for
+                    // the next read.
+                    Flow::Restart => {}
                     // The *input* ended rather than the script asking to stop,
                     // so this returns `None` — "ran out", not "quit with a
                     // status". Two things turn on the difference. Under `-s`
@@ -2908,21 +3313,29 @@ impl<'w> Exec<'w> {
                     // `--debug` the cycle is complete, so it gets the
                     // `END-OF-CYCLE:` line that `q` and `Q` do not. Measured.
                     Flow::Ended { print } => {
-                        out.trace(b"END-OF-CYCLE:\n")?;
+                        out.trace(b"END-OF-CYCLE:\n");
                         if print && !self.suppress {
                             let bytes = std::mem::take(&mut self.pattern);
                             out.line(&bytes, self.had_sep)?;
                             self.pattern = bytes;
                         }
-                        self.flush_appends(out)?;
+                        self.dump_appends(out, false)?;
                         return Ok(None);
                     }
+                    // `q` dumps the queue whether or not anything is in it --
+                    // see [`Exec::dump_appends`] -- and `Q` drops it unwritten:
+                    // GNU's `Q` returns without the dump `q` falls through to.
+                    // `printf 'a\n' | sed -e 'a X' -e Q` prints nothing.
                     Flow::Quit { code, print } => {
-                        if print && !self.suppress {
-                            let bytes = std::mem::take(&mut self.pattern);
-                            out.line(&bytes, self.had_sep)?;
+                        if print {
+                            if !self.suppress {
+                                let bytes = std::mem::take(&mut self.pattern);
+                                out.line(&bytes, self.had_sep)?;
+                            }
+                            self.dump_appends(out, true)?;
+                        } else {
+                            self.appends.clear();
                         }
-                        self.flush_appends(out)?;
                         return Ok(Some(code));
                     }
                 }
@@ -2953,9 +3366,31 @@ impl<'w> Exec<'w> {
 ///
 /// `sep` is the output separator, which the wrap and the final `$` both use:
 /// under `-z` the breaks are NUL-terminated like everything else.
+///
+/// The run itself writes through [`list_walk`], piece by piece; this whole
+/// rendering is what the tests read.
+#[cfg(test)]
 fn list_escape(bytes: &[u8], width: usize, sep: u8) -> Vec<u8> {
-    const OCTAL: &[u8; 8] = b"01234567";
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len().saturating_add(2));
+    // A `Vec` cannot refuse a write, so the walk cannot fail.
+    drop(list_walk(bytes, width, sep, &mut |piece| {
+        out.extend_from_slice(piece);
+        Ok(())
+    }));
+    out
+}
+
+/// [`list_escape`] one piece at a time, each handed to `emit` as GNU's
+/// `do_list` writes it: a character's rendering, the `\` and separator of a
+/// line break, and the closing `$`. The pieces are the unit a write failure is
+/// reported in, so they are GNU's.
+fn list_walk(
+    bytes: &[u8],
+    width: usize,
+    sep: u8,
+    emit: &mut dyn FnMut(&[u8]) -> io::Result<()>,
+) -> io::Result<()> {
+    const OCTAL: &[u8; 8] = b"01234567";
     let mut col = 0usize;
     let mut esc: Vec<u8> = Vec::with_capacity(4);
     for &b in bytes {
@@ -2985,15 +3420,14 @@ fn list_escape(bytes: &[u8], width: usize, sep: u8) -> Vec<u8> {
             }
         }
         if width > 0 && col.saturating_add(esc.len()).saturating_add(1) > width {
-            out.push(b'\\');
-            out.push(sep);
+            emit(b"\\")?;
+            emit(&[sep])?;
             col = 0;
         }
-        out.extend_from_slice(&esc);
+        emit(&esc)?;
         col = col.saturating_add(esc.len());
     }
-    out.push(b'$');
-    out
+    emit(b"$")
 }
 
 /// Escape bytes the way `--debug` writes them.
@@ -3293,6 +3727,8 @@ struct SedArgs {
     sandbox: bool,
     /// `--debug`: dump the compiled program, then trace every cycle.
     debug: bool,
+    /// `-u`: flush every output line as it is written. See [`UNBUFFERED`].
+    unbuffered: bool,
     /// `-l N`, defaulting to [`DEFAULT_LINE_LEN`]; 0 means never wrap.
     line_len: usize,
     /// `Some(suffix)` for `-i`; an empty suffix means no backup.
@@ -3311,6 +3747,7 @@ impl Default for SedArgs {
             null_data: false,
             sandbox: false,
             debug: false,
+            unbuffered: false,
             line_len: DEFAULT_LINE_LEN,
             in_place: None,
             script_parts: Vec::new(),
@@ -3375,13 +3812,12 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             }
             Opt::Long("sandbox", _) => out.sandbox = true,
             Opt::Long("debug", _) => out.debug = true,
-            // Accepted and ignored, each for its own reason. `-u` asks for less
-            // buffering, and this sed already flushes at every boundary that
-            // matters. `-b` asks for binary mode, which is the only mode there
-            // is here: nothing translates CR+LF. `--follow-symlinks` and
-            // `--posix` are answered in tranche 2c.
-            Opt::Short(b'u', _)
-            | Opt::Long("unbuffered" | "binary" | "posix" | "follow-symlinks", _) => {}
+            Opt::Short(b'u', _) | Opt::Long("unbuffered", _) => out.unbuffered = true,
+            // Accepted and ignored. `-b` asks for binary mode, which is the
+            // only mode there is here: nothing translates CR+LF. The other two
+            // are not done yet: known-issues.md ->
+            // TD-B-SED-HAS-NO-POSIX-MODE-AND-NO-FOLLOW-SYMLINKS.
+            Opt::Long("binary" | "posix" | "follow-symlinks", _) => {}
             Opt::Short(b'i', value) | Opt::Long("in-place", value) => {
                 // `-i` takes an *optional* value, so it is never the next word:
                 // GNU reads `sed -i backup f` as an in-place edit of `backup`
@@ -3473,7 +3909,7 @@ Usage: sed [OPTION]... {script-only-if-no-other-script} [input-file]...
                            use extended regular expressions in the script
   -s, --separate           consider the files separate rather than one stream
       --sandbox            operate in sandbox mode (disable e/r/w commands)
-  -u, --unbuffered         accepted and ignored: this sed does not batch files
+  -u, --unbuffered         flush the output after every line
   -z, --null-data          separate lines by NUL characters
       --help               display this help and exit
       --version            output version information and exit
@@ -3602,22 +4038,27 @@ fn locate(script: &[u8], segments: &[Segment], pos: Pos) -> Option<Vec<u8>> {
 }
 
 fn main() {
+    stdfd::restore();
     let args: Vec<OsString> = env::args_os().skip(1).collect();
     let parsed = match parse_args(&args) {
         Ok(Request::Run(p)) => p,
+        // GNU's `usage (EXIT_SUCCESS)` and `--version`: the text on standard
+        // output, then `ck_fclose (NULL)` -- which is what makes a full disk
+        // `couldn't flush stdout` and status 4, where this used to panic
+        // (status 134) inside `println!`.
         Ok(Request::Help) => {
-            println!("{USAGE}");
-            let _ = io::stdout().flush();
-            process::exit(0);
+            let mut text = USAGE.as_bytes().to_vec();
+            text.push(b'\n');
+            FileDest(stdout_file()).put_unchecked(&text);
+            finish(0)
         }
         Ok(Request::Version) => {
-            println!("sed (SlateOS coreutils)");
-            let _ = io::stdout().flush();
-            process::exit(0);
+            FileDest(stdout_file()).put_unchecked(b"sed (SlateOS coreutils)\n");
+            finish(0)
         }
         Ok(Request::BadUsage) => {
             diag!("{USAGE}");
-            process::exit(1);
+            finish(1)
         }
         Err(e) => {
             // `e.sentence`, not `e.message()`: GNU sed answers a usage error
@@ -3625,21 +4066,23 @@ fn main() {
             // `Try 'sed --help' for more information.` referral.
             diag!("sed: {}", e.sentence);
             diag!("{USAGE}");
-            process::exit(e.status);
+            finish(e.status)
         }
     };
+    UNBUFFERED.store(parsed.unbuffered, AtomicOrdering::Relaxed);
 
     let (script_text, segments) = match collect_script(&parsed.script_parts) {
         Ok(s) => s,
         // Not status 1: the command line was well formed, and a `-f` file that
         // will not open is an I/O failure like any other.
+        // GNU's `panic`: nothing has been written yet, so `exit` has nothing
+        // to flush, but it is the same exit.
         Err(msg) => {
-            let _ = io::stdout().flush();
             let mut line = Vec::from(&b"sed: "[..]);
             line.extend_from_slice(&msg);
             line.push(b'\n');
             stdfd::diag_bytes(&line);
-            process::exit(EXIT_PANIC);
+            exit_quietly(EXIT_PANIC);
         }
     };
 
@@ -3660,9 +4103,8 @@ fn main() {
             }
             line.extend_from_slice(&e.msg);
             line.push(b'\n');
-            let _ = io::stdout().flush();
             stdfd::diag_bytes(&line);
-            process::exit(e.code);
+            exit_quietly(e.code);
         }
     };
 
@@ -3671,7 +4113,8 @@ fn main() {
     // goes to standard output even under `-i`, where the edited text does not.
     if parsed.debug {
         let dump = debug_program(&script.cmds);
-        let _ = io::stdout().write_all(&dump);
+        // `printf`, unchecked, like every line of the trace.
+        FileDest(stdout_file()).put_unchecked(&dump);
     }
 
     // `-i` rewrites the files it is given, so with none it has nothing to
@@ -3697,7 +4140,7 @@ fn main() {
         // handle to it. See [`Trace`].
         trace: if parsed.debug {
             Some(if parsed.in_place.is_some() {
-                Trace::Stdout
+                Trace::Stdout(stdout_file())
             } else {
                 Trace::Inline
             })
@@ -3713,7 +4156,28 @@ fn main() {
     } else {
         job.joined(&files)
     };
-    process::exit(status);
+    finish(status)
+}
+
+/// GNU sed's last act: `ck_fclose (NULL)` -- every `w` file and then standard
+/// output, flushed and closed -- and `exit (status)`.
+///
+/// The close is where a full disk is finally `couldn't flush stdout`, and where
+/// a standard output that was never open is `couldn't close stdout: Bad file
+/// descriptor` even when nothing was written to it; either is status 4. A
+/// reader that left is the exception, as everywhere (§377).
+fn finish(status: i32) -> ! {
+    match close_everything() {
+        Ok(()) => process::exit(status),
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => exit_quietly(status),
+        Err(e) => {
+            let mut line = b"sed: ".to_vec();
+            line.extend_from_slice(&failure_message(&e));
+            line.push(b'\n');
+            stdfd::diag_bytes(&line);
+            exit_quietly(EXIT_PANIC)
+        }
+    }
 }
 
 /// Everything a run needs that does not change from one input file to the next.
@@ -3733,7 +4197,20 @@ struct Job<'a> {
 
 impl Job<'_> {
     /// Wire one `Input` to one `Out` and run the script over it.
-    fn run_one(&mut self, input: &mut Input, sink: &mut dyn Write) -> (Option<i32>, bool) {
+    ///
+    /// `owed` is the separator the output still owes from before this input,
+    /// and is left as this input leaves it: GNU's `output_file.missing_newline`,
+    /// which survives from one file to the next under `-s` -- the inputs are
+    /// separate, but the output is one stream -- and is dropped under `-i`,
+    /// where each file's output is a file of its own. `printf 'a\nb' > n;
+    /// sed -s -n '$p' n n` is `b`, a newline, `b`: measured, and this port
+    /// used to print `bb`.
+    fn run_one(
+        &mut self,
+        input: &mut Input,
+        sink: &mut dyn Dest,
+        owed: &mut bool,
+    ) -> (Option<i32>, bool) {
         let mut exec = Exec::new(
             self.script,
             self.suppress,
@@ -3743,18 +4220,27 @@ impl Job<'_> {
         let mut out = Out {
             w: sink,
             sep: self.sep,
-            owed: false,
-            trace_to: self.trace,
+            owed: *owed,
+            trace_to: self.trace.clone(),
         };
-        let quit = match exec.cycle(&self.script.cmds, input, &mut out) {
+        let ran = exec.cycle(&self.script.cmds, input, &mut out);
+        *owed = out.owed;
+        let quit = match ran {
             Ok(q) => q,
             Err(Stop::Io(e)) => {
-                // A closed pipe is how `sed … | head` ends, not a failure.
-                if e.kind() != io::ErrorKind::BrokenPipe {
-                    diag!("sed: couldn't write: {}", strerror(&e));
-                    return (Some(EXIT_PANIC), true);
+                // A closed pipe is how `sed … | head` ends, not a failure:
+                // GNU is killed by `SIGPIPE` there, saying nothing, and there
+                // is no signal here to be killed by (design-decisions §377).
+                // Stop where it would have died, and keep the status earned.
+                if e.kind() == io::ErrorKind::BrokenPipe {
+                    exit_quietly(status(None, input.had_error));
                 }
-                None
+                // GNU's `ck_fwrite` panics: the message, then `exit`.
+                let mut line = b"sed: ".to_vec();
+                line.extend_from_slice(&failure_message(&e));
+                line.push(b'\n');
+                stdfd::diag_bytes(&line);
+                exit_quietly(EXIT_PANIC);
             }
             // Not "couldn't write": the run stopped because a search was
             // abandoned, and sending the reader to the disk would waste their
@@ -3763,23 +4249,21 @@ impl Job<'_> {
                 diag!("sed: {e}");
                 return (Some(EXIT_PANIC), true);
             }
-            // Upstream leaves at once, and leaves *after* what it has already
-            // written: a `w` file given a line on an earlier cycle keeps it, and
-            // the pattern spaces already printed are on standard output. Hence
-            // the flush before the diagnostic and the exit rather than a return
-            // — under `-i` there is a half-written temporary file, and GNU does
-            // not finish it either. Measured.
+            // Upstream leaves at once, and keeps what it has already written:
+            // a `w` file given a line on an earlier cycle keeps it, and the
+            // pattern spaces already printed reach standard output -- after
+            // the message, since it is `exit` that flushes them. Under `-i`
+            // there is a half-written temporary file, and GNU does not finish
+            // it either. Measured.
             Err(Stop::NoRegex) => {
-                let _ = sink.flush();
                 let mut line = Vec::from(&b"sed: "[..]);
                 if let Some(at) = self.script.end_loc.as_deref() {
                     line.extend_from_slice(at);
                     line.extend_from_slice(b": ");
                 }
                 line.extend_from_slice(b"no previous regular expression\n");
-                let _ = io::stdout().flush();
                 stdfd::diag_bytes(&line);
-                process::exit(1);
+                exit_quietly(1);
             }
         };
         // The cycle either finished or took one of the branches above, each of
@@ -3789,18 +4273,17 @@ impl Job<'_> {
 
     /// All the files as one stream: line numbers and `$` run across them.
     fn joined(&mut self, files: &[OsString]) -> i32 {
-        let stdout = io::stdout();
-        let mut sink = stdout.lock();
+        let mut sink = FileDest(stdout_file());
         let mut input = Input::new(files.to_vec(), self.sep, true);
-        let (quit, exec_err) = self.run_one(&mut input, &mut sink);
-        let _ = sink.flush();
+        let (quit, exec_err) = self.run_one(&mut input, &mut sink, &mut false);
         status(quit, input.had_error || exec_err)
     }
 
     /// `-s`: each file starts again at line 1, and each has its own last line.
     fn separate(&mut self, files: &[OsString]) -> i32 {
-        let stdout = io::stdout();
-        let mut sink = stdout.lock();
+        let mut sink = FileDest(stdout_file());
+        // One debt for the whole run: see `run_one`.
+        let mut owed = false;
         let mut bad = false;
         for path in files {
             // Upstream rewinds every `R` source when a new input file starts
@@ -3809,14 +4292,12 @@ impl Job<'_> {
             // the first. See [`rewind_rfiles`].
             rewind_rfiles(&mut self.rfiles);
             let mut input = Input::new(vec![path.clone()], self.sep, true);
-            let (quit, exec_err) = self.run_one(&mut input, &mut sink);
+            let (quit, exec_err) = self.run_one(&mut input, &mut sink, &mut owed);
             bad = bad || input.had_error || exec_err;
             if let Some(code) = quit {
-                let _ = sink.flush();
                 return status(Some(code), bad);
             }
         }
-        let _ = sink.flush();
         status(None, bad)
     }
 
@@ -3858,7 +4339,8 @@ impl Job<'_> {
             // a file, and the reader has to agree — otherwise `-i` on a file
             // named `-` would open it, then read standard input into it.
             let mut input = Input::new(vec![path.clone()], self.sep, false);
-            let (quit, exec_err) = self.run_one(&mut input, &mut buf);
+            // A debt of its own, which ends with the file.
+            let (quit, exec_err) = self.run_one(&mut input, &mut buf, &mut false);
             bad = bad || input.had_error || exec_err;
 
             if let Some(backup) = backup_name(path, suffix)
@@ -4015,7 +4497,7 @@ mod tests {
             sep: b'\n',
             trace: Some(Trace::Inline),
         };
-        job.run_one(&mut inp, &mut sink);
+        job.run_one(&mut inp, &mut sink, &mut false);
         String::from_utf8_lossy(&sink).into_owned()
     }
 
@@ -4061,7 +4543,15 @@ mod tests {
             sep,
             trace: None,
         };
-        job.run_one(&mut inp, &mut sink);
+        job.run_one(&mut inp, &mut sink, &mut false);
+        // The end of a real run closes the `w` files, which is when their
+        // buffers reach the disk; the tests read them back, so they close
+        // them too.
+        for w in job.wfiles.iter().rev() {
+            if let WTarget::File(f) = &w.target {
+                ck_fclose(f).expect("closing a `w` file");
+            }
+        }
         sink
     }
 
@@ -4156,7 +4646,7 @@ mod tests {
             sep: b'\n',
             trace: None,
         };
-        let (status, _) = job.run_one(&mut inp, &mut sink);
+        let (status, _) = job.run_one(&mut inp, &mut sink, &mut false);
         assert_eq!(status, Some(4), "a declined search must fail the run");
         assert!(
             sink.is_empty(),
@@ -4488,6 +4978,80 @@ mod tests {
     }
 
     #[test]
+    fn a_separate_file_pays_the_newline_the_one_before_it_held_back() {
+        // `-s` makes the inputs separate and leaves the output one stream: the
+        // newline the first file's unterminated last line held back is paid
+        // when the next file prints. GNU prints `b`, a newline, `c`; starting
+        // each file with no debt printed `bc`.
+        let compiled = compile(b"$p", false).unwrap();
+        let mut job = Job {
+            script: &compiled,
+            wfiles: Vec::new(),
+            rfiles: Vec::new(),
+            suppress: true,
+            sep: b'\n',
+            trace: None,
+        };
+        let mut sink: Vec<u8> = Vec::new();
+        let mut owed = false;
+        let mut inp = over(b"a\nb".to_vec(), b'\n');
+        job.run_one(&mut inp, &mut sink, &mut owed);
+        assert!(owed, "an unterminated last line leaves a debt");
+        let mut inp = over(b"c\n".to_vec(), b'\n');
+        job.run_one(&mut inp, &mut sink, &mut owed);
+        assert_eq!(sink, b"b\nc\n");
+        assert!(!owed);
+    }
+
+    /// What `script` fails with on its first write to standard input, or
+    /// `Ok` if it never makes one.
+    fn stdin_refusal(script: &[u8], input: &[u8]) -> Result<(), Vec<u8>> {
+        let compiled = compile(script, false).unwrap();
+        let mut wfiles = open_wfiles(&compiled.wfiles);
+        assert!(matches!(
+            wfiles.first().map(|w| &w.target),
+            Some(WTarget::Stdin)
+        ));
+        let mut rfiles = Vec::new();
+        let mut sink: Vec<u8> = Vec::new();
+        let mut inp = over(input.to_vec(), b'\n');
+        let mut exec = Exec::new(&compiled, true, &mut wfiles, &mut rfiles);
+        let mut out = Out {
+            w: &mut sink,
+            sep: b'\n',
+            owed: false,
+            trace_to: None,
+        };
+        match exec.cycle(&compiled.cmds, &mut inp, &mut out) {
+            Ok(_) => Ok(()),
+            Err(Stop::Io(e)) => Err(failure_message(&e)),
+            Err(Stop::Limit(_) | Stop::NoRegex) => {
+                panic!("{} stopped for another reason", show(script))
+            }
+        }
+    }
+
+    #[test]
+    fn writing_to_standard_input_fails_rather_than_opening_it() {
+        // GNU writes to its `stdin` stream, which is open for reading, and the
+        // first write fails. Opening the name instead re-opens standard input
+        // for writing -- and truncates it, when it is a file.
+        let message = stdin_refusal(b"w /dev/stdin", b"abc\n").unwrap_err();
+        assert!(message.starts_with(b"couldn't write 3 items to stdin: "));
+        #[cfg(unix)]
+        assert_eq!(
+            message,
+            b"couldn't write 3 items to stdin: Bad file descriptor"
+        );
+        // The count is the first write's: an empty line's is its separator.
+        let message = stdin_refusal(b"w /dev/stdin", b"\n").unwrap_err();
+        assert!(message.starts_with(b"couldn't write 1 item to stdin: "));
+        // An emptied unterminated last line writes nothing at all, so there
+        // is nothing to fail.
+        assert_eq!(stdin_refusal(b"s/a//w /dev/stdin", b"a"), Ok(()));
+    }
+
+    #[test]
     fn a_line_that_is_not_text_passes_through() {
         let compiled = compile(b"s/b/B/", false).unwrap();
         let raw: Vec<u8> = vec![0xff, b'a', b'b', 0xfe, b'\n'];
@@ -4501,7 +5065,7 @@ mod tests {
             sep: b'\n',
             trace: None,
         };
-        job.run_one(&mut inp, &mut sink);
+        job.run_one(&mut inp, &mut sink, &mut false);
         assert_eq!(sink, vec![0xff, b'a', b'B', 0xfe, b'\n']);
     }
 
@@ -4602,6 +5166,29 @@ mod tests {
         let _ = fs::remove_file(&target);
         run_opts(&format!("W {path}"), "a", true, false);
         assert_eq!(fs::read(&target).expect("W wrote nothing"), b"a");
+    }
+
+    #[test]
+    fn standard_output_is_not_whichever_file_opened_first() {
+        // The `w` files open while the script is read, before standard output
+        // is first used. Finding standard output as "the oldest open file" --
+        // which this port briefly did -- found the `w` file instead, and `sed
+        // 'w out'` wrote its output into `out` and nothing to standard output.
+        // Each test runs on a thread of its own, so the thread-local list
+        // starts empty here.
+        let dir = ScratchDir::new("sed-stdout-identity");
+        let made = File::create(dir.path("out")).expect("creating a `w` file");
+        let w = register(StdioFile::from_file(made), b"out");
+        let stdout = stdout_file();
+        assert!(!Rc::ptr_eq(&w, &stdout));
+        assert_eq!(stdout.borrow().name, b"stdout");
+        // ...and it is the same stream on every later call.
+        assert!(Rc::ptr_eq(&stdout, &stdout_file()));
+        // First on the list, whenever it was made, so that `exit` -- which
+        // flushes the newest first -- reaches it last, as glibc's does.
+        let first = OPEN.with(|open| open.borrow().first().cloned());
+        assert!(first.is_some_and(|f| Rc::ptr_eq(&f, &stdout)));
+        ck_fclose(&w).expect("closing the `w` file");
     }
 
     // ---------------- `R` ----------------

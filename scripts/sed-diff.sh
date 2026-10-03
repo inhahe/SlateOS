@@ -79,6 +79,12 @@ printf 'foo bar\na_b  c\ncaf\xc3\xa9 x1\n' > words2.txt
 # visibly wrong here and merely lucky against a file that has none.
 printf 'a\0b\nB\0c\0'                   > nulsep.txt
 : > empty.txt
+# One unterminated line, and one line longer than a 4096-byte block: what is
+# written to a full disk depends on where stdio's buffer fills, and a line that
+# overflows it on its own is where a write fails rather than a flush.
+printf 'z'                              > lone.txt
+head -c 5000 /dev/zero | tr '\0' x     > long.txt
+printf '\n'                            >> long.txt
 
 # --- one invocation of one side ----------------------------------------------
 #
@@ -245,7 +251,7 @@ kbug_stdin() {
 # copy would have the second read what the first wrote.
 run_inplace() {
   local label=$1; shift
-  local o_err g_err o_rc g_rc o_state g_state
+  local o_err g_err o_out g_out o_rc g_rc o_state g_state
   rm -rf ours.d gnu.d
   mkdir -p ours.d gnu.d
   cp abc.txt def.txt nonl.txt empty.txt ours.d/
@@ -254,19 +260,29 @@ run_inplace() {
   # is covered: it opens happily and only fails on the first read, which is
   # exactly the case a naive implementation reports as a read error.
   mkdir ours.d/adir gnu.d/adir
-  o_err=$(mktemp); g_err=$(mktemp)
+  o_err=$(mktemp); g_err=$(mktemp); o_out=$(mktemp); g_out=$(mktemp)
   # stdin is `/dev/null` rather than inherited: `-i` with no operand is one of
   # the cases below, and a sed that failed to reject it would otherwise block
   # on the harness's own terminal and hang the run rather than fail it.
-  ( cd ours.d && env PATH="$bindir/ours" sed "$@" ) </dev/null >/dev/null 2>"$o_err"; o_rc=$?
-  ( cd gnu.d  && env PATH="$bindir/gnu"  sed "$@" ) </dev/null >/dev/null 2>"$g_err"; g_rc=$?
+  #
+  # Standard output is compared too. Under `-i` the edit goes to the file and
+  # nothing else should go anywhere -- except what is *meant* for standard
+  # output: `--debug`'s trace, and `w /dev/stdout`, which this port once wrote
+  # into the edited file. Discarding it hid both.
+  ( cd ours.d && env PATH="$bindir/ours" sed "$@" ) </dev/null >"$o_out" 2>"$o_err"; o_rc=$?
+  ( cd gnu.d  && env PATH="$bindir/gnu"  sed "$@" ) </dev/null >"$g_out" 2>"$g_err"; g_rc=$?
+  o_state="$(printf 'stdout:\n'; od -An -tx1 <"$o_out")"
+  g_state="$(printf 'stdout:\n'; od -An -tx1 <"$g_out")"
+  rm -f "$o_out" "$g_out"
   # `find | sort` names every file, including one only one side created; `od`
   # of each in turn compares contents. A missing file shows up as an absent
   # block rather than as silence.
-  o_state=$(cd ours.d && find . -type f | sort | while read -r f; do
-              printf '== %s\n' "$f"; od -An -tx1 <"$f"; done)
-  g_state=$(cd gnu.d && find . -type f | sort | while read -r f; do
-              printf '== %s\n' "$f"; od -An -tx1 <"$f"; done)
+  o_state="$o_state
+$(cd ours.d && find . -type f | sort | while read -r f; do
+              printf '== %s\n' "$f"; od -An -tx1 <"$f"; done)"
+  g_state="$g_state
+$(cd gnu.d && find . -type f | sort | while read -r f; do
+              printf '== %s\n' "$f"; od -An -tx1 <"$f"; done)"
   local o_msg g_msg
   # The directory name leaks into a diagnostic that quotes the path, so it is
   # normalised away before comparison — the difference under test is sed's
@@ -594,6 +610,158 @@ run_stdin abc.txt -n 'w /nosuch/dir/file'
 # fails even when no line ever reaches the command.
 run_stdin - -n 'w /nosuch/dir/file'
 run_stdin - -n '/nomatch/w /nosuch/dir/file'
+
+# --- the separator an unterminated line holds back ----------------------------
+#
+# GNU keeps one such debt per output stream (`struct output`'s
+# `missing_newline`), and these are the places it is easy to keep one too few
+# or too many. Under `-s` the inputs are separate but standard output is one
+# stream, so a debt crosses the file boundary -- and under `-i` it does not,
+# each file being an output of its own. `w /dev/stdout` is standard output's
+# buffer with a debt of its *own*: `printf 'a\nb' | sed 'w /dev/stdout'` ends
+# `bb`, neither copy paying the other's. All measured, sed 4.9; this port had
+# every one of them wrong until 2026-10-03.
+run_case -s -n '$p' nonl.txt abc.txt
+run_case -s -n '$p' nonl.txt nonl.txt
+run_case -s -n '$p' lone.txt lone.txt lone.txt
+run_case -s -n '$p' nonl.txt nosuch.txt abc.txt
+run_case -s -n '$p' abc.txt nonl.txt
+run_case 'w /dev/stdout' nonl.txt
+run_case -n 'p;w /dev/stdout' nonl.txt
+run_case -n -s 'w /dev/stdout' lone.txt lone.txt
+run_case 's/b/B/w /dev/stdout' nonl.txt
+run_case -n 'W /dev/stdout' nonl.txt
+run_case 'w /dev/stderr' nonl.txt
+run_inplace '-i and w /dev/stdout'     -i 'w /dev/stdout' nonl.txt
+run_inplace '-i -n and w /dev/stdout'  -i -n 'w /dev/stdout' nonl.txt abc.txt
+# When the debt is paid: GNU dumps the append queue as the next line is read
+# -- and after `q` whether or not anything is queued, which is how `printf z |
+# sed q` comes out as `z` and a newline. `Q` drops the queue unwritten, `n`
+# and `N` at the end of the input read nothing and so dump nothing, and `D`
+# starts the script again without reading.
+run_stdin lone.txt q
+run_stdin lone.txt -n q
+run_stdin lone.txt -e '1r nosuch.txt' -e q
+run_stdin abc.txt -e 'a X' -e N
+run_stdin abc.txt -e 'a X' -e Q
+run_stdin abc.txt -e 'a X' -e q
+run_stdin abc.txt -e 'a X' -e '$!N' -e D
+run_stdin nonl.txt -e '$!a X' -e n
+run_stdin nonl.txt -e '1a X' -e 1q
+run_stdin nonl.txt -n -e 'p;=' -e 'p;l'
+run_stdin nonl.txt -n -e 'p;i X'
+run_stdin nonl.txt -n -e 'p;e printf hi'
+
+# --- output that cannot go where it is sent ------------------------------------
+#
+# GNU sed checks every write and names the one that failed -- `couldn't write 5001
+# items to stdout`, `couldn't flush stdout`, `couldn't close stdout` -- so which
+# write fails, and with how many bytes, is output in its own right, and it turns
+# on exactly where glibc's buffer fills (coreutils::stdio). `redir_case MODE
+# ARGS...` sends one stream somewhere it cannot be written and compares what can
+# still be seen:
+#
+#   full       standard output is /dev/full     stderr and status compared
+#   closed     standard output is closed        stderr and status compared
+#   errfull    standard error is /dev/full      stdout and status compared
+#   errclosed  standard error is closed         stdout and status compared
+#   both       both streams into one file       that file and status compared
+#
+# Each side runs in a directory of its own holding copies of the fixtures, so a
+# `w` file one side writes is not read by the other, and whatever each leaves
+# behind is compared too.
+redir_side() {
+  local side=$1 mode=$2 out=$3 err=$4; shift 4
+  local dir=$DIFF_TMP/redir-$side
+  rm -rf "$dir"; mkdir -p "$dir"
+  cp abc.txt nonl.txt lone.txt long.txt "$dir/"
+  (
+    cd "$dir" || exit 125
+    case $mode in
+      full)      env PATH="$bindir/$side" sed "$@" </dev/null >/dev/full 2>"$err" ;;
+      closed)    env PATH="$bindir/$side" sed "$@" </dev/null >&- 2>"$err" ;;
+      errfull)   env PATH="$bindir/$side" sed "$@" </dev/null >"$out" 2>/dev/full ;;
+      errclosed) env PATH="$bindir/$side" sed "$@" </dev/null >"$out" 2>&- ;;
+      both)      env PATH="$bindir/$side" sed "$@" </dev/null >"$out" 2>&1 ;;
+    esac
+  )
+}
+
+redir_state() {
+  (cd "$DIFF_TMP/redir-$1" && find . -type f | sort | while read -r f; do
+     printf '== %s\n' "$f"; od -An -tx1 <"$f"; done)
+}
+
+redir_case() {
+  local mode=$1; shift
+  local o_out g_out o_err g_err o_rc g_rc o_all g_all
+  o_out=$(mktemp); g_out=$(mktemp); o_err=$(mktemp); g_err=$(mktemp)
+  redir_side ours "$mode" "$o_out" "$o_err" "$@"; o_rc=$?
+  o_all="$(od -An -tx1 <"$o_out"; cat "$o_err"; redir_state ours)"
+  redir_side gnu  "$mode" "$g_out" "$g_err" "$@"; g_rc=$?
+  g_all="$(od -An -tx1 <"$g_out"; cat "$g_err"; redir_state gnu)"
+  rm -f "$o_out" "$g_out" "$o_err" "$g_err"
+  rm -rf "$DIFF_TMP/redir-ours" "$DIFF_TMP/redir-gnu"
+  if [ "$o_all" = "$g_all" ] && [ "$o_rc" = "$g_rc" ]; then
+    pass=$((pass+1))
+    [ -n "${VERBOSE:-}" ] && printf 'OK   [%s] sed %s\n' "$mode" "$*"
+  else
+    fail=$((fail+1))
+    printf 'DIFF [%s] sed %s\n' "$mode" "$*"
+    printf '  ours (rc=%s) %s\n' "$o_rc" "$(printf '%s' "$o_all" | tr -s ' \n' ' ')"
+    printf '  gnu  (rc=%s) %s\n' "$g_rc" "$(printf '%s' "$g_all" | tr -s ' \n' ' ')"
+  fi
+  return 0
+}
+
+redir_case full p abc.txt
+redir_case closed p abc.txt
+# Nothing written is a clean flush, even onto a full disk -- but a closed
+# standard output still fails at the close.
+redir_case full -n 9p abc.txt
+redir_case closed -n 9p abc.txt
+redir_case full -u p abc.txt
+# A line longer than the buffer fails in the write itself, and names its size.
+redir_case full p long.txt
+redir_case full -n l long.txt
+# `=` is an unchecked `fprintf`: only the flush at the end can fail.
+redir_case full -n = abc.txt
+redir_case full -u -n = abc.txt
+redir_case full '1r long.txt' abc.txt
+# The first write to a stream finds no buffer, so a whole block of it goes
+# straight to the descriptor: `e`'s first 4096-byte piece fails, not its second.
+redir_case full -u '1e cat long.txt' abc.txt
+redir_case full 'w out' abc.txt
+redir_case closed 'w out' abc.txt
+redir_case full -n 'w /dev/stdout' abc.txt
+redir_case full -u -n 'w /dev/stdout' abc.txt
+redir_case full -u -n 'w /dev/full' abc.txt
+# The trace is unchecked; the text it traces is not.
+redir_case full --debug p abc.txt
+redir_case full --help
+redir_case closed --version
+# A diagnostic nobody can read changes nothing -- except where writing it is
+# the point: `w /dev/stderr`.
+redir_case errfull p nosuch.txt
+redir_case errclosed p nosuch.txt
+redir_case errfull --bogus
+redir_case errfull -n 'w /dev/stderr' abc.txt
+redir_case errclosed -n 'w /dev/stderr' abc.txt
+# Order on a shared file: the diagnostic at once, standard output at the end --
+# or line by line under `-u`.
+redir_case both p nosuch.txt abc.txt
+redir_case both 'w /dev/stderr' abc.txt
+redir_case both -u 'w /dev/stderr' abc.txt
+# `/dev/stdin` is GNU's read-only `stdin` stream, so writing it fails at the
+# first write. Opening the name instead -- which this port did -- truncates
+# standard input when it is a file.
+redir_case both -n 'w /dev/stdin' abc.txt
+redir_case both -n 's/b/B/w /dev/stdin' abc.txt
+# GNU unlinks a `w` file from its list of names before the flush that closes
+# it, so a failure there is reported as `<unknown>`. The name is known here
+# and is printed.
+xfail_case 'a w file that fails at the final flush is named, not <unknown>' \
+  -n 'w /dev/full' abc.txt
 
 # --- reading a file back: r and R --------------------------------------------
 run_stdin abc.txt "1r def.txt"

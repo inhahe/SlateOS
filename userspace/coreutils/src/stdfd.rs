@@ -702,6 +702,19 @@ pub fn close_stdin() -> io::Result<()> {
     imp::close_fd(0)
 }
 
+/// `close(2)` on a standard descriptor -- stdio's `fclose (stdout)`, which is
+/// where a descriptor that was never open is finally noticed when nothing was
+/// written to it. For [`crate::stdio::StdioFile::close`]; call it on the way
+/// out, since nothing written to `fd` afterwards arrives.
+///
+/// # Errors
+///
+/// Whatever `close(2)` reports -- `EBADF` for a descriptor that was closed
+/// when the process started. Always `Ok` off Linux.
+pub fn close_descriptor(fd: i32) -> io::Result<()> {
+    imp::close_fd(fd)
+}
+
 /// Whether a diagnostic failed to reach descriptor 2 — `ferror (stderr)`,
 /// which is process-global in stdio for the same reason it is here.
 ///

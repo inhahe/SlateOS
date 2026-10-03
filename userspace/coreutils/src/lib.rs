@@ -571,6 +571,9 @@ pub mod stdfd;
 /// `stdfdguard` crate's since 2026-09-26, when it moved out of `stdfd` so the
 /// programs outside coreutils could have it.
 pub use stdfdguard::guard_std_fds;
+// glibc's `FILE` buffer arithmetic, for a port whose upstream reports which
+// `fwrite` failed (GNU sed). Most utilities want `stdfd::Stream` instead.
+pub mod stdio;
 pub mod sum;
 pub mod tabstops;
 pub mod umask;

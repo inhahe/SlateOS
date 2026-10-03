@@ -225,13 +225,24 @@ impl Rights {
     /// `/proc/secureboot`.
     pub const ENROLL_SECUREBOOT: Self = Self(1 << 23);
 
+    /// May replace the running kernel without a firmware reset: `SYS_POWER_RELOAD`
+    /// (kexec -- load a kernel image, quiesce, and jump to it).
+    ///
+    /// Its own bit, deliberately **not** implied by any "reboot" authority,
+    /// because the caller chooses the image: "restart into *this* kernel" is a
+    /// different and larger trust question than "restart the machine", which
+    /// hands control to firmware-verified boot. A holder decides what code the
+    /// machine runs next with full privilege, so this is among the strongest
+    /// rights -- granting "may set the keyboard layout" must not grant it.
+    pub const RELOAD_KERNEL: Self = Self(1 << 24);
+
     /// Every distinct right, in declaration order.
     ///
     /// Exists so that [`the aliasing assertion below`](self) can be stated
     /// once over the whole set rather than pairwise by hand. Convenience
     /// *combinations* (`ALL`, `READ_ONLY`, …) are deliberately absent — they
     /// are unions of these and would defeat the check.
-    const DISTINCT: [Self; 18] = [
+    const DISTINCT: [Self; 19] = [
         Self::READ,
         Self::WRITE,
         Self::EXECUTE,
@@ -250,6 +261,7 @@ impl Rights {
         Self::SET_KEYLAYOUT,
         Self::SET_BRIGHTNESS,
         Self::ENROLL_SECUREBOOT,
+        Self::RELOAD_KERNEL,
     ];
 
     // --- Convenience combinations ---
@@ -326,7 +338,15 @@ impl Rights {
             // no narrower grant to give yet: the machinery for handing one
             // administrative tool a right its parent lacks (`authbroker`) is
             // the next module on the same list. See §1501.
-            | Self::ENROLL_SECUREBOOT.0,
+            | Self::ENROLL_SECUREBOOT.0
+            // The same decision, for the same reason, for replacing the kernel
+            // (kexec): init holds it, as it holds ENROLL_SECUREBOOT, because the
+            // alternative -- withholding it here -- is a narrowing smuggled in
+            // under an unrelated feature, which §930 rejected as a separate and
+            // larger change (the authbroker that hands one tool a right its
+            // parent lacks). `powerctl` reaches it as a root descendant until
+            // then.
+            | Self::RELOAD_KERNEL.0,
     );
 
     /// What the init process is granted on [`ResourceType::File`].
@@ -367,7 +387,8 @@ impl Rights {
             // would be a narrowing smuggled in under an unrelated feature,
             // and 930 rejected narrowing as a separate, larger change.
             | Self::SET_KEYLAYOUT.0
-            | Self::ENROLL_SECUREBOOT.0,
+            | Self::ENROLL_SECUREBOOT.0
+            | Self::RELOAD_KERNEL.0,
     );
 
     /// What the init process is granted on [`ResourceType::Socket`].
@@ -392,7 +413,8 @@ impl Rights {
             | Self::SET_HOSTNAME.0
             // Per 930, as for `INIT_FILE` above.
             | Self::SET_KEYLAYOUT.0
-            | Self::ENROLL_SECUREBOOT.0,
+            | Self::ENROLL_SECUREBOOT.0
+            | Self::RELOAD_KERNEL.0,
     );
 
     /// No rights.
@@ -518,9 +540,24 @@ const _: () = {
 /// mechanism. `design-decisions.md` §928.
 const _: () = {
     assert!(
-        // 18 as of 2026-09-27: ENROLL_SECUREBOOT was added for
+        // 19 as of 2026-10-03: RELOAD_KERNEL was added for SYS_POWER_RELOAD
+        // (kexec -- replace the running kernel without the firmware). The
+        // decision this pin demands:
+        //
+        //   INIT_PROCESS  yes
+        //   INIT_FILE     yes
+        //   INIT_SOCKET   yes
+        //
+        // As ENROLL_SECUREBOOT is, and for its reason: a right nobody holds is a
+        // door nobody can open, and there is no narrower grant to give until
+        // `authbroker` can hand one tool (powerctl) a right its parent lacks;
+        // until then powerctl reaches it as a root descendant. Also added to
+        // ROOT_PROCESS_RIGHTS, so it is dropped when uid leaves 0. Claude's call
+        // within the operator's scope, to revisit when authbroker lands.
+        //
+        // 18 (2026-09-27) was ENROLL_SECUREBOOT, added for
         // SYS_SECUREBOOT_ENROLL / _REMOVE (design-decisions §978, §1501).
-        // The decision this pin demands:
+        // The decision this pin demanded:
         //
         //   INIT_PROCESS  yes
         //   INIT_FILE     yes
@@ -544,7 +581,7 @@ const _: () = {
         // This pin did its job then: the right was added, committed and
         // pushed before the build was run, and the const assertion is what
         // caught it rather than a boot two hours later.
-        Rights::DISTINCT.len() == 18,
+        Rights::DISTINCT.len() == 19,
         "a right was added or removed. Decide, SEPARATELY FOR EACH OF THE THREE \
          CLASSES init is granted, whether it should hold the new right: add it \
          to Rights::INIT_PROCESS, Rights::INIT_FILE and Rights::INIT_SOCKET as \

@@ -6580,6 +6580,17 @@ pub const SYS_PIDFD_OPEN: u64 = 1137;
 /// `InvalidHandle` if the caller does not hold it.
 pub const SYS_PIDFD_CLOSE: u64 = 1138;
 
+/// `SYS_POWER_RELOAD(image_ptr, image_len)` -- replace the running kernel with
+/// the ELF kernel image at `image_ptr` (`image_len` bytes in the caller's
+/// address space), without a firmware reset (kexec): load it, quiesce, and jump.
+/// Does not return on success. Requires a `Process` capability carrying
+/// [`Rights::RELOAD_KERNEL`](crate::cap::Rights::RELOAD_KERNEL) -- the caller
+/// chooses the image, a larger trust question than rebooting, so it is its own
+/// right and not implied by any reboot authority. `PermissionDenied` without it;
+/// `InvalidArgument` for a malformed image. The jump itself is not yet wired, so
+/// a well-formed, authorised call currently returns `NotSupported`.
+pub const SYS_POWER_RELOAD: u64 = 1139;
+
 /// Bytes [`SYS_UNIX_NAME`] writes: kind, length, 108 bytes of name.
 pub const UNIX_ADDR_LEN: usize = 116;
 /// Bytes [`SYS_UNIX_RECV`] writes at `info_ptr`.

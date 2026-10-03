@@ -69,6 +69,7 @@ use super::number::{
     SYS_NS_BIND, SYS_NS_CREATE, SYS_NS_HIDE, SYS_NS_QUERY, SYS_NS_UNBIND, SYS_PHYS_PAGES_AVAIL,
     SYS_PHYS_PAGES_TOTAL, SYS_PIDFD_CLOSE, SYS_PIDFD_OPEN, SYS_PIPE_CLOSE, SYS_PIPE_CREATE,
     SYS_PIPE_PEEK, SYS_PIPE_POLL, SYS_PIPE_READ, SYS_PIPE_READ_TIMEOUT, SYS_PIPE_READABLE_BYTES,
+    SYS_POWER_RELOAD,
     SYS_PIPE_TRY_READ, SYS_PIPE_TRY_WRITE, SYS_PIPE_WAIT_READABLE, SYS_PIPE_WRITE,
     SYS_PIPE_WRITE_TIMEOUT, SYS_PORT_READ, SYS_PORT_WRITE, SYS_PROCESS_CHROOT, SYS_PROCESS_COUNT,
     SYS_PROCESS_CRASH_INFO, SYS_PROCESS_GET_ARGS, SYS_PROCESS_GET_CREDENTIALS, SYS_PROCESS_GET_CWD,
@@ -768,6 +769,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_SIGNAL_EXIT_SELF as usize] = Some(handlers::sys_signal_exit_self);
     handlers[SYS_PIDFD_OPEN as usize] = Some(handlers::sys_pidfd_open);
     handlers[SYS_PIDFD_CLOSE as usize] = Some(handlers::sys_pidfd_close);
+    handlers[SYS_POWER_RELOAD as usize] = Some(handlers::sys_power_reload);
     handlers[SYS_ARP_TABLE as usize] = Some(handlers::sys_arp_table);
     handlers[SYS_DNS_CACHE_STATS as usize] = Some(handlers::sys_dns_cache_stats);
     handlers[SYS_TCP_POLL_STATUS as usize] = Some(handlers::sys_tcp_poll_status);
@@ -1105,6 +1107,7 @@ pub fn self_test() -> KernelResult<()> {
     test_cpu_current()?;
     test_dispatch_shared_anonymous_memory()?;
     test_dispatch_secureboot_doors()?;
+    test_dispatch_power_reload()?;
     test_dispatch_ipc_possession()?;
     test_dispatch_dropping_root_is_one_way()?;
     test_dispatch_pty_syscalls()?;
@@ -5224,6 +5227,37 @@ fn test_dispatch_fs_gates() -> KernelResult<()> {
 /// which here are not UTF-8; an output that cannot be written refused before
 /// anything is recorded. The verdicts themselves are
 /// `fs::secureboot::self_test`'s.
+/// `SYS_POWER_RELOAD` is gated on `RELOAD_KERNEL` before it acts. In kernel
+/// context no process holds the right, so the call is refused (NoSuchProcess or
+/// PermissionDenied) before the image arguments are read -- proving the syscall
+/// is registered and gated, not ungated or gated after its arguments. The granted
+/// arm (which returns NotSupported until the jump is wired) needs a ring-3 caller
+/// holding the right, as the secure-boot doors above do.
+fn test_dispatch_power_reload() -> KernelResult<()> {
+    let probe = SyscallArgs {
+        arg0: 0x1000,
+        arg1: 64,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let v = dispatch(SYS_POWER_RELOAD, &probe).value;
+    let refused = v == i64::from(KernelError::NoSuchProcess.code())
+        || v == i64::from(KernelError::PermissionDenied.code());
+    if !refused {
+        serial_println!(
+            "[syscall]   FAIL: SYS_POWER_RELOAD answered {} with no RELOAD_KERNEL -- ungated, or gated after its arguments",
+            v
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[syscall]   SYS_POWER_RELOAD gated on RELOAD_KERNEL (refused without it, before the image is read): OK"
+    );
+    Ok(())
+}
+
 fn test_dispatch_secureboot_doors() -> KernelResult<()> {
     use crate::fs::secureboot::{self, BootState, KeyType};
 

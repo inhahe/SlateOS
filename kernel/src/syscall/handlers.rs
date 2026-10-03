@@ -8024,6 +8024,47 @@ fn require_secureboot_right() -> Result<(), KernelError> {
     }
 }
 
+/// The caller holds `(Process, RELOAD_KERNEL)`, checked before the image is read
+/// so an unauthorised caller cannot even cause it to be copied.
+fn require_power_reload_right() -> Result<(), KernelError> {
+    use crate::proc::thread;
+
+    let Some(pid) = thread::owner_process(sched::current_task_id()) else {
+        return Err(KernelError::NoSuchProcess);
+    };
+    if pcb::has_capability_type(
+        pid,
+        ResourceType::Process,
+        crate::cap::Rights::RELOAD_KERNEL,
+    ) {
+        Ok(())
+    } else {
+        Err(KernelError::PermissionDenied)
+    }
+}
+
+/// `SYS_POWER_RELOAD` -- replace the running kernel without a firmware reset
+/// (kexec). See [`SYS_POWER_RELOAD`](crate::syscall::number::SYS_POWER_RELOAD).
+///
+/// Gates on [`Rights::RELOAD_KERNEL`](crate::cap::Rights::RELOAD_KERNEL) before
+/// anything else -- the caller chooses the image, a larger trust question than a
+/// reboot -- then checks the image arguments. The handoff *preparation*
+/// (`kexec::prepare_handoff`) is built and self-tested, but the quiesce-and-jump
+/// that would make this call not return is not yet wired (todo.txt), so a
+/// well-formed, authorised call is refused cleanly with `NotSupported` rather
+/// than half-acting.
+pub fn sys_power_reload(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_power_reload_right() {
+        return SyscallResult::err(e);
+    }
+    let image_ptr = args.arg0;
+    let image_len = args.arg1;
+    if image_ptr == 0 || image_len == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    SyscallResult::err(KernelError::NotSupported)
+}
+
 /// Copy a `len`-byte argument of at most `max` bytes out of user memory.
 fn read_bounded_arg(ptr: u64, len: u64, max: usize) -> Result<alloc::vec::Vec<u8>, KernelError> {
     let len = usize::try_from(len).map_err(|_| KernelError::InvalidArgument)?;

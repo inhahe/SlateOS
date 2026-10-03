@@ -11538,6 +11538,9 @@ pub(crate) fn ctest_generic_grant(word: &str) -> Option<(ResourceType, u64, Righ
         // The right to change Secure Boot's lists: the granted arm of
         // SYS_SECUREBOOT_ENROLL and _REMOVE (design-decisions §1501).
         "secureboot" => Some((ResourceType::Process, 0, Rights::ENROLL_SECUREBOOT)),
+        // The right to replace the running kernel: the granted arm of
+        // SYS_POWER_RELOAD (kexec).
+        "reload_kernel" => Some((ResourceType::Process, 0, Rights::RELOAD_KERNEL)),
         _ => None,
     }
 }

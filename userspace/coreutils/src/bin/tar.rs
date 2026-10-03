@@ -19,6 +19,21 @@
 //! dash is a run of option letters whose value-taking letters take the argv
 //! words that follow, in letter order; see [`explode_old_option`].
 //!
+//! # The archive, and the two standard streams
+//!
+//! `-f -` -- and no `-f` at all, unless `TAPE` names an archive -- is standard
+//! output to `-c` and standard input to `-t` and `-x`, so `tar -cf - dir | tar
+//! -xf - -C there` works; see [`resolve_archive`]. Either is refused when it is
+//! a terminal ([`refuse_terminal`]), and an archive that is `/dev/null` is not
+//! written at all, nor are its regular files opened ([`is_dev_null`]).
+//!
+//! Nothing written is allowed to vanish. A write of the archive that fails is
+//! fatal, and says how much of the record went ([`archive_write_failed`]); a
+//! member list that could not be written, or a diagnostic that could not, turns
+//! the exit status to 2 at the end of the run, as GNU's `close_stdout` does
+//! ([`conclude`]). Both standard descriptors are first put through gnulib's
+//! `stdopen`, as GNU tar's are, which decides what a *closed* one looks like.
+//!
 //! Supports basic POSIX/ustar tar format (uncompressed).
 //! Files > 8GB and paths > 255 chars are not supported.
 //!
@@ -87,7 +102,7 @@ use coreutils::quote::{escape, escape_os, os_bytes, quote, quoteaf};
 // it is the non-unix twin of `Dir` that needs it, to build a path out of a
 // member's bytes; on unix every component is handed to `openat` as it stands.
 use coreutils::quote::os_from_bytes;
-use coreutils::stdfd;
+use coreutils::stdfd::{self, Stream};
 // Split, and not merged back: `BTreeSet` backs [`PrefixNotice`], which every
 // host builds because `tar -tf` issues the same `Removing leading` notices a
 // unix extraction does. `BTreeMap` backs the uid/gid name cache and the
@@ -105,6 +120,11 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::Path;
 use std::process;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+// The standard descriptors as the process was started with them; `main` calls
+// `stdfd::restore` and then `stdfd::stdopen`, which is GNU tar's own first act.
+coreutils::guard_std_fds!();
 
 /// GNU tar's exit status for "a fatal error occurred". Used for every failure
 /// that leaves the archive or the extracted tree incomplete, because a caller
@@ -445,6 +465,8 @@ fn failed_with_previous_errors() -> i32 {
 /// partial or merely incomplete.
 fn fatal() -> i32 {
     diag!("tar: Error is not recoverable: exiting now");
+    // GNU exits here, so nothing after this point is checked. See [`FATAL`].
+    FATAL.store(true, Ordering::Relaxed);
     EXIT_FATAL
 }
 
@@ -520,7 +542,16 @@ struct TarArgs {
     /// What to do about something already standing where a member is to go.
     /// See [`OldFiles`].
     old_files: OldFiles,
+    /// The last `-f` / `--file` given, if any, exactly as written -- `-` is not
+    /// resolved here. What it means, and what an absent one means, is decided
+    /// once by [`resolve_archive`].
     archive_file: Option<OsString>,
+    /// How many times `-f` / `--file` was given. GNU keeps every one, as the
+    /// volumes of a multi-volume archive, and refuses more than one without
+    /// `-M` -- which this tar does not have, so a second `-f` is always the
+    /// refusal. Counted rather than collected because the refusal is the only
+    /// thing the extra names are ever used for.
+    archives_named: usize,
     /// Every `-C` / `--directory`, in the order it was written.
     ///
     /// Not `Option<OsString>`, because `-C` is not an option carrying a value —
@@ -566,6 +597,7 @@ impl Default for TarArgs {
             same_permissions: false,
             old_files: OldFiles::default(),
             archive_file: None,
+            archives_named: 0,
             chdirs: Vec::new(),
             files: Vec::new(),
             record_size: DEFAULT_RECORD_SIZE,
@@ -617,6 +649,17 @@ impl TarArgs {
         self.mode.choose(Mode::List)?;
         self.verbose = self.verbose.saturating_add(1);
         Ok(())
+    }
+
+    /// `-f` / `--file`: name the archive, and count the naming.
+    ///
+    /// The count is what [`TarArgs::archives_named`] is for: a second `-f` is
+    /// refused, but not here -- GNU refuses it after every option has been
+    /// read, so `tar -f a -f b --frobnicate` is an unknown option, not two
+    /// archives. A helper so that the short and long spellings count alike.
+    fn name_archive(&mut self, value: Option<OsString>) {
+        self.archive_file = value;
+        self.archives_named = self.archives_named.saturating_add(1);
     }
 }
 
@@ -1007,7 +1050,7 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             Opt::Short(b'p', _) => out.same_permissions = true,
             Opt::Short(b'k', _) => out.old_files.choose(OldFiles::Keep)?,
             Opt::Short(b'U', _) => out.old_files.choose(OldFiles::UnlinkFirst)?,
-            Opt::Short(b'f', value) => out.archive_file = value,
+            Opt::Short(b'f', value) => out.name_archive(value),
             // Pushed, not assigned: see [`TarArgs::chdirs`]. `value` is
             // `Required` in both tables, so `None` cannot reach here.
             Opt::Short(b'C', value) => out.chdirs.extend(value),
@@ -1038,7 +1081,7 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
                 "list" => out.list()?,
                 "verbose" => out.verbose = out.verbose.saturating_add(1),
                 "preserve-permissions" | "same-permissions" => out.same_permissions = true,
-                "file" => out.archive_file = value,
+                "file" => out.name_archive(value),
                 "directory" => out.chdirs.extend(value),
                 // Both spellings of the record size. See
                 // [`TarArgs::record_size`] for why they share a field.
@@ -1286,6 +1329,20 @@ Usage: tar [-ctxkUpv?] [-C DIR] [-f ARCHIVE] [-b BLOCKS] [--create] [--list]
 }
 
 fn main() {
+    // The standard descriptors as the process was given them, and then gnulib's
+    // `stdopen` over them -- GNU tar's first act, before it reads an option.
+    // The second step is what makes a closed descriptor behave as GNU tar's
+    // does rather than as a coreutils program's: it is reopened the wrong way
+    // round, so `tar -tf a.tar >&-` reports `stdout: write error` with no
+    // reason, and `tar -cf - dir >&-` succeeds, because standard output is now
+    // `/dev/null` and an archive written there is not written at all. See
+    // [`stdfd::stdopen`].
+    stdfd::restore();
+    if stdfd::stdopen().is_err() {
+        diag!("tar: failed to assert availability of the standard file descriptors");
+        process::exit(fatal());
+    }
+
     let args: Vec<OsString> = env::args_os().skip(1).collect();
     let parsed = match parse_args(&args) {
         Ok(p) => p,
@@ -1324,6 +1381,27 @@ fn main() {
         }
         Request::Run(parsed) => parsed,
     };
+
+    // The tail of GNU's `decode_options`, which runs after every option has
+    // been read -- so an unknown option is still reported ahead of this -- and
+    // before anything is opened. A second `-f` names a second volume, which
+    // needs `-M`, which this tar does not have.
+    if parsed.archives_named > 1 {
+        diag!("tar: Multiple archive files require '-M' option");
+        diag!("{TRY_HELP}");
+        process::exit(conclude(EXIT_FATAL, true));
+    }
+    let archive = resolve_archive(
+        parsed.archive_file.as_deref(),
+        env::var_os("TAPE").as_deref(),
+    );
+    let archive = archive.as_deref();
+    // GNU's `stdlis`: the member list goes to standard output, except when the
+    // archive itself is being written there -- then the names would be
+    // interleaved with the archive's bytes and ruin both, so they go to
+    // standard error instead. Which of the two it is also decides how the run
+    // ends; see [`conclude`].
+    let listing_on_stdout = !(parsed.mode == Mode::Create && archive.is_none());
 
     // Every mode returns its own status rather than exiting inline, so that
     // "some members failed" survives to the caller. A tool that reports 0
@@ -1372,13 +1450,13 @@ fn main() {
         }
         Mode::Create => {
             // The one case where the member list is a diagnostic rather than
-            // output: with no `-f`, the archive itself is on stdout, and a name
-            // printed there would be a block of the archive.
-            let verbose = Verbose::new(parsed.verbose, parsed.archive_file.is_none());
+            // output: the archive itself is on stdout, and a name printed
+            // there would be a block of the archive.
+            let verbose = Verbose::new(parsed.verbose, !listing_on_stdout);
             #[cfg(unix)]
             {
                 do_create(
-                    parsed.archive_file.as_deref(),
+                    archive,
                     &parsed.chdirs,
                     &parsed.files,
                     verbose,
@@ -1393,7 +1471,7 @@ fn main() {
             }
         }
         Mode::Extract => do_extract(
-            parsed.archive_file.as_deref(),
+            archive,
             &parsed.chdirs,
             // Extraction never writes the archive to stdout, so the list always
             // goes there.
@@ -1401,12 +1479,14 @@ fn main() {
             &parsed.files,
             parsed.same_permissions,
             parsed.old_files,
+            parsed.record_size,
         ),
         Mode::List => do_list_main(
-            parsed.archive_file.as_deref(),
+            archive,
             &parsed.chdirs,
             parsed.verbose,
             &parsed.files,
+            parsed.record_size,
         ),
         Mode::Unset => {
             // GNU's own sentence, listing options this tar does not have. That
@@ -1428,7 +1508,268 @@ fn main() {
         }
     };
 
-    process::exit(status);
+    process::exit(conclude(status, listing_on_stdout));
+}
+
+// ============================================================================
+// the archive's name, the standard streams, and how a run ends
+// ============================================================================
+
+/// Which archive a run is about: GNU's `archive_name_array[0]`, resolved the way
+/// `decode_options` resolves it.
+///
+/// The last `-f` given; else `TAPE` from the environment; else `-`. And `-` --
+/// *exactly* `-`, so that `./-` is a file of that name -- is the standard stream
+/// the mode uses: standard input to read an archive, standard output to write
+/// one. `None` is that stream; `Some` is a file to open.
+///
+/// That `-` was treated as a file name here until 2026-10-03, so `tar -cf - dir
+/// | ssh host tar -xf -` -- the reason the convention exists -- wrote an archive
+/// called `-` into the current directory and nothing into the pipe. An empty
+/// `TAPE` is a name like any other, as it is in GNU, and fails to open as
+/// `tar: : Cannot open: No such file or directory`.
+fn resolve_archive(given: Option<&OsStr>, tape: Option<&OsStr>) -> Option<OsString> {
+    let name = given.or(tape)?;
+    if name == OsStr::new("-") {
+        None
+    } else {
+        Some(name.to_os_string())
+    }
+}
+
+/// GNU's `check_tty`: refuse to read an archive from a terminal, or write one to
+/// it, when the archive is a standard stream.
+///
+/// A `tar -c dir` typed without `-f` would otherwise pour binary over the
+/// terminal, and a `tar -x` would sit waiting for an archive to be typed in.
+/// Only for the standard stream: `-f /dev/tty` names the terminal on purpose and
+/// is obeyed. Checked where GNU checks it, as the archive is opened -- after the
+/// command line has been accepted and after the record size, before anything is
+/// read, written or entered.
+fn refuse_terminal(writing: bool) -> Result<(), i32> {
+    let (fd, what) = if writing {
+        (1, "write archive contents to")
+    } else {
+        (0, "read archive contents from")
+    };
+    if stdfd::is_tty(fd) {
+        diag!("tar: Refusing to {what} terminal (missing -f option?)");
+        return Err(fatal());
+    }
+    Ok(())
+}
+
+/// The archive on a standard stream, read and written with `read(2)` and
+/// `write(2)` themselves.
+///
+/// Not `io::stdin()` and `io::stdout()`: both pass their results through the
+/// standard library's `handle_ebadf`, which makes a closed descriptor read as an
+/// empty archive and write as a successful one. GNU reports both -- see
+/// [`stdfd::stdopen`] for what a closed descriptor looks like by then -- and a
+/// `tar -cf - dir` that exits 0 having written nowhere is the failure this whole
+/// file is arranged against. Unbuffered: the reader sits behind a `BufReader`
+/// and the writer behind a [`RecordWriter`], which do that job.
+struct StdioArchive(i32);
+
+impl Read for StdioArchive {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        stdfd::read(self.0, buf)
+    }
+}
+
+impl Write for StdioArchive {
+    /// One `write(2)`, and its count as it came back -- a short write is
+    /// [`RecordWriter`]'s to account for, since GNU's `Wrote only` message
+    /// reports exactly how far it got.
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        stdfd::write_some(self.0, buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Whether an archive opened for writing is `/dev/null`: GNU's
+/// `sys_detect_dev_null_output`.
+///
+/// By name, or by being the same character device: `/dev/./null`, a symlink to
+/// it, and a standard output redirected to it all count. GNU then writes
+/// nothing at all and opens none of the regular files it archives -- their
+/// contents would only be thrown away -- which is observable: `tar -cf /dev/null
+/// unreadable-file` succeeds silently where any other archive reports `Cannot
+/// open: Permission denied`. It is the idiom for asking `tar` to walk a tree
+/// (`-v` still lists it) without paying to read it.
+#[cfg(unix)]
+fn is_dev_null(name: Option<&OsStr>, archive: Option<&fs::Metadata>) -> bool {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    if name.is_some_and(|n| n == OsStr::new("/dev/null")) {
+        return true;
+    }
+    let Some(archive) = archive else {
+        return false;
+    };
+    if !archive.file_type().is_char_device() {
+        return false;
+    }
+    // `stat`, following a symlink, as GNU's does. A `/dev/null` that cannot be
+    // stat'ed is simply not this archive.
+    fs::metadata("/dev/null")
+        .is_ok_and(|null| null.ino() == archive.ino() && null.dev() == archive.dev())
+}
+
+/// Set by [`fatal`]: the run ended inside a fatal error.
+///
+/// GNU's `fatal_exit` exits on the spot, from inside the failure, with no look
+/// at standard output or standard error afterwards. [`conclude`] honours that by
+/// checking nothing once this is set, so a listing lost earlier in a run that
+/// then died of a truncated archive is not reported a second time.
+static FATAL: AtomicBool = AtomicBool::new(false);
+
+/// Set when the member list's reader has gone away.
+///
+/// GNU is killed by `SIGPIPE` at the flush that discovers it: no more members,
+/// no more messages, and no deferred work done. SlateOS has no signal to be
+/// killed by (`design-decisions` §377), so the translation is the one the rest
+/// of the tree uses -- stop where GNU would have died, say nothing more, and keep
+/// the status the run had earned so far. Every loop that writes the list asks
+/// [`reader_gone`] after doing so and unwinds when it is set.
+static READER_GONE: AtomicBool = AtomicBool::new(false);
+
+/// See [`READER_GONE`].
+fn reader_gone() -> bool {
+    READER_GONE.load(Ordering::Relaxed)
+}
+
+/// One line of the member list on standard output: GNU's `fprintf (stdlis, …)`
+/// and the `fflush (stdlis)` that ends every `print_header`.
+///
+/// A failure is recorded by the [`Stream`], not acted on. GNU never looks at
+/// what `fprintf` returned and goes on archiving, extracting or listing; the
+/// verdict is taken once, at the end, by [`conclude`] -- `tar: stdout: write
+/// error`. The flush after every line is why that message carries no reason:
+/// each line fails, and is discarded, as it is written, so the close at the end
+/// has nothing left to fail on.
+///
+/// The one failure acted on at once is the reader leaving. See [`READER_GONE`].
+fn list_line(line: &[u8]) {
+    let mut out = Stream::stdout_line_buffered();
+    // `Stream`'s `Write` never fails: the failure is kept in the stream, which
+    // is where both checks below and `conclude` find it.
+    drop(out.write_all(line));
+    drop(out.flush());
+    if out.error().is_some_and(|e| stdfd::reader_gone(&e)) {
+        READER_GONE.store(true, Ordering::Relaxed);
+    }
+}
+
+/// A write of the archive itself failed: GNU's `archive_write_error`, which is
+/// fatal -- every member after it would land at the wrong offset.
+///
+/// Worded by how far the record had got, as GNU's `write_error_details` words
+/// it:
+///
+/// | the record | GNU says |
+/// |---|---|
+/// | none of it went | `tar: a.tar: Cannot write: No space left on device` |
+/// | part of it went | `tar: a.tar: Wrote only 4096 of 10240 bytes` |
+///
+/// The first renders the name the way every `Cannot` diagnostic does; the
+/// second prints it as it stands -- GNU's bare `%s` -- and that is reproduced
+/// rather than tidied. Both are followed by [`fatal`]'s line. The second is what
+/// a backup that fills its disk ends with, which is why it is worth getting
+/// right.
+///
+/// Except a reader of a piped archive going away, which is reported by nobody:
+/// GNU is killed by `SIGPIPE` at that write, and this sets [`READER_GONE`]
+/// instead, for the caller to stop on.
+///
+/// Create mode is unix-only (see the module docs), and so is its one caller.
+#[cfg(unix)]
+fn archive_write_failed(label: &[u8], e: &io::Error, sent: usize, record: usize) {
+    if stdfd::reader_gone(e) {
+        READER_GONE.store(true, Ordering::Relaxed);
+        return;
+    }
+    if sent == 0 {
+        diag!("tar: {}: Cannot write: {}", escape(label), strerror(e));
+    } else {
+        // "bytes", never "byte": `ngettext` picks the singular for a record of
+        // one byte, and a record is a whole number of 512-byte blocks.
+        let mut line = b"tar: ".to_vec();
+        line.extend_from_slice(label);
+        line.extend_from_slice(format!(": Wrote only {sent} of {record} bytes\n").as_bytes());
+        stdfd::diag_bytes(&line);
+    }
+    fatal();
+}
+
+/// [`list_line`] as an `io::Write`, for [`list_archive`], which writes to
+/// whatever it is handed so that the unit tests can hand it a `Vec`.
+struct Listing;
+
+impl Write for Listing {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        list_line(buf);
+        Ok(buf.len())
+    }
+
+    /// Every line is flushed as it is written, so there is never anything
+    /// left to flush.
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The bottom of GNU tar's `main`: what became of the two standard streams,
+/// folded into the exit status.
+///
+/// ```c
+/// if (stdlis == stdout)
+///   close_stdout ();
+/// else if (ferror (stderr) || fclose (stderr) != 0)
+///   set_exit_status (TAREXIT_FAILURE);
+/// ```
+///
+/// With the list on standard output, gnulib's `close_stdout` decides: a list
+/// that did not arrive is `tar: stdout: write error` and status 2 whatever the
+/// run had earned, and then a diagnostic that did not arrive is status 2 as well,
+/// silently. With the list on standard error -- the archive was written to
+/// standard output -- only standard error is looked at, and a lost diagnostic
+/// *raises* the status to 2. The two come to the same thing for every status
+/// this tar can produce; they are kept apart because they are GNU's two rules,
+/// and the second one does not look at standard output at all.
+///
+/// A run that died of a fatal error is not checked (see [`FATAL`]), and one
+/// whose reader left keeps its earned status (see [`READER_GONE`]).
+fn conclude(status: i32, listing_on_stdout: bool) -> i32 {
+    if FATAL.load(Ordering::Relaxed) {
+        return EXIT_FATAL;
+    }
+    if reader_gone() {
+        return status;
+    }
+    if listing_on_stdout {
+        match Stream::stdout_line_buffered().finish() {
+            Ok(()) => {}
+            // Unreachable while `list_line` is the only writer, since it would
+            // have set `READER_GONE`; kept so that a reader leaving can never be
+            // reported as a write error.
+            Err(e) if stdfd::reader_gone(&e) => return status,
+            Err(e) => {
+                stdfd::write_error_named("tar", "stdout", &e);
+                return EXIT_FATAL;
+            }
+        }
+        if stdfd::diagnostic_lost() {
+            return EXIT_FATAL;
+        }
+        status
+    } else if stdfd::diagnostic_lost() {
+        status.max(EXIT_FATAL)
+    } else {
+        status
+    }
 }
 
 // ============================================================================
@@ -1782,10 +2123,10 @@ impl Verbose {
         if self.to_stderr {
             stdfd::diag_bytes(line);
         } else {
-            // Unbuffered, by fd. Nothing else in `-c`/`-x` writes to stdout, so
-            // there is no ordering to keep with a `BufWriter`, and a failure to
-            // write the listing must not abort the archive.
-            drop(stdfd::write_all(1, line));
+            // A line at a time, and a failure recorded rather than acted on: a
+            // listing that cannot be written must not abort the archive, and is
+            // reported once the run is over. See [`list_line`].
+            list_line(line);
         }
     }
 }
@@ -2076,8 +2417,17 @@ impl OwnerNames {
 /// two are separate command-line arguments, and stores the *first* name it
 /// happened to archive, so `tar -c t/h t/a.txt` links `a.txt` to `h`.
 #[cfg(unix)]
-struct Creator<'a> {
-    out: &'a mut dyn Write,
+struct Creator<'a, 'w> {
+    /// The archive, a record at a time. The writer itself rather than any
+    /// `Write`, because a failed write is reported with how much of the record
+    /// it had delivered -- see [`archive_write_failed`].
+    out: &'a mut RecordWriter<'w>,
+    /// The archive's name as GNU's write diagnostics give it: as typed, or `-`
+    /// for standard output. See [`archive_label`].
+    label: Vec<u8>,
+    /// The archive is `/dev/null`, so no regular file is opened: see
+    /// [`is_dev_null`] and [`Creator::dumpable`].
+    dev_null: bool,
     verbose: Verbose,
     /// 0, or [`EXIT_FATAL`] once anything has gone wrong. A member that cannot
     /// be archived sets this and is skipped; it does not abandon the archive.
@@ -2108,14 +2458,17 @@ struct Creator<'a> {
     /// grows — the result is a much larger file holding a truncated snapshot of
     /// itself, and no warning that it happened.
     archive_id: Option<(u64, u64)>,
-    /// Cleared by the first failed write. There is no point continuing after
-    /// one: every later member would land at the wrong offset, producing a file
-    /// that looks like an archive and is not one.
+    /// Cleared when the run is over before its operands are: by the first
+    /// failed write of the archive, which is fatal -- every later member would
+    /// land at the wrong offset, producing a file that looks like an archive and
+    /// is not one -- and by the member list's reader leaving (see
+    /// [`READER_GONE`]). Nothing is stat'ed, opened, written or announced after
+    /// it, because GNU is no longer running by then.
     writable: bool,
 }
 
 #[cfg(unix)]
-impl Creator<'_> {
+impl Creator<'_, '_> {
     fn fail(&mut self) {
         self.status = EXIT_FATAL;
     }
@@ -2134,14 +2487,24 @@ impl Creator<'_> {
     /// Both would render the same today. This one cannot drift into rendering a
     /// *stored* name, which is the difference the paragraph above turns on.
     fn announce(&mut self, shown: &[u8], meta: &fs::Metadata, typeflag: u8, linkname: &[u8]) {
-        use std::os::unix::fs::MetadataExt;
         if self.verbose.silent() {
             return;
         }
-        if !self.verbose.long() {
+        if self.verbose.long() {
+            self.announce_long(shown, meta, typeflag, linkname);
+        } else {
             self.verbose.line(shown);
-            return;
         }
+        // The line went nowhere, and nobody will read the next one: stop where
+        // GNU would have been killed. See [`READER_GONE`].
+        if reader_gone() {
+            self.writable = false;
+        }
+    }
+
+    /// [`Creator::announce`]'s `-vv` line.
+    fn announce_long(&mut self, shown: &[u8], meta: &fs::Metadata, typeflag: u8, linkname: &[u8]) {
+        use std::os::unix::fs::MetadataExt;
         // Borrowed out first: the two lookups take `&mut self`, and the struct
         // literal below borrows it again.
         let uname = self.owners.user(meta.uid()).to_vec();
@@ -2182,12 +2545,29 @@ impl Creator<'_> {
         match self.out.write_all(buf) {
             Ok(()) => true,
             Err(e) => {
-                diag!("tar: Cannot write: {}", strerror(&e));
                 self.writable = false;
-                self.fail();
+                archive_write_failed(&self.label, &e, self.out.sent(), self.out.record());
                 false
             }
         }
+    }
+
+    /// Whether a regular file's contents are read at all: GNU's
+    /// `file_dumpable_p`.
+    ///
+    /// Not when the archive is `/dev/null` -- the bytes would be thrown away,
+    /// and so the file is not even opened (see [`is_dev_null`]). And not when it
+    /// is empty and readable by everyone: there is nothing to read, and nothing
+    /// the open could tell us. An empty file *without* those permissions is still
+    /// opened, because the open is what discovers that it cannot be read.
+    fn dumpable(&self, meta: &fs::Metadata) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        /// GNU's `MODE_R`: read permission for owner, group and other alike.
+        const MODE_R: u32 = 0o444;
+        if self.dev_null {
+            return false;
+        }
+        !(meta.len() == 0 && meta.mode() & MODE_R == MODE_R)
     }
 
     /// The name this member goes into the archive under: `name` with any
@@ -2273,6 +2653,11 @@ impl Creator<'_> {
     /// file. Restoring such an archive does not restore the tree.
     fn add(&mut self, path: &Path, name: &[u8]) {
         use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        // The run is over -- a fatal write, or nobody reading the list. Nothing
+        // more is looked at, so nothing more is reported; see the field.
+        if !self.writable {
+            return;
+        }
         let meta = match fs::symlink_metadata(path) {
             Ok(m) => m,
             Err(e) => {
@@ -2448,13 +2833,18 @@ impl Creator<'_> {
         // `tar-hardnotice3.sh`.
         let stored = self.stored_name(name, false);
 
-        let mut f = match File::open(path) {
-            Ok(f) => f,
-            Err(e) => {
-                diag!("tar: {}: Cannot open: {}", escape(name), strerror(&e));
-                self.fail();
-                return false;
+        // Opened only if it is going to be read: see [`Creator::dumpable`].
+        let file = if self.dumpable(meta) {
+            match File::open(path) {
+                Ok(f) => Some(f),
+                Err(e) => {
+                    diag!("tar: {}: Cannot open: {}", escape(name), strerror(&e));
+                    self.fail();
+                    return false;
+                }
             }
+        } else {
+            None
         };
 
         let Some(mut header) = self.header_for(&stored, meta) else {
@@ -2468,6 +2858,16 @@ impl Creator<'_> {
         }
 
         self.announce(name, meta, b'0', b"");
+        if !self.writable {
+            return false;
+        }
+        // Not read, so no data blocks: an empty file has none, and an archive
+        // that is `/dev/null` is not written to at all, so the blocks the header
+        // promises have nowhere to go. GNU's loop runs over them without
+        // filling them; there is nothing here for it to do.
+        let Some(mut f) = file else {
+            return true;
+        };
 
         let mut remaining = declared;
         let mut buf = [0u8; BLOCK_SIZE];
@@ -2545,6 +2945,9 @@ impl Creator<'_> {
         let mut shown = name.to_vec();
         shown.push(b'/');
         self.announce(&shown, meta, b'5', b"");
+        if !self.writable {
+            return;
+        }
 
         let entries = match fs::read_dir(dir) {
             Ok(e) => e,
@@ -2658,6 +3061,14 @@ struct RecordWriter<'a> {
     /// the end, so the file that comes out is the same file.
     buf: Vec<u8>,
     record: usize,
+    /// How many bytes of the record being written have reached the stream.
+    ///
+    /// Reset as each record starts going out, and read only after a write has
+    /// failed: GNU reports a record that went out in part as `Wrote only N of M
+    /// bytes`, and one that did not go out at all as `Cannot write:` with the
+    /// reason -- a disk that fills part-way through a record is the first case,
+    /// `/dev/full` the second. See [`archive_write_failed`].
+    sent: usize,
 }
 
 #[cfg_attr(not(unix), allow(dead_code))]
@@ -2667,14 +3078,48 @@ impl<'a> RecordWriter<'a> {
             inner,
             buf: Vec::new(),
             record,
+            sent: 0,
         }
+    }
+
+    /// Bytes of the current record delivered so far. See the field.
+    fn sent(&self) -> usize {
+        self.sent
+    }
+
+    /// The record size, for the `of M bytes` half of the same message.
+    fn record(&self) -> usize {
+        self.record
+    }
+
+    /// `write` until `data` is gone, counting every byte that went into
+    /// [`RecordWriter::sent`] -- `write_all`, with the count kept when it fails.
+    fn deliver(&mut self, data: &[u8]) -> io::Result<()> {
+        let mut rest = data;
+        while !rest.is_empty() {
+            match self.inner.write(rest) {
+                Ok(0) => return Err(io::Error::from(io::ErrorKind::WriteZero)),
+                Ok(n) => {
+                    self.sent = self.sent.saturating_add(n);
+                    rest = rest.get(n..).unwrap_or_default();
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
     }
 
     /// Hand the record in hand to the stream and start a new one.
     fn spill(&mut self) -> io::Result<()> {
-        self.inner.write_all(&self.buf)?;
+        self.sent = 0;
+        // Taken out for the call, which needs `&mut self` for the count, and put
+        // back afterwards so that its allocation is reused by the next record.
+        let record = std::mem::take(&mut self.buf);
+        let result = self.deliver(&record);
+        self.buf = record;
         self.buf.clear();
-        Ok(())
+        result
     }
 
     /// Write the last record, padded out to the full record length, and flush.
@@ -2685,9 +3130,11 @@ impl<'a> RecordWriter<'a> {
     ///
     /// # Errors
     ///
-    /// Whatever the underlying stream gives. The caller reports it as
-    /// `Cannot write:` — this is the point at which the bytes that make the file
-    /// a valid archive reach the disk, so a failure here loses exactly those.
+    /// Whatever the underlying stream gives, with [`RecordWriter::sent`]
+    /// counting the record's bytes and its pad's alike, since the two are one
+    /// record. The caller reports it through [`archive_write_failed`] — this is
+    /// the point at which the bytes that make the file a valid archive reach the
+    /// disk, so a failure here loses exactly those.
     fn finish(&mut self) -> io::Result<()> {
         if !self.buf.is_empty() {
             let pad = self.record.saturating_sub(self.buf.len());
@@ -2702,7 +3149,7 @@ impl<'a> RecordWriter<'a> {
                 let Some(chunk) = zeros.get(..take) else {
                     break;
                 };
-                self.inner.write_all(chunk)?;
+                self.deliver(chunk)?;
                 left = left.saturating_sub(take);
             }
         }
@@ -2740,34 +3187,52 @@ impl Write for RecordWriter<'_> {
 
 #[cfg(unix)]
 fn do_create(
-    archive_file: Option<&OsStr>,
+    archive: Option<&OsStr>,
     chdirs: &[OsString],
     files: &[Operand],
     verbose: Verbose,
     record_size: u64,
 ) -> i32 {
-    // Identified by inode, not by name: `tar -cf ./b.tar .` and `tar -cf b.tar
-    // .` name the archive differently and it is the same file both times, and
-    // comparing the strings would catch neither.
-    let mut archive_id = None;
-    let mut sink: Box<dyn Write> = match archive_file {
+    use std::os::unix::fs::MetadataExt;
+    // `None` is standard output; see [`resolve_archive`]. Either way the
+    // archive is `fstat`ed once it is open, for the two checks below.
+    let (opened, archive_meta): (Box<dyn Write>, Option<fs::Metadata>) = match archive {
         Some(path) => match File::create(path) {
+            // A stat that fails is not fatal; it only costs the two checks,
+            // and the archive is otherwise fine.
             Ok(f) => {
-                use std::os::unix::fs::MetadataExt;
-                // A stat that fails is not fatal; it only costs the self-check,
-                // and the archive is otherwise fine.
-                if let Ok(m) = f.metadata() {
-                    archive_id = Some((m.dev(), m.ino()));
-                }
-                Box::new(f)
+                let meta = f.metadata().ok();
+                (Box::new(f), meta)
             }
             Err(e) => {
                 diag!("tar: {}: Cannot open: {}", escape_os(path), strerror(&e));
                 return fatal();
             }
         },
-        None => Box::new(io::stdout()),
+        None => {
+            if let Err(rc) = refuse_terminal(true) {
+                return rc;
+            }
+            (Box::new(StdioArchive(1)), stdfd::metadata(1).ok())
+        }
     };
+    let dev_null = is_dev_null(archive, archive_meta.as_ref());
+    // Nothing is written to `/dev/null` at all -- see [`is_dev_null`] -- which
+    // also covers a standard output that `stdopen` made a *read-only*
+    // `/dev/null`, where a write would fail.
+    let mut sink: Box<dyn Write> = if dev_null {
+        Box::new(io::sink())
+    } else {
+        opened
+    };
+    // Identified by inode, not by name: `tar -cf ./b.tar .` and `tar -cf b.tar
+    // .` name the archive differently and it is the same file both times, and
+    // comparing the strings would catch neither. The same for an archive on
+    // standard output that was redirected into the tree being archived. Not for
+    // `/dev/null`, where GNU skips the check along with the writing.
+    let archive_id = archive_meta
+        .filter(|_| !dev_null)
+        .map(|m| (m.dev(), m.ino()));
 
     // A record larger than a `usize` cannot be buffered, and cannot be asked for
     // either on the hosts this runs on: `--record-size` accepts up to 2⁶⁴−512,
@@ -2779,6 +3244,8 @@ fn do_create(
 
     let mut creator = Creator {
         out: &mut out,
+        label: archive_label(archive),
+        dev_null,
         verbose,
         status: 0,
         links: BTreeMap::new(),
@@ -2794,6 +3261,11 @@ fn do_create(
     // so `entered` only ever moves forward and a plain chdir suffices.
     let mut entered = 0usize;
     for operand in files {
+        // A fatal write, or a reader that left: the run is over, and GNU would
+        // not be here to enter the next `-C` or report on the next operand.
+        if !creator.writable {
+            break;
+        }
         if let Err(rc) = enter_chdirs(chdirs, &mut entered, operand.dir) {
             return rc;
         }
@@ -2803,6 +3275,17 @@ fn do_create(
         // the whole point of `-C` over a path prefix.
         let name = os_bytes(&operand.name);
         creator.add(Path::new(&operand.name), &name);
+    }
+    // Ended early. A write that failed has been reported and was fatal
+    // (`archive_write_failed`); a reader that left is reported by nobody, and
+    // the run keeps the status it had earned by then (`READER_GONE`). Neither
+    // writes the end of the archive, and neither says anything more.
+    if !creator.writable {
+        return if reader_gone() {
+            creator.status
+        } else {
+            EXIT_FATAL
+        };
     }
     // A `-C` written after the last operand is still *executed* — so one naming
     // a directory that does not exist is the ordinary fatal chdir failure, and
@@ -2818,15 +3301,18 @@ fn do_create(
     let mut status = creator.status;
     // Read out before the borrow of `out` ends, and checked before finishing:
     // once a write has failed there is nothing to gain by writing the pad, and
-    // something to lose — a second `Cannot write:` for one broken stream, where
-    // GNU reports it once.
-    let writable = creator.writable;
+    // something to lose — a second report for one broken stream, where GNU
+    // reports it once, having exited at the first.
+    let label = creator.label.clone();
+    if !creator.writable {
+        return if reader_gone() { status } else { EXIT_FATAL };
+    }
     // The end-of-archive marker and the pad after it are the last things
     // written, so a failure here loses precisely the bytes that make the file a
     // valid archive.
-    if writable && let Err(e) = out.finish() {
-        diag!("tar: Cannot write: {}", strerror(&e));
-        status = EXIT_FATAL;
+    if let Err(e) = out.finish() {
+        archive_write_failed(&label, &e, out.sent(), out.record());
+        return if reader_gone() { status } else { EXIT_FATAL };
     }
 
     // Having executed the trailing `-C`s above, GNU then refuses the command
@@ -4651,25 +5137,60 @@ fn apply_delayed_links(
     }
 }
 
+/// The most a reading buffer is allowed to be, whatever the record size.
+///
+/// A record is GNU's unit of reading, and buffering one record is what makes a
+/// block-at-a-time decoder cost one system call per record rather than one per
+/// 512 bytes. But `--record-size` accepts records far beyond anything worth
+/// holding in memory to read a few kilobytes, so the buffer stops growing here;
+/// past it, a record is simply read in more than one call.
+const READ_BUFFER_MAX: usize = 1 << 20;
+
+/// Open the archive `-t` and `-x` read: GNU's `_open_archive (ACCESS_READ)`.
+///
+/// A file, or standard input once [`refuse_terminal`] has had its say; either
+/// way behind a buffer one record long (see [`READ_BUFFER_MAX`]). Standard input
+/// is read with `read(2)` itself rather than through `io::stdin()`, which would
+/// report a closed descriptor as an empty archive -- see [`StdioArchive`].
+///
+/// # Errors
+///
+/// The status, already reported, when the archive cannot be opened or is a
+/// terminal. Both are fatal, as they are in GNU.
+fn open_for_reading(archive: Option<&OsStr>, record_size: u64) -> Result<Box<dyn Read>, i32> {
+    let raw: Box<dyn Read> = match archive {
+        Some(path) => match File::open(path) {
+            Ok(f) => Box::new(f),
+            Err(e) => {
+                diag!("tar: {}: Cannot open: {}", escape_os(path), strerror(&e));
+                return Err(fatal());
+            }
+        },
+        None => {
+            refuse_terminal(false)?;
+            Box::new(StdioArchive(0))
+        }
+    };
+    let capacity = usize::try_from(record_size)
+        .unwrap_or(usize::MAX)
+        .clamp(BLOCK_SIZE, READ_BUFFER_MAX);
+    Ok(Box::new(io::BufReader::with_capacity(capacity, raw)))
+}
+
 fn do_extract(
-    archive_file: Option<&OsStr>,
+    archive: Option<&OsStr>,
     chdirs: &[OsString],
     verbose: Verbose,
     members: &[Operand],
     same_permissions: bool,
     old_files: OldFiles,
+    record_size: u64,
 ) -> i32 {
     // The archive is opened before the `-C` chdir, so its own path is resolved
     // against the directory the user was standing in, as GNU does.
-    let mut input: Box<dyn Read> = match archive_file {
-        Some(path) => match File::open(path) {
-            Ok(f) => Box::new(f),
-            Err(e) => {
-                diag!("tar: {}: Cannot open: {}", escape_os(path), strerror(&e));
-                return fatal();
-            }
-        },
-        None => Box::new(io::stdin()),
+    let mut input = match open_for_reading(archive, record_size) {
+        Ok(input) => input,
+        Err(rc) => return rc,
     };
 
     // Each member goes to the destination *its own operand* named, so the chain
@@ -4783,6 +5304,12 @@ fn do_extract(
             verbose.write(&long_line(member, &link_target, &mut ugswidth, &zone));
         } else {
             verbose.line(raw_name);
+        }
+        // Nobody is reading the list any more, and GNU would have been killed
+        // writing that line: this member is not extracted, and neither is
+        // anything after it. See [`READER_GONE`].
+        if reader_gone() {
+            return Handled::Stop(0);
         }
 
         // `--keep-newer-files` is decided here, above the type switch, because
@@ -5040,6 +5567,12 @@ fn do_extract(
     {
         return rc;
     }
+    // The same for a reader of the list that went away, for the same reason --
+    // GNU is no longer running -- except that nothing reported it, and the run
+    // keeps the status it had earned. See [`READER_GONE`].
+    if reader_gone() {
+        return status;
+    }
 
     // Links before directories, because creating one bumps the mtime of the
     // directory it lands in. GNU reaches the same place by a longer route — it
@@ -5077,7 +5610,7 @@ fn do_extract(
     }
 
     let missing = selector.report_missing();
-    let walk_status = report_stop(stop, &archive_label(archive_file));
+    let walk_status = report_stop(stop, &archive_label(archive));
     if walk_status != 0 {
         return walk_status;
     }
@@ -5165,9 +5698,11 @@ struct DelayedLink {
     id: (u64, u64),
 }
 
-/// The archive's name for a diagnostic: its path, or `-` for standard input.
-fn archive_label(archive_file: Option<&OsStr>) -> Vec<u8> {
-    archive_file.map_or_else(|| b"-".to_vec(), |p| os_bytes(p).into_owned())
+/// The archive's name for a diagnostic: its path, or `-` for the standard
+/// stream -- which is how GNU names it, since `-` is what its
+/// `archive_name_array` holds.
+fn archive_label(archive: Option<&OsStr>) -> Vec<u8> {
+    archive.map_or_else(|| b"-".to_vec(), |p| os_bytes(p).into_owned())
 }
 
 /// Open the file a regular member is to be written to, reporting why not.
@@ -5292,20 +5827,15 @@ fn extract_regular_file(
 }
 
 fn do_list_main(
-    archive_file: Option<&OsStr>,
+    archive: Option<&OsStr>,
     chdirs: &[OsString],
     verbose: u8,
     members: &[Operand],
+    record_size: u64,
 ) -> i32 {
-    let mut input: Box<dyn Read> = match archive_file {
-        Some(path) => match File::open(path) {
-            Ok(f) => Box::new(f),
-            Err(e) => {
-                diag!("tar: {}: Cannot open: {}", escape_os(path), strerror(&e));
-                return fatal();
-            }
-        },
-        None => Box::new(io::stdin()),
+    let mut input = match open_for_reading(archive, record_size) {
+        Ok(input) => input,
+        Err(rc) => return rc,
     };
 
     // Listing writes nothing to the filesystem, so a `-C` cannot change the
@@ -5328,17 +5858,18 @@ fn do_list_main(
         return rc;
     }
 
-    let stdout = io::stdout();
-    let mut out = io::BufWriter::new(stdout.lock());
     let mut selector = Selector::new(members, chdirs.len());
     // Read once, before any member is printed. `-tv` renders every timestamp in
     // the machine's zone, and re-resolving `TZ` per member would let a listing
     // straddle a zone change mid-file.
     let zone = localtime::Zone::from_env();
 
-    let (stop, write_err) = list_archive(
+    // Each line goes out as it is made and a failed one is remembered, not
+    // acted on: GNU lists to the end of the archive however many lines were
+    // lost, and says so once, at exit. See [`list_line`] and [`conclude`].
+    let stop = list_archive(
         input.as_mut(),
-        &mut out,
+        &mut Listing,
         verbose,
         &mut selector,
         &zone,
@@ -5346,15 +5877,12 @@ fn do_list_main(
         &mut entered,
     );
 
-    let flush_err = out.flush().err();
-    if let Some(e) = write_err.or(flush_err) {
-        // `tar -tf big.tar | head -5` closes the pipe on purpose; that is how
-        // a pipeline ends, not a failure of this program.
-        if e.kind() == io::ErrorKind::BrokenPipe {
-            return 0;
-        }
-        diag!("tar: 'standard output': Cannot write: {}", strerror(&e));
-        return fatal();
+    // `tar -tf big.tar | head -5` closes the pipe on purpose; that is how a
+    // pipeline ends, not a failure of this program, and GNU -- killed by the
+    // signal -- reports nothing after it, not even the members it never
+    // reached. See [`READER_GONE`].
+    if reader_gone() {
+        return 0;
     }
 
     // A `-C` that could not be entered exits on the spot; see `do_extract`.
@@ -5368,7 +5896,7 @@ fn do_list_main(
     // worth saying even when the archive also ended badly, because the two are
     // different complaints about different things.
     let missing = selector.report_missing();
-    let walk_status = report_stop(stop, &archive_label(archive_file));
+    let walk_status = report_stop(stop, &archive_label(archive));
     if walk_status != 0 {
         return walk_status;
     }
@@ -5391,12 +5919,17 @@ const UGSWIDTH_MIN: usize = 18;
 
 /// List an archive's members to `out`.
 ///
-/// Returns the reason the walk stopped and the first write error, if any; the
-/// caller turns those into a status. Splitting it that way is what lets the
-/// unit tests drive a synthetic archive through the real code path and inspect
-/// both the bytes written and *why* the read ended — the old version returned
-/// `io::Result<()>` and answered `Ok(())` for a truncated archive, a corrupt
-/// one, and a file that was never an archive alike.
+/// Returns the reason the walk stopped; the caller turns that into a status.
+/// Splitting it that way is what lets the unit tests drive a synthetic archive
+/// through the real code path and inspect both the bytes written and *why* the
+/// read ended — the old version returned `io::Result<()>` and answered `Ok(())`
+/// for a truncated archive, a corrupt one, and a file that was never an archive
+/// alike.
+///
+/// What became of the bytes written is not this function's business: `out` is
+/// [`Listing`] in a real run, which keeps a failure for [`conclude`] to report
+/// at exit, as GNU does, and the walk stops early only when the reader has gone
+/// (see [`READER_GONE`]).
 ///
 /// `verbose` is the counter, not a flag. Listing is the mode where that matters
 /// most: `-t` alone is already level 1 because `-t` bumps it, so the interesting
@@ -5410,22 +5943,23 @@ fn list_archive(
     zone: &localtime::Zone,
     chdirs: &[OsString],
     entered: &mut usize,
-) -> (Stop, Option<io::Error>) {
+) -> Stop {
     let mut ugswidth = UGSWIDTH_MIN;
-    let mut write_err: Option<io::Error> = None;
     // Listing announces the prefixes it *would* strip, exactly as extraction
     // does: measured, `tar -tf` on an archive holding `/a` prints ``Removing
     // leading `/' from member names`` above the `/a` line, and exits 0. The
     // notice belongs to reading a header, not to writing a file.
     let mut prefixes = PrefixNotice::new();
 
-    let stop = walk(input, |member, _data| {
-        // The notices go to stderr while the listing goes through a buffer, so
-        // without a flush every notice would surface after the whole listing.
-        // GNU has the same split and solves it the same way: gnulib's `error()`
-        // does `fflush(stdout)` before it writes. The hook is only invoked when
-        // a diagnostic is actually about to print, so the common member costs
-        // no extra syscall.
+    walk(input, |member, _data| {
+        // The notices go to stderr while the listing goes to `out`, so a writer
+        // that buffered would put every notice ahead of lines written before
+        // it. GNU has the same split and solves it the same way: gnulib's
+        // `error()` does `fflush(stdout)` before it writes. [`Listing`] flushes
+        // every line and `diag!` flushes standard output first anyway, so in a
+        // real run the hook finds nothing to do; it is kept so that the order
+        // does not depend on which writer `out` happens to be. It is only
+        // invoked when a diagnostic is about to print.
         let _stored_under =
             prefixes.strip_flushing(&member.name, PrefixKind::MemberNames, &mut || {
                 drop(out.flush());
@@ -5463,16 +5997,16 @@ fn list_archive(
             l.push(b'\n');
             l
         };
-        if let Err(e) = out.write_all(&line) {
-            write_err = Some(e);
-            // Zero, not a failure status: the reason is carried in `write_err`
-            // and a closed pipe is not an error at all.
+        // A failure is the writer's to keep: [`Listing`] records it and never
+        // returns one, and a test's `Vec` cannot fail. Discarded rather than
+        // acted on, because GNU goes on listing past a line it could not write.
+        drop(out.write_all(&line));
+        // Zero, not a failure status: a reader that left is not an error at all.
+        if reader_gone() {
             return Handled::Stop(0);
         }
         Handled::Skip
-    });
-
-    (stop, write_err)
+    })
 }
 
 /// One line of `tar -tv`, byte for byte as GNU lays it out.
@@ -5753,7 +6287,7 @@ mod tests {
     fn list_names(input: &[u8], out: &mut Vec<u8>) -> Stop {
         let mut sel = Selector::new(&[], 0);
         let mut entered = 0usize;
-        let (stop, err) = list_archive(
+        list_archive(
             &mut &input[..],
             out,
             1,
@@ -5761,9 +6295,7 @@ mod tests {
             &Zone::utc(),
             &[],
             &mut entered,
-        );
-        assert!(err.is_none(), "unexpected write error listing to a Vec");
-        stop
+        )
     }
 
     /// As [`list_names`], in the long (`-tv`) form — level 2, the counter's
@@ -5771,7 +6303,7 @@ mod tests {
     fn list_long(input: &[u8], out: &mut Vec<u8>) -> Stop {
         let mut sel = Selector::new(&[], 0);
         let mut entered = 0usize;
-        let (stop, err) = list_archive(
+        list_archive(
             &mut &input[..],
             out,
             2,
@@ -5779,9 +6311,7 @@ mod tests {
             &Zone::utc(),
             &[],
             &mut entered,
-        );
-        assert!(err.is_none(), "unexpected write error listing to a Vec");
-        stop
+        )
     }
 
     /// A header with every field a `-tv` line reads set explicitly.
@@ -8130,5 +8660,136 @@ mod tests {
         // every member name there is.
         assert_eq!(trim_slashes(b"/"), b"/");
         assert_eq!(trim_slashes(b""), b"");
+    }
+
+    // ---------------- which archive, and how far a write got ----------------
+
+    #[test]
+    fn a_dash_is_the_standard_stream_and_nothing_else_is() {
+        assert_eq!(resolve_archive(Some(OsStr::new("-")), None), None);
+        // Only exactly `-`: with anything else in the name it is a file.
+        assert_eq!(
+            resolve_archive(Some(OsStr::new("./-")), None),
+            Some(OsString::from("./-"))
+        );
+        assert_eq!(
+            resolve_archive(Some(OsStr::new("a.tar")), None),
+            Some(OsString::from("a.tar"))
+        );
+        // No `-f` and no `TAPE` is `-`.
+        assert_eq!(resolve_archive(None, None), None);
+    }
+
+    #[test]
+    fn tape_names_the_archive_only_when_no_f_does() {
+        let tape = Some(OsStr::new("t.tar"));
+        assert_eq!(resolve_archive(None, tape), Some(OsString::from("t.tar")));
+        assert_eq!(
+            resolve_archive(Some(OsStr::new("f.tar")), tape),
+            Some(OsString::from("f.tar"))
+        );
+        // `-f -` outranks a `TAPE` naming a file, as any `-f` does.
+        assert_eq!(resolve_archive(Some(OsStr::new("-")), tape), None);
+        // `-` in `TAPE` is the stream too, and an empty `TAPE` is a name -- one
+        // that will not open, which is GNU's `tar: : Cannot open`.
+        assert_eq!(resolve_archive(None, Some(OsStr::new("-"))), None);
+        assert_eq!(
+            resolve_archive(None, Some(OsStr::new(""))),
+            Some(OsString::new())
+        );
+    }
+
+    #[test]
+    fn every_f_is_counted_whatever_its_spelling() {
+        let a = run_args(&s(&["-c", "-f", "a.tar", "--file=b.tar", "x"])).unwrap();
+        assert_eq!(a.archives_named, 2);
+        // The last is the one kept, though with two it is never used.
+        assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("b.tar")));
+        // The old style hands each `f` its own word.
+        let a = run_args(&s(&["cff", "a.tar", "b.tar", "x"])).unwrap();
+        assert_eq!(a.archives_named, 2);
+        let a = run_args(&s(&["-cf", "a.tar", "x"])).unwrap();
+        assert_eq!(a.archives_named, 1);
+        assert_eq!(run_args(&s(&["-c", "x"])).unwrap().archives_named, 0);
+    }
+
+    /// A stream with room for `room` more bytes, which then fails the way a
+    /// full disk does -- `ENOSPC`, after a short write if the room ran out
+    /// part-way through one.
+    struct Filling {
+        room: usize,
+    }
+
+    impl Write for Filling {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if self.room == 0 {
+                return Err(io::Error::from_raw_os_error(28));
+            }
+            let n = buf.len().min(self.room);
+            self.room -= n;
+            Ok(n)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_record_that_went_in_part_says_how_much_went() {
+        // 1024-byte records and room for one and a half of them.
+        let mut disk = Filling { room: 1536 };
+        let mut w = RecordWriter::new(&mut disk, 1024);
+        // The first record is only buffered; the second write spills it, whole.
+        w.write_all(&[b'a'; 1024]).unwrap();
+        w.write_all(&[b'b'; 1024]).unwrap();
+        assert_eq!(w.sent(), 1024);
+        // The third spills the second record, which gets half way.
+        let err = w.write_all(&[b'c'; 512]).unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(28));
+        assert_eq!((w.sent(), w.record()), (512, 1024));
+    }
+
+    #[test]
+    fn a_record_that_went_nowhere_says_none_went() {
+        let mut disk = Filling { room: 0 };
+        let mut w = RecordWriter::new(&mut disk, 512);
+        w.write_all(&[b'a'; 512]).unwrap();
+        assert!(w.finish().is_err());
+        assert_eq!(w.sent(), 0);
+    }
+
+    #[test]
+    fn the_pad_counts_toward_the_record_it_finishes() {
+        // A last record of 100 bytes of member and 924 of pad, and room for
+        // 300: the data goes, and the pad runs out 200 bytes in. One record,
+        // so one count -- which is what GNU's message is about.
+        let mut disk = Filling { room: 300 };
+        let mut w = RecordWriter::new(&mut disk, 1024);
+        w.write_all(&[b'a'; 100]).unwrap();
+        assert!(w.finish().is_err());
+        assert_eq!((w.sent(), w.record()), (300, 1024));
+    }
+
+    #[test]
+    fn a_closed_pipe_is_not_counted_as_a_short_write() {
+        // `EPIPE` part-way through is the reader leaving, whatever was sent
+        // first: the count is kept, and it is the caller -- seeing the kind --
+        // that stays quiet. See `archive_write_failed`.
+        struct Leaving;
+        impl Write for Leaving {
+            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+                Err(io::Error::from(io::ErrorKind::BrokenPipe))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut pipe = Leaving;
+        let mut w = RecordWriter::new(&mut pipe, 512);
+        w.write_all(&[b'a'; 512]).unwrap();
+        let err = w.finish().unwrap_err();
+        assert!(stdfd::reader_gone(&err));
+        assert_eq!(w.sent(), 0);
     }
 }

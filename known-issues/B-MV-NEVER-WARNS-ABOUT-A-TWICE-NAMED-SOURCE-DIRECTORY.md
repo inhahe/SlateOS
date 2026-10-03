@@ -1,4 +1,21 @@
-## B-MV-NEVER-WARNS-ABOUT-A-TWICE-NAMED-SOURCE-DIRECTORY — OPEN 2026-09-03
+## B-MV-NEVER-WARNS-ABOUT-A-TWICE-NAMED-SOURCE-DIRECTORY — filed 2026-09-03 (lane B)
+
+**Status:** FIXED 2026-10-03 (lane B), boot confirmation pending. `mv`
+records a directory operand in the copied-inode table as upstream does
+(`copy.c:2664`), and `directory_named_again` in `mv.rs` is the directory arm
+of upstream's `earlier_file` block in its order: into itself, specified more
+than once (a success that leaves the source alone), or "will not create hard
+link". The `forget` calls on the failure paths now take directories too,
+which is upstream's arrangement -- `forget_created` is keyed by device and
+inode alone -- so the concern below about what `forget` would come to mean
+did not stand up. `scripts/mv-diff.sh` §22 expresses the case after all: its
+`FAR` hook builds the far tree and then takes the far directory's write bit
+(`chmod 555 .`), and three cases now agree (with `-v`, without, and three
+operands). The first run of them also found that a cross-device directory
+move printed `created directory …` without `-v`; fixed in `copy.rs`, where
+the `mv` arm had skipped the verbose test the `cp` arm makes.
+
+*The entry as filed:*
 
 **In short:** naming the same directory twice on one `mv` command line can make
 GNU print `mv: warning: source directory 'd' specified more than once` and skip

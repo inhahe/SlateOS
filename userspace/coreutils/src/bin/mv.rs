@@ -1464,35 +1464,36 @@ fn move_one<O: Write, E: Write>(
     // Nothing is asked when the rename *succeeded* (`copy.c:2663`), and this
     // function has already returned in that case.
     //
-    // Directories are left out, and unlike the rest of this block that *is* a
-    // gap rather than upstream's shape: `copy.c:2664` records a directory
-    // operand too, under `x->recursive && S_ISDIR`, and the `earlier_file` arm
-    // it feeds produces two sentences this `mv` therefore never says —
-    // `cannot copy a directory, X, into itself, Y` and `warning: source
-    // directory X specified more than once`.
+    // A directory operand is recorded too -- `copy.c:2664`, `x->recursive &&
+    // S_ISDIR (src_mode)` with `command_line_arg`, which every operand here is
+    // -- and always with `remember`, whatever its link count, since a
+    // directory's count says nothing about other names for it. A later operand
+    // naming the same directory then finds it, and [`directory_named_again`]
+    // says which of upstream's three things that is.
     //
-    // What keeps it small is how narrow the trigger is, which was measured
-    // rather than reasoned: the same directory operand twice over, *and* the
-    // first move must have got as far as copying and then failed to remove the
-    // source — a `forget_created` on any earlier failure takes the entry back
-    // out, and a success takes the source away, and either one leaves the
-    // second operand with nothing to find. `mv -v FAR/d FAR/d dest` with `FAR`
-    // read-only is the whole of it. Logged rather than fixed here because the
-    // table would have to start holding directories, which changes what
-    // [`Copied::forget`] means on every other path. See `known-issues.md` →
-    // `B-MV-NEVER-WARNS-ABOUT-A-TWICE-NAMED-SOURCE-DIRECTORY`.
-    let src_id = if src_meta.is_dir() {
-        None
-    } else {
-        file_id(src, &src_meta)
-    };
+    // The trigger is narrow, and was measured rather than reasoned: the same
+    // directory operand twice over, *and* the first move must have got as far
+    // as copying and then failed to remove the source. A failure earlier than
+    // that takes the entry back out ([`forget`], `forget_created`), and a
+    // success takes the source away, and either leaves the second operand
+    // nothing to find. `mv -v FAR/d FAR/d dest`, across devices, with `FAR`
+    // read-only, is the whole of it.
+    //
+    // The [`forget`] calls below take directories now as well, which is
+    // upstream's arrangement and not a widening of it: `forget_created` is
+    // keyed by device and inode alone (`copy.c:2865`, `2883`, `3362`), and on
+    // each of those paths the directory's destination was not made either.
+    let src_id = file_id(src, &src_meta);
     if let Some(id) = &src_id {
-        let earlier = if nlink(&src_meta) > 1 {
+        let earlier = if src_meta.is_dir() || nlink(&src_meta) > 1 {
             job.copied.remember(id, target)
         } else {
             job.copied.lookup(id).map(Path::to_path_buf)
         };
         if let Some(earlier) = earlier {
+            if src_meta.is_dir() {
+                return directory_named_again(job, &earlier, src, target, moved_aside.as_deref());
+            }
             return link_to_earlier(
                 job,
                 &earlier,
@@ -1534,9 +1535,9 @@ fn move_one<O: Write, E: Write>(
         // No [`Copied::forget`] here, and upstream says why in as many words:
         // "there is no need to call forget_created here, (compare with the other
         // calls in this file) since the destination directory didn't exist
-        // before" (`copy.c:2807`). This `mv` cannot even reach it with an entry
-        // to forget — the table takes no directories — but the omission is
-        // deliberate rather than an oversight, which is why it is written down.
+        // before" (`copy.c:2807`). The directory's entry stays in the table, as
+        // upstream's does -- deliberate rather than an oversight, which is why
+        // it is written down.
         return false;
     }
 
@@ -1782,6 +1783,67 @@ fn link_to_earlier<O: Write, E: Write>(
     // A hard link's source is never a directory — `link(2)` cannot make one —
     // so this walk is always the one-`unlink` case, and the `lstat` says so.
     remove_source(job, src, src_meta)
+}
+
+/// A directory operand whose inode an earlier operand already recorded:
+/// the directory arm of GNU's `earlier_file` block (`copy.c:2694`), in its
+/// order.
+///
+/// * **The source is where the earlier copy went** -- `cannot copy a
+///   directory, X, into itself, Y`, a failure, nothing removed. Upstream sets
+///   `copy_into_self` here, which in `mv.c` means the same thing: no removal,
+///   status 1.
+/// * **This destination is where the earlier copy went** -- the operand was
+///   simply named twice. `warning: source directory X specified more than
+///   once`, and *success*: upstream sets `rename_succeeded` so that `mv.c`
+///   leaves the source alone, and "just ignore[s] this repeated entry". The
+///   first operand has already said why the source is still there.
+/// * **Anything else** -- one directory asked to appear under two names in
+///   the destination, which only a hard link could do and which upstream
+///   refuses: `will not create hard link Y to directory Z`, a failure.
+///
+/// The two failures are `goto un_backup`: a backup made of the destination is
+/// put back. The entry is not forgotten on either -- `un_backup` forgets only
+/// when `earlier_file` is null, and here it is not -- because the destination
+/// it names was made, by the earlier operand, and is still there.
+fn directory_named_again<O: Write, E: Write>(
+    job: &mut Job<'_, O, E>,
+    earlier: &Path,
+    src: &Path,
+    target: &Path,
+    moved_aside: Option<&Path>,
+) -> bool {
+    if same_entry(src, earlier) {
+        let _ = writeln!(
+            job.err,
+            "mv: cannot copy a directory, {}, into itself, {}",
+            quoteaf_os(src),
+            quoteaf_os(target)
+        );
+    } else if same_entry(target, earlier) {
+        let _ = writeln!(
+            job.err,
+            "mv: warning: source directory {} specified more than once",
+            quoteaf_os(src)
+        );
+        return true;
+    } else {
+        let _ = writeln!(
+            job.err,
+            "mv: will not create hard link {} to directory {}",
+            quoteaf_os(target),
+            quoteaf_os(earlier)
+        );
+    }
+    backup::un_backup(
+        "mv",
+        moved_aside,
+        target,
+        job.flags.verbose,
+        &mut *job.out,
+        &mut *job.err,
+    );
+    false
 }
 
 /// Note that the file just moved now sits at `relname`, so a later source that
@@ -4717,6 +4779,127 @@ mod tests {
         assert!(
             copied.lookup(&id).is_some(),
             "a complete destination has nothing to forget"
+        );
+    }
+
+    /// A directory named twice whose first, cross-device move copied it and
+    /// could not remove it: the second is upstream's warning and a success,
+    /// not a second copy -- `known-issues-resolved/`
+    /// `B-MV-NEVER-WARNS-ABOUT-A-TWICE-NAMED-SOURCE-DIRECTORY`.
+    ///
+    /// Driven as the test above is, with the rename "returning" `EXDEV`; the
+    /// source survives the first move because the directory holding its name
+    /// has lost its write bit.
+    #[test]
+    #[cfg(unix)]
+    fn a_directory_named_twice_is_warned_about_not_moved_twice() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("xdev_dir_twice");
+        let pen = dir.path("pen");
+        let src = pen.join("d");
+        fs::create_dir_all(src.join("sub")).unwrap();
+        fs::write(src.join("f"), b"hello").unwrap();
+        let target = dir.path("d");
+        fs::set_permissions(&pen, fs::Permissions::from_mode(0o555)).unwrap();
+        // As above: root, and some filesystems, ignore the write bit.
+        if fs::write(pen.join("probe"), b"").is_ok() {
+            fs::set_permissions(&pen, fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+
+        let mut out: Vec<u8> = Vec::new();
+        let mut err: Vec<u8> = Vec::new();
+        let mut answers = Canned::new(&[]);
+        let flags = MvFlags::default();
+        let mut copied = Copied::default();
+        let mut seen: Option<DestInfo> = Some(DestInfo::default());
+        let (first, second) = {
+            let mut job = Job {
+                flags: &flags,
+                out: &mut out,
+                err: &mut err,
+                answers: &mut answers,
+                copied: &mut copied,
+                umask: coreutils::umask::current(),
+            };
+            let mut once = |job: &mut Job<'_, Vec<u8>, Vec<u8>>| {
+                move_one(
+                    job,
+                    &src,
+                    &target,
+                    &OsString::from("d"),
+                    Renamed::Failed(io::Error::from_raw_os_error(CROSS_DEVICE_ERRNO)),
+                    false,
+                    &mut seen,
+                )
+            };
+            (once(&mut job), once(&mut job))
+        };
+        fs::set_permissions(&pen, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(!first, "the first move could not remove its source");
+        assert!(second, "the repeat is a warning, not a failure");
+        assert_eq!(
+            String::from_utf8_lossy(&err),
+            format!(
+                "mv: cannot remove {}: Permission denied\n\
+                 mv: warning: source directory {} specified more than once\n",
+                shown(&src),
+                shown(&src)
+            ),
+        );
+        assert_eq!(fs::read(target.join("f")).unwrap(), b"hello");
+        assert!(src.is_dir(), "the repeat must leave the source alone");
+    }
+
+    /// The other two answers upstream gives a directory it has seen before:
+    /// the same inode going to a *different* name is a hard link to a
+    /// directory, which it refuses; and a source that is itself where the
+    /// earlier copy went is a copy into itself.
+    #[test]
+    fn a_directory_seen_before_elsewhere_is_refused() {
+        let dir = scratch("dir_seen_before");
+        let earlier = dir.path("dest/d");
+        fs::create_dir_all(&earlier).unwrap();
+        let src = dir.path("src/d");
+        fs::create_dir_all(&src).unwrap();
+        let other = dir.path("dest/e");
+
+        let mut out: Vec<u8> = Vec::new();
+        let mut err: Vec<u8> = Vec::new();
+        let mut answers = Canned::new(&[]);
+        let flags = MvFlags::default();
+        let mut copied = Copied::default();
+        let mut job = Job {
+            flags: &flags,
+            out: &mut out,
+            err: &mut err,
+            answers: &mut answers,
+            copied: &mut copied,
+            umask: coreutils::umask::current(),
+        };
+        assert!(!directory_named_again(
+            &mut job, &earlier, &src, &other, None
+        ));
+        assert!(!directory_named_again(
+            &mut job, &earlier, &earlier, &other, None
+        ));
+        assert!(directory_named_again(
+            &mut job, &earlier, &src, &earlier, None
+        ));
+        drop(job);
+        assert_eq!(
+            String::from_utf8_lossy(&err),
+            format!(
+                "mv: will not create hard link {} to directory {}\n\
+                 mv: cannot copy a directory, {}, into itself, {}\n\
+                 mv: warning: source directory {} specified more than once\n",
+                shown(&other),
+                shown(&earlier),
+                shown(&earlier),
+                shown(&other),
+                shown(&src)
+            ),
         );
     }
 

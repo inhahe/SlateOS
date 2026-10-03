@@ -87,6 +87,32 @@ machine-readable half.
 
 Nothing here needs doing for code this project wrote itself.
 
+## Lane B: done (2026-10-01)
+
+Lane B's ports are named, eleven components besides `file`, in five
+manifests: `userspace/coreutils/licenses/` (GNU coreutils 9.4, gnulib, GNU
+findutils 4.9.0, GNU diffutils 3.10, GNU Time 1.9, procps-ng 4.0.4),
+`userspace/ulclosestream/licenses/` (util-linux 2.39.3),
+`userspace/localtime/licenses/` (glibc 2.39), `userspace/oils/licenses/`
+(GNU Bash 5.2.37) and `userspace/autoopts/licenses/` (AutoOpts 41.1, GNU
+sharutils 4.15.2). `known-issues.md` B-PORTED-CODE-CARRIES-NO-NOTICES has
+the survey and how each licence was read.
+
+**For every other lane:** the gatherer refuses a component named by two
+manifests, so if your code ports one of these -- lane D and glibc or gnulib
+are the likely case -- do not add a second entry: file a request and lane B
+will add your crate to the comment above its entry (and widen the entry's
+licence, if your files carry one it does not list).
+
+One more, which other lanes may share: a table generated from the Unicode
+Character Database's files is a modified copy of them, and the Unicode
+licence lets those travel only with its notice. Lane B's width tables now
+come from the UCD's files (design-decisions §1042), so
+`userspace/charwidth/licenses/` names the Unicode Character Database 18.0.0
+(`Unicode-3.0`). A lane with its own UCD-derived tables at a *different*
+Unicode version names that version itself; at the same version, the
+two-manifests rule above applies.
+
 ## Reply from lane F -- 2026-10-01
 
 Both written, and `gather-notices.py --check` and `test-gather-notices.py`
@@ -110,13 +136,10 @@ texts, attributions included.
   and **fontTools**' tag registry. Each has its text beside the manifest, and
   the crate's README now says what derives from where.
 
-For everyone else, one thing this turned up: a table *generated from* the
-Unicode Character Database owes Unicode's notice (Unicode License v3 asks for
-it "with all copies of the Data Files ... or in associated Documentation").
-`gui/font` now carries it as `Unicode Character Database` 16.0.0. The
-gatherer refuses the same component and version named by two manifests, so a
-crate with tables from Unicode 16.0.0 is already covered; one built from
-another version needs an entry of its own.
+The Unicode point lane B makes above applies here too: `gui/font`'s tables
+come from Unicode 16.0.0, so `gui/font/licenses/` names the `Unicode Character
+Database` at 16.0.0, beside lane B's 18.0.0. A crate with tables from 16.0.0
+is covered by this entry and must not add a second.
 
 `rav1d` needed nothing: its `COPYING` and `license` are found as a vendored
 crate.

@@ -558,7 +558,10 @@ fn scan_arg(arg: &[u8]) -> Result<Operand, getopt::Error> {
             precision = if exponent < 0 {
                 saturating_add_i64(precision, exponent.saturating_neg())
             } else {
-                saturating_add_i64(precision, -i64::from(precision).min(exponent))
+                saturating_add_i64(
+                    precision,
+                    i64::from(precision).min(exponent).saturating_neg(),
+                )
             };
             // The `e...` is read but never written, so it leaves the width.
             width = width.wrapping_sub(s.len().wrapping_sub(e));
@@ -621,9 +624,13 @@ fn strtol(s: &[u8]) -> i64 {
         }
         magnitude = magnitude
             .saturating_mul(10)
-            .saturating_add(i64::from(c - b'0'));
+            .saturating_add(i64::from(c.saturating_sub(b'0')));
     }
-    if neg { -magnitude } else { magnitude }
+    if neg {
+        magnitude.saturating_neg()
+    } else {
+        magnitude
+    }
 }
 
 /// `int += long`, saturating rather than wrapping.
@@ -780,7 +787,9 @@ fn default_format(settings: &Settings, first: Operand, step: Operand, last: Oper
             // corrected for the difference between how it was written and how
             // it is about to be printed.
             let widen = |width: usize, precision: i32| {
-                width.wrapping_add_signed(isize::try_from(prec - precision).unwrap_or(0))
+                width.wrapping_add_signed(
+                    isize::try_from(prec.saturating_sub(precision)).unwrap_or(0),
+                )
             };
             let mut first_width = widen(first.width, first.precision);
             let mut last_width = widen(last.width, last.precision);

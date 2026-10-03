@@ -721,8 +721,12 @@ fn long_option(
         ),
         None => (body, None),
     };
-    let typed = String::from_utf8_lossy(typed_bytes).into_owned();
-    let (resolved, takes) = OD.resolve_long(&typed, bytes, LONG_OPTIONS)?;
+    // Every name in the table is ASCII, so one that is not UTF-8 matches none,
+    // and is refused whole, as typed -- upstream's `unrecognized option`.
+    let Ok(typed) = std::str::from_utf8(typed_bytes) else {
+        return Err(Fail::from(OD.unrecognized_option(bytes)));
+    };
+    let (resolved, takes) = OD.resolve_long(typed, bytes, LONG_OPTIONS)?;
     let value = match takes {
         Takes::Nothing => {
             if inline.is_some() {

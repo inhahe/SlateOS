@@ -420,8 +420,38 @@ def baseline_keys() -> set[tuple[str, int]]:
     return out
 
 
-def write_baseline(found: list[tuple[str, int, int, int]]) -> int:
-    keys = sorted({(p, b) for p, _ln, b, _n in found})
+def baseline_notes() -> dict[tuple[str, int], str]:
+    """The note each baseline entry carries, keyed like `baseline_keys`."""
+    if not BASELINE.is_file():
+        return {}
+    return _parse_baseline_notes(BASELINE.read_text(encoding="utf-8"))
+
+
+def _parse_baseline_notes(text: str) -> dict[tuple[str, int], str]:
+    """`baseline_notes`'s parser, over a string, so the self-test can reach it."""
+    out: dict[tuple[str, int], str] = {}
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        parts = line.split("\t", 2)
+        if len(parts) < 2:
+            continue
+        try:
+            key = (parts[0].strip(), int(parts[1], 16))
+        except ValueError:
+            continue
+        out[key] = parts[2].strip() if len(parts) > 2 else ""
+    return out
+
+
+def render_baseline(keys: list[tuple[str, int]],
+                    notes: dict[tuple[str, int], str]) -> str:
+    """The baseline file for `keys`, each entry keeping the note it had.
+
+    The notes are the only thing in this file a person wrote -- the gate's own
+    refusal says "--update-baseline, then say why" -- so a rewrite that dropped
+    them would erase the reason for every tolerated byte in the tree, the first
+    time anybody baselined a new one. Until 2026-10-01 it did exactly that."""
     lines = [
         "# Occurrences of a raw control byte that are known and tolerated.",
         "# Written by scripts/check-control-bytes.py --update-baseline.",
@@ -432,11 +462,16 @@ def write_baseline(found: list[tuple[str, int, int, int]]) -> int:
         "",
     ]
     for p, b in keys:
-        lines.append(f"{p}\t{b:02x}\t")
+        lines.append(f"{p}\t{b:02x}\t{notes.get((p, b), '')}")
+    return "\n".join(lines) + "\n"
+
+
+def write_baseline(found: list[tuple[str, int, int, int]]) -> int:
+    keys = sorted({(p, b) for p, _ln, b, _n in found})
     # `newline=""` so this is LF on every platform: the file is read back by
     # this same gate, and a fixture whose bytes depend on the host is the one
     # kind that cannot be trusted.
-    write_text(BASELINE, "\n".join(lines) + "\n", newline="")
+    write_text(BASELINE, render_baseline(keys, baseline_notes()), newline="")
     return len(keys)
 
 
@@ -591,6 +626,23 @@ def self_test() -> int:
          _parse_baseline_text("# c\n\n") == set())
     case("a malformed byte field is skipped, not crashed on",
          _parse_baseline_text("x\tzz\t") == set())
+
+    # -- the baseline writer keeps what a person wrote --
+    old = "# header\na/b.bin\t00\tfixture: why\nc/d.txt\t0c\t\n"
+    notes = _parse_baseline_notes(old)
+    case("a note is read with its entry",
+         notes == {("a/b.bin", 0x00): "fixture: why", ("c/d.txt", 0x0C): ""})
+    rewritten = render_baseline([("a/b.bin", 0x00), ("e/f.txt", 0x0C)], notes)
+    case("a rewrite keeps a surviving entry's note",
+         "a/b.bin\t00\tfixture: why\n" in rewritten)
+    case("...gives a new entry an empty one to fill in",
+         "e/f.txt\t0c\t\n" in rewritten)
+    case("...and drops an entry the tree no longer has",
+         "c/d.txt" not in rewritten)
+    case("...in a file the reader reads back to the same keys",
+         _parse_baseline_text(rewritten) == {("a/b.bin", 0x00), ("e/f.txt", 0x0C)})
+    case("a note may itself hold a tab-free colon and spaces",
+         _parse_baseline_notes("p\t07\ta: b c")[("p", 0x07)] == "a: b c")
 
     bad = [label for label, ok in cases if not ok]
     for label, ok in cases:

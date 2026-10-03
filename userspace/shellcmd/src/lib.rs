@@ -77,9 +77,44 @@ pub fn shell_bytes(text: &[u8]) -> Command {
     }
 }
 
+/// `program -c text`, with `argv[0]` spelled by the caller: [`shell`] for a
+/// utility whose upstream chooses its own shell.
+///
+/// `split --filter` is the one. GNU's runs the user's `$SHELL` rather than
+/// `/bin/sh`, and names it by its last component -- `execl (shell_prog,
+/// last_component (shell_prog), "-c", filter_command, (char *) nullptr)` -- so
+/// a command that fails under `SHELL=/bin/bash` says `bash: line 1: ...`
+/// there, not `sh: 1: ...`. Which program, and how it is named, are that
+/// upstream's own decisions, so both are arguments here rather than a policy
+/// this crate would have to guess at.
+///
+/// `program` is found the way [`Command::new`] finds a program: a name with no
+/// slash in it is looked up on `PATH`. A caller imitating `execl`, which never
+/// searches, passes `./name` instead.
+///
+/// A non-Unix host has no `argv[0]` separate from the program, and there
+/// `arg0` goes unused.
+#[must_use]
+pub fn shell_as<P: AsRef<OsStr>, S: AsRef<OsStr>>(program: P, arg0: &OsStr, text: S) -> Command {
+    let mut command = Command::new(program);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.arg0(arg0);
+    }
+    #[cfg(not(unix))]
+    {
+        // Nothing to set it on; see the doc comment.
+        let _ = arg0;
+    }
+    command.arg("-c").arg(text);
+    command
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{shell, shell_bytes};
+    use super::{shell, shell_as, shell_bytes};
+    use std::ffi::OsStr;
 
     #[test]
     fn the_text_is_one_argument_after_dash_c() {
@@ -105,5 +140,22 @@ mod tests {
         let command = shell_bytes(b"printf '%s' abc");
         let args: Vec<_> = command.get_args().collect();
         assert_eq!(args, ["-c", "printf '%s' abc"]);
+    }
+
+    #[test]
+    fn the_caller_s_shell_is_run_as_named() {
+        let command = shell_as("/bin/bash", OsStr::new("bash"), "echo $0");
+        assert_eq!(command.get_program(), "/bin/bash");
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args, ["-c", "echo $0"]);
+    }
+
+    /// `argv[0]` is the caller's word, not the path: measured, a shell named
+    /// `bash` by its last component prints `bash` for `$0`.
+    #[cfg(unix)]
+    #[test]
+    fn the_caller_s_shell_sees_the_name_it_was_given() {
+        let out = shell_as("/bin/sh", OsStr::new("my-sh"), "printf %s \"$0\"").output();
+        assert!(out.as_ref().is_ok_and(|o| o.stdout == b"my-sh"), "{out:?}");
     }
 }

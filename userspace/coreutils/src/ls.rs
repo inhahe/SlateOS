@@ -88,7 +88,7 @@ use crate::errmsg::strerror;
 use crate::fnmatch::{Flags, fnmatch};
 use crate::getopt::{self, Opt, Program, Takes};
 use crate::human::{Opts, default_block_size, human_readable};
-use crate::pathname::{base_len, last_component, last_component_offset};
+use crate::pathname::{file_name_concat, last_component};
 use crate::quote::{Mb, Style, next_mb, os_bytes, quote, quoteaf, quotef};
 #[cfg(unix)]
 use crate::stdfd::{self, Stream};
@@ -645,6 +645,13 @@ struct Config {
     file_output_block_size: u64,
     /// `[non-recent, recent]`, GNU's `long_time_format`.
     long_time_format: [Vec<u8>; 2],
+    /// `--hyperlink`: wrap each name in an OSC 8 link to the file. See
+    /// [`hyperlink_open`].
+    print_hyperlink: bool,
+    /// The host name the links carry -- `xgethostname()`, or empty when it
+    /// cannot be had, which in a `file://` URI means this machine. Read only
+    /// when [`Config::print_hyperlink`] is set, as upstream reads it.
+    hostname: Vec<u8>,
     format_needs_stat: bool,
     format_needs_type: bool,
     check_symlink_mode: bool,
@@ -698,6 +705,8 @@ impl Default for Config {
             file_human_output_opts: Opts::NONE,
             file_output_block_size: 1,
             long_time_format: [b"%b %e  %Y".to_vec(), b"%b %e %H:%M".to_vec()],
+            print_hyperlink: false,
+            hostname: Vec::new(),
             format_needs_stat: false,
             format_needs_type: false,
             check_symlink_mode: false,
@@ -1320,6 +1329,7 @@ fn finish(
     // upstream drops it silently otherwise, and only *then* checks it against
     // `--zero` — so `ls --dired --zero` is fine and `ls -l --dired --zero` is
     // the error.
+    cfg.print_hyperlink = set.print_hyperlink;
     cfg.dired = cfg.dired && cfg.format == Format::Long && !set.print_hyperlink;
     if cfg.eolbyte == 0 && cfg.dired {
         return Err(Refusal::fatal(
@@ -1735,6 +1745,55 @@ fn quote_name(
     }
 }
 
+/// gnulib's `file_escape` over upstream's `RFC3986` table: a byte the
+/// table calls unreserved -- ASCII letters and digits, `~`, `-`, `.`, `_` --
+/// stays, and any other becomes `%xx` in lower case. With `path`, a `/` stays
+/// too.
+fn file_escape(text: &[u8], path: bool) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len());
+    for &b in text {
+        if (path && b == b'/')
+            || b.is_ascii_alphanumeric()
+            || matches!(b, b'~' | b'-' | b'.' | b'_')
+        {
+            out.push(b);
+        } else {
+            out.extend_from_slice(format!("%{b:02x}").as_bytes());
+        }
+    }
+    out
+}
+
+/// The OSC 8 sequence that opens a link to `absolute_name` on `host`:
+/// `ESC ] 8 ; ; file://HOST/PATH BEL`, the path given its leading `/` if it
+/// lacks one. [`HYPERLINK_CLOSE`] ends it.
+fn hyperlink_open(host: &[u8], absolute_name: &[u8]) -> Vec<u8> {
+    let name = file_escape(absolute_name, true);
+    let mut out = b"\x1b]8;;file://".to_vec();
+    out.extend_from_slice(&file_escape(host, false));
+    if name.first() != Some(&b'/') {
+        out.push(b'/');
+    }
+    out.extend_from_slice(&name);
+    out.push(0x07);
+    out
+}
+
+/// The OSC 8 sequence that ends a link: an empty URI.
+const HYPERLINK_CLOSE: &[u8] = b"\x1b]8;;\x07";
+
+/// `xgethostname ()`, for `--hyperlink`: this machine's name, or empty when
+/// it cannot be had -- upstream ignores the failure, "the hostname is
+/// generally ignored".
+#[must_use]
+fn hostname() -> Vec<u8> {
+    let mut buf = [0u8; libcall::HOST_NAME_MAX + 1];
+    match libcall::hostname_into(&mut buf) {
+        Ok(n) => buf.get(..n).unwrap_or_default().to_vec(),
+        Err(_) => Vec::new(),
+    }
+}
+
 // ------------------------------------------------------------ file records ---
 
 /// One timestamp, as `ls` holds and compares it.
@@ -1820,6 +1879,11 @@ struct FileInfo {
     /// The cached screen width, filled in before the sort when the layout or
     /// `-U`-less width sorting will ask for it more than once.
     width: Option<usize>,
+    /// Under `--hyperlink`, the name canonicalised as gnulib's
+    /// `canonicalize_filename_mode (CAN_MISSING)` makes it: what the link
+    /// points at -- for the file's own name and for its link target alike, as
+    /// upstream has it.
+    absolute_name: Option<Vec<u8>>,
 }
 
 impl Default for FileInfo {
@@ -1838,6 +1902,7 @@ impl Default for FileInfo {
             link_ok: false,
             quoted: None,
             width: None,
+            absolute_name: None,
         }
     }
 }
@@ -2061,39 +2126,6 @@ fn full_name_for(dirname: &[u8], name: &[u8]) -> Vec<u8> {
     }
 }
 
-/// gnulib's `file_name_concat`, which is *not* [`attach`].
-///
-/// `ls` joins a directory to an entry two different ways on purpose, and the
-/// difference is visible: `attach` builds the path handed to `stat`, and drops
-/// a `dirname` of `.` so an error reads `cannot access 'x'`; this one builds
-/// the name a recursive listing will *print*, and keeps it, so `ls -R .`
-/// heads the subdirectory `./dirA`. Measured, GNU ls 9.4.
-///
-/// The dir is truncated to the end of its last component, so a trailing run of
-/// slashes collapses: `ls -R 'dirA//'` heads `dirA//` — the operand, printed
-/// verbatim — but its children `dirA/sub1`. The `.` separator is gnulib's
-/// answer to joining the root to an absolute base: `/` + `/foo` is `/./foo`,
-/// because `//foo` names a different file on some POSIX systems.
-fn file_name_concat(dir: &[u8], base: &[u8]) -> Vec<u8> {
-    let dirbase_at = last_component_offset(dir);
-    let dirbaselen = base_len(dir.get(dirbase_at..).unwrap_or_default());
-    let dirlen = dirbase_at.saturating_add(dirbaselen);
-    let sep = if dirbaselen == 0 {
-        // The dir is a filesystem root.
-        (base.first() == Some(&b'/')).then_some(b'.')
-    } else {
-        let ends_in_slash = dirlen
-            .checked_sub(1)
-            .and_then(|last| dir.get(last))
-            .is_some_and(|&c| c == b'/');
-        (!ends_in_slash && base.first() != Some(&b'/')).then_some(b'/')
-    };
-    let mut out = dir.get(..dirlen).unwrap_or_default().to_vec();
-    out.extend(sep);
-    out.extend_from_slice(base);
-    out
-}
-
 /// GNU's `basename_is_dot_or_dotdot`, the guard that stops `-R` recursing
 /// through `./././.` forever.
 fn basename_is_dot_or_dotdot(name: &[u8]) -> bool {
@@ -2108,10 +2140,9 @@ fn basename_is_dot_or_dotdot(name: &[u8]) -> bool {
 /// type, and nothing in the default output needs more than the name. Every
 /// clause below names an option that does need more.
 ///
-/// Upstream's `print_hyperlink` clause is absent: `ls` here accepts
-/// `--hyperlink` and emits nothing for it (`known-issues.md`
-/// `TD-B-LS-ACCEPTS-HYPERLINK-WITHOUT-EMITTING-IT`), so a `stat` driven by it
-/// could only change which errors are printed, never the listing.
+/// `--hyperlink` is one of the clauses: the link needs the canonical name,
+/// which is computed where the `stat` is, so every entry is stated -- and an
+/// entry that cannot be is reported, as upstream reports it.
 fn needs_stat(cfg: &Config, kind: FileType, inode_known: bool, command_line_arg: bool) -> bool {
     // The three sticky/other-writable colours are decided from the mode, and
     // `readdir` supplies only the type — so a coloured listing stats every
@@ -2132,6 +2163,7 @@ fn needs_stat(cfg: &Config, kind: FileType, inode_known: bool, command_line_arg:
         });
 
     command_line_arg
+        || cfg.print_hyperlink
         || cfg.format_needs_stat
         || color_needs_dir_mode
         // Dereferencing changes both the inode and the type, and `readdir`
@@ -2218,6 +2250,14 @@ fn extract_dirs_from_files(
             continue;
         }
         let name = match dirname {
+            // gnulib's `file_name_concat`, which is *not* `attach`: `ls` joins
+            // a directory to an entry two ways on purpose, and the difference
+            // is visible. `attach` builds the path handed to `stat` and drops
+            // a `dirname` of `.`, so an error reads `cannot access 'x'`; this
+            // builds the name a recursive listing *prints* and keeps it, so
+            // `ls -R .` heads the subdirectory `./dirA`, and a trailing run of
+            // slashes collapses: `ls -R 'dirA//'` heads `dirA//` but its
+            // children `dirA/sub1`. Measured, GNU ls 9.4.
             Some(dir) if f.name.first() != Some(&b'/') => file_name_concat(dir, &f.name),
             _ => f.name.clone(),
         };
@@ -3081,7 +3121,7 @@ enum Funky {
 /// * **Octal and hex wrap in a byte.** Upstream accumulates into a `char`, so
 ///   `\501` is `(('5' << 3) + 0) << 3 + 1` truncated — the arithmetic is done
 ///   on the byte, not on a wide integer that is later checked.
-fn get_funky_string(src: &[u8], equals_end: bool) -> Option<(Vec<u8>, usize)> {
+pub fn get_funky_string(src: &[u8], equals_end: bool) -> Option<(Vec<u8>, usize)> {
     let mut out = Vec::new();
     let mut p = 0usize;
     let mut num: u8 = 0;
@@ -3632,9 +3672,41 @@ fn print_name_with_quoting(
     if let (Some(colors), Some(seq)) = (cfg.colors.as_deref(), color) {
         out.print_color_indicator(colors, seq);
     }
+    // The link goes inside the colour, around the name -- and, where the
+    // names are aligned on their outer quotes, inside those too: "if we're
+    // padding, then don't include the outer quotes in the --hyperlink, to
+    // improve the alignment of those links". One byte each end, whatever
+    // they are, as upstream takes them.
+    let link = f.absolute_name.as_deref();
+    let skip_quotes = link.is_some()
+        && cfg.align_variable_outer_quotes
+        && cwd_some_quoted
+        && !rendered.pad
+        && rendered.bytes.len() >= 2;
+    let inner = if skip_quotes {
+        rendered
+            .bytes
+            .get(1..rendered.bytes.len().saturating_sub(1))
+            .unwrap_or_default()
+    } else {
+        rendered.bytes.as_slice()
+    };
+    if let Some(absolute) = link {
+        if skip_quotes && let Some(&open) = rendered.bytes.first() {
+            out.buf.push(open);
+        }
+        out.buf
+            .extend_from_slice(&hyperlink_open(&cfg.hostname, absolute));
+    }
     out.mark(cfg, stack);
-    out.buf.extend_from_slice(&rendered.bytes);
+    out.buf.extend_from_slice(inner);
     out.mark(cfg, stack);
+    if link.is_some() {
+        out.buf.extend_from_slice(HYPERLINK_CLOSE);
+        if skip_quotes && let Some(&close) = rendered.bytes.last() {
+            out.buf.push(close);
+        }
+    }
 
     let len = rendered.bytes.len().saturating_add(pad);
 
@@ -4448,6 +4520,10 @@ trait Tree {
     /// list a directory of millions of entries in constant memory, which a
     /// `Vec` of every entry would defeat.
     fn read_dir<'t>(&'t self, path: &[u8]) -> std::io::Result<DirIter<'t>>;
+    /// gnulib's `canonicalize_filename_mode (path, CAN_MISSING)`: the name
+    /// made absolute, its links followed and its dots resolved, with nothing
+    /// required to exist -- what `--hyperlink` links to.
+    fn canonicalize(&self, path: &[u8]) -> std::io::Result<Vec<u8>>;
 }
 
 /// What [`Tree::read_dir`] hands back: `readdir` until it stops.
@@ -4569,6 +4645,25 @@ fn gobble_file(
         // top level.
         let full_name = full_name_for(dirname, name);
         f.full_name.clone_from(&full_name);
+
+        // Before the `stat`, as upstream does it; a failure is reported and
+        // the entry still listed, without a link.
+        if cfg.print_hyperlink {
+            match tree.canonicalize(&full_name) {
+                Ok(absolute) => f.absolute_name = Some(absolute),
+                Err(error) => {
+                    out.flush();
+                    let _ = writeln!(
+                        err,
+                        "{}: error canonicalizing {}: {}",
+                        program_name(),
+                        quoteaf(&full_name),
+                        strerror(&error)
+                    );
+                    status.fail(command_line_arg);
+                }
+            }
+        }
 
         // Which of `stat` and `lstat` runs. `-H` and
         // `--dereference-command-line-symlink-to-dir` both start with `stat`
@@ -4819,6 +4914,15 @@ impl Listing<'_> {
             // set, is never measured for the shortcut (upstream's `-1`), and
             // is never padded — `clear_files` has just cleared
             // `cwd_some_quoted`, so there is nothing to align against.
+            // The heading links to `name` canonicalised, even when it prints
+            // `realname`, as upstream's does.
+            let mut absolute = None;
+            if self.cfg.print_hyperlink {
+                match self.tree.canonicalize(name) {
+                    Ok(a) => absolute = Some(a),
+                    Err(e) => self.file_failure(command_line_arg, "error canonicalizing", name, &e),
+                }
+            }
             let rendered = quote_name(
                 self.cfg,
                 DIRNAME_EXTRA,
@@ -4826,9 +4930,17 @@ impl Listing<'_> {
                 realname.unwrap_or(name),
                 None,
             );
+            if let Some(a) = &absolute {
+                self.out
+                    .buf
+                    .extend_from_slice(&hyperlink_open(&self.cfg.hostname, a));
+            }
             self.out.mark(self.cfg, Dired::Headers);
             self.out.buf.extend_from_slice(&rendered.bytes);
             self.out.mark(self.cfg, Dired::Headers);
+            if absolute.is_some() {
+                self.out.buf.extend_from_slice(HYPERLINK_CLOSE);
+            }
             self.out.buf.extend_from_slice(b":\n");
         }
 
@@ -5245,6 +5357,10 @@ impl Tree for RealTree {
         Ok(os_bytes(std::fs::read_link(os_from_bytes(path))?.as_os_str()).into_owned())
     }
 
+    fn canonicalize(&self, path: &[u8]) -> std::io::Result<Vec<u8>> {
+        crate::canon::canonicalize(&crate::canon::RealFs, path, crate::canon::Mode::Missing)
+    }
+
     /// `readdir`, plus the two entries `std::fs::read_dir` filters out.
     ///
     /// `.` and `..` are real directory entries and `ls -a` lists them; std
@@ -5429,6 +5545,10 @@ fn run_main() -> ExitCode {
         }
         Request::Run(cfg, operands) => (cfg, operands),
     };
+    let mut cfg = cfg;
+    if cfg.print_hyperlink {
+        cfg.hostname = hostname();
+    }
 
     // The two lookups the long format needs. Both are skipped entirely when
     // nothing will ask them: `-n` never resolves an id to a name, and a
@@ -8139,6 +8259,12 @@ mod tests {
             self.targets.get(path).cloned().ok_or_else(enoent)
         }
 
+        /// The fake's file system is rooted at `/fake`, and has no links the
+        /// canonical name would follow.
+        fn canonicalize(&self, path: &[u8]) -> std::io::Result<Vec<u8>> {
+            Ok([b"/fake/".as_slice(), path].concat())
+        }
+
         fn read_dir<'t>(&'t self, path: &[u8]) -> std::io::Result<DirIter<'t>> {
             let entries = self.dirs.get(path).ok_or_else(enoent)?;
             Ok(Box::new(entries.iter().cloned().map(Ok)))
@@ -8377,6 +8503,63 @@ mod tests {
         assert_eq!(entry.blocks, 0, "unknown blocks are not counted as zero");
         // And it widened nothing: the accumulation is after the early return.
         assert_eq!(entry.cwd.widths, Widths::default());
+    }
+
+    /// `file_escape`: RFC 3986's unreserved bytes stay, everything else is
+    /// `%xx` in lower case, and `/` stays only in a path.
+    #[test]
+    fn hyperlink_names_are_escaped_as_upstream_escapes_them() {
+        assert_eq!(
+            file_escape(b"a b/c%~-._\xff\t'", true),
+            b"a%20b/c%25~-._%ff%09%27".to_vec()
+        );
+        assert_eq!(file_escape(b"a/b", false), b"a%2fb".to_vec());
+        assert_eq!(file_escape(b"Host-1.lan", false), b"Host-1.lan".to_vec());
+    }
+
+    /// The link's shape: `ESC ] 8 ; ; file://HOST/PATH BEL`, the path's
+    /// leading `/` supplied when missing, and an empty host left empty.
+    #[test]
+    fn a_hyperlink_opens_with_the_host_and_the_absolute_name() {
+        assert_eq!(
+            hyperlink_open(b"box", b"/t/sp ace"),
+            b"\x1b]8;;file://box/t/sp%20ace\x07".to_vec()
+        );
+        assert_eq!(
+            hyperlink_open(b"box", b"rel"),
+            b"\x1b]8;;file://box/rel\x07".to_vec()
+        );
+        assert_eq!(
+            hyperlink_open(b"", b"/t/a"),
+            b"\x1b]8;;file:///t/a\x07".to_vec()
+        );
+        assert_eq!(HYPERLINK_CLOSE, b"\x1b]8;;\x07");
+    }
+
+    /// `--hyperlink` stats every entry -- a plain listing would stat none --
+    /// and gives each its canonical name, before the stat, so that an entry
+    /// whose stat fails still has its link.
+    #[test]
+    fn a_hyperlinked_listing_canonicalises_every_entry() {
+        let tree = FakeTree::default();
+        let cfg = Config {
+            print_hyperlink: true,
+            ..Config::default()
+        };
+        assert!(needs_stat(&cfg, FileType::Normal, true, false));
+        let entry = gobble(&tree, &cfg, "dangle", FileType::SymbolicLink, 7, false, ".");
+        let f = entry.cwd.files.first().unwrap();
+        assert_eq!(f.absolute_name.as_deref(), Some(b"/fake/dangle".as_slice()));
+        let plain = gobble(
+            &tree,
+            &Config::default(),
+            "x",
+            FileType::Normal,
+            7,
+            false,
+            ".",
+        );
+        assert!(plain.cwd.files.first().unwrap().absolute_name.is_none());
     }
 
     /// `ls -i` prints the inode `readdir` supplied and never stats for it, so

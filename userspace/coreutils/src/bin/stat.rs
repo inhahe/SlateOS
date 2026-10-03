@@ -483,10 +483,10 @@ fn out_epoch(out: &mut Vec<u8>, conv: Conv, secs: i64, nsec: u32) {
         for _ in kept..9 {
             divisor = divisor.saturating_mul(10);
         }
-        frac = u64::from(nsec) / divisor;
+        frac = u64::from(nsec).checked_div(divisor).unwrap_or(0);
         if secs < 0 && nsec != 0 {
-            let modulus = 1_000_000_000_u64 / divisor;
-            let lost = u64::from(nsec) % divisor != 0;
+            let modulus = 1_000_000_000_u64.checked_div(divisor).unwrap_or(0);
+            let lost = u64::from(nsec).checked_rem(divisor).unwrap_or(0) != 0;
             frac = modulus.saturating_sub(frac).saturating_sub(u64::from(lost));
             if frac != 0 {
                 sec = sec.saturating_add(1);
@@ -1192,8 +1192,11 @@ Valid format sequences for file systems:
 --terse --file-system is equivalent to the following FORMAT:
     {}
 ",
-        String::from_utf8_lossy(TERSE_FILE).trim_end(),
-        String::from_utf8_lossy(TERSE_FS).trim_end(),
+        // Both formats are ASCII literals, so neither decode can fail.
+        std::str::from_utf8(TERSE_FILE)
+            .unwrap_or_default()
+            .trim_end(),
+        std::str::from_utf8(TERSE_FS).unwrap_or_default().trim_end(),
     )
 }
 

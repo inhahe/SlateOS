@@ -445,6 +445,7 @@ unsafe extern "C" {
     fn mkfifoat(dirfd: i32, path: *const u8, mode: u32) -> i32;
     fn mknodat(dirfd: i32, path: *const u8, mode: u32, dev: u64) -> i32;
     fn fchmodat(dirfd: i32, path: *const u8, mode: u32, flags: i32) -> i32;
+    fn fchownat(dirfd: i32, path: *const u8, owner: u32, group: u32, flags: i32) -> i32;
     fn utimensat(dirfd: i32, path: *const u8, times: *const CTimespec, flags: i32) -> i32;
     fn fdopendir(fd: i32) -> *mut CDir;
     fn readdir(dirp: *mut CDir) -> *mut CDirent;
@@ -519,7 +520,7 @@ const _: () = assert!(core::mem::size_of::<CStat>() == 144);
 /// The `open` flags used here, as Linux numbers them and as
 /// `posix/src/fcntl.rs` declares them.
 #[cfg(unix)]
-mod oflag {
+pub(crate) mod oflag {
     pub const RDONLY: i32 = 0;
     pub const WRONLY: i32 = 1;
     pub const CREAT: i32 = 0o100;
@@ -907,6 +908,20 @@ impl Dir {
         let cname = c_name(name)?;
         // SAFETY: `cname` is NUL-terminated and outlives the call.
         checked(unsafe { fchmodat(self.0, cname.as_ptr(), mode, 0) })
+    }
+
+    /// Give `name` the owner `uid` and group `gid`.
+    ///
+    /// `follow` says whether a final symlink is followed or is itself what
+    /// changes hands -- `lchown` against `chown`, through `fchownat` so that
+    /// the name is resolved beneath this directory like every other operation
+    /// here.
+    pub fn chown(&self, name: &[u8], uid: u32, gid: u32, follow: bool) -> io::Result<()> {
+        let cname = c_name(name)?;
+        let flags = if follow { 0 } else { AT_SYMLINK_NOFOLLOW };
+        // SAFETY: `cname` is NUL-terminated and outlives the call, which
+        // retains no pointer to it.
+        checked(unsafe { fchownat(self.0, cname.as_ptr(), uid, gid, flags) })
     }
 
     /// Stamp `name`'s access and modification times to the same second.
@@ -1780,7 +1795,7 @@ mod tests {
         assert!(dir.stamp(b"d/e", 0, true).is_err());
         assert!(dir.read_link(b"d/e").is_err());
         // ...and nothing was created under the path it refused to walk.
-        assert!(dir.names().unwrap().len() == 1);
+        assert_eq!(dir.names().unwrap().len(), 1);
     }
 
     /// A NUL is refused in a target as firmly as in a name, because a C call

@@ -513,6 +513,8 @@ fn print_stuff(
     }
 }
 
+coreutils::guard_std_fds!();
+
 #[cfg(not(unix))]
 fn main() -> std::process::ExitCode {
     diag!("id: unix-only utility; not supported on this platform");
@@ -527,9 +529,9 @@ mod imp {
         Ids, Output, Request, Settings, help_text, parse_args, print_stuff, resolve_operand,
     };
     use coreutils::diag;
-    use coreutils::errmsg::strerror;
     use coreutils::grouplist::{current_ids, process_groups};
     use coreutils::quote::{os_bytes, quote};
+    use coreutils::stdfd::Stream;
     use pwdb::Db;
     use std::ffi::OsString;
     use std::io::{self, Write};
@@ -593,15 +595,19 @@ mod imp {
         Ok(())
     }
 
-    pub fn main() -> ExitCode {
+    /// Everything but the funnel: the status earned, with standard output
+    /// written to `stdout`, whose failure is the funnel's to report.
+    pub fn main(stdout: &mut Stream) -> ExitCode {
         let args: Vec<OsString> = std::env::args_os().skip(1).collect();
         let settings = match parse_args(&args) {
+            // The stream records a failure rather than returning one; see
+            // `coreutils::stdfd::Stream`.
             Ok(Request::Help) => {
-                print!("{}", help_text());
+                let _ = stdout.write_all(help_text().as_bytes());
                 return ExitCode::SUCCESS;
             }
             Ok(Request::Version) => {
-                println!("id (SlateOS coreutils) 0.1.0");
+                let _ = stdout.write_all(b"id (SlateOS coreutils) 0.1.0\n");
                 return ExitCode::SUCCESS;
             }
             Ok(Request::Run(settings)) => settings,
@@ -616,17 +622,8 @@ mod imp {
         // answers on a system without the files.
         let db = Db::load();
         let mut out = Output::new();
-        let stdout = io::stdout();
-        let mut sink = stdout.lock();
-
-        if let Err(e) = run(&settings, &db, &mut out, &mut sink) {
-            diag!("id: write error: {}", strerror(&e));
-            return ExitCode::from(1);
-        }
-        if let Err(e) = sink.flush() {
-            diag!("id: write error: {}", strerror(&e));
-            return ExitCode::from(1);
-        }
+        // Never an error: the stream records it for the funnel.
+        let _ = run(&settings, &db, &mut out, stdout);
         if out.ok {
             ExitCode::SUCCESS
         } else {
@@ -635,13 +632,16 @@ mod imp {
     }
 }
 
-/// The funnel. A diagnostic that could not be written turns the earned
-/// status into `exit_failure`, which is what upstream's `atexit
-/// (close_stdout)` does on every exit path at once. See
-/// [`coreutils::stdfd::close_stderr`].
+/// The funnel: upstream's `atexit (close_stdout)`, which checks standard
+/// output and then standard error on every exit path at once -- `id >&-` is
+/// `id: write error: Bad file descriptor` and status 1, and so is a
+/// diagnostic that did not arrive. See [`coreutils::stdfd::close_stdout`].
 #[cfg(unix)]
 fn main() -> std::process::ExitCode {
-    coreutils::stdfd::close_stderr(imp::main(), 1)
+    coreutils::stdfd::restore();
+    let mut out = coreutils::stdfd::Stream::stdout();
+    let earned = imp::main(&mut out);
+    coreutils::stdfd::close_stdout("id", out, earned)
 }
 
 #[cfg(test)]

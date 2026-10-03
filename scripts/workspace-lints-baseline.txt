@@ -39,25 +39,19 @@ services/ticker
 services/udpget
 userspace/acl  # bare deny(clippy::all)
 userspace/acpi
-userspace/apparmor  # bare deny(clippy::all)
 userspace/arp
 userspace/at
-userspace/audit  # bare deny(clippy::all)
 userspace/backup
 userspace/bootctl  # bare deny(clippy::all)
-userspace/capsh  # bare deny(clippy::all)
 userspace/cgroup  # bare deny(clippy::all)
 userspace/chage  # bare deny(clippy::all)
 userspace/chattr  # bare deny(clippy::all)
 userspace/chpasswd
-userspace/chroot
 userspace/coredumpctl  # bare deny(clippy::all)
 userspace/cpio
-userspace/cpupower  # bare deny(clippy::all)
 userspace/crond
 userspace/crontab
 userspace/ctags
-userspace/dbus
 userspace/diskutil
 userspace/dmesg
 userspace/dmidecode  # bare deny(clippy::all)
@@ -66,15 +60,11 @@ userspace/efibootmgr  # bare deny(clippy::all)
 userspace/eject  # bare deny(clippy::all)
 userspace/fdisk
 userspace/fio  # bare deny(clippy::all)
-userspace/firejail  # bare deny(clippy::all)
-userspace/fmt
 userspace/fsck
 userspace/fuser  # bare deny(clippy::all)
 userspace/fw
-userspace/fwupd  # bare deny(clippy::all)
 userspace/getent  # bare deny(clippy::all)
 userspace/getty
-userspace/grub2  # bare deny(clippy::all)
 userspace/gzip
 userspace/hardlink  # bare deny(clippy::all)
 userspace/hexdump
@@ -85,7 +75,6 @@ userspace/hwinfo  # bare deny(clippy::all)
 userspace/ifconfig  # bare deny(clippy::all)
 userspace/indexer
 userspace/inotify  # bare deny(clippy::all)
-userspace/install
 userspace/ip
 userspace/ipcalc  # bare deny(clippy::all)
 userspace/iptables  # bare deny(clippy::all)
@@ -97,7 +86,6 @@ userspace/last
 userspace/ldconfig  # bare deny(clippy::all)
 userspace/less
 userspace/lex
-userspace/locale
 userspace/localectl  # bare deny(clippy::all)
 userspace/login
 userspace/loginctl  # bare deny(clippy::all)
@@ -113,8 +101,6 @@ userspace/m4
 userspace/make
 userspace/man
 userspace/mkfs
-userspace/mkinitramfs  # bare deny(clippy::all)
-userspace/mktemp
 userspace/monctl
 userspace/mount
 userspace/nano
@@ -125,54 +111,38 @@ userspace/nologin  # bare deny(clippy::all)
 userspace/notimpl  # bare deny(clippy::all)
 userspace/nsenter  # bare deny(clippy::all)
 userspace/nslookup
-userspace/numactl  # bare deny(clippy::all)
 userspace/oils  # bare deny(clippy::all)
 userspace/passwd
-userspace/perf  # bare deny(clippy::all)
-userspace/pgrep
 userspace/ping
 userspace/pkg
-userspace/plymouth  # bare deny(clippy::all)
-userspace/powerctl
 userspace/pstree  # bare deny(clippy::all)
 userspace/pv
 userspace/quoting  # bare deny(clippy::all)
-userspace/resolvectl  # bare deny(clippy::all)
 userspace/rfkill  # bare deny(clippy::all)
 userspace/route
 userspace/rsync
 userspace/sanitize
 userspace/scp  # bare deny(clippy::all)
 userspace/screen
-userspace/selinux  # bare deny(clippy::all)
 userspace/service
 userspace/shell
-userspace/shuf
 userspace/ss
 userspace/sysctl
 userspace/syslogd
 userspace/sysstat  # bare deny(clippy::all)
 userspace/systemctl  # bare deny(clippy::all)
-userspace/tac
-userspace/thermald  # bare deny(clippy::all)
-userspace/timeout
 userspace/top
 userspace/tput
 userspace/traceroute
-userspace/tuned  # bare deny(clippy::all)
 userspace/udevd
-userspace/udisks  # bare deny(clippy::all)
 userspace/unshare  # bare deny(clippy::all)
 userspace/update-alternatives  # bare deny(clippy::all)
 userspace/updatedb  # bare deny(clippy::all)
-userspace/upower  # bare deny(clippy::all)
 userspace/useradd  # bare deny(clippy::all)
 userspace/vi
 userspace/vmstat
 userspace/wall
 userspace/watch
-userspace/who
 userspace/wpa  # bare deny(clippy::all)
-userspace/xattr  # bare deny(clippy::all)
 userspace/xdg
 userspace/yacc

@@ -202,8 +202,9 @@ fn signal_number(spec: &str) -> Option<i32> {
 ///
 /// The tree has two ways to end a process and they are not interchangeable.
 /// The native `SYS_PROCESS_KILL` (506) takes a PID and an **exit code**, and
-/// `userspace/kill` and `userspace/pgrep` use it with the shell's 128+signal
-/// convention -- 143 for TERM, 137 for KILL. `fuser` is a Linux-compatible
+/// `userspace/kill` uses it with the shell's 128+signal convention -- 143 for
+/// TERM, 137 for KILL. (So did `userspace/pgrep`'s `pkill`, until procps'
+/// replaced it, sending through `kill(2)` as this does.) `fuser` is a Linux-compatible
 /// tool whose `-s` argument is a **signal**, so it goes through `kill(2)`,
 /// which takes the signal number the user actually named and lets the libc
 /// decide how that maps. `posix/src/signal.rs` exports it as a C symbol on

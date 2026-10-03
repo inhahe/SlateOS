@@ -35,12 +35,13 @@
 # produced a 2 GB transcript during measurement. Cases here stay in single
 # digits, and the bounds of `-w` are tested through its *diagnostics* instead.
 #
-# ## Two cases that differ on purpose
+# ## A pattern that will not compile
 #
-# `-bp` compiles a POSIX **basic** regular expression. Ours goes through
-# `ere::bre`, whose compile-error wording is its own rather than glibc's
-# `Invalid regular expression`. Those two are `xfail_case`d rather than silently
-# tolerated. (Backreferences used to be a third: `ere` refused them, so
+# `-bp` compiles a POSIX **basic** regular expression, and one that will not
+# compile is glibc's `regcomp` sentence alone -- `nl: Unmatched ( or \(`. Those
+# cases were `xfail_case`d while `ere::bre` worded its refusals its own way;
+# it carries glibc's code for every one now (`EreError::message`), and they
+# are ordinary cases. (Backreferences were a third: `ere` refused them, so
 # `-bp'\(ab\)\1'` numbered nothing. It has a backtracking matcher for those
 # patterns now — `design-decisions.md` §333 — and the case agrees with GNU.)
 #
@@ -350,10 +351,12 @@ run_case -w3 --body-numbering=p blanks.txt
 run_case -w3 -hp'H' -fp'F' -bp'B' sec.txt
 run_case -w3 -bn -hp'.' sec.txt
 run_case -w3 -bp'\(ab\)\1' words.txt
-xfail_case 'the regex compile-error wording is ere::bre own, not glibc regcomp' \
-  -w3 -bp'[' words.txt
-xfail_case 'the regex compile-error wording is ere::bre own, not glibc regcomp' \
-  -w3 -bp'\(' words.txt
+run_case -w3 -bp'[' words.txt
+run_case -w3 -bp'\(' words.txt
+run_case -w3 -bp'a\{1' words.txt
+run_case -w3 -bp'[[:foo:]]' words.txt
+run_case -w3 -bp'\1' words.txt
+run_case -w3 -hp'a\' -bp'[' words.txt
 
 # --- style diagnostics, and the fact that they accumulate --------------------
 run_case -b X plain.txt

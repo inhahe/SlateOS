@@ -346,7 +346,7 @@ mod tests {
         fs::set_permissions(&ro, fs::Permissions::from_mode(0o444)).expect("chmod");
         let meta = fs::symlink_metadata(&ro).expect("stat");
 
-        let name = quoteaf_os(&ro).to_string();
+        let name = quoteaf_os(&ro);
 
         let mut err: Vec<u8> = Vec::new();
         let mut answers = Canned::new(&["n\n"]);

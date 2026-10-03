@@ -47,15 +47,12 @@ acpi: read_sysfs_string(&path.join("technology")).unwrap_or_default()  # examine
 acpi: read_sysfs_string(&path.join("type")).unwrap_or_default()  # examined 2026-09-11: a cooling-device column, printed as read
 coreutils: sprintf(b"%.6g", &[Value::Num(n)], b"%.6g").unwrap_or_default()
 coreutils: std::env::var("TARGET").unwrap_or_default()  # examined 2026-09-11: build.rs, where cargo always sets TARGET, so the default is unreachable
-cpupower: read_sysfs_string(&format!("{}/scaling_available_frequencies", base)) .unwrap_or_default()  # examined 2026-09-11: as above
-cpupower: read_sysfs_string(&format!("{}/scaling_available_governors", base)).unwrap_or_default()  # examined 2026-09-11: display only, joined into a list line; nothing validates against it
 diskutil: read_file(&format!("{dev_path}/device/model")).unwrap_or_default()  # examined 2026-09-11: the Model line is printed only when non-empty, and loop/dm devices have none
 diskutil: read_file(&format!("{dev_path}/device/serial")).unwrap_or_default()  # examined 2026-09-11: as above
 dmesg: extract_json_string(line, "level").unwrap_or_default()  # examined 2026-09-11: "" reaches LogLevel::from_str and becomes Unknown
 dmesg: extract_json_string(line, "service").unwrap_or_default()  # examined 2026-09-11: an optional field; absent means the line came from the kernel rather than a service
 fuser: fs::read_to_string("/etc/passwd").unwrap_or_default()  # examined 2026-09-11: uid_to_name falls back to the numeric uid, which is what real fuser prints
 hwinfo: fs::read_to_string(path) .unwrap_or_default()
-install: std::env::var("TARGET").unwrap_or_default()  # examined 2026-09-11: build.rs, where cargo always sets TARGET, so the default is unreachable
 losetup: std::env::var("TARGET").unwrap_or_default()  # examined 2026-09-11: build.rs, where cargo always sets TARGET, so the default is unreachable
 lspci: read_file(&format!("{dev_path}/driver/name")).unwrap_or_default()  # examined 2026-09-11: a device with no driver bound has no driver/name link at all, so empty IS unbound
 lsusb: read_attr(&format!("{dev_path}/bMaxPower")).unwrap_or_default()  # examined 2026-09-11: sysfs omits the file when the device exposes no such descriptor, so empty IS absent; the display omits the line, as real lsusb does
@@ -65,10 +62,6 @@ lsusb: read_attr(&format!("{dev_path}/product")).unwrap_or_default()  # examined
 lsusb: read_attr(&format!("{dev_path}/serial")).unwrap_or_default()  # examined 2026-09-11: sysfs omits the file when the device exposes no such descriptor, so empty IS absent; the display omits the line, as real lsusb does
 lsusb: read_attr(&format!("{dev_path}/speed")).unwrap_or_default()  # examined 2026-09-11: sysfs omits the file when the device exposes no such descriptor, so empty IS absent; the display omits the line, as real lsusb does
 man: extract_name_line(page.source).unwrap_or_default()
-mktemp: gid_to_name(egid).unwrap_or_default()  # examined 2026-09-11: as above
-mktemp: gid_to_name(gid).unwrap_or_default()  # examined 2026-09-11: as above
-mktemp: uid_to_name(euid).unwrap_or_default()  # examined 2026-09-11: as above
-mktemp: uid_to_name(uid).unwrap_or_default()  # examined 2026-09-11: is_empty() prints uid=N with no name, as real id does
 monctl: read_file(&format!("{base}/modes")).unwrap_or_default()  # examined 2026-09-11: empty yields the resolution "unknown", which is honest
 newgrp: std::fs::read_to_string("/etc/gshadow").unwrap_or_default()  # examined 2026-09-11: empty refuses everyone; see the fn's own doc comment
 oils: std::env::var("TARGET").unwrap_or_default()  # examined 2026-09-11: build.rs, where cargo always sets TARGET, so the default is unreachable
@@ -80,9 +73,5 @@ pwdb: std::fs::read(group).unwrap_or_default()  # examined 2026-09-11: as above
 pwdb: std::fs::read(passwd).unwrap_or_default()  # examined 2026-09-11: from_files' docstring argues this -- an unreadable database is empty, as glibc does, so ls -l still lists a directory with numeric ids
 rfkill: read_sysfs(&base.join("type")).unwrap_or_default()
 shell: std::env::var("TARGET").unwrap_or_default()  # examined 2026-09-11: build.rs, where cargo always sets TARGET, so the default is unreachable
-tuned: std::fs::read_to_string(ACTIVE_PROFILE) .unwrap_or_default()
-udisks: fs::read_to_string(path) .unwrap_or_default()
 update-alternatives: std::env::var("TARGET").unwrap_or_default()  # examined 2026-09-11: build.rs, where cargo always sets TARGET, so the default is unreachable
 updatedb: std::env::var("TARGET").unwrap_or_default()  # examined 2026-09-11: build.rs, where cargo always sets TARGET, so the default is unreachable
-upower: std::fs::read_to_string(p) .unwrap_or_default()
-who: fs::read_to_string(entry.path()).unwrap_or_default()

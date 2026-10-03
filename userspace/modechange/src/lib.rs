@@ -21,7 +21,7 @@
 //! |---|---|
 //! | `parse_symbolic` | `coreutils/src/bin/chmod.rs` |
 //! | `parse_symbolic_mode` / `apply_symbolic_mode` | `userspace/chown/src/main.rs` |
-//! | `parse_symbolic_mode` | `userspace/install/src/main.rs` |
+//! | `parse_symbolic_mode` | `userspace/install/src/main.rs` (deleted 2026-10-02; `install` is coreutils') |
 //! | `parse_symbolic_umask` | `userspace/oils/src/interp.rs` |
 //!
 //! Between them they were wrong in thirteen ways, every one of which was

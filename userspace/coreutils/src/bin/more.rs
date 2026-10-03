@@ -1052,7 +1052,10 @@ fn terminal_columns(env_value: Option<&str>) -> usize {
 /// Build the three header lines printed before a file, as bytes, with the
 /// trailing newline on each.
 fn file_header(path: &[u8]) -> Vec<u8> {
-    let mut v = Vec::with_capacity(path.len().saturating_add(BANNER.len() * 2 + 3));
+    let mut v = Vec::with_capacity(
+        path.len()
+            .saturating_add(BANNER.len().saturating_mul(2).saturating_add(3)),
+    );
     v.extend_from_slice(BANNER);
     v.push(b'\n');
     v.extend_from_slice(path);

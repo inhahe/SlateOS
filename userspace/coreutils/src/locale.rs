@@ -38,6 +38,8 @@
 /// A locale category some utility asks about.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Category {
+    /// `LC_CTYPE`: what a character is -- whether bytes or UTF-8 sequences.
+    Ctype,
     /// `LC_MESSAGES`: the language diagnostics and prompts are written in.
     Messages,
     /// `LC_TIME`: how dates and times are written.
@@ -49,6 +51,7 @@ impl Category {
     #[must_use]
     pub const fn variable(self) -> &'static str {
         match self {
+            Category::Ctype => "LC_CTYPE",
             Category::Messages => "LC_MESSAGES",
             Category::Time => "LC_TIME",
         }
@@ -85,14 +88,60 @@ pub fn hard_locale_with(category: Category, var: impl Fn(&str) -> Option<Vec<u8>
 /// gnulib's `hard_locale (CATEGORY)` for this process's environment.
 #[must_use]
 pub fn hard_locale(category: Category) -> bool {
-    hard_locale_with(category, |name| {
-        std::env::var_os(name).map(|value| crate::quote::os_bytes(&value).into_owned())
+    hard_locale_with(category, env_var)
+}
+
+/// Whether the locale named `name` reads text as UTF-8: its codeset, after
+/// the `.`, is `UTF-8` or `utf8` in any case -- `C.UTF-8`, `en_US.utf8`.
+/// `C`, `POSIX` and no name at all read bytes.
+#[must_use]
+pub fn is_utf8(name: Option<&[u8]>) -> bool {
+    name.and_then(|n| {
+        n.iter()
+            .rposition(|&b| b == b'.')
+            .and_then(|dot| n.get(dot..))
+            .and_then(|from_dot| from_dot.get(1..))
     })
+    .map(|codeset| codeset.split(|&b| b == b'@').next().unwrap_or(codeset))
+    .is_some_and(|c| c.eq_ignore_ascii_case(b"UTF-8") || c.eq_ignore_ascii_case(b"utf8"))
+}
+
+/// Whether this process's `LC_CTYPE` reads text as UTF-8 -- which decides,
+/// for a utility handed a regular expression, whether `.` is a byte or a
+/// character.
+#[must_use]
+pub fn ctype_is_utf8() -> bool {
+    is_utf8(selected_with(Category::Ctype, env_var).as_deref())
+}
+
+/// A variable of this process's environment, as bytes.
+fn env_var(name: &str) -> Option<Vec<u8>> {
+    std::env::var_os(name).map(|value| crate::quote::os_bytes(&value).into_owned())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Category, hard_locale_with, is_hard, selected_with};
+    use super::{Category, hard_locale_with, is_hard, is_utf8, selected_with};
+
+    #[test]
+    fn a_utf8_codeset_is_recognised_in_either_spelling() {
+        for name in [
+            "C.UTF-8",
+            "en_US.UTF-8",
+            "en_US.utf8",
+            "de_DE.utf-8",
+            "sr_RS.UTF-8@latin",
+        ] {
+            assert!(is_utf8(Some(name.as_bytes())), "{name}");
+        }
+        for name in ["C", "POSIX", "en_US", "en_US.ISO-8859-1", "UTF-8", ""] {
+            assert!(!is_utf8(Some(name.as_bytes())), "{name}");
+        }
+        assert!(!is_utf8(None));
+        let vars = [("LC_CTYPE", "C"), ("LANG", "C.UTF-8")];
+        let name = selected_with(Category::Ctype, env(&vars));
+        assert!(!is_utf8(name.as_deref()));
+    }
 
     /// An environment holding exactly `pairs`.
     fn env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<Vec<u8>> + 'a {

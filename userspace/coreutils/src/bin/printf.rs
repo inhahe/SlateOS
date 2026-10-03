@@ -818,7 +818,11 @@ impl<W: Write> Printer<W> {
             return if scan.negative { i64::MIN } else { i64::MAX };
         }
         let magnitude = i128::from(scan.magnitude);
-        let value = if scan.negative { -magnitude } else { magnitude };
+        let value = if scan.negative {
+            magnitude.saturating_neg()
+        } else {
+            magnitude
+        };
         i64::try_from(value).unwrap_or(i64::MAX)
     }
 

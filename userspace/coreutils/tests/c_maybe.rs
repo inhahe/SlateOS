@@ -30,6 +30,17 @@
 //! file name may hold it), the empty string, and — for the plain style only —
 //! anything containing `/`.
 
+// A test fails by panicking, so the lints that keep panics out of production
+// code -- unwrap, expect, panic, indexing, unchecked arithmetic -- are allowed
+// here, where a panic is the point.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
+
 use coreutils::quote::{quote_c_maybe, quote_c_maybe_colon};
 
 const FIXTURE: &str = include_str!("c-maybe-gnu.txt");

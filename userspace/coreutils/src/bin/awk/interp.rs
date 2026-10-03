@@ -1,4 +1,7 @@
-//! The interpreter: a tree walk over the parsed program.
+//! The interpreter: the state a running awk program has, and the operations
+//! on it -- records and fields, variables, input and output. The loop that runs
+//! the compiled program is [`run`]; see [`crate::compile`] for why the program
+//! is compiled rather than walked.
 //!
 //! ## `$0` and the fields are one thing viewed two ways
 //!
@@ -11,6 +14,21 @@
 //! [`Interp::ensure_split`] splits the record with `FS`. `NF` is not stored
 //! anywhere; it is the field count, computed when read.
 //!
+//! ## A field is one value per record
+//!
+//! Each field, and `$0`, is made into a [`Value`] the first time it is read
+//! and the same value is handed out after, until the record or that field
+//! changes -- gawk's one node per field. It matters because a value from input
+//! remembers whether it has been used as a number (see `value.rs`), and a
+//! program that tests `$1 > 0` and then stores `a[$1]` stores what gawk
+//! stores.
+//!
+//! What a field holds is what was put there, as in gawk: a field split from
+//! input is input (a strnum when it looks like a number), but `$2 = "10.0"`
+//! makes `$2` the string `"10.0"` -- so `$2 == 10` is false -- and `$2 = 10`
+//! the number. `$0` likewise: input when read, whatever was assigned when
+//! assigned, and a plain string when rebuilt from its fields.
+//!
 //! ## Where a character is not a byte
 //!
 //! Records, fields and every string are bytes, because awk is a filter and a
@@ -19,27 +37,68 @@
 //! engine indexes by character too, so those five convert. Mixing the two up is
 //! how `substr($0, 1, 3)` cuts a UTF-8 character in half.
 
+mod run;
+
 use crate::ast::{
-    BinOp, Builtin, CmpOp, Expr, GetlineSrc, Lvalue, Pattern, Program, RedirMode, Redirect, Stmt,
-    V_ARGC, V_ARGV, V_CONVFMT, V_ENVIRON, V_FILENAME, V_FNR, V_FS, V_NF, V_NR, V_OFMT, V_OFS,
-    V_ORS, V_RLENGTH, V_RS, V_RSTART, V_SUBSEP, VarRef,
+    Loc, Program, RedirMode, V_ARGC, V_ARGV, V_CONVFMT, V_ENVIRON, V_FILENAME, V_FNR, V_FS, V_NF,
+    V_NR, V_OFMT, V_OFS, V_ORS, V_RLENGTH, V_RS, V_RSTART, V_SUBSEP, VarRef,
 };
+use crate::compile::Code;
 use crate::io::{Inputs, Outputs, Records, Rs};
-use crate::value::{Str, Value, compare, num_to_str};
+use crate::value::{FieldNode, Str, Value, c_long, num_to_str};
+use ere::awk::{self as escape, Warnings};
 use ere::{Regex, ch};
+use run::{Ctx, ForIter, Frame, Item};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::Read;
 use std::rc::Rc;
 
 /// An error that stops the program. awk has no exceptions; every one of these
-/// ends the run with a diagnostic and status 2.
-pub struct Fatal(pub String);
+/// ends the run.
+pub enum Fatal {
+    /// gawk's `fatal:` and its kin: said after `awk: ` and where the program
+    /// was, and the run ends with status 2. Bytes, because most of them name
+    /// a file or a command, and gawk prints those with `%s`.
+    Said(Str),
+    /// Standard output's reader went away. gawk dies of `SIGPIPE` there; this
+    /// system does not use signals for process control, so -- as everywhere
+    /// in coreutils (`stdfd::reader_gone`) -- the run ends quietly, with the
+    /// status it had already earned.
+    ReaderGone,
+}
+
+impl Fatal {
+    /// [`Fatal::Said`] from this file's own sentences, built as text.
+    pub fn said(message: impl Into<Str>) -> Fatal {
+        Fatal::Said(message.into())
+    }
+}
 
 impl From<String> for Fatal {
     fn from(s: String) -> Fatal {
-        Fatal(s)
+        Fatal::Said(s.into_bytes())
     }
+}
+
+impl From<Str> for Fatal {
+    fn from(s: Str) -> Fatal {
+        Fatal::Said(s)
+    }
+}
+
+/// `head NAME tail`, the name as it is: gawk prints file and command names
+/// with `%s`, and a name need not be text.
+fn named(head: &str, name: &[u8], tail: &str) -> Str {
+    let mut said = Vec::with_capacity(
+        head.len()
+            .saturating_add(name.len())
+            .saturating_add(tail.len()),
+    );
+    said.extend_from_slice(head.as_bytes());
+    said.extend_from_slice(name);
+    said.extend_from_slice(tail.as_bytes());
+    said
 }
 
 /// A regex search that gave up is fatal, not a non-match.
@@ -51,14 +110,21 @@ impl From<String> for Fatal {
 /// reading, and it is what `gawk` does with its own regex-cost limits.
 impl From<ere::MatchLimit> for Fatal {
     fn from(e: ere::MatchLimit) -> Fatal {
-        Fatal(e.to_string())
+        Fatal::said(e.to_string())
     }
 }
 
 type R<T> = Result<T, Fatal>;
 
 /// An awk array: shared, because arrays are passed to functions by reference.
-type Array = Rc<RefCell<HashMap<Str, Value>>>;
+/// Laid out as gawk lays them out, for gawk's `for (k in a)` order; see
+/// [`crate::array`].
+type Array = Rc<RefCell<crate::array::Array>>;
+
+/// A new, empty array.
+fn new_array() -> Array {
+    Rc::new(RefCell::new(crate::array::Array::new()))
+}
 
 /// What a variable slot holds.
 #[derive(Clone)]
@@ -73,15 +139,22 @@ impl Default for Cell {
     }
 }
 
-/// How control left a statement.
+/// How control left a stretch of code: by reaching its end, or by `next`,
+/// `nextfile` or `exit` -- from wherever they were run, a function included.
 enum Flow {
     Normal,
-    Break,
-    Continue,
     Next,
     NextFile,
     Exit,
-    Return(Value),
+}
+
+/// What reading the next record of the main input came to. A file that would
+/// not open is not one of these: that is a fatal error wherever it happens.
+enum MainRead {
+    Record(Str),
+    Eof,
+    /// The open file could not be read.
+    Failed(std::io::Error),
 }
 
 /// How `FS` splits a record.
@@ -101,6 +174,15 @@ enum Fs {
 struct Fields {
     record: Str,
     fields: Vec<Str>,
+    /// `$0` as a value, once read or assigned: the one node every reader
+    /// shares.
+    record_value: Option<Value>,
+    /// Whether `$0` came from input, which makes it input once read; a `$0`
+    /// rebuilt from its fields is a plain string.
+    record_input: bool,
+    /// Each field as a value, once read; `None` until then. Kept the length
+    /// of `fields`.
+    field_values: Vec<Option<Value>>,
     /// The field vector agrees with the record.
     split_valid: bool,
     /// The record agrees with the field vector.
@@ -112,6 +194,9 @@ impl Fields {
         Fields {
             record: Str::new(),
             fields: Vec::new(),
+            record_value: None,
+            record_input: true,
+            field_values: Vec::new(),
             split_valid: true,
             record_valid: true,
         }
@@ -134,9 +219,16 @@ struct MainInput {
 
 pub struct Interp {
     prog: Program,
+    /// The program, compiled; shared so the loop can hold it while it runs.
+    code: Rc<Code>,
     globals: Vec<Cell>,
-    /// The call frames. The last is the running function's.
-    frames: Vec<Vec<Cell>>,
+    /// The call frames, on the heap rather than the native stack. The last is
+    /// the running function's.
+    frames: Vec<Frame>,
+    /// The values, arrays and assignment targets the instructions work on.
+    stack: Vec<Item>,
+    /// The `for (k in a)` loops in progress.
+    iters: Vec<ForIter>,
     f: Fields,
     fs: Fs,
     /// The `FS` string the current [`Fs`] was built from, so it is only rebuilt
@@ -149,32 +241,57 @@ pub struct Interp {
     inputs: Inputs,
     re_cache: HashMap<Str, Rc<Regex>>,
     main: MainInput,
+    /// gawk's C `long`s behind `NR` and `FNR`. The variables keep whatever was
+    /// assigned to them, but a read gives the long whenever the two disagree
+    /// -- `NR = 2.5` reads back 2, `NR = "7x"` reads back `7x` -- and the
+    /// counting is the long's (see [`Interp::counter`]).
+    nr: i64,
+    fnr: i64,
     /// Set by `exit`; also the process's status.
     exit_code: Option<i32>,
-    /// Depth of user function calls, bounded so a runaway recursion is a
-    /// diagnostic rather than a stack overflow — which on a kernel with a
-    /// guard page is a crash the script cannot catch.
-    depth: usize,
+    /// An `exit` statement ran: gawk's `exiting`, which keeps an error writing
+    /// standard output at exit from turning a 0 into a 1.
+    exited: bool,
     rng: u64,
     seed: f64,
-    /// True while the END rules are running, so `exit` inside END does not
-    /// re-run them.
-    in_end: bool,
+    /// The run's escape warnings: gawk says each once per run, so this is the
+    /// same table the program text was lexed with ([`Interp::adopt_warnings`]).
+    warnings: Warnings,
+    /// The line of the instruction running, as a diagnostic names it --
+    /// gawk's `sourceline`, set by every instruction that has a line. `None`
+    /// until the first one runs.
+    loc: Option<Loc>,
 }
 
-/// A recursion this deep is a program that will never finish; the limit exists
-/// so it fails with a message instead of a stack overflow.
-const MAX_DEPTH: usize = 2500;
+/// Write every escape warning said and not yet written, as gawk's `warning()`
+/// does: `awk: `, then `prefix` -- where the program was, `cmd. line:1: ` and
+/// at run time the input file and record, as [`Interp::diagnostic_prefix`]
+/// gives it, or nothing for the command line's `-v`, `-F` and `var=value`,
+/// which gawk does not place either -- then `warning: ` and the message.
+pub fn emit_warnings(w: &mut Warnings, prefix: &[u8]) {
+    for message in w.take() {
+        let mut line = b"awk: ".to_vec();
+        line.extend_from_slice(prefix);
+        line.extend_from_slice(b"warning: ");
+        line.extend_from_slice(&message);
+        line.push(b'\n');
+        coreutils::stdfd::diag_bytes(&line);
+    }
+}
 
 impl Interp {
     /// Build an interpreter for `prog`, with `argv` as awk's `ARGV[1..]`.
     #[must_use]
     pub fn new(prog: Program, argv: &[Str], env: &[(Str, Str)]) -> Interp {
         let globals = vec![Cell::default(); prog.globals];
+        let code = Rc::new(crate::compile::compile(&prog));
         let mut it = Interp {
             prog,
+            code,
             globals,
             frames: Vec::new(),
+            stack: Vec::new(),
+            iters: Vec::new(),
             f: Fields::new(),
             fs: Fs::Whitespace,
             fs_src: b" ".to_vec(),
@@ -191,11 +308,14 @@ impl Interp {
                 stdin_used: false,
                 done: false,
             },
+            nr: 0,
+            fnr: 0,
             exit_code: None,
-            depth: 0,
+            exited: false,
             rng: 0,
             seed: 0.0,
-            in_end: false,
+            warnings: Warnings::default(),
+            loc: None,
         };
         it.ranges = vec![false; it.prog.ranges];
         it.set_global(V_FS, Value::str(b" ".to_vec()));
@@ -211,20 +331,26 @@ impl Interp {
         it.set_global(V_RLENGTH, Value::Num(-1.0));
         it.set_global(V_FILENAME, Value::str(Str::new()));
 
-        let environ = it.array_slot(V_ENVIRON);
+        // ENVIRON is a string array from the start, whatever its first
+        // name (gawk's `load_environ`), filled in the environment's order.
+        let environ: Array = Rc::new(RefCell::new(crate::array::Array::new_str()));
+        it.set_cell(VarRef::Global(V_ENVIRON), Cell::Arr(Rc::clone(&environ)));
         {
             let mut m = environ.borrow_mut();
             for (k, v) in env {
-                m.insert(k.clone(), Value::from_input(v.clone()));
+                *m.lookup(&Value::str(k.clone()), b"%.6g") = Value::from_input(v.clone());
             }
         }
+        // ARGV's subscripts are numbers, so it is an integer array (gawk's
+        // `init_args`).
         let argv_arr = it.array_slot(V_ARGV);
         {
             let mut m = argv_arr.borrow_mut();
-            m.insert(b"0".to_vec(), Value::str(b"awk".to_vec()));
+            *m.lookup(&Value::Num(0.0), b"%.6g") = Value::str(b"awk".to_vec());
             for (i, a) in argv.iter().enumerate() {
-                let k = format!("{}", i.saturating_add(1)).into_bytes();
-                m.insert(k, Value::from_input(a.clone()));
+                #[allow(clippy::cast_precision_loss)]
+                let k = Value::Num(i.saturating_add(1) as f64);
+                *m.lookup(&k, b"%.6g") = Value::from_input(a.clone());
             }
         }
         // ARGC counts ARGV[0] ("awk") as well as the operands, so a program that
@@ -239,14 +365,153 @@ impl Interp {
         it
     }
 
-    /// Set a variable named on the command line by `-v` or as `var=value`.
-    ///
-    /// The value is a strnum, so `-v n=10` compares numerically — which is what
-    /// makes `awk -v n=10 '$1 == n'` work on a numeric column.
+    /// Carry on with the escape warnings the command line and the program text
+    /// were read with, so that what they already said is not said again.
+    pub fn adopt_warnings(&mut self, warnings: Warnings) {
+        self.warnings = warnings;
+    }
+
+    /// Write whatever the escape layers have said since last time, each with
+    /// where the program was, as gawk's `warning()` does.
+    fn say_warnings(&mut self) {
+        if self.warnings.is_empty() {
+            return;
+        }
+        self.flush_before_diagnostic();
+        let prefix = self.diagnostic_prefix();
+        emit_warnings(&mut self.warnings, &prefix);
+    }
+
+    /// Flush standard output before a diagnostic, as gawk's `err()` does, so
+    /// that when both go to one place the warning follows what was printed
+    /// before it rather than jumping the queue. A failure here is not this
+    /// diagnostic's to report: the next write, or the exit, meets it again.
+    fn flush_before_diagnostic(&mut self) {
+        let _ = self.out.flush_stdout();
+    }
+
+    /// What gawk's `err()` puts between `awk: ` and a diagnostic: the running
+    /// statement's `cmd. line:3: ` (or `prog.awk:3: `), then, once input has
+    /// been read, `(FILENAME=... FNR=...) `. Measured, gawk 5.2.1 `--posix`:
+    /// `awk: cmd. line:2: (FILENAME=f1 FNR=1) fatal: division by zero
+    /// attempted` from an END after one line of `f1`; nothing after the colon
+    /// in a BEGIN that has read nothing but its location.
+    #[must_use]
+    pub fn diagnostic_prefix(&self) -> Str {
+        let mut out = match self.loc {
+            Some(loc) => crate::source::prefix(&self.prog.sources, loc),
+            None => Str::new(),
+        };
+        // gawk tests its C `long` FNR, not the variable.
+        if self.fnr > 0 {
+            out.push(b'(');
+            // `FILENAME=%.*s `, printed only when the value has a string at
+            // all -- a number assigned to it has none (`(FNR=1)` alone) --
+            // and, being C's `%s`, only up to a NUL.
+            if let Some(name) = self.filename_shown() {
+                out.extend_from_slice(b"FILENAME=");
+                out.extend_from_slice(&name);
+                out.push(b' ');
+            }
+            out.extend_from_slice(format!("FNR={}) ", self.fnr).as_bytes());
+        }
+        out
+    }
+
+    /// Say a warning of the interpreter's own, placed as gawk's `warning()`
+    /// places it.
+    fn warning(&mut self, message: &[u8]) {
+        self.flush_before_diagnostic();
+        let mut line = b"awk: ".to_vec();
+        line.extend_from_slice(&self.diagnostic_prefix());
+        line.extend_from_slice(b"warning: ");
+        line.extend_from_slice(message);
+        line.push(b'\n');
+        coreutils::stdfd::diag_bytes(&line);
+    }
+
+    /// `FILENAME` as gawk's `err()` prints it: nothing for a value that is
+    /// only a number (gawk's `stptr` is NULL until something formats it),
+    /// else the text up to its first NUL.
+    fn filename_shown(&self) -> Option<Str> {
+        let name = self.get_global(V_FILENAME);
+        // Asked without settling anything: gawk reads the node's `stptr`.
+        if !name.has_text() {
+            return None;
+        }
+        let text = self.to_str(&name);
+        let end = text.iter().position(|b| *b == 0).unwrap_or(text.len());
+        Some(text.get(..end).unwrap_or_default().to_vec())
+    }
+
+    /// Write whatever the escape layers have said since last time with no
+    /// location: what gawk does for a `var=value` operand, whose escapes are
+    /// resolved between records rather than by a statement (measured: `awk:
+    /// warning: escape sequence ...`, even after a file has been read).
+    fn say_warnings_unplaced(&mut self) {
+        if self.warnings.is_empty() {
+            return;
+        }
+        self.flush_before_diagnostic();
+        emit_warnings(&mut self.warnings, b"");
+    }
+
+    /// A `var=value` operand, as gawk's `arg_assign` takes one: refused if
+    /// the name is a keyword, a built-in or a function, or the value holds a
+    /// newline; then the value's escapes, said where nothing is placed, and
+    /// the assignment.
     ///
     /// # Errors
-    /// Returns a diagnostic if the name is one of the built-in arrays.
-    pub fn assign_cli(&mut self, name: &str, value: Str) -> Result<(), String> {
+    /// gawk's fatal error for each refusal, and for an assignment that fails.
+    fn assign_operand(&mut self, name: &str, raw: &[u8]) -> R<()> {
+        // gawk forgets where it was for this: what it says has no line, and
+        // the line stays forgotten until the next instruction sets it. And it
+        // zeroes FNR for the whole of it, so nothing said has an input
+        // position either; FNR comes back only if the assignment succeeds.
+        self.loc = None;
+        let saved = self.fnr;
+        self.fnr = 0;
+        if let Some(refusal) = cli_refusal(name, raw) {
+            return Err(Fatal::said(refusal));
+        }
+        if self.prog.funcs.iter().any(|f| f.name == name) {
+            return Err(Fatal::said(format!(
+                "fatal: cannot use function `{name}' as variable name"
+            )));
+        }
+        let value = escape::string(raw, true, &mut self.warnings);
+        self.say_warnings_unplaced();
+        self.assign_value(name, value)?;
+        self.fnr = saved;
+        Ok(())
+    }
+
+    /// Set a variable named by `-v` (or `-F`), its name and value already
+    /// checked and its escapes already resolved before the program was
+    /// parsed, as gawk does it.
+    ///
+    /// gawk zeroes `FNR` around the assignment and restores it after, so a
+    /// failure is said with no input position, and an assignment *to* `FNR`
+    /// is undone: `-v FNR=2.5` leaves BEGIN reading 0, as `awk 'END { print
+    /// FNR }' f FNR=10` reads `f`'s count. Measured.
+    ///
+    /// # Errors
+    /// gawk's fatal error for a name that is an array, or a variable whose
+    /// assignment fails (`NF` negative, `FS` not compiling).
+    pub fn assign_cli(&mut self, name: &str, value: Str) -> R<()> {
+        self.loc = None;
+        let saved = self.fnr;
+        self.fnr = 0;
+        self.assign_value(name, value)?;
+        self.fnr = saved;
+        Ok(())
+    }
+
+    /// The assignment itself: refused for a name that holds an array, else
+    /// through `set_var` -- a strnum, so `-v n=10` compares numerically, which
+    /// is what makes `awk -v n=10 '$1 == n'` work on a numeric column. Already
+    /// looked at as a number, as gawk's `arg_assign` leaves it.
+    fn assign_value(&mut self, name: &str, value: Str) -> R<()> {
         let Some(slot) = self.prog.global_names.iter().position(|n| n == name) else {
             // A name the program never mentions still has to be settable: a
             // script that reads `-v debug=1` only in a branch it does not have
@@ -254,17 +519,14 @@ impl Interp {
             return Ok(());
         };
         if matches!(self.globals.get(slot), Some(Cell::Arr(_))) {
-            return Err(format!(
-                "{name} is an array and cannot be assigned on the command line"
-            ));
+            return Err(Fatal::said(format!(
+                "fatal: attempt to use array `{name}' in a scalar context"
+            )));
         }
         // Through `set_var`, not `set_global`: `-F:` and `-v RS=;` have to take
         // effect, and it is `set_var` that recompiles the splitter when `FS` or
-        // `RS` changes. Writing the slot directly stored the new value where
-        // nothing would read it until the next assignment.
-        self.set_var(VarRef::Global(slot), Value::from_input(value))
-            .map_err(|e| e.0)?;
-        Ok(())
+        // `RS` changes.
+        self.set_var(VarRef::Global(slot), Value::from_assignment(value))
     }
 
     /// Run the whole program, returning the process exit status.
@@ -278,161 +540,117 @@ impl Interp {
     /// fatal error does not retract the lines that were written before it.
     /// `awk '{print}' good.txt missing.txt` prints `good.txt` and then fails;
     /// so does any program that prints for an hour and then divides by zero.
+    /// (It did not, once: the body was one `?`-chain that skipped its flush on
+    /// the error path, and `process::exit` runs no destructors. Measured
+    /// against gawk, which prints it.)
     ///
-    /// It did not, and the bug was invisible for as long as it existed. The
-    /// body below is one `?`-chain, so a fatal skipped the `finish_all` at the
-    /// end of it; `die` then reached `process::exit`, which does not run
-    /// destructors, so the `BufWriter` holding an entire run's output was
-    /// dropped without being written. Nothing reported it — the output simply
-    /// was not there. Measured against gawk, which prints it.
+    /// # Exit is gawk's `Op_atexit`
     ///
-    /// The old harness could not have caught this: it compared stdout through
-    /// `$(...)` for cases that were all a single line, and it had no file
-    /// operands at all, so the two-file case that shows it plainly could not
-    /// be written.
+    /// With the program done, gawk forgets where it was (its line, not its
+    /// input position), closes every redirection -- one that will not flush is
+    /// a fatal error, `flush to "f" failed` -- and then flushes standard
+    /// output, where a failure is only a warning: `error writing standard
+    /// output`, and status 1 unless the program said `exit`. After a fatal
+    /// error none of that is said; C's `exit` flushes what it can, quietly.
     pub fn run(&mut self) -> R<i32> {
         let outcome = self.run_to_end();
-        let flushed = self
-            .out
-            .finish_all()
-            .map_err(|e| Fatal(format!("write error: {}", coreutils::errmsg::strerror(&e))));
         match outcome {
-            // The program's own failure is the cause and wins the report; a
-            // flush that also failed is a consequence of the same full disk.
-            Err(e) => Err(e),
             Ok(code) => {
-                flushed?;
-                Ok(code)
+                self.loc = None;
+                if let Err((name, e)) = self.out.finish_redirects() {
+                    self.out.finish_quietly();
+                    return Err(Fatal::Said(named(
+                        "fatal: flush to \"",
+                        &name,
+                        &format!("\" failed: {}", coreutils::errmsg::strerror(&e)),
+                    )));
+                }
+                match self.out.finish_stdout() {
+                    Ok(()) => Ok(code),
+                    Err(e) if coreutils::stdfd::reader_gone(&e) => Err(Fatal::ReaderGone),
+                    Err(e) => {
+                        let message = format!(
+                            "error writing standard output: {}",
+                            coreutils::errmsg::strerror(&e)
+                        );
+                        self.warning(message.as_bytes());
+                        Ok(if code == 0 && !self.exited { 1 } else { code })
+                    }
+                }
+            }
+            Err(e) => {
+                self.out.finish_quietly();
+                Err(e)
             }
         }
     }
 
+    /// The status the run had earned: what `exit` said, or 0.
+    #[must_use]
+    pub fn exit_status(&self) -> i32 {
+        self.exit_code.unwrap_or(0)
+    }
+
     /// The program itself, without the flush that has to happen either way.
     fn run_to_end(&mut self) -> R<i32> {
-        let begin = std::mem::take(&mut self.prog.begin);
-        let res = self.exec_all(&begin);
-        self.prog.begin = begin;
-        let flow = res?;
+        let flow = self.run_code(self.code.begin, Ctx::Begin)?;
 
         let needs_input = !self.prog.rules.is_empty() || !self.prog.end.is_empty();
         if !matches!(flow, Flow::Exit) && needs_input {
             self.main_loop()?;
         }
 
-        // POSIX: `exit` in BEGIN or in a rule still runs END — that is what lets
-        // a program bail out early and still print its totals. The only thing
-        // that skips END is an `exit` from inside END itself, which empties the
-        // list on its way out.
-        let end = std::mem::take(&mut self.prog.end);
-        self.in_end = true;
-        let res = self.exec_all(&end);
-        self.prog.end = end;
-        res?;
-
+        // POSIX: `exit` in BEGIN or in a rule still runs END -- that is what
+        // lets a program bail out early and still print its totals. An `exit`
+        // inside END ends END.
+        self.run_code(self.code.end, Ctx::End)?;
         Ok(self.exit_code.unwrap_or(0))
     }
 
     fn main_loop(&mut self) -> R<()> {
         loop {
-            let Some(rec) = self.next_main_record()? else {
-                return Ok(());
+            let rec = match self.next_main_record()? {
+                MainRead::Record(r) => r,
+                MainRead::Eof => return Ok(()),
+                MainRead::Failed(e) => {
+                    return Err(Fatal::Said(named(
+                        "fatal: error reading input file `",
+                        &self.string_of(V_FILENAME),
+                        &format!("': {}", coreutils::errmsg::strerror(&e)),
+                    )));
+                }
             };
             self.bump(V_NR);
             self.bump(V_FNR);
             self.set_record(rec);
-            match self.run_rules()? {
+            match self.run_code(self.code.rules, Ctx::Rule)? {
                 Flow::Exit => return Ok(()),
-                Flow::NextFile => {
-                    self.main.current = None;
-                }
-                _ => {}
+                Flow::NextFile => self.main.current = None,
+                Flow::Normal | Flow::Next => {}
             }
         }
-    }
-
-    fn run_rules(&mut self) -> R<Flow> {
-        let rules = std::mem::take(&mut self.prog.rules);
-        let mut result = Ok(Flow::Normal);
-        for rule in &rules {
-            let matched = match &rule.pattern {
-                Pattern::Always => Ok(true),
-                Pattern::Expr(e) => self.eval(e).map(|v| v.truthy()),
-                Pattern::Range(a, b, id) => self.range_matches(a, b, *id),
-            };
-            let matched = match matched {
-                Ok(m) => m,
-                Err(e) => {
-                    result = Err(e);
-                    break;
-                }
-            };
-            if !matched {
-                continue;
-            }
-            let flow = match &rule.action {
-                None => self.print_values(&[], None).map(|()| Flow::Normal),
-                Some(body) => self.exec_all(body),
-            };
-            match flow {
-                Ok(Flow::Normal) => {}
-                Ok(Flow::Next) => break,
-                Ok(other) => {
-                    result = Ok(other);
-                    break;
-                }
-                Err(e) => {
-                    result = Err(e);
-                    break;
-                }
-            }
-        }
-        self.prog.rules = rules;
-        result
-    }
-
-    /// A `first, last` pattern. It is stateful on purpose: once `first` has
-    /// matched the rule stays on until `last` does, and a record where both
-    /// match is a one-record range, not the start of one.
-    fn range_matches(&mut self, a: &Expr, b: &Expr, id: usize) -> R<bool> {
-        let open = self.ranges.get(id).copied().unwrap_or(false);
-        if open {
-            if self.eval(b)?.truthy()
-                && let Some(slot) = self.ranges.get_mut(id)
-            {
-                *slot = false;
-            }
-            return Ok(true);
-        }
-        if !self.eval(a)?.truthy() {
-            return Ok(false);
-        }
-        if !self.eval(b)?.truthy()
-            && let Some(slot) = self.ranges.get_mut(id)
-        {
-            *slot = true;
-        }
-        Ok(true)
     }
 
     // ---- the main input ---------------------------------------------------
 
-    fn next_main_record(&mut self) -> R<Option<Str>> {
+    /// The next record of the main input, moving on through `ARGV` as each
+    /// file ends.
+    ///
+    /// # Errors
+    /// gawk's fatal error for a file that will not open, wherever the read
+    /// came from -- the main loop or a plain `getline`.
+    fn next_main_record(&mut self) -> R<MainRead> {
         loop {
             if let Some(reader) = self.main.current.as_mut() {
                 let rs = self.rs.clone();
                 match reader.next(&rs) {
-                    Ok(Some(rec)) => return Ok(Some(rec)),
+                    Ok(Some(rec)) => return Ok(MainRead::Record(rec)),
                     Ok(None) => self.main.current = None,
-                    Err(e) => {
-                        return Err(Fatal(format!(
-                            "read error: {}",
-                            coreutils::errmsg::strerror(&e)
-                        )));
-                    }
+                    Err(e) => return Ok(MainRead::Failed(e)),
                 }
             }
             if !self.open_next_input()? {
-                return Ok(None);
+                return Ok(MainRead::Eof);
             }
         }
     }
@@ -459,14 +677,20 @@ impl Interp {
                 // filter does.
                 self.main.stdin_used = true;
                 self.main.current = Some(Records::new(Box::new(std::io::stdin())));
-                self.set_global(V_FNR, Value::Num(0.0));
+                // gawk names standard input `-` here, `--posix` or not:
+                // `echo x | gawk --posix '{print FILENAME}'` prints `-`
+                // (measured), and so does its diagnostics' `(FILENAME=- FNR=1)`.
+                self.set_global(V_FILENAME, Value::str(b"-".to_vec()));
+                self.set_counter(V_FNR, 0);
                 return Ok(true);
             }
-            let key = format!("{}", self.main.argv).into_bytes();
+            #[allow(clippy::cast_precision_loss)]
+            let key = Value::Num(self.main.argv as f64);
             self.main.argv = self.main.argv.saturating_add(1);
             let arg = {
                 let arr = self.array_slot(V_ARGV);
-                let v = arr.borrow().get(&key).cloned();
+                let convfmt = self.convfmt();
+                let v = arr.borrow().get(&key, &convfmt).cloned();
                 v.unwrap_or(Value::Uninit)
             };
             let text = self.to_str(&arg);
@@ -476,18 +700,17 @@ impl Interp {
                 continue;
             }
             if let Some((name, value)) = command_assignment(&text) {
-                let value = unescape(&value);
-                let _ = self.assign_cli(&name, value);
+                self.assign_operand(&name, &value)?;
                 continue;
             }
             self.main.opened_any = true;
             self.set_global(V_FILENAME, Value::str(text.as_ref().clone()));
-            self.set_global(V_FNR, Value::Num(0.0));
+            self.set_counter(V_FNR, 0);
             let src: Box<dyn Read> = if text.as_ref() == b"-" || text.as_ref() == b"/dev/stdin" {
                 self.main.stdin_used = true;
                 Box::new(std::io::stdin())
             } else {
-                match std::fs::File::open(crate::io::os_path(&text)) {
+                match open_input(&text) {
                     Ok(f) => Box::new(f),
                     Err(e) => {
                         // An input file that cannot be opened stops the run. It
@@ -500,180 +723,16 @@ impl Interp {
                         // rendering of a parser's internals but a plain report
                         // about a file, and a script that greps awk's stderr
                         // should not have to know which awk it got.
-                        return Err(Fatal(format!(
-                            "fatal: cannot open file `{}' for reading: {}",
-                            String::from_utf8_lossy(&text),
-                            coreutils::errmsg::strerror(&e)
+                        return Err(Fatal::Said(named(
+                            "fatal: cannot open file `",
+                            &text,
+                            &format!("' for reading: {}", coreutils::errmsg::strerror(&e)),
                         )));
                     }
                 }
             };
             self.main.current = Some(Records::new(src));
             return Ok(true);
-        }
-    }
-
-    // ---- statements -------------------------------------------------------
-
-    fn exec_all(&mut self, body: &[Stmt]) -> R<Flow> {
-        for s in body {
-            match self.exec(s)? {
-                Flow::Normal => {}
-                other => return Ok(other),
-            }
-        }
-        Ok(Flow::Normal)
-    }
-
-    fn exec(&mut self, s: &Stmt) -> R<Flow> {
-        match s {
-            Stmt::Nop => Ok(Flow::Normal),
-            Stmt::Expr(e) => {
-                self.eval(e)?;
-                Ok(Flow::Normal)
-            }
-            Stmt::Block(b) => self.exec_all(b),
-            Stmt::Print(args, r) => {
-                let vals = self.eval_all(args)?;
-                let target = self.redirect_name(r.as_ref())?;
-                self.print_values(&vals, target)?;
-                Ok(Flow::Normal)
-            }
-            Stmt::Printf(args, r) => {
-                let vals = self.eval_all(args)?;
-                let target = self.redirect_name(r.as_ref())?;
-                self.printf_values(&vals, target)?;
-                Ok(Flow::Normal)
-            }
-            Stmt::If(c, t, e) => {
-                if self.eval(c)?.truthy() {
-                    return self.exec(t);
-                }
-                match e {
-                    Some(e) => self.exec(e),
-                    None => Ok(Flow::Normal),
-                }
-            }
-            Stmt::While(c, body) => {
-                while self.eval(c)?.truthy() {
-                    match self.exec(body)? {
-                        Flow::Normal | Flow::Continue => {}
-                        Flow::Break => break,
-                        other => return Ok(other),
-                    }
-                }
-                Ok(Flow::Normal)
-            }
-            Stmt::DoWhile(body, c) => {
-                loop {
-                    match self.exec(body)? {
-                        Flow::Normal | Flow::Continue => {}
-                        Flow::Break => break,
-                        other => return Ok(other),
-                    }
-                    if !self.eval(c)?.truthy() {
-                        break;
-                    }
-                }
-                Ok(Flow::Normal)
-            }
-            Stmt::For {
-                init,
-                cond,
-                step,
-                body,
-            } => {
-                if let Some(i) = init {
-                    self.exec(i)?;
-                }
-                loop {
-                    if let Some(c) = cond
-                        && !self.eval(c)?.truthy()
-                    {
-                        break;
-                    }
-                    match self.exec(body)? {
-                        Flow::Normal | Flow::Continue => {}
-                        Flow::Break => break,
-                        other => return Ok(other),
-                    }
-                    if let Some(s) = step {
-                        self.exec(s)?;
-                    }
-                }
-                Ok(Flow::Normal)
-            }
-            Stmt::ForIn { var, array, body } => {
-                let arr = self.array_ref(*array);
-                // A snapshot of the keys, because the body is allowed to delete
-                // from the array it is iterating — and often does.
-                let keys: Vec<Str> = arr.borrow().keys().cloned().collect();
-                for k in keys {
-                    if !arr.borrow().contains_key(&k) {
-                        continue;
-                    }
-                    self.assign(var, Value::from_input(k))?;
-                    match self.exec(body)? {
-                        Flow::Normal | Flow::Continue => {}
-                        Flow::Break => break,
-                        other => return Ok(other),
-                    }
-                }
-                Ok(Flow::Normal)
-            }
-            Stmt::Next => Ok(Flow::Next),
-            Stmt::NextFile => Ok(Flow::NextFile),
-            Stmt::Break => Ok(Flow::Break),
-            Stmt::Continue => Ok(Flow::Continue),
-            Stmt::Return(e) => {
-                let v = match e {
-                    Some(e) => self.eval(e)?,
-                    None => Value::Uninit,
-                };
-                Ok(Flow::Return(v))
-            }
-            Stmt::Exit(e) => {
-                if let Some(e) = e {
-                    #[allow(clippy::cast_possible_truncation)]
-                    let code = self.eval(e)?.to_num() as i32;
-                    self.exit_code = Some(code);
-                } else if self.exit_code.is_none() {
-                    self.exit_code = Some(0);
-                }
-                if self.in_end {
-                    // `exit` inside END must not re-enter END.
-                    self.prog.end.clear();
-                }
-                Ok(Flow::Exit)
-            }
-            Stmt::Delete(arr, subs) => {
-                let a = self.array_ref(*arr);
-                if subs.is_empty() {
-                    a.borrow_mut().clear();
-                } else {
-                    let key = self.subscript(subs)?;
-                    a.borrow_mut().remove(&key);
-                }
-                Ok(Flow::Normal)
-            }
-        }
-    }
-
-    fn eval_all(&mut self, args: &[Expr]) -> R<Vec<Value>> {
-        let mut out = Vec::with_capacity(args.len());
-        for a in args {
-            out.push(self.eval(a)?);
-        }
-        Ok(out)
-    }
-
-    fn redirect_name(&mut self, r: Option<&Redirect>) -> R<Option<(RedirMode, Str)>> {
-        match r {
-            None => Ok(None),
-            Some(r) => {
-                let v = self.eval(&r.target)?;
-                Ok(Some((r.mode, self.to_str(&v).as_ref().clone())))
-            }
         }
     }
 
@@ -699,195 +758,94 @@ impl Interp {
             }
         }
         line.extend_from_slice(&ors);
-        self.emit(&line, target)
+        self.emit(&line, target, "print")
     }
 
     fn printf_values(&mut self, vals: &[Value], target: Option<(RedirMode, Str)>) -> R<()> {
         let Some(fmt) = vals.first() else {
-            return Err(Fatal("printf: no format string".to_string()));
+            return Err(Fatal::said("printf: no format string".to_string()));
         };
         let fmt = self.to_str(fmt);
         let convfmt = self.string_of(V_CONVFMT);
         let rest = vals.get(1..).unwrap_or_default();
-        let text = crate::fmt::sprintf(&fmt, rest, &convfmt).map_err(Fatal)?;
-        self.emit(&text, target)
+        let text = crate::fmt::sprintf(&fmt, rest, &convfmt).map_err(Fatal::said)?;
+        self.emit(&text, target, "printf")
     }
 
-    fn emit(&mut self, bytes: &[u8], target: Option<(RedirMode, Str)>) -> R<()> {
-        let res = match &target {
-            None => self.out.write_stdout(bytes),
-            Some((mode, name)) => self.out.write_to(name, *mode, bytes),
-        };
-        res.map_err(|e| {
-            let where_ = match &target {
-                None => "standard output".to_string(),
-                Some((_, n)) => String::from_utf8_lossy(n).into_owned(),
+    /// Write a print's output where it goes, failing as gawk's `efwrite`
+    /// fails: `from` is the statement, `print` or `printf`, which gawk names.
+    fn emit(&mut self, bytes: &[u8], target: Option<(RedirMode, Str)>, from: &str) -> R<()> {
+        let Some((mode, name)) = target else {
+            return match self.out.write_stdout(bytes) {
+                Ok(()) => Ok(()),
+                Err(e) if coreutils::stdfd::reader_gone(&e) => Err(Fatal::ReaderGone),
+                Err(e) => Err(Fatal::said(format!(
+                    "fatal: {from} to \"standard output\" failed: {}",
+                    coreutils::errmsg::strerror(&e)
+                ))),
             };
-            Fatal(format!("{where_}: {}", coreutils::errmsg::strerror(&e)))
-        })
+        };
+        if name.is_empty() {
+            return Err(null_redirect(redirect_symbol(mode)));
+        }
+        match self.out.write_to(&name, mode, bytes) {
+            Ok(()) => Ok(()),
+            Err(crate::io::OutError::Open(e)) => {
+                let why = coreutils::errmsg::strerror(&e);
+                Err(Fatal::Said(match mode {
+                    RedirMode::Pipe => named(
+                        "fatal: cannot open pipe `",
+                        &name,
+                        &format!("' for output: {why}"),
+                    ),
+                    RedirMode::Truncate | RedirMode::Append => {
+                        named("fatal: cannot redirect to `", &name, &format!("': {why}"))
+                    }
+                }))
+            }
+            // A write that reached standard output through `/dev/stdout`
+            // meets its reader going away as standard output does.
+            Err(crate::io::OutError::Write(e))
+                if coreutils::stdfd::reader_gone(&e)
+                    && (name.as_slice() == b"/dev/stdout" || name.as_slice() == b"-") =>
+            {
+                Err(Fatal::ReaderGone)
+            }
+            Err(crate::io::OutError::Write(e)) => Err(Fatal::Said(named(
+                &format!("fatal: {from} to \""),
+                &name,
+                &format!("\" failed: {}", coreutils::errmsg::strerror(&e)),
+            ))),
+        }
     }
 
-    // ---- expressions ------------------------------------------------------
-
-    #[allow(clippy::too_many_lines)]
-    fn eval(&mut self, e: &Expr) -> R<Value> {
-        match e {
-            Expr::Num(n) => Ok(Value::Num(*n)),
-            Expr::Str(s) => Ok(Value::Str(Rc::clone(s))),
-            // A bare regex in a value context asks whether it matches `$0`.
-            Expr::Regex(re) => {
-                let rec = self.record().clone();
-                Ok(Value::Num(f64::from(u8::from(re.is_match(&rec)?))))
+    /// gawk's `flush_io`: standard output, then every redirection, each
+    /// failure fatal as gawk words it. What `fflush()` is, and what `system`
+    /// does before it runs anything.
+    fn flush_io(&mut self) -> R<()> {
+        match self.out.flush_all() {
+            Ok(()) => Ok(()),
+            Err(crate::io::FlushError::Stdout(e)) if coreutils::stdfd::reader_gone(&e) => {
+                Err(Fatal::ReaderGone)
             }
-            Expr::Get(lv) => self.load(lv),
-            Expr::Assign(lv, rhs) => {
-                let v = self.eval(rhs)?;
-                self.assign(lv, v.clone())?;
-                Ok(v)
-            }
-            Expr::AugAssign(lv, op, rhs) => {
-                let r = self.eval(rhs)?.to_num();
-                let l = self.load(lv)?.to_num();
-                let v = Value::Num(arith(*op, l, r)?);
-                self.assign(lv, v.clone())?;
-                Ok(v)
-            }
-            Expr::Cond(c, a, b) => {
-                if self.eval(c)?.truthy() {
-                    self.eval(a)
-                } else {
-                    self.eval(b)
-                }
-            }
-            Expr::Or(a, b) => {
-                if self.eval(a)?.truthy() {
-                    return Ok(Value::Num(1.0));
-                }
-                Ok(Value::Num(f64::from(u8::from(self.eval(b)?.truthy()))))
-            }
-            Expr::And(a, b) => {
-                if !self.eval(a)?.truthy() {
-                    return Ok(Value::Num(0.0));
-                }
-                Ok(Value::Num(f64::from(u8::from(self.eval(b)?.truthy()))))
-            }
-            Expr::Not(a) => Ok(Value::Num(f64::from(u8::from(!self.eval(a)?.truthy())))),
-            Expr::Neg(a) => Ok(Value::Num(-self.eval(a)?.to_num())),
-            Expr::Pos(a) => Ok(Value::Num(self.eval(a)?.to_num())),
-            Expr::In(subs, arr) => {
-                let key = self.subscript(subs)?;
-                let a = self.array_ref(*arr);
-                let present = a.borrow().contains_key(&key);
-                Ok(Value::Num(f64::from(u8::from(present))))
-            }
-            Expr::Match { neg, lhs, rhs } => {
-                let subject = self.eval(lhs)?;
-                let subject = self.to_str(&subject);
-                let re = self.regex_of(rhs)?;
-                let m = re.is_match(&subject)?;
-                Ok(Value::Num(f64::from(u8::from(m != *neg))))
-            }
-            Expr::Cmp(op, a, b) => {
-                let l = self.eval(a)?;
-                let r = self.eval(b)?;
-                let convfmt = self.string_of(V_CONVFMT);
-                let ord = compare(&l, &r, &convfmt);
-                let yes = match ord {
-                    // NaN compares false against everything, as in C.
-                    None => false,
-                    Some(o) => match op {
-                        CmpOp::Lt => o.is_lt(),
-                        CmpOp::Le => o.is_le(),
-                        CmpOp::Gt => o.is_gt(),
-                        CmpOp::Ge => o.is_ge(),
-                        CmpOp::Eq => o.is_eq(),
-                        CmpOp::Ne => o.is_ne(),
-                    },
-                };
-                Ok(Value::Num(f64::from(u8::from(yes))))
-            }
-            Expr::Concat(a, b) => {
-                let l = self.eval(a)?;
-                let r = self.eval(b)?;
-                let mut s = self.to_str(&l).as_ref().clone();
-                s.extend_from_slice(&self.to_str(&r));
-                Ok(Value::str(s))
-            }
-            Expr::Bin(op, a, b) => {
-                let l = self.eval(a)?.to_num();
-                let r = self.eval(b)?.to_num();
-                Ok(Value::Num(arith(*op, l, r)?))
-            }
-            Expr::PreIncr(lv, d) => {
-                let v = self.load(lv)?.to_num() + d;
-                self.assign(lv, Value::Num(v))?;
-                Ok(Value::Num(v))
-            }
-            Expr::PostIncr(lv, d) => {
-                let old = self.load(lv)?.to_num();
-                self.assign(lv, Value::Num(old + d))?;
-                Ok(Value::Num(old))
-            }
-            Expr::Call(f, args) => self.call(*f, args),
-            Expr::Builtin(b, args) => self.builtin(*b, args),
-            Expr::Getline(g) => self.getline(g),
+            Err(crate::io::FlushError::Stdout(e)) => Err(Fatal::said(format!(
+                "fatal: fflush: cannot flush standard output: {}",
+                coreutils::errmsg::strerror(&e)
+            ))),
+            Err(crate::io::FlushError::Sink { name, pipe, err }) => Err(Fatal::Said(named(
+                &format!("fatal: {} flush of `", if pipe { "pipe" } else { "file" }),
+                &name,
+                &format!("' failed: {}", coreutils::errmsg::strerror(&err)),
+            ))),
         }
     }
 
     // ---- variables and fields --------------------------------------------
 
-    fn load(&mut self, lv: &Lvalue) -> R<Value> {
-        match lv {
-            Lvalue::Var(v) => self.get_var(*v),
-            Lvalue::Field(e) => {
-                let n = self.field_index(e)?;
-                self.get_field(n)
-            }
-            Lvalue::Index(v, subs) => {
-                let key = self.subscript(subs)?;
-                let a = self.array_ref(*v);
-                // Referring to `a[k]` *creates* it, which is why
-                // `if (a[k] == "") …` makes `k in a` true afterwards. Every awk
-                // does this and programs test for it.
-                let mut m = a.borrow_mut();
-                Ok(m.entry(key).or_insert(Value::Uninit).clone())
-            }
-        }
-    }
-
-    fn assign(&mut self, lv: &Lvalue, v: Value) -> R<()> {
-        match lv {
-            Lvalue::Var(r) => self.set_var(*r, v),
-            Lvalue::Field(e) => {
-                let n = self.field_index(e)?;
-                let s = self.to_str(&v).as_ref().clone();
-                self.set_field(n, s)
-            }
-            Lvalue::Index(r, subs) => {
-                let key = self.subscript(subs)?;
-                let a = self.array_ref(*r);
-                a.borrow_mut().insert(key, v);
-                Ok(())
-            }
-        }
-    }
-
-    fn field_index(&mut self, e: &Expr) -> R<usize> {
-        let n = self.eval(e)?.to_num();
-        if n < 0.0 || !n.is_finite() {
-            return Err(Fatal(format!("attempt to access field {n}")));
-        }
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let i = n as usize;
-        // A field number this large is a typo, not a record; without the bound
-        // `$1000000000 = "x"` allocates until the machine gives up.
-        if i > 16_000_000 {
-            return Err(Fatal(format!("field {i} is beyond any plausible record")));
-        }
-        Ok(i)
-    }
-
     fn get_var(&mut self, v: VarRef) -> R<Value> {
+        if let VarRef::Global(slot @ (V_NR | V_FNR)) = v {
+            return Ok(self.counter(slot));
+        }
         if v == VarRef::Global(V_NF) {
             self.ensure_split()?;
             let n = self.f.fields.len();
@@ -903,25 +861,51 @@ impl Interp {
     }
 
     fn set_var(&mut self, v: VarRef, val: Value) -> R<()> {
+        // A variable keeps its own copy of a field (gawk's `UNFIELD`).
+        let val = val.unfield();
         if let VarRef::Global(slot) = v {
             match slot {
                 V_NF => {
                     self.ensure_split()?;
-                    let n = val.to_num();
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                    let n = if n < 0.0 {
-                        0usize
-                    } else {
-                        (n as usize).min(16_000_000)
-                    };
+                    // gawk's `set_NF`: the count as a C `long`, and a negative
+                    // one refused rather than read as 0.
+                    let n = c_long(val.to_num());
+                    if n < 0 {
+                        return Err(Fatal::said("fatal: NF set to negative value".to_string()));
+                    }
+                    let n = usize::try_from(n).unwrap_or(usize::MAX).min(16_000_000);
                     self.f.fields.resize(n, Str::new());
+                    self.f.field_values.resize(n, None);
                     self.f.record_valid = false;
+                    self.f.record_value = None;
                     self.f.split_valid = true;
                     return Ok(());
                 }
                 V_FS | V_RS => {
                     self.set_global(slot, val);
-                    self.refresh_separators();
+                    return self.refresh_separators();
+                }
+                // gawk's `set_OFS`, `set_ORS`, `set_SUBSEP`, `set_CONVFMT`
+                // and `set_OFMT` take the new value's text at once
+                // (`force_string`), which settles an index from `for (k in
+                // a)` into a string there and then. `set_OFS` first rebuilds
+                // a `$0` whose fields have changed, with the OFS it is
+                // replacing: `$3 = "x"; OFS = "-"; print` prints `a b x`.
+                V_OFS | V_ORS | V_SUBSEP | V_CONVFMT | V_OFMT => {
+                    if slot == V_OFS {
+                        self.rebuild_record();
+                    }
+                    let _ = self.to_str(&val);
+                }
+                V_NR | V_FNR => {
+                    // gawk's `set_NR`: the long is the value's, truncated.
+                    let n = c_long(val.to_num());
+                    self.set_global(slot, val);
+                    if slot == V_NR {
+                        self.nr = n;
+                    } else {
+                        self.fnr = n;
+                    }
                     return Ok(());
                 }
                 _ => {}
@@ -944,26 +928,68 @@ impl Interp {
         }
     }
 
+    /// Count one more record in `NR` or `FNR`: the long, as gawk counts.
     fn bump(&mut self, slot: usize) {
-        let n = self.get_global(slot).to_num();
-        self.set_global(slot, Value::Num(n + 1.0));
+        let n = if slot == V_NR { self.nr } else { self.fnr }.wrapping_add(1);
+        self.set_counter(slot, n);
+    }
+
+    /// Set `NR` or `FNR` to a count, the variable and the long both.
+    fn set_counter(&mut self, slot: usize, n: i64) {
+        if slot == V_NR {
+            self.nr = n;
+        } else {
+            self.fnr = n;
+        }
+        #[allow(clippy::cast_precision_loss)]
+        self.set_global(slot, Value::Num(n as f64));
+    }
+
+    /// `NR` or `FNR` as a read gives it: gawk's `update_NR` replaces the
+    /// variable's value with the long whenever the two disagree, and keeps
+    /// what was assigned when they agree -- a string included.
+    fn counter(&self, slot: usize) -> Value {
+        let long = if slot == V_NR { self.nr } else { self.fnr };
+        let stored = self.get_global(slot);
+        #[allow(clippy::cast_precision_loss, clippy::float_cmp)]
+        if stored.to_num() == long as f64 {
+            stored
+        } else {
+            Value::Num(long as f64)
+        }
     }
 
     fn cell(&self, v: VarRef) -> Option<&Cell> {
         match v {
             VarRef::Global(s) => self.globals.get(s),
-            VarRef::Local(s) => self.frames.last().and_then(|f| f.get(s)),
+            VarRef::Local(s) => self.frames.last().and_then(|f| f.locals.get(s)),
         }
     }
 
     fn set_cell(&mut self, v: VarRef, c: Cell) {
         let slot = match v {
             VarRef::Global(s) => self.globals.get_mut(s),
-            VarRef::Local(s) => self.frames.last_mut().and_then(|f| f.get_mut(s)),
+            VarRef::Local(s) => self.frames.last_mut().and_then(|f| f.locals.get_mut(s)),
         };
         if let Some(slot) = slot {
             *slot = c;
         }
+    }
+
+    /// The array a program names, refusing a global the command line made a
+    /// scalar first: `-v a=1` with `a[1]` in the program is gawk's `attempt to
+    /// use scalar `a' as an array`, said where the array is used.
+    fn array_of(&mut self, v: VarRef) -> R<Array> {
+        if let VarRef::Global(slot) = v
+            && let Some(Cell::Val(val)) = self.globals.get(slot)
+            && !matches!(val, Value::Uninit)
+        {
+            let name = self.prog.global_names.get(slot).map_or("?", String::as_str);
+            return Err(Fatal::said(format!(
+                "fatal: attempt to use scalar `{name}' as an array"
+            )));
+        }
+        Ok(self.array_ref(v))
     }
 
     /// The array in a slot, creating it if the slot is still untouched.
@@ -971,7 +997,7 @@ impl Interp {
         if let Some(Cell::Arr(a)) = self.cell(v) {
             return Rc::clone(a);
         }
-        let a: Array = Rc::new(RefCell::new(HashMap::new()));
+        let a = new_array();
         self.set_cell(v, Cell::Arr(Rc::clone(&a)));
         a
     }
@@ -980,58 +1006,72 @@ impl Interp {
         self.array_ref(VarRef::Global(slot))
     }
 
-    /// Join subscripts with `SUBSEP`, which is how awk gives a one-dimensional
-    /// map two-dimensional syntax.
-    fn subscript(&mut self, subs: &[Expr]) -> R<Str> {
-        if subs.len() == 1
-            && let Some(one) = subs.first()
-        {
-            let v = self.eval(one)?;
-            return Ok(self.to_str(&v).as_ref().clone());
-        }
-        let sep = self.string_of(V_SUBSEP);
-        let mut out = Str::new();
-        for (i, s) in subs.iter().enumerate() {
-            if i > 0 {
-                out.extend_from_slice(&sep);
-            }
-            let v = self.eval(s)?;
-            out.extend_from_slice(&self.to_str(&v));
-        }
-        Ok(out)
-    }
-
+    /// `$n`: the field's value, made on first reading and the same value
+    /// after, so that what has been done to it shows (see the module docs).
     fn get_field(&mut self, n: usize) -> R<Value> {
         if n == 0 {
-            return Ok(Value::from_input(self.record().clone()));
+            self.rebuild_record();
+            let f = &mut self.f;
+            let v = f.record_value.get_or_insert_with(|| {
+                if f.record_input {
+                    Value::from_field(f.record.clone(), FieldNode::Record)
+                } else {
+                    Value::str(f.record.clone())
+                }
+            });
+            return Ok(v.clone());
         }
         self.ensure_split()?;
-        Ok(match self.f.fields.get(n.saturating_sub(1)) {
-            Some(s) => Value::from_input(s.clone()),
+        let i = n.saturating_sub(1);
+        let Some(text) = self.f.fields.get(i) else {
             // Past NF is the empty string, and reading it does not extend the
             // record — only assigning does.
-            None => Value::Uninit,
-        })
+            return Ok(Value::Uninit);
+        };
+        if self.f.field_values.len() != self.f.fields.len() {
+            self.f.field_values.resize(self.f.fields.len(), None);
+        }
+        let make = || Value::from_field(text.clone(), FieldNode::Field);
+        let v = match self.f.field_values.get_mut(i) {
+            Some(slot) => slot.get_or_insert_with(make).clone(),
+            None => make(),
+        };
+        Ok(v)
     }
 
-    fn set_field(&mut self, n: usize, s: Str) -> R<()> {
+    /// `$n = v`: gawk's `Op_store_field`. The field holds `v` itself -- a
+    /// copy, if `v` is another field (`UNFIELD`) -- and its text; `$0` is to
+    /// be rebuilt. `$0 = v` makes `v` the record, to be split again.
+    fn set_field(&mut self, n: usize, v: Value) -> R<()> {
+        let v = v.unfield();
+        let text = self.to_str(&v).as_ref().clone();
         if n == 0 {
-            self.set_record(s);
+            self.set_record(text);
+            self.f.record_value = Some(v);
+            self.f.record_input = false;
             return Ok(());
         }
         self.ensure_split()?;
         if self.f.fields.len() < n {
             self.f.fields.resize(n, Str::new());
         }
+        self.f.field_values.resize(self.f.fields.len(), None);
         if let Some(slot) = self.f.fields.get_mut(n.saturating_sub(1)) {
-            *slot = s;
+            *slot = text;
+        }
+        if let Some(slot) = self.f.field_values.get_mut(n.saturating_sub(1)) {
+            *slot = Some(v);
         }
         self.f.record_valid = false;
+        self.f.record_value = None;
         Ok(())
     }
 
+    /// A record read from input: `$0` and, once split, its fields are input.
     fn set_record(&mut self, rec: Str) {
         self.f.record = rec;
+        self.f.record_value = None;
+        self.f.record_input = true;
         self.f.record_valid = true;
         self.f.split_valid = false;
     }
@@ -1042,6 +1082,8 @@ impl Interp {
         }
         let rec = self.record().clone();
         self.f.fields = self.split_record(&rec)?;
+        self.f.field_values.clear();
+        self.f.field_values.resize(self.f.fields.len(), None);
         self.f.split_valid = true;
         Ok(())
     }
@@ -1061,19 +1103,60 @@ impl Interp {
 
     /// Rebuild `FS` and `RS` from their variables. Called after either is
     /// assigned, and cheap enough to be called when neither changed.
-    fn refresh_separators(&mut self) {
+    ///
+    /// # Errors
+    /// gawk's fatal error for a separator that will not compile as a regex.
+    fn refresh_separators(&mut self) -> R<()> {
         let fs = self.string_of(V_FS);
         if fs != self.fs_src {
-            self.fs = make_fs(&fs);
+            self.fs = self.make_fs(&fs)?;
             self.fs_src = fs;
             // The fields were split by the old FS; POSIX says a change to FS
             // takes effect on the *next* record, so the current split stands.
         }
         let rs = self.string_of(V_RS);
         if rs != self.rs_src {
-            self.rs = make_rs(&rs);
+            self.rs = self.make_rs(&rs)?;
             self.rs_src = rs;
         }
+        Ok(())
+    }
+
+    /// Build the field splitter `FS` describes.
+    ///
+    /// The single-character case is *literal*, not a one-character regex: POSIX
+    /// says so, and it is why `FS = "."` splits on dots rather than on
+    /// everything. Anything longer is a regex, through gawk's `make_regexp` --
+    /// escape layer included, so `FS = "\\|"` splits on a bar -- and one that
+    /// will not compile is gawk's fatal error: `FS = "a("` stops the run with
+    /// `invalid regexp: Unmatched ( or \(: /a(/`, measured. (It used to fall
+    /// back to splitting on the first character, which answered a question
+    /// the program had not asked.)
+    fn make_fs(&mut self, fs: &[u8]) -> R<Fs> {
+        Ok(match fs {
+            b" " => Fs::Whitespace,
+            b"" => Fs::Chars,
+            &[c] => Fs::Char(c),
+            other => Fs::Regex(Rc::new(self.dynamic_regex(other)?)),
+        })
+    }
+
+    /// Build the record reader `RS` describes: empty for paragraphs, one
+    /// character literally, anything longer a regex as [`Self::make_fs`]'s is.
+    fn make_rs(&mut self, rs: &[u8]) -> R<Rs> {
+        Ok(match rs {
+            b"" => Rs::Paragraph,
+            &[c] => Rs::Char(c),
+            other => Rs::Regex(Rc::new(self.dynamic_regex(other)?)),
+        })
+    }
+
+    /// Compile a regex whose text was computed at run time, saying any
+    /// escape warnings it earned.
+    fn dynamic_regex(&mut self, text: &[u8]) -> R<Regex> {
+        let compiled = crate::parse::compile_dynamic(text, &mut self.warnings);
+        self.say_warnings();
+        compiled.map_err(Fatal::Said)
     }
 
     fn string_of(&self, slot: usize) -> Str {
@@ -1088,442 +1171,15 @@ impl Interp {
     }
 
     fn to_str(&self, v: &Value) -> Rc<Str> {
-        let convfmt = match self.globals.get(V_CONVFMT) {
+        v.to_str(&self.convfmt())
+    }
+
+    /// `CONVFMT`'s text, which turns a number into a string.
+    fn convfmt(&self) -> Rc<Str> {
+        match self.globals.get(V_CONVFMT) {
             Some(Cell::Val(v)) => v.to_str(b"%.6g"),
             _ => Rc::new(b"%.6g".to_vec()),
-        };
-        v.to_str(&convfmt)
-    }
-
-    // ---- functions --------------------------------------------------------
-
-    fn call(&mut self, slot: usize, args: &[Expr]) -> R<Value> {
-        let Some(func) = self.prog.funcs.get(slot).cloned() else {
-            return Err(Fatal("calling an undefined function".to_string()));
-        };
-        if args.len() > func.params.len() {
-            return Err(Fatal(format!(
-                "function {}: called with {} arguments but declared with {}",
-                func.name,
-                args.len(),
-                func.params.len()
-            )));
         }
-        if self.depth >= MAX_DEPTH {
-            return Err(Fatal(format!("function {}: recursion too deep", func.name)));
-        }
-
-        let is_array = self
-            .prog
-            .param_is_array
-            .get(slot)
-            .cloned()
-            .unwrap_or_default();
-        let mut frame: Vec<Cell> = Vec::with_capacity(func.params.len());
-        for i in 0..func.params.len() {
-            let wants_array = is_array.get(i).copied().unwrap_or(false);
-            match args.get(i) {
-                None if wants_array => {
-                    // An argument the caller did not pass is a fresh local
-                    // array — this is how awk programs declare local arrays.
-                    frame.push(Cell::Arr(Rc::new(RefCell::new(HashMap::new()))));
-                }
-                None => frame.push(Cell::Val(Value::Uninit)),
-                Some(Expr::Get(Lvalue::Var(v))) if wants_array => {
-                    // By reference: the callee's changes are the caller's.
-                    frame.push(Cell::Arr(self.array_ref(*v)));
-                }
-                Some(a) => {
-                    let v = self.eval(a)?;
-                    frame.push(Cell::Val(v));
-                }
-            }
-        }
-
-        self.frames.push(frame);
-        self.depth = self.depth.saturating_add(1);
-        let flow = self.exec_all(&func.body);
-        self.depth = self.depth.saturating_sub(1);
-        self.frames.pop();
-        match flow? {
-            Flow::Return(v) => Ok(v),
-            // `next` and `exit` inside a function propagate out of it, but a
-            // tree walk cannot carry them through an expression; a function
-            // that ends any other way simply returns the empty value.
-            Flow::Exit => {
-                if self.exit_code.is_none() {
-                    self.exit_code = Some(0);
-                }
-                Err(Fatal(String::new()))
-            }
-            _ => Ok(Value::Uninit),
-        }
-    }
-
-    // ---- getline ----------------------------------------------------------
-
-    fn getline(&mut self, g: &crate::ast::Getline) -> R<Value> {
-        let rs = self.rs.clone();
-        match &g.src {
-            GetlineSrc::Main => {
-                let rec = match self.next_main_record() {
-                    Ok(Some(r)) => r,
-                    Ok(None) => return Ok(Value::Num(0.0)),
-                    Err(_) => return Ok(Value::Num(-1.0)),
-                };
-                self.bump(V_NR);
-                self.bump(V_FNR);
-                match &g.into {
-                    // Into a variable: NR and FNR move, but the fields do not,
-                    // because `$0` was not touched.
-                    Some(lv) => self.assign(lv, Value::from_input(rec))?,
-                    None => self.set_record(rec),
-                }
-                Ok(Value::Num(1.0))
-            }
-            GetlineSrc::File(e) => {
-                let v = self.eval(e)?;
-                let name = self.to_str(&v).as_ref().clone();
-                let rec = match self.inputs.file(&name).and_then(|r| r.next(&rs)) {
-                    Ok(Some(r)) => r,
-                    Ok(None) => return Ok(Value::Num(0.0)),
-                    // A file that will not open is -1, not a fatal error: that
-                    // is what lets `while ((getline < f) > 0)` be written
-                    // against a file that may not be there.
-                    Err(_) => return Ok(Value::Num(-1.0)),
-                };
-                match &g.into {
-                    Some(lv) => self.assign(lv, Value::from_input(rec))?,
-                    None => self.set_record(rec),
-                }
-                Ok(Value::Num(1.0))
-            }
-            GetlineSrc::Cmd(e) => {
-                let v = self.eval(e)?;
-                let name = self.to_str(&v).as_ref().clone();
-                // The child inherits our standard output, so anything buffered
-                // has to be flushed before it can write.
-                let _ = self.out.flush(None);
-                let rec = match self.inputs.command(&name).and_then(|r| r.next(&rs)) {
-                    Ok(Some(r)) => r,
-                    Ok(None) => return Ok(Value::Num(0.0)),
-                    Err(_) => return Ok(Value::Num(-1.0)),
-                };
-                self.bump(V_NR);
-                match &g.into {
-                    Some(lv) => self.assign(lv, Value::from_input(rec))?,
-                    None => self.set_record(rec),
-                }
-                Ok(Value::Num(1.0))
-            }
-        }
-    }
-
-    // ---- built-in functions ----------------------------------------------
-
-    /// The compiled form of a regex argument.
-    ///
-    /// A `/re/` literal was compiled when the program was parsed. Anything else
-    /// is a *dynamic* regex — its text is computed at run time — so it is
-    /// compiled on first use and cached, because the usual shape is a pattern
-    /// held in a variable and used on every record.
-    fn regex_of(&mut self, e: &Expr) -> R<Rc<Regex>> {
-        if let Expr::Regex(re) = e {
-            return Ok(Rc::clone(re));
-        }
-        let v = self.eval(e)?;
-        let text = self.to_str(&v).as_ref().clone();
-        if let Some(re) = self.re_cache.get(&text) {
-            return Ok(Rc::clone(re));
-        }
-        let re = crate::parse::compile_regex(&text).map_err(Fatal)?;
-        let re = Rc::new(re);
-        // The cache is per distinct pattern text; a program that builds a new
-        // pattern from every record would otherwise grow it without bound.
-        if self.re_cache.len() < 1000 {
-            self.re_cache.insert(text, Rc::clone(&re));
-        }
-        Ok(re)
-    }
-
-    #[allow(clippy::too_many_lines)]
-    fn builtin(&mut self, b: Builtin, args: &[Expr]) -> R<Value> {
-        match b {
-            Builtin::Length => {
-                let Some(a) = args.first() else {
-                    let rec = self.record().clone();
-                    return Ok(Value::Num(count_chars(&rec)));
-                };
-                // `length(arr)` is the element count. It is not POSIX, but it
-                // is in every awk in use and the alternative — the length of
-                // the empty string — is never what anyone meant.
-                if let Expr::Get(Lvalue::Var(v)) = a
-                    && matches!(self.cell(*v), Some(Cell::Arr(_)))
-                {
-                    let arr = self.array_ref(*v);
-                    let n = arr.borrow().len();
-                    return Ok(Value::Num(f64::from(u32::try_from(n).unwrap_or(u32::MAX))));
-                }
-                let v = self.eval(a)?;
-                let s = self.to_str(&v);
-                Ok(Value::Num(count_chars(&s)))
-            }
-            Builtin::Substr => {
-                let sv = self.eval_arg(args, 0)?;
-                let s = self.to_str(&sv);
-                let chars: Vec<ch::Ch> = ch::chars(&s).collect();
-                let len = chars.len();
-                // The start and the length are *rounded*, not truncated, so
-                // `substr(s, 1.5, 2.4)` takes two characters from the second.
-                //
-                // A start below 1 becomes 1 and the length is kept, so
-                // `substr("Alpha1", 0, 3)` is `Alp` rather than `Al`. The awks
-                // are split on this — mawk measures the length from the
-                // out-of-range start and drops the part that falls off the
-                // front — and POSIX's wording ("the at most n-character
-                // substring that begins at position m") does not settle it. This
-                // follows gawk and the one true awk, which are the two a script
-                // is most likely to have been written against.
-                let m = round_half_up(self.eval_arg(args, 1)?.to_num());
-                let n = match args.get(2) {
-                    None => f64::INFINITY,
-                    Some(e) => round_half_up(self.eval(e)?.to_num()),
-                };
-                let lo = m.max(1.0);
-                let end = if n.is_infinite() {
-                    f64::INFINITY
-                } else {
-                    lo + n
-                };
-                #[allow(clippy::cast_precision_loss)]
-                let hi = if end.is_infinite() {
-                    (len as f64) + 1.0
-                } else {
-                    end.min((len as f64) + 1.0)
-                };
-                // Not `hi <= lo`: either may be NaN — `substr($0, "x")` is a
-                // legal call — and an empty result is the right answer then.
-                if hi.partial_cmp(&lo) != Some(std::cmp::Ordering::Greater) {
-                    return Ok(Value::str(Str::new()));
-                }
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                let (a, bnd) = (
-                    (lo as usize).saturating_sub(1),
-                    (hi as usize).saturating_sub(1),
-                );
-                let mut out = Str::new();
-                for c in chars.get(a..bnd).unwrap_or_default() {
-                    c.push_to(&mut out);
-                }
-                Ok(Value::str(out))
-            }
-            Builtin::Index => {
-                let hv = self.eval_arg(args, 0)?;
-                let nv = self.eval_arg(args, 1)?;
-                let hay = self.to_str(&hv);
-                let needle = self.to_str(&nv);
-                Ok(Value::Num(index_of(&hay, &needle)))
-            }
-            Builtin::Split => {
-                let sv = self.eval_arg(args, 0)?;
-                let s = self.to_str(&sv).as_ref().clone();
-                let Some(Expr::Get(Lvalue::Var(arr))) = args.get(1) else {
-                    return Err(Fatal(
-                        "split: the second argument must be an array".to_string(),
-                    ));
-                };
-                let arr = *arr;
-                let fs = match args.get(2) {
-                    None => None,
-                    Some(Expr::Regex(re)) => Some(Fs::Regex(Rc::clone(re))),
-                    Some(e) => {
-                        let v = self.eval(e)?;
-                        let text = self.to_str(&v);
-                        Some(make_fs(&text))
-                    }
-                };
-                let parts = match &fs {
-                    None => self.split_record(&s)?,
-                    Some(f) => split_with(f, &s, false)?,
-                };
-                let a = self.array_ref(arr);
-                {
-                    let mut m = a.borrow_mut();
-                    m.clear();
-                    for (i, p) in parts.iter().enumerate() {
-                        let key = format!("{}", i.saturating_add(1)).into_bytes();
-                        m.insert(key, Value::from_input(p.clone()));
-                    }
-                }
-                Ok(Value::Num(f64::from(
-                    u32::try_from(parts.len()).unwrap_or(u32::MAX),
-                )))
-            }
-            Builtin::Sub | Builtin::Gsub => self.substitute(b == Builtin::Gsub, args),
-            Builtin::Match => {
-                let sv = self.eval_arg(args, 0)?;
-                let s = self.to_str(&sv);
-                let Some(pat) = args.get(1) else {
-                    return Err(Fatal("match: missing pattern".to_string()));
-                };
-                let re = self.regex_of(pat)?;
-                match re.find(&s)? {
-                    Some((a, b2)) => {
-                        // RSTART and RLENGTH are in characters, so the byte
-                        // offsets the engine gives have to be converted.
-                        let start = count_chars(s.get(..a).unwrap_or_default()) + 1.0;
-                        let len = count_chars(s.get(a..b2).unwrap_or_default());
-                        self.set_global(V_RSTART, Value::Num(start));
-                        self.set_global(V_RLENGTH, Value::Num(len));
-                        Ok(Value::Num(start))
-                    }
-                    None => {
-                        self.set_global(V_RSTART, Value::Num(0.0));
-                        self.set_global(V_RLENGTH, Value::Num(-1.0));
-                        Ok(Value::Num(0.0))
-                    }
-                }
-            }
-            Builtin::Sprintf => {
-                let vals = self.eval_all(args)?;
-                let Some(fmt) = vals.first() else {
-                    return Err(Fatal("sprintf: no format string".to_string()));
-                };
-                let fmt = self.to_str(fmt);
-                let convfmt = self.string_of(V_CONVFMT);
-                let text = crate::fmt::sprintf(&fmt, vals.get(1..).unwrap_or_default(), &convfmt)
-                    .map_err(Fatal)?;
-                Ok(Value::str(text))
-            }
-            Builtin::Sin => Ok(Value::Num(self.eval_arg(args, 0)?.to_num().sin())),
-            Builtin::Cos => Ok(Value::Num(self.eval_arg(args, 0)?.to_num().cos())),
-            Builtin::Atan2 => {
-                let y = self.eval_arg(args, 0)?.to_num();
-                let x = self.eval_arg(args, 1)?.to_num();
-                Ok(Value::Num(y.atan2(x)))
-            }
-            Builtin::Exp => Ok(Value::Num(self.eval_arg(args, 0)?.to_num().exp())),
-            Builtin::Log => Ok(Value::Num(self.eval_arg(args, 0)?.to_num().ln())),
-            Builtin::Sqrt => Ok(Value::Num(self.eval_arg(args, 0)?.to_num().sqrt())),
-            Builtin::Int => Ok(Value::Num(self.eval_arg(args, 0)?.to_num().trunc())),
-            Builtin::Rand => Ok(Value::Num(self.next_random())),
-            Builtin::Srand => {
-                let previous = self.seed;
-                let new = match args.first() {
-                    Some(e) => self.eval(e)?.to_num(),
-                    None => seconds_since_epoch(),
-                };
-                self.seed = new;
-                let bits = new.to_bits();
-                // Any odd, non-zero state will do; xorshift is dead at zero.
-                self.rng = bits ^ 0x9e37_79b9_7f4a_7c15 | 1;
-                Ok(Value::Num(previous))
-            }
-            Builtin::Tolower | Builtin::Toupper => {
-                let v = self.eval_arg(args, 0)?;
-                let s = self.to_str(&v);
-                let mut out = Str::new();
-                for c in ch::chars(&s) {
-                    let mapped = if b == Builtin::Tolower {
-                        c.to_lowercase()
-                    } else {
-                        c.to_uppercase()
-                    };
-                    for m in mapped {
-                        m.push_to(&mut out);
-                    }
-                }
-                Ok(Value::str(out))
-            }
-            Builtin::System => {
-                let v = self.eval_arg(args, 0)?;
-                let cmd = self.to_str(&v);
-                // Everything buffered must be written before the child runs, or
-                // the child's output and ours come out in the wrong order.
-                self.out
-                    .flush(None)
-                    .map_err(|e| Fatal(format!("flush: {}", coreutils::errmsg::strerror(&e))))?;
-                match crate::io::shell(&cmd).status() {
-                    Ok(s) => Ok(Value::Num(f64::from(s.code().unwrap_or(0)))),
-                    Err(_) => Ok(Value::Num(-1.0)),
-                }
-            }
-            Builtin::Close => {
-                let v = self.eval_arg(args, 0)?;
-                let name = self.to_str(&v);
-                if let Some(code) = self.inputs.close(&name) {
-                    return Ok(Value::Num(f64::from(code)));
-                }
-                match self.out.close(&name) {
-                    Some(code) => Ok(Value::Num(f64::from(code))),
-                    None => Ok(Value::Num(-1.0)),
-                }
-            }
-            Builtin::Fflush => {
-                let name = match args.first() {
-                    None => None,
-                    Some(e) => {
-                        let v = self.eval(e)?;
-                        Some(self.to_str(&v).as_ref().clone())
-                    }
-                };
-                let res = self.out.flush(name.as_deref());
-                Ok(Value::Num(if res.is_ok() { 0.0 } else { -1.0 }))
-            }
-        }
-    }
-
-    fn eval_arg(&mut self, args: &[Expr], i: usize) -> R<Value> {
-        match args.get(i) {
-            Some(e) => self.eval(e),
-            None => Ok(Value::Uninit),
-        }
-    }
-
-    /// `sub` and `gsub`.
-    ///
-    /// The replacement's `&` stands for the matched text and `\&` for a literal
-    /// ampersand — the one piece of syntax in awk where a backslash has to be
-    /// interpreted at *substitution* time rather than when the string was read.
-    fn substitute(&mut self, global: bool, args: &[Expr]) -> R<Value> {
-        let Some(pat) = args.first() else {
-            return Err(Fatal("sub: missing pattern".to_string()));
-        };
-        let re = self.regex_of(pat)?;
-        let rv = self.eval_arg(args, 1)?;
-        let repl = self.to_str(&rv).as_ref().clone();
-        let target = match args.get(2) {
-            Some(Expr::Get(lv)) => lv.clone(),
-            None => Lvalue::Field(Box::new(Expr::Num(0.0))),
-            Some(_) => {
-                return Err(Fatal(
-                    "sub: the third argument must be a variable, a field or an array element"
-                        .to_string(),
-                ));
-            }
-        };
-        let sv = self.load(&target)?;
-        let hay = self.to_str(&sv).as_ref().clone();
-
-        let mut out = Str::new();
-        let mut last = 0usize;
-        let mut count = 0u32;
-        for span in re.find_iter(&hay) {
-            let (s, e) = span?;
-            out.extend_from_slice(hay.get(last..s).unwrap_or_default());
-            expand_ampersand(&repl, hay.get(s..e).unwrap_or_default(), &mut out);
-            last = e;
-            count = count.saturating_add(1);
-            if !global {
-                break;
-            }
-        }
-        if count == 0 {
-            return Ok(Value::Num(0.0));
-        }
-        out.extend_from_slice(hay.get(last..).unwrap_or_default());
-        self.assign(&target, Value::str(out))?;
-        Ok(Value::Num(f64::from(count)))
     }
 
     /// A uniform value in `[0, 1)`, from a xorshift generator.
@@ -1550,8 +1206,9 @@ impl Interp {
     ///
     /// Every reader of the record goes through here rather than touching
     /// `self.f.record`, because `$2 = "x"` leaves the stored record stale on
-    /// purpose: rebuilding on assignment would join with whatever `OFS` was at
-    /// that moment, and awk joins with `OFS` as it is when `$0` is *read*.
+    /// purpose: gawk rebuilds when `$0` is next *read*, with the `OFS` then in
+    /// force -- or, if `OFS` is assigned first, with the `OFS` it replaces
+    /// (see `set_var`).
     fn record(&mut self) -> &Str {
         self.rebuild_record();
         &self.f.record
@@ -1563,14 +1220,24 @@ impl Interp {
             return;
         }
         let ofs = self.string_of(V_OFS);
+        let convfmt = self.convfmt();
         let mut out = Str::new();
         for (i, f) in self.f.fields.iter().enumerate() {
             if i > 0 {
                 out.extend_from_slice(&ofs);
             }
-            out.extend_from_slice(f);
+            // A number assigned to a field takes its text now, with the
+            // CONVFMT in force now, as gawk's `force_string` re-formats a
+            // number whose format has changed since.
+            match self.f.field_values.get(i) {
+                Some(Some(v @ Value::Num(_))) => out.extend_from_slice(&v.to_str(&convfmt)),
+                _ => out.extend_from_slice(f),
+            }
         }
         self.f.record = out;
+        // Rebuilt, `$0` is a string: gawk makes it with `make_str_node`.
+        self.f.record_value = None;
+        self.f.record_input = false;
         self.f.record_valid = true;
     }
 }
@@ -1628,71 +1295,6 @@ fn split_with(fs: &Fs, text: &[u8], paragraph_mode: bool) -> R<Vec<Str>> {
     })
 }
 
-/// Build the field splitter `FS` describes.
-///
-/// The single-character case is *literal*, not a one-character regex: POSIX
-/// says so, and it is why `FS = "."` splits on dots rather than on everything.
-fn make_fs(fs: &[u8]) -> Fs {
-    match fs {
-        b" " => Fs::Whitespace,
-        b"" => Fs::Chars,
-        one if one.len() == 1 => match one.first() {
-            Some(c) => Fs::Char(*c),
-            None => Fs::Whitespace,
-        },
-        // A two-character escape like `\t` reaching here unprocessed would be a
-        // regex that means "a tab", which is the same thing, so no special case
-        // is needed.
-        other => match Regex::new(other) {
-            Ok(re) => Fs::Regex(Rc::new(re)),
-            // An FS that will not compile is not worth killing the run over;
-            // treating it literally is what the single-character case does and
-            // is the least surprising fallback.
-            Err(_) => Fs::Char(other.first().copied().unwrap_or(b' ')),
-        },
-    }
-}
-
-fn make_rs(rs: &[u8]) -> Rs {
-    match rs {
-        b"" => Rs::Paragraph,
-        one if one.len() == 1 => Rs::Char(one.first().copied().unwrap_or(b'\n')),
-        other => match Regex::new(other) {
-            Ok(re) => Rs::Regex(Rc::new(re)),
-            Err(_) => Rs::Char(other.first().copied().unwrap_or(b'\n')),
-        },
-    }
-}
-
-fn arith(op: BinOp, l: f64, r: f64) -> R<f64> {
-    Ok(match op {
-        BinOp::Add => l + r,
-        BinOp::Sub => l - r,
-        BinOp::Mul => l * r,
-        // The wording is gawk's. `attempted` is not decoration: it says the
-        // division did not happen, which is the difference between this and an
-        // IEEE infinity, and awk is one of the few languages where that is a
-        // hard error rather than a value.
-        BinOp::Div => {
-            if r == 0.0 {
-                return Err(Fatal("fatal: division by zero attempted".to_string()));
-            }
-            l / r
-        }
-        BinOp::Mod => {
-            if r == 0.0 {
-                return Err(Fatal(
-                    "fatal: division by zero attempted in `%'".to_string(),
-                ));
-            }
-            // C's `fmod`, which keeps the sign of the left operand — awk is
-            // specified in terms of it, so `-7 % 3` is -1 and not 2.
-            l % r
-        }
-        BinOp::Pow => l.powf(r),
-    })
-}
-
 /// The number of characters in a byte string, counting an undecodable byte as
 /// one character.
 fn count_chars(s: &[u8]) -> f64 {
@@ -1712,15 +1314,6 @@ fn index_of(hay: &[u8], needle: &[u8]) -> f64 {
         Some(byte) => count_chars(hay.get(..byte).unwrap_or_default()) + 1.0,
         None => 0.0,
     }
-}
-
-/// POSIX rounds `substr`'s arguments to the nearest integer, halves away from
-/// zero — not C's truncation, which is why this is not `trunc`.
-fn round_half_up(v: f64) -> f64 {
-    if v.is_nan() {
-        return 0.0;
-    }
-    v.round()
 }
 
 /// Write `repl` into `out`, with `&` replaced by `matched`.
@@ -1757,6 +1350,62 @@ fn expand_ampersand(repl: &[u8], matched: &[u8], out: &mut Str) {
     }
 }
 
+/// How gawk writes a redirection's operator in a diagnostic.
+fn redirect_symbol(mode: RedirMode) -> &'static str {
+    match mode {
+        RedirMode::Truncate => ">",
+        RedirMode::Append => ">>",
+        RedirMode::Pipe => "|",
+    }
+}
+
+/// gawk's refusal of a redirection to or from the empty string, which
+/// `redirect_string` makes before it tries anything.
+fn null_redirect(symbol: &str) -> Fatal {
+    Fatal::said(format!(
+        "fatal: expression for `{symbol}' redirection has null string value"
+    ))
+}
+
+/// Open a main-input operand, refusing a directory as gawk does when it opens
+/// one (`iop_alloc` checks), rather than letting the first read fail.
+fn open_input(name: &[u8]) -> std::io::Result<std::fs::File> {
+    let f = std::fs::File::open(crate::io::os_path(name))?;
+    if f.metadata()?.is_dir() {
+        return Err(std::io::Error::from(std::io::ErrorKind::IsADirectory));
+    }
+    Ok(f)
+}
+
+/// The names gawk refuses as a command-line variable under `--posix`
+/// (`check_special`): its keywords and built-in functions, less those marked
+/// as extensions (`func` is an ordinary name under `--posix`). `eval` is on the
+/// list because gawk's table does not mark it.
+const RESERVED: &[&str] = &[
+    "BEGIN", "END", "atan2", "break", "close", "continue", "cos", "delete", "do", "else", "eval",
+    "exit", "exp", "fflush", "for", "function", "getline", "gsub", "if", "in", "index", "int",
+    "length", "log", "match", "next", "nextfile", "print", "printf", "rand", "return", "sin",
+    "split", "sprintf", "sqrt", "srand", "sub", "substr", "system", "tolower", "toupper", "while",
+];
+
+/// What gawk's `arg_assign` refuses about a command-line assignment before it
+/// looks at the program -- a reserved name, a newline in the value -- worded
+/// as gawk words it; `None` if nothing.
+#[must_use]
+pub fn cli_refusal(name: &str, raw: &[u8]) -> Option<String> {
+    if RESERVED.contains(&name) {
+        return Some(format!(
+            "fatal: cannot use gawk builtin `{name}' as variable name"
+        ));
+    }
+    // POSIX allows no newline inside a string; the lexer says so for the
+    // program text, and this for the command line.
+    if raw.contains(&b'\n') {
+        return Some("fatal: POSIX does not allow physical newlines in string values".to_string());
+    }
+    None
+}
+
 /// Split `var=value` if that is what the argument is.
 ///
 /// The name has to be a valid awk identifier — otherwise `file=1.txt` would be
@@ -1774,66 +1423,61 @@ pub fn command_assignment(arg: &[u8]) -> Option<(String, Str)> {
         return None;
     }
     let value = arg.get(eq.saturating_add(1)..)?.to_vec();
-    Some((String::from_utf8_lossy(name).into_owned(), value))
-}
-
-/// Resolve the escape sequences in a command-line assignment's value, which
-/// POSIX requires — `-F '\t'` and `-v sep='\t'` both mean a tab.
-#[must_use]
-pub fn unescape(s: &[u8]) -> Str {
-    let mut out = Str::new();
-    let mut i = 0usize;
-    while let Some(&c) = s.get(i) {
-        if c != b'\\' {
-            out.push(c);
-            i = i.saturating_add(1);
-            continue;
-        }
-        i = i.saturating_add(1);
-        let Some(&n) = s.get(i) else {
-            out.push(b'\\');
-            break;
-        };
-        i = i.saturating_add(1);
-        match n {
-            b'n' => out.push(b'\n'),
-            b't' => out.push(b'\t'),
-            b'r' => out.push(b'\r'),
-            b'\\' => out.push(b'\\'),
-            b'"' => out.push(b'"'),
-            b'/' => out.push(b'/'),
-            b'a' => out.push(0x07),
-            b'b' => out.push(0x08),
-            b'f' => out.push(0x0c),
-            b'v' => out.push(0x0b),
-            b'0'..=b'7' => {
-                let mut v = u32::from(n.wrapping_sub(b'0'));
-                let mut k = 1u32;
-                while k < 3 {
-                    match s.get(i) {
-                        Some(d @ b'0'..=b'7') => {
-                            v = v
-                                .saturating_mul(8)
-                                .saturating_add(u32::from(d.wrapping_sub(b'0')));
-                            i = i.saturating_add(1);
-                            k = k.saturating_add(1);
-                        }
-                        _ => break,
-                    }
-                }
-                out.push(u8::try_from(v & 0xff).unwrap_or(0));
-            }
-            other => {
-                out.push(b'\\');
-                out.push(other);
-            }
-        }
-    }
-    out
+    // Checked above to be an ASCII identifier, so the decode cannot fail.
+    Some((std::str::from_utf8(name).ok()?.to_string(), value))
 }
 
 fn seconds_since_epoch() -> f64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0.0, |d| d.as_secs_f64())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    /// gawk's `arg_assign` refusals that need no program: a reserved name
+    /// (`check_special`, POSIX names only) and a newline in the value.
+    #[test]
+    fn a_command_line_assignment_is_refused_as_gawk_refuses_it() {
+        assert_eq!(
+            cli_refusal("if", b"1").as_deref(),
+            Some("fatal: cannot use gawk builtin `if' as variable name")
+        );
+        assert_eq!(
+            cli_refusal("length", b"1").as_deref(),
+            Some("fatal: cannot use gawk builtin `length' as variable name")
+        );
+        // An extension is an ordinary name under `--posix`.
+        assert_eq!(cli_refusal("func", b"1"), None);
+        assert_eq!(cli_refusal("gensub", b"1"), None);
+        assert_eq!(
+            cli_refusal("x", b"a\nb").as_deref(),
+            Some("fatal: POSIX does not allow physical newlines in string values")
+        );
+        assert_eq!(cli_refusal("x", b"a b"), None);
+    }
+
+    /// A `var=value` operand is one only with an identifier before the `=`;
+    /// anything else is a file name.
+    #[test]
+    fn an_operand_is_an_assignment_only_with_a_name() {
+        assert_eq!(
+            command_assignment(b"x=1"),
+            Some(("x".to_string(), b"1".to_vec()))
+        );
+        assert_eq!(
+            command_assignment(b"_a1=="),
+            Some(("_a1".to_string(), b"=".to_vec()))
+        );
+        assert_eq!(command_assignment(b"1x=1"), None);
+        assert_eq!(
+            command_assignment(b"file=1.txt/x"),
+            Some(("file".to_string(), b"1.txt/x".to_vec()))
+        );
+        assert_eq!(command_assignment(b"=1"), None);
+        assert_eq!(command_assignment(b"a.txt"), None);
+    }
 }

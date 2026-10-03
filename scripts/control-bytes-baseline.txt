@@ -5,11 +5,13 @@
 # Every entry here is either a deliberate control byte in a fixture or
 # a defect nobody has got to yet. Both deserve the note.
 
-#   write(fm, "[ETX]", 1) where the escape became the byte. Filed as
-#   requests/b-a-a-raw-control-byte-is-sitting-in-a-comment-in-main-rs.md
-#   on 2026-09-11; remove this entry when lane A lands the fix.
 gui/imagecodec/tests/data/ico_refused_no_entries.ico	00	binary fixture: a 6-byte ICO header declaring no images (lane F); too short for the 32-control-byte binary test
 gui/imagecodec/tests/data/ico_refused_no_entries.ico	01	binary fixture: a 6-byte ICO header declaring no images (lane F); too short for the 32-control-byte binary test
 rustcrypto/digest/tests/data/fixed_hash_serialization.bin	00	binary fixture vendored byte-for-byte from crates.io (digest 0.11.3, rustcrypto/README.md, lane E); too short for the 32-control-byte binary test
 rustcrypto/digest/tests/data/fixed_hash_serialization.bin	01	binary fixture vendored byte-for-byte from crates.io (digest 0.11.3, rustcrypto/README.md, lane E); too short for the 32-control-byte binary test
 rustcrypto/digest/tests/data/fixed_hash_serialization.bin	13	binary fixture vendored byte-for-byte from crates.io (digest 0.11.3, rustcrypto/README.md, lane E); too short for the 32-control-byte binary test
+userspace/coreutils/licenses/LGPL-2.1	0c	form feeds of the LGPL 2.1 text, verbatim as glibc 2.39 and util-linux 2.39.3 ship it (page breaks); a licence text travels byte for byte (gather-notices.py), lane B
+userspace/file/magic/blcr	08	backspaces in two commented-out rules of file 5.45's magic/Magdir/blcr, vendored byte for byte (scripts/file-magic-vendor.py); upstream's text, lane B
+userspace/localtime/licenses/LGPL-2.1	0c	form feeds of the LGPL 2.1 text, verbatim as glibc 2.39 and util-linux 2.39.3 ship it (page breaks); a licence text travels byte for byte (gather-notices.py), lane B
+userspace/lockfile/licenses/GPL-2.0	0c	form feeds of the GPL 2 text, verbatim as procmail 3.24 ships it in COPYING (page breaks); a licence text travels byte for byte (gather-notices.py), lane B
+userspace/ulclosestream/licenses/LGPL-2.1	0c	form feeds of the LGPL 2.1 text, verbatim as glibc 2.39 and util-linux 2.39.3 ship it (page breaks); a licence text travels byte for byte (gather-notices.py), lane B

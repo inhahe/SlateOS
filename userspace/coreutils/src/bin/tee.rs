@@ -408,7 +408,7 @@ fn run(settings: &Settings) -> ExitCode {
                 Sink::File(f) => f.write_all(chunk),
             };
             match result {
-                Ok(()) => i += 1,
+                Ok(()) => i = i.saturating_add(1),
                 Err(e) => {
                     let broken = e.kind() == io::ErrorKind::BrokenPipe;
                     let reportable = settings.output_error.reportable(broken);

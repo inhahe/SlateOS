@@ -7,7 +7,7 @@
 //!
 //! | Reader | Layout | Result |
 //! |---|---|---|
-//! | `userspace/who` | 384-byte records, every field | correct |
+//! | `userspace/who` | 384-byte records, every field | correct; crate retired 2026-10-02 |
 //! | `userspace/uptime` | 384-byte records, `ut_type` only | correct; crate retired 2026-09-12 |
 //! | `userspace/w` | **colon-separated text** | never matches anything |
 //!
@@ -126,6 +126,12 @@ pub struct Record {
     pub pid: i32,
     /// `ut_tv.tv_sec` as Unix epoch seconds, or 0 if it was negative.
     pub login_time: u64,
+    /// `ut_tv.tv_sec` exactly as stored: signed, and sign-extended from the
+    /// record's 32 bits. GNU's readers hand this to `localtime` without
+    /// asking whether it is plausible, so `who` prints a 1969 date for a
+    /// negative one; [`login_time`](Self::login_time) is for the readers that
+    /// treat such a record as corrupt.
+    pub tv_sec: i64,
     /// `ut_tv.tv_usec`, the microseconds part of the timestamp.
     pub login_usec: u32,
     /// `ut_exit`, the two `short`s a DEAD_PROCESS record carries: the
@@ -257,8 +263,10 @@ pub fn parse(data: &[u8]) -> Vec<Record> {
             id,
             pid,
             // tv_sec is signed but holds a positive epoch time. A negative one
-            // is a corrupt record, and 0 is the only honest reading of it.
+            // is a corrupt record, and 0 is the only honest reading of it --
+            // for a reader that wants a time. `tv_sec` keeps it as stored.
             login_time: u64::try_from(tv_sec).unwrap_or(0),
+            tv_sec: i64::from(tv_sec),
             login_usec,
             exit_status,
             session,
@@ -269,15 +277,6 @@ pub fn parse(data: &[u8]) -> Vec<Record> {
     }
 
     records
-}
-
-/// The number of records describing a user logged in now.
-///
-/// `uptime` wants only this, and computing it here keeps the record layout in
-/// one place rather than two.
-#[must_use]
-pub fn count_user_sessions(data: &[u8]) -> usize {
-    parse(data).iter().filter(|r| r.is_user_session()).count()
 }
 
 #[cfg(test)]
@@ -375,14 +374,13 @@ mod tests {
         data.extend(record(USER_PROCESS, 3, b"tty3", b"", b"c", b"", 30));
         let got = parse(&data);
         assert_eq!(got.len(), 3);
-        assert_eq!(count_user_sessions(&data), 2);
+        assert_eq!(got.iter().filter(|r| r.is_user_session()).count(), 2);
     }
 
     #[test]
     fn an_empty_or_short_file_yields_no_records() {
         assert!(parse(b"").is_empty());
         assert!(parse(&[0u8; RECORD_SIZE - 1]).is_empty());
-        assert_eq!(count_user_sessions(b""), 0);
     }
 
     #[test]
@@ -405,13 +403,22 @@ mod tests {
         assert_eq!(parse(&data)[0].login_time, 0);
     }
 
+    /// ...while `tv_sec` keeps the value as stored, sign and all: what GNU's
+    /// readers hand to `localtime`.
+    #[test]
+    fn tv_sec_is_the_stored_time_sign_extended() {
+        for stored in [-1, -86_400, i32::MIN, 0, 1_700_000_000, i32::MAX] {
+            let data = record(USER_PROCESS, 1, b"tty1", b"", b"alice", b"", stored);
+            assert_eq!(parse(&data)[0].tv_sec, i64::from(stored), "{stored}");
+        }
+    }
+
     #[test]
     fn dead_records_parse_but_are_not_sessions() {
         let data = record(DEAD_PROCESS, 9, b"tty9", b"", b"ghost", b"", 0);
         let got = parse(&data);
         assert_eq!(got.len(), 1, "a dead record is still a record");
         assert!(!got[0].is_user_session());
-        assert_eq!(count_user_sessions(&data), 0);
     }
 
     #[test]

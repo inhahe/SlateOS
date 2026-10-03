@@ -1987,8 +1987,8 @@ impl Opts {
         OPT_LETTERS.iter().position(|&l| l == letter)
     }
 
-    fn name_index(name: &str) -> Option<usize> {
-        OPT_NAMES.iter().position(|&n| n == name)
+    fn name_index(name: &[u8]) -> Option<usize> {
+        OPT_NAMES.iter().position(|n| n.as_bytes() == name)
     }
 
     fn get(self, letter: u8) -> bool {
@@ -2006,7 +2006,7 @@ impl Opts {
         true
     }
 
-    fn set_named(&mut self, name: &str, on: bool) -> bool {
+    fn set_named(&mut self, name: &[u8], on: bool) -> bool {
         let Some(i) = Self::name_index(name) else {
             return false;
         };
@@ -2206,6 +2206,16 @@ fn diag_out(bytes: &[u8]) {
     // that reaches the exit status.
     let _ = write_fd(&io, 2, bytes);
     flush_stdout();
+}
+
+/// A diagnostic assembled from byte pieces, with its newline: for a message
+/// that quotes what the script wrote. That is bytes, and it is printed as
+/// it was written -- a decode would put U+FFFD where the script had a
+/// byte, and the message would then quote something the script never said.
+fn diag_parts(parts: &[&[u8]]) {
+    let mut bytes = parts.concat();
+    bytes.push(b'\n');
+    diag_out(&bytes);
 }
 
 /// Push this shell's buffered standard output out.
@@ -2809,11 +2819,12 @@ impl Shell {
                     } else {
                         msg
                     };
-                    diag!(
-                        "sh: {}: {}",
-                        coreutils::quote::quotef(name),
-                        String::from_utf8_lossy(&msg)
-                    );
+                    diag_parts(&[
+                        b"sh: ",
+                        coreutils::quote::quotef(name).as_bytes(),
+                        b": ",
+                        &msg,
+                    ]);
                     return Err(Flow::Exit(2));
                 }
                 cur.unwrap_or_default()
@@ -3272,10 +3283,13 @@ impl Shell {
                 // the message usable: the expression the script *wrote* was
                 // `$((x/y))`, and only the substituted form says what the
                 // values were.
-                diag!(
-                    "sh: arithmetic expression: {e}: \"{}\"",
-                    String::from_utf8_lossy(&text)
-                );
+                diag_parts(&[
+                    b"sh: arithmetic expression: ",
+                    e.as_bytes(),
+                    b": \"",
+                    &text,
+                    b"\"",
+                ]);
                 Err(Flow::Exit(2))
             }
         }
@@ -3795,6 +3809,11 @@ impl Shell {
     ///
     /// There is no `fork` behind this. See [`Shell::restore`] for what that
     /// costs and what it covers.
+    ///
+    /// Always `Ok`: a subshell absorbs its body's flow, which is the point of
+    /// one. It answers [`Run`] anyway because it stands wherever a command
+    /// does, and every way of running a command answers [`Run`].
+    #[allow(clippy::unnecessary_wraps)]
     fn subshell(&mut self, body: impl FnOnce(&mut Self) -> Run<()>) -> Run<()> {
         let snap = self.snapshot();
         let r = body(self);
@@ -4729,7 +4748,9 @@ fn echo_escapes(src: &[u8], out: &mut Vec<u8>) -> bool {
                     && d.is_ascii_digit()
                     && d < b'8'
                 {
-                    v = v.saturating_mul(8).saturating_add(u32::from(d - b'0'));
+                    v = v
+                        .saturating_mul(8)
+                        .saturating_add(u32::from(d.saturating_sub(b'0')));
                     i = i.saturating_add(1);
                     k = k.saturating_add(1);
                 }
@@ -4850,6 +4871,13 @@ impl Shell {
         );
     }
 
+    /// Run the builtin `argv` names.
+    ///
+    /// Every builtin returns [`Run`], including the ones that never stop the
+    /// shell (`echo`, `pwd`, `cd` and others answer with `self.status`), so
+    /// that each arm below reads alike and a builtin that later learns to stop
+    /// the shell, `exit`'s way, does not change its caller. Those carry
+    /// `allow(clippy::unnecessary_wraps)` pointing here.
     fn run_builtin(&mut self, argv: &[Vec<u8>], io: &Io) -> Run<()> {
         let name = argv.first().cloned().unwrap_or_default();
         let args = argv.get(1..).unwrap_or_default();
@@ -4866,11 +4894,11 @@ impl Shell {
             b"pwd" => self.bi_pwd(io),
             b"cd" => self.bi_cd(args, io),
             b"exit" => {
-                let n = self.number_arg(args, self.status)?;
+                let n = self.number_arg(args, self.status);
                 Err(Flow::Exit(n))
             }
             b"return" => {
-                let n = self.number_arg(args, self.status)?;
+                let n = self.number_arg(args, self.status);
                 Err(Flow::Return(n))
             }
             b"break" => self.bi_loopctl(args, false),
@@ -4895,21 +4923,22 @@ impl Shell {
     }
 
     /// The optional numeric argument of `exit`, `return` and friends.
-    fn number_arg(&mut self, args: &[Vec<u8>], default: u8) -> Run<u8> {
+    fn number_arg(&mut self, args: &[Vec<u8>], default: u8) -> u8 {
         match args.first() {
-            None => Ok(default),
+            None => default,
             Some(a) => match parse_int(a) {
                 // `exit 300` is `exit 44`: the status is a byte, and truncating
                 // is what every shell does with a wider number.
-                Some(v) => Ok(status_byte(i32::try_from(v).unwrap_or(0))),
+                Some(v) => status_byte(i32::try_from(v).unwrap_or(0)),
                 None => {
-                    diag!("sh: illegal number: {}", String::from_utf8_lossy(a));
-                    Ok(2)
+                    diag_parts(&[b"sh: illegal number: ", a]);
+                    2
                 }
             },
         }
     }
 
+    #[allow(clippy::unnecessary_wraps)] // One signature for every builtin: see `run_builtin`.
     fn bi_echo(&mut self, args: &[Vec<u8>], io: &Io) -> Run<()> {
         let mut newline = true;
         let mut rest = args;
@@ -4937,6 +4966,7 @@ impl Shell {
         Ok(())
     }
 
+    #[allow(clippy::unnecessary_wraps)] // One signature for every builtin: see `run_builtin`.
     fn bi_pwd(&mut self, io: &Io) -> Run<()> {
         match env::current_dir() {
             Ok(d) => {
@@ -4953,6 +4983,7 @@ impl Shell {
         Ok(())
     }
 
+    #[allow(clippy::unnecessary_wraps)] // One signature for every builtin: see `run_builtin`.
     fn bi_cd(&mut self, args: &[Vec<u8>], io: &Io) -> Run<()> {
         // `-L` and `-P` are accepted and ignored: this shell has no logical
         // path to keep, since it tracks `PWD` from the kernel's answer.
@@ -5015,7 +5046,7 @@ impl Shell {
             Some(a) => match parse_int(a).and_then(|v| u32::try_from(v).ok()) {
                 Some(v) if v > 0 => v,
                 _ => {
-                    diag!("sh: {word}: illegal number: {}", String::from_utf8_lossy(a));
+                    diag_parts(&[b"sh: ", word.as_bytes(), b": illegal number: ", a]);
                     self.status = 2;
                     return Ok(());
                 }
@@ -5041,7 +5072,7 @@ impl Shell {
             Some(a) => match parse_int(a).and_then(|v| usize::try_from(v).ok()) {
                 Some(v) => v,
                 None => {
-                    diag!("sh: shift: illegal number: {}", String::from_utf8_lossy(a));
+                    diag_parts(&[b"sh: shift: illegal number: ", a]);
                     return self.special_error(2);
                 }
             },
@@ -5103,6 +5134,7 @@ impl Shell {
     /// function otherwise*, which is POSIX's rule and not the obvious one:
     /// `unset f` after `f() { … }` really does remove the function, so a
     /// script can retract a definition without knowing it was one.
+    #[allow(clippy::unnecessary_wraps)] // One signature for every builtin: see `run_builtin`.
     fn bi_unset(&mut self, args: &[Vec<u8>]) -> Run<()> {
         // `None` is "neither option given" — the fall-back rule above.
         let mut kind: Option<bool> = None;
@@ -5172,9 +5204,8 @@ impl Shell {
                     match args.get(i.saturating_add(1)) {
                         Some(nm) => {
                             i = i.saturating_add(1);
-                            let text = String::from_utf8_lossy(nm).into_owned();
-                            if !self.opts.set_named(&text, on) {
-                                diag!("sh: set: illegal option name: {text}");
+                            if !self.opts.set_named(nm, on) {
+                                diag_parts(&[b"sh: set: illegal option name: ", nm]);
                                 return self.special_error(2);
                             }
                         }
@@ -5288,6 +5319,7 @@ impl Shell {
         }
     }
 
+    #[allow(clippy::unnecessary_wraps)] // One signature for every builtin: see `run_builtin`.
     fn bi_read(&mut self, args: &[Vec<u8>], io: &Io) -> Run<()> {
         let mut raw = false;
         let mut i = 0usize;
@@ -5436,6 +5468,7 @@ impl Shell {
         }
     }
 
+    #[allow(clippy::unnecessary_wraps)] // One signature for every builtin: see `run_builtin`.
     fn bi_wait(&mut self, args: &[Vec<u8>]) -> Run<()> {
         let mut children = std::mem::take(&mut self.bg);
         if args.is_empty() {
@@ -5450,7 +5483,7 @@ impl Shell {
         let mut status = 0u8;
         for a in args {
             let Some(pid) = parse_int(a).and_then(|v| u32::try_from(v).ok()) else {
-                diag!("sh: wait: {}: bad process id", String::from_utf8_lossy(a));
+                diag_parts(&[b"sh: wait: ", a, b": bad process id"]);
                 self.bg = children;
                 self.status = 2;
                 return Ok(());
@@ -5558,7 +5591,7 @@ impl Shell {
             }
             pending.extend_from_slice(&line);
             match parse(&pending) {
-                Err(ParseErr::Incomplete) => continue,
+                Err(ParseErr::Incomplete) => {}
                 Err(e) => {
                     // A syntax error only skips a line at a prompt; the script
                     // case is `run_text`'s, and it stops there.
@@ -5637,9 +5670,8 @@ fn run_main() -> ExitCode {
                     i = i.saturating_add(1);
                     match argv.get(i) {
                         Some(nm) => {
-                            let text = String::from_utf8_lossy(nm).into_owned();
-                            if !sh.opts.set_named(&text, on) {
-                                diag!("sh: illegal option name: {text}");
+                            if !sh.opts.set_named(nm, on) {
+                                diag_parts(&[b"sh: illegal option name: ", nm]);
                                 return ExitCode::from(2);
                             }
                         }
@@ -5734,6 +5766,43 @@ mod tests {
     /// What a script exited with.
     fn code(script: &[u8]) -> u8 {
         run(script).0
+    }
+
+    /// A diagnostic quotes what the script wrote as it was written: a byte
+    /// that is not UTF-8 comes out as that byte, not as U+FFFD -- which would
+    /// quote the script saying something it never said.
+    #[test]
+    fn diagnostics_quote_the_scripts_bytes() {
+        let cases: [(&[u8], &[u8]); 7] = [
+            (
+                b"set -o a\xffb 2>&1",
+                b"sh: set: illegal option name: a\xffb\n",
+            ),
+            (b"exit 1\xff 2>&1", b"sh: illegal number: 1\xff\n"),
+            (b"shift x\xff 2>&1", b"sh: shift: illegal number: x\xff\n"),
+            (
+                b"for i in 1; do break x\xff 2>&1; done",
+                b"sh: break: illegal number: x\xff\n",
+            ),
+            (b"wait 1\xff 2>&1", b"sh: wait: 1\xff: bad process id\n"),
+            (b"{ : ${x?a\xffb}; } 2>&1", b"sh: x: a\xffb\n"),
+            // The error names the byte in shell quoting; the expression after
+            // it is the script's text as written.
+            (
+                b"{ : $((1/\xff)); } 2>&1",
+                b"sh: arithmetic expression: unexpected ''$'\\377': \"1/\xff\"\n",
+            ),
+        ];
+        for (script, want) in cases {
+            let got = run(script).1;
+            assert_eq!(
+                got,
+                want,
+                "{} printed {}",
+                String::from_utf8_lossy(script),
+                String::from_utf8_lossy(&got)
+            );
+        }
     }
 
     fn first_word(src: &[u8]) -> Word {

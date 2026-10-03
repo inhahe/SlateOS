@@ -76,6 +76,16 @@ for n in 1 2 12; do
   done
 done
 
+# A session with no name, which upstream's count_users skips: one real
+# record and one nameless USER_PROCESS, so the count is 1 and not 2.
+python3 - "$fixdir/utmp-nameless" <<'PY'
+import struct, sys
+def rec(t, user):
+    return struct.pack("<hxxi32s4s32s256shhiii16s20s", t, 1, b"pts/9", b"ts/9",
+                       user, b"", 0, 0, 0, 1700000000, 0, b"\0" * 16, b"\0" * 20)
+open(sys.argv[1], "wb").write(rec(7, b"someone") + rec(7, b""))
+PY
+
 # Can we pin it?  Probed once, and the answer decides whether the cases below
 # are evidence or are masked.  The probe checks the SYSTEMD mask too, because
 # without it the user count is logind's and three of the cases below would be
@@ -224,6 +234,46 @@ run_uptime() {
   printf '16000.00 100000.00\n' > "$fixdir/uptime"
 }
 
+# A case run against a chosen /proc/uptime TEXT, or /proc/loadavg TEXT.
+run_uptime_text() {
+  local text=$1; shift
+  if [ "$ns" != yes ]; then masked=$((masked + 1)); return 0; fi
+  printf '%s' "$text" > "$fixdir/uptime"
+  compare "$fixdir/utmp1" "$@"
+  report "uptime $* [/proc/uptime = $(printf '%s' "$text" | tr '\n\t' '|>')]"
+  printf '16000.00 100000.00\n' > "$fixdir/uptime"
+}
+
+run_loadavg_text() {
+  local text=$1; shift
+  if [ "$ns" != yes ]; then masked=$((masked + 1)); return 0; fi
+  printf '%s' "$text" > "$fixdir/loadavg"
+  compare "$fixdir/utmp1" "$@"
+  report "uptime $* [/proc/loadavg = $(printf '%s' "$text" | tr '\n\t' '|>')]"
+  printf '0.07 1.05 12.34 2/297 51893\n' > "$fixdir/loadavg"
+}
+
+xfail_uptime_text() {
+  local text=$1 why=$2; shift 2
+  if [ "$ns" != yes ]; then masked=$((masked + 1)); return 0; fi
+  printf '%s' "$text" > "$fixdir/uptime"
+  compare "$fixdir/utmp1" "$@"
+  local label
+  label="uptime $* [/proc/uptime = $(printf '%s' "$text" | tr '\n\t' '|>')]"
+  if [ "$AGREED" = broken ]; then
+    broken=$((broken + 1))
+    printf 'BROKEN %s -- never reached `uptime`\n' "$label"
+  elif [ "$AGREED" = yes ]; then
+    xpass=$((xpass + 1))
+    printf 'XPASS %s -- expected to differ (%s) and did not\n' "$label" "$why"
+  else
+    xfail=$((xfail + 1))
+    [ -n "${VERBOSE:-}" ] && printf 'xfail %s (%s)\n' "$label" "$why"
+  fi
+  printf '16000.00 100000.00\n' > "$fixdir/uptime"
+  return 0
+}
+
 # An expected divergence at a chosen /proc/uptime value.
 xfail_uptime() {
   local secs=$1 why=$2; shift 2
@@ -273,6 +323,59 @@ for s in 0 5 59 60 61 119 3599 3600 3601 3660 7199 7200 86399 86400 86460 \
   run_uptime "$s"
 done
 
+# --- /proc/uptime as fscanf reads it --------------------------------------------
+# Two numbers or nothing: one number alone, an empty file and a line of prose
+# are each `Cannot get system uptime`, exit 1.
+run_uptime_text '16000.50 100000.00
+'
+run_uptime_text '16000.50 100000.00
+' -p
+run_uptime_text '16000.00
+'
+run_uptime_text '16000.00
+' -p
+run_uptime_text '16000.00
+' -s
+run_uptime_text ''
+run_uptime_text '' -s
+# fscanf collects `1e` whole and converts it as 1; the second number follows.
+run_uptime_text '1e 5
+'
+run_uptime_text '  16000.00	100000.00
+'
+# What `parse` refused and fscanf reads: a negative, NaN, infinity, and a
+# count past INT_MAX, on which upstream's `int` arithmetic prints negatives.
+run_uptime_text '-3600 0
+'
+run_uptime_text '-59 0
+'
+run_uptime_text 'nan 0
+'
+run_uptime_text 'inf 0
+'
+run_uptime_text '3000000000.00 0
+'
+# A line of prose: upstream appends `strerror (errno)` here too, and errno is
+# whatever an unrelated call left -- `No such file or directory` on this host,
+# nothing for an empty file. Ours names no reason, there being none.
+xfail_uptime_text 'garbage
+' "procps appends a stale errno to a refusal that has no reason"
+xfail_uptime_text 'garbage
+' "procps appends a stale errno to a refusal that has no reason" -s
+
+# --- /proc/loadavg: each field that parses, and zeros after the first that does not
+run_loadavg_text '1.50 x
+'
+run_loadavg_text 'a line of prose
+'
+run_loadavg_text ''
+run_loadavg_text 'nan -nan inf 1/2 3
+'
+run_loadavg_text '0.125 0.375 2.675 1/2 3
+'
+run_loadavg_text '1e2 2e-1 0x10 1/2 3
+'
+
 # --- the user count, including the value that is singular ---------------------
 # `,  0 user` -- SINGULAR at zero. `n == 1 ? "" : "s"` gets every other row
 # right, and gets wrong the one a machine with nobody logged in prints.
@@ -281,6 +384,13 @@ done
 for n in 0 1 2 12; do
   run_users "$n"
 done
+# A USER_PROCESS entry with no name is not a session to upstream.
+if [ "$ns" = yes ]; then
+  compare "$fixdir/utmp-nameless"
+  report "uptime [a nameless USER_PROCESS entry]"
+else
+  masked=$((masked + 1))
+fi
 
 # --- the other two forms ------------------------------------------------------
 run_case -p
@@ -325,26 +435,22 @@ for s in 60 3600 86400 172800 604800 1209600 31536000 34560000 315360000; do
   xfail_uptime "$s" "procps-ng 4.0.4 rolls over on > rather than >=" -p
 done
 
-# --- refusals, where a stub and a real implementation part company ------------
-# The EXIT STATUS and the refusal itself agree; the text after it does not, and
-# the difference is a house style rather than a defect on either side.
-#
-#   ours:   uptime: invalid option -- 'Z'
-#           Try 'uptime --help' for more information.
-#   procps: uptime: invalid option -- 'Z'
-#           <blank>
-#           <the entire --help text>
-#
-# GNU coreutils prints the `Try …` hint; procps prints its whole usage. This
-# tree's `coreutils::getopt` implements the GNU style for all 86 bins, and
-# `uptime` is the one whose upstream is procps. Changing the shared formatter
-# to match this single program would make the other 85 wrong, so the divergence
-# is declared here instead of chased -- the refusal and the status, which are
-# what a script reads, do match.
+# --- refusals ------------------------------------------------------------------
+# procps prints getopt's sentence and then its whole usage, where GNU prints a
+# `Try …` hint. These were declared differences until 2026-10-02 on the ground
+# that `coreutils::getopt` formats every bin GNU's way and could not be changed
+# for one -- which was true of the shared formatter and never of this program:
+# getopt's sentence is a field of its error, and `free` and `w` print it with
+# their usage after it. So `uptime` does too, and these are cases.
 for a in -Z --nosuchoption extra-operand --pretty=value; do
-  xfail_case "procps prints its full usage after an error; ours prints GNU's hint" "$a"
+  run_case "$a"
 done
-xfail_case "procps prints its full usage after an error; ours prints GNU's hint" -p extra
+run_case -p extra
+# An operand is refused AFTER the options, as upstream's `optind != argc` test
+# comes after its getopt loop: so `-s` after an operand still answers, and an
+# option error after one is still getopt's own.
+run_case extra -s
+run_case extra -Z
 
 # `-ps` is NOT an error and this harness is what told me. I put it in the
 # refusal list above on the assumption that a clustered pair would be rejected;

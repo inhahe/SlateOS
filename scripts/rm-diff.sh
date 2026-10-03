@@ -48,12 +48,11 @@
 #     which points `Rm::root` — GNU's `x.root_dev_ino` — at a scratch directory
 #     and so tests the comparison itself with no `/` anywhere near it.
 #
-# `--one-file-system` and `--preserve-root=all` are likewise absent: both need
-# a mount point to mean anything, and mounting needs privileges this harness
-# does not have and should not ask for. See `known-issues.md` ->
-# `TD-B-RM-ONE-FILE-SYSTEM-AND-PRESERVE-ROOT-ALL-ARE-IMPLEMENTED-BUT-UNCERTIFIED`,
-# which also records the `unshare --map-root-user --mount` section that would
-# close the gap.
+# `--one-file-system` and `--preserve-root=all` need a mount point to mean
+# anything, and mounting needs privileges this harness does not ask for. It
+# does not need them: section 16b runs each side in its own user and mount
+# namespace (`unshare -mUr`), where an ordinary user may mount a tmpfs on a
+# directory of the fixture and so make a mount point of its own.
 #
 # ## Why both sides run inside WSL
 #
@@ -722,6 +721,88 @@ TREE='mktree; printf x > "tree/it'"'"'s\$"'
 run_case -rv tree
 TREE='mktree; printf x > "$(printf "tree/a\nb")"'
 run_case -rv tree
+
+# =============================================================================
+# 16b. Mount points: --one-file-system and --preserve-root=all
+# =============================================================================
+# Both options are about a directory on a different filesystem from its
+# parent -- a mount point -- and only a mount point can measure them. Each side
+# runs in its own user and mount namespace (`unshare -mUr`), where mounting a
+# tmpfs needs no privilege outside it: `tree/sub` becomes one, and the files
+# under it are written into the tmpfs. Everything the case looks at is taken
+# *inside* the namespace -- the program's output and status, and what is left
+# of the tree, mount included -- because the mount, and whatever survived on
+# it, vanish with the namespace.
+#
+# Inside it the program runs as the namespace's root, which is why no case
+# here turns on write permission: those are the rest of this file's.
+#
+# The section is skipped, and says so, where the namespace cannot be made.
+mount_side() {
+  local side=$1 dir=$2 res=$3; shift 3
+  mkdir -p "$dir/tree/sub" || return 1
+  printf 'a\n' >"$dir/tree/a.txt"
+  ( cd "$dir" || exit 1
+    PATH="$bindir/$side:$PATH"
+    diff_run timeout -k 2 30 unshare -mUr --propagation private sh -c '
+      res=$1; shift
+      mount -t tmpfs none tree/sub || exit 125
+      mkdir tree/sub/deep && printf "bb\n" >tree/sub/b.txt \
+        && printf "c\n" >tree/sub/deep/c.txt || exit 125
+      rm "$@" >"$res.out" 2>"$res.err"
+      echo "$?" >"$res.rc"
+      find . -mindepth 1 \( -type d -printf "%P %m d\n" -o -printf "%P %m %s\n" \) \
+        2>/dev/null | LC_ALL=C sort >"$res.snap"
+    ' _ "$res" "$@" )
+}
+
+mount_case() {
+  case_no=$((case_no+1))
+  local o=$work/mo$case_no g=$work/mg$case_no f
+  mount_side ours "$o.d" "$o" "$@"
+  mount_side gnu "$g.d" "$g" "$@"
+  LABEL="rm $*   [tree/sub is a tmpfs mount]"
+  if ! [ -s "$o.rc" ] || ! [ -s "$g.rc" ]; then
+    AGREED=no
+    REPORT="  the namespace or the mount could not be set up"
+  else
+    AGREED=yes
+    for f in out err rc snap; do
+      cmp -s "$o.$f" "$g.$f" || AGREED=no
+    done
+    REPORT=$(printf '  ours: rc=%s err{%s}\n        out{%s}\n        tree{%s}\n  gnu : rc=%s err{%s}\n        out{%s}\n        tree{%s}' \
+      "$(cat "$o.rc")" "$(tr '\n' '|' <"$o.err")" "$(tr '\n' '|' <"$o.out")" "$(tr '\n' '|' <"$o.snap")" \
+      "$(cat "$g.rc")" "$(tr '\n' '|' <"$g.err")" "$(tr '\n' '|' <"$g.out")" "$(tr '\n' '|' <"$g.snap")")
+  fi
+  report
+}
+
+if ! unshare -mUr true 2>/dev/null; then
+  echo "SKIP section 16b: no user and mount namespace can be made here"
+else
+  # Removing across the mount, and stopping at it.
+  mount_case -rv tree
+  mount_case -rv --one-file-system tree
+  mount_case -r --one-file-system tree
+  mount_case -rf --one-file-system tree
+  # Naming the mount point itself: --one-file-system compares against the
+  # operand's own device, so the whole of the tmpfs goes, and only the mount
+  # point refuses to.
+  mount_case -rv --one-file-system tree/sub
+  mount_case -rv tree/sub
+  # --preserve-root=all refuses an operand that is a mount point -- and only an
+  # operand: inside a tree it is --one-file-system's business, not its.
+  mount_case -rf --preserve-root=all tree/sub
+  mount_case -rv --preserve-root=all tree/sub
+  mount_case -rv --preserve-root=all tree
+  mount_case -rv --preserve-root=all tree/a.txt tree/sub
+  mount_case -rv --preserve-root=all --one-file-system tree
+  mount_case -rv --preserve-root tree/sub
+  mount_case -rv --no-preserve-root tree/sub
+  # Not recursive: the mount point is a directory, and is refused as one.
+  mount_case -v --preserve-root=all tree/sub
+  mount_case -dv --preserve-root=all tree/sub
+fi
 
 # =============================================================================
 # 17. --help and --version

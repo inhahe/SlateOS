@@ -352,8 +352,17 @@ def main():
         return 2
 
     findings, scanned = [], 0
+    # Since 2026-10-02 `known-issues.md` is a signpost and each issue is a file in
+    # `known-issues/` (open) or `known-issues-resolved/`. A doc name whose
+    # directory exists is read file by file; the rest as single files.
+    sources = []
     for doc in docs:
-        path = ROOT / doc
+        folders = {"known-issues.md": ("known-issues", "known-issues-resolved")}.get(doc, ())
+        files = [p for f in folders if (ROOT / f).is_dir() for p in sorted((ROOT / f).glob("*.md"))
+                 if p.name != "README.md"]
+        sources.extend((p.relative_to(ROOT).as_posix(), p) for p in files) if files else \
+            sources.append((doc, ROOT / doc))
+    for doc, path in sources:
         if not path.is_file():
             continue
         for heading, body in entries(path.read_text(encoding="utf-8", errors="replace")):

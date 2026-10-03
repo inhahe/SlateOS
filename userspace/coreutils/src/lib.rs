@@ -467,23 +467,46 @@
 //! - [`sum`] — the BSD and System V checksums, for `sum` and for `cksum -a
 //!   bsd` and `-a sysv`.
 //! - [`grouplist`] — the group list `id -G`, `id` and `groups` print.
+//! - [`interval`] — a time interval, `strtod` and an `s`/`m`/`h`/`d` suffix:
+//!   `sleep`'s operands and `timeout`'s durations, which upstream copies
+//!   between the two files.
 //! - [`locale`] — the locale `setlocale (LC_ALL, "")` would select, and
 //!   gnulib's `hard_locale`, for `ls`, `cmp` and `pinky`. Two private copies
 //!   had disagreed about whether `LC_ALL=` is set.
 //! - [`ls`] — `ls`, `dir` and `vdir`: `ls.c` built three times.
 //! - [`mbswidth`] — gnulib's `mbswidth`, the columns a string occupies, for
 //!   `df`'s column widths and `pr`'s centred page header.
+//! - [`mkdirp`] — gnulib's `mkdir-p.c`, `mkancesdirs.c` and `dirchownmod.c`:
+//!   a directory and its missing ancestors, then its owner and mode, for
+//!   `install -d` and `install -D`.
 //! - [`parse_datetime`] — gnulib's `parse-datetime`, the date language of
 //!   `date -d`, `touch -d` and `find -newermt`: upstream's Bison tables and
 //!   actions, not a reimplementation of the forms they accept.
+//! - [`pgrep`] — procps-ng's `pgrep`, `pkill` and `pidwait`, which upstream
+//!   builds from one source and which decide what they are by the name they
+//!   are started under; `bin/pgrep.rs` and `bin/pkill.rs` both run it.
 //! - [`posixtm`] — gnulib's `posixtm`, the `[[CC]YY]MMDDhhmm[.ss]` stamps
 //!   of `touch -t` and the obsolete `touch MMDDhhmm[YY]` operand.
 //! - [`posixver`] — gnulib's `posix2_version`, the POSIX edition
 //!   `_POSIX2_VERSION` names, for `sort`, `tail`, `touch` and `uniq`.
+//! - [`procps`] — procps-ng's library: the status line `uptime` and `w` both
+//!   print (`procps_uptime_sprint`), the `/proc` numbers under it,
+//!   `readproc.c`'s reading of each process -- the table `w` searches,
+//!   `ps` lists and `pgrep` matches -- with the terminal namer, the name
+//!   cache, the namespaces, procps' signal names and `escape.c`'s escaping
+//!   of what they show.
 //! - [`randint`] — gnulib's `randread` and `randint`, for `shred`.
 //! - [`remove`] — what `rm` and `mv` must agree on about deleting a tree.
 //! - [`setfields`] — the `cut`-style LIST of fields, for `cut` and `numfmt
 //!   --field` (`set-fields.c`).
+//! - [`sig2str`] — gnulib's `sig2str.c`, signal names and numbers in GNU's
+//!   spelling (`POLL` for 29, `RTMIN+2`), for `split --filter`'s report of the
+//!   signal that ended its command, and coreutils' `operand2sig.c`, for
+//!   `timeout -s` -- with a name that needs no allocation, for `timeout -v`'s
+//!   report from inside a signal handler.
+//! - [`utmp`] — gnulib's `readutmp`: which login records `who`, `users` and
+//!   `pinky` are given, the boot entry made up when a Linux utmp has none, and
+//!   the readings of a record's fields the three share.
 //! - [`utsname`] — the `uname(2)` answers `uname` and `arch` both print.
 //!
 //! The regex engine, which is the other thing they must not disagree about,
@@ -492,9 +515,11 @@
 
 pub mod backup;
 pub mod basenc;
-pub mod bignat;
+// Exact big naturals, C's printf conversions and the x87 `long double` -- the
+// shared `cprintf` crate since 2026-10-01, re-exported here so
+// `coreutils::{bignat, cfmt, extfloat}` and their `crate::` paths stand.
+pub use ::cprintf::{bignat, cfmt, extfloat};
 pub mod canon;
-pub mod cfmt;
 pub mod chowncore;
 pub mod cksum;
 pub mod copy;
@@ -503,23 +528,28 @@ pub mod dirfd;
 // strerror(3)'s wording for an io::Error -- the shared `errmsg` crate since
 // 2026-09-26, re-exported here so `coreutils::errmsg` and `crate::errmsg` stand.
 pub use ::errmsg;
-pub mod extfloat;
 pub mod fileid;
 pub mod filekind;
-pub mod fnmatch;
+// POSIX fnmatch over bytes -- the shared `fnmatch` crate since 2026-10-01,
+// re-exported here so `coreutils::fnmatch` and `crate::fnmatch` stand.
+pub use ::fnmatch;
 pub mod fsattr;
 pub mod getopt;
 pub mod grouplist;
 pub mod hardlink;
 pub mod human;
+pub mod interval;
 pub mod locale;
 pub mod ls;
 pub mod mbswidth;
+pub mod mkdirp;
 pub mod overwrite;
 pub mod parse_datetime;
 pub mod pathname;
+pub mod pgrep;
 pub mod posixtm;
 pub mod posixver;
+pub mod procps;
 pub mod randint;
 /// How a name is rendered inside a diagnostic — now `userspace/quoting`.
 ///
@@ -531,6 +561,7 @@ pub use quoting as quote;
 pub mod remove;
 pub mod rename;
 pub mod setfields;
+pub mod sig2str;
 // Handing a command line to `sh -c`. This was `src/shell.rs` until 2026-09-27;
 // it became the `shellcmd` crate so that GNU AutoGen's libopts (`autoopts`,
 // whose `--more-help` runs `$PAGER`) runs its pager the same way.
@@ -540,6 +571,9 @@ pub mod stdfd;
 /// `stdfdguard` crate's since 2026-09-26, when it moved out of `stdfd` so the
 /// programs outside coreutils could have it.
 pub use stdfdguard::guard_std_fds;
+// glibc's `FILE` buffer arithmetic, for a port whose upstream reports which
+// `fwrite` failed (GNU sed). Most utilities want `stdfd::Stream` instead.
+pub mod stdio;
 pub mod sum;
 pub mod tabstops;
 pub mod umask;
@@ -550,9 +584,12 @@ pub mod umask;
 // it with a private parser that tried the NUMBER FIRST. POSIX requires the
 // name first (GNU's manual, "Disambiguating names and IDs"), which is why the
 // `+` escape exists at all — so `install -o 1000` disagreed with `chown 1000`
-// on any system with an account named `1000`.
+// on any system with an account named `1000`. (Since 2026-10-02 `install` is a
+// coreutils bin again and follows `install.c`'s own `get_ids` -- the name, then
+// a number in any base -- so this crate's one user is coreutils' `chown` side.)
 pub use userspec;
 pub mod utimecmp;
+pub mod utmp;
 pub mod utsname;
 pub mod vercmp;
 pub mod xnum;

@@ -1,6 +1,6 @@
 ## TD-B-WHO-S-W-MODE-CANNOT-BE-REACHED-BY-ANY-INVOCATION (lane B, 2026-09-10)
 
-**Status:** FIXED 2026-10-02 (lane B), boot confirmation pending. `w` is no
+**Status:** FIXED 2026-10-02 (lane B), boot-tested on main in `7950a0c0e`. `w` is no
 longer a mode of anything: it is procps-ng 4.0.4's program, ported into
 coreutils as its own executable (`userspace/coreutils/src/bin/w.rs`, measured
 by `scripts/w-diff.sh` -- 144 cases agree, and the `w` mode described below

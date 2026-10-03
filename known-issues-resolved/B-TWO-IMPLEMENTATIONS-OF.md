@@ -1,6 +1,6 @@
 ## B-TWO-IMPLEMENTATIONS-OF-`w`-AND-THE-BETTER-ONE-CAN-NEVER-RUN (lane B, 2026-08-22)
 
-**Status:** FIXED 2026-10-02 (lane B), boot confirmation pending. `w` is
+**Status:** FIXED 2026-10-02 (lane B), boot-tested on main in `7950a0c0e`. `w` is
 procps-ng 4.0.4's, ported into coreutils as a program of its own
 (`userspace/coreutils/src/bin/w.rs`, measured by `scripts/w-diff.sh`: 144
 cases agree, and the implementation it replaces agreed on none of them).

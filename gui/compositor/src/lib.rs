@@ -6089,12 +6089,8 @@ impl Compositor {
             // program, because one of them registered too many.
             return false;
         }
-        self.tray_icons.push(guiremote::tray::TrayIcon {
-            owner,
-            id,
-            glyph,
-            tooltip: tooltip.to_string(),
-        });
+        self.tray_icons
+            .push(guiremote::tray::TrayIcon::new(owner, id, glyph, tooltip));
         true
     }
 

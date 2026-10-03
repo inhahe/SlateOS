@@ -121,6 +121,35 @@ const REG_RAH0: u32 = 0x5404;
 /// Multicast Table Array (128 entries × 4 bytes).
 const REG_MTA_BASE: u32 = 0x5200;
 
+/// Words in the Multicast Table Array: 128 × 32 = 4096 hash bits.
+pub const MTA_WORDS: usize = 128;
+
+/// The Multicast Table Array bit the card checks for a frame sent to `mac`,
+/// with `RCTL.MO` = 00b (the driver never sets it): bits 47:36 of the
+/// address -- all of its sixth byte and the high nibble of its fifth --
+/// index the 4096-bit table (Intel 8254x SDM §13.4.22; Linux
+/// `e1000_hash_mc_addr`; QEMU `e1000x_rx_group_filter`).
+#[must_use]
+pub fn mta_hash(mac: &[u8; 6]) -> u16 {
+    ((u16::from(mac[5]) << 4) | (u16::from(mac[4]) >> 4)) & 0x0FFF
+}
+
+/// The table that passes multicast frames sent to any of `addrs`: one bit
+/// per address. A hash filter admits more than it is given -- 4096 buckets
+/// shared by every multicast address there is -- so the receiver still
+/// checks the destination, as the netstack daemon does.
+#[must_use]
+pub fn mta_words(addrs: &[[u8; 6]]) -> [u32; MTA_WORDS] {
+    let mut words = [0u32; MTA_WORDS];
+    for mac in addrs {
+        let hash = usize::from(mta_hash(mac));
+        if let Some(word) = words.get_mut(hash >> 5) {
+            *word |= 1 << (hash & 31);
+        }
+    }
+    words
+}
+
 /// Good Packets Transmitted Count.
 ///
 /// Statistics register, **clear-on-read**: reading it returns the count since
@@ -324,6 +353,31 @@ impl E1000Device {
     }
 
     // -----------------------------------------------------------------------
+    // Multicast filter
+    // -----------------------------------------------------------------------
+
+    /// Pass multicast frames sent to `addrs`, and (hash collisions aside) no
+    /// others: program the Multicast Table Array ([`mta_words`]). The card
+    /// takes the table while receiving, as Linux's `e1000_set_rx_mode`
+    /// relies on; broadcast and frames to the card's own address pass
+    /// regardless.
+    pub fn set_multicast(&mut self, addrs: &[[u8; 6]]) {
+        for (offset, word) in (REG_MTA_BASE..).step_by(4).zip(mta_words(addrs)) {
+            self.write_reg(offset, word);
+        }
+    }
+
+    /// The Multicast Table Array as the card holds it.
+    #[must_use]
+    pub fn read_mta(&self) -> [u32; MTA_WORDS] {
+        let mut words = [0u32; MTA_WORDS];
+        for (offset, word) in (REG_MTA_BASE..).step_by(4).zip(words.iter_mut()) {
+            *word = self.read_reg(offset);
+        }
+        words
+    }
+
+    // -----------------------------------------------------------------------
     // EEPROM access
     // -----------------------------------------------------------------------
 
@@ -499,11 +553,9 @@ impl E1000Device {
         dev.write_reg(REG_FCT, 0);
         dev.write_reg(REG_FCTTV, 0);
 
-        // Step 5: Clear Multicast Table Array (128 entries).
-        for i in 0..128u32 {
-            #[allow(clippy::arithmetic_side_effects)]
-            dev.write_reg(REG_MTA_BASE.wrapping_add(i.wrapping_mul(4)), 0);
-        }
+        // Step 5: Clear Multicast Table Array (128 entries): no multicast
+        // until whoever holds the card says which (`net::mcast_filter`).
+        dev.set_multicast(&[]);
 
         // Step 6: Set up RX.
         dev.init_rx()?;

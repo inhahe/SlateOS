@@ -63,49 +63,50 @@ use super::number::{
     SYS_ITIMER_GET, SYS_ITIMER_SET, SYS_KEYLAYOUT_SET, SYS_LOADAVG, SYS_LOG_READ,
     SYS_MM_GET_PROFILE, SYS_MM_SET_PROFILE, SYS_MMAP, SYS_MPROTECT, SYS_MUNMAP,
     SYS_NET_FW_ADD_RULE, SYS_NET_FW_DEL_RULE, SYS_NET_FW_ENABLE, SYS_NET_FW_FLUSH,
-    SYS_NET_FW_SET_POLICY, SYS_NET_IF_CONFIG, SYS_NET_IF_INFO, SYS_NET_RAW_CLOSE, SYS_NET_RAW_OPEN,
-    SYS_NET_RAW_RX, SYS_NET_RAW_TX, SYS_NET_ROUTE_ADD, SYS_NET_ROUTE_DEL, SYS_NET_ROUTE_LIST,
-    SYS_NET_STAT, SYS_NOTIFY_READY, SYS_NS_ATTACH, SYS_NS_BIND, SYS_NS_CREATE, SYS_NS_HIDE,
-    SYS_NS_QUERY, SYS_NS_UNBIND, SYS_PHYS_PAGES_AVAIL, SYS_PHYS_PAGES_TOTAL, SYS_PIPE_CLOSE,
-    SYS_PIPE_CREATE, SYS_PIPE_PEEK, SYS_PIPE_POLL, SYS_PIPE_READ, SYS_PIPE_READ_TIMEOUT,
-    SYS_PIPE_READABLE_BYTES, SYS_PIPE_TRY_READ, SYS_PIPE_TRY_WRITE, SYS_PIPE_WAIT_READABLE,
-    SYS_PIPE_WRITE, SYS_PIPE_WRITE_TIMEOUT, SYS_PORT_READ, SYS_PORT_WRITE, SYS_PROCESS_CHROOT,
-    SYS_PROCESS_COUNT, SYS_PROCESS_CRASH_INFO, SYS_PROCESS_GET_ARGS, SYS_PROCESS_GET_CREDENTIALS,
-    SYS_PROCESS_GET_CWD, SYS_PROCESS_GET_INITIAL_FDS, SYS_PROCESS_GET_NICE, SYS_PROCESS_GET_PGID,
-    SYS_PROCESS_GET_PHDR, SYS_PROCESS_GET_PRIORITY, SYS_PROCESS_GET_RUSAGE, SYS_PROCESS_GET_SID,
-    SYS_PROCESS_ID, SYS_PROCESS_IS_READY, SYS_PROCESS_KILL, SYS_PROCESS_PARENT_ID,
-    SYS_PROCESS_SET_CREDENTIALS, SYS_PROCESS_SET_CWD, SYS_PROCESS_SET_EXEC_CLOSE,
-    SYS_PROCESS_SET_EXEC_FDS, SYS_PROCESS_SET_NICE, SYS_PROCESS_SET_PGID, SYS_PROCESS_SET_PRIORITY,
-    SYS_PROCESS_SET_SID, SYS_PROCESS_SETGROUPS, SYS_PROCESS_SPAWN, SYS_PROCESS_SPAWN_EX,
-    SYS_PROCESS_SPAWN_EX2, SYS_PROCESS_TRY_WAIT, SYS_PROCESS_UMASK, SYS_PROCESS_WAIT,
-    SYS_PROCESS_WAIT_STATUS, SYS_PTY_CLOSE, SYS_PTY_CREATE, SYS_PTY_DUP, SYS_PTY_GET_PGRP,
-    SYS_PTY_GET_TERMIOS, SYS_PTY_GET_WINSIZE, SYS_PTY_MASTER_READ, SYS_PTY_MASTER_TRY_READ,
-    SYS_PTY_MASTER_TRY_WRITE, SYS_PTY_MASTER_WRITE, SYS_PTY_POLL, SYS_PTY_READABLE_BYTES,
-    SYS_PTY_SET_PGRP, SYS_PTY_SET_TERMIOS, SYS_PTY_SET_WINSIZE, SYS_PTY_SLAVE_ID,
-    SYS_PTY_SLAVE_READ, SYS_PTY_SLAVE_TRY_READ, SYS_PTY_SLAVE_WRITE, SYS_RLIMIT_GET,
-    SYS_RLIMIT_SET, SYS_SCHED_GET_AFFINITY, SYS_SCHED_GET_PROFILE, SYS_SCHED_GET_TIMESLICE,
-    SYS_SCHED_RECONFIGURE, SYS_SCHED_SET_AFFINITY, SYS_SCHED_SET_PROFILE, SYS_SCHED_SET_TIMESLICE,
-    SYS_SECUREBOOT_ENROLL, SYS_SECUREBOOT_REMOVE, SYS_SECUREBOOT_VERIFY, SYS_SEM_CLOSE,
-    SYS_SEM_CREATE, SYS_SEM_SIGNAL, SYS_SEM_TRY_WAIT, SYS_SEM_WAIT, SYS_SEM_WAIT_TIMEOUT,
-    SYS_SERVICE_ACCEPT, SYS_SERVICE_ACCEPT_TIMEOUT, SYS_SERVICE_CONNECT, SYS_SERVICE_REGISTER,
-    SYS_SERVICE_TRY_ACCEPT, SYS_SERVICE_UNREGISTER, SYS_SET_EXCEPTION_HANDLER, SYS_SET_FS_BASE,
-    SYS_SHM_CLOSE, SYS_SHM_CREATE, SYS_SHM_MAP, SYS_SHM_MAP_AT, SYS_SHM_SIZE, SYS_SHM_UNMAP,
-    SYS_SIGNAL_ALTSTACK, SYS_SIGNAL_GET_IGNORED, SYS_SIGNAL_MASK, SYS_SIGNAL_PENDING,
-    SYS_SIGNAL_QUEUE, SYS_SIGNAL_REGISTER, SYS_SIGNAL_SEND, SYS_SIGNAL_SET_IGNORED,
-    SYS_SIGNAL_STOP_SELF, SYS_SIGNAL_TGKILL, SYS_SLEEP, SYS_SOCKETPAIR_CLOSE,
-    SYS_SOCKETPAIR_CREATE, SYS_SOCKETPAIR_POLL, SYS_SOCKETPAIR_READABLE_BYTES, SYS_SOCKETPAIR_RECV,
-    SYS_SOCKETPAIR_RECV_TIMEOUT, SYS_SOCKETPAIR_SEND, SYS_SOCKETPAIR_SEND_TIMEOUT,
-    SYS_SOCKETPAIR_SHUTDOWN, SYS_SOCKETPAIR_TRY_RECV, SYS_SOCKETPAIR_TRY_SEND, SYS_SYSCTL_GET,
-    SYS_SYSCTL_SET, SYS_SYSTEM_SET_PROFILE, SYS_TASK_ID, SYS_TCP_ABORT, SYS_TCP_ACCEPT,
-    SYS_TCP_BIND, SYS_TCP_CLOSE, SYS_TCP_CLOSE_LISTENER, SYS_TCP_CONNECT, SYS_TCP_INFO,
-    SYS_TCP_LAST_ERROR, SYS_TCP_LIST, SYS_TCP_LISTENER_LIST, SYS_TCP_LISTENER_READY,
-    SYS_TCP_LOCAL_PORT, SYS_TCP_PEER_ADDR, SYS_TCP_POLL_STATUS, SYS_TCP_RECV, SYS_TCP_SEND,
-    SYS_TCP_SET_KEEPALIVE, SYS_TCP_SET_KEEPALIVE_PARAMS, SYS_TCP_SET_NODELAY, SYS_TCP_SHUTDOWN,
-    SYS_THREAD_CREATE, SYS_THREAD_EXIT, SYS_THREAD_JOIN, SYS_THREAD_JOIN_TIMEOUT,
-    SYS_THREAD_RESUME, SYS_THREAD_SET_PRIORITY, SYS_THREAD_SUSPEND, SYS_TIMER_CANCEL,
-    SYS_TIMER_CREATE, SYS_TTY_ACQUIRE_CTTY, SYS_TTY_FLUSH, SYS_TTY_GET_PGRP, SYS_TTY_GET_TERMIOS,
-    SYS_TTY_READ, SYS_TTY_RELEASE_CTTY, SYS_TTY_SET_PGRP, SYS_TTY_SET_TERMIOS, SYS_UDP_BIND,
-    SYS_UDP_CLOSE, SYS_UDP_CONNECT, SYS_UDP_GET_OPTION, SYS_UDP_LOCAL_PORT, SYS_UDP_MCAST_JOIN,
+    SYS_NET_FW_SET_POLICY, SYS_NET_IF_CONFIG, SYS_NET_IF_INFO, SYS_NET_RAW_CLOSE,
+    SYS_NET_RAW_MCAST, SYS_NET_RAW_OPEN, SYS_NET_RAW_RX, SYS_NET_RAW_TX, SYS_NET_ROUTE_ADD,
+    SYS_NET_ROUTE_DEL, SYS_NET_ROUTE_LIST, SYS_NET_STAT, SYS_NOTIFY_READY, SYS_NS_ATTACH,
+    SYS_NS_BIND, SYS_NS_CREATE, SYS_NS_HIDE, SYS_NS_QUERY, SYS_NS_UNBIND, SYS_PHYS_PAGES_AVAIL,
+    SYS_PHYS_PAGES_TOTAL, SYS_PIPE_CLOSE, SYS_PIPE_CREATE, SYS_PIPE_PEEK, SYS_PIPE_POLL,
+    SYS_PIPE_READ, SYS_PIPE_READ_TIMEOUT, SYS_PIPE_READABLE_BYTES, SYS_PIPE_TRY_READ,
+    SYS_PIPE_TRY_WRITE, SYS_PIPE_WAIT_READABLE, SYS_PIPE_WRITE, SYS_PIPE_WRITE_TIMEOUT,
+    SYS_PORT_READ, SYS_PORT_WRITE, SYS_PROCESS_CHROOT, SYS_PROCESS_COUNT, SYS_PROCESS_CRASH_INFO,
+    SYS_PROCESS_GET_ARGS, SYS_PROCESS_GET_CREDENTIALS, SYS_PROCESS_GET_CWD,
+    SYS_PROCESS_GET_INITIAL_FDS, SYS_PROCESS_GET_NICE, SYS_PROCESS_GET_PGID, SYS_PROCESS_GET_PHDR,
+    SYS_PROCESS_GET_PRIORITY, SYS_PROCESS_GET_RUSAGE, SYS_PROCESS_GET_SID, SYS_PROCESS_ID,
+    SYS_PROCESS_IS_READY, SYS_PROCESS_KILL, SYS_PROCESS_PARENT_ID, SYS_PROCESS_SET_CREDENTIALS,
+    SYS_PROCESS_SET_CWD, SYS_PROCESS_SET_EXEC_CLOSE, SYS_PROCESS_SET_EXEC_FDS,
+    SYS_PROCESS_SET_NICE, SYS_PROCESS_SET_PGID, SYS_PROCESS_SET_PRIORITY, SYS_PROCESS_SET_SID,
+    SYS_PROCESS_SETGROUPS, SYS_PROCESS_SPAWN, SYS_PROCESS_SPAWN_EX, SYS_PROCESS_SPAWN_EX2,
+    SYS_PROCESS_TRY_WAIT, SYS_PROCESS_UMASK, SYS_PROCESS_WAIT, SYS_PROCESS_WAIT_STATUS,
+    SYS_PTY_CLOSE, SYS_PTY_CREATE, SYS_PTY_DUP, SYS_PTY_GET_PGRP, SYS_PTY_GET_TERMIOS,
+    SYS_PTY_GET_WINSIZE, SYS_PTY_MASTER_READ, SYS_PTY_MASTER_TRY_READ, SYS_PTY_MASTER_TRY_WRITE,
+    SYS_PTY_MASTER_WRITE, SYS_PTY_POLL, SYS_PTY_READABLE_BYTES, SYS_PTY_SET_PGRP,
+    SYS_PTY_SET_TERMIOS, SYS_PTY_SET_WINSIZE, SYS_PTY_SLAVE_ID, SYS_PTY_SLAVE_READ,
+    SYS_PTY_SLAVE_TRY_READ, SYS_PTY_SLAVE_WRITE, SYS_RLIMIT_GET, SYS_RLIMIT_SET,
+    SYS_SCHED_GET_AFFINITY, SYS_SCHED_GET_PROFILE, SYS_SCHED_GET_TIMESLICE, SYS_SCHED_RECONFIGURE,
+    SYS_SCHED_SET_AFFINITY, SYS_SCHED_SET_PROFILE, SYS_SCHED_SET_TIMESLICE, SYS_SECUREBOOT_ENROLL,
+    SYS_SECUREBOOT_REMOVE, SYS_SECUREBOOT_VERIFY, SYS_SEM_CLOSE, SYS_SEM_CREATE, SYS_SEM_SIGNAL,
+    SYS_SEM_TRY_WAIT, SYS_SEM_WAIT, SYS_SEM_WAIT_TIMEOUT, SYS_SERVICE_ACCEPT,
+    SYS_SERVICE_ACCEPT_TIMEOUT, SYS_SERVICE_CONNECT, SYS_SERVICE_REGISTER, SYS_SERVICE_TRY_ACCEPT,
+    SYS_SERVICE_UNREGISTER, SYS_SET_EXCEPTION_HANDLER, SYS_SET_FS_BASE, SYS_SHM_CLOSE,
+    SYS_SHM_CREATE, SYS_SHM_MAP, SYS_SHM_MAP_AT, SYS_SHM_SIZE, SYS_SHM_UNMAP, SYS_SIGNAL_ALTSTACK,
+    SYS_SIGNAL_GET_IGNORED, SYS_SIGNAL_MASK, SYS_SIGNAL_PENDING, SYS_SIGNAL_QUEUE,
+    SYS_SIGNAL_REGISTER, SYS_SIGNAL_SEND, SYS_SIGNAL_SET_IGNORED, SYS_SIGNAL_STOP_SELF,
+    SYS_SIGNAL_TGKILL, SYS_SLEEP, SYS_SOCKETPAIR_CLOSE, SYS_SOCKETPAIR_CREATE, SYS_SOCKETPAIR_POLL,
+    SYS_SOCKETPAIR_READABLE_BYTES, SYS_SOCKETPAIR_RECV, SYS_SOCKETPAIR_RECV_TIMEOUT,
+    SYS_SOCKETPAIR_SEND, SYS_SOCKETPAIR_SEND_TIMEOUT, SYS_SOCKETPAIR_SHUTDOWN,
+    SYS_SOCKETPAIR_TRY_RECV, SYS_SOCKETPAIR_TRY_SEND, SYS_SYSCTL_GET, SYS_SYSCTL_SET,
+    SYS_SYSTEM_SET_PROFILE, SYS_TASK_ID, SYS_TCP_ABORT, SYS_TCP_ACCEPT, SYS_TCP_BIND,
+    SYS_TCP_CLOSE, SYS_TCP_CLOSE_LISTENER, SYS_TCP_CONNECT, SYS_TCP_INFO, SYS_TCP_LAST_ERROR,
+    SYS_TCP_LIST, SYS_TCP_LISTENER_LIST, SYS_TCP_LISTENER_READY, SYS_TCP_LOCAL_PORT,
+    SYS_TCP_PEER_ADDR, SYS_TCP_POLL_STATUS, SYS_TCP_RECV, SYS_TCP_SEND, SYS_TCP_SET_KEEPALIVE,
+    SYS_TCP_SET_KEEPALIVE_PARAMS, SYS_TCP_SET_NODELAY, SYS_TCP_SHUTDOWN, SYS_THREAD_CREATE,
+    SYS_THREAD_EXIT, SYS_THREAD_JOIN, SYS_THREAD_JOIN_TIMEOUT, SYS_THREAD_RESUME,
+    SYS_THREAD_SET_PRIORITY, SYS_THREAD_SUSPEND, SYS_TIMER_CANCEL, SYS_TIMER_CREATE,
+    SYS_TTY_ACQUIRE_CTTY, SYS_TTY_FLUSH, SYS_TTY_GET_PGRP, SYS_TTY_GET_TERMIOS, SYS_TTY_READ,
+    SYS_TTY_RELEASE_CTTY, SYS_TTY_SET_PGRP, SYS_TTY_SET_TERMIOS, SYS_UDP_BIND, SYS_UDP_CLOSE,
+    SYS_UDP_CONNECT, SYS_UDP_GET_OPTION, SYS_UDP_LOCAL_PORT, SYS_UDP_MCAST_JOIN,
     SYS_UDP_MCAST_JOIN6, SYS_UDP_MCAST_LEAVE, SYS_UDP_MCAST_LEAVE6, SYS_UDP_RECV, SYS_UDP_RECV6,
     SYS_UDP_RX_FRONT_BYTES, SYS_UDP_RX_READY, SYS_UDP_SEND, SYS_UDP_SEND6, SYS_UDP_SET_OPTION,
     SYS_WAIT_MULTIPLE, SYS_YIELD,
@@ -763,6 +764,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_NET_RAW_TX as usize] = Some(handlers::sys_net_raw_tx);
     handlers[SYS_NET_RAW_RX as usize] = Some(handlers::sys_net_raw_rx);
     handlers[SYS_NET_RAW_CLOSE as usize] = Some(handlers::sys_net_raw_close);
+    handlers[SYS_NET_RAW_MCAST as usize] = Some(handlers::sys_net_raw_mcast);
     handlers[SYS_ARP_TABLE as usize] = Some(handlers::sys_arp_table);
     handlers[SYS_DNS_CACHE_STATS as usize] = Some(handlers::sys_dns_cache_stats);
     handlers[SYS_TCP_POLL_STATUS as usize] = Some(handlers::sys_tcp_poll_status);
@@ -1093,6 +1095,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_exec_close()?;
     test_dispatch_native_socket_possession()?;
     test_dispatch_udp_v6_and_options()?;
+    test_dispatch_raw_mcast()?;
     test_dispatch_tioc_and_watch_records()?;
     test_cpu_current()?;
     test_dispatch_shared_anonymous_memory()?;
@@ -3696,6 +3699,115 @@ fn test_dispatch_udp_v6_and_options() -> KernelResult<()> {
         "[syscall]   SYS_UDP_SEND6/RECV6/MCAST_JOIN6/SET_OPTION/GET_OPTION (1129-1134): a \
          group joined from user memory, hop limit 0, the datagram looped back with its \
          source: OK"
+    );
+    Ok(())
+}
+
+/// `SYS_NET_RAW_MCAST` (1135) through the syscall layer, the list in the
+/// caller's own memory: refused to a process without the raw claim; with it,
+/// the filter takes the list (sorted, duplicates dropped) and reports the raw
+/// owner; a unicast address or a list past the limit is refused and changes
+/// nothing; an empty list passes none; and releasing the claim puts the
+/// kernel stack's set back. Skipped if something already holds the claim --
+/// normally nothing does, as the netstack daemon starts after the boot
+/// self-tests.
+fn test_dispatch_raw_mcast() -> KernelResult<()> {
+    use super::number::{MAP_READ, MAP_WRITE};
+    use crate::mm::user::copy_to_user_as;
+    use crate::net::mcast_filter::{self, Owner};
+    use crate::proc::pcb::{self, ProcessId};
+    use crate::proc::thread::{self_test_as_process, self_test_in_process};
+
+    const LIST: [[u8; 6]; 3] = [
+        [0x33, 0x33, 0x00, 0x00, 0x00, 0xFB], // ff02::fb
+        [0x01, 0x00, 0x5E, 0x00, 0x00, 0xFB], // 224.0.0.251
+        [0x33, 0x33, 0x00, 0x00, 0x00, 0xFB], // again: kept once
+    ];
+    const EXPECTED: [[u8; 6]; 2] = [
+        [0x01, 0x00, 0x5E, 0x00, 0x00, 0xFB],
+        [0x33, 0x33, 0x00, 0x00, 0x00, 0xFB],
+    ];
+    const UNICAST: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
+
+    fn fail(msg: &str, pid: ProcessId) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: SYS_NET_RAW_MCAST: {}", msg);
+        // Releasing a claim the process may not hold is a no-op, and never
+        // fails (`net::raw::release`).
+        let _ = crate::net::raw::release(pid);
+        pcb::destroy(pid);
+        Err(KernelError::InternalError)
+    }
+    if crate::net::raw::is_claimed() {
+        serial_println!("[syscall]   SYS_NET_RAW_MCAST (1135): the NIC is claimed -- skipped");
+        return Ok(());
+    }
+    let args = |arg0: u64, arg1: u64, arg2: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let code = |e: KernelError| i64::from(e.code());
+    let filter = || mcast_filter::current().ok();
+
+    let pid = pcb::create("raw-mcast-dispatch", 0);
+    let mapped = self_test_as_process(pid, || {
+        dispatch(SYS_MMAP, &args(0, 0x4000, MAP_READ | MAP_WRITE)).value
+    });
+    let Ok(page) = u64::try_from(mapped) else {
+        return fail("could not map the process's memory", pid);
+    };
+    let Some(pml4) = pcb::get_pml4(pid).filter(|&p| p != 0) else {
+        return fail("the process has no address space", pid);
+    };
+    let flat: alloc::vec::Vec<u8> = LIST.iter().flatten().copied().collect();
+    let unicast_at = page.saturating_add(64);
+    if copy_to_user_as(pml4, page, &flat).is_err()
+        || copy_to_user_as(pml4, unicast_at, &UNICAST).is_err()
+    {
+        return fail("could not write into the process's memory", pid);
+    }
+    let call = |a: SyscallArgs| self_test_in_process(pid, || dispatch(SYS_NET_RAW_MCAST, &a).value);
+
+    if call(args(page, 3, 0)) != Some(code(KernelError::PermissionDenied)) {
+        return fail("taken from a process without the raw claim", pid);
+    }
+    if crate::net::raw::claim(pid).is_err() {
+        return fail("could not claim the NIC", pid);
+    }
+    let set = call(args(page, 3, 0)) == Some(0);
+    if !set || filter() != Some((Owner::Raw, EXPECTED.to_vec())) {
+        return fail("the list did not become the filter", pid);
+    }
+    let too_many = u64::try_from(mcast_filter::MAX_ADDRS.saturating_add(1)).unwrap_or(u64::MAX);
+    let unicast = call(args(unicast_at, 1, 0)) == Some(code(KernelError::InvalidArgument));
+    let oversize = call(args(page, too_many, 0)) == Some(code(KernelError::InvalidArgument));
+    if !(unicast && oversize) || filter() != Some((Owner::Raw, EXPECTED.to_vec())) {
+        return fail("a refused list was taken, or changed the filter", pid);
+    }
+    let emptied = call(args(0, 0, 0)) == Some(0)
+        && filter().is_some_and(|(owner, addrs)| owner == Owner::Raw && addrs.is_empty());
+    if !emptied {
+        return fail("an empty list did not empty the filter", pid);
+    }
+    // Releasing never fails; it hands the cards back to the kernel's set.
+    let _ = crate::net::raw::release(pid);
+    let restored = filter().is_some_and(|(owner, addrs)| {
+        owner == Owner::Kernel && addrs.contains(&mcast_filter::ALL_HOSTS_MAC)
+    });
+    pcb::destroy(pid);
+    if !restored {
+        serial_println!(
+            "[syscall]   FAIL: SYS_NET_RAW_MCAST: the release did not restore the kernel's set"
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[syscall]   SYS_NET_RAW_MCAST (1135): refused without the claim; with it the list \
+         from user memory became the filter, refusals changed nothing, release restored \
+         the kernel's set: OK"
     );
     Ok(())
 }

@@ -17455,6 +17455,42 @@ pub fn sys_net_raw_rx(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// `SYS_NET_RAW_MCAST` — set the multicast addresses the network cards pass.
+///
+/// `arg0`: pointer to `arg1` six-byte Ethernet group addresses.  Caller must
+/// own the raw claim; see `net::mcast_filter`.
+pub fn sys_net_raw_mcast(args: &SyscallArgs) -> SyscallResult {
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return SyscallResult::err(KernelError::NoSuchProcess),
+    };
+    if crate::net::raw::owner() != Some(pid) {
+        return SyscallResult::err(KernelError::PermissionDenied);
+    }
+    let Ok(count) = usize::try_from(args.arg1) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    if count > crate::net::mcast_filter::MAX_ADDRS {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let max_bytes = crate::net::mcast_filter::MAX_ADDRS.saturating_mul(6);
+    // Copied before it is looked at, so the list cannot change between
+    // validation and the cards' programming. An empty list reads nothing.
+    let bytes = match crate::mm::user::read_user_vec(args.arg0, count.saturating_mul(6), max_bytes)
+    {
+        Ok(b) => b,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let addrs: alloc::vec::Vec<[u8; 6]> = bytes
+        .chunks_exact(6)
+        .filter_map(|c| <[u8; 6]>::try_from(c).ok())
+        .collect();
+    match crate::net::mcast_filter::set_raw(&addrs) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 /// `SYS_NET_RAW_CLOSE` — release the caller's raw NIC claim.  Idempotent.
 pub fn sys_net_raw_close(_args: &SyscallArgs) -> SyscallResult {
     if let Some(pid) = caller_pid() {

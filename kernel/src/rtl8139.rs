@@ -46,9 +46,66 @@ const RTL8139_DEVICE_IDS: &[u16] = &[
 /// MAC address registers (bytes 0-5).
 const REG_MAC: u16 = 0x00;
 
-/// Multicast registers (8 bytes).
-#[allow(dead_code)]
+/// Multicast registers (8 bytes): a 64-bit hash filter `RX_CFG_AM` consults.
 const REG_MAR: u16 = 0x08;
+
+/// The Ethernet CRC-32 the card hashes a frame's destination with, computed
+/// as the card does: each byte fed least-significant bit first into a
+/// register that shifts left, polynomial `0x04C11DB7`, no final inversion
+/// (Linux `ether_crc`; QEMU `net_crc32`).
+#[must_use]
+pub fn ether_crc(data: &[u8]) -> u32 {
+    let mut crc = u32::MAX;
+    for &byte in data {
+        let mut octet = byte;
+        for _ in 0..8 {
+            let feedback = (crc >> 31) ^ u32::from(octet & 1);
+            crc <<= 1;
+            if feedback != 0 {
+                crc ^= 0x04C1_1DB7;
+            }
+            octet >>= 1;
+        }
+    }
+    crc
+}
+
+/// The `MAR` bit the card checks for a frame sent to `mac`: the top six
+/// bits of its [`ether_crc`] (RTL8139 datasheet §5.6; Linux
+/// `rtl8139_set_rx_mode`).
+#[must_use]
+pub fn mar_index(mac: &[u8; 6]) -> u8 {
+    // A 32-bit value shifted right by 26 is below 64.
+    u8::try_from(ether_crc(mac) >> 26).unwrap_or(0)
+}
+
+/// The eight `MAR` bytes that pass multicast frames sent to any of `addrs`
+/// (and, the filter being a hash, whatever shares a bit with one of them).
+#[must_use]
+pub fn mar_bytes(addrs: &[[u8; 6]]) -> [u8; 8] {
+    let mut mar = [0u8; 8];
+    for mac in addrs {
+        let index = mar_index(mac);
+        if let Some(byte) = mar.get_mut(usize::from(index >> 3)) {
+            *byte |= 1 << (index & 7);
+        }
+    }
+    mar
+}
+
+/// Write `mar` to the card at `io_base`, as two 32-bit writes (the width
+/// Linux uses for these registers).
+fn write_mar(io_base: u16, mar: &[u8; 8]) {
+    let low = u32::from_le_bytes([mar[0], mar[1], mar[2], mar[3]]);
+    let high = u32::from_le_bytes([mar[4], mar[5], mar[6], mar[7]]);
+    // SAFETY: port I/O to this card's own MAR0-7 (io_base + 0x08 .. 0x10),
+    // which only this driver drives; callers hold the device lock or own
+    // the card outright (init, before it is published).
+    unsafe {
+        port::outl(io_base.wrapping_add(REG_MAR), low);
+        port::outl(io_base.wrapping_add(REG_MAR).wrapping_add(4), high);
+    }
+}
 
 /// TX status registers (4 descriptors × 4 bytes each).
 const REG_TX_STATUS0: u16 = 0x10;
@@ -380,6 +437,10 @@ pub fn init(hhdm_offset: u64) {
     unsafe {
         port::outl(io_base + REG_RX_CONFIG, rx_config);
     }
+    // "Accept multicast" admits only what the MAR hash passes, and the
+    // datasheet leaves MAR unspecified at reset: start from none, until
+    // whoever holds the card says which (`net::mcast_filter`).
+    write_mar(io_base, &[0; 8]);
 
     // Configure TX: default (IFG = 960ns, DMA burst = 1024 bytes).
     // SAFETY: Standard register write.
@@ -445,6 +506,28 @@ pub fn recv() -> Option<Vec<u8>> {
 // ---------------------------------------------------------------------------
 
 impl Rtl8139Device {
+    /// Pass multicast frames sent to `addrs` ([`mar_bytes`]); broadcast and
+    /// frames to the card's own address pass regardless.
+    pub fn set_multicast(&mut self, addrs: &[[u8; 6]]) {
+        write_mar(self.io_base, &mar_bytes(addrs));
+    }
+
+    /// The `MAR` bytes as the card holds them.
+    #[must_use]
+    pub fn read_mar(&self) -> [u8; 8] {
+        // SAFETY: port reads of this card's own MAR0-7; the caller holds the
+        // device lock (`with_device`).
+        let (low, high) = unsafe {
+            (
+                port::inl(self.io_base.wrapping_add(REG_MAR)),
+                port::inl(self.io_base.wrapping_add(REG_MAR).wrapping_add(4)),
+            )
+        };
+        let [a, b, c, d] = low.to_le_bytes();
+        let [e, f, g, h] = high.to_le_bytes();
+        [a, b, c, d, e, f, g, h]
+    }
+
     /// Send a raw Ethernet frame via the next available TX descriptor.
     pub fn send(&mut self, frame: &[u8]) -> KernelResult<()> {
         if frame.len() > TX_BUF_SIZE {

@@ -282,43 +282,64 @@ static MCAST_GROUPS: Mutex<[McastEntry; MAX_GLOBAL_GROUPS]> = Mutex::new({
     [EMPTY; MAX_GLOBAL_GROUPS]
 });
 
-/// Add a reference to a multicast group in the global table.
+/// Add a reference to a multicast group in the global table. A group new to
+/// the table is a frame the network cards must now let through
+/// ([`super::mcast_filter::refresh_kernel`], called with the table unlocked:
+/// it reads the table).
 fn mcast_global_join(group: Ipv4Addr) {
-    let mut groups = MCAST_GROUPS.lock();
-
-    // If already present, increment refcount.
-    for entry in groups.iter_mut() {
-        if entry.refcount > 0 && entry.addr == group {
+    let added = {
+        let mut groups = MCAST_GROUPS.lock();
+        if let Some(entry) = groups
+            .iter_mut()
+            .find(|e| e.refcount > 0 && e.addr == group)
+        {
             entry.refcount = entry.refcount.saturating_add(1);
-            return;
-        }
-    }
-
-    // Not present — find a free slot.
-    for entry in groups.iter_mut() {
-        if entry.refcount == 0 {
+            false
+        } else if let Some(entry) = groups.iter_mut().find(|e| e.refcount == 0) {
             entry.addr = group;
             entry.refcount = 1;
-            return;
+            true
+        } else {
+            // Table full — silently ignore (best effort).
+            crate::serial_println!(
+                "[udp] Warning: multicast group table full, cannot join {}",
+                group
+            );
+            false
         }
+    };
+    if added {
+        super::mcast_filter::refresh_kernel();
     }
-
-    // Table full — silently ignore (best effort).
-    crate::serial_println!(
-        "[udp] Warning: multicast group table full, cannot join {}",
-        group
-    );
 }
 
-/// Remove a reference from a multicast group in the global table.
+/// Remove a reference from a multicast group in the global table; the last
+/// one takes the group out of the cards' filter.
 fn mcast_global_leave(group: Ipv4Addr) {
-    let mut groups = MCAST_GROUPS.lock();
-    for entry in groups.iter_mut() {
-        if entry.refcount > 0 && entry.addr == group {
-            entry.refcount = entry.refcount.saturating_sub(1);
-            return;
-        }
+    let removed = {
+        let mut groups = MCAST_GROUPS.lock();
+        groups
+            .iter_mut()
+            .find(|e| e.refcount > 0 && e.addr == group)
+            .is_some_and(|entry| {
+                entry.refcount = entry.refcount.saturating_sub(1);
+                entry.refcount == 0
+            })
+    };
+    if removed {
+        super::mcast_filter::refresh_kernel();
     }
+}
+
+/// The IPv4 groups some socket is in: what the network cards' multicast
+/// filter must pass for the kernel-resident stack ([`super::mcast_filter`]).
+pub fn multicast_groups() -> alloc::vec::Vec<Ipv4Addr> {
+    MCAST_GROUPS
+        .lock()
+        .iter()
+        .filter(|e| e.refcount > 0)
+        .map(|e| e.addr)
+        .collect()
 }
 
 /// Check if any socket has joined the given multicast group.
@@ -357,15 +378,24 @@ static MCAST_GROUPS_V6: Mutex<[McastEntryV6; MAX_GLOBAL_GROUPS_V6]> = Mutex::new
     [EMPTY; MAX_GLOBAL_GROUPS_V6]
 });
 
-/// Add a reference to an IPv6 multicast group in the global table.
+/// Add a reference to an IPv6 multicast group in the global table, telling
+/// the cards' filter when the group is new (as [`mcast_global_join`]).
 fn mcast_global_join_v6(group: Ipv6Addr) {
+    let added = mcast_table_join_v6(group);
+    if added {
+        super::mcast_filter::refresh_kernel();
+    }
+}
+
+/// [`mcast_global_join_v6`]'s table half: whether the group is new.
+fn mcast_table_join_v6(group: Ipv6Addr) -> bool {
     let mut groups = MCAST_GROUPS_V6.lock();
 
     // If already present, increment refcount.
     for entry in groups.iter_mut() {
         if entry.refcount > 0 && entry.addr == group {
             entry.refcount = entry.refcount.saturating_add(1);
-            return;
+            return false;
         }
     }
 
@@ -374,7 +404,7 @@ fn mcast_global_join_v6(group: Ipv6Addr) {
         if entry.refcount == 0 {
             entry.addr = group;
             entry.refcount = 1;
-            return;
+            return true;
         }
     }
 
@@ -383,17 +413,35 @@ fn mcast_global_join_v6(group: Ipv6Addr) {
         "[udp] Warning: IPv6 multicast group table full, cannot join {}",
         group
     );
+    false
 }
 
-/// Remove a reference from an IPv6 multicast group in the global table.
+/// Remove a reference from an IPv6 multicast group in the global table; the
+/// last one takes the group out of the cards' filter.
 fn mcast_global_leave_v6(group: Ipv6Addr) {
-    let mut groups = MCAST_GROUPS_V6.lock();
-    for entry in groups.iter_mut() {
-        if entry.refcount > 0 && entry.addr == group {
-            entry.refcount = entry.refcount.saturating_sub(1);
-            return;
-        }
+    let removed = {
+        let mut groups = MCAST_GROUPS_V6.lock();
+        groups
+            .iter_mut()
+            .find(|e| e.refcount > 0 && e.addr == group)
+            .is_some_and(|entry| {
+                entry.refcount = entry.refcount.saturating_sub(1);
+                entry.refcount == 0
+            })
+    };
+    if removed {
+        super::mcast_filter::refresh_kernel();
     }
+}
+
+/// The IPv6 groups some socket is in (as [`multicast_groups`]).
+pub fn multicast_groups_v6() -> alloc::vec::Vec<Ipv6Addr> {
+    MCAST_GROUPS_V6
+        .lock()
+        .iter()
+        .filter(|e| e.refcount > 0)
+        .map(|e| e.addr)
+        .collect()
 }
 
 /// Check if any socket has joined the given IPv6 multicast group.

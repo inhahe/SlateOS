@@ -462,16 +462,31 @@ mod tests {
     #[test]
     fn the_ipv4_ttl_takes_an_int_or_a_byte_and_minus_one_is_the_default() {
         let ttl = ring::UDP_OPT_MCAST_TTL;
-        assert_eq!(set(SOL_IP, IP_MULTICAST_TTL, &int(32), UDP4), scalar(ttl, 32));
-        assert_eq!(set(SOL_IP, IP_MULTICAST_TTL, &int(255), UDP4), scalar(ttl, 255));
+        assert_eq!(
+            set(SOL_IP, IP_MULTICAST_TTL, &int(32), UDP4),
+            scalar(ttl, 32)
+        );
+        assert_eq!(
+            set(SOL_IP, IP_MULTICAST_TTL, &int(255), UDP4),
+            scalar(ttl, 255)
+        );
         assert_eq!(set(SOL_IP, IP_MULTICAST_TTL, &int(0), UDP4), scalar(ttl, 0));
-        assert_eq!(set(SOL_IP, IP_MULTICAST_TTL, &int(-1), UDP4), scalar(ttl, 1));
+        assert_eq!(
+            set(SOL_IP, IP_MULTICAST_TTL, &int(-1), UDP4),
+            scalar(ttl, 1)
+        );
         assert_eq!(set(SOL_IP, IP_MULTICAST_TTL, &int(256), UDP4), Err(EINVAL));
         assert_eq!(set(SOL_IP, IP_MULTICAST_TTL, &int(-2), UDP4), Err(EINVAL));
         // A one-byte optval is an unsigned char: 200 stays 200.
-        assert_eq!(set(SOL_IP, IP_MULTICAST_TTL, &[200], UDP4), scalar(ttl, 200));
+        assert_eq!(
+            set(SOL_IP, IP_MULTICAST_TTL, &[200], UDP4),
+            scalar(ttl, 200)
+        );
         // Three bytes are still too few for an int, so the first is read.
-        assert_eq!(set(SOL_IP, IP_MULTICAST_TTL, &[7, 9, 9], UDP4), scalar(ttl, 7));
+        assert_eq!(
+            set(SOL_IP, IP_MULTICAST_TTL, &[7, 9, 9], UDP4),
+            scalar(ttl, 7)
+        );
         assert_eq!(set(SOL_IP, IP_MULTICAST_TTL, &[], UDP4), Err(EINVAL));
         // A stream socket has no multicast TTL.
         assert_eq!(set(SOL_IP, IP_MULTICAST_TTL, &int(2), TCP4), Err(EINVAL));
@@ -484,10 +499,16 @@ mod tests {
         let lp = ring::UDP_OPT_MCAST_LOOP4;
         assert_eq!(set(SOL_IP, IP_MULTICAST_LOOP, &int(0), UDP4), scalar(lp, 0));
         assert_eq!(set(SOL_IP, IP_MULTICAST_LOOP, &int(1), UDP4), scalar(lp, 1));
-        assert_eq!(set(SOL_IP, IP_MULTICAST_LOOP, &int(-7), UDP4), scalar(lp, 1));
+        assert_eq!(
+            set(SOL_IP, IP_MULTICAST_LOOP, &int(-7), UDP4),
+            scalar(lp, 1)
+        );
         assert_eq!(set(SOL_IP, IP_MULTICAST_LOOP, &[0], UDP4), scalar(lp, 0));
         assert_eq!(set(SOL_IP, IP_MULTICAST_LOOP, &[], UDP4), Err(EINVAL));
-        assert_eq!(set(SOL_IP, IP_MULTICAST_LOOP, &int(1), TCP4), Err(ENOPROTOOPT));
+        assert_eq!(
+            set(SOL_IP, IP_MULTICAST_LOOP, &int(1), TCP4),
+            Err(ENOPROTOOPT)
+        );
     }
 
     #[test]
@@ -533,7 +554,10 @@ mod tests {
         for bad in [1, 3, -1] {
             let m = mreqn(MDNS4, [0; 4], bad);
             assert_eq!(set(SOL_IP, IP_ADD_MEMBERSHIP, &m, UDP4), Err(ENODEV));
-            assert_eq!(set(SOL_IP, IP_DROP_MEMBERSHIP, &m, UDP4), Err(EADDRNOTAVAIL));
+            assert_eq!(
+                set(SOL_IP, IP_DROP_MEMBERSHIP, &m, UDP4),
+                Err(EADDRNOTAVAIL)
+            );
         }
     }
 
@@ -543,7 +567,12 @@ mod tests {
         // Joining a unicast address is EINVAL, before the index is looked at.
         assert_eq!(set(SOL_IP, IP_ADD_MEMBERSHIP, &unicast, UDP4), Err(EINVAL));
         assert_eq!(
-            set(SOL_IP, IP_ADD_MEMBERSHIP, &mreqn([10, 0, 0, 1], [0; 4], 9), UDP4),
+            set(
+                SOL_IP,
+                IP_ADD_MEMBERSHIP,
+                &mreqn([10, 0, 0, 1], [0; 4], 9),
+                UDP4
+            ),
             Err(EINVAL)
         );
         // Leaving one is the daemon's EADDRNOTAVAIL: Linux does not check.
@@ -552,36 +581,78 @@ mod tests {
             Ok(Set::Group { .. })
         ));
         // Short of an ip_mreq.
-        assert_eq!(set(SOL_IP, IP_ADD_MEMBERSHIP, &[224, 0, 0, 1, 0, 0, 0], UDP4), Err(EINVAL));
+        assert_eq!(
+            set(SOL_IP, IP_ADD_MEMBERSHIP, &[224, 0, 0, 1, 0, 0, 0], UDP4),
+            Err(EINVAL)
+        );
         // A stream socket is EPROTO, before even the length.
         assert_eq!(set(SOL_IP, IP_ADD_MEMBERSHIP, &[0; 3], TCP4), Err(EPROTO));
-        assert_eq!(set(SOL_IP, IP_DROP_MEMBERSHIP, &mreq(MDNS4, [0; 4]), TCP6), Err(EPROTO));
+        assert_eq!(
+            set(SOL_IP, IP_DROP_MEMBERSHIP, &mreq(MDNS4, [0; 4]), TCP6),
+            Err(EPROTO)
+        );
     }
 
     #[test]
     fn the_ipv6_hop_limit_needs_an_int() {
         let hops = ring::UDP_OPT_MCAST_HOPS;
-        assert_eq!(set(SOL_IPV6, IPV6_MULTICAST_HOPS, &int(5), UDP6), scalar(hops, 5));
-        assert_eq!(set(SOL_IPV6, IPV6_MULTICAST_HOPS, &int(-1), UDP6), scalar(hops, 1));
-        assert_eq!(set(SOL_IPV6, IPV6_MULTICAST_HOPS, &int(255), UDP6), scalar(hops, 255));
-        assert_eq!(set(SOL_IPV6, IPV6_MULTICAST_HOPS, &int(256), UDP6), Err(EINVAL));
-        assert_eq!(set(SOL_IPV6, IPV6_MULTICAST_HOPS, &int(-2), UDP6), Err(EINVAL));
+        assert_eq!(
+            set(SOL_IPV6, IPV6_MULTICAST_HOPS, &int(5), UDP6),
+            scalar(hops, 5)
+        );
+        assert_eq!(
+            set(SOL_IPV6, IPV6_MULTICAST_HOPS, &int(-1), UDP6),
+            scalar(hops, 1)
+        );
+        assert_eq!(
+            set(SOL_IPV6, IPV6_MULTICAST_HOPS, &int(255), UDP6),
+            scalar(hops, 255)
+        );
+        assert_eq!(
+            set(SOL_IPV6, IPV6_MULTICAST_HOPS, &int(256), UDP6),
+            Err(EINVAL)
+        );
+        assert_eq!(
+            set(SOL_IPV6, IPV6_MULTICAST_HOPS, &int(-2), UDP6),
+            Err(EINVAL)
+        );
         // No byte form at this level.
         assert_eq!(set(SOL_IPV6, IPV6_MULTICAST_HOPS, &[5], UDP6), Err(EINVAL));
-        assert_eq!(set(SOL_IPV6, IPV6_MULTICAST_HOPS, &int(5), TCP6), Err(ENOPROTOOPT));
+        assert_eq!(
+            set(SOL_IPV6, IPV6_MULTICAST_HOPS, &int(5), TCP6),
+            Err(ENOPROTOOPT)
+        );
         // An AF_INET socket has no IPv6 options at all.
-        assert_eq!(set(SOL_IPV6, IPV6_MULTICAST_HOPS, &int(5), UDP4), Err(ENOPROTOOPT));
+        assert_eq!(
+            set(SOL_IPV6, IPV6_MULTICAST_HOPS, &int(5), UDP4),
+            Err(ENOPROTOOPT)
+        );
     }
 
     #[test]
     fn the_ipv6_loop_is_zero_or_one_only() {
         let lp = ring::UDP_OPT_MCAST_LOOP6;
-        assert_eq!(set(SOL_IPV6, IPV6_MULTICAST_LOOP, &int(0), UDP6), scalar(lp, 0));
-        assert_eq!(set(SOL_IPV6, IPV6_MULTICAST_LOOP, &int(1), UDP6), scalar(lp, 1));
-        assert_eq!(set(SOL_IPV6, IPV6_MULTICAST_LOOP, &int(2), UDP6), Err(EINVAL));
-        assert_eq!(set(SOL_IPV6, IPV6_MULTICAST_LOOP, &int(-1), UDP6), Err(EINVAL));
+        assert_eq!(
+            set(SOL_IPV6, IPV6_MULTICAST_LOOP, &int(0), UDP6),
+            scalar(lp, 0)
+        );
+        assert_eq!(
+            set(SOL_IPV6, IPV6_MULTICAST_LOOP, &int(1), UDP6),
+            scalar(lp, 1)
+        );
+        assert_eq!(
+            set(SOL_IPV6, IPV6_MULTICAST_LOOP, &int(2), UDP6),
+            Err(EINVAL)
+        );
+        assert_eq!(
+            set(SOL_IPV6, IPV6_MULTICAST_LOOP, &int(-1), UDP6),
+            Err(EINVAL)
+        );
         assert_eq!(set(SOL_IPV6, IPV6_MULTICAST_LOOP, &[1], UDP6), Err(EINVAL));
-        assert_eq!(set(SOL_IPV6, IPV6_MULTICAST_LOOP, &int(1), TCP6), Err(ENOPROTOOPT));
+        assert_eq!(
+            set(SOL_IPV6, IPV6_MULTICAST_LOOP, &int(1), TCP6),
+            Err(ENOPROTOOPT)
+        );
     }
 
     #[test]
@@ -593,8 +664,14 @@ mod tests {
                 len: ring::UDP_MREQ6_LEN,
             })
         };
-        assert_eq!(set(SOL_IPV6, IPV6_JOIN_GROUP, &mreq6(MDNS6, 0), UDP6), join(MDNS6));
-        assert_eq!(set(SOL_IPV6, IPV6_JOIN_GROUP, &mreq6(MDNS6, 2), UDP6), join(MDNS6));
+        assert_eq!(
+            set(SOL_IPV6, IPV6_JOIN_GROUP, &mreq6(MDNS6, 0), UDP6),
+            join(MDNS6)
+        );
+        assert_eq!(
+            set(SOL_IPV6, IPV6_JOIN_GROUP, &mreq6(MDNS6, 2), UDP6),
+            join(MDNS6)
+        );
         assert_eq!(
             set(SOL_IPV6, IPV6_LEAVE_GROUP, &mreq6(MDNS6, 0), UDP6),
             Ok(Set::Group {
@@ -603,7 +680,10 @@ mod tests {
                 len: ring::UDP_MREQ6_LEN,
             })
         );
-        assert_eq!(set(SOL_IPV6, IPV6_JOIN_GROUP, &mreq6(MDNS6, 1), UDP6), Err(ENODEV));
+        assert_eq!(
+            set(SOL_IPV6, IPV6_JOIN_GROUP, &mreq6(MDNS6, 1), UDP6),
+            Err(ENODEV)
+        );
         assert_eq!(
             set(SOL_IPV6, IPV6_LEAVE_GROUP, &mreq6(MDNS6, 7), UDP6),
             Err(EADDRNOTAVAIL)
@@ -620,18 +700,36 @@ mod tests {
             a
         };
         // IPv6 refuses a unicast address to leave as well as to join.
-        assert_eq!(set(SOL_IPV6, IPV6_JOIN_GROUP, &mreq6(unicast, 0), UDP6), Err(EINVAL));
-        assert_eq!(set(SOL_IPV6, IPV6_LEAVE_GROUP, &mreq6(unicast, 0), UDP6), Err(EINVAL));
+        assert_eq!(
+            set(SOL_IPV6, IPV6_JOIN_GROUP, &mreq6(unicast, 0), UDP6),
+            Err(EINVAL)
+        );
+        assert_eq!(
+            set(SOL_IPV6, IPV6_LEAVE_GROUP, &mreq6(unicast, 0), UDP6),
+            Err(EINVAL)
+        );
         // A v4-mapped multicast address is not IPv6 multicast.
         let mut mapped = [0u8; 16];
         mapped[10] = 0xFF;
         mapped[11] = 0xFF;
         mapped[12..].copy_from_slice(&MDNS4);
-        assert_eq!(set(SOL_IPV6, IPV6_JOIN_GROUP, &mreq6(mapped, 0), UDP6), Err(EINVAL));
+        assert_eq!(
+            set(SOL_IPV6, IPV6_JOIN_GROUP, &mreq6(mapped, 0), UDP6),
+            Err(EINVAL)
+        );
         // Length is checked before the socket's type here, unlike IPv4.
-        assert_eq!(set(SOL_IPV6, IPV6_JOIN_GROUP, &[0xFF; 19], TCP6), Err(EINVAL));
-        assert_eq!(set(SOL_IPV6, IPV6_JOIN_GROUP, &mreq6(MDNS6, 0), TCP6), Err(EPROTO));
-        assert_eq!(set(SOL_IPV6, IPV6_JOIN_GROUP, &mreq6(MDNS6, 0), UDP4), Err(ENOPROTOOPT));
+        assert_eq!(
+            set(SOL_IPV6, IPV6_JOIN_GROUP, &[0xFF; 19], TCP6),
+            Err(EINVAL)
+        );
+        assert_eq!(
+            set(SOL_IPV6, IPV6_JOIN_GROUP, &mreq6(MDNS6, 0), TCP6),
+            Err(EPROTO)
+        );
+        assert_eq!(
+            set(SOL_IPV6, IPV6_JOIN_GROUP, &mreq6(MDNS6, 0), UDP4),
+            Err(ENOPROTOOPT)
+        );
     }
 
     #[test]
@@ -648,7 +746,10 @@ mod tests {
             scalar(ring::UDP_OPT_MCAST_TTL, 3)
         );
         // An optval shorter than its own optlen is the caller's fault.
-        assert_eq!(parse_set(SOL_IP, IP_MULTICAST_TTL, &[1], 4, UDP4), Err(EFAULT));
+        assert_eq!(
+            parse_set(SOL_IP, IP_MULTICAST_TTL, &[1], 4, UDP4),
+            Err(EFAULT)
+        );
     }
 
     #[test]
@@ -659,8 +760,14 @@ mod tests {
         assert!(is_multicast_option(SOL_IP, IP_ADD_MEMBERSHIP));
         assert!(is_multicast_option(SOL_IPV6, IPV6_LEAVE_GROUP));
         assert_eq!(set(SOL_IP, 1, &int(0), UDP4), Err(ENOPROTOOPT));
-        assert_eq!(get_option(SOL_IP, IP_ADD_MEMBERSHIP, UDP4), Err(ENOPROTOOPT));
-        assert_eq!(get_option(SOL_IPV6, IPV6_JOIN_GROUP, UDP6), Err(ENOPROTOOPT));
+        assert_eq!(
+            get_option(SOL_IP, IP_ADD_MEMBERSHIP, UDP4),
+            Err(ENOPROTOOPT)
+        );
+        assert_eq!(
+            get_option(SOL_IPV6, IPV6_JOIN_GROUP, UDP6),
+            Err(ENOPROTOOPT)
+        );
     }
 
     #[test]
@@ -681,11 +788,23 @@ mod tests {
             get_option(SOL_IPV6, IPV6_MULTICAST_LOOP, UDP6),
             Ok(Get::Ask(ring::UDP_OPT_MCAST_LOOP6))
         );
-        assert_eq!(get_option(SOL_IP, IP_MULTICAST_TTL, TCP4), Ok(Get::Fixed(1)));
-        assert_eq!(get_option(SOL_IPV6, IPV6_MULTICAST_LOOP, TCP6), Ok(Get::Fixed(1)));
+        assert_eq!(
+            get_option(SOL_IP, IP_MULTICAST_TTL, TCP4),
+            Ok(Get::Fixed(1))
+        );
+        assert_eq!(
+            get_option(SOL_IPV6, IPV6_MULTICAST_LOOP, TCP6),
+            Ok(Get::Fixed(1))
+        );
         // The IPv6 level on an AF_INET socket: EOPNOTSUPP to read.
-        assert_eq!(get_option(SOL_IPV6, IPV6_MULTICAST_HOPS, UDP4), Err(EOPNOTSUPP));
-        assert_eq!(get_option(SOL_IPV6, IPV6_MULTICAST_HOPS, TCP4), Err(EOPNOTSUPP));
+        assert_eq!(
+            get_option(SOL_IPV6, IPV6_MULTICAST_HOPS, UDP4),
+            Err(EOPNOTSUPP)
+        );
+        assert_eq!(
+            get_option(SOL_IPV6, IPV6_MULTICAST_HOPS, TCP4),
+            Err(EOPNOTSUPP)
+        );
     }
 
     #[test]

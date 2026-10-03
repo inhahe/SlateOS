@@ -149,6 +149,8 @@ pub fn release(pid: ProcessId) -> KernelResult<()> {
         .is_ok()
     {
         CLAIMED.store(false, Ordering::Release);
+        // The owner's multicast filter goes with its claim.
+        super::mcast_filter::raw_released();
     }
     Ok(())
 }

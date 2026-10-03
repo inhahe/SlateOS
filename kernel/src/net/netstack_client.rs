@@ -2233,6 +2233,10 @@ const MCAST_PORT: u16 = 9330;
 const MCAST_PORT6: u16 = 9332;
 const MCAST_GROUP4: [u8; 4] = [239, 255, 77, 1];
 const MCAST_GROUP6: [u8; 16] = [0xFF, 0x15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x51, 0x57];
+/// The groups' Ethernet addresses: 01:00:5e and the low 23 bits, 33:33 and
+/// the low 32.
+const MCAST_GROUP4_MAC: [u8; 6] = [0x01, 0x00, 0x5E, 0x7F, 77, 1];
+const MCAST_GROUP6_MAC: [u8; 6] = [0x33, 0x33, 0, 0, 0x51, 0x57];
 const MCAST_PAYLOAD: &[u8] = b"slate-udp:multicast-loop";
 
 /// An IPv4 join (or leave) of `group` on the interface with address `iface`.
@@ -2293,7 +2297,12 @@ fn mcast_expect_get(
     if got == want {
         return Ok(());
     }
-    crate::serial_println!("[netstack-client]   multicast: {} read {}, want {}", what, got, want);
+    crate::serial_println!(
+        "[netstack-client]   multicast: {} read {}, want {}",
+        what,
+        got,
+        want
+    );
     Err(KernelError::InternalError)
 }
 
@@ -2301,7 +2310,11 @@ fn mcast_expect_get(
 /// is (`true`) or is not (`false`) waiting on `h`, polling a few times: the
 /// daemon queues a looped-back datagram while it serves the send, so the
 /// first poll finds it, and the rest only guard against a slow pump.
-fn mcast_arrives(h: crate::net::socket::SocketHandle, family: u16, port: u16) -> KernelResult<bool> {
+fn mcast_arrives(
+    h: crate::net::socket::SocketHandle,
+    family: u16,
+    port: u16,
+) -> KernelResult<bool> {
     let mut buf = [0u8; 64];
     for _ in 0..8u32 {
         match crate::net::socket::dgram_recv_from(h, &mut buf, true) {
@@ -2323,6 +2336,26 @@ fn mcast_arrives(h: crate::net::socket::SocketHandle, family: u16, port: u16) ->
         }
     }
     Ok(false)
+}
+
+/// Check the network cards' multicast filter, which the daemon sets through
+/// `SYS_NET_RAW_MCAST` (`net::mcast_filter`), is the daemon's and does
+/// (`want`) or does not pass `mac`.
+fn mcast_filter_check(what: &str, mac: [u8; 6], want: bool) -> KernelResult<()> {
+    let (owner, addrs) = crate::net::mcast_filter::current()?;
+    if owner == crate::net::mcast_filter::Owner::Raw && addrs.contains(&mac) == want {
+        return Ok(());
+    }
+    crate::serial_println!(
+        "[netstack-client]   multicast: {} -- the cards' filter ({:?}, {} addresses) {} \
+         {:02x?}",
+        what,
+        owner,
+        addrs.len(),
+        if want { "lacks" } else { "still passes" },
+        mac
+    );
+    Err(KernelError::InternalError)
 }
 
 /// Fail with `what` unless `got == want`.
@@ -2347,10 +2380,20 @@ fn multicast_v4_steps(h: crate::net::socket::SocketHandle) -> KernelResult<()> {
     mcast_expect_get(h, "default TTL", r::UDP_OPT_MCAST_TTL, 1)?;
     mcast_expect_set(h, "TTL 0", mcast_scalar(r::UDP_OPT_MCAST_TTL, 0), Ok(()))?;
     mcast_expect_get(h, "TTL set unbound", r::UDP_OPT_MCAST_TTL, 0)?;
-    // 2. Joins before bind, and the daemon's refusals.
+    // 2. Joins before bind, and the daemon's refusals. The daemon's filter
+    // has the base groups from the start, and the group from its join.
+    mcast_filter_check("all-hosts", crate::net::mcast_filter::ALL_HOSTS_MAC, true)?;
+    mcast_filter_check("all-nodes", crate::net::mcast_filter::ALL_NODES_MAC, true)?;
+    mcast_filter_check("the group before the join", MCAST_GROUP4_MAC, false)?;
     let join = mcast_group4(MCAST_GROUP4, [0; 4], true);
     mcast_expect_set(h, "join", join, Ok(()))?;
-    mcast_expect_set(h, "join twice", join, Err(r::ERR_ADDR_IN_USE.saturating_neg()))?;
+    mcast_filter_check("the joined group", MCAST_GROUP4_MAC, true)?;
+    mcast_expect_set(
+        h,
+        "join twice",
+        join,
+        Err(r::ERR_ADDR_IN_USE.saturating_neg()),
+    )?;
     mcast_expect_set(
         h,
         "join on a foreign address",
@@ -2377,18 +2420,50 @@ fn multicast_v4_steps(h: crate::net::socket::SocketHandle) -> KernelResult<()> {
     socket::close(h2);
     second?;
     socket::dgram_send_to(h, &MCAST_GROUP4, MCAST_PORT, MCAST_PAYLOAD)?;
-    mcast_check("send after the second socket closed", mcast_arrives(h, af, MCAST_PORT)?, true)?;
+    mcast_check(
+        "send after the second socket closed",
+        mcast_arrives(h, af, MCAST_PORT)?,
+        true,
+    )?;
     // 5. Loop off, then leave.
-    mcast_expect_set(h, "loop off", mcast_scalar(r::UDP_OPT_MCAST_LOOP4, 0), Ok(()))?;
+    mcast_expect_set(
+        h,
+        "loop off",
+        mcast_scalar(r::UDP_OPT_MCAST_LOOP4, 0),
+        Ok(()),
+    )?;
     mcast_expect_get(h, "loop read back", r::UDP_OPT_MCAST_LOOP4, 0)?;
     socket::dgram_send_to(h, &MCAST_GROUP4, MCAST_PORT, MCAST_PAYLOAD)?;
-    mcast_check("send with the loop off", mcast_arrives(h, af, MCAST_PORT)?, false)?;
-    mcast_expect_set(h, "loop on", mcast_scalar(r::UDP_OPT_MCAST_LOOP4, 1), Ok(()))?;
+    mcast_check(
+        "send with the loop off",
+        mcast_arrives(h, af, MCAST_PORT)?,
+        false,
+    )?;
+    mcast_expect_set(
+        h,
+        "loop on",
+        mcast_scalar(r::UDP_OPT_MCAST_LOOP4, 1),
+        Ok(()),
+    )?;
     let leave = mcast_group4(MCAST_GROUP4, [0; 4], false);
     mcast_expect_set(h, "leave", leave, Ok(()))?;
-    mcast_expect_set(h, "leave twice", leave, Err(r::ERR_ADDR_NOT_AVAIL.saturating_neg()))?;
+    mcast_filter_check(
+        "the group after its last member left",
+        MCAST_GROUP4_MAC,
+        false,
+    )?;
+    mcast_expect_set(
+        h,
+        "leave twice",
+        leave,
+        Err(r::ERR_ADDR_NOT_AVAIL.saturating_neg()),
+    )?;
     socket::dgram_send_to(h, &MCAST_GROUP4, MCAST_PORT, MCAST_PAYLOAD)?;
-    mcast_check("send after leaving", mcast_arrives(h, af, MCAST_PORT)?, false)
+    mcast_check(
+        "send after leaving",
+        mcast_arrives(h, af, MCAST_PORT)?,
+        false,
+    )
 }
 
 /// Step 4 of [`self_test_udp_multicast`]: `h2` joins the group (opening its
@@ -2416,7 +2491,12 @@ fn multicast_refused_bind(h2: crate::net::socket::SocketHandle) -> KernelResult<
         join,
         Err(netipc::ring::ERR_ADDR_IN_USE.saturating_neg()),
     )?;
-    mcast_expect_get(h2, "second socket's TTL", netipc::ring::UDP_OPT_MCAST_TTL, 1)
+    mcast_expect_get(
+        h2,
+        "second socket's TTL",
+        netipc::ring::UDP_OPT_MCAST_TTL,
+        1,
+    )
 }
 
 /// The IPv6 steps of [`self_test_udp_multicast`] on the fresh `AF_INET6`
@@ -2430,7 +2510,13 @@ fn multicast_v6_steps(h: crate::net::socket::SocketHandle) -> KernelResult<()> {
         len: r::UDP_MREQ6_LEN,
     };
     mcast_expect_set(h, "v6 join", join, Ok(()))?;
-    mcast_expect_set(h, "hop limit 0", mcast_scalar(r::UDP_OPT_MCAST_HOPS, 0), Ok(()))?;
+    mcast_filter_check("the joined v6 group", MCAST_GROUP6_MAC, true)?;
+    mcast_expect_set(
+        h,
+        "hop limit 0",
+        mcast_scalar(r::UDP_OPT_MCAST_HOPS, 0),
+        Ok(()),
+    )?;
     mcast_expect_get(h, "hop limit read back", r::UDP_OPT_MCAST_HOPS, 0)?;
     mcast_expect_get(h, "default v6 loop", r::UDP_OPT_MCAST_LOOP6, 1)?;
     let port = socket::dgram_bind(h, MCAST_PORT6)?;
@@ -2449,7 +2535,8 @@ fn multicast_v6_steps(h: crate::net::socket::SocketHandle) -> KernelResult<()> {
         window: MCAST_GROUP6,
         len: r::UDP_MREQ6_LEN,
     };
-    mcast_expect_set(h, "v6 leave", leave, Ok(()))
+    mcast_expect_set(h, "v6 leave", leave, Ok(()))?;
+    mcast_filter_check("the v6 group after the leave", MCAST_GROUP6_MAC, false)
 }
 
 /// Boot self-test: prove that a **non-blocking** receive on a freshly-connected

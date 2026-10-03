@@ -42803,16 +42803,11 @@ fn socket_set_multicast(
             return linux_err(linux_errno_for(e));
         }
     }
-    let set = match netipc::sockopt::parse_set(
-        level,
-        optname,
-        raw.get(..n).unwrap_or(&[]),
-        len,
-        shape,
-    ) {
-        Ok(s) => s,
-        Err(errno) => return linux_err(errno),
-    };
+    let set =
+        match netipc::sockopt::parse_set(level, optname, raw.get(..n).unwrap_or(&[]), len, shape) {
+            Ok(s) => s,
+            Err(errno) => return linux_err(errno),
+        };
     match crate::net::socket::dgram_setopt(h, set) {
         Ok(Ok(())) => SyscallResult::ok(0),
         Ok(Err(errno)) => linux_err(errno),

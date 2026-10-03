@@ -3881,10 +3881,15 @@ _Port ext4 first. Don't write a custom filesystem._
         Options set before `bind` get an unbound daemon socket
         (design-decisions 1535). Boot check:
         `netstack_client::self_test_udp_multicast`.
-      - [ ] Wire multicast on e1000/e1000e and rtl8139: both drivers drop
-        every multicast frame (known-issues
-        `A-E1000-AND-RTL8139-DROP-EVERY-MULTICAST-FRAME`); a raw-NIC
-        multicast filter the daemon sets.
+      - [-] Wire multicast on e1000/e1000e and rtl8139, on `lane-a-wip`
+        (2026-10-03), awaiting a boot: both drivers dropped every multicast
+        frame (known-issues `A-E1000-AND-RTL8139-DROP-EVERY-MULTICAST-FRAME`).
+        `net::mcast_filter` programs every present card's hash filter (e1000
+        `MTA`, rtl8139 `MAR`) from the kernel stack's memberships, or from the
+        daemon's set through the new `SYS_NET_RAW_MCAST` (1135) while it holds
+        the NIC. The daemon's serving loop now also answers ARP requests,
+        pings, Neighbor Solicitations and ping6 for its addresses, which only
+        its startup loop (ARP, ping) ever did.
 - [-] `[A]` Later: WiFi (requires wireless driver + wpa_supplicant port)
   - [x] `net80211` crate: `no_std`, allocation-free 802.11 wire format — MAC
     header and frame-control parsing, management-frame bodies (beacon, probe,

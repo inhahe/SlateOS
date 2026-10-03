@@ -5780,7 +5780,9 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
              behave as Linux's -- UDP multicast proven"
         ),
         Ok(None) => {
-            serial_println!("[spawn]   persistent netstack udp-multicast: no NIC MAC — check skipped");
+            serial_println!(
+                "[spawn]   persistent netstack udp-multicast: no NIC MAC — check skipped"
+            );
         }
         Err(e) => {
             serial_println!(

@@ -249,7 +249,12 @@ pub fn encode_tcp_fetch(out: &mut [u8], ip: &[u8; 4], port: u16, payload: &[u8])
 /// Encode an [`OP_UDP_EXCHANGE`] request (`[op][ip:4][port_be:2][payload]`) into
 /// `out`. Returns bytes written, or `None` if `out` is too small.
 #[must_use]
-pub fn encode_udp_exchange(out: &mut [u8], ip: &[u8; 4], port: u16, payload: &[u8]) -> Option<usize> {
+pub fn encode_udp_exchange(
+    out: &mut [u8],
+    ip: &[u8; 4],
+    port: u16,
+    payload: &[u8],
+) -> Option<usize> {
     encode_ip_port_payload(out, OP_UDP_EXCHANGE, ip, port, payload)
 }
 
@@ -497,7 +502,10 @@ mod tests {
     fn ipv4_reply_round_trip() {
         let mut buf = [0u8; 8];
         let n = encode_ok_ipv4(&mut buf, &[93, 184, 216, 34]).unwrap();
-        assert_eq!(parse_ipv4_reply(&buf[..n]), Ipv4Reply::Ok([93, 184, 216, 34]));
+        assert_eq!(
+            parse_ipv4_reply(&buf[..n]),
+            Ipv4Reply::Ok([93, 184, 216, 34])
+        );
         let n = encode_fail(&mut buf).unwrap();
         assert_eq!(parse_ipv4_reply(&buf[..n]), Ipv4Reply::Fail);
         assert_eq!(parse_ipv4_reply(&[]), Ipv4Reply::Malformed);
@@ -629,7 +637,10 @@ mod tests {
     fn bytes_reply_round_trip() {
         let mut buf = [0u8; 32];
         let n = encode_ok_bytes(&mut buf, b"HTTP/1.1 200").unwrap();
-        assert_eq!(parse_bytes_reply(&buf[..n]), BytesReply::Ok(b"HTTP/1.1 200"));
+        assert_eq!(
+            parse_bytes_reply(&buf[..n]),
+            BytesReply::Ok(b"HTTP/1.1 200")
+        );
         let n = encode_fail(&mut buf).unwrap();
         assert_eq!(parse_bytes_reply(&buf[..n]), BytesReply::Fail);
         assert_eq!(parse_bytes_reply(&[ST_OK]), BytesReply::Ok(b""));

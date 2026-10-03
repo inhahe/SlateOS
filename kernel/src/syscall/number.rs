@@ -6540,6 +6540,19 @@ pub const SYS_UDP_SET_OPTION: u64 = 1133;
 /// limit, or 1/0 for a loop setting.
 pub const SYS_UDP_GET_OPTION: u64 = 1134;
 
+/// `SYS_NET_RAW_MCAST(addrs_ptr, count)` -- set the multicast Ethernet
+/// addresses the network cards pass up, for the raw NIC owner (the netstack
+/// daemon, which knows its groups): `count` six-byte addresses at
+/// `addrs_ptr`, each a group address (low bit of the first byte set).
+/// Replaces the previous set; `count` 0 passes none. Broadcast and frames to
+/// the card's own address pass regardless. The cards filter by hash, so a
+/// few other groups get through too: the receiver still checks the
+/// destination. Releasing the NIC puts the kernel stack's own set back.
+/// `PermissionDenied` unless the caller holds the raw claim;
+/// `InvalidArgument` for more than `net::mcast_filter::MAX_ADDRS` (128)
+/// addresses or a unicast one. See `net::mcast_filter`.
+pub const SYS_NET_RAW_MCAST: u64 = 1135;
+
 /// Bytes [`SYS_UNIX_NAME`] writes: kind, length, 108 bytes of name.
 pub const UNIX_ADDR_LEN: usize = 116;
 /// Bytes [`SYS_UNIX_RECV`] writes at `info_ptr`.

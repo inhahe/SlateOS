@@ -60,6 +60,9 @@ const SYS_NET_RAW_OPEN: u64 = 865;
 const SYS_NET_RAW_TX: u64 = 866;
 const SYS_NET_RAW_RX: u64 = 867;
 const SYS_NET_RAW_CLOSE: u64 = 868;
+/// Set the multicast Ethernet addresses the network cards pass up (the raw
+/// owner's call; kernel `net::mcast_filter`).
+const SYS_NET_RAW_MCAST: u64 = 1135;
 
 /// `EAGAIN`/`WouldBlock`: raw RX had no frame ready.
 const E_WOULD_BLOCK: i64 = -4;
@@ -531,6 +534,72 @@ use netproto::{arp, dns, ethernet, icmp, icmpv6, igmp, ipv4, ipv6, mcast, mld, t
 const MAX_SOCK_GROUPS: usize = 8;
 /// Most multicast groups the host can be in at once, over every socket.
 const MAX_HOST_GROUPS: usize = 32;
+/// Most addresses the cards' multicast filter holds for us: the host's
+/// groups, plus all-hosts, all-nodes and our solicited-node group.
+const MAX_FILTER: usize = MAX_HOST_GROUPS + 3;
+
+/// The multicast filter last given to the kernel ([`sync_mcast_filter`]):
+/// sorted, no duplicates, `len` of `addrs` in use. `pushed` is false until a
+/// push succeeds, so a refused one is retried at the next change.
+struct McastFilter {
+    addrs: [[u8; 6]; MAX_FILTER],
+    len: usize,
+    pushed: bool,
+}
+
+/// Add `mac` to the first `*len` entries of `set` unless it is there or the
+/// set is full.
+fn push_unique(set: &mut [[u8; 6]; MAX_FILTER], len: &mut usize, mac: [u8; 6]) {
+    if set.get(..*len).is_some_and(|s| s.contains(&mac)) {
+        return;
+    }
+    if let Some(slot) = set.get_mut(*len) {
+        *slot = mac;
+        *len += 1;
+    }
+}
+
+/// Tell the kernel which multicast addresses the network cards must pass:
+/// all-hosts (IGMP queries), all-nodes (MLD queries, router
+/// advertisements), our solicited-node group (neighbour discovery) and every
+/// group a socket is in -- when that set has changed since the last push.
+/// Without it an e1000 or rtl8139 card drops every multicast frame (kernel
+/// known-issues `A-E1000-AND-RTL8139-DROP-EVERY-MULTICAST-FRAME`).
+fn sync_mcast_filter(net: &mut Net, me: &IfInfo) {
+    let mut set = [[0u8; 6]; MAX_FILTER];
+    let mut len = 0;
+    push_unique(&mut set, &mut len, igmp::multicast_mac(&igmp::ALL_HOSTS));
+    push_unique(
+        &mut set,
+        &mut len,
+        mld::multicast_mac(&icmpv6::ALL_NODES_LINK_LOCAL),
+    );
+    push_unique(
+        &mut set,
+        &mut len,
+        mld::multicast_mac(&icmpv6::solicited_node_multicast(&me.ip6)),
+    );
+    for g in net.mcast.iter() {
+        push_unique(&mut set, &mut len, g.mac());
+    }
+    let wanted = set.get_mut(..len).unwrap_or(&mut []);
+    wanted.sort_unstable();
+    let have = &net.filter;
+    if have.pushed && have.addrs.get(..have.len) == Some(&*wanted) {
+        return;
+    }
+    if syscall2(SYS_NET_RAW_MCAST, wanted.as_ptr() as u64, len as u64) < 0 {
+        // The cards keep the previous filter; the next change retries.
+        print("[netstack] WARN: the kernel refused the multicast filter\n");
+        net.filter.pushed = false;
+        return;
+    }
+    net.filter = McastFilter {
+        addrs: set,
+        len,
+        pushed: true,
+    };
+}
 
 // The kernel answers `getsockopt` for a socket the daemon holds nothing for
 // yet from `netipc::sockopt::default_value`; a new socket here starts from
@@ -2469,6 +2538,9 @@ fn run_dns_service(me: &IfInfo, persistent: bool) -> i64 {
     // calls so a connection opened in one call is addressable in later ones.
     let mut sessions = Sessions::new();
     let mut net = Net::new();
+    // The cards pass no multicast until told: all-hosts, all-nodes and our
+    // solicited-node group go in now.
+    sync_mcast_filter(&mut net, me);
 
     // Persistent mode ignores the idle deadline and serves for the system's
     // lifetime; bounded mode exits after SERVICE_IDLE_ITERS idle iterations.
@@ -2890,8 +2962,109 @@ fn recv_any(me: &IfInfo, frame: &mut [u8], tcp_pl: &mut [u8], udp_pl: &mut [u8])
     }
     match parse_udp(me, bytes, udp_pl) {
         Some(dg) => Rx::Udp(dg),
-        None => parse_query(bytes).unwrap_or(Rx::Other),
+        None => match parse_query(bytes) {
+            Some(query) => query,
+            None => {
+                answer_link(bytes, me);
+                Rx::Other
+            }
+        },
     }
+}
+
+/// Answer what any host on a link must, for a frame nothing else claimed:
+/// an ARP request for our IPv4 address, a ping to it, a Neighbor
+/// Solicitation for our IPv6 address, a ping6 to it. Until 2026-10-03 the
+/// serving loop answered none of them (only the startup loop's
+/// [`handle_frame`] did), so once a router's ARP entry for us aged out --
+/// a minute or so on Linux -- it could no longer reach us, and IPv6
+/// neighbours could never resolve us at all. Quiet, unlike `handle_frame`:
+/// routers ask again every few minutes for as long as we run.
+fn answer_link(frame: &[u8], me: &IfInfo) {
+    let Some(eth) = ethernet::Frame::parse(frame) else {
+        return;
+    };
+    match eth.ethertype {
+        ethernet::ETHERTYPE_ARP => {
+            if me.ip != [0; 4]
+                && let Some(pkt) = arp::Packet::parse(eth.payload)
+                && matches!(pkt.op, arp::Op::Request)
+                && pkt.target_ip == me.ip
+                && let Some(reply) = arp::reply_to(&pkt, &me.mac)
+            {
+                // A lost reply is asked for again.
+                let _ = raw_tx(&reply);
+            }
+        }
+        ethernet::ETHERTYPE_IPV4 => handle_ipv4(eth.payload, &eth.src, me),
+        ethernet::ETHERTYPE_IPV6 => answer_icmpv6(eth.payload, &eth.src, me),
+        _ => {}
+    }
+}
+
+/// The IPv6 half of [`answer_link`]: a Neighbor Solicitation for our
+/// address gets a Neighbor Advertisement (RFC 4861 §7.2.4,
+/// `icmpv6::answer_solicitation`), an Echo Request to it an Echo Reply.
+fn answer_icmpv6(body: &[u8], src_mac: &[u8; 6], me: &IfInfo) {
+    let Some(ip) = ipv6::Packet::parse(body) else {
+        return;
+    };
+    if ip.next_header != icmpv6::NH_ICMPV6 {
+        return;
+    }
+    let l4_off = ethernet::HEADER_LEN + ipv6::HEADER_LEN;
+    let mut out = [0u8; MAX_FRAME];
+    let Some(l4) = out.get_mut(l4_off..) else {
+        return;
+    };
+    let (dst, eth_dst, hop_limit, len) =
+        if ip.payload.first() == Some(&icmpv6::TYPE_NEIGHBOR_SOLICITATION) {
+            // Only from this link (hop limit 255), and a duplicate-address check
+            // (from ::) carries no source link-layer address (RFC 4861 §7.1.1).
+            if ip.hop_limit != icmpv6::NDP_HOP_LIMIT {
+                return;
+            }
+            let Some(ns) = icmpv6::parse_neighbor_solicitation(ip.payload, &ip.src, &ip.dst) else {
+                return;
+            };
+            if ip.src == icmpv6::UNSPECIFIED && ns.link_addr.is_some() {
+                return;
+            }
+            let Some((dst, flags)) = icmpv6::answer_solicitation(&ip.src, &ns, &me.ip6) else {
+                return;
+            };
+            let eth_dst = if dst == icmpv6::ALL_NODES_LINK_LOCAL {
+                mld::multicast_mac(&dst)
+            } else {
+                ns.link_addr.unwrap_or(*src_mac)
+            };
+            let Some(n) =
+                icmpv6::write_neighbor_advertisement(l4, &me.ip6, &dst, &me.ip6, flags, &me.mac)
+            else {
+                return;
+            };
+            (dst, eth_dst, icmpv6::NDP_HOP_LIMIT, n)
+        } else if ip.dst == me.ip6 && icmpv6::is_echo_request(ip.payload, &ip.src, &ip.dst) {
+            let Some(n) = icmpv6::write_echo_reply(l4, &me.ip6, &ip.src, ip.payload) else {
+                return;
+            };
+            (ip.src, *src_mac, 64, n)
+        } else {
+            return;
+        };
+    let hdr = ipv6::Builder {
+        traffic_class: 0,
+        flow_label: 0,
+        next_header: icmpv6::NH_ICMPV6,
+        hop_limit,
+        src: me.ip6,
+        dst,
+    }
+    .build_header(len as u16);
+    out[ethernet::HEADER_LEN..l4_off].copy_from_slice(&hdr);
+    ethernet::write_header(&mut out, &eth_dst, &me.mac, ethernet::ETHERTYPE_IPV6);
+    // A lost answer is asked for again.
+    let _ = raw_tx(&out[..l4_off + len]);
 }
 
 /// Classify a frame as a router's membership query: an IGMP Membership
@@ -2919,7 +3092,9 @@ fn parse_query(bytes: &[u8]) -> Option<Rx> {
             if ip.next_header != 0 || ip.payload.first() != Some(&58) {
                 return None;
             }
-            let hbh_len = usize::from(*ip.payload.get(1)?).checked_add(1)?.checked_mul(8)?;
+            let hbh_len = usize::from(*ip.payload.get(1)?)
+                .checked_add(1)?
+                .checked_mul(8)?;
             let msg = mld::parse(ip.payload.get(hbh_len..)?, &ip.src, &ip.dst)?;
             (msg.kind == mld::TYPE_QUERY).then(|| Rx::Query {
                 about: (!msg.is_general_query()).then_some(mcast::Group::V6(msg.group)),
@@ -3470,7 +3645,16 @@ fn udp_sock_send(
     payload: &[u8],
     id: u16,
 ) -> i32 {
-    udp_send_from(me, next_hop_mac, sock.local_port, dst_ip, dst_port, payload, id, 64)
+    udp_send_from(
+        me,
+        next_hop_mac,
+        sock.local_port,
+        dst_ip,
+        dst_port,
+        payload,
+        id,
+        64,
+    )
 }
 
 /// [`udp_sock_send`] from local port `src_port`, to Ethernet address
@@ -3524,7 +3708,15 @@ fn udp_sock_send6(
     dst_port: u16,
     payload: &[u8],
 ) -> i32 {
-    udp_send6_from(me, next_hop_mac, sock.local_port, dst_ip6, dst_port, payload, 64)
+    udp_send6_from(
+        me,
+        next_hop_mac,
+        sock.local_port,
+        dst_ip6,
+        dst_port,
+        payload,
+        64,
+    )
 }
 
 /// [`udp_sock_send6`] from `src_port`, to `dst_mac`, with hop limit
@@ -4078,6 +4270,8 @@ struct Net {
     /// The multicast groups the host is in on behalf of its UDP sockets, each
     /// with how many are in it (`OP_UDP_SETOPT`).
     mcast: mcast::HostGroups<MAX_HOST_GROUPS>,
+    /// The multicast filter the kernel last took for the cards.
+    filter: McastFilter,
     /// Connections their owner has closed, lingering to answer their peers.
     closing: Closing,
 }
@@ -4191,6 +4385,11 @@ impl Net {
             listeners: Listeners::new(),
             udp: UdpSocks::new(),
             mcast: mcast::HostGroups::new(),
+            filter: McastFilter {
+                addrs: [[0; 6]; MAX_FILTER],
+                len: 0,
+                pushed: false,
+            },
             closing: Closing::new(),
         }
     }
@@ -4232,6 +4431,7 @@ impl Net {
                 leave_all(mcast, &sock.mcast, me);
             }
         }
+        sync_mcast_filter(self, me);
     }
 }
 
@@ -4556,6 +4756,7 @@ fn ring_tcp_process(
                         // Its groups go with it, announced as the last member
                         // of each leaves.
                         leave_all(&mut net.mcast, &sock.mcast, me);
+                        sync_mcast_filter(net, me);
                         0
                     } else if net.listeners.remove(k, me, &mut net.closing) {
                         0
@@ -4653,14 +4854,18 @@ fn ring_tcp_process(
                 if want > 0 && !ring.read_data(sqe.data_off as usize, &mut window[..want]) {
                     -1
                 } else {
-                    udp_setopt(
+                    let r = udp_setopt(
                         net,
                         me,
                         key(id_space, sqe.conn_id),
                         option,
                         value,
                         &window[..want],
-                    )
+                    );
+                    if r == 0 {
+                        sync_mcast_filter(net, me);
+                    }
+                    r
                 }
             }
             netipc::ring::OP_UDP_GETOPT => {

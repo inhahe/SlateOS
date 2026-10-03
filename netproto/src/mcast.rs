@@ -46,6 +46,16 @@ impl Group {
             Self::V6(a) => mld::reportable(a),
         }
     }
+
+    /// The Ethernet address the group's frames are sent to, and so the one a
+    /// network card's multicast filter must pass for the host to hear it.
+    #[must_use]
+    pub fn mac(&self) -> crate::MacAddr {
+        match self {
+            Self::V4(a) => igmp::multicast_mac(a),
+            Self::V6(a) => mld::multicast_mac(a),
+        }
+    }
 }
 
 /// What a membership change requires the caller to send.
@@ -248,6 +258,12 @@ impl<const M: usize> HostGroups<M> {
         Announce::Nothing
     }
 
+    /// Every group the host is in, reportable or not, in no particular
+    /// order: what the network card's multicast filter must let through.
+    pub fn iter(&self) -> impl Iterator<Item = Group> + '_ {
+        self.entries.iter().flatten().map(|&(g, _)| g)
+    }
+
     /// The groups a router's query asks this host to report: every
     /// announced group of the query's family for a general query (`about`
     /// is `None`), or `about` alone when the host is in it.
@@ -340,5 +356,28 @@ mod tests {
         assert_eq!(specific, std::vec![SSDP4]);
         // A group the host is not in is not answered.
         assert_eq!(h.answer(Some(Group::V4([239, 1, 1, 1])), false).count(), 0);
+    }
+
+    #[test]
+    fn every_group_is_listed_for_the_filter_announced_or_not() {
+        let mut h: HostGroups<4> = HostGroups::new();
+        let all_hosts = Group::V4(igmp::ALL_HOSTS);
+        for g in [MDNS4, MDNS6, all_hosts] {
+            h.join(g).unwrap();
+        }
+        h.join(MDNS4).unwrap(); // counted twice, listed once
+        let mut listed: std::vec::Vec<Group> = h.iter().collect();
+        assert_eq!(listed.len(), 3);
+        listed.retain(|g| *g != MDNS4 && *g != MDNS6 && *g != all_hosts);
+        assert!(listed.is_empty());
+        h.leave(&MDNS6);
+        assert!(!h.iter().any(|g| g == MDNS6));
+    }
+
+    #[test]
+    fn a_group_names_its_ethernet_address() {
+        assert_eq!(MDNS4.mac(), [0x01, 0x00, 0x5E, 0x00, 0x00, 0xFB]);
+        assert_eq!(SSDP4.mac(), [0x01, 0x00, 0x5E, 0x7F, 0xFF, 0xFA]);
+        assert_eq!(MDNS6.mac(), [0x33, 0x33, 0x00, 0x00, 0x00, 0xFB]);
     }
 }

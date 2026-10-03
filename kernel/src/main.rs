@@ -8106,6 +8106,16 @@ extern "C" fn kernel_main() -> ! {
         virtio::net::self_test()
     });
 
+    // The cards' multicast filter (known-issues A-E1000-AND-RTL8139-DROP-
+    // EVERY-MULTICAST-FRAME): e1000 and rtl8139 hashes against QEMU's, and
+    // the programmed table read back from whichever card is present. Runs
+    // before the netstack daemon claims the NIC, and puts the kernel's own
+    // set back when done.
+    // §914: Diagnostic — optional network hardware.
+    selftest::dispatch_debug("mcast filter", selftest::Severity::Diagnostic, || {
+        net::mcast_filter::self_test()
+    });
+
     // Intel HD Audio self-test.
     // §914: Diagnostic — optional audio hardware.
     selftest::dispatch_debug("HDA", selftest::Severity::Diagnostic, || hda::self_test());

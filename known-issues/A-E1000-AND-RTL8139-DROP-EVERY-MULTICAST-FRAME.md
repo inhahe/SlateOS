@@ -1,6 +1,6 @@
 ### A-E1000-AND-RTL8139-DROP-EVERY-MULTICAST-FRAME -- 2026-10-03 -- OPEN (lane A)
 
-**Status:** OPEN (lane A) -- being fixed next, on `lane-a-wip`.
+**Status:** OPEN -- fixed on lane-a-wip (8c3e25af6), awaiting a boot on main
 
 **In short:** two of the kernel's three network-card drivers tell the card to
 throw away every multicast frame (one addressed to a group of machines rather
@@ -29,13 +29,28 @@ rtl8139 devices from `scripts/boot-test.sh`), join a group from a socket and
 send to it from the host; nothing arrives. QEMU's own filter
 (`e1000x_rx_group_filter`, `rtl8139_do_receive`) drops it.
 
-**The fix:** a raw-NIC multicast filter the netstack daemon sets, as Linux's
-`ndo_set_rx_mode` does: a new `SYS_NET_RAW_*` call taking the list of
-multicast MAC addresses to accept, which the active driver programs into its
-hash filter (e1000: bits 47:36 of the address index the 4096-bit `MTA`;
-rtl8139: the top six bits of the Ethernet CRC index the 64-bit `MAR`). The
-daemon always includes the all-hosts group (01:00:5e:00:00:01), IPv6
-all-nodes (33:33:00:00:00:01) and its solicited-node group
-(33:33:ff + the last three bytes of its address), and adds or removes a
-group's address as the host joins or leaves it. Releasing the NIC clears the
-filter.
+**The fix (as done):** a multicast filter in the kernel,
+`net::mcast_filter`, as Linux's `ndo_set_rx_mode`. Every present card is
+programmed (`net::recv_frame` drains them all): e1000 indexes its 4096-bit
+`MTA` with bits 47:36 of the address, rtl8139 its 64-bit `MAR` with the top
+six bits of the Ethernet CRC; virtio-net already passes everything. Whoever
+holds the NIC decides the set:
+
+- the netstack daemon, through the new `SYS_NET_RAW_MCAST` (1135): all-hosts
+  (01:00:5e:00:00:01), all-nodes (33:33:00:00:00:01), its solicited-node
+  group, and each group a socket is in, pushed at startup and whenever the
+  host's groups change;
+- the kernel-resident stack otherwise: the same base set plus `net::udp`'s
+  joined groups, refreshed when a group enters or leaves its tables, and put
+  back when the daemon releases the NIC or dies holding it.
+
+Boot checks: `net::mcast_filter::self_test` (both hashes against an
+independent model of QEMU's filters, the tables read back from the cards),
+the syscall's dispatch test, and `self_test_udp_multicast` (a joined group's
+address enters the filter and leaves with its last member).
+
+**Found alongside, fixed in the same change:** the daemon's serving loop
+answered no ARP request, ping, Neighbor Solicitation or ping6 -- only its
+startup loop answered ARP and ping -- so a router whose ARP entry for us aged
+out could no longer reach us, and IPv6 neighbours could never resolve us.
+`answer_link` in `services/netstack` now answers all four, quietly.

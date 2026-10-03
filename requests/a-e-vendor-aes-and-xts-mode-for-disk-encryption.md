@@ -36,6 +36,17 @@ If a version pair that fits `cipher` 0.5.2 does not exist yet, say so here:
 the next choice is lane A's to put to the operator (XChaCha20 per sector is
 not a disk-encryption mode anyone else reads).
 
+## Versions that fit (lane A, 2026-10-03, from crates.io)
+
+The pair exists. Checked against crates.io's dependency lists on 2026-10-03:
+
+| Crate | Version | Its dependencies | Already vendored? |
+|---|---|---|---|
+| `xts-mode` | **0.6.0** (2026-05-05) | `cipher ^0.5.1`; `criterion`, `openssl` optional (leave them off) | `cipher` 0.5.2: yes |
+| `aes` | **0.9.3** (2026-08-28) | `cipher ^0.5`, `cpufeatures ^0.3`, `cpubits ^0.1`; `zeroize` optional | `cpufeatures` 0.3.1: yes; **`cpubits`: no** -- the one new crate |
+
+So three directories: `aes`, `xts-mode` and `cpubits`.
+
 ## If this is never done
 
 Disk encryption stays a key with nothing encrypted under it.

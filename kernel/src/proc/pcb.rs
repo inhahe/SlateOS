@@ -6249,11 +6249,29 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
 fn lock_table_for_fault(
     wait: bool,
 ) -> Option<crate::sync::MutexGuard<'static, BTreeMap<ProcessId, Process>>> {
-    if let Some(table) = PROCESS_TABLE.try_lock() {
-        return Some(table);
+    table_or_busy(
+        wait,
+        || PROCESS_TABLE.try_lock(),
+        || PROCESS_TABLE.held_by_current_task(),
+        || PROCESS_TABLE.lock(),
+    )
+}
+
+/// The decision [`lock_table_for_fault`] makes, apart from the lock it makes
+/// it about, so it can be tested without holding that lock (which
+/// `check-recursive-locks` would rightly refuse): taken at once if free;
+/// with `wait`, waited for unless the caller holds it already; else busy.
+fn table_or_busy<G>(
+    wait: bool,
+    try_take: impl FnOnce() -> Option<G>,
+    held_by_caller: impl FnOnce() -> bool,
+    take: impl FnOnce() -> G,
+) -> Option<G> {
+    if let Some(guard) = try_take() {
+        return Some(guard);
     }
-    if wait && !PROCESS_TABLE.held_by_current_task() {
-        return Some(PROCESS_TABLE.lock());
+    if wait && !held_by_caller() {
+        return Some(take());
     }
     None
 }
@@ -8865,16 +8883,74 @@ fn test_prot_none() -> KernelResult<()> {
 /// A fault met with the process table held is `Busy`, not `Unresolvable`
 /// ([`resolve_fault`]): the #PF handler retries it rather than killing the
 /// process, and a waiting caller that holds the table itself gets an answer
-/// rather than a self-deadlock. Once the table is free, the same fault
-/// resolves.
+/// rather than a self-deadlock.
 ///
-/// Both holds are this task's: for the no-wait call it stands for another
-/// CPU holding the table, and for the waiting call it is the caller's own.
-/// A wait for another CPU's hold needs a second CPU, and is
-/// `PROCESS_TABLE.lock()`.
+/// Three parts, none holding `PROCESS_TABLE` across a call that takes it --
+/// which `check-recursive-locks` refuses, however safe the resolver makes it:
+/// - the decision ([`table_or_busy`]) with fakes: taken when free; busy
+///   without waiting; busy for a waiter that holds it; waited for otherwise;
+/// - the owner check it relies on (`sync::Mutex::held_by_current_task`), on
+///   a mutex of the test's own: true while held, false after;
+/// - a read fault on a committed page with the table free: `Resolved`.
 fn test_fault_with_the_table_held() -> KernelResult<()> {
     use crate::mm::page_table::PageFlags;
 
+    // The decision, with fakes: (wait, free, held by caller) -> taken?, and
+    // whether it waited.
+    let cases = [
+        // free: taken at once, whatever else is true
+        (false, true, false, true, false),
+        (true, true, true, true, false),
+        // held elsewhere, no waiting: busy
+        (false, false, false, false, false),
+        // held by the caller itself: busy, never a wait that cannot end
+        (true, false, true, false, false),
+        // held elsewhere, waiting: waited for, then taken
+        (true, false, false, true, true),
+    ];
+    for (wait, free, held_by_caller, want_taken, want_waited) in cases {
+        let mut waited = false;
+        let taken = table_or_busy(
+            wait,
+            || free.then_some(()),
+            || held_by_caller,
+            || waited = true,
+        )
+        .is_some();
+        if taken != want_taken || waited != want_waited {
+            serial_println!(
+                "[proc]   FAIL: busy-table decision: wait {} free {} held by caller {}: taken {} \
+                 waited {} (want {} {})",
+                wait,
+                free,
+                held_by_caller,
+                taken,
+                waited,
+                want_taken,
+                want_waited
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // The owner check, on a mutex of the test's own.
+    let probe = crate::sync::Mutex::named((), b"fault_probe");
+    let held = probe.lock();
+    let while_held = probe.held_by_current_task();
+    drop(held);
+    let after = probe.held_by_current_task();
+    if !while_held || after {
+        serial_println!(
+            "[proc]   FAIL: held_by_current_task: while held {} after release {} \
+             (want true, false)",
+            while_held,
+            after
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // End to end, with the table free: a read fault on a committed anonymous
+    // frame resolves.
     let frame = crate::mm::frame::FRAME_SIZE as u64;
     let pid = create("fault-busy-test", 0);
     set_running(pid)?;
@@ -8883,9 +8959,6 @@ fn test_fault_with_the_table_held() -> KernelResult<()> {
         destroy(pid);
         return Err(KernelError::InternalError);
     }
-
-    // A committed anonymous frame, not populated yet: a read of it
-    // demand-pages.
     let base: u64 = 0x0000_0031_0000_0000; // clear of test_prot_none's window
     let flags = PageFlags::PRESENT
         | PageFlags::WRITABLE
@@ -8904,35 +8977,18 @@ fn test_fault_with_the_table_held() -> KernelResult<()> {
         destroy(pid);
         return Err(KernelError::InternalError);
     }
-
-    // A user read fault: not present, not a write.
-    let read_fault = 1 << 2;
-    let (no_wait, waiting_holder) = {
-        let _table = PROCESS_TABLE.lock();
-        (
-            resolve_fault(pid, base, read_fault, false),
-            resolve_fault(pid, base, read_fault, true),
-        )
-    };
-    let free = resolve_fault(pid, base, read_fault, false);
+    let free = resolve_fault(pid, base, 1 << 2, false);
     destroy(pid);
-
-    if no_wait != FaultOutcome::Busy
-        || waiting_holder != FaultOutcome::Busy
-        || free != FaultOutcome::Resolved
-    {
+    if free != FaultOutcome::Resolved {
         serial_println!(
-            "[proc]   FAIL: busy-table fault: table held, no wait {:?}; table held by the \
-             waiter {:?}; table free {:?} (want Busy, Busy, Resolved)",
-            no_wait,
-            waiting_holder,
+            "[proc]   FAIL: busy-table fault: with the table free the fault was {:?}",
             free
         );
         return Err(KernelError::InternalError);
     }
     serial_println!(
-        "[proc]   a fault met with the process table held is retried, not refused, and \
-         resolves once it is free: OK"
+        "[proc]   a fault that finds the process table held is retried or waited out, not \
+         refused; with it free it resolves: OK"
     );
     Ok(())
 }

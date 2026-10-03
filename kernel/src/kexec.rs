@@ -1275,6 +1275,84 @@ pub fn adjust_memory_map(
 }
 
 // ---------------------------------------------------------------------------
+// Patching the requests
+// ---------------------------------------------------------------------------
+
+/// The HHDM pointers of the responses the handoff built, to patch into the
+/// loaded image's requests. `None` where no response was built -- because the
+/// image carries no such request, or the handoff does not answer it -- in which
+/// case that request's response pointer is left untouched, exactly as Limine
+/// leaves an unmade request's.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ResponseAddrs {
+    /// Pointer to the memory-map response.
+    pub memmap: Option<u64>,
+    /// Pointer to the HHDM response.
+    pub hhdm: Option<u64>,
+    /// Pointer to the framebuffer response.
+    pub framebuffer: Option<u64>,
+    /// Pointer to the RSDP response.
+    pub rsdp: Option<u64>,
+    /// Pointer to the executable-address response.
+    pub executable_address: Option<u64>,
+    /// Pointer to the kernel-file response.
+    pub kernel_file: Option<u64>,
+}
+
+/// Write a little-endian `u64` at `off` in `image`, or fail if out of bounds.
+fn write_u64_at(image: &mut [u8], off: usize, value: u64) -> KernelResult<()> {
+    let end = off.checked_add(8).ok_or(KernelError::InvalidArgument)?;
+    let slot = image
+        .get_mut(off..end)
+        .ok_or(KernelError::InvalidArgument)?;
+    slot.copy_from_slice(&value.to_le_bytes());
+    Ok(())
+}
+
+/// Write one response pointer into its request's `response` field, when both the
+/// request site and the response exist.
+fn patch_one(image: &mut [u8], site: Option<usize>, response: Option<u64>) -> KernelResult<()> {
+    if let (Some(off), Some(ptr)) = (site, response) {
+        let at = off
+            .checked_add(REQUEST_RESPONSE_OFFSET)
+            .ok_or(KernelError::InvalidArgument)?;
+        write_u64_at(image, at, ptr)?;
+    }
+    Ok(())
+}
+
+/// Fill in the loaded image's Limine requests: write each built response's HHDM
+/// pointer into its request's `response` field, and set the base-revision tag's
+/// revision word to 0 to mark the requested revision supported -- the two writes
+/// Limine performs. Requests with no response are left untouched. Operates on the
+/// kernel's own mutable copy of the image (never the caller's buffer), before it
+/// is staged.
+///
+/// # Errors
+///
+/// [`KernelError::InvalidArgument`] if a site plus its field offset lies outside
+/// `image` (a truncated or malformed image).
+pub fn patch_requests(
+    image: &mut [u8],
+    sites: &RequestSites,
+    responses: &ResponseAddrs,
+) -> KernelResult<()> {
+    if let Some(off) = sites.base_revision {
+        let at = off
+            .checked_add(BASE_REVISION_WORD_OFFSET)
+            .ok_or(KernelError::InvalidArgument)?;
+        write_u64_at(image, at, 0)?;
+    }
+    patch_one(image, sites.memmap, responses.memmap)?;
+    patch_one(image, sites.hhdm, responses.hhdm)?;
+    patch_one(image, sites.framebuffer, responses.framebuffer)?;
+    patch_one(image, sites.rsdp, responses.rsdp)?;
+    patch_one(image, sites.executable_address, responses.executable_address)?;
+    patch_one(image, sites.kernel_file, responses.kernel_file)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 
@@ -1667,6 +1745,51 @@ pub fn self_test() -> KernelResult<()> {
     selftest::check_eq!(adjusted.len(), expected.len(), "adjusted map entry count");
     for (i, want) in expected.iter().enumerate() {
         selftest::check_eq!(adjusted.get(i), Some(want), "adjusted map entry");
+    }
+
+    // ---- patching the requests (pure) ----
+    let (reqbytes, reqsites) = build_test_request_image();
+    let mut img = reqbytes;
+    // RSDP's response is deliberately left None: its request must stay untouched.
+    let resp = ResponseAddrs {
+        memmap: Some(0x2222_0000_0000_0000),
+        hhdm: Some(0x1111_0000_0000_0000),
+        framebuffer: None,
+        rsdp: None,
+        executable_address: Some(0x4444_0000_0000_0000),
+        kernel_file: None,
+    };
+    patch_requests(&mut img, &reqsites, &resp).map_err(|e| {
+        crate::serial_println!("  FAIL: patch_requests: {:?}", e);
+        KernelError::InternalError
+    })?;
+    if let Some(off) = reqsites.base_revision {
+        selftest::check_eq!(
+            le_u64(&img, off.saturating_add(BASE_REVISION_WORD_OFFSET)),
+            Some(0),
+            "base revision marked supported"
+        );
+    }
+    if let Some(off) = reqsites.hhdm {
+        selftest::check_eq!(
+            le_u64(&img, off.saturating_add(REQUEST_RESPONSE_OFFSET)),
+            Some(0x1111_0000_0000_0000),
+            "HHDM request response patched"
+        );
+    }
+    if let Some(off) = reqsites.executable_address {
+        selftest::check_eq!(
+            le_u64(&img, off.saturating_add(REQUEST_RESPONSE_OFFSET)),
+            Some(0x4444_0000_0000_0000),
+            "executable-address request response patched"
+        );
+    }
+    if let Some(off) = reqsites.rsdp {
+        selftest::check_eq!(
+            le_u64(&img, off.saturating_add(REQUEST_RESPONSE_OFFSET)),
+            Some(0),
+            "RSDP request left untouched (no response built)"
+        );
     }
 
     Ok(())

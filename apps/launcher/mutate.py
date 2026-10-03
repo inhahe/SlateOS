@@ -155,6 +155,24 @@ MUTATIONS = [
         '    list.sort_by(by_name);\n    list.reverse();\n    list\n}',
         ['the_launcher_offers_the_one_list_of_programs'],
     ),
+    (
+        'AltGr is taken for Ctrl',
+        '        if textline::is_ctrl_chord(event.modifiers) {',
+        '        if event.modifiers.ctrl {',
+        ['a_chord_is_neither_a_launcher_key_nor_typing'],
+    ),
+    (
+        "a command's letter is typed into the query",
+        '        if textline::types_into_field(event) {',
+        '        if event.types_text() {',
+        ['a_chord_is_neither_a_launcher_key_nor_typing'],
+    ),
+    (
+        "a chord works the launcher's own keys",
+        '        if !textline::is_plain(event.modifiers) {\n            return LauncherAction::None;\n        }\n',
+        '',
+        ['a_chord_is_neither_a_launcher_key_nor_typing'],
+    ),
 ]
 
 if __name__ == "__main__":

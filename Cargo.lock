@@ -1890,6 +1890,7 @@ dependencies = [
  "oswindow",
  "programs",
  "scratchdir",
+ "textline",
 ]
 
 [[package]]

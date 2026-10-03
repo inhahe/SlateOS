@@ -789,6 +789,46 @@ impl LauncherState {
             return LauncherAction::None;
         }
 
+        // Ctrl+1..8: launch Nth result directly. A Ctrl chord, not Ctrl held:
+        // AltGr arrives as Ctrl+Alt and types, and AltGr+1 launched the first
+        // program on a layout where it types `~`.
+        if textline::is_ctrl_chord(event.modifiers) {
+            let idx = match event.key {
+                Key::Num1 => 0,
+                Key::Num2 => 1,
+                Key::Num3 => 2,
+                Key::Num4 => 3,
+                Key::Num5 => 4,
+                Key::Num6 => 5,
+                Key::Num7 => 6,
+                Key::Num8 => 7,
+                _ => return LauncherAction::None,
+            };
+            if idx < self.results.len() {
+                self.selected_index = idx;
+                return self.launch_selected();
+            }
+            return LauncherAction::None;
+        }
+
+        // Text input: what a key typed, AltGr's among it, and not a command's
+        // letter, which a chord carries -- Ctrl+X typed an `x` into the query.
+        if textline::types_into_field(event) {
+            for ch in event.typed() {
+                self.query.insert(self.cursor, ch);
+                self.cursor = self.cursor.saturating_add(ch.len_utf8());
+            }
+            self.selected_index = 0;
+            self.update_results();
+            return LauncherAction::None;
+        }
+
+        // The box's own keys are plain: Alt+Enter launched the selection and
+        // Alt+Escape put the launcher away.
+        if !textline::is_plain(event.modifiers) {
+            return LauncherAction::None;
+        }
+
         match event.key {
             Key::Escape => {
                 self.hide();
@@ -884,46 +924,7 @@ impl LauncherState {
                 return LauncherAction::None;
             }
 
-            // Ctrl+1..8: launch Nth result directly
-            Key::Num1
-            | Key::Num2
-            | Key::Num3
-            | Key::Num4
-            | Key::Num5
-            | Key::Num6
-            | Key::Num7
-            | Key::Num8
-                if event.modifiers.ctrl =>
-            {
-                let idx = match event.key {
-                    Key::Num1 => 0,
-                    Key::Num2 => 1,
-                    Key::Num3 => 2,
-                    Key::Num4 => 3,
-                    Key::Num5 => 4,
-                    Key::Num6 => 5,
-                    Key::Num7 => 6,
-                    Key::Num8 => 7,
-                    _ => return LauncherAction::None,
-                };
-                if idx < self.results.len() {
-                    self.selected_index = idx;
-                    return self.launch_selected();
-                }
-                return LauncherAction::None;
-            }
-
             _ => {}
-        }
-
-        // Text input: if the event carries a printable character, insert it
-        if event.types_text() {
-            for ch in event.typed() {
-                self.query.insert(self.cursor, ch);
-                self.cursor = self.cursor.saturating_add(ch.len_utf8());
-            }
-            self.selected_index = 0;
-            self.update_results();
         }
 
         LauncherAction::None
@@ -2130,6 +2131,47 @@ mod tests {
             "each of the first eight rows should name the key that launches it"
         );
         assert_eq!(hints.first().map(String::as_str), Some("Ctrl+1"));
+    }
+
+    /// **A chord is neither a launcher key nor typing, and AltGr types**:
+    /// Alt+Enter launched the selection and Alt+Escape put the launcher away,
+    /// each chord arriving carrying its key; Ctrl+X typed an `x` into the
+    /// query; and AltGr+1 -- Ctrl+Alt, which types -- launched the first
+    /// result as Ctrl+1 does.
+    #[test]
+    fn a_chord_is_neither_a_launcher_key_nor_typing() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let key = |k: Key, text: &str, modifiers: Modifiers| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        };
+        let mut launcher = LauncherState::new(1920.0, 1080.0);
+        launcher.show();
+        for (k, text, m) in [
+            (Key::Enter, "", Modifiers::alt()),
+            (Key::Escape, "", Modifiers::alt()),
+            (Key::Escape, "", Modifiers::super_key()),
+            (Key::Num1, "", altgr),
+            (Key::Down, "", Modifiers::alt()),
+            (Key::X, "x", Modifiers::ctrl()),
+            (Key::X, "x", Modifiers::alt()),
+        ] {
+            assert_eq!(
+                launcher.handle_key(&key(k, text, m)),
+                LauncherAction::None,
+                "{m:?} {k:?} {text:?} was taken"
+            );
+        }
+        assert!(launcher.visible, "a chord put the launcher away");
+        assert_eq!(launcher.selected_index, 0, "a chord moved the selection");
+        assert_eq!(launcher.query, "", "a command's letter was typed");
+        launcher.handle_key(&key(Key::S, "ś", altgr));
+        assert_eq!(launcher.query, "ś", "AltGr's ś was not typed");
     }
 
     #[test]

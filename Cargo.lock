@@ -4446,6 +4446,7 @@ dependencies = [
  "oswindow",
  "pathtext",
  "settingsfile",
+ "textline",
  "yamldoc",
 ]
 

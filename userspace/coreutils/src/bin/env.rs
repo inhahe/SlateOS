@@ -55,7 +55,7 @@
 
 use coreutils::diag;
 use coreutils::getopt::{Opt, Takes};
-use coreutils::stdfd;
+use coreutils::stdfd::{self, Stream};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, ErrorKind, Write};
@@ -65,6 +65,8 @@ use std::process::{Command, ExitStatus};
 use coreutils::errmsg::strerror;
 use coreutils::getopt::Program;
 use coreutils::quote::{os_bytes, quote_os, quoteaf_os};
+
+coreutils::guard_std_fds!();
 
 /// `env`'s own failures exit 125, not 1 — GNU reserves 126 and 127 for "found
 /// the command but could not run it" and "could not find it", so a third
@@ -729,19 +731,13 @@ fn render(vars: &[(OsString, OsString)], sep: &Sep) -> Vec<u8> {
     out
 }
 
-/// Write to stdout, treating a closed pipe as success and anything else as the
-/// failure it is. `println!` panics on a write error; `env | head -1` must not
-/// produce a panic message.
-fn write_out(bytes: &[u8]) -> i32 {
-    let mut out = io::stdout().lock();
-    match out.write_all(bytes).and_then(|()| out.flush()) {
-        Ok(()) => 0,
-        Err(e) if e.kind() == ErrorKind::BrokenPipe => 0,
-        Err(e) => {
-            diag!("env: write error: {}", strerror(&e));
-            EXIT_CANCELED
-        }
-    }
+/// Write the environment to standard output. A failure is the stream's to
+/// record and [`main`]'s funnel to report -- `env: write error: ...`, status
+/// 125 -- and a closed pipe is the one failure that means success.
+fn write_out(out: &mut Stream, bytes: &[u8]) -> i32 {
+    // Never an error: see above.
+    let _ = out.write_all(bytes);
+    0
 }
 
 /// A status as `main` must return it.
@@ -756,15 +752,22 @@ fn status(code: i32) -> ExitCode {
     ExitCode::from(u8::try_from(code).unwrap_or(125))
 }
 
-/// The funnel. A diagnostic that could not be written turns the earned
-/// status into `exit_failure`, which is what upstream's `atexit
-/// (close_stdout)` does on every exit path at once. See
-/// [`stdfd::close_stderr`].
+/// The funnel: upstream's `atexit (close_stdout)` after
+/// `initialize_exit_failure (EXIT_CANCELED)`, which checks standard output and
+/// then standard error on every exit path at once -- an output or a
+/// diagnostic that did not arrive is status 125, measured: `env -i A=1 >&-`
+/// and `env nosuchcmd 2>&-` both. The descriptor guard matters twice here: it
+/// is what lets `env` see a closed descriptor at all, and what hands the
+/// command it runs the descriptors `env` was given -- closed ones closed,
+/// where the runtime used to fill them with `/dev/null`.
 fn main() -> ExitCode {
-    stdfd::close_stderr(run_main(), 125)
+    stdfd::restore();
+    let mut out = Stream::stdout();
+    let earned = run_main(&mut out);
+    stdfd::close_stdout_with("env", out, earned, 125)
 }
 
-fn run_main() -> ExitCode {
+fn run_main(out: &mut Stream) -> ExitCode {
     let args: Vec<OsString> = env::args_os().skip(1).collect();
     let cfg = match parse_args(&args) {
         Ok(c) => c,
@@ -858,7 +861,7 @@ fn run_main() -> ExitCode {
             diag!("Try 'env --help' for more information.");
             return status(EXIT_CANCELED);
         }
-        return status(write_out(&render(&vars, &cfg.sep)));
+        return status(write_out(out, &render(&vars, &cfg.sep)));
     };
 
     if cfg.debug {

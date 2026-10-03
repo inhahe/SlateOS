@@ -216,10 +216,15 @@ wherever upstream has a rule, and is absent where upstream has none:
 The other half of this is the closed-*descriptor* guard (`guard_std_fds!` and
 `stdfd::restore`), without which Rust's runtime quietly replaces a closed
 descriptor with `/dev/null` before `main` and a program cannot see `>&-` at
-all. Forty-three programs still lack it: `bc chmod chown cmp cp csplit cut
-date df dir du ed env expr find id install kill ln ls mkdir mkfifo mktemp more mv
-od patch readlink realpath rmdir shuf stat tac tail tee touch tr uname uniq vdir
-awk hostname sort`. Each wants measuring against its reference before it
+all. Thirty-four programs still lack it: `bc chmod chown cmp cp csplit cut
+date df dir du ed expr find install kill ln ls mktemp more mv od patch shuf stat
+tac tail tee tr uniq vdir awk hostname sort`. (`uname`, `id`, `env`, `readlink`,
+`realpath`, `mkdir`, `rmdir`, `mkfifo` and `touch` were converted on
+2026-10-03, each measured against GNU coreutils 9.4 with standard output
+closed and full, standard error closed and full, and standard input closed:
+all 100 rows agree. `env` was the one where it mattered twice -- the command
+it runs used to inherit `/dev/null` where `env` had been given a closed
+descriptor.) Each wants measuring against its reference before it
 is converted -- `tar`'s answer to a closed stdout (a reason-less `write error`,
 because GNU tar reopens it read-only first) is not `wc`'s -- which is why this
 is done program by program rather than as one edit.

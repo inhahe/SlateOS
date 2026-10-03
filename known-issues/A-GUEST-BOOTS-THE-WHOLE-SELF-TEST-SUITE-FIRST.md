@@ -1,7 +1,7 @@
 ### [A] The guest channel boots the whole self-test suite before its agent answers -- 2026-10-03
 
-**Status:** FIXED on `lane-a-wip` 2026-10-03, awaiting a boot and a measured
-start time (see "Fixed" below).
+**Status:** OPEN -- fixed on lane-a-wip (8c0e4a1e9), awaiting a boot on main
+and a measured start time (see "Fixed" below).
 
 **In short:** `python scripts/guest.py start` is meant to give a running
 SlateOS to copy programs into in minutes (C-Q11 idea 1, design-decisions

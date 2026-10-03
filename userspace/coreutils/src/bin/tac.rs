@@ -47,6 +47,9 @@ use std::ffi::OsString;
 use std::io::Write as _;
 use std::process::ExitCode;
 
+// Before `main`, so that `stdfd::restore` still sees a caller's descriptors.
+coreutils::guard_std_fds!();
+
 /// `tac -Z; echo $?` is 1.
 const TAC: Program = Program::new("tac", 1);
 
@@ -819,7 +822,18 @@ mod imp {
                 .create_new(true)
                 .mode(0o600)
                 .open(&path)
-            {
+                // Upstream's `mkstemp` comes from gnulib's `stdlib--.h` and
+                // never returns descriptor 0, 1 or 2. A plain open would land
+                // on descriptor 0 when standard input is closed, and `tac`
+                // would then read its own empty temporary file as its input
+                // instead of reporting `'standard input': read error`.
+                .and_then(|f| {
+                    stdfd::fd_safer(f).inspect_err(|_| {
+                        // Best effort: the file cannot be used, and the
+                        // failure reported below is the descriptor's.
+                        drop(std::fs::remove_file(&path));
+                    })
+                }) {
                 Ok(f) => {
                     let name = os_bytes(path.as_os_str()).into_owned();
                     if let Err(e) = std::fs::remove_file(&path) {

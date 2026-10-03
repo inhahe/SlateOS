@@ -1702,7 +1702,65 @@ else
 fi
 
 # ===========================================================================
-# 13. the known divergences
+# 13. a damaged archive, and when a directory is finished with
+# ===========================================================================
+# GNU reports on an archive *as it reads it*: a block that is not a header is
+# announced where it is met, before the members after it, and everything about
+# the archive itself comes before the `Not found in archive` lines. This tar
+# kept it all for the end, which put the two in the opposite order. And a block
+# that is not a header is skipped -- GNU goes on to the next block that is one,
+# so a damaged archive still gives back the members after the damage, where this
+# tar stopped and reported every one of them missing.
+#
+# Fixtures, all made by GNU with one-block records so that a cut lands where it
+# is meant to: `dmg-lone.tar` ends in one zero block after members with data
+# (so the block GNU names counts the data blocks); `dmg-mid.tar` has a block of
+# noise spliced between two members; `dmg-junk.tar` is noise from the start.
+mkdir -p dmg/t
+printf 'a\n' > dmg/t/a; printf 'b\n' > dmg/t/b
+touch -d '2020-01-02 03:04:05' dmg/t/a dmg/t/b dmg/t
+( cd dmg && "$gnu_real" --format=ustar --sort=name -b1 -cf ../dmg-full.tar t )
+dmg_size=$(stat -c %s dmg-full.tar)
+head -c $((dmg_size - 512)) dmg-full.tar > dmg-lone.tar
+{ head -c 1536 dmg-full.tar
+  head -c 512 /dev/zero | tr '\0' '\245'
+  tail -c +1537 dmg-full.tar; } > dmg-mid.tar
+head -c 700 /dev/zero | tr '\0' 'g' > dmg-junk.tar
+
+plain_case 'a lone zero block, named counting data'   -tf dmg-lone.tar
+plain_case 'a lone zero block comes before Not found' -tf dmg-lone.tar nosuch
+plain_case 'and when a member was found first'        -tf dmg-lone.tar t/a nosuch
+plain_case 'noise from the start: both lines'         -tf dmg-junk.tar
+plain_case 'noise from the start, and Not found'      -tf dmg-junk.tar nosuch
+plain_case 'noise mid-archive: the rest is listed'    -tf dmg-mid.tar
+plain_case 'and verbosely'                            -tvf dmg-mid.tar
+plain_case 'a member after the noise is found'        -tf dmg-mid.tar t/b
+extract_case 'noise mid-archive: the rest is extracted' dmg-mid.tar
+extract_case 'a lone zero block, extracting'            dmg-lone.tar nosuch
+
+# A fatal stop part-way through an extraction still finishes what was started:
+# GNU's `fatal_exit` runs `extract_finish` first, so a directory already
+# extracted gets its stored mode and stamp. `tree/sub` is stored 0700 and dated
+# 2020, and is met before `tree/zero.txt`, whose `-C` cannot be entered; a run
+# that skipped the finishing would leave `tree/sub` as it was made.
+PREP=prep_one_dir extract_case 'a fatal -C still stamps what was extracted' ref.tar \
+  -C d1 tree/sub -C nosuchdir tree/zero.txt
+
+# GNU stamps a directory when the extraction *leaves* it, not at the end. Only
+# an archive out of the usual order can show the difference: `d/b` comes after
+# `f`, so `d` is stamped when `f` is met and then written into again -- and its
+# stored mtime is lost, in GNU's tar and so in ours.
+mkdir -p unsorted/d
+printf '1\n' > unsorted/d/a; printf '2\n' > unsorted/d/b; printf '3\n' > unsorted/f
+touch -d '2020-01-02 03:04:05' unsorted/d/a unsorted/d/b unsorted/f unsorted/d
+( cd unsorted && "$gnu_real" --format=ustar --no-recursion -cf ../unsorted.tar d d/a f d/b )
+extract_case 'a directory is stamped when the extraction leaves it' unsorted.tar
+# With `f` not asked for, nothing leaves `d` before `d/b` is written, so `d`
+# keeps its stored mtime: it is stamped at the end, after everything inside it.
+extract_case 'and kept when nothing outside it is asked for'       unsorted.tar d
+
+# ===========================================================================
+# 14. the known divergences
 # ===========================================================================
 plain_xcase \
   "GNU's -Z is compression, which this tar does not implement; the message is a refusal either way, and the wording of a refusal for an option we do not have is not something to copy" \
@@ -1711,6 +1769,10 @@ plain_xcase \
 plain_xcase \
   "both tars print help and exit 0; the texts differ because ours documents the options it has and GNU's documents 172 it has. Copying GNU's list would advertise options that do not work -- see design-decisions.md 703" \
   'a long option' --help
+
+plain_xcase \
+  "GNU credits a member to the first operand that covers it, so an operand inside an earlier one is reported 'Not found in archive' although its member was listed or extracted, and the run exits 2; ours credits every operand that covers a member -- see Selector::wants in tar.rs" \
+  'an operand inside an earlier one' -tf unsorted.tar d d/b
 
 # `uname`/`gname` were an xfail here until ours learned to fill them. They are
 # not a case of their own any more: `--numeric-owner` came out of GNUFMT at the

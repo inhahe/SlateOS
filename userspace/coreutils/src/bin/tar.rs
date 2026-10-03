@@ -3529,36 +3529,89 @@ fn decode_member(block: &[u8; BLOCK_SIZE]) -> Member {
     }
 }
 
-/// Why a walk over an archive stopped.
+/// How a walk over an archive ended.
 ///
-/// Every variant but [`Stop::End`] used to be the same code path — `break` —
-/// and the same exit status: zero. That is the defect this enum exists to
-/// remove. A tool that cannot distinguish "the archive ended" from "the file
-/// was never an archive" reports success for both.
+/// Every way of ending used to be the same code path — `break` — and the same
+/// exit status: zero. That is the defect this type exists to remove. A tool
+/// that cannot distinguish "the archive ended" from "the file was never an
+/// archive" reports success for both.
+///
+/// What the walk had to *say* about the archive, it has said by the time it
+/// returns — at the place in the archive where it found it, as GNU's
+/// `read_and` does; see [`walk`]. This records only what the caller still has
+/// to act on.
 #[cfg_attr(test, derive(Debug))]
 enum Stop {
-    /// Ran out of blocks at a header boundary. An archive may legally end
-    /// without its two zero blocks and GNU accepts that in silence, so this is
-    /// the *only* clean ending.
+    /// The archive ended: at its two zero blocks, at a lone one (warned
+    /// about), or where the stream ran out between members. Anything wrong on
+    /// the way is in [`Walked::failed`].
     End,
-    /// Ended after a single zero block where the marker is a pair. Clean — GNU
-    /// exits 0 — but it warns, and the warning carries the block's ordinal.
-    LoneZeroBlock(u64),
-    /// The first block was not a header: an empty file, a short read at offset
-    /// zero, or a checksum that does not match.
-    NotAnArchive,
-    /// A later block was not a header.
-    BadHeader,
-    /// The stream ended inside a member's *data*. Note that ending inside a
-    /// later *header* is not this — see [`walk`].
-    Truncated,
-    /// The archive could not be read at all — the classic case being a
-    /// directory passed to `-f`, which opens and then fails at the first read.
-    /// The flag is "this was the very first block", which GNU words differently
-    /// ("At beginning of tape, quitting now").
-    Unreadable(io::Error, bool),
+    /// The archive cannot be read any further: a member's data ran out
+    /// (`Unexpected EOF in archive`), or a read failed (`Cannot read`).
+    /// Reported, and fatal — the caller does what GNU's `fatal_exit_hook` does
+    /// and then prints [`fatal`]'s line.
+    Fatal,
     /// The handler asked to stop and has already reported why.
     Handler(i32),
+}
+
+/// What [`walk`] found.
+#[cfg_attr(test, derive(Debug))]
+struct Walked {
+    stop: Stop,
+    /// Something in the archive was not a header where one had to be: `This
+    /// does not look like a tar archive`, `Skipping to next header`. GNU's
+    /// `ERROR`, which ends the run with status 2 however the rest of it went.
+    /// A lone zero block is a `WARN`, and does not count.
+    failed: bool,
+    /// The block a lone-zero-block warning named, when one was given. Kept for
+    /// the tests, which cannot read the warning back off standard error; the
+    /// run itself has already said it, so nothing else reads it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    lone_zero_block: Option<u64>,
+}
+
+/// GNU's `prev_status`: what the block before this one turned out to be, which
+/// decides what a block that is not a header is worth saying.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Previous {
+    /// Nothing has been read yet.
+    Nothing,
+    /// A member's header.
+    Header,
+    /// A block that was not a header, already reported.
+    Failure,
+}
+
+/// A `Read` that counts what passes through it: GNU's `current_block_ordinal`,
+/// in bytes.
+///
+/// Headers, data blocks and zero blocks alike. The lone-zero-block warning
+/// names a block by its place in the whole archive, and counting only the
+/// blocks [`walk`] reads for itself -- which is what this tar did -- named the
+/// wrong block as soon as any member had data: `A lone zero block at 4` where
+/// GNU says `at 6`.
+struct Counting<'a> {
+    inner: &'a mut dyn Read,
+    bytes: u64,
+}
+
+impl Read for Counting<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.bytes = self
+            .bytes
+            .saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+        Ok(n)
+    }
+}
+
+impl Counting<'_> {
+    /// Whole blocks consumed so far.
+    fn blocks(&self) -> u64 {
+        // The divisor is the constant 512, so the division always happens.
+        self.bytes.checked_div(BLOCK_SIZE as u64).unwrap_or(0)
+    }
 }
 
 /// Why [`read_block`] could not deliver a whole block.
@@ -3609,52 +3662,106 @@ fn read_block(input: &mut dyn Read, buf: &mut [u8; BLOCK_SIZE]) -> Result<Option
 /// The handler is responsible for the member's data blocks only when it returns
 /// [`Handled::Consumed`]; otherwise the driver skips them, which is what keeps
 /// the stream aligned when a member is refused.
-fn walk<F>(input: &mut dyn Read, mut handle: F) -> Stop
+///
+/// GNU's `read_and`, and like it this reports on the archive *as it reads it*:
+/// a block that is not a header is announced before the members after it are
+/// listed or extracted, and everything said here comes before the caller's
+/// `Not found in archive` lines. This tar used to keep it all for the end, which
+/// put the two in the opposite order to GNU's.
+///
+/// A block that is not a header is skipped, and the walk goes on looking for
+/// the next one -- `Skipping to next header` is a description, not a farewell.
+/// That is what lets a damaged archive give back the members after the damage;
+/// this tar used to stop at the first bad block and lose every one of them.
+/// Every block after it is tried as a header, data blocks included, exactly as
+/// GNU tries them, and only the first of a run of bad blocks is reported.
+///
+/// `label` names the archive in a read error, which is the one message here
+/// that needs it.
+fn walk<F>(input: &mut dyn Read, label: &[u8], mut handle: F) -> Walked
 where
     F: FnMut(&Member, &mut dyn Read) -> Handled,
 {
-    let mut first = true;
-    // Counts every block consumed, so the lone-zero-block warning can name one.
-    let mut ordinal = 0u64;
+    let mut input = Counting { inner: input, bytes: 0 };
+    let mut previous = Previous::Nothing;
+    let mut failed = false;
+    let ended = |failed: bool, lone_zero_block: Option<u64>| Walked {
+        stop: Stop::End,
+        failed,
+        lone_zero_block,
+    };
+    let fatal_end = |failed: bool| Walked {
+        stop: Stop::Fatal,
+        failed,
+        lone_zero_block: None,
+    };
     loop {
         let mut block = [0u8; BLOCK_SIZE];
-        match read_block(input, &mut block) {
-            Ok(Some(())) => ordinal = ordinal.saturating_add(1),
-            Ok(None) => {
-                // An empty file is not an archive; an archive that simply ran
-                // out after its last member is one that ended.
-                return if first { Stop::NotAnArchive } else { Stop::End };
+        match read_block(&mut input, &mut block) {
+            Ok(Some(())) => {}
+            // An empty file, or one shorter than a block, is not an archive;
+            // an archive that simply ran out after its last member, or after a
+            // bad block, is one that ended. A short read where a *header*
+            // should start is an ending, not a truncation — GNU only calls it
+            // truncation when a member's data runs out. Measured on a
+            // 3584-byte archive whose members are 6 and 8 bytes: `head -c 512`,
+            // `-c 513` and `-c 700` all exit 0 in silence, while `-c 1024` and
+            // `-c 1100` — which cut into the first member's data — give
+            // "Unexpected EOF in archive"; `head -c 300` is "This does not look
+            // like a tar archive", and nothing more.
+            Ok(None) | Err(ReadStop::Short) => {
+                if previous == Previous::Nothing {
+                    diag!("tar: This does not look like a tar archive");
+                    failed = true;
+                }
+                return ended(failed, None);
             }
-            // A short read where a *header* should start is an ending, not a
-            // truncation — GNU only calls it truncation when a member's data
-            // runs out. Measured on a 3584-byte archive whose members are 6 and
-            // 8 bytes: `head -c 512`, `-c 513` and `-c 700` all exit 0 in
-            // silence, while `-c 1024` and `-c 1100` — which cut into the first
-            // member's data — give "Unexpected EOF in archive". Only a short
-            // read of the *first* block is rejected outright, as GNU's "This
-            // does not look like a tar archive" (`head -c 300`).
-            Err(ReadStop::Short) if first => return Stop::NotAnArchive,
-            Err(ReadStop::Short) => return Stop::End,
-            Err(ReadStop::Io(e)) => return Stop::Unreadable(e, first),
+            Err(ReadStop::Io(e)) => {
+                diag!("tar: {}: Cannot read: {}", escape(label), strerror(&e));
+                if previous == Previous::Nothing {
+                    // GNU's phrasing for "nothing at all was read", inherited
+                    // from when the archive really was on tape. Kept because it
+                    // is the line that tells an unreadable archive from one that
+                    // failed part-way through.
+                    diag!("tar: At beginning of tape, quitting now");
+                }
+                return fatal_end(failed);
+            }
         }
 
         // The end-of-archive marker is *two* zero blocks. GNU accepts one and
-        // exits 0, but warns, so look ahead once to tell the two apart.
+        // exits 0, but warns, naming the block by its place in the archive --
+        // counted before the look-ahead, which GNU does not count either.
         if block.iter().all(|&b| b == 0) {
+            let ordinal = input.blocks();
             let mut next = [0u8; BLOCK_SIZE];
-            return match read_block(input, &mut next) {
-                Ok(Some(())) if next.iter().all(|&b| b == 0) => Stop::End,
-                _ => Stop::LoneZeroBlock(ordinal),
+            return match read_block(&mut input, &mut next) {
+                Ok(Some(())) if next.iter().all(|&b| b == 0) => ended(failed, None),
+                _ => {
+                    diag!("tar: A lone zero block at {ordinal}");
+                    ended(failed, Some(ordinal))
+                }
             };
         }
         if !checksum_ok(&block) {
-            return if first {
-                Stop::NotAnArchive
-            } else {
-                Stop::BadHeader
-            };
+            // GNU's `HEADER_FAILURE`. The first block of all gets both lines --
+            // the file may not be an archive at all, and either way it is being
+            // skipped -- a block after a member gets the second, and a block
+            // after a block that was already reported gets nothing, so a
+            // stretch of damage is one message rather than one per block.
+            match previous {
+                Previous::Nothing => {
+                    diag!("tar: This does not look like a tar archive");
+                    diag!("tar: Skipping to next header");
+                }
+                Previous::Header => diag!("tar: Skipping to next header"),
+                Previous::Failure => {}
+            }
+            failed = true;
+            previous = Previous::Failure;
+            continue;
         }
-        first = false;
+        previous = Previous::Header;
 
         let member = decode_member(&block);
         // A header that passes the checksum and names nothing is *not* refused.
@@ -3665,62 +3772,22 @@ where
         // the rest of a readable archive over one blank name field, which is a
         // strictly worse answer than GNU's; see [`PrefixNotice::strip`].
         let size = if member.has_data() { member.size } else { 0 };
-        match handle(&member, input) {
-            Handled::Consumed => {}
-            Handled::Skip => {
-                if !skip_data(input, size) {
-                    return Stop::Truncated;
-                }
+        let data_ran_out = match handle(&member, &mut input) {
+            Handled::Consumed => false,
+            Handled::Skip => !skip_data(&mut input, size),
+            Handled::Truncated => true,
+            Handled::Stop(s) => {
+                return Walked {
+                    stop: Stop::Handler(s),
+                    failed,
+                    lone_zero_block: None,
+                };
             }
-            Handled::Truncated => return Stop::Truncated,
-            Handled::Stop(s) => return Stop::Handler(s),
-        }
-    }
-}
-
-/// Turn the reason a walk stopped into GNU's closing diagnostics and a status.
-///
-/// `label` is the archive's name in bytes, for the one message that mentions
-/// it — `-` when the archive is standard input, as GNU spells it.
-fn report_stop(stop: Stop, label: &[u8]) -> i32 {
-    match stop {
-        Stop::End => 0,
-        Stop::LoneZeroBlock(n) => {
-            // A warning, not an error: GNU prints this and still exits 0.
-            // Measured — a 3584-byte archive cut to 3072 leaves one zero block
-            // as its sixth, and GNU says "A lone zero block at 6", rc 0.
-            diag!("tar: A lone zero block at {n}");
-            0
-        }
-        Stop::NotAnArchive => {
-            diag!("tar: This does not look like a tar archive");
-            failed_with_previous_errors()
-        }
-        Stop::BadHeader => {
-            // GNU scans forward for the next plausible header and says so. We
-            // stop instead — the remaining bytes are of unknown provenance and
-            // resynchronising on them is guessing — but the line it prints is
-            // the same, because what a caller needs to know is that a header
-            // was not where one was expected.
-            diag!("tar: Skipping to next header");
-            failed_with_previous_errors()
-        }
-        Stop::Truncated => {
+        };
+        if data_ran_out {
             diag!("tar: Unexpected EOF in archive");
-            fatal()
+            return fatal_end(failed);
         }
-        Stop::Unreadable(e, at_start) => {
-            diag!("tar: {}: Cannot read: {}", escape(label), strerror(&e));
-            if at_start {
-                // GNU's phrasing for "nothing at all was read", inherited from
-                // when the archive really was on tape. Kept because it is the
-                // line that distinguishes an unreadable archive from one that
-                // failed part-way through.
-                diag!("tar: At beginning of tape, quitting now");
-            }
-            fatal()
-        }
-        Stop::Handler(s) => s,
     }
 }
 
@@ -5033,6 +5100,28 @@ impl Roots {
     /// The process exit status, already reported, if a directory in the chain
     /// cannot be entered or the destination cannot be opened.
     fn at(&mut self, chdirs: &[OsString], want: usize) -> Result<&Dir, i32> {
+        // `map_err` with a closure, not a value: `fatal()` *prints*, and must
+        // only be reached when there is an error. An eager argument here once
+        // put `Error is not recoverable: exiting now` on stderr once per member
+        // of every successful extraction -- caught by the differential harness,
+        // and the reason a fallible-looking accessor on a hot path is worth
+        // reading twice.
+        self.reach(chdirs, want).map_err(|Unreachable| fatal())
+    }
+
+    /// [`Roots::at`] without the fatal line: the directory that could not be
+    /// entered is reported, and the rest is the caller's.
+    ///
+    /// For the extraction walk, where GNU's `fatal_exit` runs `extract_finish`
+    /// *before* it says `Error is not recoverable` -- the directories already
+    /// extracted still get their stamps, and the delayed links are still made.
+    /// See `do_extract`.
+    ///
+    /// # Errors
+    ///
+    /// [`Unreachable`], already reported, if a directory in the chain cannot be
+    /// entered or the destination cannot be opened.
+    fn reach(&mut self, chdirs: &[OsString], want: usize) -> Result<&Dir, Unreachable> {
         while self.dirs.len() <= want {
             // One behind the level being opened: `dirs` always holds level 0.
             let Some(dir) = chdirs.get(self.dirs.len().saturating_sub(1)) else {
@@ -5040,13 +5129,13 @@ impl Roots {
             };
             if let Err(e) = env::set_current_dir(dir) {
                 diag!("tar: {}: Cannot open: {}", escape_os(dir), strerror(&e));
-                return Err(fatal());
+                return Err(Unreachable);
             }
             match Dir::open_root(Path::new(".")) {
                 Ok(root) => self.dirs.push(root),
                 Err(e) => {
                     diag!("tar: {}: Cannot open: {}", escape_os(dir), strerror(&e));
-                    return Err(fatal());
+                    return Err(Unreachable);
                 }
             }
         }
@@ -5054,18 +5143,226 @@ impl Roots {
         // which means the loop always reaches it. `last()` is a fallback that
         // cannot be taken, preferred over indexing so that no `unwrap` is
         // needed to say so.
-        //
-        // `ok_or_else`, not `ok_or`: the latter builds its argument before it
-        // looks at the `Option`, and `fatal()` *prints*. Written that way it put
-        // `Error is not recoverable: exiting now` on stderr once per member of
-        // every successful extraction — caught by the differential harness, and
-        // the reason a fallible-looking accessor on a hot path is worth reading
-        // twice.
         self.dirs
             .get(want)
             .or_else(|| self.dirs.last())
-            .ok_or_else(fatal)
+            .ok_or(Unreachable)
     }
+}
+
+/// A `-C` destination that could not be entered: reported, and fatal, with
+/// [`fatal`]'s closing line still to be printed. See [`Roots::reach`].
+struct Unreachable;
+
+/// A directory whose stored metadata waits until extraction is done with it:
+/// GNU's `struct delayed_set_stat`.
+///
+/// It has to wait. Every member written into a directory bumps its mtime, and a
+/// directory whose stored mode has no write bit cannot receive members at all,
+/// so a mode and a stamp applied when the directory member is met would be
+/// undone, or would stop the extraction. GNU applies them when the extraction
+/// *leaves* the directory -- before the first member that is not inside it --
+/// and whatever is still waiting at the end, in [`finish_extraction`].
+struct DelayedDir {
+    /// Which `-C` destination the member went to. See [`Roots`].
+    level: usize,
+    /// The member's name as stored, without its trailing slash: what
+    /// [`is_ancestor`] compares later members' names against.
+    name: Vec<u8>,
+    mode: u32,
+    mtime: i64,
+    /// Waits for the delayed links, not just for the members inside it: set for
+    /// `.`, and for the directory a delayed link is made in, whose mtime making
+    /// the link would otherwise undo. See [`mark_after_links`].
+    after_links: bool,
+}
+
+/// GNU's `delay_set_stat`: queue a directory member's metadata.
+///
+/// The same directory named a second time updates the record rather than
+/// adding one, so the last member's metadata is the one that sticks, as in GNU.
+/// "The same" here is the name *and* the `-C` destination, where GNU compares
+/// the name alone: `-C d1 x/ -C d2 x/` gives each `x` its own record, where
+/// GNU's second would take over the first and leave `d1/x` unstamped.
+fn delay_dir(dirs: &mut Vec<DelayedDir>, entry: DelayedDir) {
+    let index = if let Some(i) = dirs
+        .iter()
+        .position(|d| d.level == entry.level && d.name == entry.name)
+    {
+        let Some(same) = dirs.get_mut(i) else {
+            return;
+        };
+        same.mode = entry.mode;
+        same.mtime = entry.mtime;
+        i
+    } else {
+        dirs.push(entry);
+        dirs.len().saturating_sub(1)
+    };
+    // `.` covers everything the run writes, delayed links included, so its
+    // stamp is the last thing applied.
+    if dirs
+        .get(index)
+        .is_some_and(|d| must_be_dot_or_slash(&d.name))
+    {
+        mark_after_links(dirs, index);
+    }
+}
+
+/// GNU's `mark_after_links`: the record at `index`, and every older one below
+/// it down to the first already marked, waits for the delayed links.
+///
+/// Older records are, in an archive in the usual order, the ancestors of the
+/// newer ones -- a directory's members follow it -- so this is "this directory
+/// and the ones it is inside".
+fn mark_after_links(dirs: &mut [DelayedDir], index: usize) {
+    let Some(head) = dirs.get_mut(..=index) else {
+        return;
+    };
+    for (n, dir) in head.iter_mut().rev().enumerate() {
+        // The record that started the marking is marked whatever it was; past
+        // it, the first record already marked ends the walk.
+        if n > 0 && dir.after_links {
+            break;
+        }
+        dir.after_links = true;
+    }
+}
+
+/// GNU's `find_direct_ancestor` and the marking that follows it, for a delayed
+/// link stood up as a placeholder at `name`: the waiting directory it is made
+/// directly inside of, if there is one, will be stamped after the link exists.
+fn mark_parent_after_links(dirs: &mut [DelayedDir], name: &[u8]) {
+    let leaf = name
+        .iter()
+        .rposition(|&b| b == b'/')
+        .map_or(0, |i| i.saturating_add(1));
+    let parent = dirs.iter().rposition(|d| {
+        !d.after_links
+            && name.starts_with(&d.name)
+            && name.get(d.name.len()) == Some(&b'/')
+            && d.name.len().saturating_add(1) == leaf
+    });
+    if let Some(index) = parent {
+        mark_after_links(dirs, index);
+    }
+}
+
+/// Whether the member `file` is inside the directory member `dir`, judged by
+/// their names the way GNU judges it: `dir` is a proper prefix of `file`, and
+/// the prefix ends at a slash -- `file`'s next byte, or `dir`'s own last one.
+fn is_ancestor(dir: &[u8], file: &[u8]) -> bool {
+    dir.len() < file.len()
+        && file.starts_with(dir)
+        && (file.get(dir.len()) == Some(&b'/') || dir.last() == Some(&b'/'))
+}
+
+/// GNU's `must_be_dot_or_slash`: whether a name can only mean `.` or `/` --
+/// `.`, `./`, `././.`, `//`, `/./` and the like.
+fn must_be_dot_or_slash(name: &[u8]) -> bool {
+    let at = |i: usize| name.get(i).copied().unwrap_or(0);
+    if at(0) == b'/' {
+        let mut i = 0usize;
+        loop {
+            if at(i.saturating_add(1)) == b'/' {
+                i = i.saturating_add(1);
+            } else if at(i.saturating_add(1)) == b'.' {
+                // `/.` or `/..`, followed by a slash, steps over that component.
+                let dots = if at(i.saturating_add(2)) == b'.' { 2 } else { 1 };
+                if at(i.saturating_add(1).saturating_add(dots)) == b'/' {
+                    i = i.saturating_add(dots).saturating_add(1);
+                } else {
+                    return false;
+                }
+            } else {
+                return at(i.saturating_add(1)) == 0;
+            }
+        }
+    }
+    let mut i = 0usize;
+    while at(i) == b'.' && at(i.saturating_add(1)) == b'/' {
+        i = i.saturating_add(2);
+        while at(i) == b'/' {
+            i = i.saturating_add(1);
+        }
+    }
+    at(i) == 0 || (at(i) == b'.' && at(i.saturating_add(1)) == 0)
+}
+
+/// GNU's `apply_nonancestor_delayed_set_stat`: stamp every waiting directory
+/// that `name` is not inside of, newest first, stopping at the first one it is
+/// inside of -- and, unless `after_links`, at the first one that waits for the
+/// delayed links.
+///
+/// Called before each member is extracted, so a directory is stamped as soon as
+/// the extraction has left it, and with `name` empty at the end, where nothing
+/// is inside anything. The timing is observable: a message about a directory
+/// comes out between the members, where GNU puts it, rather than in a block at
+/// the end.
+fn apply_nonancestor(
+    roots: &mut Roots,
+    chdirs: &[OsString],
+    dirs: &mut Vec<DelayedDir>,
+    name: &[u8],
+    after_links: bool,
+    status: &mut i32,
+) {
+    while let Some(top) = dirs.last() {
+        if (!after_links && top.after_links) || is_ancestor(&top.name, name) {
+            break;
+        }
+        let Some(top) = dirs.pop() else {
+            break;
+        };
+        set_dir_stat(roots, chdirs, &top, status);
+    }
+}
+
+/// Apply one waiting directory's metadata.
+///
+/// Every level recorded was entered when the directory was made, so the
+/// destination cannot fail to open; it is a `Result` all the same, and a
+/// failure is reported rather than assumed away.
+fn set_dir_stat(roots: &mut Roots, chdirs: &[OsString], dir: &DelayedDir, status: &mut i32) {
+    let root = match roots.at(chdirs, dir.level) {
+        Ok(root) => root,
+        Err(rc) => {
+            *status = rc;
+            return;
+        }
+    };
+    match root.locate(&dir.name) {
+        Ok(at) => restore_metadata(&at, &dir.name, dir.mode, dir.mtime, status),
+        Err(e) => {
+            // The directory was made, and resolved, a moment ago. That it does
+            // not resolve now means the tree changed underneath the extraction,
+            // and the stamp is declined rather than applied to whatever took
+            // the name.
+            diag!("tar: {}: Cannot utime: {}", escape(&dir.name), strerror(&e));
+            *status = EXIT_FATAL;
+        }
+    }
+}
+
+/// GNU's `extract_finish`: what an extraction leaves to the end, in GNU's
+/// order -- the directories that are only waiting for the extraction to leave
+/// them, then the delayed links, then the directories that waited for the
+/// links, since making a link bumps the mtime of the directory it is made in.
+///
+/// Run at the end of every extraction that started, *including* one that died
+/// of a fatal error part-way: GNU registers this as `fatal_exit_hook`, so the
+/// directories already extracted still get their modes and stamps, and the
+/// delayed links are still made, before `Error is not recoverable` is said.
+fn finish_extraction(
+    roots: &mut Roots,
+    chdirs: &[OsString],
+    dirs: &mut Vec<DelayedDir>,
+    links: Vec<DelayedLink>,
+    status: &mut i32,
+) {
+    apply_nonancestor(roots, chdirs, dirs, b"", false, status);
+    apply_delayed_links(roots, chdirs, links, status);
+    apply_nonancestor(roots, chdirs, dirs, b"", true, status);
 }
 
 /// Replace every placeholder with the symlink it stood for.
@@ -5226,16 +5523,13 @@ fn do_extract(
     // the same reason `do_list_main` resolves it before the first member.
     let mut ugswidth = UGSWIDTH_MIN;
     let zone = localtime::Zone::from_env();
-    // Directory metadata is applied last, in reverse order. It has to be: a
-    // directory's mtime is bumped by every child written into it, and a
-    // directory whose stored mode has no write bit cannot receive children at
-    // all. GNU defers both for the same reason, which is why `tar -xf` restores
-    // a 0500 directory's mode *and* its timestamp, and ours restored neither.
-    // The `-C` level travels with the name: a directory member and a file member
-    // can belong to different destinations, and the stamp has to be applied under
-    // the one that member was written into. Measured — `-C d1 t/sub -C d2 t/a.txt`
-    // restores `d1/t/sub`'s 0500 mode and its stored mtime, not `d1/d2`'s.
-    let mut pending_dirs: Vec<(usize, Vec<u8>, u32, i64)> = Vec::new();
+    // Directory metadata waits until the extraction has left the directory; see
+    // [`DelayedDir`]. The `-C` level travels with the name: a directory member
+    // and a file member can belong to different destinations, and the stamp has
+    // to be applied under the one that member was written into. Measured —
+    // `-C d1 t/sub -C d2 t/a.txt` restores `d1/t/sub`'s 0500 mode and its stored
+    // mtime, not `d1/d2`'s.
+    let mut dirs: Vec<DelayedDir> = Vec::new();
     let mut delayed: Vec<DelayedLink> = Vec::new();
     // Type flag `7` is announced once per *run*, not once per member, and the
     // line names no member — unlike the unknown-flag warning below, which does
@@ -5251,7 +5545,8 @@ fn do_extract(
         directory_member: false,
     };
 
-    let stop = walk(input.as_mut(), |member, input| {
+    let label = archive_label(archive);
+    let walked = walk(input.as_mut(), &label, |member, input| {
         let raw_name = member.name.as_slice();
 
         // Stripping happens as the header is decoded, before the member is
@@ -5275,10 +5570,11 @@ fn do_extract(
         let Some(level) = selector.wants(raw_name) else {
             return Handled::Skip;
         };
-        let root = match roots.at(chdirs, level) {
-            Ok(root) => root,
-            Err(rc) => return Handled::Stop(rc),
-        };
+        // A `-C` that cannot be entered is fatal, with its last line held back:
+        // `do_extract` finishes what GNU's `fatal_exit_hook` would first.
+        if roots.reach(chdirs, level).is_err() {
+            return Handled::Stop(EXIT_FATAL);
+        }
 
         // Nothing below may use `raw_name` as a path. It is attacker-chosen,
         // and stripping a prefix does not make a `..` in the middle safe.
@@ -5312,6 +5608,16 @@ fn do_extract(
             return Handled::Stop(0);
         }
 
+        // The directories this member is not inside of are finished with, and
+        // get their metadata now -- after the member's `-v` line and before the
+        // member itself, which is where GNU's `extract_archive` does it, and so
+        // where any message about them comes out. See [`DelayedDir`].
+        apply_nonancestor(&mut roots, chdirs, &mut dirs, &name, false, &mut status);
+        // Entered above; this only hands back the handle.
+        let Ok(root) = roots.reach(chdirs, level) else {
+            return Handled::Stop(EXIT_FATAL);
+        };
+
         // `--keep-newer-files` is decided here, above the type switch, because
         // it applies to *every* member type and not only to the regular files
         // whose data would be rewritten: measured, a symlink, a fifo, a hard
@@ -5340,7 +5646,7 @@ fn do_extract(
                 // `--overwrite`, wrong for these, and for two different reasons.
                 //
                 // Under `-k` and `--skip-old-files` it is wrong because success
-                // is what puts the member's mode and mtime in `pending_dirs`:
+                // is what queues the member's mode and mtime ([`delay_dir`]):
                 // measured, `tar -xkf` over a directory it has already unpacked
                 // leaves that directory's 0700 mode and old timestamp exactly as
                 // found, where the default restores the member's (`tar-ovw6.sh`).
@@ -5374,14 +5680,16 @@ fn do_extract(
                         status = EXIT_FATAL;
                     }
                     Err(NotCreated::Silent) => {}
-                    Ok(_) => {
-                        pending_dirs.push((
+                    Ok(_) => delay_dir(
+                        &mut dirs,
+                        DelayedDir {
                             level,
                             name,
-                            extraction_mode(member.mode, same_permissions, umask),
-                            member.mtime,
-                        ));
-                    }
+                            mode: extraction_mode(member.mode, same_permissions, umask),
+                            mtime: member.mtime,
+                            after_links: false,
+                        },
+                    ),
                 }
                 Handled::Skip
             }
@@ -5417,13 +5725,19 @@ fn do_extract(
                 // stops that one is [`Dir::locate`], which refuses to walk
                 // through it however it got there.
                 match make_placeholder(root, &name, ovw, &mut status) {
-                    Ok(id) => delayed.push(DelayedLink {
-                        name: name.clone(),
-                        target: member.linkname.clone(),
-                        mtime: member.mtime,
-                        id,
-                        dir: level,
-                    }),
+                    Ok(id) => {
+                        delayed.push(DelayedLink {
+                            name: name.clone(),
+                            target: member.linkname.clone(),
+                            mtime: member.mtime,
+                            id,
+                            dir: level,
+                        });
+                        // Making the link at the end will bump the mtime of the
+                        // directory it is made in, so that directory's stamp
+                        // waits until after it, as GNU's does.
+                        mark_parent_after_links(&mut dirs, &name);
+                    }
                     Err(NotCreated::Failed(e) | NotCreated::Immovable(e)) => {
                         // `Cannot open`, not `Cannot create symlink`: at this
                         // point GNU really is opening a file, and the wording
@@ -5556,65 +5870,38 @@ fn do_extract(
         }
     });
 
-    // A `-C` that could not be entered is fatal *where it is met*: GNU prints
-    // `Error is not recoverable: exiting now` and exits on the spot, so none of
-    // what normally rounds off a run happens — not the delayed links, not the
-    // directory stamps, not the `Not found in archive` notices for operands the
-    // archive had not reached yet. Measured: `-C nosuchdir t/a.txt -C d1
-    // t/z.txt` says only `nosuchdir: Cannot open`, never a word about `t/z.txt`.
-    if let Stop::Handler(rc) = stop
-        && rc != 0
-    {
-        return rc;
-    }
-    // The same for a reader of the list that went away, for the same reason --
-    // GNU is no longer running -- except that nothing reported it, and the run
-    // keeps the status it had earned. See [`READER_GONE`].
+    // A reader of the list that went away: GNU was killed writing to it, so
+    // nothing that rounds off a run happens and nothing more is said, and the
+    // run keeps the status it had earned. See [`READER_GONE`].
     if reader_gone() {
         return status;
     }
 
-    // Links before directories, because creating one bumps the mtime of the
-    // directory it lands in. GNU reaches the same place by a longer route — it
-    // fixes every directory that is *not* an ancestor of a delayed link, then
-    // applies the links, then fixes the ancestors — and the observable result
-    // is identical: measured, an archive whose only member under `sub/` is a
-    // symlink to an absolute path leaves `sub`'s stored mtime intact.
-    apply_delayed_links(&mut roots, chdirs, delayed, &mut status);
-
-    // Deepest first: `pending_dirs` is in archive order, which is parents
-    // before children, so the reverse leaves a parent's timestamp untouched by
-    // work still to be done inside it.
-    for (level, name, mode, mtime) in pending_dirs.into_iter().rev() {
-        // Every level recorded here was entered during the walk, so this cannot
-        // fail; it is a `Result` all the same, and a failure is reported rather
-        // than assumed away.
-        let root = match roots.at(chdirs, level) {
-            Ok(root) => root,
-            Err(rc) => {
-                status = rc;
-                continue;
-            }
-        };
-        match root.locate(&name) {
-            Ok(at) => restore_metadata(&at, &name, mode, mtime, &mut status),
-            Err(e) => {
-                // The directory was made a moment ago and resolved then. That
-                // it does not resolve now means the tree changed underneath the
-                // extraction, and the stamp is declined rather than applied to
-                // whatever took the name.
-                diag!("tar: {}: Cannot utime: {}", escape(&name), strerror(&e));
-                status = EXIT_FATAL;
-            }
-        }
+    // A fatal stop -- a `-C` that could not be entered, an archive whose data
+    // ran out or could not be read -- has said what went wrong where it was
+    // met. GNU then runs `extract_finish` from `fatal_exit_hook` before its
+    // last line: the directories already extracted still get their modes and
+    // stamps, and the delayed links are still made. What it does *not* do is
+    // the `Not found in archive` notices, which belong to the end of a read
+    // that did not end. Measured: `-C nosuchdir t/a.txt -C d1 t/z.txt` says
+    // only `nosuchdir: Cannot open`, never a word about `t/z.txt`.
+    let fatal_stop = match walked.stop {
+        Stop::Fatal => true,
+        Stop::Handler(rc) => rc != 0,
+        Stop::End => false,
+    };
+    if fatal_stop {
+        finish_extraction(&mut roots, chdirs, &mut dirs, delayed, &mut status);
+        return fatal();
     }
 
+    // GNU's order at the end of a read: what the archive itself had to say
+    // (already said, by the walk), then the members asked for and not found,
+    // then everything left waiting -- directories, links, the directories that
+    // waited for the links.
     let missing = selector.report_missing();
-    let walk_status = report_stop(stop, &archive_label(archive));
-    if walk_status != 0 {
-        return walk_status;
-    }
-    if status == 0 && missing == 0 {
+    finish_extraction(&mut roots, chdirs, &mut dirs, delayed, &mut status);
+    if status == 0 && missing == 0 && !walked.failed {
         0
     } else {
         failed_with_previous_errors()
@@ -5867,7 +6154,8 @@ fn do_list_main(
     // Each line goes out as it is made and a failed one is remembered, not
     // acted on: GNU lists to the end of the archive however many lines were
     // lost, and says so once, at exit. See [`list_line`] and [`conclude`].
-    let stop = list_archive(
+    let label = archive_label(archive);
+    let walked = list_archive(
         input.as_mut(),
         &mut Listing,
         verbose,
@@ -5875,6 +6163,7 @@ fn do_list_main(
         &zone,
         chdirs,
         &mut entered,
+        &label,
     );
 
     // `tar -tf big.tar | head -5` closes the pipe on purpose; that is how a
@@ -5885,25 +6174,25 @@ fn do_list_main(
         return 0;
     }
 
-    // A `-C` that could not be entered exits on the spot; see `do_extract`.
-    if let Stop::Handler(rc) = stop
-        && rc != 0
-    {
-        return rc;
+    match walked.stop {
+        // A `-C` that could not be entered exits on the spot; see `do_extract`.
+        Stop::Handler(rc) if rc != 0 => return rc,
+        // Reported where it was met, by the walk.
+        Stop::Fatal => return fatal(),
+        Stop::End | Stop::Handler(_) => {}
     }
 
-    // Order matters: a member the caller named and the archive does not hold is
-    // worth saying even when the archive also ended badly, because the two are
-    // different complaints about different things.
+    // After everything the archive itself had to say, as GNU's
+    // `names_notfound` comes after its read loop: a member the caller named
+    // and the archive did not hold is said even when the archive also ended
+    // badly, because the two are different complaints about different things,
+    // and it is said second. Measured: `A lone zero block at 6`, then
+    // `nosuch: Not found in archive`.
     let missing = selector.report_missing();
-    let walk_status = report_stop(stop, &archive_label(archive));
-    if walk_status != 0 {
-        return walk_status;
-    }
-    if missing == 0 {
-        0
-    } else {
+    if walked.failed || missing > 0 {
         failed_with_previous_errors()
+    } else {
+        0
     }
 }
 
@@ -5943,7 +6232,8 @@ fn list_archive(
     zone: &localtime::Zone,
     chdirs: &[OsString],
     entered: &mut usize,
-) -> Stop {
+    label: &[u8],
+) -> Walked {
     let mut ugswidth = UGSWIDTH_MIN;
     // Listing announces the prefixes it *would* strip, exactly as extraction
     // does: measured, `tar -tf` on an archive holding `/a` prints ``Removing
@@ -5951,7 +6241,7 @@ fn list_archive(
     // notice belongs to reading a header, not to writing a file.
     let mut prefixes = PrefixNotice::new();
 
-    walk(input, |member, _data| {
+    walk(input, label, |member, _data| {
         // The notices go to stderr while the listing goes to `out`, so a writer
         // that buffered would put every notice ahead of lines written before
         // it. GNU has the same split and solves it the same way: gnulib's
@@ -6284,7 +6574,7 @@ mod tests {
     ///
     /// Level 1 is what a bare `-t` produces: `-t` bumps the counter once, so
     /// the plain listing is level 1, not level 0 (which is silent).
-    fn list_names(input: &[u8], out: &mut Vec<u8>) -> Stop {
+    fn list_names(input: &[u8], out: &mut Vec<u8>) -> Walked {
         let mut sel = Selector::new(&[], 0);
         let mut entered = 0usize;
         list_archive(
@@ -6295,12 +6585,13 @@ mod tests {
             &Zone::utc(),
             &[],
             &mut entered,
+            b"test.tar",
         )
     }
 
     /// As [`list_names`], in the long (`-tv`) form — level 2, the counter's
     /// ceiling.
-    fn list_long(input: &[u8], out: &mut Vec<u8>) -> Stop {
+    fn list_long(input: &[u8], out: &mut Vec<u8>) -> Walked {
         let mut sel = Selector::new(&[], 0);
         let mut entered = 0usize;
         list_archive(
@@ -6311,6 +6602,7 @@ mod tests {
             &Zone::utc(),
             &[],
             &mut entered,
+            b"test.tar",
         )
     }
 
@@ -7805,7 +8097,7 @@ mod tests {
         let mut out = Vec::new();
         let stop = list_names(&input, &mut out);
         assert!(out.is_empty());
-        assert!(matches!(stop, Stop::End), "{stop:?}");
+        assert!(matches!(stop.stop, Stop::End), "{stop:?}");
     }
 
     #[test]
@@ -7818,7 +8110,7 @@ mod tests {
         let mut out = Vec::new();
         let stop = list_names(&input, &mut out);
         assert_eq!(String::from_utf8(out).unwrap(), "hello.txt\n");
-        assert!(matches!(stop, Stop::End), "{stop:?}");
+        assert!(matches!(stop.stop, Stop::End), "{stop:?}");
     }
 
     #[test]
@@ -7832,7 +8124,7 @@ mod tests {
         let mut out = Vec::new();
         let stop = list_names(&input, &mut out);
         assert_eq!(String::from_utf8(out).unwrap(), "data.bin\n");
-        assert!(matches!(stop, Stop::End), "{stop:?}");
+        assert!(matches!(stop.stop, Stop::End), "{stop:?}");
     }
 
     #[test]
@@ -7850,7 +8142,7 @@ mod tests {
         let stop = list_names(&input, &mut out);
         let listing = String::from_utf8(out).unwrap();
         assert_eq!(listing, "a.txt\nb.txt\nc.txt\n");
-        assert!(matches!(stop, Stop::End), "{stop:?}");
+        assert!(matches!(stop.stop, Stop::End), "{stop:?}");
     }
 
     #[test]
@@ -7866,7 +8158,7 @@ mod tests {
         let mut out = Vec::new();
         let stop = list_names(&input, &mut out);
         assert_eq!(String::from_utf8(out).unwrap(), "caf\\351.txt\n");
-        assert!(matches!(stop, Stop::End), "{stop:?}");
+        assert!(matches!(stop.stop, Stop::End), "{stop:?}");
     }
 
     #[test]
@@ -7881,7 +8173,7 @@ mod tests {
         let mut out = Vec::new();
         let stop = list_names(&input, &mut out);
         assert_eq!(String::from_utf8(out).unwrap(), "café.txt\n");
-        assert!(matches!(stop, Stop::End), "{stop:?}");
+        assert!(matches!(stop.stop, Stop::End), "{stop:?}");
     }
 
     /// `t/` + `n`×`d` + `/` + `m`×`f`, the shape every split test uses.
@@ -8116,7 +8408,7 @@ mod tests {
         let mut out = Vec::new();
         let stop = list_names(&input, &mut out);
         assert_eq!(String::from_utf8(out).unwrap(), "a\\nb.txt\n");
-        assert!(matches!(stop, Stop::End), "{stop:?}");
+        assert!(matches!(stop.stop, Stop::End), "{stop:?}");
     }
 
     #[test]
@@ -8149,7 +8441,7 @@ mod tests {
         let mut out = Vec::new();
         let stop = list_names(&input, &mut out);
         assert_eq!(String::from_utf8(out).unwrap(), "liar.bin\n");
-        assert!(matches!(stop, Stop::Truncated), "{stop:?}");
+        assert!(matches!(stop.stop, Stop::Fatal), "{stop:?}");
     }
 
     #[test]
@@ -8164,7 +8456,7 @@ mod tests {
         let mut out = Vec::new();
         let stop = list_names(&input, &mut out);
         assert_eq!(String::from_utf8(out).unwrap(), "whole.txt\n");
-        assert!(matches!(stop, Stop::End), "{stop:?}");
+        assert!(matches!(stop.stop, Stop::End), "{stop:?}");
     }
 
     #[test]
@@ -8178,7 +8470,10 @@ mod tests {
         let mut out = Vec::new();
         let stop = list_names(&input, &mut out);
         assert_eq!(String::from_utf8(out).unwrap(), "a.txt\n");
-        assert!(matches!(stop, Stop::LoneZeroBlock(2)), "{stop:?}");
+        assert!(matches!(stop.stop, Stop::End), "{stop:?}");
+        assert_eq!(stop.lone_zero_block, Some(2));
+        // A warning, not an error: nothing turns the status to 2.
+        assert!(!stop.failed);
     }
 
     #[test]
@@ -8189,7 +8484,7 @@ mod tests {
         let mut out = Vec::new();
         let stop = list_names(&input, &mut out);
         assert_eq!(String::from_utf8(out).unwrap(), "a.txt\n");
-        assert!(matches!(stop, Stop::End), "{stop:?}");
+        assert!(matches!(stop.stop, Stop::End), "{stop:?}");
     }
 
     #[test]
@@ -8200,7 +8495,8 @@ mod tests {
         let mut out = Vec::new();
         let stop = list_names(&input, &mut out);
         assert!(out.is_empty());
-        assert!(matches!(stop, Stop::NotAnArchive), "{stop:?}");
+        assert!(matches!(stop.stop, Stop::End), "{stop:?}");
+        assert!(stop.failed);
     }
 
     #[test]
@@ -8212,7 +8508,8 @@ mod tests {
         let mut out = Vec::new();
         let stop = list_names(&input, &mut out);
         assert!(out.is_empty(), "{:?}", String::from_utf8_lossy(&out));
-        assert!(matches!(stop, Stop::NotAnArchive), "{stop:?}");
+        assert!(matches!(stop.stop, Stop::End), "{stop:?}");
+        assert!(stop.failed);
     }
 
     #[test]
@@ -8229,7 +8526,46 @@ mod tests {
         let mut out = Vec::new();
         let stop = list_names(&input, &mut out);
         assert_eq!(String::from_utf8(out).unwrap(), "good.txt\n");
-        assert!(matches!(stop, Stop::BadHeader), "{stop:?}");
+        assert!(matches!(stop.stop, Stop::End), "{stop:?}");
+        assert!(stop.failed);
+    }
+
+    #[test]
+    fn list_skips_a_bad_block_and_finds_the_header_after_it() {
+        // `Skipping to next header` is a description, not a farewell: a
+        // damaged block in the middle of an archive costs the members it
+        // damaged, and the walk picks up at the next block that is a header.
+        // This tar used to stop there, and report every member after the
+        // damage as `Not found in archive`. Measured against GNU with one
+        // block of random bytes spliced between two members: both list the
+        // member after it.
+        let mut input: Vec<u8> = Vec::new();
+        input.extend_from_slice(&make_header(b"before.txt", 0, b'0'));
+        input.extend_from_slice(&[0xa5; BLOCK_SIZE]);
+        input.extend_from_slice(&[0x5a; BLOCK_SIZE]);
+        input.extend_from_slice(&make_header(b"after.txt", 0, b'0'));
+        input.extend_from_slice(&[0u8; BLOCK_SIZE * 2]);
+        let mut out = Vec::new();
+        let stop = list_names(&input, &mut out);
+        assert_eq!(String::from_utf8(out).unwrap(), "before.txt\nafter.txt\n");
+        assert!(matches!(stop.stop, Stop::End), "{stop:?}");
+        assert!(stop.failed);
+    }
+
+    #[test]
+    fn a_lone_zero_block_is_numbered_counting_the_data_blocks() {
+        // The warning names the block by its place in the archive. Counting
+        // only the headers named the wrong one as soon as a member had data:
+        // here the header is block 1, its two data blocks are 2 and 3, and the
+        // zero block is block 4 -- not 2.
+        let mut input: Vec<u8> = Vec::new();
+        input.extend_from_slice(&make_header(b"a.bin", 600, b'0'));
+        input.extend_from_slice(&[b'x'; BLOCK_SIZE * 2]);
+        input.extend_from_slice(&[0u8; BLOCK_SIZE]);
+        let mut out = Vec::new();
+        let stop = list_names(&input, &mut out);
+        assert_eq!(String::from_utf8(out).unwrap(), "a.bin\n");
+        assert_eq!(stop.lone_zero_block, Some(4));
     }
 
     #[test]
@@ -8253,7 +8589,7 @@ mod tests {
         let mut out = Vec::new();
         let stop = list_names(&input, &mut out);
         assert_eq!(String::from_utf8(out).unwrap(), "deep/dir/leaf.txt\n");
-        assert!(matches!(stop, Stop::End), "{stop:?}");
+        assert!(matches!(stop.stop, Stop::End), "{stop:?}");
     }
 
     #[test]
@@ -8276,7 +8612,7 @@ mod tests {
         let mut out = Vec::new();
         let stop = list_names(&input, &mut out);
         assert_eq!(String::from_utf8(out).unwrap(), "leaf.txt\n");
-        assert!(matches!(stop, Stop::End), "{stop:?}");
+        assert!(matches!(stop.stop, Stop::End), "{stop:?}");
     }
 
     // ---------------- the -tv long format ----------------
@@ -8791,5 +9127,103 @@ mod tests {
         let err = w.finish().unwrap_err();
         assert!(stdfd::reader_gone(&err));
         assert_eq!(w.sent(), 0);
+    }
+
+    // ---------------- directories that wait ----------------
+
+    #[test]
+    fn dot_and_slash_are_recognised_however_they_are_spelled() {
+        // GNU's `must_be_dot_or_slash`, case by case -- including its two
+        // surprises, `/.` and `/./.`, which it does *not* count.
+        for name in [
+            &b"."[..],
+            b"./",
+            b"././",
+            b"./.",
+            b".//",
+            b"",
+            b"/",
+            b"//",
+            b"/./",
+            b"/../",
+        ] {
+            assert!(must_be_dot_or_slash(name), "{:?}", String::from_utf8_lossy(name));
+        }
+        for name in [&b"a"[..], b"./a", b"/a", b"..", b"../", b"/.", b"/./.", b".a"] {
+            assert!(!must_be_dot_or_slash(name), "{:?}", String::from_utf8_lossy(name));
+        }
+    }
+
+    #[test]
+    fn a_directory_contains_what_its_name_and_a_slash_begin() {
+        assert!(is_ancestor(b"d", b"d/f"));
+        assert!(is_ancestor(b"a/b", b"a/b/c/d"));
+        assert!(is_ancestor(b".", b"./x"));
+        // A name ending in a slash already ends at the boundary.
+        assert!(is_ancestor(b"d/", b"d/x"));
+        // A prefix that does not end at a slash is a different name, and a
+        // directory does not contain itself.
+        assert!(!is_ancestor(b"d", b"df"));
+        assert!(!is_ancestor(b"d", b"d"));
+        // `.` is not, by name, an ancestor of a name that does not spell it --
+        // which is the reason it waits for the links instead.
+        assert!(!is_ancestor(b".", b"x"));
+    }
+
+    fn waiting(name: &[u8]) -> DelayedDir {
+        DelayedDir {
+            level: 0,
+            name: name.to_vec(),
+            mode: 0o755,
+            mtime: 0,
+            after_links: false,
+        }
+    }
+
+    #[test]
+    fn dot_waits_for_the_links_and_takes_the_older_records_with_it() {
+        let mut dirs = Vec::new();
+        delay_dir(&mut dirs, waiting(b"outer"));
+        delay_dir(&mut dirs, waiting(b"."));
+        delay_dir(&mut dirs, waiting(b"./later"));
+        let marked: Vec<bool> = dirs.iter().map(|d| d.after_links).collect();
+        // `.` and everything queued before it; not what came after.
+        assert_eq!(marked, [true, true, false]);
+    }
+
+    #[test]
+    fn the_same_directory_twice_is_one_record_with_the_later_metadata() {
+        let mut dirs = Vec::new();
+        delay_dir(&mut dirs, waiting(b"d"));
+        let mut again = waiting(b"d");
+        again.mode = 0o700;
+        again.mtime = 7;
+        delay_dir(&mut dirs, again);
+        assert_eq!(dirs.len(), 1);
+        assert_eq!((dirs[0].mode, dirs[0].mtime), (0o700, 7));
+        // At another `-C` destination it is a different directory.
+        let mut elsewhere = waiting(b"d");
+        elsewhere.level = 1;
+        delay_dir(&mut dirs, elsewhere);
+        assert_eq!(dirs.len(), 2);
+    }
+
+    #[test]
+    fn a_delayed_link_holds_back_the_directory_it_is_made_in() {
+        let mut dirs = vec![waiting(b"a"), waiting(b"a/b")];
+        // Made directly inside `a/b`: `a/b` waits, and so does `a` beneath it.
+        mark_parent_after_links(&mut dirs, b"a/b/link");
+        assert!(dirs.iter().all(|d| d.after_links));
+
+        let mut dirs = vec![waiting(b"a"), waiting(b"a/b")];
+        // Made directly inside `a`, not inside `a/b`: only `a` waits.
+        mark_parent_after_links(&mut dirs, b"a/link");
+        let marked: Vec<bool> = dirs.iter().map(|d| d.after_links).collect();
+        assert_eq!(marked, [true, false]);
+
+        // Made inside nothing that is waiting: nothing changes.
+        let mut dirs = vec![waiting(b"a")];
+        mark_parent_after_links(&mut dirs, b"z/link");
+        assert!(!dirs[0].after_links);
     }
 }

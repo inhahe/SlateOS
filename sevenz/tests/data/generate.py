@@ -120,6 +120,7 @@ MADE = [
     ("delta", ["-mf=Delta:4", "-m0=LZMA2"]),
     ("arm", ["-mf=ARM", "-m0=LZMA2"]),
     ("arm64", ["-mf=ARM64", "-m0=LZMA2"]),
+    ("riscv", ["-mf=RISCV", "-m0=LZMA2"]),
     ("headers-plain", ["-m0=LZMA2", "-mhc=off"]),
     ("times", ["-m0=LZMA2", "-mtc=on", "-mta=on"]),
     ("encrypted", ["-m0=LZMA2", "-psecret"]),
@@ -127,15 +128,41 @@ MADE = [
 ]
 
 # Mutated whole: small archives with something in every part of the format.
-MUTATED = ["small-lzma2", "small-headers-plain", "small-copy", "small-ppmd"]
+MUTATED = [
+    "small-lzma2",
+    "small-headers-plain",
+    "small-copy",
+    "small-ppmd",
+    "small-bzip2",
+    "small-deflate",
+    "small-bcj-lzma2",
+    "small-bcj2",
+    "small-arm64",
+]
 SMALL = {
     "small-lzma2": ["-m0=LZMA2", "-mx=5"],
     "small-headers-plain": ["-m0=LZMA", "-mhc=off"],
     "small-copy": ["-m0=Copy", "-mhc=off"],
     "small-ppmd": ["-m0=PPMd", "-mhc=off"],
+    "small-bzip2": ["-m0=BZip2", "-mhc=off"],
+    "small-deflate": ["-m0=Deflate", "-mhc=off"],
+    # A filter before a coder: two coders, one bond.
+    "small-bcj-lzma2": ["-mf=BCJ", "-m0=LZMA2", "-mhc=off"],
+    # Four packed streams, three of them through LZMA.
+    "small-bcj2": ["-mf=BCJ2", "-m0=LZMA", "-mhc=off"],
+    # A filter 7-Zip added in 23.00, over Copy: every byte it converted is
+    # in the archive as it stands.
+    "small-arm64": ["-mf=ARM64", "-m0=Copy", "-mhc=off"],
 }
-# The tree they are made of.
-SMALL_TREE = [("a.txt", text(300, 6)), ("dir", None), ("b.bin", random_bytes(40, 7)), ("e.txt", b"")]
+# The tree they are made of: text, random bytes, machine-code-like bytes for
+# the branch converters, an empty file and an empty folder.
+SMALL_TREE = [
+    ("a.txt", text(300, 6)),
+    ("dir", None),
+    ("b.bin", random_bytes(40, 7)),
+    ("c.bin", code(240, 8)),
+    ("e.txt", b""),
+]
 
 
 # Mutated at chosen bytes: archives too big to mutate whole, whose LZMA2
@@ -221,7 +248,10 @@ def verdict(archive: pathlib.Path, one_thread: bool = False) -> str:
       its last file).
     """
     threads = ["-mmt=off"] if one_thread else []
-    args = ["t", *threads, "-bso1", "-bse1", "-bsp0", "-sccUTF-8", "-psecret", str(archive)]
+    # `-t7z`: 7-Zip's 7z handler and no other. Without it, an archive whose
+    # 7z signature is damaged is tried as every other format 7-Zip knows --
+    # and a BZip2 folder inside one opens as a .bz2 at offset 32.
+    args = ["t", "-t7z", *threads, "-bso1", "-bse1", "-bsp0", "-sccUTF-8", "-psecret", str(archive)]
     # 7-Zip 26.00 itself sometimes dies -- an access violation, exit
     # 0xC0000005 -- testing a damaged LZMA2 archive of several blocks with
     # several threads: about one run in twelve on the worst mutants here,

@@ -2,12 +2,19 @@
 //!
 //! A port of 7-Zip's own 7z reader (`CPP/7zip/Archive/7z/7zIn.cpp`,
 //! `7zDecode.cpp`) from the LZMA SDK 26.00, which Igor Pavlov placed in the
-//! public domain, with its codecs: LZMA and LZMA2 by 7-Zip's own decoders,
-//! ported here (`lzma_dec`, `lzma2_dec`, `lzma_coder`: on damaged data they
-//! part from liblzma's, and a 7z reader must fail where 7-Zip fails); the
-//! branch converters through the workspace's `xz`, BZip2 through `bzip2`,
-//! Deflate through `deflate`; and BCJ2, PPMd and 7z's AES to be ported here
-//! from the same SDK.
+//! public domain, with its codecs. Ported here from the same SDK: LZMA and
+//! LZMA2 by 7-Zip's own decoders (`lzma_dec`, `lzma2_dec`, `lzma_coder`: on
+//! damaged data they part from liblzma's, and a 7z reader must fail where
+//! 7-Zip fails), PPMd (`ppmd7`), BCJ2 (`bcj2`), the ARM64 and RISC-V
+//! converters (`branch`) and 7z's AES (`aes7z`, over the workspace's `aes`
+//! and `sha2`). Through other crates: the older branch converters and delta
+//! (`xz`), and BZip2 by 7-Zip's rules (`bzip2::decompress_as_7zip`).
+//! Deflate and Deflate64 by a decoder of this crate's own that keeps 7-Zip's
+//! rules (`inflate`): 7-Zip's Deflate decoder is not in the public-domain
+//! SDK, and zlib's rules are not its.
+//!
+//! An encrypted archive is opened with [`Archive::open_with_password`], or
+//! given one with [`Archive::set_password`] when only its files are.
 //!
 //! LZMA2 is decoded as 7-Zip with several threads decodes it, unless
 //! [`Archive::set_threads`] says otherwise ([`Threads`]); the two differ only
@@ -34,12 +41,16 @@
 
 extern crate alloc;
 
+mod aes7z;
 mod bcj2;
+mod branch;
 mod decode;
 mod header;
+mod inflate;
 mod lzma2_dec;
 mod lzma_coder;
 mod lzma_dec;
+mod names;
 mod ppmd7;
 
 use alloc::vec::Vec;
@@ -139,6 +150,7 @@ pub struct Archive<'a> {
     db: Database,
     recovered: bool,
     threads: Threads,
+    keys: decode::Keys,
 }
 
 /// What an archive is, without its bytes.
@@ -171,6 +183,24 @@ impl<'a> Archive<'a> {
     /// [`Error::Unsupported`] as 7-Zip refuses the archive; a packed header
     /// that will not decode fails as its data does.
     pub fn open(data: &'a [u8]) -> Result<Self> {
+        Self::open_inner(data, None)
+    }
+
+    /// Opens `data` as [`Archive::open`] does, with `password` for whatever
+    /// is encrypted: the header, when 7-Zip was told to encrypt it
+    /// (`-mhe=on`), and the files.
+    ///
+    /// # Errors
+    ///
+    /// As [`Archive::open`]. A wrong password is found only by what it
+    /// decrypts to: an encrypted header that will not decode, or a file
+    /// that fails as damaged data or its CRC (7-Zip: "Wrong password?").
+    pub fn open_with_password(data: &'a [u8], password: &str) -> Result<Self> {
+        Self::open_inner(data, Some(password))
+    }
+
+    fn open_inner(data: &'a [u8], password: Option<&str>) -> Result<Self> {
+        let keys = decode::Keys::new(password);
         if !data.starts_with(&SIGNATURE) {
             return Err(Error::NotSevenZip);
         }
@@ -218,6 +248,7 @@ impl<'a> Archive<'a> {
                 db: Database::default(),
                 recovered,
                 threads: Threads::default(),
+                keys,
             });
         }
         let available = (data.len() as u64).saturating_sub(after_header);
@@ -232,14 +263,58 @@ impl<'a> Archive<'a> {
         if crc32::crc32(next) != next_crc {
             return Err(Error::Header);
         }
-        let unpacker = decode::ArchiveUnpacker { data };
+        let unpacker = decode::ArchiveUnpacker { data, keys: &keys };
         let db = header::read_database(next, after_header, next_offset, &unpacker)?;
         Ok(Self {
             data,
             db,
             recovered,
             threads: Threads::default(),
+            keys,
         })
+    }
+
+    /// The password to decrypt files with, for an archive whose header was
+    /// not encrypted and so opened without one.
+    pub fn set_password(&mut self, password: &str) {
+        self.keys = decode::Keys::new(Some(password));
+    }
+
+    /// Folder `folder`'s methods as 7-Zip lists them: each coder's name and
+    /// settings, its last coder first -- "LZMA2:24 BCJ", "PPMD:o6:mem22".
+    #[must_use]
+    pub fn folder_method(&self, folder: usize) -> alloc::string::String {
+        self.db
+            .folders
+            .folders
+            .get(folder)
+            .map_or_else(alloc::string::String::new, |f| {
+                names::folder_method(&f.coders)
+            })
+    }
+
+    /// The bytes folder `folder` takes in the archive: its packed streams.
+    #[must_use]
+    pub fn folder_packed_size(&self, folder: usize) -> u64 {
+        let n = self
+            .db
+            .folders
+            .folders
+            .get(folder)
+            .map_or(0, |f| f.pack_streams.len());
+        (0..n)
+            .map(|j| self.db.folders.pack_stream(folder, j).1)
+            .fold(0u64, u64::saturating_add)
+    }
+
+    /// Whether folder `folder`'s data is encrypted.
+    #[must_use]
+    pub fn is_folder_encrypted(&self, folder: usize) -> bool {
+        self.db
+            .folders
+            .folders
+            .get(folder)
+            .is_some_and(|f| f.coders.iter().any(|c| c.method == decode::method::AES))
     }
 
     /// Which 7-Zip to decode LZMA2 as: by default 7-Zip as it runs on a
@@ -339,6 +414,7 @@ impl<'a> Archive<'a> {
             self.db.data_start,
             limit,
             self.threads,
+            &self.keys,
         )?;
         let first = self.db.folder_start_file.get(folder).copied().unwrap_or(0) as usize;
         let mut remaining = self

@@ -18,7 +18,12 @@ crc32 = { path = "../crc32" }
 xz = { path = "../xz" }
 # BZip2.
 bzip2 = { path = "../bzip2" }
-# Deflate.
+# 7z's encryption: AES-256 with a SHA-256 key.
+aes = { path = "../aes" }
+sha2 = { path = "../sha2" }
+
+[dev-dependencies]
+# Deflate streams for `inflate`'s tests, from a compressor of another hand.
 deflate = { path = "../deflate" }
 
 [lints]

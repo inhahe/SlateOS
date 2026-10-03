@@ -13,6 +13,7 @@ bcj2.7z OK -- -mf=BCJ2 -m0=LZMA
 delta.7z OK -- -mf=Delta:4 -m0=LZMA2
 arm.7z OK -- -mf=ARM -m0=LZMA2
 arm64.7z OK -- -mf=ARM64 -m0=LZMA2
+riscv.7z OK -- -mf=RISCV -m0=LZMA2
 headers-plain.7z OK -- -m0=LZMA2 -mhc=off
 times.7z OK -- -m0=LZMA2 -mtc=on -mta=on
 encrypted.7z OK -- -m0=LZMA2 -psecret
@@ -21,5 +22,10 @@ small-lzma2.7z OK -- -m0=LZMA2 -mx=5
 small-headers-plain.7z OK -- -m0=LZMA -mhc=off
 small-copy.7z OK -- -m0=Copy -mhc=off
 small-ppmd.7z OK -- -m0=PPMd -mhc=off
+small-bzip2.7z OK -- -m0=BZip2 -mhc=off
+small-deflate.7z OK -- -m0=Deflate -mhc=off
+small-bcj-lzma2.7z OK -- -mf=BCJ -m0=LZMA2 -mhc=off
+small-bcj2.7z OK -- -mf=BCJ2 -m0=LZMA -mhc=off
+small-arm64.7z OK -- -mf=ARM64 -m0=Copy -mhc=off
 chunks-lzma2.7z OK -- -m0=LZMA2 -mx=5
 blocks-lzma2.7z OK -- -m0=LZMA2:d=64k:c=64k

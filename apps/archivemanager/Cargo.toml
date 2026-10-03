@@ -26,6 +26,8 @@ deflate = { path = "../../deflate" }
 bzip2 = { path = "../../bzip2" }
 # The xz a .tar.xz is wrapped in: liblzma's decoder, ported.
 xz = { path = "../../xz" }
+# 7z: the port of 7-Zip's own reader, with its codecs.
+sevenz = { path = "../../sevenz" }
 
 [lints]
 workspace = true

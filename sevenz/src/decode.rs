@@ -15,15 +15,18 @@
 //! (`Archive::read_folder`).
 
 use alloc::vec::Vec;
+use core::cell::RefCell;
 
 use crate::header::{Folder, Folders, Unpacker};
 use crate::lzma_coder::{self, Threads};
-use crate::{Error, Result, bcj2, ppmd7};
+use crate::{Error, Result, aes7z, bcj2, branch, inflate, ppmd7};
 
 /// The method IDs (`7zHeader.h`).
 pub(crate) mod method {
     pub(crate) const COPY: u64 = 0;
     pub(crate) const DELTA: u64 = 3;
+    pub(crate) const ARM64: u64 = 0xa;
+    pub(crate) const RISCV: u64 = 0xb;
     pub(crate) const LZMA2: u64 = 0x21;
     pub(crate) const LZMA: u64 = 0x03_0101;
     pub(crate) const PPMD: u64 = 0x03_0401;
@@ -54,9 +57,56 @@ pub(crate) struct Decoded {
     pub(crate) after_end: bool,
 }
 
+/// The password, and the keys derived from it -- once for each salt and
+/// number of rounds, as 7-Zip caches them, since deriving one takes 2^19
+/// rounds of SHA-256 by default.
+#[derive(Debug, Default)]
+pub(crate) struct Keys {
+    /// The password's UTF-16LE bytes, if there is one.
+    password: Option<Vec<u8>>,
+    derived: RefCell<Vec<Derived>>,
+}
+
+/// A key derived, and what from besides the password.
+#[derive(Debug)]
+struct Derived {
+    cycles_power: u32,
+    salt: Vec<u8>,
+    key: [u8; 32],
+}
+
+impl Keys {
+    pub(crate) fn new(password: Option<&str>) -> Self {
+        Self {
+            password: password.map(aes7z::password_bytes),
+            derived: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// The key for `props`, or `None` without a password.
+    fn key(&self, props: &aes7z::Props) -> Option<[u8; 32]> {
+        let password = self.password.as_deref()?;
+        let mut derived = self.derived.borrow_mut();
+        if let Some(d) = derived
+            .iter()
+            .find(|d| d.cycles_power == props.cycles_power && d.salt == props.salt)
+        {
+            return Some(d.key);
+        }
+        let key = aes7z::derive_key(props, password);
+        derived.push(Derived {
+            cycles_power: props.cycles_power,
+            salt: props.salt.clone(),
+            key,
+        });
+        Some(key)
+    }
+}
+
 /// The archive as [`Unpacker`] needs it, to decode packed header streams.
 pub(crate) struct ArchiveUnpacker<'a> {
     pub(crate) data: &'a [u8],
+    pub(crate) keys: &'a Keys,
 }
 
 impl Unpacker for ArchiveUnpacker<'_> {
@@ -64,7 +114,15 @@ impl Unpacker for ArchiveUnpacker<'_> {
         let size = usize::try_from(folders.unpack_size(index)).map_err(|_| Error::Unsupported)?;
         // 7-Zip decodes a packed header with one thread (`7zIn.cpp` passes
         // `mtMode = false`).
-        let d = decode_folder(self.data, folders, index, base, size, Threads::One)?;
+        let d = decode_folder(
+            self.data,
+            folders,
+            index,
+            base,
+            size,
+            Threads::One,
+            self.keys,
+        )?;
         match d.error {
             Some(e) => Err(e),
             None => Ok((d.out, d.after_end)),
@@ -139,6 +197,7 @@ pub(crate) fn decode_folder(
     start: u64,
     limit: usize,
     threads: Threads,
+    keys: &Keys,
 ) -> Result<Decoded> {
     let folder = folders.folders.get(index).ok_or(Error::Header)?;
     if folder.coders.len() > DECODE_CODERS_MAX {
@@ -157,6 +216,7 @@ pub(crate) fn decode_folder(
         start,
         limit,
         threads,
+        keys,
     };
     ctx.coder(folder.unpack_coder as usize)
 }
@@ -171,6 +231,7 @@ struct Ctx<'a> {
     start: u64,
     limit: usize,
     threads: Threads,
+    keys: &'a Keys,
 }
 
 impl Ctx<'_> {
@@ -226,6 +287,7 @@ impl Ctx<'_> {
             size,
             self.threads,
             self.limit,
+            self.keys,
         )?;
         d.after_end |= after_end;
         if d.error.is_none() {
@@ -248,6 +310,7 @@ fn run(
     size: usize,
     threads: Threads,
     limit: usize,
+    keys: &Keys,
 ) -> Result<Decoded> {
     let simple = |inputs: &mut [Vec<u8>]| -> Result<Vec<u8>> {
         match inputs {
@@ -307,33 +370,41 @@ fn run(
             Ok(done(c.out, (!c.ok).then_some(Error::Data)))
         }
         method::BZIP2 => {
-            let data = simple(inputs)?;
-            Ok(match bzip2::decompress_limited(&data, size) {
-                Ok(out) => done(out, None),
-                Err(_) => done(Vec::new(), Some(Error::Data)),
-            })
-        }
-        method::DEFLATE => {
-            let data = simple(inputs)?;
-            let mut stream = deflate::inflate_stream(&data, size);
-            let mut out = alloc::vec![0u8; size];
-            let mut n = 0usize;
-            let mut error = None;
-            while n < size {
-                let Some(rest) = out.get_mut(n..) else {
-                    break;
-                };
-                match stream.read(rest) {
-                    Ok(0) => break,
-                    Ok(k) => n = n.saturating_add(k),
-                    Err(_) => {
-                        error = Some(Error::Data);
-                        break;
-                    }
-                }
+            // 7-Zip's BZip2 and Deflate coders take no properties, and since
+            // 23.00 a coder given some it cannot take is refused.
+            if !props.is_empty() {
+                return Err(Error::Unsupported);
             }
-            out.truncate(n);
-            Ok(done(out, error))
+            let data = simple(inputs)?;
+            // As 7-Zip's decoder reads it: one stream, by rules of its own.
+            // What decoded before damage is kept, a block's bytes before its
+            // CRC is checked: 7-Zip writes them, and the files they complete
+            // are judged by their own CRCs.
+            let mut out = Vec::new();
+            let mut d = match bzip2::decompress_as_7zip(&data, &mut out, size) {
+                Ok(used) => {
+                    let mut d = done(Vec::new(), None);
+                    // 7-Zip's mixer: input left after a coder that succeeded.
+                    d.after_end = used < data.len();
+                    d
+                }
+                Err(_) => done(Vec::new(), Some(Error::Data)),
+            };
+            d.out = out;
+            Ok(d)
+        }
+        method::DEFLATE | method::DEFLATE64 => {
+            if !props.is_empty() {
+                return Err(Error::Unsupported);
+            }
+            let data = simple(inputs)?;
+            // By 7-Zip's rules for the coder (`inflate.rs`), which part from
+            // zlib's at the end of the stream and past the end of the input.
+            let r = inflate::decode(&data, size, method == method::DEFLATE64);
+            let mut d = done(r.out, (!r.ok).then_some(Error::Data));
+            // 7-Zip's mixer: input left after a coder that succeeded.
+            d.after_end = r.ok && r.used < data.len();
+            Ok(d)
         }
         method::DELTA => {
             let &[p] = props else {
@@ -352,19 +423,46 @@ fn run(
                 method::ARMT => xz::Bcj::ArmThumb,
                 _ => xz::Bcj::Sparc,
             };
-            let start = match props {
+            // 7-Zip's coder for these takes no properties, and since 23.00
+            // refuses a coder that is given some (`7zDecode.cpp`).
+            if !props.is_empty() {
+                return Err(Error::Unsupported);
+            }
+            let mut data = simple(inputs)?;
+            xz::bcj_decode(arch, 0, &mut data);
+            Ok(done(data, None))
+        }
+        method::ARM64 | method::RISCV => {
+            // `NCompress::NBranch::CDecoder`: an optional start address,
+            // aligned to the instruction (4 bytes, or 2 for RISC-V).
+            let alignment = if method == method::ARM64 { 3 } else { 1 };
+            let pc = match props {
                 [] => 0,
                 &[a, b, c, d] => u32::from_le_bytes([a, b, c, d]),
                 _ => return Err(Error::Unsupported),
             };
+            if pc & alignment != 0 {
+                return Err(Error::Unsupported);
+            }
             let mut data = simple(inputs)?;
-            xz::bcj_decode(arch, start, &mut data);
+            // What is not converted -- a last partial instruction -- is
+            // kept as it is, as `FilterCoder` writes it at the stream's end.
+            if method == method::ARM64 {
+                branch::arm64_decode(&mut data, pc);
+            } else {
+                branch::riscv_decode(&mut data, pc);
+            }
             Ok(done(data, None))
         }
-        // Ported next; until then, refused as 7-Zip refuses a method it
-        // lacks.
-        method::DEFLATE64 => Err(Error::Unsupported),
-        method::AES => Err(Error::PasswordRequired),
+        method::AES => {
+            // The properties first, as 7-Zip sets them before it asks for
+            // a password.
+            let p = aes7z::parse_props(props).ok_or(Error::Unsupported)?;
+            let key = keys.key(&p).ok_or(Error::PasswordRequired)?;
+            let data = simple(inputs)?;
+            let c = aes7z::decrypt(&p, &key, &data, size);
+            Ok(done(c.out, (!c.ok).then_some(Error::Data)))
+        }
         _ => Err(Error::Unsupported),
     }
 }

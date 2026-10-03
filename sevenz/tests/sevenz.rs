@@ -13,6 +13,9 @@ fn data_dir() -> PathBuf {
         .join("data")
 }
 
+/// The password `generate.py` gives 7-Zip.
+const PASSWORD: &str = "secret";
+
 fn read(rel: &str) -> Vec<u8> {
     std::fs::read(data_dir().join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"))
 }
@@ -81,7 +84,8 @@ fn archives_7zip_made_are_read() {
             continue;
         }
         let data = read(&format!("made/{name}"));
-        let archive = match Archive::open(&data) {
+        // `generate.py` gives 7-Zip this password for every archive.
+        let archive = match Archive::open_with_password(&data, PASSWORD) {
             Ok(a) => a,
             Err(Error::Unsupported | Error::PasswordRequired) => {
                 skipped.push(name);
@@ -119,12 +123,8 @@ fn archives_7zip_made_are_read() {
         assert_eq!(archive.warnings(), sevenz::Warnings::default(), "{name}");
         read_ok.push(name);
     }
-    // What this reader does not yet decode: ARM64 and AES.
-    assert_eq!(
-        skipped,
-        ["arm64.7z", "encrypted.7z", "encrypted-headers.7z"],
-        "read: {read_ok:?}"
-    );
+    // Every method and filter 7-Zip used here is read.
+    assert!(skipped.is_empty(), "skipped {skipped:?}, read {read_ok:?}");
 }
 
 /// LZMA2 streams of several chunks under one dictionary, and of several
@@ -149,10 +149,43 @@ fn lzma2_of_many_chunks_and_blocks_is_read() {
     }
 }
 
+/// Each folder's methods are named as `7z l -slt` names a file's (its
+/// archive-wide `Method` line, first, is another list).
+#[test]
+fn methods_are_named_as_7zip_names_them() {
+    for (name, want) in [
+        ("bcj-lzma2.7z", "BCJ LZMA2:17"),
+        ("bcj2.7z", "BCJ2 LZMA:17 LZMA:17:lc0:lp2 LZMA:17:lc0:lp2"),
+        ("delta.7z", "Delta:4 LZMA2:17"),
+        ("encrypted.7z", "LZMA2:17 7zAES:19"),
+        ("ppmd.7z", "PPMD:o6:mem21"),
+        ("ppmd-small-mem.7z", "PPMD:o32:mem16"),
+        ("lzma.7z", "LZMA:17"),
+        ("arm64.7z", "ARM64 LZMA2:17"),
+        ("riscv.7z", "RISCV LZMA2:17"),
+        ("deflate.7z", "Deflate"),
+        ("bzip2.7z", "BZip2"),
+        ("copy.7z", "Copy"),
+        ("lzma2-files.7z", "LZMA2:16"),
+    ] {
+        let data = read(&format!("made/{name}"));
+        let archive = Archive::open_with_password(&data, PASSWORD).unwrap();
+        assert!(archive.num_folders() > 0, "{name}");
+        for folder in 0..archive.num_folders() {
+            assert_eq!(
+                archive.folder_method(folder),
+                want,
+                "{name} folder {folder}"
+            );
+            assert!(archive.folder_packed_size(folder) > 0, "{name}");
+        }
+    }
+}
+
 /// What this reader, as 7-Zip with `threads`, makes of an archive, in the
 /// words of `generate.py`'s `verdict`.
 fn our_verdict(data: &[u8], threads: Threads) -> String {
-    let mut archive = match Archive::open(data) {
+    let mut archive = match Archive::open_with_password(data, PASSWORD) {
         Ok(a) => a,
         Err(e) => {
             let kind = match e {

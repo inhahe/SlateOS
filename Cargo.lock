@@ -80,6 +80,7 @@ dependencies = [
  "oswindow",
  "pathtext",
  "quoting",
+ "sevenz",
  "tararchive",
  "xz",
  "ziparchive",
@@ -3501,9 +3502,11 @@ dependencies = [
 name = "sevenz"
 version = "0.1.0"
 dependencies = [
+ "aes",
  "bzip2",
  "crc32",
  "deflate",
+ "sha2",
  "xz",
 ]
 

@@ -335,6 +335,60 @@ MUTATIONS = [
         "            true",
         [LIST_CURSOR],
     ),
+    (
+        'a chord raises the keys',
+        '    if key.key == Key::F1 && plain {',
+        '    if key.key == Key::F1 {',
+        ['each_kind_of_key_is_asked_for_as_itself'],
+    ),
+    (
+        'AltGr is taken for Ctrl',
+        '    if textline::is_ctrl_chord(key.modifiers) {\n        return handle_ctrl_chord(app, key);',
+        '    if key.modifiers.ctrl {\n        return handle_ctrl_chord(app, key);',
+        ['each_kind_of_key_is_asked_for_as_itself'],
+    ),
+    (
+        'AltGr is taken for Alt',
+        '    if key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key {',
+        '    if key.modifiers.alt {',
+        ['each_kind_of_key_is_asked_for_as_itself'],
+    ),
+    (
+        "the Windows key's chords work the board",
+        '    if !plain {\n        return false;\n    }\n',
+        '',
+        ['each_kind_of_key_is_asked_for_as_itself'],
+    ),
+    (
+        'a chord works the archive',
+        '    let plain = textline::is_plain(key.modifiers);\n    match key.key {\n        Key::Up if plain => {',
+        '    let plain = true;\n    match key.key {\n        Key::Up if plain => {',
+        ['each_kind_of_key_is_asked_for_as_itself'],
+    ),
+    (
+        'AltGr is taken for Ctrl in the archive',
+        '        Key::D if textline::is_ctrl_chord(key.modifiers) => {',
+        '        Key::D if key.modifiers.ctrl => {',
+        ['each_kind_of_key_is_asked_for_as_itself'],
+    ),
+    (
+        'a chord works the open card',
+        '    let plain = textline::is_plain(key.modifiers);\n    let card_id = app.selected_card?;',
+        '    let plain = true;\n    let card_id = app.selected_card?;',
+        ['each_kind_of_key_is_asked_for_as_itself'],
+    ),
+    (
+        "a command's letter is typed into the input line",
+        '    if textline::types_into_field(key) {\n        app.input_buffer.extend(key.typed());',
+        '    if key.types_text() {\n        app.input_buffer.extend(key.typed());',
+        ['each_kind_of_key_is_asked_for_as_itself'],
+    ),
+    (
+        'a chord works the input line',
+        '    if !textline::is_plain(key.modifiers) {\n        return false;\n    }\n    match key.key {\n        Key::Escape => {\n            app.input_mode = InputMode::None;',
+        '    match key.key {\n        Key::Escape => {\n            app.input_mode = InputMode::None;',
+        ['each_kind_of_key_is_asked_for_as_itself'],
+    ),
 ]
 
 if __name__ == "__main__":

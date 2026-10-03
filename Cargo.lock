@@ -1863,6 +1863,7 @@ dependencies = [
  "pathtext",
  "safeio",
  "textarea",
+ "textline",
  "unsaved",
 ]
 
@@ -1877,6 +1878,7 @@ dependencies = [
  "safeio",
  "settingsfile",
  "textfmt",
+ "textline",
  "unsaved",
 ]
 

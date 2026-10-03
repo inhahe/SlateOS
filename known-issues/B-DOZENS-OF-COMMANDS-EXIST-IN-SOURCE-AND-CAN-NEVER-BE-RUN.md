@@ -73,7 +73,7 @@ live one:
 |---|---|---|
 | `userspace/head` | `tail` | `coreutils`'s `tail` — and `tail-diff.sh` tests *that* one |
 | `userspace/chown` | `chmod` | `coreutils`'s `chmod` -- **crate retired 2026-09-12** |
-| `userspace/who` | `w` | `userspace/w` — see the entry below |
+| ~~`userspace/who`~~ | ~~`w`~~ | ~~`userspace/w`~~ — **crate deleted 2026-10-02**; `who` and `w` are coreutils programs |
 | `userspace/pv` | `fuser` | `userspace/fuser` |
 | `userspace/sysstat` | `iostat` | `userspace/iostat` |
 | `userspace/chpasswd` | `passwd` | `userspace/passwd` |

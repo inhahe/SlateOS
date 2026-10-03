@@ -63,12 +63,14 @@
 
 use core::ffi::CStr;
 
+pub mod clock;
 pub mod conf;
 pub mod inotify;
 pub mod netdb;
 pub mod process;
 pub mod pty;
 pub mod signal;
+pub mod termios;
 pub mod utmp;
 
 // ---------------------------------------------------------------------------

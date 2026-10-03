@@ -486,6 +486,9 @@
 //!   of `touch -t` and the obsolete `touch MMDDhhmm[YY]` operand.
 //! - [`posixver`] — gnulib's `posix2_version`, the POSIX edition
 //!   `_POSIX2_VERSION` names, for `sort`, `tail`, `touch` and `uniq`.
+//! - [`procps`] — procps-ng's library: the status line `uptime` and `w` both
+//!   print (`procps_uptime_sprint`), the `/proc` numbers under it, the
+//!   process table `w` searches, and `escape.c`'s escaping of what it shows.
 //! - [`randint`] — gnulib's `randread` and `randint`, for `shred`.
 //! - [`remove`] — what `rm` and `mv` must agree on about deleting a tree.
 //! - [`setfields`] — the `cut`-style LIST of fields, for `cut` and `numfmt
@@ -495,6 +498,9 @@
 //!   signal that ended its command, and coreutils' `operand2sig.c`, for
 //!   `timeout -s` -- with a name that needs no allocation, for `timeout -v`'s
 //!   report from inside a signal handler.
+//! - [`utmp`] — gnulib's `readutmp`: which login records `who`, `users` and
+//!   `pinky` are given, the boot entry made up when a Linux utmp has none, and
+//!   the readings of a record's fields the three share.
 //! - [`utsname`] — the `uname(2)` answers `uname` and `arch` both print.
 //!
 //! The regex engine, which is the other thing they must not disagree about,
@@ -536,6 +542,7 @@ pub mod parse_datetime;
 pub mod pathname;
 pub mod posixtm;
 pub mod posixver;
+pub mod procps;
 pub mod randint;
 /// How a name is rendered inside a diagnostic — now `userspace/quoting`.
 ///
@@ -572,6 +579,7 @@ pub mod umask;
 // a number in any base -- so this crate's one user is coreutils' `chown` side.)
 pub use userspec;
 pub mod utimecmp;
+pub mod utmp;
 pub mod utsname;
 pub mod vercmp;
 pub mod xnum;

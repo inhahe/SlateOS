@@ -1,6 +1,8 @@
-//! Making, replacing and waiting for processes, and the process group they
-//! run in: `fork`, `execvp`, `waitpid`, `setpgid`, `prctl (PR_SET_DUMPABLE)`
-//! and `_exit`.
+//! Making, replacing and waiting for processes, the process group they run
+//! in, and the root and credentials they run with: `fork`, `execvp`,
+//! `waitpid`, `setpgid`, `prctl (PR_SET_DUMPABLE)`, `_exit`, `chroot`,
+//! `setgroups`, `setgid` and `setuid`. The last four are what GNU `chroot`
+//! changes before it becomes its command.
 //!
 //! What GNU `timeout` starts its command with
 //! (`userspace/coreutils/src/bin/timeout.rs`), and the reason it does not use
@@ -43,6 +45,10 @@ mod sys {
         // On x86-64 both find them in the same registers.
         pub fn prctl(option: i32, ...) -> i32;
         pub fn _exit(status: i32) -> !;
+        pub fn chroot(path: *const u8) -> i32;
+        pub fn setgroups(size: usize, list: *const u32) -> i32;
+        pub fn setgid(gid: u32) -> i32;
+        pub fn setuid(uid: u32) -> i32;
     }
 }
 
@@ -272,6 +278,106 @@ fn disable_core_dumps_one() -> Result<(), i32> {
     Err(ENOSYS)
 }
 
+/// Make `path` this process's root directory: `chroot`.
+///
+/// Every path this process resolves from now on starts there, the ones that
+/// look absolute included. The working directory is *not* moved -- it may now
+/// lie outside the root, which is why `chroot (1)` changes to `/` straight
+/// after, unless told not to.
+///
+/// # Errors
+///
+/// `EPERM` without the privilege (`CAP_SYS_CHROOT`), `ENOENT` or `ENOTDIR` for
+/// a path that names no directory, and [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn change_root(path: &CStr) -> Result<(), i32> {
+    change_root_one(path)
+}
+
+#[cfg(unix)]
+fn change_root_one(path: &CStr) -> Result<(), i32> {
+    // SAFETY: `path` is NUL-terminated and borrowed for the call, which reads
+    // it and keeps nothing.
+    let rc = unsafe { sys::chroot(path.as_ptr().cast()) };
+    if rc == 0 { Ok(()) } else { Err(last_errno()) }
+}
+
+#[cfg(not(unix))]
+fn change_root_one(_path: &CStr) -> Result<(), i32> {
+    Err(ENOSYS)
+}
+
+/// Make `groups` this process's supplementary groups, replacing all of them:
+/// `setgroups`. An empty list clears them.
+///
+/// # Errors
+///
+/// `EPERM` without the privilege (`CAP_SETGID`) -- and always, in a user
+/// namespace whose `setgroups` is denied -- `EINVAL` for more groups than the
+/// system keeps, and [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn set_groups(groups: &[u32]) -> Result<(), i32> {
+    set_groups_one(groups)
+}
+
+#[cfg(unix)]
+fn set_groups_one(groups: &[u32]) -> Result<(), i32> {
+    // SAFETY: `groups` is a live slice of `gid_t`s, `groups.len()` long, which
+    // is exactly what the call reads.
+    let rc = unsafe { sys::setgroups(groups.len(), groups.as_ptr()) };
+    if rc == 0 { Ok(()) } else { Err(last_errno()) }
+}
+
+#[cfg(not(unix))]
+fn set_groups_one(_groups: &[u32]) -> Result<(), i32> {
+    Err(ENOSYS)
+}
+
+/// Set this process's group id: `setgid`.
+///
+/// # Errors
+///
+/// `EPERM` without the privilege, `EINVAL` for a gid this system -- or this
+/// user namespace -- cannot represent, and [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn set_gid(gid: u32) -> Result<(), i32> {
+    set_gid_one(gid)
+}
+
+#[cfg(unix)]
+fn set_gid_one(gid: u32) -> Result<(), i32> {
+    // SAFETY: a number, and no memory of ours read or written.
+    let rc = unsafe { sys::setgid(gid) };
+    if rc == 0 { Ok(()) } else { Err(last_errno()) }
+}
+
+#[cfg(not(unix))]
+fn set_gid_one(_gid: u32) -> Result<(), i32> {
+    Err(ENOSYS)
+}
+
+/// Set this process's user id: `setuid`. For a privileged process it is a
+/// one-way step -- the privilege goes with the old id -- which is why it is
+/// the last of the three credentials a program sets.
+///
+/// # Errors
+///
+/// `EPERM` without the privilege, `EINVAL` for a uid this system -- or this
+/// user namespace -- cannot represent, `EAGAIN` when the new user is at its
+/// limit of processes, and [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn set_uid(uid: u32) -> Result<(), i32> {
+    set_uid_one(uid)
+}
+
+#[cfg(unix)]
+fn set_uid_one(uid: u32) -> Result<(), i32> {
+    // SAFETY: a number, and no memory of ours read or written.
+    let rc = unsafe { sys::setuid(uid) };
+    if rc == 0 { Ok(()) } else { Err(last_errno()) }
+}
+
+#[cfg(not(unix))]
+fn set_uid_one(_uid: u32) -> Result<(), i32> {
+    Err(ENOSYS)
+}
+
 /// End this process now, with `status`: `_exit`.
 ///
 /// Nothing else runs -- no `atexit` handler, no flush of any buffer -- which
@@ -366,6 +472,33 @@ mod tests {
         assert_eq!(disable_core_dumps(), Err(ENOSYS));
         let mut slots = [core::ptr::null(); 2];
         assert_eq!(execvp(&[c"true"], &mut slots), ENOSYS);
+        assert_eq!(change_root(c"/"), Err(ENOSYS));
+        assert_eq!(set_groups(&[]), Err(ENOSYS));
+        assert_eq!(set_gid(0), Err(ENOSYS));
+        assert_eq!(set_uid(0), Err(ENOSYS));
+    }
+
+    /// The real library's refusals, chosen so that no outcome changes this
+    /// test process's root or credentials: a root that does not exist, and
+    /// the one id no process can have, `(uid_t) -1`.
+    #[cfg(unix)]
+    #[test]
+    fn credentials_and_root_are_refused_as_the_library_refuses_them() {
+        assert_eq!(
+            change_root(c"/nonexistent/libcall-test"),
+            Err(crate::ENOENT)
+        );
+        assert_eq!(set_uid(u32::MAX), Err(posix::errno::EINVAL));
+        assert_eq!(set_gid(u32::MAX), Err(posix::errno::EINVAL));
+        // Too many groups: `EPERM` for a caller without the privilege, which
+        // the kernel checks first, `EINVAL` for one with it. Neither changes
+        // anything.
+        let too_many = [0u32; 65537];
+        let refused = set_groups(&too_many);
+        assert!(
+            refused == Err(posix::errno::EPERM) || refused == Err(posix::errno::EINVAL),
+            "{refused:?}"
+        );
     }
 
     /// The real library: a child is made, exits with a status of its own,

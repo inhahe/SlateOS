@@ -7,11 +7,12 @@
 // ignored -- so the name went to `userspace/coreutils/src/bin/pinky.rs`, a
 // port of GNU's, and this is finger alone.
 //
-// IT USED TO ANSWER TO `w` TOO, and that name now belongs to `userspace/who`,
-// which performs the operation: `who -w` computes JCPU and PCPU, which this
-// program has no columns for at all, and derives WHAT from the session
-// leader's cmdline where this printed a fixed "-". design-decisions 1019 --
-// the name belongs to whichever program does the work.
+// IT USED TO ANSWER TO `w` TOO, and that name belongs to coreutils' `w`, a
+// port of procps-ng's, which performs the operation: it computes JCPU and
+// PCPU, which this program has no columns for at all, and derives WHAT from
+// the terminal's foreground process where this printed a fixed "-".
+// design-decisions 1019 -- the name belongs to whichever program does the
+// work.
 //
 // Usage:
 //   finger [OPTIONS] [user@host | user...]

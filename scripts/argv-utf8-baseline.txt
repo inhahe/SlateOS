@@ -27,7 +27,6 @@ userspace/backup/src/main.rs:argv-as-string
 userspace/bootctl/src/main.rs:argv-as-string
 userspace/cgroup/src/main.rs:argv-as-string
 userspace/chattr/src/main.rs:argv-as-string
-userspace/chroot/src/main.rs:argv-as-string
 userspace/coredumpctl/src/main.rs:argv-as-string
 userspace/cpio/src/main.rs:argv-as-string
 userspace/crond/src/main.rs:argv-as-string
@@ -116,7 +115,6 @@ userspace/ss/src/main.rs:argv-as-string
 userspace/ssh-keygen/src/lib.rs:argv-as-string
 userspace/ssh/src/lib.rs:argv-as-string
 userspace/strace/src/main.rs:argv-as-string
-userspace/stty/src/main.rs:argv-as-string
 userspace/sysctl/src/main.rs:argv-as-string
 userspace/sysinfo/src/main.rs:argv-as-string
 userspace/syslogd/src/main.rs:argv-as-string
@@ -137,7 +135,6 @@ userspace/vmstat/src/main.rs:argv-as-string
 userspace/wall/src/main.rs:argv-as-string
 userspace/watch/src/main.rs:argv-as-string
 userspace/wget/src/main.rs:argv-as-string
-userspace/who/src/main.rs:argv-as-string
 userspace/whois/src/main.rs:argv-as-string
 userspace/wpa/src/main.rs:argv-as-string
 userspace/xdg/src/main.rs:argv-as-string

@@ -47,7 +47,6 @@ userspace/cgroup  # bare deny(clippy::all)
 userspace/chage  # bare deny(clippy::all)
 userspace/chattr  # bare deny(clippy::all)
 userspace/chpasswd
-userspace/chroot
 userspace/coredumpctl  # bare deny(clippy::all)
 userspace/cpio
 userspace/crond
@@ -145,7 +144,6 @@ userspace/vi
 userspace/vmstat
 userspace/wall
 userspace/watch
-userspace/who
 userspace/wpa  # bare deny(clippy::all)
 userspace/xdg
 userspace/yacc

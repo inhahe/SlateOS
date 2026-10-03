@@ -142,6 +142,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/check-workspace-lints.py` | Find crates that are not subject to the project's own lint policy. |
 | `scripts/chgrp-diff.sh` | Differential test: our `chgrp` against GNU `chgrp`. |
 | `scripts/chown-diff.sh` | Differential test: our `chown` against GNU `chown`. |
+| `scripts/chroot-diff.sh` | Differential test: our `chroot` against GNU coreutils 9.4's. |
 | `scripts/cksum-diff.sh` | cksum-diff.sh — compare our `cksum` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/clippy-diff.py` | Compare two clippy logs by diagnostic *kind*, so a refactor can be cleared. |
 | `scripts/clippy-sites.py` | Count and list distinct clippy warning sites. |
@@ -334,6 +335,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/probe-env-split-options.sh` | Round 3 of the -S measurement: are OPTIONS inside the split string honoured? |
 | `scripts/probe-env-split-string.sh` | Measure GNU env's -S/--split-string grammar. NOT a gate and not a harness -- |
 | `scripts/probe-tcc-hosted.sh` | Probe: what files does tcc open to compile+link a hosted dynamic glibc program? |
+| `scripts/procps-ref.sh` | Builds procps-ng 4.0.4's `w` from the release, for a harness whose reference |
 | `scripts/proctree.py` | proctree.py — launch a child process so that its *whole tree* can be killed. |
 | `scripts/program-catalogue.py` | The catalogue of every program the workspace builds: `programs.md`. |
 | `scripts/prune-build-cache.py` | Prune the parts of a cargo `target/` that no recent build has used. |
@@ -413,6 +415,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/straddle-check.py` | Report which loops in a kernel binary straddle a 4 KiB guest page. |
 | `scripts/strftime-diff.sh` | strftime-diff.sh — both of GNU's time formatters, ours against theirs. |
 | `scripts/strings-diff.sh` | Differential test: our `strings` against GNU binutils `strings`. |
+| `scripts/stty-diff.sh` | Differential test: our `stty` against GNU coreutils 9.4's. |
 | `scripts/suite_pool.py` | Run a tooling suite's independent cases a few at a time, with one-at-a-time output. |
 | `scripts/sum-diff.sh` | sum-diff.sh — compare our `sum` against GNU's, inside WSL. |
 | `scripts/swapon-diff.sh` | Differential test: our `swapon` and `swapoff` against util-linux 2.39.3's. |
@@ -499,11 +502,13 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/util-linux-source.sh` | Fetches util-linux 2.39.3's source and test data, for harnesses that need them. |
 | `scripts/uu-diff.sh` | Differential test: our `uuencode` and `uudecode` against GNU sharutils 4.15.2's. |
 | `scripts/verify_mutations.py` | Check a `mutate.py` table against the source it claims to break. |
+| `scripts/w-diff.sh` | Differential test: our `w` against procps-ng 4.0.4's, built as SlateOS's |
 | `scripts/wc-diff.sh` | Differential test: our wc against GNU wc. |
 | `scripts/wdog-nmi-soak.sh` | wdog-nmi-soak.sh — DIAGNOSTIC (throwaway): boot repeatedly under the |
 | `scripts/wdog-reset-experiment.sh` | wdog-reset-experiment.sh — DIAGNOSTIC (throwaway) loop to discriminate, for the |
 | `scripts/wedge-soak.sh` | wedge-soak.sh — armed hang-repro soak for the still-open boot wedge race. |
 | `scripts/which-lane.py` | Print which of the six parallel-agent lanes this session is, and what it owns. |
+| `scripts/who-diff.sh` | Differential test: our `who` against GNU coreutils 9.4's. |
 | `scripts/who-holds-dir.py` | Report which processes are keeping a directory un-renamable, without admin. |
 | `scripts/whoami-diff.sh` | whoami-diff.sh — compare our `whoami` against the real GNU one, inside WSL. |
 | `scripts/wipefs-diff.sh` | Differential test: our `wipefs` against util-linux 2.39.3's. |
@@ -512,4 +517,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_502 scripts._
+_507 scripts._

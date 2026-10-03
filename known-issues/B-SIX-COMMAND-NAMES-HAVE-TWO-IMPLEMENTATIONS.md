@@ -57,8 +57,9 @@ the same day: there the shadowing crate was the thin one and coreutils had
 both. **The rule is not "prefer coreutils" or "prefer the standalone"; it is
 read both.**
 
-The `who:w` row is unaffected: `userspace/who` still answers to `w`, and
-`userspace/w` still provides it. Seven pairs remain.
+The `who:w` row was unaffected then: `userspace/who` still answered to `w`.
+**Resolved 2026-10-02:** `userspace/who` is deleted, and `who` (GNU 9.4's) and
+`w` (procps-ng 4.0.4's) are two coreutils programs, each its own executable.
 | `userspace/cron` | `crond` | `userspace/crond` |
 | `userspace/cron` | `crontab` | `userspace/crontab` |
 

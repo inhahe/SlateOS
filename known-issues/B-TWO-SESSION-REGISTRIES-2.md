@@ -9,7 +9,7 @@ programs that *show* you the list read one of them; the daemon whose job is to
 
 | | writes | reads |
 |---|---|---|
-| `/run/sessions/<pid>` | `userspace/su` (main.rs:333, removed at :359) | `userspace/who` (main.rs:462), `userspace/loginctl` (main.rs:143) |
+| `/run/sessions/<pid>` | `userspace/su` (main.rs:333, removed at :359) | `userspace/loginctl` (main.rs:143); `userspace/who` (main.rs:462) until it was deleted on 2026-10-02 -- `who`, `w` and `users` are coreutils' now and read utmp alone, as their upstreams do |
 | `Daemon::sessions`, in memory | `userspace/logind`, served over the service bus | nothing outside the daemon |
 
 `su` writes `user=`/`tty=`/`host=`/`time=`/`pid=` lines, assembled as bytes

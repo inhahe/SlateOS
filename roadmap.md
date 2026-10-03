@@ -4344,13 +4344,27 @@ _Port ext4 first. Don't write a custom filesystem._
   new `libcall::signal` and `libcall::process`, its timer on upstream's `setitimer` arm because
   SlateOS's `timer_settime` arms nothing, `known-issues/B-POSIX-TIMER-SETTIME-REPORTS-SUCCESS-AND-ARMS-NOTHING.md`;
   `coreutils::interval` now `sleep`'s and its duration reader, and `coreutils::sig2str` gained
-  `operand2sig`); and `nproc`,
+  `operand2sig`); `chroot` (2026-10-02, replacing the standalone `userspace/chroot`, which refused
+  every step as unimplemented although the kernel has had native `chroot` and `setgroups` since
+  2026-09-07: upstream's two lookup passes, outside the new root and inside it, with the values
+  carrying over between them as they do there, and the credentials through `libcall::process`);
+  `who` (2026-10-02, replacing `userspace/who`, written from the manual, which agreed with GNU on 4 of
+  `scripts/who-diff.sh`'s 105 cases to the port's 105: gnulib's `readutmp` as `coreutils::utmp`, which
+  `users` and `pinky` now share, with the boot entry made up from boot-touched files or the uptime when
+  utmp has none); `w` (2026-10-02 too, procps-ng 4.0.4's rather than GNU's, from the same deleted crate,
+  whose `argv[0]` branch agreed on none of `scripts/w-diff.sh`'s 144 cases to the port's 144: real
+  sessions on fixture ptys, `procps_uptime_sprint` shared with `uptime` as `coreutils::procps`, and the
+  process table read through `readproc`'s rules, which on SlateOS still wants the kernel to name each
+  process's terminal, `requests/b-ad-proc-stat-reports-no-controlling-terminal.md`); `stty`
+  (2026-10-02, replacing `userspace/stty`, written from the manual, which agreed with GNU on 110
+  of `scripts/stty-diff.sh`'s 312 cases to the port's 312: its tables as glibc's Linux headers
+  resolve them, the terminal through the new `libcall::termios` -- so the speeds are the C
+  library's, shared field and all -- and upstream's two passes over argv, `getopt` in
+  return-in-order mode restarted after every setting, quirks included);
+  and `nproc`,
   re-ported because the standalone crate that had it was not GNU's and is retired. The multi-personality crates that answered some of these
   names in part lost those branches (§1005: `getopt` printenv/sync/cksum, `pv` truncate and shred, `nproc` arch/pathchk/users, `shuf` numfmt and factor, `base64` base32, `finger` pinky).
-  **Next:** three 9.4 programs exist here only as standalone crates that were not ported from it,
-  and none is on the image: `chroot`, `who` and `stty`. Each comes into coreutils from
-  the 9.4 source with a harness, as `install` and `timeout` did, and its crate is retired. Beyond those,
-  **nothing of GNU 9.4 is missing** that has something here to act on. Not ported, for want of what they act on: `chcon`/`runcon` (SELinux contexts) and `stdbuf` (works by
+  With `stty`, **nothing of GNU 9.4 is missing** that has something here to act on. Not ported, for want of what they act on: `chcon`/`runcon` (SELinux contexts) and `stdbuf` (works by
   `LD_PRELOAD` into a dynamically linked program). `[` is `test` under another name and needs only the image alias. None
   ships until lane D lists it: `requests/b-d-new-coreutils-programs-for-the-rootfs-manifest.md`.
 - [-] `[B]` System administration utilities — Rust userspace binaries: -- 150 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `locale`, `mesg`, `dbus`, `perf`, `capsh`, `resolvectl`, `socat`, `parted`, `getfattr`, `auditctl`, `grub-install`, `upower`, `mkinitramfs`, `plymouth`, `udisksctl`, `numactl`, `btrfs`, `flatpak`, `firejail`, `apparmor`, `selinux`, `snapper`, `tuned`, `cpupower`, `thermald`, `fwupdmgr`, `podman`, `resolvectl`, `mcelog`, `rasdaemon`, `kexec`, `nvme`, `tpm2`, `avahi-daemon`, `cups`, `powertop`, `tlp`, `fscrypt`, `pipewire`, `xz`, `zstd`, `bzip2`, `lz4`, `age`, `openssl`, `certbot`, `gpg`, `borg`, `restic`, `rclone`, `git`, `sqlite3`, `cmake`, `meson`, `ninja`, `python3`, `node`, `docker`, `ffmpeg`, `valgrind`, `pkgconf`, `sensors`, `tmux`, `ruby`, `java`, `go`, `rustup`, `terraform`, `ansible`, `kubectl`, `gradle`, `maven`, `helm`, `prometheus`, `memcached`, `elasticsearch`, `consul`, `vault`, `etcd`, `minio`, `nginx`, `haproxy`, `traefik`, `caddy`, `envoy`, `openvpn`, `pgbouncer`, `neo4j`, `cassandra`, `iperf3`, `squid`, `postfix`, `dovecot`, `unbound`, `gitea`, `keycloak`, `mattermost`, `nextcloud`, `jellyfin`, `syncthing`, `borgmatic`, `pandoc`, `tesseract`, `exiftool`, `doxygen`, `ccache`, `distcc`, `sccache`, `mold`, `loki`, `tempo`, `jaeger`, `vegeta`, `k6`, `wrk`, `ab`, `cfssl`, `hashcat`, `john`, `lynis`, `trivy`, `cosign`, `buildah`, `cni-plugins`, `flux`, `argocd`, `pulumi`, `packer`, `mpv`, `sox`, `cmus`, `ncmpcpp`, `remmina`, `xrdp`, `borg`, `duplicity`, `timeshift`, `snapper2`, `lua`, `perl`, `php`, `julia`, `deno`, `bun`, `zig`, `micro`, `lazygit`, `lazydocker`, `bat`, `eza`.
@@ -4379,7 +4393,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] kill/killall: process termination (graceful IPC + force kill, name matching, wait/timeout)
   - [x] hostname: get/set hostname (FQDN, domain, IP display, RFC validation, domainname mode)
   - [x] date: date/time display/set (strftime format, ISO 8601/RFC 5322/3339, date parsing)
-  - [x] uptime: system uptime (load averages, pretty/since/raw modes, user count, JSON)
+  - [x] uptime: procps-ng 4.0.4's, in coreutils -- the default line, `-p` and `-s`; the line is `procps_uptime_sprint`, shared with `w` as `coreutils::procps`, reading `/proc/uptime` and `/proc/loadavg` as its `fscanf` does (`scripts/uptime-diff.sh`, 68 cases)
   - [x] ping: ICMP echo (RTT statistics, flood mode, DNS resolve, Ctrl+C summary)
   - [x] wget: HTTP file download (chunked transfer, redirects, resume, progress bar, retries)
   - [x] du: disk usage (recursive walk, glob exclude, inode dedup, threshold, 16 KiB blocks)
@@ -4390,7 +4404,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] traceroute: network path tracing (ICMP TTL increment, reverse DNS, per-hop RTT)
   - [x] logrotate: log rotation — config parsing (stanzas with glob patterns, globals inherited per stanza and overridable without leaking back), daily/weekly/monthly/size schedules, `rotate N` retention, real gzip via the shared `deflate` crate, `missingok`, `notifempty`, `--dry-run`, `--force`, `--state`. Frequency is decided against the STATE FILE, not the log's mtime. An unimplemented directive (`olddir`, `postrotate`, …) is an ERROR with its line number rather than a silent skip — a config file states what should happen to a machine's logs, and ignoring part of it puts files somewhere nobody asked for and reports success. 28 tests. **On the image since 2026-09-13** — and it was the attempt to put it there that found that not one of the 278 Rust utilities under `userspace/` had ever been on the image: see `B-THE-RUST-HALF-OF-OUR-USERLAND-HAD-NEVER-BEEN-ON-THE-IMAGE`. (14 compiled-Python utilities were already promoted into `/bin` by the fastpy block, which the first version of that entry missed — the correction is recorded there.) `scripts/create-ext4-rootfs.sh` now stages every ELF in `target/x86_64-slateos/release/` into `/bin`: a measured image build staged 71 of them (60 MiB), skipping 15 names already owned by fastpy and dash, and took `/bin` from 36 entries to 107. Staged is not run: a boot test asserting one of them executes is lane A's, requested in `requests/b-a-our-own-utilities-are-on-the-image-now-can-a-boot-test-run-one.md`.
   - [x] dd: data copy/convert (block sizes, conversions, progress display, skip/seek)
-  - [x] who/w: logged-in users (utmp parsing, idle tracking, w mode with uptime header)
+  - [x] who/w: `who` is GNU 9.4's and `w` procps-ng 4.0.4's, both coreutils programs since 2026-10-02 (see the coreutils item; `scripts/who-diff.sh`, `scripts/w-diff.sh`)
   - [x] env/printenv: environment variable display/modify with command execution
   - [x] tar: POSIX ustar archive (create/extract/list, glob exclude, strip-components, verbose)
   - [x] watch: periodic command execution (difference highlighting, precise interval, exit-on-change)
@@ -4443,7 +4457,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] zip/unzip: ZIP archive create/extract (DEFLATE, CRC32, argv[0] mode, recursive, levels 0-9)
   - [x] readelf: ELF binary inspector (header/sections/segments/symbols/relocs/dynamic/notes, ELF32+ELF64)
   - [x] ldd: shared library dependency lister (DT_NEEDED, recursive resolution, RPATH/RUNPATH/LD_LIBRARY_PATH)
-  - [x] stty: terminal settings (termios ioctls, all flag categories, baud rates, raw/cooked/sane, control chars)
+  - [x] stty: GNU coreutils 9.4's, a coreutils program since 2026-10-02 (see the coreutils item; `scripts/stty-diff.sh`, 312 cases)
   - [x] nmap: network port scanner (TCP connect, ping scan, service version, OS detect, CIDR, timing T0-T5)
   - [x] sftp: SFTP file transfer client (protocol v3, interactive+batch, get/put/mget/mput, glob, progress)
   - [x] jq: JSON processor (full parser, filter engine with dot/pipe/index/select/map/sort_by/group_by, arithmetic/comparison/boolean ops, if-then-else, @base64/@html/@uri/@csv/@tsv, object/array construction, recursive descent)

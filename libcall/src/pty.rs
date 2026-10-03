@@ -238,6 +238,25 @@ pub fn set_window_size(master: i32, size: WinSize) -> Result<(), i32> {
     set_window_size_one(master, size)
 }
 
+/// The size of the terminal on `fd`.
+///
+/// This is `ioctl(fd, TIOCGWINSZ)`, the question a program asks of its own
+/// standard output to learn how wide to draw -- `w` sizes its `WHAT` column
+/// from it, falling back to `COLUMNS` only when the answer is an error or zero
+/// columns. Either end of a pseudo-terminal answers, and so does the console.
+///
+/// # Errors
+///
+/// * [`EBADF`] — `fd` is negative, or not an open descriptor.
+/// * `ENOTTY` — `fd` is not a terminal: a pipe, a file, `/dev/null`.
+/// * [`ENOSYS`](crate::ENOSYS) — built for a host with no terminals of ours.
+pub fn window_size(fd: i32) -> Result<WinSize, i32> {
+    if fd < 0 {
+        return Err(EBADF);
+    }
+    window_size_one(fd)
+}
+
 /// Whether the child `pid` has finished, without waiting for it to.
 ///
 /// `waitpid(pid, WNOHANG)`. A child that has finished is *reaped* by this
@@ -373,6 +392,8 @@ mod sys {
     pub const FD_CLOEXEC: i64 = 1;
     /// `TIOCSWINSZ`: set a terminal's window size.
     pub const TIOCSWINSZ: u64 = 0x5414;
+    /// `TIOCGWINSZ`: read a terminal's window size.
+    pub const TIOCGWINSZ: u64 = 0x5413;
     /// `waitpid`: do not block.
     pub const WNOHANG: i32 = 1;
     /// `waitid`: the id names one process.
@@ -618,6 +639,34 @@ fn set_window_size_one(_master: i32, _size: WinSize) -> Result<(), i32> {
     Err(crate::ENOSYS)
 }
 
+#[cfg(unix)]
+fn window_size_one(fd: i32) -> Result<WinSize, i32> {
+    let mut winsize = sys::Winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: `TIOCGWINSZ` writes one `struct winsize` through the pointer,
+    // which is `winsize`, live and writable for the whole call.
+    let rc = unsafe { sys::ioctl(fd, sys::TIOCGWINSZ, &raw mut winsize) };
+    if rc == 0 {
+        Ok(WinSize {
+            rows: winsize.ws_row,
+            cols: winsize.ws_col,
+            xpixel: winsize.ws_xpixel,
+            ypixel: winsize.ws_ypixel,
+        })
+    } else {
+        Err(crate::last_errno())
+    }
+}
+
+#[cfg(not(unix))]
+fn window_size_one(_fd: i32) -> Result<WinSize, i32> {
+    Err(crate::ENOSYS)
+}
+
 #[cfg(not(unix))]
 fn try_wait_one(_pid: i32) -> Result<ChildState, i32> {
     Err(crate::ENOSYS)
@@ -712,6 +761,7 @@ mod tests {
         assert_eq!(sys::F_SETFD, posix::fcntl_ops::F_SETFD);
         assert_eq!(sys::FD_CLOEXEC, i64::from(posix::fdtable::FD_CLOEXEC));
         assert_eq!(sys::TIOCSWINSZ, posix::ioctl::TIOCSWINSZ);
+        assert_eq!(sys::TIOCGWINSZ, posix::ioctl::TIOCGWINSZ);
         assert_eq!(sys::WNOHANG, posix::process::WNOHANG);
         assert_eq!(sys::P_PID, posix::process::P_PID);
         assert_eq!(sys::WEXITED, posix::process::WEXITED);
@@ -797,6 +847,12 @@ mod tests {
         assert_eq!(set_window_size(-1, size(24, 80)), Err(EBADF));
     }
 
+    /// The same for the question as for the order.
+    #[test]
+    fn window_size_refuses_a_negative_descriptor() {
+        assert_eq!(window_size(-1), Err(EBADF));
+    }
+
     /// On a host every call declines once the checks have passed, rather than
     /// pretending a terminal exists.
     #[cfg(not(unix))]
@@ -804,6 +860,7 @@ mod tests {
     fn the_host_arms_decline() {
         assert_eq!(spawn(SH, &[SH], &[], size(24, 80)), Err(ENOSYS));
         assert_eq!(set_window_size(3, size(24, 80)), Err(ENOSYS));
+        assert_eq!(window_size(1), Err(ENOSYS));
         assert_eq!(try_wait(1), Err(ENOSYS));
         assert_eq!(wait_exited(1), Err(ENOSYS));
     }
@@ -943,6 +1000,36 @@ mod tests {
             close(s.master);
             assert!(out.contains("40 132"), "after the resize stty said {out:?}");
             wait_for(s.pid);
+        }
+
+        /// `window_size` reads back what the terminal was told, from the
+        /// master -- the end a terminal emulator holds -- before and after a
+        /// resize.
+        #[test]
+        fn the_size_reads_back_from_the_master() {
+            let s = spawn(SH, &[c"sh", c"-c", c"read x"], &[], size(33, 101)).expect("spawn");
+            assert_eq!(window_size(s.master), Ok(size(33, 101)));
+            set_window_size(s.master, size(40, 132)).expect("resize");
+            assert_eq!(window_size(s.master), Ok(size(40, 132)));
+            // SAFETY: a one-byte write from a live buffer to our own master,
+            // which lets the child's `read` finish.
+            let wrote = unsafe { sys::write(s.master, b"\n".as_ptr(), 1) };
+            assert_eq!(wrote, 1);
+            read_until_closed(s.master, Duration::from_secs(5));
+            close(s.master);
+            wait_for(s.pid);
+        }
+
+        /// A pipe is not a terminal, and says so rather than answering zero.
+        #[test]
+        fn a_pipe_has_no_window_size() {
+            let mut fds = [0i32; 2];
+            // SAFETY: `fds` is writable for the two descriptors `pipe2` returns.
+            assert_eq!(unsafe { sys::pipe2(fds.as_mut_ptr(), sys::O_CLOEXEC) }, 0);
+            assert_eq!(window_size(fds[0]), Err(ENOTTY));
+            assert_eq!(window_size(fds[1]), Err(ENOTTY));
+            close(fds[0]);
+            close(fds[1]);
         }
 
         /// The environment is exactly the one passed, not the parent's.

@@ -1,5 +1,14 @@
 ## B-TWO-IMPLEMENTATIONS-OF-`w`-AND-THE-BETTER-ONE-CAN-NEVER-RUN (lane B, 2026-08-22)
 
+**Status:** FIXED 2026-10-02 (lane B), boot confirmation pending. `w` is
+procps-ng 4.0.4's, ported into coreutils as a program of its own
+(`userspace/coreutils/src/bin/w.rs`, measured by `scripts/w-diff.sh`: 144
+cases agree, and the implementation it replaces agreed on none of them).
+`userspace/who`, whose `argv[0]` branch was the last `w`, is deleted; `who` is
+GNU 9.4's, in coreutils too. `finger` is `userspace/finger` and `pinky` is
+coreutils', both since September. No name is reached through `argv[0]` any
+more, which is item 3 of the proper fix below.
+
 **In short:** `w` is the command that lists who is logged in and what each of
 them is running. We have written it **twice**, in two different places, and the
 two disagree about what columns it prints. Only one of them can ever actually

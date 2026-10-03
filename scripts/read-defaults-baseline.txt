@@ -75,4 +75,3 @@ rfkill: read_sysfs(&base.join("type")).unwrap_or_default()
 shell: std::env::var("TARGET").unwrap_or_default()  # examined 2026-09-11: build.rs, where cargo always sets TARGET, so the default is unreachable
 update-alternatives: std::env::var("TARGET").unwrap_or_default()  # examined 2026-09-11: build.rs, where cargo always sets TARGET, so the default is unreachable
 updatedb: std::env::var("TARGET").unwrap_or_default()  # examined 2026-09-11: build.rs, where cargo always sets TARGET, so the default is unreachable
-who: fs::read_to_string(entry.path()).unwrap_or_default()

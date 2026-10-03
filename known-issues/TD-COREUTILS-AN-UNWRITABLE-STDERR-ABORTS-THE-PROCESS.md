@@ -216,9 +216,13 @@ wherever upstream has a rule, and is absent where upstream has none:
 The other half of this is the closed-*descriptor* guard (`guard_std_fds!` and
 `stdfd::restore`), without which Rust's runtime quietly replaces a closed
 descriptor with `/dev/null` before `main` and a program cannot see `>&-` at
-all. Twenty-two programs still lack it: `bc chmod chown cmp csplit
-date df dir du ed find install kill ls more patch stat tail vdir awk hostname
-sort`. (`od`, `tee`, `tr` and `uniq` were converted on 2026-10-03 with their
+all. Twenty-one programs still lack it: `bc chmod chown cmp csplit
+date df dir du ed find install kill ls more patch stat tail vdir awk hostname`.
+(`sort` was converted on 2026-10-03, its output moved onto
+`stdio::StdioFile` so that a failure is upstream's `write failed` or `fflush
+failed` -- whichever glibc's buffer makes it -- followed by `close_stdout`'s
+`write error`; 32 of 35 descriptor rows agree, the rest `--help`'s text.
+`od`, `tee`, `tr` and `uniq` were converted on 2026-10-03 with their
 closed-standard-input fixes, each measured with every standard descriptor
 closed and full: 73 of 85 rows agree with GNU, the rest `--help`'s text.
 `cut` was converted on 2026-10-03 with its

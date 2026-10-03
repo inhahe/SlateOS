@@ -668,6 +668,76 @@ run_stdin 'a\nb\n' --field-separator , -k1
 # argument: this checks, and leaves `quiet` an operand that does not exist.
 run_msg --check quiet
 
+# --- an input that cannot be read, an output that cannot be written ----------
+# stdout, the stderr *text* and the status, under one redirection each. Every
+# row here was measured against GNU sort 9.4 on 2026-10-03 and failed before
+# that day's conversion:
+#
+# * Sorting `fstat`s every `-` once its first input is open -- `stat failed:
+#   -: Bad file descriptor` -- but a file opened while descriptor 0 is closed
+#   becomes descriptor 0, which `xfclose` never closes, so in `sort f -` the
+#   `-` is `f` again, at its end. `-c` and `-m` read without the `fstat`.
+# * A failure while the lines go out is `write failed`, one at the final
+#   `fflush` is `fflush failed`, each naming the output, and `close_stdout`
+#   then adds a reason-less `write error`. Which of the two depends on where
+#   glibc's buffer flushes, so a small and a large output are both asked.
+run_fd() {
+  local mode=$1; shift
+  local o_out g_out o_err g_err o_rc g_rc
+  o_out=$(mktemp); g_out=$(mktemp); o_err=$(mktemp); g_err=$(mktemp)
+  # A spelling per mode: a redirection held in a variable would arrive as an
+  # argument.
+  case $mode in
+    stdin-closed)
+      $OURS_RUN "$@" <&- >"$o_out" 2>"$o_err"; o_rc=$?
+      $GNU_RUN  "$@" <&- >"$g_out" 2>"$g_err"; g_rc=$? ;;
+    stdin-dir)
+      $OURS_RUN "$@" <. >"$o_out" 2>"$o_err"; o_rc=$?
+      $GNU_RUN  "$@" <. >"$g_out" 2>"$g_err"; g_rc=$? ;;
+    stdout-closed)
+      $OURS_RUN "$@" </dev/null >&- 2>"$o_err"; o_rc=$?
+      $GNU_RUN  "$@" </dev/null >&- 2>"$g_err"; g_rc=$? ;;
+    stdout-full)
+      $OURS_RUN "$@" </dev/null >/dev/full 2>"$o_err"; o_rc=$?
+      $GNU_RUN  "$@" </dev/null >/dev/full 2>"$g_err"; g_rc=$? ;;
+  esac
+  if [ "$o_rc" = "$g_rc" ] && cmp -s "$o_out" "$g_out" && cmp -s "$o_err" "$g_err"; then
+    AGREED=yes
+  else
+    AGREED=no
+    REPORT=$(printf '  ours (rc=%s): out{%s} err{%s}\n  gnu  (rc=%s): out{%s} err{%s}' \
+      "$o_rc" "$(tr '\n' '|' <"$o_out")" "$(tr '\n' '|' <"$o_err")" \
+      "$g_rc" "$(tr '\n' '|' <"$g_out")" "$(tr '\n' '|' <"$g_err")")
+  fi
+  rm -f "$o_out" "$g_out" "$o_err" "$g_err"
+  report "sort $* [$mode]"
+}
+seq 1 100000 > big.txt
+run_fd stdin-closed
+run_fd stdin-closed -
+run_fd stdin-closed -u
+run_fd stdin-closed sorted.txt -
+run_fd stdin-closed - sorted.txt
+run_fd stdin-closed unsorted.txt - sorted.txt
+run_fd stdin-closed -c
+run_fd stdin-closed -C
+run_fd stdin-closed -m -
+run_fd stdin-closed -m merge1.txt -
+run_fd stdin-closed -m - merge1.txt
+run_fd stdin-closed --files0-from=-
+run_fd stdin-dir
+run_fd stdin-dir -c
+run_fd stdin-dir -m -
+run_fd stdin-dir unsorted.txt -
+run_fd stdout-closed unsorted.txt
+run_fd stdout-closed big.txt
+run_fd stdout-closed -u unsorted.txt
+run_fd stdout-full unsorted.txt
+run_fd stdout-full big.txt
+run_fd stdout-full -m big.txt big.txt
+run_fd stdout-full -o /dev/full unsorted.txt
+run_fd stdout-full -o /dev/full big.txt
+
 # --- POSIXLY_CORRECT -----------------------------------------------------------
 # glibc's getopt ends option parsing at the first operand while it is set -- to
 # anything, the empty string included -- so an option after an operand is an

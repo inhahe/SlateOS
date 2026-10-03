@@ -43,9 +43,9 @@ DIFF_PROG='read-error'
 DIFF_GNU_SOURCE=9.4
 DIFF_NO_REF=1
 DIFF_NEED="timeout"
-DIFF_BINS="b2sum base32 base64 cat cksum comm cut dircolors expand factor fold head join
-           md5sum nl numfmt od paste sha1sum sha256sum sha512sum sum tee tr tsort
-           unexpand uniq wc"
+DIFF_BINS="b2sum base32 base64 cat cksum comm cut dircolors expand factor fold
+           head join md5sum nl numfmt od paste sha1sum sha256sum sha512sum sort
+           sum tee tr tsort unexpand uniq wc"
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
@@ -197,6 +197,21 @@ sweep tee
 sweep od
 sweep od        -c -
 sweep od        f -
+# `sort` `fstat`s every `-` once its first input is open, so `stat failed`
+# where the others say read; and a file opened while descriptor 0 is closed
+# becomes descriptor 0, which `xfclose` never closes -- so in `sort f -` the
+# `-` is `f` again, at its end, and the run succeeds. `-c` and `-m` read
+# without the `fstat`.
+sweep sort
+sweep sort      -
+sweep sort      -u
+sweep sort      f -
+sweep sort      - f
+sweep sort      -c
+sweep sort      -C
+sweep sort      -m -
+sweep sort      -m f -
+sweep sort      -m - f
 
 # --- a file named on the command line is not standard input ------------------
 # Neither shape may change anything here: standard input is never read, so it
@@ -210,6 +225,7 @@ sweep cat       f
 sweep head      f
 sweep od        f
 sweep uniq      f
+sweep sort      f
 
 printf '\n'
 [ -n "$DIFF_SKIPPED" ] && printf 'not compared (no reference or no build):%s\n' "$DIFF_SKIPPED"

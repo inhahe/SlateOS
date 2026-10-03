@@ -185,6 +185,27 @@ mod imp {
         // Declared as the standard library declares it, for the reason given
         // at `write`.
         fn open(path: *const core::ffi::c_char, oflag: i32, ...) -> i32;
+        // `*const u8`, as `dirfd.rs` declares it: two declarations of one C
+        // symbol must agree (`clashing_extern_declarations`).
+        fn faccessat(dirfd: i32, path: *const u8, mode: i32, flags: i32) -> i32;
+    }
+
+    /// `AT_FDCWD`, `R_OK` and `AT_EACCESS`: the Linux values.
+    const AT_FDCWD: i32 = -100;
+    const R_OK: i32 = 4;
+    const AT_EACCESS: i32 = 0x200;
+
+    pub fn readable(path: &[u8]) -> io::Result<()> {
+        // A name from argv cannot hold a NUL, and a `--files0-from` list is cut
+        // at them, so this is unreachable; `EINVAL` is what a kernel would say.
+        let c_path = std::ffi::CString::new(path).map_err(|_| io::Error::from_raw_os_error(22))?;
+        // SAFETY: `c_path` is a NUL-terminated string that outlives the call,
+        // and `faccessat` only reads it.
+        if unsafe { faccessat(AT_FDCWD, c_path.as_ptr().cast::<u8>(), R_OK, AT_EACCESS) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
     }
 
     pub fn is_tty(fd: i32) -> bool {
@@ -425,6 +446,12 @@ mod imp {
 mod imp {
     use std::io::{self, Write};
 
+    /// No `euidaccess` without libc: whether the name exists is the nearest
+    /// question the standard library can ask.
+    pub fn readable(path: &[u8]) -> io::Result<()> {
+        std::fs::metadata(crate::quote::os_from_bytes(path)).map(drop)
+    }
+
     pub fn is_tty(_fd: i32) -> bool {
         // No `isatty` without libc, and the answer only decides buffering. The
         // conservative choice is the one that shows output soonest.
@@ -624,6 +651,19 @@ pub fn is_tty(fd: i32) -> bool {
 /// refusing to run.
 pub fn probe(fd: i32) -> io::Result<()> {
     imp::probe(fd)
+}
+
+/// `euidaccess (path, R_OK)`: whether this process may read `path`, asked
+/// without opening it. That matters for a FIFO, whose open would wait for a
+/// writer, and it is how `sort`'s `check_inputs` refuses an unreadable
+/// operand before reading any of them.
+///
+/// # Errors
+///
+/// Whatever `faccessat(2)` reports -- `ENOENT`, `EACCES` and the like. Off
+/// Linux, whether the name exists at all.
+pub fn readable(path: &[u8]) -> io::Result<()> {
+    imp::readable(path)
 }
 
 /// `fstat(2)` on a descriptor: what [`probe`] asks, with the answer kept.

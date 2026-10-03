@@ -177662,6 +177662,16 @@ file again before it writes and writing only its own change into it.
 ### [E] A key held with Alt or the Windows key works a program's bare-key binding -- 2026-09-29
 
 **Status:** OPEN -- being fixed program by program (the roadmap's keys pass).
+Done, each with a test and mutation rows (2026-09-29 to 10-01): stopwatch,
+hangman, asteroids, battleship, benchmark, calendar, clipmanager, compass,
+contacts, credmanager, crossword, dbviewer, musicplayer, defrag,
+devicemanager, diskimager, dots, ebook, email, explorer, fileassoc, filediff.
+Most had the AltGr fault too -- a Ctrl shortcut matched on Ctrl held, so
+AltGr+S, a Polish `ś`, saved -- and several typed a command's letter into a
+field; both are fixed in the same pass. Two found on the way: dbviewer's and
+musicplayer's F1 list never showed (its release toggled it off again), and
+the toolkit's dialogs answer a chorded Enter or Space
+(`requests/e-c-the-toolkit-dialogs-answer-a-chorded-enter-space-and-escape.md`).
 
 **In short:** Many programs act on a plain letter: N for a new game, S for
 stop, a letter guessed in hangman. The compositor hands a chord its letter as

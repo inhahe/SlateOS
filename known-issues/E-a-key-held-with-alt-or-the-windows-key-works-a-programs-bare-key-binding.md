@@ -12,11 +12,12 @@ startupmanager, sysmonitor, systemrestore, terminal, tmux, torrent,
 typingtutor, undelete, videoplayer, weather, wordle, wordsearch, worldclock,
 yahtzee and settings; nonogram was already guarded, and paint and the
 whiteboard now ask `textline`'s predicates rather than their own copies.
-Left: the shared one-line and multi-line fields (`apps/textline`,
-`apps/textarea`) still answer Alt's and the Windows key's chords on their
-editing keys -- Alt+Backspace deletes, Windows+Left moves the caret --
-though their own docs say those keys are the application's; that fix
-touches every program using them and comes next. The entry closes with it.
+The shared one-line and multi-line fields (`apps/textline`, `apps/textarea`)
+answered Alt's and the Windows key's chords on their editing keys --
+Alt+Backspace deleted, Windows+Left moved the caret -- though their docs
+said those keys were the application's; fixed (bca1a40d6), all 73 programs
+using them tested. **Fixed; to move to `known-issues-resolved/` once it is
+boot-tested on main.**
 
 Most programs had the AltGr fault too -- a Ctrl shortcut matched on Ctrl
 held, so AltGr+S, a Polish `ś`, saved -- and many typed a command's letter

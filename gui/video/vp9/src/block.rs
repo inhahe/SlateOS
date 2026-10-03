@@ -16,9 +16,14 @@
 //! (`dec_find_mv_refs`). The contexts each decision is coded with are
 //! `vp9_pred_common.c`'s.
 //!
-//! Tiles of one tile row are independent -- nothing in one reads anything in
-//! another -- so they are decoded one after another here where libvpx
-//! interleaves them a superblock row at a time; the result is the same.
+//! Tile columns are independent -- nothing in one reads anything in another;
+//! only the tile rows within a column run on into each other -- so a column
+//! is decoded whole, top to bottom, and columns one after another, where
+//! libvpx's single thread takes a row of tiles at a time; the result is the
+//! same. On several threads each column decodes into a strip of the frame
+//! of its own, with its own block grid, motion vectors, segment ids and
+//! symbol counts, all put together in column order once every column is
+//! done (libvpx's `decode_tiles_mt`, which also merges its tiles' counts).
 //!
 //! Translated into Rust from libvpx v1.17.0's `vp9/decoder/vp9_decodeframe.c`,
 //! `vp9/decoder/vp9_decodemv.c`, `vp9/common/vp9_pred_common.c`,
@@ -36,7 +41,7 @@
     reason = "positions are mode-info coordinates bounded by the frame (at most 8192 by 8192) and small block arithmetic; values from the stream are bounded by the trees and literals they are read with, and motion vectors wrap as libvpx's 16-bit fields do"
 )]
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::Error;
 use crate::boolread::BoolReader;
@@ -57,7 +62,7 @@ use crate::header::{self, Segmentation};
 use crate::idct;
 use crate::inter::{self, McScratch, ScaleFactors};
 use crate::intra::{self, Edges};
-use crate::probs::{Counts, FrameContext, MvComponentCounts, MvCounts};
+use crate::probs::{Accumulate, Counts, FrameContext, MvComponentCounts, MvCounts};
 use crate::tables;
 
 // --- What a frame is decoded with ----------------------------------------------------
@@ -162,12 +167,42 @@ impl ModeInfo {
     }
 }
 
+/// The columns of the frame's 8x8 cells a decoder holds: all of them, or
+/// one tile column's when tile columns decode on threads of their own. The
+/// arrays kept per cell -- which block covers it, the motion vectors left
+/// for the next frame, the segment map -- hold just these columns, `width`
+/// to a row.
+#[derive(Clone, Copy, Debug)]
+struct Columns {
+    col0: usize,
+    width: usize,
+}
+
+impl Columns {
+    /// Where cell (`row`, `col`) is kept, if it is one of these columns.
+    fn index(&self, row: usize, col: usize) -> Option<usize> {
+        let c = col.checked_sub(self.col0).filter(|&c| c < self.width)?;
+        Some(row * self.width + c)
+    }
+
+    /// Where `n` cells of `row` from `col` are kept: only if all of them are
+    /// these columns'.
+    fn run(&self, row: usize, col: usize, n: usize) -> Option<core::ops::Range<usize>> {
+        let start = self.index(row, col)?;
+        (col + n <= self.col0 + self.width).then_some(start..start + n)
+    }
+}
+
 /// Which block covers each 8x8 cell of the frame: libvpx's
 /// `mi_grid_visible`, as indices into the frame's blocks.
 #[derive(Clone, Debug)]
 pub(crate) struct MiGrid {
+    /// The frame's size in cells.
     pub mi_cols: usize,
     pub mi_rows: usize,
+    /// The columns kept: the whole frame's but while a tile column decodes
+    /// alone.
+    cols: Columns,
     cells: Vec<u32>,
     pub blocks: Vec<ModeInfo>,
 }
@@ -177,21 +212,27 @@ const NO_BLOCK: u32 = u32::MAX;
 
 impl MiGrid {
     fn new(mi_cols: usize, mi_rows: usize) -> Self {
+        let cols = Columns {
+            col0: 0,
+            width: mi_cols,
+        };
+        Self::window(mi_cols, mi_rows, cols)
+    }
+
+    /// A grid of only `cols`, for a tile column decoding alone.
+    fn window(mi_cols: usize, mi_rows: usize, cols: Columns) -> Self {
         Self {
             mi_cols,
             mi_rows,
-            cells: vec![NO_BLOCK; mi_cols * mi_rows],
+            cols,
+            cells: vec![NO_BLOCK; cols.width * mi_rows],
             blocks: Vec::new(),
         }
     }
 
     /// The block covering the cell, if it has been decoded.
     pub fn at(&self, mi_row: usize, mi_col: usize) -> Option<&ModeInfo> {
-        if mi_row >= self.mi_rows || mi_col >= self.mi_cols {
-            return None;
-        }
-        let idx = *self.cells.get(mi_row * self.mi_cols + mi_col)?;
-        self.blocks.get(idx as usize)
+        self.blocks.get(self.index_at(mi_row, mi_col)?)
     }
 
     fn index_at(&self, mi_row: usize, mi_col: usize) -> Option<usize> {
@@ -199,10 +240,49 @@ impl MiGrid {
             return None;
         }
         self.cells
-            .get(mi_row * self.mi_cols + mi_col)
+            .get(self.cols.index(mi_row, mi_col)?)
             .copied()
             .filter(|&i| i != NO_BLOCK)
             .map(|i| i as usize)
+    }
+
+    /// Record `block` as covering `n` cells of `row` from `col`.
+    fn cover(&mut self, row: usize, col: usize, n: usize, block: u32) {
+        if let Some(cells) = self
+            .cols
+            .run(row, col, n)
+            .and_then(|r| self.cells.get_mut(r))
+        {
+            cells.fill(block);
+        }
+    }
+
+    /// Take in a tile column's grid: its blocks, after this grid's, and its
+    /// columns' cells, pointing at them.
+    fn absorb(&mut self, part: MiGrid) -> Result<(), Error> {
+        let offset =
+            u32::try_from(self.blocks.len()).map_err(|_| Error::Corrupt("too many blocks"))?;
+        let Columns { col0, width } = part.cols;
+        for row in 0..self.mi_rows.min(part.mi_rows) {
+            let (Some(dst), Some(src)) = (
+                self.cols
+                    .run(row, col0, width)
+                    .and_then(|r| self.cells.get_mut(r)),
+                part.cells.get(row * width..(row + 1) * width),
+            ) else {
+                continue;
+            };
+            for (d, &s) in dst.iter_mut().zip(src) {
+                *d = if s == NO_BLOCK {
+                    NO_BLOCK
+                } else {
+                    s.checked_add(offset)
+                        .ok_or(Error::Corrupt("too many blocks"))?
+                };
+            }
+        }
+        self.blocks.extend(part.blocks);
+        Ok(())
     }
 }
 
@@ -256,7 +336,9 @@ fn tile_buffers(data: &[u8], rows: usize, cols: usize) -> Result<Vec<(usize, &[u
     Ok(out)
 }
 
-/// Decode every tile of the frame into `frame`: libvpx's `decode_tiles`.
+/// Decode every tile of the frame into `frame`: libvpx's `decode_tiles`, or,
+/// given more than one thread and a frame of more than one tile column,
+/// `decode_tiles_mt` -- tile columns on threads of their own.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn decode_tiles(
     info: &FrameInfo,
@@ -269,134 +351,309 @@ pub(crate) fn decode_tiles(
     counts: &mut Counts,
     data: &[u8],
     frame: &mut AnyFrame,
+    threads: usize,
 ) -> Result<Decoded, Error> {
-    match frame {
-        AnyFrame::Eight(f) => decode_tiles_t(
-            info,
-            fc,
-            refs,
-            prev_mvs,
-            last_seg_map,
-            cur_seg_map,
-            cur_mvs,
-            counts,
-            data,
-            f,
-        ),
-        AnyFrame::High(f) => decode_tiles_t(
-            info,
-            fc,
-            refs,
-            prev_mvs,
-            last_seg_map,
-            cur_seg_map,
-            cur_mvs,
-            counts,
-            data,
-            f,
-        ),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn decode_tiles_t<P: Pixel>(
-    info: &FrameInfo,
-    fc: &FrameContext,
-    refs: &[Option<RefInfo<'_>>],
-    prev_mvs: Option<&[MvRef]>,
-    last_seg_map: &[u8],
-    cur_seg_map: &mut [u8],
-    cur_mvs: &mut [MvRef],
-    counts: &mut Counts,
-    data: &[u8],
-    frame: &mut FrameBuf<P>,
-) -> Result<Decoded, Error> {
-    let mut ref_frames: [Option<(&FrameBuf<P>, ScaleFactors)>; 3] = [None, None, None];
-    if !info.intra_only {
-        for (slot, r) in ref_frames.iter_mut().zip(refs) {
-            if let Some(r) = r {
-                let f = P::from_any(r.frame).ok_or(Error::Corrupt(
-                    "a reference frame has an incompatible colour format",
-                ))?;
-                *slot = Some((f, r.sf));
-            }
-        }
-    }
     let tile_cols = 1usize << info.log2_tile_cols;
     let tile_rows = 1usize << info.log2_tile_rows;
     let buffers = tile_buffers(data, tile_rows, tile_cols)?;
-    let aligned_cols = (info.mi_cols + 7) & !7;
-    let mut d = Dec {
-        info,
-        fc,
-        refs: ref_frames,
-        prev_mvs,
-        last_seg_map,
+    let sinks = Sinks {
         cur_seg_map,
         cur_mvs,
-        counts: if info.count { Some(counts) } else { None },
-        mi: MiGrid::new(info.mi_cols, info.mi_rows),
-        frame,
-        above_ctx: core::array::from_fn(|_| vec![0u8; 2 * aligned_cols]),
-        above_seg: vec![0u8; aligned_cols],
-        left_ctx: [[0; 16]; 3],
-        left_seg: [0; 8],
-        token_cache: [0; 1024],
-        dqcoeff: vec![0; 32 * 32],
-        mc: McScratch::new(),
-        intra_out: [[0; 32]; 32],
-        tile: TileInfo {
-            mi_col_start: 0,
-            mi_col_end: 0,
-        },
+        counts,
     };
-    let mut end_of_data = 0usize;
-    for tile_row in 0..tile_rows {
-        let mi_row_start =
-            header::tile_offset(tile_row as u32, info.mi_rows as u32, info.log2_tile_rows) as usize;
-        let mi_row_end = header::tile_offset(
-            tile_row as u32 + 1,
-            info.mi_rows as u32,
-            info.log2_tile_rows,
-        ) as usize;
-        for tile_col in 0..tile_cols {
-            let (start, buf) = *buffers
-                .get(tile_row * tile_cols + tile_col)
-                .ok_or(Error::Corrupt("a tile is missing"))?;
-            d.tile = TileInfo {
-                mi_col_start: header::tile_offset(
-                    tile_col as u32,
-                    info.mi_cols as u32,
-                    info.log2_tile_cols,
-                ) as usize,
-                mi_col_end: header::tile_offset(
-                    tile_col as u32 + 1,
-                    info.mi_cols as u32,
-                    info.log2_tile_cols,
-                ) as usize,
-            };
-            let mut r = BoolReader::new(buf)?;
-            let mut mi_row = mi_row_start;
-            while mi_row < mi_row_end {
-                d.left_ctx = [[0; 16]; 3];
-                d.left_seg = [0; 8];
-                let mut mi_col = d.tile.mi_col_start;
-                while mi_col < d.tile.mi_col_end {
-                    d.decode_partition(&mut r, mi_row, mi_col, BLOCK_64X64, 4)?;
-                    mi_col += 8;
-                }
-                if r.has_error() {
-                    return Err(Error::Corrupt("failed to decode tile data"));
-                }
-                mi_row += 8;
-            }
-            end_of_data = start + r.find_end();
+    match frame {
+        AnyFrame::Eight(f) => {
+            let shared = Shared::new(info, fc, refs, prev_mvs, last_seg_map, &buffers, f)?;
+            decode_tiles_t(shared, sinks, f, threads)
         }
+        AnyFrame::High(f) => {
+            let shared = Shared::new(info, fc, refs, prev_mvs, last_seg_map, &buffers, f)?;
+            decode_tiles_t(shared, sinks, f, threads)
+        }
+    }
+}
+
+/// What every tile of a frame reads and none writes: one copy serves every
+/// thread.
+#[derive(Clone, Copy)]
+struct Shared<'a, P: Pixel> {
+    info: &'a FrameInfo,
+    fc: &'a FrameContext,
+    refs: [Option<(&'a FrameBuf<P>, ScaleFactors)>; 3],
+    prev_mvs: Option<&'a [MvRef]>,
+    last_seg_map: &'a [u8],
+    /// Each tile's data, in raster order, with where it starts in the frame's
+    /// tile data.
+    buffers: &'a [(usize, &'a [u8])],
+    /// The frame's planes' widths: the edge intra prediction stops at.
+    plane_w: [usize; 3],
+}
+
+impl<'a, P: Pixel> Shared<'a, P> {
+    fn new(
+        info: &'a FrameInfo,
+        fc: &'a FrameContext,
+        refs: &[Option<RefInfo<'a>>],
+        prev_mvs: Option<&'a [MvRef]>,
+        last_seg_map: &'a [u8],
+        buffers: &'a [(usize, &'a [u8])],
+        frame: &FrameBuf<P>,
+    ) -> Result<Self, Error> {
+        let mut ref_frames: [Option<(&FrameBuf<P>, ScaleFactors)>; 3] = [None, None, None];
+        if !info.intra_only {
+            for (slot, r) in ref_frames.iter_mut().zip(refs) {
+                if let Some(r) = r {
+                    let f = P::from_any(r.frame).ok_or(Error::Corrupt(
+                        "a reference frame has an incompatible colour format",
+                    ))?;
+                    *slot = Some((f, r.sf));
+                }
+            }
+        }
+        Ok(Self {
+            info,
+            fc,
+            refs: ref_frames,
+            prev_mvs,
+            last_seg_map,
+            buffers,
+            plane_w: core::array::from_fn(|i| frame.planes[i].width),
+        })
+    }
+
+    /// Tile column `tile_col`'s extent, in mode-info columns.
+    fn tile_cols(&self, tile_col: usize) -> TileInfo {
+        let info = self.info;
+        let offset = |i: usize| {
+            header::tile_offset(i as u32, info.mi_cols as u32, info.log2_tile_cols) as usize
+        };
+        TileInfo {
+            mi_col_start: offset(tile_col),
+            mi_col_end: offset(tile_col + 1),
+        }
+    }
+}
+
+/// What a frame's tiles write besides pixels and blocks: the segment map
+/// and motion vectors the next frame reads, and the symbol counts the
+/// probabilities adapt from.
+struct Sinks<'a> {
+    cur_seg_map: &'a mut [u8],
+    cur_mvs: &'a mut [MvRef],
+    counts: &'a mut Counts,
+}
+
+fn decode_tiles_t<P: Pixel>(
+    shared: Shared<'_, P>,
+    sinks: Sinks<'_>,
+    frame: &mut FrameBuf<P>,
+    threads: usize,
+) -> Result<Decoded, Error> {
+    let info = shared.info;
+    let tile_cols = 1usize << info.log2_tile_cols;
+    let workers = threads.clamp(1, tile_cols);
+    if workers > 1 {
+        return decode_columns_threaded(shared, sinks, frame, workers);
+    }
+    // One decoder over every tile column in turn, straight into the frame.
+    // Tile columns are independent, so taking them a column at a time rather
+    // than a row of tiles at a time changes nothing.
+    let all = Columns {
+        col0: 0,
+        width: info.mi_cols,
+    };
+    let Sinks {
+        cur_seg_map,
+        cur_mvs,
+        counts,
+    } = sinks;
+    let mut d = Dec::new(
+        shared,
+        all,
+        frame,
+        cur_seg_map,
+        cur_mvs,
+        info.count.then_some(counts),
+    );
+    let mut end_of_data = 0;
+    for tile_col in 0..tile_cols {
+        end_of_data = d.decode_column(tile_col)?;
     }
     Ok(Decoded {
         mi: d.mi,
         end_of_data,
     })
+}
+
+/// One tile column decoded on a thread of its own: everything it writes,
+/// kept apart until every column is done -- its strip of the frame, its
+/// blocks, its cells' motion vectors and segment ids, its counts.
+struct Column<P: Pixel> {
+    tile_col: usize,
+    /// Its cells' columns.
+    cols: Columns,
+    /// Where its strip begins in the frame, in luma pixels.
+    x0: usize,
+    strip: FrameBuf<P>,
+    /// Its blocks, once decoded.
+    mi: Option<MiGrid>,
+    mvs: Vec<MvRef>,
+    seg: Vec<u8>,
+    counts: Box<Counts>,
+    /// Where its last tile's data ended.
+    end: usize,
+}
+
+impl<P: Pixel> Column<P> {
+    fn new(shared: &Shared<'_, P>, frame: &FrameBuf<P>, tile_col: usize) -> Result<Self, Error> {
+        let info = shared.info;
+        let tile = shared.tile_cols(tile_col);
+        let cols = Columns {
+            col0: tile.mi_col_start,
+            width: tile.mi_col_end.saturating_sub(tile.mi_col_start),
+        };
+        // The strip reaches its last superblock's right edge: a block at the
+        // frame's edge is predicted whole.
+        let x0 = tile.mi_col_start * 8;
+        let x1 = tile.mi_col_end.div_ceil(8) * 64;
+        Ok(Self {
+            tile_col,
+            cols,
+            x0,
+            strip: frame.strip(x1.saturating_sub(x0))?,
+            mi: None,
+            mvs: vec![MvRef::default(); cols.width * info.mi_rows],
+            seg: vec![0; cols.width * info.mi_rows],
+            counts: Box::default(),
+            end: 0,
+        })
+    }
+
+    fn decode(&mut self, shared: Shared<'_, P>) -> Result<(), Error> {
+        let info = shared.info;
+        let mut d = Dec::new(
+            shared,
+            self.cols,
+            &mut self.strip,
+            &mut self.seg,
+            &mut self.mvs,
+            info.count.then_some(&mut *self.counts),
+        );
+        d.px_x0 = [self.x0, self.x0 >> info.ss_x, self.x0 >> info.ss_x];
+        self.end = d.decode_column(self.tile_col)?;
+        self.mi = Some(d.mi);
+        Ok(())
+    }
+}
+
+/// libvpx's `decode_tiles_mt`: each tile column on a thread, `workers` at
+/// once, then the frame put together from them in column order -- the
+/// result a single thread gives, bit for bit.
+fn decode_columns_threaded<P: Pixel>(
+    shared: Shared<'_, P>,
+    sinks: Sinks<'_>,
+    frame: &mut FrameBuf<P>,
+    workers: usize,
+) -> Result<Decoded, Error> {
+    let info = shared.info;
+    let tile_cols = 1usize << info.log2_tile_cols;
+    // Columns dealt out in turn: hand h takes columns h, h + workers, ...
+    // Each hand is a thread's to decode; the mutex only carries it across
+    // the thread boundary, and is never contended.
+    let mut dealt: Vec<Vec<Column<P>>> = (0..workers).map(|_| Vec::new()).collect();
+    for tile_col in 0..tile_cols {
+        if let Some(hand) = dealt.get_mut(tile_col % workers) {
+            hand.push(Column::new(&shared, frame, tile_col)?);
+        }
+    }
+    let hands: Vec<Mutex<Vec<Column<P>>>> = dealt.into_iter().map(Mutex::new).collect();
+    let decode_hand = move |hand: &Mutex<Vec<Column<P>>>| -> Result<(), Error> {
+        let mut hand = hand
+            .lock()
+            .map_err(|_| Error::Corrupt("a tile column's thread failed"))?;
+        for column in hand.iter_mut() {
+            column.decode(shared)?;
+        }
+        Ok(())
+    };
+    let outcomes: Vec<Result<(), Error>> = std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        let mut here = vec![0];
+        for (h, hand) in hands.iter().enumerate().skip(1) {
+            match std::thread::Builder::new().spawn_scoped(scope, move || decode_hand(hand)) {
+                Ok(handle) => handles.push(handle),
+                // A thread that cannot be made leaves its hand to this one.
+                Err(_) => here.push(h),
+            }
+        }
+        // This thread takes the first hand, and any left over.
+        let mut outcomes: Vec<Result<(), Error>> = here
+            .into_iter()
+            .map(|h| hands.get(h).map_or(Ok(()), decode_hand))
+            .collect();
+        outcomes.extend(handles.into_iter().map(|handle| {
+            handle
+                .join()
+                .unwrap_or(Err(Error::Corrupt("a tile column's thread failed")))
+        }));
+        outcomes
+    });
+    for outcome in outcomes {
+        outcome?;
+    }
+    let mut columns: Vec<Column<P>> = Vec::with_capacity(tile_cols);
+    for hand in hands {
+        columns.extend(
+            hand.into_inner()
+                .map_err(|_| Error::Corrupt("a tile column's thread failed"))?,
+        );
+    }
+    if columns.len() != tile_cols {
+        return Err(Error::Corrupt("a tile column was not decoded"));
+    }
+    columns.sort_by_key(|c| c.tile_col);
+
+    let Sinks {
+        cur_seg_map,
+        cur_mvs,
+        counts,
+    } = sinks;
+    let mut mi = MiGrid::new(info.mi_cols, info.mi_rows);
+    let mut end_of_data = 0;
+    for column in columns {
+        frame.paste(&column.strip, column.x0);
+        let Columns { col0, width } = column.cols;
+        for row in 0..info.mi_rows {
+            let at = row * info.mi_cols + col0;
+            let from = row * width;
+            if let (Some(d), Some(s)) = (
+                cur_mvs.get_mut(at..at + width),
+                column.mvs.get(from..from + width),
+            ) {
+                d.copy_from_slice(s);
+            }
+            // The map is written only while segmentation is on; otherwise
+            // the frame leaves the last one as it was.
+            if info.seg.enabled
+                && let (Some(d), Some(s)) = (
+                    cur_seg_map.get_mut(at..at + width),
+                    column.seg.get(from..from + width),
+                )
+            {
+                d.copy_from_slice(s);
+            }
+        }
+        if info.count {
+            counts.accumulate(&column.counts);
+        }
+        mi.absorb(
+            column
+                .mi
+                .ok_or(Error::Corrupt("a tile column was not decoded"))?,
+        )?;
+        end_of_data = column.end;
+    }
+    Ok(Decoded { mi, end_of_data })
 }
 
 // --- The decoder of one frame's blocks ------------------------------------------------
@@ -409,11 +666,21 @@ struct Dec<'a, P: Pixel> {
     refs: [Option<(&'a FrameBuf<P>, ScaleFactors)>; 3],
     prev_mvs: Option<&'a [MvRef]>,
     last_seg_map: &'a [u8],
+    buffers: &'a [(usize, &'a [u8])],
+    /// The columns of cells this decoder writes: `cur_seg_map`, `cur_mvs`
+    /// and `mi` hold just these.
+    cols: Columns,
     cur_seg_map: &'a mut [u8],
     cur_mvs: &'a mut [MvRef],
     counts: Option<&'a mut Counts>,
     mi: MiGrid,
+    /// The frame, or a tile column's strip of it.
     frame: &'a mut FrameBuf<P>,
+    /// Per plane, the frame's column that `frame`'s column 0 is: 0, or a
+    /// strip's left edge.
+    px_x0: [usize; 3],
+    /// Per plane, the frame's width, for intra prediction's edges.
+    plane_w: [usize; 3],
     /// Per plane: whether each 4x4 column above has nonzero coefficients.
     above_ctx: [Vec<u8>; 3],
     /// Partition contexts of each 8x8 column.
@@ -448,7 +715,94 @@ pub(crate) struct BlockPos {
     pub mb_to_bottom_edge: i32,
 }
 
-impl<P: Pixel> Dec<'_, P> {
+impl<'a, P: Pixel> Dec<'a, P> {
+    /// A decoder of the cells `cols`, writing pixels to `frame` -- the frame
+    /// itself, or a tile column's strip of it, whose offset the caller sets
+    /// in `px_x0` -- and cells to the windows given.
+    fn new(
+        shared: Shared<'a, P>,
+        cols: Columns,
+        frame: &'a mut FrameBuf<P>,
+        cur_seg_map: &'a mut [u8],
+        cur_mvs: &'a mut [MvRef],
+        counts: Option<&'a mut Counts>,
+    ) -> Self {
+        let info = shared.info;
+        let aligned_cols = (info.mi_cols + 7) & !7;
+        Self {
+            info,
+            fc: shared.fc,
+            refs: shared.refs,
+            prev_mvs: shared.prev_mvs,
+            last_seg_map: shared.last_seg_map,
+            buffers: shared.buffers,
+            cols,
+            cur_seg_map,
+            cur_mvs,
+            counts,
+            mi: MiGrid::window(info.mi_cols, info.mi_rows, cols),
+            frame,
+            px_x0: [0; 3],
+            plane_w: shared.plane_w,
+            above_ctx: core::array::from_fn(|_| vec![0u8; 2 * aligned_cols]),
+            above_seg: vec![0u8; aligned_cols],
+            left_ctx: [[0; 16]; 3],
+            left_seg: [0; 8],
+            token_cache: [0; 1024],
+            dqcoeff: vec![0; 32 * 32],
+            mc: McScratch::new(),
+            intra_out: [[0; 32]; 32],
+            tile: TileInfo {
+                mi_col_start: 0,
+                mi_col_end: 0,
+            },
+        }
+    }
+
+    /// Decode tile column `tile_col`, every tile row of it in order: the
+    /// above contexts run on from one tile row into the next. Returns where
+    /// its last tile's data ended.
+    fn decode_column(&mut self, tile_col: usize) -> Result<usize, Error> {
+        let info = self.info;
+        let tile_cols = 1usize << info.log2_tile_cols;
+        let tile_rows = 1usize << info.log2_tile_rows;
+        let row_offset = |i: usize| {
+            header::tile_offset(i as u32, info.mi_rows as u32, info.log2_tile_rows) as usize
+        };
+        let col_offset = |i: usize| {
+            header::tile_offset(i as u32, info.mi_cols as u32, info.log2_tile_cols) as usize
+        };
+        self.tile = TileInfo {
+            mi_col_start: col_offset(tile_col),
+            mi_col_end: col_offset(tile_col + 1),
+        };
+        let mut end = 0;
+        for tile_row in 0..tile_rows {
+            let (start, buf) = *self
+                .buffers
+                .get(tile_row * tile_cols + tile_col)
+                .ok_or(Error::Corrupt("a tile is missing"))?;
+            let mut r = BoolReader::new(buf)?;
+            let mut mi_row = row_offset(tile_row);
+            let mi_row_end = row_offset(tile_row + 1);
+            while mi_row < mi_row_end {
+                self.left_ctx = [[0; 16]; 3];
+                self.left_seg = [0; 8];
+                let mut mi_col = self.tile.mi_col_start;
+                while mi_col < self.tile.mi_col_end {
+                    self.decode_partition(&mut r, mi_row, mi_col, BLOCK_64X64, 4)?;
+                    mi_col += 8;
+                }
+                if r.has_error() {
+                    return Err(Error::Corrupt("failed to decode tile data"));
+                }
+                mi_row += 8;
+            }
+            end = start + r.find_end();
+        }
+        Ok(end)
+    }
+
     fn counts(&mut self) -> Option<&mut Counts> {
         self.counts.as_deref_mut()
     }
@@ -666,10 +1020,7 @@ impl<P: Pixel> Dec<'_, P> {
             u32::try_from(self.mi.blocks.len()).map_err(|_| Error::Corrupt("too many blocks"))?;
         self.mi.blocks.push(mi);
         for y in 0..y_mis {
-            let row = (mi_row + y) * info.mi_cols + mi_col;
-            if let Some(cells) = self.mi.cells.get_mut(row..row + x_mis) {
-                cells.fill(idx);
-            }
+            self.mi.cover(mi_row + y, mi_col, x_mis, idx);
         }
 
         if mi.skip {
@@ -678,6 +1029,7 @@ impl<P: Pixel> Dec<'_, P> {
         let skip_lf = if mi.is_inter() {
             inter::build_inter_predictors_sb(
                 self.frame,
+                self.px_x0[0],
                 &self.refs,
                 &mi,
                 &pos,
@@ -820,8 +1172,10 @@ impl<P: Pixel> Dec<'_, P> {
         } else {
             (u32::from(info.ss_x), u32::from(info.ss_y))
         };
-        // The block's top-left pixel in this plane.
-        let x0 = ((pos.mi_col * 8) >> sx) + 4 * col;
+        // The block's top-left pixel in this plane, in `frame` (a strip
+        // begins `px_x0` into the frame).
+        let px_x0 = self.px_x0[plane.min(2)];
+        let x0 = (((pos.mi_col * 8) >> sx) + 4 * col).saturating_sub(px_x0);
         let y0 = ((pos.mi_row * 8) >> sy) + 4 * row;
         let lossless = info.lossless;
         let bd = info.bit_depth;
@@ -847,7 +1201,7 @@ impl<P: Pixel> Dec<'_, P> {
                 have_right: col + txw < bw4,
                 past_right: pos.mb_to_right_edge < 0,
                 past_bottom: pos.mb_to_bottom_edge < 0,
-                frame_width: p.width,
+                frame_width: self.plane_w[plane.min(2)].saturating_sub(px_x0),
                 frame_height: p.height,
             };
             intra::predict(
@@ -1027,10 +1381,12 @@ impl<P: Pixel> Dec<'_, P> {
             mv: mi.mv,
             ref_frame: mi.ref_frame,
         };
-        let cols = self.info.mi_cols;
         for y in 0..y_mis {
-            let row = (pos.mi_row + y) * cols + pos.mi_col;
-            if let Some(cells) = self.cur_mvs.get_mut(row..row + x_mis) {
+            if let Some(cells) = self
+                .cols
+                .run(pos.mi_row + y, pos.mi_col, x_mis)
+                .and_then(|r| self.cur_mvs.get_mut(r))
+            {
                 cells.fill(mv_ref);
             }
         }
@@ -1131,21 +1487,27 @@ impl<P: Pixel> Dec<'_, P> {
         let cols = self.info.mi_cols;
         for y in 0..y_mis {
             let start = (mi_row + y) * cols + mi_col;
-            for i in start..start + x_mis {
-                let v = self.last_seg_map.get(i).copied().unwrap_or(0);
-                if let Some(c) = self.cur_seg_map.get_mut(i) {
-                    *c = v;
-                }
+            let Some(dst) = self
+                .cols
+                .run(mi_row + y, mi_col, x_mis)
+                .and_then(|r| self.cur_seg_map.get_mut(r))
+            else {
+                continue;
+            };
+            for (i, c) in (start..).zip(dst.iter_mut()) {
+                *c = self.last_seg_map.get(i).copied().unwrap_or(0);
             }
         }
     }
 
     /// libvpx's `set_segment_id`.
     fn set_segment_id(&mut self, mi_row: usize, mi_col: usize, x_mis: usize, y_mis: usize, id: u8) {
-        let cols = self.info.mi_cols;
         for y in 0..y_mis {
-            let start = (mi_row + y) * cols + mi_col;
-            if let Some(cells) = self.cur_seg_map.get_mut(start..start + x_mis) {
+            if let Some(cells) = self
+                .cols
+                .run(mi_row + y, mi_col, x_mis)
+                .and_then(|r| self.cur_seg_map.get_mut(r))
+            {
                 cells.fill(id);
             }
         }

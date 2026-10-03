@@ -43,9 +43,20 @@
 //! - `loopfilter`: smoothing across block edges.
 //! - `frame`: the planes frames are decoded into.
 //!
-//! Not yet here: threading (libvpx decodes tile columns, and loop-filters
-//! rows, in parallel), SIMD (every filter and transform is libvpx's C, in
-//! Rust), and reuse of frame buffers between frames.
+//! # Speed
+//!
+//! A frame's tile columns decode on threads of their own, as libvpx's
+//! `decode_tiles_mt` does them: each into its own strip of the frame, put
+//! back together in column order, so the pictures are the same on any
+//! number of threads ([`Decoder::set_threads`]; a new decoder uses every
+//! core). The hot loops -- motion compensation and the loop filter -- are
+//! written for the compiler to vectorise for baseline x86-64 (SSE2), in
+//! 16-bit lanes where every value provably fits. There is no hand-written
+//! SIMD and no `unsafe`; `tests/bench.rs` measures it against libvpx.
+//!
+//! Not yet here: threads within a tile column (libvpx's loop filter rows in
+//! parallel, and its row-based multithreading), and reuse of frame buffers
+//! between frames.
 //!
 //! # What a hostile stream can do
 //!

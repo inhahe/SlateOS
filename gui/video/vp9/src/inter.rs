@@ -137,9 +137,11 @@ fn kernel(filter: u8) -> &'static [[i16; 8]; 16] {
 }
 
 /// Predict an inter block, every plane, from its one or two references:
-/// libvpx's `dec_build_inter_predictors_sb`.
+/// libvpx's `dec_build_inter_predictors_sb`. `frame` is the frame, or a
+/// strip of it beginning `x0` luma pixels in.
 pub(crate) fn build_inter_predictors_sb<P: Pixel>(
     frame: &mut FrameBuf<P>,
+    x0: usize,
     refs: &[Option<(&FrameBuf<P>, ScaleFactors)>; 3],
     mi: &ModeInfo,
     pos: &BlockPos,
@@ -184,6 +186,7 @@ pub(crate) fn build_inter_predictors_sb<P: Pixel>(
                 kernel: k,
                 avg: r == 1,
                 max,
+                dst_x0: (x0 >> ss_x) as i32,
             };
             if mi.sb_type < BLOCK_8X8 {
                 let n4_w = (pos.bw << 1) >> ss_x;
@@ -261,6 +264,9 @@ struct Geometry<'a> {
     /// first predicted.
     avg: bool,
     max: i32,
+    /// Where the destination's column 0 is in the frame, in this plane:
+    /// 0, or a strip's left edge.
+    dst_x0: i32,
 }
 
 /// libvpx's `clamp_mv_to_umv_border_sb`: a vector so far out that no visible
@@ -353,7 +359,7 @@ fn predict<P: Pixel>(
 
     // The destination: this piece of the block in the current frame.
     let dst_plane = &mut frame.planes[plane.min(2)];
-    let dst_x = ((g.pos.mi_col * 8) >> g.ss_x) as i32 + x;
+    let dst_x = ((g.pos.mi_col * 8) >> g.ss_x) as i32 + x - g.dst_x0;
     let dst_y = ((g.pos.mi_row * 8) >> g.ss_y) as i32 + y;
     let dst_stride = dst_plane.stride;
     let dst_start = dst_y as usize * dst_stride + dst_x as usize;

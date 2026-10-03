@@ -218,6 +218,41 @@ impl<P: Pixel> FrameBuf<P> {
             crop_height,
         })
     }
+
+    /// A blank strip `width` luma pixels wide (a multiple of 64; chroma
+    /// planes take their share) of this frame's rows and format, for a tile
+    /// column to decode into on a thread of its own. Its planes' widths are
+    /// the strip's; the frame's own edges are the decoder's to keep track of.
+    pub(crate) fn strip(&self, width: usize) -> Result<Self, Error> {
+        let plane = |i: usize, p: &Plane<P>| {
+            let w = if i == 0 { width } else { width >> self.ss_x };
+            Self::plane(w, p.alloc_height, w, p.height, w, p.crop_height)
+        };
+        let [y, u, v] = &self.planes;
+        Ok(Self {
+            planes: [plane(0, y)?, plane(1, u)?, plane(2, v)?],
+            ..*self
+        })
+    }
+
+    /// Copy a strip made by [`Self::strip`] back in at luma pixel `x0`.
+    pub(crate) fn paste(&mut self, strip: &Self, x0: usize) {
+        for (i, (dst, src)) in self.planes.iter_mut().zip(&strip.planes).enumerate() {
+            let x = if i == 0 { x0 } else { x0 >> self.ss_x };
+            let w = src.stride.min(dst.stride.saturating_sub(x));
+            let rows = dst
+                .data
+                .chunks_exact_mut(dst.stride.max(1))
+                .zip(src.data.chunks_exact(src.stride.max(1)));
+            for (d, s) in rows {
+                if let (Some(d), Some(s)) =
+                    (d.get_mut(x..).and_then(|d| d.get_mut(..w)), s.get(..w))
+                {
+                    d.copy_from_slice(s);
+                }
+            }
+        }
+    }
 }
 
 /// A frame of either sample type, as the reference slots hold them.

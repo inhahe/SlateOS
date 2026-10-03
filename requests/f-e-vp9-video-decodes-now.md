@@ -36,8 +36,11 @@ if let Some(picture) = decoder.decode(&packet)? {
   decoder with `Decoder::with_max_pixels`.
 - `vp9::peek_stream_info(packet)` reads a frame's size and whether it is a
   key frame without decoding it -- for a probe, or for seeking to a key frame.
-- Single-threaded for now, and plain Rust with no SIMD: correct first,
-  threads next (roadmap, `[F]` VP9).
+- A frame's tile columns decode on threads of their own, one per core by
+  default (`decoder.set_threads(n)` to limit it); the pictures are the same
+  on any number of threads. Video encoded with one tile column -- small
+  frames, or old encoders -- decodes on one. `gui/video/vp9/tests/bench.rs`
+  measures it against libvpx.
 
 ## What is between a file and a frame on screen
 

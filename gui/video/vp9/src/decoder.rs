@@ -162,6 +162,8 @@ pub struct Decoder {
     /// libvpx's `pbi->need_resync`: inter frames are refused.
     need_resync: bool,
     max_pixels: u64,
+    /// How many threads a frame's tile columns may decode on.
+    threads: usize,
 
     // --- VP9_COMMON: what persists from frame to frame -------------------------
     profile: u8,
@@ -236,6 +238,7 @@ impl Decoder {
             iface_need_resync: true,
             need_resync: true,
             max_pixels: DEFAULT_MAX_PIXELS,
+            threads: std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get),
             profile: 0,
             color: ColorConfig {
                 bit_depth: 8,
@@ -289,6 +292,23 @@ impl Decoder {
             max_pixels,
             ..Self::new()
         }
+    }
+
+    /// Decode on at most `threads` threads (at least one) from the next
+    /// packet on. A new decoder uses as many as the machine has cores.
+    ///
+    /// A frame's tile columns are what decode in parallel, so a stream
+    /// coded with one tile column decodes on one thread whatever this says;
+    /// encoders give 1080p video four. The pictures are the same however
+    /// many threads make them.
+    pub fn set_threads(&mut self, threads: usize) {
+        self.threads = threads.max(1);
+    }
+
+    /// How many threads the decoder may use.
+    #[must_use]
+    pub fn threads(&self) -> usize {
+        self.threads
     }
 
     /// Decode one packet -- a frame, or a superframe of several -- and return
@@ -475,6 +495,7 @@ impl Decoder {
             &mut counts,
             tiles,
             &mut frame,
+            self.threads,
         )?;
 
         if self.lf.filter_level != 0 {

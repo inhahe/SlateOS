@@ -213,6 +213,109 @@ pub struct Counts {
     pub mv: MvCounts,
 }
 
+// --- Adding counts up ---------------------------------------------------------------
+
+/// Counts that add up: one tile column's to the frame's, when tile columns
+/// decode on threads of their own -- libvpx's `vp9_accumulate_frame_counts`.
+/// Wrapping, as the counters' own increments do. Each structure is taken
+/// apart field by field, so a field added later cannot be left out.
+pub(crate) trait Accumulate {
+    fn accumulate(&mut self, other: &Self);
+}
+
+impl Accumulate for u32 {
+    fn accumulate(&mut self, other: &Self) {
+        *self = self.wrapping_add(*other);
+    }
+}
+
+impl<T: Accumulate, const N: usize> Accumulate for [T; N] {
+    fn accumulate(&mut self, other: &Self) {
+        for (a, b) in self.iter_mut().zip(other) {
+            a.accumulate(b);
+        }
+    }
+}
+
+impl Accumulate for TxCounts {
+    fn accumulate(&mut self, other: &Self) {
+        let Self {
+            p32x32,
+            p16x16,
+            p8x8,
+        } = self;
+        p32x32.accumulate(&other.p32x32);
+        p16x16.accumulate(&other.p16x16);
+        p8x8.accumulate(&other.p8x8);
+    }
+}
+
+impl Accumulate for MvComponentCounts {
+    fn accumulate(&mut self, other: &Self) {
+        let Self {
+            sign,
+            classes,
+            class0,
+            bits,
+            class0_fp,
+            fp,
+            class0_hp,
+            hp,
+        } = self;
+        sign.accumulate(&other.sign);
+        classes.accumulate(&other.classes);
+        class0.accumulate(&other.class0);
+        bits.accumulate(&other.bits);
+        class0_fp.accumulate(&other.class0_fp);
+        fp.accumulate(&other.fp);
+        class0_hp.accumulate(&other.class0_hp);
+        hp.accumulate(&other.hp);
+    }
+}
+
+impl Accumulate for MvCounts {
+    fn accumulate(&mut self, other: &Self) {
+        let Self { joints, comps } = self;
+        joints.accumulate(&other.joints);
+        comps.accumulate(&other.comps);
+    }
+}
+
+impl Accumulate for Counts {
+    fn accumulate(&mut self, other: &Self) {
+        let Self {
+            y_mode,
+            uv_mode,
+            partition,
+            coef,
+            eob_branch,
+            switchable_interp,
+            inter_mode,
+            intra_inter,
+            comp_inter,
+            single_ref,
+            comp_ref,
+            tx,
+            skip,
+            mv,
+        } = self;
+        y_mode.accumulate(&other.y_mode);
+        uv_mode.accumulate(&other.uv_mode);
+        partition.accumulate(&other.partition);
+        coef.accumulate(&other.coef);
+        eob_branch.accumulate(&other.eob_branch);
+        switchable_interp.accumulate(&other.switchable_interp);
+        inter_mode.accumulate(&other.inter_mode);
+        intra_inter.accumulate(&other.intra_inter);
+        comp_inter.accumulate(&other.comp_inter);
+        single_ref.accumulate(&other.single_ref);
+        comp_ref.accumulate(&other.comp_ref);
+        tx.accumulate(&other.tx);
+        skip.accumulate(&other.skip);
+        mv.accumulate(&other.mv);
+    }
+}
+
 // --- Merging counts into probabilities -----------------------------------------
 
 /// `num / den` as a probability out of 256, clipped to 1..=255: libvpx's

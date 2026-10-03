@@ -42,12 +42,13 @@ fn picture_md5(p: &Picture) -> String {
     md5::hex(&md5.finalize()).to_string()
 }
 
-/// Decode a vector; compare each picture with libvpx's. Returns how many
-/// pictures matched, or the first difference.
-fn check(path: &Path) -> Result<usize, String> {
+/// Decode a vector on up to `threads` threads; compare each picture with
+/// libvpx's. Returns how many pictures matched, or the first difference.
+fn check(path: &Path, threads: usize) -> Result<usize, String> {
     let v = common::read_vector(path)?;
     let want = common::read_md5s(&common::md5_path(path))?;
     let mut d = Decoder::new();
+    d.set_threads(threads);
     let mut n = 0usize;
     for (i, packet) in v.packets.iter().enumerate() {
         let picture = d.decode(packet).map_err(|e| format!("packet {i}: {e}"))?;
@@ -72,27 +73,46 @@ fn check(path: &Path) -> Result<usize, String> {
     Ok(n)
 }
 
-fn check_all(dir: &Path) -> (usize, Vec<String>) {
+fn check_all(dir: &Path, threads: usize) -> (usize, Vec<String>) {
     let vectors = common::vectors_in(dir);
     assert!(!vectors.is_empty(), "no vectors in {}", dir.display());
     let mut failures = Vec::new();
     for p in &vectors {
-        if let Err(e) = check(p) {
+        if let Err(e) = check(p, threads) {
             failures.push(format!("{}: {e}", p.file_name().unwrap().to_string_lossy()));
         }
     }
     (vectors.len(), failures)
 }
 
+/// The thread counts every vector is decoded with: one, and four -- more
+/// than one forces the threaded path wherever a frame has two tile columns
+/// or more, whatever the machine's cores, and four against eight or sixteen
+/// columns gives each thread several.
+const THREADS: [usize; 2] = [1, 4];
+
 #[test]
 fn every_committed_vector_decodes_to_libvpx_pictures() {
-    let (n, failures) = check_all(&common::committed_dir());
-    assert!(
-        failures.is_empty(),
-        "{} of {n} vectors differ from libvpx:\n{}",
-        failures.len(),
-        failures.join("\n")
-    );
+    for threads in THREADS {
+        let (n, failures) = check_all(&common::committed_dir(), threads);
+        assert!(
+            failures.is_empty(),
+            "on {threads} thread(s), {} of {n} vectors differ from libvpx:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+}
+
+/// Tile columns dealt unevenly to threads, and more threads than columns:
+/// the pictures are the same however the work is shared.
+#[test]
+fn any_thread_count_gives_libvpx_pictures() {
+    let path = common::committed_dir().join("vp90-2-14-resize-fp-tiles-1-2.webm");
+    for threads in [1, 2, 3, 5, 64] {
+        let result = check(&path, threads);
+        assert!(result.is_ok(), "on {threads} thread(s): {result:?}");
+    }
 }
 
 #[test]
@@ -100,12 +120,14 @@ fn every_committed_vector_decodes_to_libvpx_pictures() {
 fn every_vector_of_the_full_suite_decodes_to_libvpx_pictures() {
     let dir = common::full_suite_dir()
         .expect("the full suite is not fetched: python gui/video/vp9/tools/fetch_vectors.py");
-    let (n, failures) = check_all(&dir);
-    assert_eq!(n, 314, "libvpx's suite has 314 VP9 vectors");
-    assert!(
-        failures.is_empty(),
-        "{} of {n} vectors differ from libvpx:\n{}",
-        failures.len(),
-        failures.join("\n")
-    );
+    for threads in THREADS {
+        let (n, failures) = check_all(&dir, threads);
+        assert_eq!(n, 314, "libvpx's suite has 314 VP9 vectors");
+        assert!(
+            failures.is_empty(),
+            "on {threads} thread(s), {} of {n} vectors differ from libvpx:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
 }

@@ -1,7 +1,7 @@
 ### [E] A key held with Alt or the Windows key works a program's bare-key binding -- 2026-09-29
 
-**Status:** every program on the list below is done (2026-09-29 to 10-03),
-each with a test and mutation rows: stopwatch, hangman, asteroids,
+**Status:** pending a boot test on main. Every program on the list below is
+done (2026-09-29 to 10-03), each with a test and mutation rows: stopwatch, hangman, asteroids,
 battleship, benchmark, calendar, clipmanager, compass, contacts, credmanager,
 crossword, dbviewer, musicplayer, defrag, devicemanager, diskimager, dots,
 ebook, email, explorer, fileassoc, filediff, finance, flashcards, jsonviewer,

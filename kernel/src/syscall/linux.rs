@@ -4155,6 +4155,12 @@ fn dispatch_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
                 arg4: 0,
                 arg5: 0,
             };
+            // O_NONBLOCK is the open file's (pipe2's flag, or F_SETFL's): a
+            // full pipe then answers EAGAIN rather than waiting, as Linux's
+            // pipe_write does. Until 2026-10-02 this always waited.
+            if entry.status_flags & oflags::O_NONBLOCK != 0 {
+                return linux_from_native(handlers::sys_pipe_try_write(&a));
+            }
             // A pipe is a slow object: an interrupted blocking write is
             // restartable (SA_RESTART) via the ERESTARTSYS sentinel.
             linux_from_slow_io(handlers::sys_pipe_write(&a))
@@ -4596,6 +4602,15 @@ fn dispatch_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
                 arg4: 0,
                 arg5: 0,
             };
+            // O_NONBLOCK is the open file's (pipe2's flag, or F_SETFL's): an
+            // empty pipe with a writer then answers EAGAIN rather than
+            // waiting, as Linux's pipe_read does; with no writer it is still
+            // end of file. Until 2026-10-02 this always waited, and a
+            // non-blocking reader that held the only writer itself waited for
+            // ever -- the SCM_RIGHTS fixture's 0x14 step (rq43).
+            if entry.status_flags & oflags::O_NONBLOCK != 0 {
+                return linux_from_native(handlers::sys_pipe_try_read(&a));
+            }
             // A pipe is a slow object: an interrupted blocking read is
             // restartable (SA_RESTART) via the ERESTARTSYS sentinel.
             linux_from_slow_io(handlers::sys_pipe_read(&a))

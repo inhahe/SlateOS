@@ -1815,16 +1815,21 @@ pub fn handle_event(state: &mut WorldClockApp, event: &Event) -> EventResult {
 }
 
 fn handle_key(state: &mut WorldClockApp, key: &KeyEvent) -> EventResult {
+    // A key on its own is taken plain, nothing held but Shift: a chord with
+    // Ctrl, Alt or the Windows key is the window's or the desktop's and
+    // arrives carrying its key -- Alt+X removed the chosen clock and Alt+Space
+    // moved every clock on an hour.
+    let plain = textline::is_plain(key.modifiers);
     // Above the picker, so the card can be raised and dismissed from either
     // screen, and `Escape` closes the card before the picker acts on it.
-    if key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift) {
+    if plain && (key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift)) {
         state.show_help = !state.show_help;
         return EventResult::Consumed;
     }
     if state.show_help {
         // The card is modal: it takes every key, and a few dismiss it. Letting
         // the rest through would mean changing a clock you cannot see.
-        if matches!(key.key, Key::Escape | Key::Enter | Key::Space) {
+        if plain && matches!(key.key, Key::Escape | Key::Enter | Key::Space) {
             state.show_help = false;
         }
         return EventResult::Consumed;
@@ -1832,6 +1837,9 @@ fn handle_key(state: &mut WorldClockApp, key: &KeyEvent) -> EventResult {
 
     if state.show_picker {
         return handle_picker_key(state, key);
+    }
+    if !plain {
+        return EventResult::Ignored;
     }
     match key.key {
         Key::Left | Key::H if state.selected_clock > 0 => {
@@ -1874,13 +1882,19 @@ fn handle_key(state: &mut WorldClockApp, key: &KeyEvent) -> EventResult {
     EventResult::Consumed
 }
 
+/// Keys while the time-zone picker is up: its own keys plain, and its search
+/// typing what was typed -- AltGr's letters among it, and not the letter a
+/// command carries (Alt+X searched for `x`). Backspace is refused only to Alt
+/// and the Windows key.
 fn handle_picker_key(state: &mut WorldClockApp, key: &KeyEvent) -> EventResult {
+    let plain = textline::is_plain(key.modifiers);
     match key.key {
-        Key::Escape => state.show_picker = false,
-        Key::Backspace => {
+        Key::Backspace if !textline::is_alt_or_windows_chord(key.modifiers) => {
             state.picker_search.pop();
             state.picker_scroll = 0;
         }
+        _ if !plain && !textline::types_into_field(key) => return EventResult::Ignored,
+        Key::Escape => state.show_picker = false,
         Key::Enter => {
             if let Some(&tz_idx) = state.filtered_timezones().first() {
                 state.add_clock(tz_idx);
@@ -1892,6 +1906,9 @@ fn handle_picker_key(state: &mut WorldClockApp, key: &KeyEvent) -> EventResult {
         Key::PageUp => state.scroll_picker(-4),
         Key::PageDown => state.scroll_picker(4),
         _ => {
+            if !textline::types_into_field(key) {
+                return EventResult::Ignored;
+            }
             let typed: String = key.typed().collect();
             if typed.is_empty() {
                 return EventResult::Ignored;
@@ -2079,6 +2096,94 @@ mod tests {
     /// Send a key the way the window does.
     fn press(app: &mut WorldClockApp, k: Key) -> EventResult {
         probe::key(app, &probe::press(k))
+    }
+
+    /// **A chord is neither a clock key nor typing**: a chord with Ctrl, Alt
+    /// or the Windows key carries its key -- Alt+X removed the chosen clock,
+    /// Alt+Space moved every clock on an hour, Alt+T changed the clock to
+    /// twelve hours -- and in the city search Alt+X searched for `x`, while
+    /// a letter typed with AltGr belongs in it.
+    ///
+    /// Each key is asserted as it is pressed: the toggles go round.
+    #[test]
+    fn a_chord_is_neither_a_clock_key_nor_typing() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let chord = |k: Key, text: &str, modifiers: Modifiers| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        };
+        let mut app = sample_app();
+        app.selected_clock = 2;
+        let state = |app: &WorldClockApp| {
+            (
+                (app.clocks.len(), app.selected_clock, app.offset_secs),
+                (
+                    app.view_mode,
+                    app.clock_style,
+                    app.use_24h,
+                    app.show_seconds,
+                ),
+                (app.show_picker, app.show_help, app.home_tz_idx),
+                app.clocks.iter().map(|c| c.pinned).collect::<Vec<_>>(),
+            )
+        };
+        let before = state(&app);
+        for m in [
+            Modifiers::ctrl(),
+            Modifiers::alt(),
+            Modifiers::super_key(),
+            altgr,
+        ] {
+            for k in [
+                Key::X,
+                Key::Delete,
+                Key::Space,
+                Key::T,
+                Key::S,
+                Key::A,
+                Key::G,
+                Key::P,
+                Key::N,
+                Key::Home,
+                Key::Left,
+                Key::F1,
+            ] {
+                assert_eq!(
+                    probe::key(&mut app, &chord(k, "", m)),
+                    EventResult::Ignored,
+                    "{m:?} {k:?} was taken"
+                );
+                assert_eq!(state(&app), before, "{m:?} {k:?} changed the clocks");
+            }
+        }
+
+        // The city search types what was typed.
+        press(&mut app, Key::N);
+        assert!(app.show_picker, "control: N opens the picker");
+        probe::key(&mut app, &chord(Key::X, "x", Modifiers::alt()));
+        probe::key(&mut app, &chord(Key::X, "x", Modifiers::super_key()));
+        probe::key(&mut app, &chord(Key::S, "\u{15b}", altgr));
+        probe::key(&mut app, &chord(Key::Backspace, "", Modifiers::alt()));
+        probe::key(&mut app, &chord(Key::Escape, "", Modifiers::alt()));
+        probe::key(&mut app, &chord(Key::Enter, "", Modifiers::super_key()));
+        assert!(app.show_picker, "a chorded Escape or Enter closed it");
+        assert_eq!(
+            app.picker_search, "\u{15b}",
+            "a command's letter, or AltGr lost"
+        );
+
+        // The list of keys answers plain keys.
+        press(&mut app, Key::Escape);
+        press(&mut app, Key::F1);
+        assert!(app.show_help, "control: F1 raises it");
+        probe::key(&mut app, &chord(Key::Space, " ", Modifiers::alt()));
+        assert!(app.show_help, "Alt+Space put it away");
     }
 
     /// States chosen so that between them every advertised key has work.

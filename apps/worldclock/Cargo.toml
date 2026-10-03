@@ -18,6 +18,9 @@ tzrules = { path = "../../tzrules" }
 # The window. Without it this program builds a struct in `main`, drops it and
 # exits — a clock that draws no frame, and reads no clock.
 oswindow = { path = "../../gui/window" }
+# Whether a key is plain, or typed: a chord is not the clock's, and AltGr
+# types into the city search.
+textline = { path = "../textline" }
 
 [lints]
 workspace = true

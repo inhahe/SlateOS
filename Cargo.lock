@@ -4585,6 +4585,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "textline",
  "tzrules",
 ]
 

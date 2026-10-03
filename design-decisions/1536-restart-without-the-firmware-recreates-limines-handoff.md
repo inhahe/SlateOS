@@ -23,9 +23,24 @@ own page tables early. So the handoff to recreate is small.
 
 **The mechanism:**
 
-1. **Load.** Parse the new image's `PT_LOAD` segments, copy them into one
-   physically contiguous run of frames (the kernel converts its own virtual
-   addresses by subtracting a single base), zero the BSS.
+1. **Load.** Parse the new image's `PT_LOAD` segments. The loaded kernel must
+   be *physically contiguous* -- the kernel converts its own virtual addresses
+   to physical by subtracting a single base (`alternatives` does this before
+   the page tables exist), which only holds for a contiguous image. At ~29 MiB
+   the image is larger than the buddy allocator's biggest block (order 10 =
+   16 MiB), and its natural destination -- a contiguous run the size of a
+   kernel -- is exactly the kind of range the *old* kernel already occupies,
+   so it cannot be an ordinary allocation anyway. So the destination is a
+   contiguous run chosen from the firmware memory map's USABLE regions (which
+   by the protocol never overlap the kernel image), and the copy into it is
+   done **last, by the trampoline** (step 5), exactly as Linux's kexec
+   assembles its image from a page list: the segment contents and the page
+   list are staged in scattered, ordinary frames first, and only the final
+   copy places them at the contiguous destination -- which may overlap the old
+   kernel, dead by then. The destination base is what the Executable Address
+   response (step 2) reports, so the new kernel computes its own
+   virtual-to-physical correctly wherever it lands. The BSS is zeroed as part
+   of staging.
 2. **Answer the requests.** Find the Limine request blocks in the loaded image
    (their 32-byte ids, between the start and end markers), build each
    response in memory reserved for the handoff, and write its address into
@@ -45,9 +60,16 @@ own page tables early. So the handoff to recreate is small.
    off, so the new kernel's first DMA is not translated through the old
    kernel's tables; every other CPU sent INIT, which leaves it waiting for a
    SIPI exactly as the firmware does.
-5. **Jump.** A trampoline copied into the handoff memory loads a minimal GDT
-   and an empty IDT, switches to the new tables and stack, and enters the
-   new image's entry point -- interrupts off, as Limine leaves them.
+5. **Jump.** A trampoline copied into a *control page* -- a frame outside the
+   destination, the source frames, the page list and the new page tables --
+   runs from there (through the HHDM, valid in both tables since both use the
+   same offset). It copies each staged source frame to its contiguous
+   destination (the step-1 page list), then loads a minimal GDT and an empty
+   IDT, sets the CPU state Limine guarantees (CR0 `0x8001_0011`, CR4 PAE
+   [+LA57], EFER LME+NXE, `IA32_PAT = 0x0000_0105_0007_0406`, GPRs zero, a
+   16-byte-aligned stack with a 0 return address, direction and interrupt
+   flags clear), switches to the new tables, and enters the new image's entry
+   point.
 
 **The alternative weighed:**
 

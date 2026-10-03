@@ -126,6 +126,7 @@ mod json;
 mod kcounters;
 mod kdiag;
 mod kevent;
+mod kexec;
 mod keyboard;
 mod klog;
 mod kobject;
@@ -1789,6 +1790,11 @@ extern "C" fn kernel_main() -> ! {
             // 32-bit encoding `stat` and `/proc` carry.
             selftest::dispatch_debug("DevNum", selftest::Severity::Diagnostic, || {
                 fs::devnum::self_test()
+            });
+            // kexec: ELF parsing and destination planning for `power.reload`
+            // (design-decisions §1536). Pure, so safe to run every boot.
+            selftest::dispatch_debug("kexec", selftest::Severity::Diagnostic, || {
+                kexec::self_test()
             });
             // devfs self-test (validates device file operations).
             selftest::dispatch_debug("DevFs", selftest::Severity::Diagnostic, || {

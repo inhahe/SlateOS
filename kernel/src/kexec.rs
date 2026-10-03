@@ -422,6 +422,62 @@ pub fn plan_destination(
     Err(KexecError::NoDestination)
 }
 
+/// Choose a contiguous destination placed as *high* in physical memory as a
+/// USABLE region allows, for at least `needed` bytes.
+///
+/// The handoff's own frames (page tables, staging, responses, the control page)
+/// come from the running kernel's buddy allocator, which hands out low memory
+/// first; putting the destination at the top of the highest usable region keeps
+/// it clear of them in practice, so the trampoline's copy into the destination
+/// cannot clobber a structure the handoff still needs. The caller still verifies
+/// no overlap and fails cleanly if the rare collision happens.
+///
+/// Returns the frame-aligned base of the chosen run (its *top* minus `needed`,
+/// aligned down).
+///
+/// # Errors
+///
+/// [`KexecError::NoDestination`] if no usable region is large enough, or
+/// [`KexecError::Overflow`] on an address computation overflow.
+pub fn plan_destination_high(
+    memory_map: &[&MemmapEntry],
+    needed: u64,
+) -> Result<u64, KexecError> {
+    let frame = FRAME_U64;
+    let needed = align_up(needed, frame).ok_or(KexecError::Overflow)?;
+    if needed == 0 {
+        return Err(KexecError::NoDestination);
+    }
+
+    let mut best: Option<u64> = None;
+    for entry in memory_map {
+        if entry.type_ != memmap_type::USABLE {
+            continue;
+        }
+        let region_start = match align_up(entry.base, frame) {
+            Some(s) => s,
+            None => continue,
+        };
+        let region_top = match entry.base.checked_add(entry.length) {
+            Some(t) => align_down(t, frame),
+            None => continue,
+        };
+        // The highest frame-aligned base at which [base, base+needed) fits.
+        let Some(room) = region_top.checked_sub(needed) else {
+            continue;
+        };
+        let candidate = align_down(room, frame);
+        if candidate < region_start {
+            continue;
+        }
+        if best.is_none_or(|b| candidate > b) {
+            best = Some(candidate);
+        }
+    }
+
+    best.ok_or(KexecError::NoDestination)
+}
+
 // ---------------------------------------------------------------------------
 // Limine request discovery
 // ---------------------------------------------------------------------------
@@ -1452,6 +1508,18 @@ pub fn self_test() -> KernelResult<()> {
     selftest::check!(
         plan_destination(&map, frame.wrapping_mul(1000), &[]).is_err(),
         "an over-large request has no destination"
+    );
+
+    // High placement puts the run at the top of the usable region: the region is
+    // [frame, frame*101); a 3-frame run sits at frame*98.
+    let dst_high = plan_destination_high(&map, frame.wrapping_mul(3)).map_err(|e| {
+        crate::serial_println!("  FAIL: plan_destination_high found nothing: {:?}", e);
+        KernelError::InternalError
+    })?;
+    selftest::check_eq!(dst_high, frame.wrapping_mul(98), "high placement sits at the top");
+    selftest::check!(
+        plan_destination_high(&map, frame.wrapping_mul(1000)).is_err(),
+        "an over-large high request has no destination"
     );
 
     // ---- error mapping ----

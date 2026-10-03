@@ -927,10 +927,10 @@ ENVS=(PS_PERSONALITY=gnu); run_case -ejf
 ENVS=(PS_PERSONALITY=digital); run_case -efl
 ENVS=(PS_PERSONALITY=s390); run_case -j
 run_case -ex
-ENVS=(PS_FORMAT=pid,comm); run_case
-ENVS=(PS_FORMAT=pid,comm); run_case -f
+ENVS=("PS_FORMAT=pid,comm"); run_case
+ENVS=("PS_FORMAT=pid,comm"); run_case -f
 ENVS=(PS_FORMAT=nosuch); run_case
-ENVS=(PS_FORMAT=pid,comm); run_case -L
+ENVS=("PS_FORMAT=pid,comm"); run_case -L
 ENVS=(PS_FORMAT='%p %c'); run_case
 ENVS=(LIBPROC_HIDE_KERNEL=1); run_case -ef
 ENVS=(LIBPROC_HIDE_KERNEL=); run_case -e -o pid,ppid,comm

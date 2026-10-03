@@ -3479,13 +3479,17 @@ fn test_dma_zone_kept() -> KernelResult<()> {
     /// Enough single frames to empty and refill a per-CPU cache.
     const SINGLES: usize = 96;
 
-    let mut singles = alloc::vec::Vec::with_capacity(SINGLES);
-    for _ in 0..SINGLES {
-        singles.push(alloc_frame()?);
+    // On the stack, not in a `Vec`: this runs before the heap exists. rq44
+    // (2026-10-03) panicked here with "memory allocation of 768 bytes
+    // failed" -- 96 frames of 8 bytes -- on its first boot.
+    let mut singles = [None::<PhysFrame>; SINGLES];
+    for slot in &mut singles {
+        *slot = Some(alloc_frame()?);
     }
     let block = alloc_order(3)?;
     let ordinary_in_zone = singles
         .iter()
+        .flatten()
         .chain(core::iter::once(&block))
         .filter(|f| f.addr() < DMA_ZONE_END)
         .count();
@@ -3497,7 +3501,7 @@ fn test_dma_zone_kept() -> KernelResult<()> {
         unsafe { free_frame(f)? };
     }
     let lists = validate_free_lists();
-    for f in singles {
+    for f in singles.into_iter().flatten() {
         // SAFETY: allocated just above and not aliased.
         unsafe { free_frame(f)? };
     }

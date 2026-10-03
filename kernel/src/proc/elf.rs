@@ -1327,6 +1327,34 @@ pub fn build_test_elf_public() -> alloc::vec::Vec<u8> {
     build_test_elf()
 }
 
+/// [`build_test_elf_public`] with its one segment widened down to file offset
+/// 0, so that it maps the ELF header and the program headers too, as a
+/// linker's first segment does: the program-header self-test's "found in a
+/// segment" case (`spawn::self_test_main_phdr`). The code stays at the same
+/// address. (`build_test_elf`'s segment starts after the headers, and the
+/// self-test assumed otherwise until its first boot, rq42.)
+#[must_use]
+#[allow(clippy::arithmetic_side_effects)] // offsets and sizes of a 200-byte image
+pub fn build_test_elf_mapping_headers() -> alloc::vec::Vec<u8> {
+    let mut buf = build_test_elf();
+    // The program header is at 64: p_offset +8, p_vaddr +16, p_filesz +32,
+    // p_memsz +40.
+    let read = |b: &[u8], at: usize| {
+        b.get(at..at + 8)
+            .and_then(|s| <[u8; 8]>::try_from(s).ok())
+            .map_or(0, u64::from_le_bytes)
+    };
+    let offset = read(&buf, 64 + 8);
+    let vaddr = read(&buf, 64 + 16);
+    let filesz = read(&buf, 64 + 32);
+    let memsz = read(&buf, 64 + 40);
+    write_u64(&mut buf, 64 + 8, 0);
+    write_u64(&mut buf, 64 + 16, vaddr - offset);
+    write_u64(&mut buf, 64 + 32, filesz + offset);
+    write_u64(&mut buf, 64 + 40, memsz + offset);
+    buf
+}
+
 /// Build a **Linux-ABI** test ELF that exits with `argc` as its status.
 ///
 /// This validates the System V initial-stack wiring end-to-end: the

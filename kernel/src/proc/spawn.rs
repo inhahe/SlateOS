@@ -23088,8 +23088,9 @@ pub fn self_test_linux_file_flags() -> KernelResult<()> {
 /// `pcb::main_phdr`, `AT_PHDR`): found in a loaded segment, and copied into a
 /// page of their own when no segment holds them.
 ///
-/// - The test ELF of the auxv self-test maps its headers: they are found at
-///   their segment's address plus the bias, and nothing is mapped.
+/// - A test ELF whose segment maps its headers, as a linker's first segment
+///   does (`elf::build_test_elf_mapping_headers`): they are found at their
+///   segment's address plus the bias, and nothing is mapped.
 /// - The hand-built Linux test programs map none (their one segment starts
 ///   after the headers): spawned, the process records the copy at
 ///   [`PHDR_COPY_VADDR`], the page holds exactly the file's table, and the
@@ -23106,10 +23107,10 @@ pub fn self_test_main_phdr() -> KernelResult<()> {
     serial_println!("[spawn] Running program-header placement test...");
 
     // Found: no mapping, the segment's address plus the bias.
-    let mapped = elf::build_test_elf_public();
+    let mapped = elf::build_test_elf_mapping_headers();
     let mapped_elf = elf::ElfFile::parse(&mapped)?;
     let Some(in_segment) = crate::proc::linux_stack::phdr_vaddr(&mapped_elf) else {
-        return fail("the auxv test ELF's headers are not in a segment any more");
+        return fail("the test ELF widened to map its headers has none in a segment");
     };
     // SAFETY: a table a segment holds is answered before the address space
     // is touched, so no address space is needed.

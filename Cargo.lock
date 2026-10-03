@@ -3376,6 +3376,7 @@ dependencies = [
  "guitk",
  "oswindow",
  "quoting",
+ "textline",
 ]
 
 [[package]]
@@ -3390,6 +3391,7 @@ dependencies = [
  "pngwrite",
  "safeio",
  "scratchdir",
+ "textline",
 ]
 
 [[package]]

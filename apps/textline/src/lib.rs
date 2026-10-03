@@ -124,6 +124,13 @@ pub struct LineEdit {
 ///
 /// `font_size` is the size the field's text is drawn at, which the caret
 /// needs to move visually through text that runs both ways.
+///
+/// A key held with Alt or the Windows key is not the field's, whatever the
+/// key ([`is_alt_or_windows_chord`]): Alt's chords are the window's and the
+/// Windows key's the desktop's. The editing keys answered them all the same
+/// -- Alt+Backspace deleted, Windows+Left moved the caret while the desktop
+/// moved the window -- though [`LineEdit::handled`] said they were the
+/// application's.
 pub fn apply_key(
     input: &mut TextInput,
     key: &KeyEvent,
@@ -131,6 +138,9 @@ pub fn apply_key(
     clipboard: &str,
     font_size: f32,
 ) -> LineEdit {
+    if is_alt_or_windows_chord(key.modifiers) {
+        return LineEdit::default();
+    }
     let shift = key.modifiers.shift;
     let chord = is_ctrl_chord(key.modifiers);
     let mut copied = None;
@@ -233,6 +243,43 @@ mod tests {
         let mut input = TextInput::new();
         input.set_text(text);
         input
+    }
+
+    /// **A key held with Alt or the Windows key is not the field's**: the
+    /// editing keys answered it -- Alt+Backspace deleted, Windows+Left moved
+    /// the caret -- though `LineEdit::handled` says such a key is the
+    /// application's. AltGr's are still the field's, as Ctrl's are: AltGr
+    /// is Ctrl+Alt, and a layout's AltGr+Backspace is a Backspace.
+    #[test]
+    fn a_key_held_with_alt_or_the_windows_key_edits_nothing() {
+        let windows = Modifiers::super_key();
+        let shift_alt = Modifiers {
+            shift: true,
+            ..Modifiers::alt()
+        };
+        for modifiers in [Modifiers::alt(), windows, shift_alt] {
+            for k in [
+                Key::Backspace,
+                Key::Delete,
+                Key::Left,
+                Key::Right,
+                Key::Home,
+                Key::End,
+            ] {
+                let mut input = field("abc");
+                input.move_cursor_left(false, 13.0, FontWeightHint::Regular);
+                let at = input.cursor();
+                let edit = apply_key(&mut input, &held(k, "", modifiers), 10, "", 13.0);
+                assert!(!edit.handled, "{modifiers:?} {k:?} was the field's");
+                assert_eq!(input.text(), "abc", "{modifiers:?} {k:?} edited");
+                assert_eq!(input.cursor(), at, "{modifiers:?} {k:?} moved the caret");
+            }
+        }
+        // AltGr's and Ctrl's editing keys are the field's.
+        let mut input = field("abc");
+        assert!(apply_key(&mut input, &held(Key::Backspace, "", ALTGR), 10, "", 13.0).handled);
+        assert_eq!(input.text(), "ab");
+        assert!(apply_key(&mut input, &key(Key::Left, "", true, false), 10, "", 13.0).handled);
     }
 
     #[test]

@@ -98,6 +98,12 @@ MUTATIONS = [
         "            Key::Tab => {}",
         ["tab_and_unknown_chords_are_left_to_the_application"],
     ),
+    (
+        'a key held with Alt or the Windows key edits the field',
+        '        if textline::is_alt_or_windows_chord(key.modifiers) {\n            return Edited::default();\n        }\n',
+        '',
+        ['a_key_held_with_alt_or_the_windows_key_edits_nothing'],
+    ),
 ]
 
 if __name__ == "__main__":

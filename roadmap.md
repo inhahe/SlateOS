@@ -2863,11 +2863,13 @@ word; text inside them that says "lane C" is history.
   counted 2026-09-28, most without asking whether the key is a command --
   and the Ctrl shortcuts matched on Ctrl alone in the 64 programs that take
   text and test Ctrl somewhere without Alt (notes' body, and every field on
-  `TextInput::edit_key`, wait on the request above); the Alt/Super guard
-  (paint and the whiteboard done 2026-09-29; a survey of 2026-09-29 finds 60
-  more with a bare letter binding and no guard, listed in `known-issues.md`
-  "[E] A key held with Alt or the Windows key works a program's bare-key
-  binding", with the fix: `textline::is_command` before the bare bindings);
+  `TextInput::edit_key`, wait on the request above). *The Alt/Super guard:*
+  done 2026-10-03 for all sixty programs of the 2026-09-29 survey, each with
+  a test and mutation rows (`known-issues/E-a-key-held-with-alt-or-the-windows-key-works-a-programs-bare-key-binding.md`
+  lists them); most had the AltGr-as-Ctrl fault too and many typed a
+  command's letter, both fixed alongside; and `textline::apply_key` and
+  `TextArea::apply_key` themselves now refuse Alt's and the Windows key's
+  chords on their editing keys, as their docs said they did;
   Page Up/Down, Home/End and Ctrl+Home/End through
   `guitk::listview::ListKey` for programs with lists of their own (done
   2026-09-29 for pomodoro's log, rush's puzzle sheet, sokoban's level menu

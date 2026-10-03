@@ -1,16 +1,36 @@
 ### [E] A key held with Alt or the Windows key works a program's bare-key binding -- 2026-09-29
 
-**Status:** OPEN -- being fixed program by program (the roadmap's keys pass).
-Done, each with a test and mutation rows (2026-09-29 to 10-01): stopwatch,
-hangman, asteroids, battleship, benchmark, calendar, clipmanager, compass,
-contacts, credmanager, crossword, dbviewer, musicplayer, defrag,
-devicemanager, diskimager, dots, ebook, email, explorer, fileassoc, filediff.
-Most had the AltGr fault too -- a Ctrl shortcut matched on Ctrl held, so
-AltGr+S, a Polish `ś`, saved -- and several typed a command's letter into a
-field; both are fixed in the same pass. Two found on the way: dbviewer's and
-musicplayer's F1 list never showed (its release toggled it off again), and
-the toolkit's dialogs answer a chorded Enter or Space
-(`requests/e-c-the-toolkit-dialogs-answer-a-chorded-enter-space-and-escape.md`).
+**Status:** every program on the list below is done (2026-09-29 to 10-03),
+each with a test and mutation rows: stopwatch, hangman, asteroids,
+battleship, benchmark, calendar, clipmanager, compass, contacts, credmanager,
+crossword, dbviewer, musicplayer, defrag, devicemanager, diskimager, dots,
+ebook, email, explorer, fileassoc, filediff, finance, flashcards, jsonviewer,
+kanban, launcher, match3, mediaconvert, metronome, pacman, pdfviewer, pinball,
+podcast, regextester, reminders, remotedesktop, reversi, rssreader,
+screenrecorder, screenshot, simon, snippets, soundrecorder, speedtest,
+startupmanager, sysmonitor, systemrestore, terminal, tmux, torrent,
+typingtutor, undelete, videoplayer, weather, wordle, wordsearch, worldclock,
+yahtzee and settings; nonogram was already guarded, and paint and the
+whiteboard now ask `textline`'s predicates rather than their own copies.
+Left: the shared one-line and multi-line fields (`apps/textline`,
+`apps/textarea`) still answer Alt's and the Windows key's chords on their
+editing keys -- Alt+Backspace deletes, Windows+Left moves the caret --
+though their own docs say those keys are the application's; that fix
+touches every program using them and comes next. The entry closes with it.
+
+Most programs had the AltGr fault too -- a Ctrl shortcut matched on Ctrl
+held, so AltGr+S, a Polish `ś`, saved -- and many typed a command's letter
+into a field; both are fixed in the same pass. Found on the way and fixed:
+dbviewer's and musicplayer's F1 list never showed (its release toggled it
+off again); the terminal sent nothing for AltGr's characters (no `@`, `{`
+or `|` at a German prompt) or for Alt and a letter (readline's meta keys);
+screenrecorder's volume keys moved the history's selection in the history
+view; settings' search could not be left with Escape, and Ctrl+F typed an
+`f` into the exclusion pattern. Found and logged: the toolkit's dialogs
+answer a chorded Enter or Space
+(`requests/e-c-the-toolkit-dialogs-answer-a-chorded-enter-space-and-escape.md`),
+and the screenshot tool's text annotation cannot take a digit
+(`E-the-screenshot-tools-text-annotation-cannot-take-a-digit-and-escape-throws-the-picture-away.md`).
 
 **In short:** Many programs act on a plain letter: N for a new game, S for
 stop, a letter guessed in hangman. The compositor hands a chord its letter as

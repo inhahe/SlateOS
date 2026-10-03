@@ -74,6 +74,7 @@ name = "archivemanager"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "bzip2",
  "deflate",
  "guitk",
  "oswindow",

@@ -148,6 +148,12 @@ MAIN = [
         '',
         ['a_folders_arrow_opens_it_without_showing_it', 'a_click_on_a_folder_shows_it'],
     ),
+    (
+        'TAR.BZ2 is not readable',
+        '        matches!(self, Self::Zip | Self::Tar | Self::TarGz | Self::TarBz2)',
+        '        matches!(self, Self::Zip | Self::Tar | Self::TarGz)',
+        ['a_bzipped_tar_is_decompressed_and_listed_whatever_it_is_called', 'a_tar_and_a_compressed_tar_are_rewritten_in_their_own_format'],
+    ),
 ]
 
 BACKEND = [
@@ -180,6 +186,36 @@ BACKEND = [
         "        [0xFD, b'7', b'z', b'X', b'Z', 0x00, ..] => Some(ArchiveFormat::TarXz),",
         "        [0xFD, b'7', b'z', b'X', b'Z', 0x00, ..] => None,",
         [REFUSED],
+    ),
+    (
+        'a bzipped tar is not decompressed',
+        '            bzip2::decompress_limited(compressed, limit).map_err(ArchiveError::Bzip2)',
+        '            Err(ArchiveError::NotYetReadable { format: ArchiveFormat::TarBz2 })',
+        ['a_bzipped_tar_is_decompressed_and_listed_whatever_it_is_called'],
+    ),
+    (
+        'a tar.bz2 is saved gzipped',
+        '        ArchiveFormat::TarBz2 => Ok(bzip2::compress(tar, bzip2::Level::BEST)),',
+        '        ArchiveFormat::TarBz2 => Ok(deflate::gzip(tar)),',
+        ['a_tar_and_a_compressed_tar_are_rewritten_in_their_own_format'],
+    ),
+    (
+        "a bzipped member's method says Stored",
+        '        tararchive::Kind::File if format == ArchiveFormat::TarBz2 => String::from("Bzip2"),\n',
+        '',
+        ['a_bzipped_tar_is_decompressed_and_listed_whatever_it_is_called'],
+    ),
+    (
+        "a TAR.BZ2's compressed size is its TAR's",
+        '    if format.is_compressed_tar() {\n        model.total_compressed = on_disk;',
+        '    if format == ArchiveFormat::TarGz {\n        model.total_compressed = on_disk;',
+        ['a_bzipped_tar_is_decompressed_and_listed_whatever_it_is_called'],
+    ),
+    (
+        'a new .tar.bz2 cannot be created',
+        '        Some(format @ (ArchiveFormat::TarGz | ArchiveFormat::TarBz2)) => {\n            compress_tar(format, &empty_tar)?',
+        '        Some(format @ (ArchiveFormat::TarGz | ArchiveFormat::TarBz2)) => {\n            return Err(SaveError::Unwritable { format });',
+        ['a_new_archive_is_written_in_the_format_its_name_says'],
     ),
 ]
 

@@ -1,7 +1,7 @@
 //! Slate OS Archive Manager
 //!
 //! Graphical archive/compressed file manager supporting multiple formats:
-//! - ZIP, TAR and TAR.GZ, read and written; TAR.BZ2, TAR.XZ and 7z
+//! - ZIP, TAR, TAR.GZ and TAR.BZ2, read and written; TAR.XZ and 7z
 //!   recognised -- by name or by their bytes -- and refused by name
 //! - Browse archive contents in a tree view
 //! - Extract all, extract selected, extract to folder
@@ -34,11 +34,11 @@
 //!
 //! Uses the guitk library for UI rendering.
 //!
-//! Reading and writing are real for ZIP, TAR and TAR.GZ, and live in
-//! [`backend`]; TAR.BZ2, TAR.XZ and 7z are modelled but not parsed, and say
-//! so rather than pretending. Their decompressors exist -- in the kernel,
-//! where a module of a binary crate cannot be reached by any program
-//! (`requests/e-a-bzip2-xz-and-7z-are-trapped-in-the-kernel-binary.md`).
+//! Reading and writing are real for ZIP, TAR, TAR.GZ and TAR.BZ2, and live
+//! in [`backend`]; TAR.XZ and 7z are modelled but not parsed, and say so
+//! rather than pretending. Their decoders are being ported out of the kernel,
+//! where a module of a binary crate cannot be reached by any program, as
+//! bzip2's was (`requests/e-a-bzip2-xz-and-7z-are-trapped-in-the-kernel-binary.md`).
 
 mod backend;
 
@@ -104,17 +104,23 @@ impl ArchiveFormat {
         }
     }
 
-    /// Whether this build can read an archive in this format. TAR.BZ2, TAR.XZ
-    /// and 7z are recognised and refused by name: their decompressors are in
-    /// the kernel, where no program can reach them yet.
+    /// Whether this build can read an archive in this format. TAR.XZ and 7z
+    /// are recognised and refused by name: their decoders are still in the
+    /// kernel, where no program can reach them.
     pub fn readable(self) -> bool {
-        matches!(self, Self::Zip | Self::Tar | Self::TarGz)
+        matches!(self, Self::Zip | Self::Tar | Self::TarGz | Self::TarBz2)
     }
 
     /// Whether this build can write an archive in this format -- today, the
-    /// same three it reads.
+    /// same ones it reads.
     pub fn writable(self) -> bool {
         self.readable()
+    }
+
+    /// Whether this is a TAR inside one compressed stream: decompressed
+    /// whole to read, rebuilt and recompressed whole to write.
+    pub fn is_compressed_tar(self) -> bool {
+        matches!(self, Self::TarGz | Self::TarBz2 | Self::TarXz)
     }
 
     /// Every pattern of every format for which `keep` holds, for a dialog's
@@ -3911,6 +3917,7 @@ mod tests {
             "a bare name should become a ZIP"
         );
         assert!(new.contains(&"*.tar.gz"), "{new:?}");
+        assert!(new.contains(&"*.tar.bz2"), "{new:?}");
         assert!(
             !new.contains(&"*.7z"),
             "offered a format it cannot write: {new:?}"
@@ -3940,10 +3947,12 @@ mod tests {
         }
         assert!(!shows(open, "notes.txt"), "control: the filter filters");
         let new = DialogPurpose::NewArchive;
-        assert!(
-            shows(new, "old.tar.gz"),
-            "the New dialog hides a format it writes"
-        );
+        for name in ["old.tar.gz", "old.tar.bz2"] {
+            assert!(
+                shows(new, name),
+                "the New dialog hides {name}, which it writes"
+            );
+        }
         for name in ["old.7z", "old.tar.xz"] {
             assert!(
                 !shows(new, name),

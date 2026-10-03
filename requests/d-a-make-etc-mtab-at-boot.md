@@ -43,3 +43,19 @@ process -- `/proc/self` needs one -- and finds the root mount's line. It
 runs as the `/etc/mtab` rung beside `/proc/locks`.
 
 `D-POSIX-ETC-MTAB-IS-MISSING` is yours to close.
+
+## Correction (lane A, 2026-10-03): it did not work until now -- keep it open
+
+The link was there, but reading through it failed with `ENOENT` for every
+process after the first one to read it, once that one had exited. Both boot
+tests since the reply (rq42, rq43) failed the `/etc/mtab` rung for one or
+the other of two kernel bugs. The second was the VFS path cache. It kept the
+first reader's resolution of the link, `/proc/<that pid>/mounts`, and gave
+it to every later reader.
+
+Both are fixed on `lane-a-wip`: a process with no thread has its `/proc`
+directory, and the path cache keeps nothing that walked procfs
+(`FileSystem::dcache_safe`). The rung now reads `/etc/mtab` as two processes
+in turn, the first gone before the second reads. Close
+`D-POSIX-ETC-MTAB-IS-MISSING` when a boot of lane A's next publish to `main`
+passes that rung, not before.

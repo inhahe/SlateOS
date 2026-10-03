@@ -9255,6 +9255,13 @@ fn bench_crypto_ed25519_verify() {
 ///
 /// The design spec says Linux cached lookup is ~200-500ns per component.
 /// With 2 components, expect 2× the single-component cost.
+///
+/// Since 2026-10-03 every iteration walks both components: the VFS path cache
+/// keeps no resolution through procfs, whose answers depend on the caller and
+/// on time (`FileSystem::dcache_safe`). Until then iterations after the first
+/// were cache hits. The walk asks procfs only each component's type
+/// (`FileSystem::entry_type`), so `meminfo` is still made once per `stat`, as
+/// before. A step up in this series from that date is the walk.
 fn bench_vfs_stat_deep() {
     use crate::fs::vfs::Vfs;
 
@@ -9288,9 +9295,12 @@ fn bench_vfs_stat_deep() {
 
 /// Benchmark VFS stat on a 3-component path.
 ///
-/// Uses "/proc/net/tcp" to measure the cost of 3-level path resolution.
+/// Uses "/proc/sched/stats" to measure the cost of 3-level path resolution.
 /// If that path doesn't exist, falls back to creating a temporary
 /// 3-level directory structure.
+///
+/// A procfs path is walked on every iteration since 2026-10-03, as
+/// [`bench_vfs_stat_deep`] explains; the fallback paths are cached as before.
 fn bench_vfs_stat_3comp() {
     use crate::fs::vfs::Vfs;
 

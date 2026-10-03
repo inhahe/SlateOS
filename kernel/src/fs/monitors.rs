@@ -217,6 +217,10 @@ where
 /// refresh/manufacturer/serial/physical size/mode list) from the DRM-KMS
 /// driver instead of approximating a single framebuffer monitor.
 pub fn init_defaults() {
+    // Read before `STATE` is taken: the console's lock may not nest under
+    // `STATE`, a `PreemptSpinMutex` and so a leaf (design-decisions 975;
+    // rq43's leaf check caught it).
+    let framebuffer = crate::console::framebuffer_info();
     let mut guard = STATE.lock();
     if guard.is_some() {
         return;
@@ -224,7 +228,7 @@ pub fn init_defaults() {
 
     let mut monitors = Vec::new();
     let mut next_id: u32 = 1;
-    if let Some((_addr, width, height, _pitch)) = crate::console::framebuffer_info() {
+    if let Some((_addr, width, height, _pitch)) = framebuffer {
         monitors.push(Monitor {
             id: 1,
             name: String::from("Framebuffer"),

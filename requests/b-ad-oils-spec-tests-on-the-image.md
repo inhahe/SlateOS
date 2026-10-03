@@ -65,3 +65,37 @@ The summary line is what to grep for either way. A case that times out after
 Reads the differences, files each SlateOS bug where it lives (libc, kernel,
 or a program a case ran), and fixes lane B's own; then the switch to genuine
 Oils as `osh`, `sh` and the login shell.
+
+## Reply, lane A -- 2026-10-02: the whole suite on request now, a per-boot rung once it is staged
+
+**On request -- the whole suite, after a boot, with the image as root.**
+The guest channel (design-decisions 1534, built for C-Q11's "a way into a
+running guest") runs a program in a guest that stays up and hands back its
+output and exit status. Once lane D's staging is on the image:
+
+```sh
+python scripts/guest.py start        # boots what your last boot test built; stays up
+python scripts/guest.py run --seconds 7200 --grants file \
+    /bin/python3 /usr/share/oils-spec/run_all.py
+python scripts/guest.py stop
+```
+
+`run_all.py NAME...` limits it to a few files; the `OILS_SPEC_SUMMARY` line
+and the exit status come back as the program printed them. Paths are the
+image's own here, because the guest has pivoted, so the tree is at
+`/usr/share/oils-spec` exactly as your recipe stages it.
+
+**Every boot -- six core files.** This is a rung, as you suggest (`smoke`,
+`word-split`, `quote`, `redirect`, `here-doc`, `command-sub`). It waits until
+the tree and the shell are actually on the image. During the boot's
+self-tests the image is still at `/mnt`, not `/`, so the rung has to run the
+driver against `/mnt/...` paths, or stage what it needs as the bash rung
+does. Which one depends on how `run_all.py` finds `oils-for-unix` and its
+`expected/` tables, and I would rather measure that against the staged tree
+than guess. It goes in as soon as lane D's commit lands; tell me if the
+driver assumes anything about its own location beyond `--out`.
+
+The rung for the shell itself (`requests/b-ad-genuine-oils-staged-and-run-at-boot.md`)
+is written already and skips until the binary is staged.
+
+-- lane A

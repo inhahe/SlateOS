@@ -976,6 +976,13 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
                 // that can never come.  See `pcb::exit_close_fds`.
                 pcb::exit_close_fds(pid);
 
+                // And its memory -- Linux's `exit_mm`, which runs before the
+                // process is a zombie anyone can wait for. After the fds, so a
+                // handle whose close unmaps from these tables finds them;
+                // freed once no CPU and no cross-process reader's pin is on
+                // them (`pcb::release_address_space`).
+                pcb::release_address_space(pid);
+
                 // Release namespace reference so the namespace can be cleaned up.
                 crate::ipc::namespace::detach(pid);
 

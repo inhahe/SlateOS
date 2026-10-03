@@ -1,5 +1,17 @@
 ### A-TCP-AND-UDP-SOCKETS-ARE-NOT-COUNTED-PER-PROCESS -- 2026-10-01 -- OPEN (lane A)
 
+**Status:** OPEN -- fixed on `lane-a-wip` (option A, 2026-10-02), awaiting a
+boot on main. `net::native_socket` keeps every native TCP/UDP handle:
+- opaque ids from a counter that never repeats;
+- registered per holder as `ResourceType::NativeSocket` (34), and checked by
+  all 25 handle-taking calls;
+- tied to the slot's generation, with the slot pinned during each call so it
+  cannot be reused;
+- counted at fork and spawn, released at close, exit and exec.
+
+Tests: `native_socket::self_test` and dispatch's
+`test_dispatch_native_socket_possession`.
+
 **In short:** a TCP or UDP socket here belongs to nobody in particular.
 Fork does not give the child its own reference (`proc::fork` treats
 `ResourceType::Socket` as a permission token, not a per-open object), and

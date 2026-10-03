@@ -381,6 +381,14 @@ fn dup_one(rtype: ResourceType, id: u64) -> KernelResult<Option<(ResourceType, u
             crate::ipc::unix_socket::dup(crate::ipc::unix_socket::UnixHandle::from_raw(id))?;
             Ok(Some((rtype, id)))
         }
+        ResourceType::NativeSocket => {
+            // The same for the kernel's own TCP and UDP sockets: one more
+            // holder (`net::native_socket`), so the child's close or exit
+            // leaves the parent's socket open. Until 2026-10-02 the child
+            // shared the parent's slot number and held nothing.
+            crate::net::native_socket::dup(id)?;
+            Ok(Some((rtype, id)))
+        }
         // No refcounted same-id dup yet — not inherited.  Documented
         // limitation in todo.txt; revisit when these gain dup support.
         ResourceType::SharedMemory
@@ -479,6 +487,18 @@ fn close_one(rtype: ResourceType, id: u64) {
         }
         ResourceType::NetSocket => {
             crate::net::socket::close(crate::net::socket::SocketHandle::from_raw(id));
+        }
+        // `dup_one` dups a Unix-domain socket, so a rollback must let go of
+        // it too; until 2026-10-02 this fell to the arm below and a failed
+        // fork left the socket one holder too many.
+        ResourceType::UnixSocket => {
+            crate::ipc::unix_socket::close(crate::ipc::unix_socket::UnixHandle::from_raw(id));
+        }
+        ResourceType::NativeSocket => {
+            // Dropping the hold `dup_one` added, which is never the last: the
+            // parent still holds the socket, so nothing can fail to close.
+            let _ =
+                crate::net::native_socket::release(id, crate::net::native_socket::Ending::Close);
         }
         // Nothing was duped for these in `dup_one`.
         _ => {}

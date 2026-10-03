@@ -106,12 +106,82 @@ pub struct DatagramV6 {
     pub data: Vec<u8>,
 }
 
+/// A socket's multicast sending options -- Linux's `IP_MULTICAST_TTL`,
+/// `IP_MULTICAST_LOOP`, `IPV6_MULTICAST_HOPS` and `IPV6_MULTICAST_LOOP` --
+/// with Linux's defaults: a datagram to a group goes one hop, and this
+/// machine's own members of the group get it as well.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct McastOptions {
+    /// IPv4 TTL of what the socket sends to a group; 0 keeps it on this
+    /// machine.
+    ttl: u8,
+    /// Whether this machine's own members of an IPv4 group get it too.
+    loop_v4: bool,
+    /// IPv6 hop limit of what the socket sends to a group; 0 keeps it on
+    /// this machine.
+    hops_v6: u8,
+    /// [`Self::loop_v4`], for IPv6.
+    loop_v6: bool,
+}
+
+impl McastOptions {
+    /// Linux's: one hop, looped back.
+    const DEFAULT: Self = Self {
+        ttl: 1,
+        loop_v4: true,
+        hops_v6: 1,
+        loop_v6: true,
+    };
+}
+
+/// A multicast option [`set_option`] and [`get_option`] name, by the number
+/// `SYS_UDP_SET_OPTION` and `SYS_UDP_GET_OPTION` carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McastOption {
+    /// 1: the IPv4 multicast TTL, 0 to 255, or `u64::MAX` (-1) for the
+    /// default, 1 (`IP_MULTICAST_TTL`).
+    Ttl,
+    /// 2: IPv4 multicast loop: 0 off, anything else on (`IP_MULTICAST_LOOP`).
+    Loop,
+    /// 3: the IPv6 multicast hop limit, 0 to 255, or `u64::MAX` (-1) for
+    /// the default, 1 (`IPV6_MULTICAST_HOPS`).
+    Hops6,
+    /// 4: IPv6 multicast loop, 0 or 1 and nothing else
+    /// (`IPV6_MULTICAST_LOOP`).
+    Loop6,
+}
+
+impl McastOption {
+    /// The option `raw` names; `None` for any other number.
+    #[must_use]
+    pub fn from_raw(raw: u64) -> Option<Self> {
+        match raw {
+            1 => Some(Self::Ttl),
+            2 => Some(Self::Loop),
+            3 => Some(Self::Hops6),
+            4 => Some(Self::Loop6),
+            _ => None,
+        }
+    }
+}
+
 /// A bound UDP socket.
 struct UdpSocket {
     /// Local port this socket is bound to.
     port: u16,
     /// Whether this slot is in use.
     active: bool,
+    /// Which socket this slot holds: a fresh number each time the slot is
+    /// taken ([`next_generation`]). A native handle records it when issued
+    /// (`net::native_socket`), so it stops naming anything once the slot
+    /// is closed and given to another socket, rather than naming that one.
+    generation: u32,
+    /// How many native-handle operations are using this slot now
+    /// (`net::native_socket`). While any is, the slot is not given to a
+    /// new socket, though the one in it may close meanwhile -- so an
+    /// operation can never land on a socket it was not issued for. Not
+    /// cleared by a close, which can happen mid-operation.
+    pins: u32,
     /// Network namespace this socket belongs to.
     /// Sockets in different namespaces are fully independent — the same
     /// port can be bound in multiple namespaces without conflict.
@@ -135,6 +205,9 @@ struct UdpSocket {
     mcast_groups_v6: [Ipv6Addr; MAX_GROUPS_PER_SOCKET],
     /// Number of active IPv6 multicast group memberships.
     mcast_count_v6: u8,
+    /// What the socket's datagrams to a group carry and where they go
+    /// ([`set_option`]).
+    mcast: McastOptions,
 }
 
 impl UdpSocket {
@@ -142,6 +215,8 @@ impl UdpSocket {
         Self {
             port: 0,
             active: false,
+            generation: 0,
+            pins: 0,
             ns_id: crate::netns::ROOT_NS,
             peer_ip: Ipv4Addr::UNSPECIFIED,
             peer_port: 0,
@@ -151,6 +226,7 @@ impl UdpSocket {
             mcast_count: 0,
             mcast_groups_v6: [Ipv6Addr::UNSPECIFIED; MAX_GROUPS_PER_SOCKET],
             mcast_count_v6: 0,
+            mcast: McastOptions::DEFAULT,
         }
     }
 
@@ -409,6 +485,45 @@ fn allocate_ephemeral_port(
     Err(KernelError::OutOfMemory)
 }
 
+/// The last generation given to a socket slot.
+static GENERATION: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// A generation for a slot being taken: never 0, which an empty slot has,
+/// and not repeated until the counter wraps, 2^32 bindings later.
+fn next_generation() -> u32 {
+    loop {
+        let g = GENERATION
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+            .wrapping_add(1);
+        if g != 0 {
+            return g;
+        }
+    }
+}
+
+/// Hold socket slot `handle` for a native-handle operation, if it still
+/// holds the socket of `generation` (`net::native_socket`): `false` if it
+/// holds another, or none. While held, the slot is not given to a new
+/// socket ([`bind`]). Let go with [`unpin`].
+#[must_use]
+pub fn pin(handle: usize, generation: u32) -> bool {
+    let mut sockets = SOCKETS.lock();
+    match sockets.get_mut(handle) {
+        Some(s) if s.active && s.generation == generation => {
+            s.pins = s.pins.saturating_add(1);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Let go of a [`pin`] hold.
+pub fn unpin(handle: usize) {
+    if let Some(s) = SOCKETS.lock().get_mut(handle) {
+        s.pins = s.pins.saturating_sub(1);
+    }
+}
+
 /// Bind a UDP socket to a local port.
 ///
 /// Pass port 0 to auto-assign an ephemeral port from the IANA
@@ -422,6 +537,16 @@ fn allocate_ephemeral_port(
 ///
 /// Returns a socket index (handle) on success.
 pub fn bind(ns_id: NetNsId, port: u16) -> KernelResult<usize> {
+    bind_tagged(ns_id, port).map(|(handle, _)| handle)
+}
+
+/// [`bind`], with the socket's generation as well, read under the lock that
+/// assigned it: what `net::native_socket` issues a handle for.
+///
+/// # Errors
+///
+/// [`bind`]'s.
+pub fn bind_tagged(ns_id: NetNsId, port: u16) -> KernelResult<(usize, u32)> {
     // Drawn before `SOCKETS` is taken, so the RNG's lazy first-use seeding
     // never runs inside a lock the packet-receive path is waiting on.
     let start_offset = if port == 0 {
@@ -444,15 +569,19 @@ pub fn bind(ns_id: NetNsId, port: u16) -> KernelResult<usize> {
         port
     };
 
-    // Find a free slot.
+    // Find a free slot -- not one a native-handle operation still pins.
     for (i, sock) in sockets.iter_mut().enumerate() {
-        if !sock.active {
+        if !sock.active && sock.pins == 0 {
+            let generation = next_generation();
             sock.active = true;
+            sock.generation = generation;
             sock.ns_id = ns_id;
             sock.port = effective_port;
             sock.rx_queue.clear();
             sock.rx_queue_v6.clear();
-            return Ok(i);
+            // A slot's last socket may have changed them.
+            sock.mcast = McastOptions::DEFAULT;
+            return Ok((i, generation));
         }
     }
 
@@ -727,7 +856,9 @@ pub fn leave_group_v6(handle: usize, group: Ipv6Addr) -> KernelResult<()> {
 pub fn rx_ready(handle: usize) -> usize {
     let sockets = SOCKETS.lock();
     match sockets.get(handle) {
-        Some(sock) if sock.active => sock.rx_queue.len(),
+        // Both families: a socket with only IPv6 datagrams queued is as
+        // readable as one with IPv4 ones (until 2026-10-02 it read 0).
+        Some(sock) if sock.active => sock.rx_queue.len().saturating_add(sock.rx_queue_v6.len()),
         _ => 0,
     }
 }
@@ -842,6 +973,270 @@ pub fn connect(handle: usize, peer_ip: Ipv4Addr, peer_port: u16) -> KernelResult
     Ok(())
 }
 
+/// Set socket `handle`'s multicast `option` to `value`, as Linux's
+/// `setsockopt` reads the four options ([`McastOption`]).
+///
+/// # Errors
+///
+/// `InvalidArgument` for a socket not bound, or a value the option does not
+/// take (Linux's `EINVAL`).
+pub fn set_option(handle: usize, option: McastOption, value: u64) -> KernelResult<()> {
+    // A hop count: 0 to 255, or -1 (all ones) for the default.
+    let hops = |v: u64| match v {
+        u64::MAX => Ok(McastOptions::DEFAULT.ttl),
+        v => u8::try_from(v).map_err(|_| KernelError::InvalidArgument),
+    };
+    let mut sockets = SOCKETS.lock();
+    let sock = sockets
+        .get_mut(handle)
+        .filter(|s| s.active)
+        .ok_or(KernelError::InvalidArgument)?;
+    match option {
+        McastOption::Ttl => sock.mcast.ttl = hops(value)?,
+        McastOption::Loop => sock.mcast.loop_v4 = value != 0,
+        McastOption::Hops6 => sock.mcast.hops_v6 = hops(value)?,
+        McastOption::Loop6 => {
+            sock.mcast.loop_v6 = match value {
+                0 => false,
+                1 => true,
+                _ => return Err(KernelError::InvalidArgument),
+            };
+        }
+    }
+    Ok(())
+}
+
+/// Socket `handle`'s multicast `option`: a TTL or hop limit, or 1 or 0 for
+/// a loop setting.
+///
+/// # Errors
+///
+/// `InvalidArgument` for a socket not bound.
+pub fn get_option(handle: usize, option: McastOption) -> KernelResult<u64> {
+    let sockets = SOCKETS.lock();
+    let sock = sockets
+        .get(handle)
+        .filter(|s| s.active)
+        .ok_or(KernelError::InvalidArgument)?;
+    Ok(match option {
+        McastOption::Ttl => u64::from(sock.mcast.ttl),
+        McastOption::Loop => u64::from(sock.mcast.loop_v4),
+        McastOption::Hops6 => u64::from(sock.mcast.hops_v6),
+        McastOption::Loop6 => u64::from(sock.mcast.loop_v6),
+    })
+}
+
+/// A UDP datagram -- header and `data` -- from `src_port` to `dst_port`,
+/// its checksum taken with `checksum`, which is given the datagram with a
+/// zero checksum field.
+///
+/// # Errors
+///
+/// `InvalidArgument` for a datagram longer than the 16-bit length field
+/// can say.
+fn build_datagram(
+    src_port: u16,
+    dst_port: u16,
+    data: &[u8],
+    checksum: impl FnOnce(&[u8]) -> u16,
+) -> KernelResult<Vec<u8>> {
+    let udp_len = u16::try_from(UDP_HEADER_SIZE.saturating_add(data.len()))
+        .map_err(|_| KernelError::InvalidArgument)?;
+    let mut packet = Vec::with_capacity(usize::from(udp_len));
+    packet.extend_from_slice(&src_port.to_be_bytes());
+    packet.extend_from_slice(&dst_port.to_be_bytes());
+    packet.extend_from_slice(&udp_len.to_be_bytes());
+    packet.extend_from_slice(&0u16.to_be_bytes());
+    packet.extend_from_slice(data);
+    let sum = checksum(&packet).to_be_bytes();
+    if let Some(field) = packet.get_mut(6..8) {
+        field.copy_from_slice(&sum);
+    }
+    Ok(packet)
+}
+
+/// Deliver `payload`, sent to IPv4 group `group` port `dst_port` from
+/// `src_ip:src_port`, to every socket of namespace `ns_id` bound to that port
+/// that has joined the group: the receive path's rule ([`process_udp`]) and
+/// the send path's loopback ([`send_from`]) share it. Whether any took it.
+fn deliver_multicast_v4(
+    sockets: &mut [UdpSocket],
+    ns_id: NetNsId,
+    group: Ipv4Addr,
+    src_ip: Ipv4Addr,
+    src_port: u16,
+    dst_port: u16,
+    payload: &[u8],
+) -> bool {
+    let mut delivered = false;
+    for sock in sockets.iter_mut() {
+        if !sock.active || sock.port != dst_port {
+            continue;
+        }
+        if ns_id != crate::netns::ROOT_NS && sock.ns_id != ns_id {
+            continue;
+        }
+        let joined = sock
+            .mcast_groups
+            .get(..usize::from(sock.mcast_count))
+            .is_some_and(|groups| groups.contains(&group));
+        if !joined {
+            continue;
+        }
+        if sock.rx_queue.len() < MAX_QUEUED {
+            sock.rx_queue.push_back(Datagram {
+                src_ip,
+                src_port,
+                data: Vec::from(payload),
+            });
+        }
+        delivered = true;
+    }
+    delivered
+}
+
+/// [`deliver_multicast_v4`], for IPv6.
+fn deliver_multicast_v6(
+    sockets: &mut [UdpSocket],
+    ns_id: NetNsId,
+    group: Ipv6Addr,
+    src_ip: Ipv6Addr,
+    src_port: u16,
+    dst_port: u16,
+    payload: &[u8],
+) -> bool {
+    let mut delivered = false;
+    for sock in sockets.iter_mut() {
+        if !sock.active || sock.port != dst_port {
+            continue;
+        }
+        if ns_id != crate::netns::ROOT_NS && sock.ns_id != ns_id {
+            continue;
+        }
+        let joined = sock
+            .mcast_groups_v6
+            .get(..usize::from(sock.mcast_count_v6))
+            .is_some_and(|groups| groups.contains(&group));
+        if !joined {
+            continue;
+        }
+        if sock.rx_queue_v6.len() < MAX_QUEUED {
+            sock.rx_queue_v6.push_back(DatagramV6 {
+                src_ip,
+                src_port,
+                data: Vec::from(payload),
+            });
+        }
+        delivered = true;
+    }
+    delivered
+}
+
+/// The socket's port, namespace and multicast options, for a send from it.
+fn sender(handle: usize) -> KernelResult<(u16, NetNsId, McastOptions)> {
+    let sockets = SOCKETS.lock();
+    let sock = sockets
+        .get(handle)
+        .filter(|s| s.active)
+        .ok_or(KernelError::InvalidArgument)?;
+    Ok((sock.port, sock.ns_id, sock.mcast))
+}
+
+/// Send `data` from socket `handle` to `dst_ip:dst_port`: from its port, in
+/// its namespace (that namespace's address and interface). To a multicast
+/// group it goes with the socket's multicast TTL -- 0 keeps it on this
+/// machine -- and, unless the socket turned loop off, to this machine's own
+/// members of the group as well, as Linux's `ip_mc_output` loops it back.
+///
+/// [`send`] is the kernel's own: from a port, in the root namespace, at the
+/// default TTL.
+///
+/// # Errors
+///
+/// `InvalidArgument` for a socket not bound, or a datagram too long; the
+/// send's own.
+pub fn send_from(handle: usize, dst_ip: Ipv4Addr, dst_port: u16, data: &[u8]) -> KernelResult<()> {
+    let (src_port, ns_id, mcast) = sender(handle)?;
+    let src_ip = super::interface::ns_ip(ns_id);
+    let packet = build_datagram(src_port, dst_port, data, |p| {
+        ipv4::compute_transport_checksum(src_ip, dst_ip, PROTO_UDP, p)
+    })?;
+    if !dst_ip.is_multicast() {
+        return ipv4::send_fragmentable_from(ns_id, dst_ip, PROTO_UDP, &packet, ipv4::DEFAULT_TTL);
+    }
+    if mcast.loop_v4 {
+        let mut sockets = SOCKETS.lock();
+        deliver_multicast_v4(
+            &mut sockets[..],
+            ns_id,
+            dst_ip,
+            src_ip,
+            src_port,
+            dst_port,
+            data,
+        );
+    }
+    if mcast.ttl == 0 {
+        return Ok(());
+    }
+    ipv4::send_fragmentable_from(ns_id, dst_ip, PROTO_UDP, &packet, mcast.ttl)
+}
+
+/// The source address for an IPv6 send to `dst_ip`: the link-local one for a
+/// link-local destination or a group no wider than the link, else the SLAAC
+/// global one if there is one.
+fn v6_source_for(dst_ip: Ipv6Addr) -> Ipv6Addr {
+    let our_mac = super::interface::mac();
+    let link_local = Ipv6Addr::from_mac_link_local(&our_mac);
+    // A multicast address's scope is its second byte's low nibble: 1 is the
+    // interface, 2 the link (RFC 4291 section 2.7).
+    let link_scoped_group = dst_ip.is_multicast() && dst_ip.0[1] & 0x0f <= 2;
+    if dst_ip.is_link_local() || link_scoped_group {
+        link_local
+    } else {
+        super::icmpv6::slaac_global_addr().unwrap_or(link_local)
+    }
+}
+
+/// [`send_from`], to an IPv6 address: a group gets the socket's multicast
+/// hop limit and, unless loop is off, this machine's members get it too.
+/// IPv6 here has one interface, the root namespace's.
+///
+/// # Errors
+///
+/// As [`send_from`].
+pub fn send_v6_from(
+    handle: usize,
+    dst_ip: Ipv6Addr,
+    dst_port: u16,
+    data: &[u8],
+) -> KernelResult<()> {
+    let (src_port, ns_id, mcast) = sender(handle)?;
+    let src_ip = v6_source_for(dst_ip);
+    let packet = build_datagram(src_port, dst_port, data, |p| {
+        ipv6::compute_transport_checksum(&src_ip, &dst_ip, ipv6::NH_UDP, p)
+    })?;
+    if !dst_ip.is_multicast() {
+        return ipv6::send_raw(src_ip, dst_ip, ipv6::NH_UDP, 64, &packet);
+    }
+    if mcast.loop_v6 {
+        let mut sockets = SOCKETS.lock();
+        deliver_multicast_v6(
+            &mut sockets[..],
+            ns_id,
+            dst_ip,
+            src_ip,
+            src_port,
+            dst_port,
+            data,
+        );
+    }
+    if mcast.hops_v6 == 0 {
+        return Ok(());
+    }
+    ipv6::send_raw(src_ip, dst_ip, ipv6::NH_UDP, mcast.hops_v6, &packet)
+}
+
 /// Send a UDP datagram.
 ///
 /// Computes a proper UDP checksum over the pseudo-header + segment
@@ -849,41 +1244,16 @@ pub fn connect(handle: usize, peer_ip: Ipv4Addr, peer_port: u16) -> KernelResult
 /// IPv4 (meaning "no checksum"), sending real checksums enables
 /// receivers to detect corruption from faulty NICs, bit-flips, or
 /// intermediate routers.
-#[allow(clippy::arithmetic_side_effects)]
 pub fn send(src_port: u16, dst_ip: Ipv4Addr, dst_port: u16, data: &[u8]) -> KernelResult<()> {
     let src_ip = super::interface::ip();
-
-    // Build the UDP header + payload.
-    let udp_len = UDP_HEADER_SIZE + data.len();
-
-    // UDP Length field is 16 bits; maximum datagram is 65535 bytes
-    // (8-byte header + 65527 payload).  Reject oversized payloads
-    // instead of silently truncating the length field.
-    if udp_len > u16::MAX as usize {
-        return Err(KernelError::InvalidArgument);
-    }
-
-    let mut udp_packet = Vec::with_capacity(udp_len);
-
-    // Source port.
-    udp_packet.extend_from_slice(&src_port.to_be_bytes());
-    // Destination port.
-    udp_packet.extend_from_slice(&dst_port.to_be_bytes());
-    // Length (header + data).
-    udp_packet.extend_from_slice(&(udp_len as u16).to_be_bytes());
-    // Checksum placeholder (zeroed for checksum computation).
-    udp_packet.extend_from_slice(&0u16.to_be_bytes());
-    // Payload.
-    udp_packet.extend_from_slice(data);
-
-    // Compute and fill in the UDP checksum.
-    let cksum = ipv4::compute_transport_checksum(src_ip, dst_ip, PROTO_UDP, &udp_packet);
-    udp_packet[6] = (cksum >> 8) as u8;
-    udp_packet[7] = cksum as u8;
-
-    // Send as an IPv4 packet.  Use the fragmentable path since UDP
-    // datagrams may exceed the interface MTU (unlike TCP which uses MSS).
-    ipv4::send_fragmentable(dst_ip, PROTO_UDP, &udp_packet)
+    // The 16-bit length field bounds a datagram at 65,535 bytes; a longer
+    // one is refused rather than given a truncated length.
+    let packet = build_datagram(src_port, dst_port, data, |p| {
+        ipv4::compute_transport_checksum(src_ip, dst_ip, PROTO_UDP, p)
+    })?;
+    // The fragmentable path, since a datagram may exceed the interface MTU
+    // (unlike TCP, which keeps under its MSS).
+    ipv4::send_fragmentable(dst_ip, PROTO_UDP, &packet)
 }
 
 // ---------------------------------------------------------------------------
@@ -956,11 +1326,23 @@ pub fn process_udp(ip_packet: &Ipv4Packet<'_>, ns_id: NetNsId) -> KernelResult<(
 
     let is_mcast = ip_packet.dst.is_multicast();
 
-    // Deliver to bound socket(s).
-    // For unicast: deliver to the first matching socket.
-    // For multicast: deliver to ALL sockets bound to this port that have
-    //   joined the multicast group (fan-out).
+    // Deliver to bound socket(s): for multicast, every socket on the port
+    // that has joined the group (`deliver_multicast_v4`, the rule the send
+    // path's loopback shares) and nothing to answer if none has; for
+    // unicast, the first matching socket.
     let mut sockets = SOCKETS.lock();
+    if is_mcast {
+        deliver_multicast_v4(
+            &mut sockets[..],
+            ns_id,
+            ip_packet.dst,
+            ip_packet.src,
+            src_port,
+            dst_port,
+            payload,
+        );
+        return Ok(());
+    }
     let mut delivered = false;
     for sock in sockets.iter_mut() {
         if !sock.active || sock.port != dst_port {
@@ -977,21 +1359,6 @@ pub fn process_udp(ip_packet: &Ipv4Packet<'_>, ns_id: NetNsId) -> KernelResult<(
             continue;
         }
 
-        // For multicast, check group membership.
-        if is_mcast {
-            let count = sock.mcast_count as usize;
-            let mut member = false;
-            for i in 0..count {
-                if sock.mcast_groups[i] == ip_packet.dst {
-                    member = true;
-                    break;
-                }
-            }
-            if !member {
-                continue;
-            }
-        }
-
         if sock.rx_queue.len() < MAX_QUEUED {
             sock.rx_queue.push_back(Datagram {
                 src_ip: ip_packet.src,
@@ -1003,10 +1370,8 @@ pub fn process_udp(ip_packet: &Ipv4Packet<'_>, ns_id: NetNsId) -> KernelResult<(
 
         delivered = true;
 
-        // For unicast, only deliver to the first matching socket.
-        if !is_mcast {
-            break;
-        }
+        // Unicast: only the first matching socket.
+        break;
     }
 
     if delivered {
@@ -1014,8 +1379,9 @@ pub fn process_udp(ip_packet: &Ipv4Packet<'_>, ns_id: NetNsId) -> KernelResult<(
     }
 
     // No socket bound — send ICMP Port Unreachable (RFC 1122 §3.2.2.1).
-    // Only for unicast; multicast/broadcast should be dropped silently.
-    if !is_mcast && !ip_packet.dst.is_broadcast() {
+    // Only for unicast (multicast returned above); broadcast is dropped
+    // silently.
+    if !ip_packet.dst.is_broadcast() {
         // First 8 bytes of the UDP header for the ICMP error payload.
         if data.len() >= 8 {
             let _ =
@@ -1090,11 +1456,21 @@ pub fn process_udp_v6(ip_packet: &Ipv6Packet<'_>, ns_id: NetNsId) -> KernelResul
 
     let is_mcast = ip_packet.dst.is_multicast();
 
-    // Deliver to bound socket(s).
-    // For unicast: deliver to the first matching socket.
-    // For multicast: deliver to ALL sockets bound to this port that have
-    //   joined the multicast group (fan-out), mirroring IPv4 behavior.
+    // Deliver to bound socket(s), as the IPv4 path does
+    // (`deliver_multicast_v6` for a group).
     let mut sockets = SOCKETS.lock();
+    if is_mcast {
+        deliver_multicast_v6(
+            &mut sockets[..],
+            ns_id,
+            ip_packet.dst,
+            ip_packet.src,
+            src_port,
+            dst_port,
+            payload,
+        );
+        return Ok(());
+    }
     let mut delivered = false;
     for sock in sockets.iter_mut() {
         if !sock.active || sock.port != dst_port {
@@ -1109,15 +1485,6 @@ pub fn process_udp_v6(ip_packet: &Ipv6Packet<'_>, ns_id: NetNsId) -> KernelResul
             continue;
         }
 
-        // For multicast, check IPv6 group membership.
-        if is_mcast {
-            let count = sock.mcast_count_v6 as usize;
-            let is_member = (0..count).any(|i| sock.mcast_groups_v6[i] == ip_packet.dst);
-            if !is_member {
-                continue;
-            }
-        }
-
         if sock.rx_queue_v6.len() < MAX_QUEUED {
             sock.rx_queue_v6.push_back(DatagramV6 {
                 src_ip: ip_packet.src,
@@ -1129,10 +1496,8 @@ pub fn process_udp_v6(ip_packet: &Ipv6Packet<'_>, ns_id: NetNsId) -> KernelResul
 
         delivered = true;
 
-        // Unicast: stop after first match.  Multicast: continue fan-out.
-        if !is_mcast {
-            break;
-        }
+        // Unicast: only the first matching socket.
+        break;
     }
 
     if !delivered {
@@ -1153,7 +1518,6 @@ pub fn process_udp_v6(ip_packet: &Ipv6Packet<'_>, ns_id: NetNsId) -> KernelResul
 /// Returns `None` if no IPv6 datagrams are queued.  IPv6 datagrams
 /// are stored in a separate queue from IPv4 datagrams; callers that
 /// want both must call both [`recv`] and `recv_v6`.
-#[allow(dead_code)] // Public API for future IPv6 consumers.
 pub fn recv_v6(handle: usize) -> Option<DatagramV6> {
     let mut sockets = SOCKETS.lock();
     let sock = sockets.get_mut(handle)?;
@@ -1164,7 +1528,6 @@ pub fn recv_v6(handle: usize) -> Option<DatagramV6> {
 }
 
 /// Peek at the next IPv6 datagram without removing it from the queue.
-#[allow(dead_code)] // Public API for future IPv6 consumers.
 pub fn peek_v6(handle: usize) -> Option<DatagramV6> {
     let sockets = SOCKETS.lock();
     let sock = sockets.get(handle)?;
@@ -1187,52 +1550,18 @@ pub fn rx_ready_v6(handle: usize) -> usize {
 /// Send a UDP datagram over IPv6.
 ///
 /// Computes a mandatory UDP checksum over the IPv6 pseudo-header +
-/// segment (RFC 8200 §8.1).  Uses the SLAAC global address as source
-/// for non-link-local destinations, falling back to the link-local
-/// address derived from the interface MAC.
+/// segment (RFC 8200 §8.1). The source address is [`v6_source_for`]'s:
+/// link-local for a link-local destination or a link-scoped group, else the
+/// SLAAC global address if there is one.
 #[allow(dead_code)] // Public API for future IPv6 senders.
-#[allow(clippy::arithmetic_side_effects)]
 pub fn send_v6(src_port: u16, dst_ip: Ipv6Addr, dst_port: u16, data: &[u8]) -> KernelResult<()> {
-    let our_mac = super::interface::mac();
-
-    // Use SLAAC global address for non-link-local destinations,
-    // fall back to the link-local address.
-    let src_ip = if dst_ip.is_link_local() {
-        Ipv6Addr::from_mac_link_local(&our_mac)
-    } else {
-        super::icmpv6::slaac_global_addr()
-            .unwrap_or_else(|| Ipv6Addr::from_mac_link_local(&our_mac))
-    };
-
-    let udp_len = UDP_HEADER_SIZE + data.len();
-
-    // UDP Length field is 16 bits.
-    if udp_len > u16::MAX as usize {
-        return Err(KernelError::InvalidArgument);
-    }
-
-    let mut udp_packet = Vec::with_capacity(udp_len);
-
-    // Source port.
-    udp_packet.extend_from_slice(&src_port.to_be_bytes());
-    // Destination port.
-    udp_packet.extend_from_slice(&dst_port.to_be_bytes());
-    // Length (header + data).
-    udp_packet.extend_from_slice(&(udp_len as u16).to_be_bytes());
-    // Checksum placeholder (zeroed for computation).
-    udp_packet.extend_from_slice(&0u16.to_be_bytes());
-    // Payload.
-    udp_packet.extend_from_slice(data);
-
-    // Compute checksum using the IPv6 pseudo-header.
-    // For UDP over IPv6, a computed checksum of 0 is transmitted as
-    // 0xFFFF (handled inside compute_transport_checksum).
-    let cksum = ipv6::compute_transport_checksum(&src_ip, &dst_ip, ipv6::NH_UDP, &udp_packet);
-    udp_packet[6] = (cksum >> 8) as u8;
-    udp_packet[7] = cksum as u8;
-
-    // Send as an IPv6 packet.
-    ipv6::send_raw(src_ip, dst_ip, ipv6::NH_UDP, 64, &udp_packet)
+    let src_ip = v6_source_for(dst_ip);
+    // The checksum is mandatory over IPv6 (RFC 8200 section 8.1); a computed
+    // 0 is sent as 0xFFFF, which `compute_transport_checksum` handles.
+    let packet = build_datagram(src_port, dst_port, data, |p| {
+        ipv6::compute_transport_checksum(&src_ip, &dst_ip, ipv6::NH_UDP, p)
+    })?;
+    ipv6::send_raw(src_ip, dst_ip, ipv6::NH_UDP, 64, &packet)
 }
 
 // ---------------------------------------------------------------------------
@@ -1317,8 +1646,98 @@ pub fn self_test() -> KernelResult<()> {
     test_v6_recv_empty()?;
     test_v6_process_and_deliver()?;
     test_namespace_isolation()?;
+    test_multicast_options_and_loopback()?;
 
-    crate::serial_println!("[udp] UDP self-test PASSED (12 tests)");
+    crate::serial_println!("[udp] UDP self-test PASSED (13 tests)");
+    Ok(())
+}
+
+/// A socket's multicast options start at Linux's defaults (TTL and hop
+/// limit 1, loop on), take what Linux's `setsockopt` takes and refuse the
+/// rest, and are a new socket's defaults again whatever the slot's last
+/// socket set. A datagram a socket sends to a group it has joined comes
+/// back to it with loop on and does not with loop off -- in both families,
+/// at TTL and hop limit 0, so nothing leaves the machine.
+fn test_multicast_options_and_loopback() -> KernelResult<()> {
+    use crate::serial_println;
+
+    fn fail(what: &str) -> KernelResult<()> {
+        serial_println!("[udp]   FAIL: multicast options: {}", what);
+        Err(KernelError::InternalError)
+    }
+    // An administratively scoped IPv4 group and a link-scoped IPv6 one,
+    // neither a group anything else here uses.
+    const GROUP4: Ipv4Addr = Ipv4Addr([239, 255, 0, 42]);
+    const GROUP6: Ipv6Addr = Ipv6Addr([0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0x42]);
+    const PORT: u16 = 47_811;
+
+    let s = bind(crate::netns::ROOT_NS, PORT)?;
+    let get = |o| get_option(s, o).ok();
+    let defaults = [
+        McastOption::Ttl,
+        McastOption::Loop,
+        McastOption::Hops6,
+        McastOption::Loop6,
+    ]
+    .map(get)
+        == [Some(1); 4];
+    let refused = set_option(s, McastOption::Ttl, 256).is_err()
+        && set_option(s, McastOption::Hops6, 300).is_err()
+        && set_option(s, McastOption::Loop6, 2).is_err();
+    let minus_one = set_option(s, McastOption::Ttl, 9).is_ok()
+        && set_option(s, McastOption::Ttl, u64::MAX).is_ok()
+        && get(McastOption::Ttl) == Some(1);
+    let any_nonzero =
+        set_option(s, McastOption::Loop, 7).is_ok() && get(McastOption::Loop) == Some(1);
+    if !defaults {
+        close(s);
+        return fail("a new socket's options are not Linux's defaults");
+    }
+    if !(refused && minus_one && any_nonzero) {
+        close(s);
+        return fail("a value Linux refuses was taken, or one it takes was refused");
+    }
+
+    // Loopback, kept on the machine by TTL and hop limit 0.
+    let setup = set_option(s, McastOption::Ttl, 0)
+        .and_then(|()| set_option(s, McastOption::Hops6, 0))
+        .and_then(|()| join_group(s, GROUP4))
+        .and_then(|()| join_group_v6(s, GROUP6));
+    if setup.is_err() {
+        close(s);
+        return fail("could not set the TTLs or join the groups");
+    }
+    let looped4 = send_from(s, GROUP4, PORT, b"v4 loop").is_ok()
+        && recv(s).is_some_and(|d| d.data == b"v4 loop" && d.src_port == PORT);
+    let looped6 = send_v6_from(s, GROUP6, PORT, b"v6 loop").is_ok()
+        && recv_v6(s).is_some_and(|d| d.data == b"v6 loop" && d.src_port == PORT);
+    let silenced = set_option(s, McastOption::Loop, 0).is_ok()
+        && set_option(s, McastOption::Loop6, 0).is_ok()
+        && send_from(s, GROUP4, PORT, b"x").is_ok()
+        && send_v6_from(s, GROUP6, PORT, b"x").is_ok()
+        && recv(s).is_none()
+        && recv_v6(s).is_none();
+    close(s);
+    if !(looped4 && looped6) {
+        return fail("a datagram to a joined group did not loop back to its sender");
+    }
+    if !silenced {
+        return fail("a datagram looped back with loop off");
+    }
+
+    // A new socket gets the defaults back, whatever its slot's last set.
+    let s2 = bind(crate::netns::ROOT_NS, PORT)?;
+    let fresh = get_option(s2, McastOption::Ttl).ok() == Some(1)
+        && get_option(s2, McastOption::Loop).ok() == Some(1);
+    close(s2);
+    if !fresh {
+        return fail("a new socket inherited its slot's last options");
+    }
+
+    serial_println!(
+        "[udp]   multicast options: Linux's defaults and values, reset per socket; a \
+         joined group loops back with loop on and not with it off, IPv4 and IPv6: OK"
+    );
     Ok(())
 }
 

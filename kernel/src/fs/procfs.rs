@@ -2674,6 +2674,11 @@ fn build_pid_status(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
 /// does not reflect a process rewriting its own `argv[]` at runtime
 /// (`setproctitle`); it reports the argv as captured at spawn.
 fn gen_pid_cmdline(task_id: u64) -> KernelResult<Vec<u8>> {
+    // 0. A zombie's arguments went with its memory ([`is_zombie`]).
+    if is_zombie(task_id) {
+        return Ok(Vec::new());
+    }
+
     // 1. Full argv from the persistent snapshot.
     if let Some(argv) = crate::proc::pcb::get_proc_argv(task_id) {
         if !argv.is_empty() {
@@ -2722,6 +2727,10 @@ fn gen_pid_cmdline(task_id: u64) -> KernelResult<Vec<u8>> {
 /// environment).
 fn gen_pid_environ(task_id: u64) -> KernelResult<Vec<u8>> {
     let envp = crate::proc::pcb::get_proc_envp(task_id).ok_or(KernelError::NotFound)?;
+    // A zombie's environment went with its memory ([`is_zombie`]).
+    if is_zombie(task_id) {
+        return Ok(Vec::new());
+    }
     let cap = envp.iter().map(|e| e.len().saturating_add(1)).sum();
     let mut data = Vec::with_capacity(cap);
     for entry in &envp {
@@ -2751,6 +2760,10 @@ fn gen_pid_auxv(task_id: u64) -> KernelResult<Vec<u8>> {
     // empty file) by probing a field every live process has.
     if crate::proc::pcb::get_proc_envp(task_id).is_none() {
         return Err(KernelError::NotFound);
+    }
+    // A zombie's vector went with its memory ([`is_zombie`]).
+    if is_zombie(task_id) {
+        return Ok(Vec::new());
     }
     Ok(crate::proc::pcb::linux_saved_auxv(task_id).unwrap_or_default())
 }
@@ -14022,6 +14035,15 @@ fn proc_task(id: u64) -> Option<crate::sched::TaskInfo> {
     crate::sched::task_info(id).or_else(|| crate::proc::pcb::exited_leader(id))
 }
 
+/// Whether `id` is a zombie: a process that has exited and not been reaped.
+/// Its memory and its files are gone (`pcb::release_address_space`,
+/// `pcb::exit_close_fds`), so what Linux reads from them -- `cmdline`,
+/// `environ`, `auxv` -- reads empty, and the `exe`, `cwd` and `root` links
+/// name nothing, as Linux's do once `exit_mm` and `exit_fs` have run.
+fn is_zombie(id: u64) -> bool {
+    crate::proc::pcb::state(id) == Some(crate::proc::pcb::ProcessState::Zombie)
+}
+
 /// The directory `/proc/self` names: the calling process's id -- its main
 /// thread's task id, so the directory that is the process -- or, for a
 /// kernel task with no process, its own id. Until 2026-10-01 this was the
@@ -14874,6 +14896,13 @@ impl FileSystem for ProcFs {
         "procfs"
     }
 
+    /// Never: `self` names the caller, a process's directory comes and goes
+    /// with no VFS operation to invalidate a cached lookup, and the `cwd`,
+    /// `root`, `exe` and `fd/<n>` links follow their process.
+    fn dcache_safe(&self) -> bool {
+        false
+    }
+
     fn readdir(&mut self, path: &Path) -> KernelResult<Vec<DirEntry>> {
         let rel = strip_root(path)?;
 
@@ -15150,158 +15179,13 @@ impl FileSystem for ProcFs {
     }
 
     fn stat(&mut self, path: &Path) -> KernelResult<DirEntry> {
-        let rel = strip_root(path)?;
+        proc_stat(path, true)
+    }
 
-        match classify_path(rel) {
-            ProcPath::Root => Ok(DirEntry {
-                ino: 0,
-                name: PathBuf::from("/"),
-                entry_type: EntryType::Directory,
-                size: 0,
-            }),
-            ProcPath::RootFile(name) => {
-                let size = generate(name).map_or(0, |d| d.len() as u64);
-                Ok(DirEntry {
-                    ino: 0,
-                    name: PathBuf::from(name),
-                    entry_type: EntryType::File,
-                    size,
-                })
-            }
-            ProcPath::PidDir(pid) => {
-                if !pid_dir_exists(pid) {
-                    return Err(KernelError::NotFound);
-                }
-                Ok(DirEntry {
-                    ino: 0,
-                    name: PathBuf::from(format!("{pid}")),
-                    entry_type: EntryType::Directory,
-                    size: 0,
-                })
-            }
-            ProcPath::PidFile(pid, file_name) => {
-                if !pid_dir_exists(pid) {
-                    return Err(KernelError::NotFound);
-                }
-                let size = generate_pid(pid, file_name).map_or(0, |d| d.len() as u64);
-                Ok(DirEntry {
-                    ino: 0,
-                    name: PathBuf::from(file_name),
-                    entry_type: EntryType::File,
-                    size,
-                })
-            }
-            ProcPath::PidLink(pid, link_name) => {
-                if !pid_dir_exists(pid) {
-                    return Err(KernelError::NotFound);
-                }
-                Ok(DirEntry {
-                    ino: 0,
-                    name: PathBuf::from(link_name),
-                    entry_type: EntryType::Symlink,
-                    size: 0,
-                })
-            }
-            ProcPath::SelfLink => Ok(DirEntry {
-                ino: 0,
-                name: PathBuf::from("self"),
-                entry_type: EntryType::Symlink,
-                size: 0,
-            }),
-            ProcPath::PidTaskDir(pid) => {
-                if !pid_dir_exists(pid) {
-                    return Err(KernelError::NotFound);
-                }
-                Ok(DirEntry {
-                    ino: 0,
-                    name: PathBuf::from("task"),
-                    entry_type: EntryType::Directory,
-                    size: 0,
-                })
-            }
-            ProcPath::PidTaskTidDir(pid, tid) => {
-                if !thread_belongs(pid, tid) {
-                    return Err(KernelError::NotFound);
-                }
-                Ok(DirEntry {
-                    ino: 0,
-                    name: PathBuf::from(format!("{tid}")),
-                    entry_type: EntryType::Directory,
-                    size: 0,
-                })
-            }
-            ProcPath::PidTaskFile(pid, tid, file_name) => {
-                if !thread_belongs(pid, tid) {
-                    return Err(KernelError::NotFound);
-                }
-                let size = generate_task(pid, tid, file_name).map_or(0, |d| d.len() as u64);
-                Ok(DirEntry {
-                    ino: 0,
-                    name: PathBuf::from(file_name),
-                    entry_type: EntryType::File,
-                    size,
-                })
-            }
-            ProcPath::PidFdDir(pid) => {
-                if !pid_dir_exists(pid) {
-                    return Err(KernelError::NotFound);
-                }
-                Ok(DirEntry {
-                    ino: 0,
-                    name: PathBuf::from("fd"),
-                    entry_type: EntryType::Directory,
-                    size: 0,
-                })
-            }
-            ProcPath::PidFdLink(pid, fd) => {
-                // Only a currently-open fd is a valid symlink; an absent
-                // fd (or a process with no kernel fd table) is NotFound.
-                crate::proc::pcb::linux_fd_lookup(pid, fd).ok_or(KernelError::NotFound)?;
-                Ok(DirEntry {
-                    ino: 0,
-                    name: PathBuf::from(format!("{fd}")),
-                    entry_type: EntryType::Symlink,
-                    size: 0,
-                })
-            }
-            ProcPath::PidFdInfoDir(pid) => {
-                if !pid_dir_exists(pid) {
-                    return Err(KernelError::NotFound);
-                }
-                Ok(DirEntry {
-                    ino: 0,
-                    name: PathBuf::from("fdinfo"),
-                    entry_type: EntryType::Directory,
-                    size: 0,
-                })
-            }
-            ProcPath::PidFdInfoFile(pid, fd) => {
-                // A regular file, present only for a currently-open fd.
-                let size = gen_pid_fdinfo(pid, fd)?.len() as u64;
-                Ok(DirEntry {
-                    ino: 0,
-                    name: PathBuf::from(format!("{fd}")),
-                    entry_type: EntryType::File,
-                    size,
-                })
-            }
-            ProcPath::SysDir(rel) => Ok(DirEntry {
-                ino: 0,
-                name: PathBuf::from(sys_basename(rel)),
-                entry_type: EntryType::Directory,
-                size: 0,
-            }),
-            ProcPath::SysFile(rel) => {
-                let size = gen_sys(rel).map_or(0, |d| d.len() as u64);
-                Ok(DirEntry {
-                    ino: 0,
-                    name: PathBuf::from(sys_basename(rel)),
-                    entry_type: EntryType::File,
-                    size,
-                })
-            }
-            ProcPath::NotFound => Err(KernelError::NotFound),
-        }
+    /// `stat`'s type without its size, which procfs finds out by making
+    /// the file: path resolution asks this of every component it walks.
+    fn entry_type(&mut self, path: &Path) -> KernelResult<EntryType> {
+        proc_stat(path, false).map(|e| e.entry_type)
     }
 
     /// Resolve a per-PID symbolic link (`cwd`, `root`).
@@ -15329,6 +15213,10 @@ impl FileSystem for ProcFs {
             return Err(KernelError::PermissionDenied);
         }
         match link {
+            // A zombie runs nothing from nowhere ([`is_zombie`]).
+            ProcPath::PidLink(pid, "root" | "cwd" | "exe") if is_zombie(pid) => {
+                Err(KernelError::NotFound)
+            }
             ProcPath::PidLink(pid, "root") => {
                 if !pid_dir_exists(pid) {
                     return Err(KernelError::NotFound);
@@ -15415,6 +15303,183 @@ impl FileSystem for ProcFs {
     }
 }
 
+/// What [`ProcFs`]'s `stat` reports for `path`. Without `with_size` the
+/// size is 0 and no file is made to find it out, which is all that
+/// `entry_type`, and so path resolution, wants. Whether an entry exists
+/// is decided the same way in both cases.
+fn proc_stat(path: &Path, with_size: bool) -> KernelResult<DirEntry> {
+    let rel = strip_root(path)?;
+
+    match classify_path(rel) {
+        ProcPath::Root => Ok(DirEntry {
+            ino: 0,
+            name: PathBuf::from("/"),
+            entry_type: EntryType::Directory,
+            size: 0,
+        }),
+        ProcPath::RootFile(name) => {
+            let size = if with_size {
+                generate(name).map_or(0, |d| d.len() as u64)
+            } else {
+                0
+            };
+            Ok(DirEntry {
+                ino: 0,
+                name: PathBuf::from(name),
+                entry_type: EntryType::File,
+                size,
+            })
+        }
+        ProcPath::PidDir(pid) => {
+            if !pid_dir_exists(pid) {
+                return Err(KernelError::NotFound);
+            }
+            Ok(DirEntry {
+                ino: 0,
+                name: PathBuf::from(format!("{pid}")),
+                entry_type: EntryType::Directory,
+                size: 0,
+            })
+        }
+        ProcPath::PidFile(pid, file_name) => {
+            if !pid_dir_exists(pid) {
+                return Err(KernelError::NotFound);
+            }
+            let size = if with_size {
+                generate_pid(pid, file_name).map_or(0, |d| d.len() as u64)
+            } else {
+                0
+            };
+            Ok(DirEntry {
+                ino: 0,
+                name: PathBuf::from(file_name),
+                entry_type: EntryType::File,
+                size,
+            })
+        }
+        ProcPath::PidLink(pid, link_name) => {
+            if !pid_dir_exists(pid) {
+                return Err(KernelError::NotFound);
+            }
+            Ok(DirEntry {
+                ino: 0,
+                name: PathBuf::from(link_name),
+                entry_type: EntryType::Symlink,
+                size: 0,
+            })
+        }
+        ProcPath::SelfLink => Ok(DirEntry {
+            ino: 0,
+            name: PathBuf::from("self"),
+            entry_type: EntryType::Symlink,
+            size: 0,
+        }),
+        ProcPath::PidTaskDir(pid) => {
+            if !pid_dir_exists(pid) {
+                return Err(KernelError::NotFound);
+            }
+            Ok(DirEntry {
+                ino: 0,
+                name: PathBuf::from("task"),
+                entry_type: EntryType::Directory,
+                size: 0,
+            })
+        }
+        ProcPath::PidTaskTidDir(pid, tid) => {
+            if !thread_belongs(pid, tid) {
+                return Err(KernelError::NotFound);
+            }
+            Ok(DirEntry {
+                ino: 0,
+                name: PathBuf::from(format!("{tid}")),
+                entry_type: EntryType::Directory,
+                size: 0,
+            })
+        }
+        ProcPath::PidTaskFile(pid, tid, file_name) => {
+            if !thread_belongs(pid, tid) {
+                return Err(KernelError::NotFound);
+            }
+            let size = if with_size {
+                generate_task(pid, tid, file_name).map_or(0, |d| d.len() as u64)
+            } else {
+                0
+            };
+            Ok(DirEntry {
+                ino: 0,
+                name: PathBuf::from(file_name),
+                entry_type: EntryType::File,
+                size,
+            })
+        }
+        ProcPath::PidFdDir(pid) => {
+            if !pid_dir_exists(pid) {
+                return Err(KernelError::NotFound);
+            }
+            Ok(DirEntry {
+                ino: 0,
+                name: PathBuf::from("fd"),
+                entry_type: EntryType::Directory,
+                size: 0,
+            })
+        }
+        ProcPath::PidFdLink(pid, fd) => {
+            // Only a currently-open fd is a valid symlink; an absent
+            // fd (or a process with no kernel fd table) is NotFound.
+            crate::proc::pcb::linux_fd_lookup(pid, fd).ok_or(KernelError::NotFound)?;
+            Ok(DirEntry {
+                ino: 0,
+                name: PathBuf::from(format!("{fd}")),
+                entry_type: EntryType::Symlink,
+                size: 0,
+            })
+        }
+        ProcPath::PidFdInfoDir(pid) => {
+            if !pid_dir_exists(pid) {
+                return Err(KernelError::NotFound);
+            }
+            Ok(DirEntry {
+                ino: 0,
+                name: PathBuf::from("fdinfo"),
+                entry_type: EntryType::Directory,
+                size: 0,
+            })
+        }
+        ProcPath::PidFdInfoFile(pid, fd) => {
+            // A regular file, present only for a currently-open fd -- which is
+            // what making it finds out, so it is made either way.
+            let made = gen_pid_fdinfo(pid, fd)?;
+            let size = if with_size { made.len() as u64 } else { 0 };
+            Ok(DirEntry {
+                ino: 0,
+                name: PathBuf::from(format!("{fd}")),
+                entry_type: EntryType::File,
+                size,
+            })
+        }
+        ProcPath::SysDir(rel) => Ok(DirEntry {
+            ino: 0,
+            name: PathBuf::from(sys_basename(rel)),
+            entry_type: EntryType::Directory,
+            size: 0,
+        }),
+        ProcPath::SysFile(rel) => {
+            let size = if with_size {
+                gen_sys(rel).map_or(0, |d| d.len() as u64)
+            } else {
+                0
+            };
+            Ok(DirEntry {
+                ino: 0,
+                name: PathBuf::from(sys_basename(rel)),
+                entry_type: EntryType::File,
+                size,
+            })
+        }
+        ProcPath::NotFound => Err(KernelError::NotFound),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Mount helper
 // ---------------------------------------------------------------------------
@@ -15460,6 +15525,13 @@ pub fn make_etc_mtab() -> KernelResult<()> {
 /// directory is there because the process is ([`pid_dir_exists`]) -- which
 /// it was not until 2026-10-02, and this read was `NotFound` (rq42).
 ///
+/// Read by two processes in turn, the first gone before the second reads.
+/// Until 2026-10-03 the VFS path cache kept the first reader's resolution of
+/// the link, `/proc/<first>/mounts`, and handed it to every later reader, for
+/// whom it named a directory that was no longer there: rq43's `NotFound`,
+/// after rq42's had been fixed. Procfs resolutions are no longer kept
+/// (`FileSystem::dcache_safe`); the second read is the test of that.
+///
 /// # Errors
 ///
 /// `InternalError` when the link or its contents are wrong; the VFS's own.
@@ -15469,6 +15541,35 @@ pub fn self_test_etc_mtab() -> KernelResult<()> {
     fn fail(what: &str) -> KernelResult<()> {
         serial_println!("[procfs]   FAIL: /etc/mtab: {}", what);
         Err(KernelError::InternalError)
+    }
+
+    /// `/etc/mtab`'s contents, read as a new process that is gone again on
+    /// return.
+    fn read_as_new_process(name: &str) -> KernelResult<alloc::vec::Vec<u8>> {
+        let pid = crate::proc::pcb::create(name, 0);
+        let table = crate::proc::thread::self_test_as_process(pid, || {
+            let table = crate::fs::Vfs::read_file("/etc/mtab");
+            if table.is_err() {
+                // Each step of the resolution, so a failure says which one
+                // answered: rq42 and rq43 both read `NotFound` and no more.
+                let own = alloc::format!("/proc/{pid}");
+                let own_mounts = alloc::format!("/proc/{pid}/mounts");
+                serial_println!(
+                    "[procfs]   /etc/mtab steps as process {}: readlink /proc/self {:?}; stat {} \
+                     {:?}; read {} {:?}; read /proc/self/mounts {:?}",
+                    pid,
+                    crate::fs::Vfs::readlink("/proc/self"),
+                    own,
+                    crate::fs::Vfs::stat(&own).map(|_| ()),
+                    own_mounts,
+                    crate::fs::Vfs::read_file(&own_mounts).map(|t| t.len()),
+                    crate::fs::Vfs::read_file("/proc/self/mounts").map(|t| t.len())
+                );
+            }
+            table
+        });
+        crate::proc::pcb::destroy(pid);
+        table
     }
 
     if crate::fs::Vfs::stat("/etc").is_err() {
@@ -15483,24 +15584,30 @@ pub fn self_test_etc_mtab() -> KernelResult<()> {
             return fail("it is not a link to /proc/self/mounts");
         }
     }
-    let pid = crate::proc::pcb::create("etc-mtab-selftest", 0);
-    let table =
-        crate::proc::thread::self_test_as_process(pid, || crate::fs::Vfs::read_file("/etc/mtab"));
-    crate::proc::pcb::destroy(pid);
-    // A line whose second field, the mount point, is "/".
-    let has_root = table.as_ref().is_ok_and(|t| {
-        t.split(|&b| b == b'\n')
-            .any(|line| line.split(|&b| b == b' ').nth(1) == Some(b"/".as_slice()))
-    });
-    if !has_root {
-        serial_println!(
-            "[procfs]   /etc/mtab read: {:?}",
-            table.as_ref().map(alloc::vec::Vec::len)
-        );
-        return fail("reading it gave no line for the root mount");
+    let first = read_as_new_process("etc-mtab-selftest-1");
+    let second = read_as_new_process("etc-mtab-selftest-2");
+    for (reader, table) in [("first", &first), ("second", &second)] {
+        // A line whose second field, the mount point, is "/".
+        let has_root = table.as_ref().is_ok_and(|t| {
+            t.split(|&b| b == b'\n')
+                .any(|line| line.split(|&b| b == b' ').nth(1) == Some(b"/".as_slice()))
+        });
+        if !has_root {
+            serial_println!(
+                "[procfs]   /etc/mtab read by the {} process: {:?}",
+                reader,
+                table.as_ref().map(alloc::vec::Vec::len)
+            );
+            return fail(if reader == "first" {
+                "reading it gave no line for the root mount"
+            } else {
+                "a second process read no line for the root mount (a kept resolution?)"
+            });
+        }
     }
     serial_println!(
-        "[procfs]   /etc/mtab: a link to /proc/self/mounts, read as the mount table: OK"
+        "[procfs]   /etc/mtab: a link to /proc/self/mounts, read as the mount table by two \
+         processes in turn: OK"
     );
     Ok(())
 }
@@ -15517,6 +15624,59 @@ pub fn self_test() -> KernelResult<()> {
     let mut skips = crate::fs::selftest::Skips::new();
 
     let mut fs = ProcFs::new();
+
+    // `entry_type`, which path resolution asks of every component it walks,
+    // agrees with `stat` on every kind of entry, present or not. It is `stat`
+    // without the size (`proc_stat`); an existence check that only one of the
+    // two made would let a path resolve that `stat` then denies, or the
+    // reverse. Added 2026-10-03, with `entry_type`. The process has no thread,
+    // so its `fd/0`, `fdinfo/0` and `task/<pid>` are absent, which they must
+    // be for both.
+    {
+        let pid = crate::proc::pcb::create("procfs-entry-type", 0);
+        let paths = [
+            String::from("/"),
+            String::from("/meminfo"),
+            String::from("/self"),
+            String::from("/sys/kernel"),
+            String::from("/sys/kernel/hostname"),
+            String::from("/no-such-entry"),
+            format!("/{pid}"),
+            format!("/{pid}/status"),
+            format!("/{pid}/cwd"),
+            format!("/{pid}/task"),
+            format!("/{pid}/task/{pid}"),
+            format!("/{pid}/task/{pid}/status"),
+            format!("/{pid}/fd"),
+            format!("/{pid}/fd/0"),
+            format!("/{pid}/fdinfo"),
+            format!("/{pid}/fdinfo/0"),
+            String::from("/999999999"),
+            String::from("/999999999/status"),
+        ];
+        let mut disagreed = false;
+        for p in &paths {
+            let by_stat = fs.stat(Path::new(p)).map(|e| e.entry_type);
+            let by_type = fs.entry_type(Path::new(p));
+            if by_stat != by_type {
+                serial_println!(
+                    "[procfs]   FAIL: {}: stat says {:?}, entry_type says {:?}",
+                    p,
+                    by_stat,
+                    by_type
+                );
+                disagreed = true;
+            }
+        }
+        crate::proc::pcb::destroy(pid);
+        if disagreed {
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[procfs]   entry_type agrees with stat on {} paths, present and absent: OK",
+            paths.len()
+        );
+    }
 
     // `/proc/sys/kernel/hostname` reports what `fs::nameservice` holds.
     //

@@ -479,8 +479,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[dma]   alloc/free 64K: OK");
 
     // Test 4: Constrained allocation — Below4G.
-    // Our QEMU VM has 256 MiB of RAM (all below 4 GiB), so this should
-    // always succeed.  Verify the result is actually below 4 GiB.
+    // Most of the boot test's RAM is below 4 GiB, so this succeeds while
+    // anything is free there.  Verify the result is actually below 4 GiB.
     let buf = alloc(FRAME_SIZE, DmaConstraint::Below4G).expect("DMA alloc Below4G");
     let end = buf.phys_addr() + buf.allocated_size() as u64;
     assert!(
@@ -493,8 +493,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[dma]   constrained Below4G: OK");
 
     // Test 5: Constrained allocation — Below16M.
-    // ISA DMA zone.  With 256 MiB of RAM, the first 16 MiB should have
-    // free frames.  Verify the result is below 16 MiB.
+    // ISA DMA zone.  The frame allocator keeps it for requests like this
+    // one (`frame::DMA_ZONE_END`), so it has free frames however much the
+    // boot has allocated -- until 2026-10-02 it did not, and late in boot
+    // this failed with gigabytes free (rq43).  Verify the result is below
+    // 16 MiB.
     let buf = alloc(FRAME_SIZE, DmaConstraint::Below16M).expect("DMA alloc Below16M");
     let end = buf.phys_addr() + buf.allocated_size() as u64;
     assert!(end <= 0x100_0000, "Below16M: end {:#x} exceeds 16 MiB", end);

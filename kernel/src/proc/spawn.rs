@@ -490,11 +490,11 @@ pub mod fd_handle_type {
     /// same read or write end safely (matching Linux fork() pipe
     /// inheritance).
     pub const PIPE: u8 = 1;
-    /// TCP socket handle.
-    #[allow(dead_code)] // Protocol constant — used when net stack is integrated.
+    /// A kernel TCP connection or listener handle (`net::native_socket`).
+    /// Spawn dups via `native_socket::dup()`, one more holder of the same
+    /// socket, as for a pipe.
     pub const TCP_SOCKET: u8 = 2;
-    /// UDP socket handle.
-    #[allow(dead_code)] // Protocol constant — used when net stack is integrated.
+    /// A kernel UDP socket handle (`net::native_socket`), duped the same way.
     pub const UDP_SOCKET: u8 = 3;
     /// Console I/O (stdin/stdout/stderr virtual handle).
     pub const CONSOLE: u8 = 4;
@@ -545,11 +545,10 @@ pub mod fd_handle_type {
 ///
 /// `CONSOLE` maps to `None` because it is a *virtual* handle — it names "the
 /// console" rather than any refcounted object, so there is nothing to reclaim.
-/// `TCP_SOCKET`/`UDP_SOCKET` also map to `None`, but for a different reason:
-/// the dup loop has no arm for them at all, so no handle of either type can
-/// reach registration.  They are listed explicitly rather than swept into the
-/// wildcard so that adding the missing dup arm forces this decision to be made
-/// again rather than defaulting to "leaks silently".
+/// `TCP_SOCKET`/`UDP_SOCKET` map to `NativeSocket`: since 2026-10-02 the
+/// kernel's own TCP and UDP sockets are counted per holder
+/// (`net::native_socket`), so a spawn can pass one on as it passes a pipe.
+/// Until then the dup loop had no arm for them and refused both types.
 #[must_use]
 const fn ipc_resource_of(handle_type: u8) -> Option<crate::cap::ResourceType> {
     use crate::cap::ResourceType;
@@ -559,7 +558,8 @@ const fn ipc_resource_of(handle_type: u8) -> Option<crate::cap::ResourceType> {
         fd_handle_type::STREAM_SOCKET => Some(ResourceType::StreamSocket),
         fd_handle_type::EVENTFD => Some(ResourceType::EventFd),
         fd_handle_type::PTY => Some(ResourceType::Pty),
-        // CONSOLE: virtual. TCP_SOCKET/UDP_SOCKET: unreachable (no dup arm).
+        fd_handle_type::TCP_SOCKET | fd_handle_type::UDP_SOCKET => Some(ResourceType::NativeSocket),
+        // CONSOLE: virtual.
         _ => None,
     }
 }
@@ -2035,6 +2035,26 @@ fn spawn_process_inner(
                         // `ipc_handles` each appears in.
                         crate::tty::pty::dup(crate::tty::pty::PtyHandle::from_raw(parent_handle))
                             .map(|h| h.raw())
+                    }
+                }
+                fd_handle_type::TCP_SOCKET | fd_handle_type::UDP_SOCKET => {
+                    // A kernel TCP or UDP socket the parent holds: one more
+                    // holder (`net::native_socket`) -- an inetd handing its
+                    // accepted connection to the service it starts. The type
+                    // must say what the handle is: TCP for a connection or a
+                    // listener, UDP for a datagram socket.
+                    use crate::net::native_socket::{self, Kind};
+                    let kind_agrees = match native_socket::kind_of(parent_handle) {
+                        Some(Kind::TcpConnection | Kind::TcpListener) => {
+                            handle_type == fd_handle_type::TCP_SOCKET
+                        }
+                        Some(Kind::Udp) => handle_type == fd_handle_type::UDP_SOCKET,
+                        None => false,
+                    };
+                    if parent_lacks(crate::cap::ResourceType::NativeSocket) || !kind_agrees {
+                        Err(KernelError::InvalidHandle)
+                    } else {
+                        native_socket::dup(parent_handle)
                     }
                 }
                 _ => {
@@ -22803,9 +22823,12 @@ pub fn self_test_native_device_door() -> KernelResult<()> {
 pub fn self_test_linux_unix_sockets() -> KernelResult<()> {
     /// The program's success exit.
     const OK_EXIT: i32 = 0x5D;
-    /// The program never blocks for long -- every wait it makes has its
-    /// answer already queued -- so this only bounds a broken run.
-    const MAX_YIELDS: usize = 1024;
+    /// How long the program may take. It waits once on purpose: 50 ms for
+    /// `SO_RCVTIMEO` to run out (0xFC). A count of yields measured nothing
+    /// there -- a yield returns at once when nothing else is runnable, and
+    /// 1024 of them passed inside those 50 ms and failed the rung mid-wait
+    /// (rq43) -- so this is a time, which only a broken run reaches.
+    const DEADLINE_NS: u64 = 5_000_000_000;
     /// The path the program binds and then unlinks.
     const NODE: &str = "/tmp/slt.sock";
 
@@ -22841,7 +22864,8 @@ pub fn self_test_linux_unix_sockets() -> KernelResult<()> {
             return Err(e);
         }
     };
-    for _ in 0..MAX_YIELDS {
+    let started = crate::hrtimer::now_ns();
+    while crate::hrtimer::now_ns().saturating_sub(started) < DEADLINE_NS {
         crate::sched::yield_now();
         if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
             break;
@@ -22856,8 +22880,8 @@ pub fn self_test_linux_unix_sockets() -> KernelResult<()> {
 
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
-            "[spawn]   FAIL: Unix-domain sockets (ring 3) -- not a zombie after {} yields, got {:?}; {}",
-            MAX_YIELDS,
+            "[spawn]   FAIL: Unix-domain sockets (ring 3) -- not a zombie after {} s, got {:?}; {}",
+            DEADLINE_NS / 1_000_000_000,
             state,
             unfinished
         );
@@ -22984,7 +23008,10 @@ pub fn self_test_linux_scm_rights() -> KernelResult<()> {
 /// - `/proc` lists it;
 /// - `stat` is `<pid> (<name>) Z ...` with a start time;
 /// - `status` says `State:\tZ (zombie)`, `comm` is its name, `wchan` is `0`;
-/// - a process-wide file, `mounts`, is still served.
+/// - a process-wide file, `mounts`, is still served;
+/// - its memory is gone, released at its exit as Linux's `exit_mm` does:
+///   nothing to pin, `maps` empty, `statm` zeros, `stat` vsize 0, `cmdline`
+///   and `environ` empty, no `exe`.
 ///
 /// Reaped, the directory is gone and unlisted. Until 2026-10-02 a zombie's
 /// directory went with its first thread's task at the scheduler's next reap
@@ -23067,6 +23094,44 @@ pub fn self_test_zombie_keeps_proc_dir() -> KernelResult<()> {
         {
             return fail("mounts has no line for the root mount");
         }
+
+        // Its memory went at its exit, as Linux's does in `exit_mm`
+        // (`pcb::release_address_space`), and with it what is read from it.
+        if pcb::pin_address_space(pid).is_some() {
+            return fail("its address space outlived its exit");
+        }
+        if read("maps").ok().as_deref() != Some(b"".as_slice()) {
+            return fail("maps is not empty");
+        }
+        let statm = read("statm").unwrap_or_default();
+        let statm_fields: alloc::vec::Vec<&[u8]> = statm
+            .split(|&b| b == b' ' || b == b'\n')
+            .filter(|f| !f.is_empty())
+            .collect();
+        if statm_fields.len() != 7 || statm_fields.iter().any(|&f| f != b"0") {
+            return fail("statm is not seven zeros");
+        }
+        // Field 23, vsize: the 21st of the fields after the `)`.
+        let vsize = stat
+            .rsplit(|&b| b == b')')
+            .next()
+            .and_then(|rest| rest.split(|&b| b == b' ').filter(|f| !f.is_empty()).nth(20));
+        if vsize != Some(b"0".as_slice()) {
+            return fail("stat's vsize is not 0");
+        }
+        if read("cmdline").ok().as_deref() != Some(b"".as_slice()) {
+            return fail("cmdline is not empty");
+        }
+        if read("environ").ok().as_deref() != Some(b"".as_slice()) {
+            return fail("environ is not empty");
+        }
+        match crate::fs::Vfs::readlink(alloc::format!("{dir}/exe")) {
+            Err(KernelError::NotFound) => {}
+            other => {
+                serial_println!("[spawn]   its exe link reads {:?}", other);
+                return fail("exe still names a file");
+            }
+        }
         Ok(())
     }
 
@@ -23145,7 +23210,8 @@ pub fn self_test_zombie_keeps_proc_dir() -> KernelResult<()> {
     serial_println!(
         "[spawn]   zombie /proc directory (listed, stat `Z` with its name and start time, \
          status, comm, wchan 0 and mounts from the process's own record after its thread \
-         was freed; gone with the reap): OK"
+         was freed; its memory released at exit -- maps, statm, vsize, cmdline, environ \
+         and exe empty; gone with the reap): OK"
     );
     Ok(())
 }
@@ -23292,14 +23358,17 @@ pub fn self_test_main_phdr() -> KernelResult<()> {
         return fail("headers in a segment were not found at its address plus the bias");
     }
 
-    // Copied: a real spawn of a program whose segment leaves them out.
-    let exe = elf::build_linux_exit_elf(0);
+    // Copied: a real spawn of a program whose segment leaves them out -- one
+    // that does not end by itself, since a process frees its memory as it
+    // exits (`pcb::release_address_space`) and an exit program could take
+    // the page away before it was read.
+    let exe = elf::build_linux_pause_elf();
     let exe_elf = elf::ElfFile::parse(&exe)?;
     let Some(table) = exe_elf.phdr_table_bytes() else {
-        return fail("the exit test ELF has no program-header table");
+        return fail("the pause test ELF has no program-header table");
     };
     if crate::proc::linux_stack::phdr_vaddr(&exe_elf).is_some() {
-        return fail("the exit test ELF's segment holds its headers; the copy path is untested");
+        return fail("the pause test ELF's segment holds its headers; the copy path is untested");
     }
     let argv: &[&[u8]] = &[b"spawn-test-phdr"];
     let options = SpawnOptions {
@@ -23317,9 +23386,9 @@ pub fn self_test_main_phdr() -> KernelResult<()> {
     let spawned = spawn_process(&exe, &options)?;
     let recorded = pcb::main_phdr(spawned.pid);
     let mut copy = alloc::vec![0u8; table.len()];
-    let read = pcb::get_pml4(spawned.pid)
+    let read = pcb::pin_address_space(spawned.pid)
         .ok_or(KernelError::NoSuchProcess)
-        .and_then(|pml4| crate::mm::user::copy_from_user_as(pml4, PHDR_COPY_VADDR, &mut copy));
+        .and_then(|pin| crate::mm::user::copy_from_user_as(pin.pml4(), PHDR_COPY_VADDR, &mut copy));
     let auxv = pcb::linux_saved_auxv(spawned.pid).unwrap_or_default();
     let le = |s: &[u8]| -> Option<u64> { Some(u64::from_le_bytes(s.try_into().ok()?)) };
     let at_phdr = auxv
@@ -28452,6 +28521,199 @@ pub fn self_test_bash_on_slateos_libc() -> KernelResult<()> {
             Err(KernelError::InternalError)
         }
     }
+}
+
+/// Run the genuine Oils shell once -- `argv` from `exe_path` -- with stdout and
+/// stderr captured to files, as `cmake_invoke` does. Returns the exit status
+/// and both streams.
+///
+/// # Errors
+///
+/// The capture files' open, or the spawn.
+fn oils_invoke(
+    exe_elf: &[u8],
+    exe_path: &str,
+    argv: &[&[u8]],
+) -> KernelResult<(Option<i32>, alloc::vec::Vec<u8>, alloc::vec::Vec<u8>)> {
+    use crate::fs::handle;
+
+    /// A shell starting up and running one line; bounds a hang.
+    const MAX_YIELDS: usize = 1_048_576;
+    const OUT: &str = "/tmp/oils-rung.out";
+    const ERR: &str = "/tmp/oils-rung.err";
+
+    // Fresh files per run, so a read-back can only see this run's bytes.
+    let _ = crate::fs::Vfs::remove(OUT);
+    let _ = crate::fs::Vfs::remove(ERR);
+    let flags = handle::OpenFlags::WRITE
+        .union(handle::OpenFlags::CREATE)
+        .union(handle::OpenFlags::TRUNCATE);
+    let out_handle = handle::open(OUT, flags)?;
+    let err_handle = handle::open(ERR, flags)?;
+    let fd_map = [
+        (0_i32, fd_handle_type::CONSOLE, 0_u64),
+        (1_i32, fd_handle_type::FILE, out_handle),
+        (2_i32, fd_handle_type::FILE, err_handle),
+    ];
+    let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C", b"HOME=/tmp"];
+    let caps = [(
+        ResourceType::File,
+        1u64,
+        Rights::READ | Rights::WRITE | Rights::METADATA,
+    )];
+    let options = SpawnOptions {
+        name: "spawn-test-oils",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &fd_map,
+        argv,
+        envp,
+        exe_path: Some(exe_path.as_bytes()),
+        cwd: Some(b"/tmp"),
+        uid_gid: None,
+    };
+    let result = spawn_process(exe_elf, &options)?;
+    for _ in 0..MAX_YIELDS {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break;
+        }
+        crate::sched::yield_now();
+    }
+    let finished = pcb::state(result.pid) == Some(pcb::ProcessState::Zombie);
+    let exit_code = pcb::exit_code(result.pid).filter(|_| finished);
+    let out = crate::fs::Vfs::read_file(OUT).unwrap_or_default();
+    let err = crate::fs::Vfs::read_file(ERR).unwrap_or_default();
+    teardown_fixture(result.pid, result.task_id);
+    Ok((exit_code, out, err))
+}
+
+/// The genuine Oils shell (`oils-for-unix`: OSH and YSH, built from upstream's
+/// C++ against SlateOS's C library) runs here, by lane B's request
+/// (`requests/b-ad-genuine-oils-staged-and-run-at-boot.md`; the operator's
+/// choice of default shell, design-decisions 1043). Four lines, each measured
+/// from the same release on Linux:
+///
+/// | Case | What it runs | What it shows |
+/// |---|---|---|
+/// | 1 | OSH: a command substitution, a function's status, extended globs in `[[ ]]` and `case` | a fork, a pipe and a wait; `fnmatch`'s `FNM_EXTMATCH` |
+/// | 2 | OSH: an unset variable's `?` | a C++ exception thrown and caught -- an abort here means libunwind found no unwind tables |
+/// | 3 | YSH: `json write` | YSH and its JSON writer |
+/// | 4 | YSH: a division by zero | the same exception path from YSH, status 3 |
+///
+/// Skips, counted, until lane D stages `/bin/oils-for-unix` and `/bin/ysh`
+/// on the image (`/mnt/bin/...` while the self-tests run).
+///
+/// # Errors
+///
+/// `InternalError` naming the case whose status, stdout or stderr differed.
+pub fn self_test_oils() -> KernelResult<()> {
+    const RUNG: &str = "genuine Oils (OSH and YSH)";
+    // Where the programs will be once the image is the root. argv[0] names
+    // these, since Oils picks OSH or YSH by the name it was run as.
+    const OILS: &str = "/bin/oils-for-unix";
+    const YSH: &str = "/bin/ysh";
+    // Where they are during the boot's self-tests: the image is at /mnt
+    // until the pivot, as the bash and CPython rungs read theirs.
+    const OILS_ON_IMAGE: &str = "/mnt/bin/oils-for-unix";
+    const YSH_ON_IMAGE: &str = "/mnt/bin/ysh";
+
+    struct Case {
+        label: &'static str,
+        exe: &'static str,
+        argv: &'static [&'static [u8]],
+        stdout: &'static [u8],
+        /// What stderr must end with (after trailing newlines), or empty for
+        /// nothing at all.
+        stderr_tail: &'static [u8],
+        status: i32,
+    }
+    const CASES: &[Case] = &[
+        Case {
+            label: "1 OSH: substitution, status, extended globs",
+            exe: OILS,
+            argv: &[
+                b"/bin/oils-for-unix",
+                b"osh",
+                b"-c",
+                b"echo osh-ok; [[ ab == @(ab|cd) ]] && echo extglob-ok; f() { return 3; }; f; \
+                  echo status=$?; x=$(echo sub); echo \"$x\"; \
+                  case abc in @(x|abc)) echo case-ok;; esac",
+            ],
+            stdout: b"osh-ok\nextglob-ok\nstatus=3\nsub\ncase-ok\n",
+            stderr_tail: b"",
+            status: 0,
+        },
+        Case {
+            label: "2 OSH: an exception from an unset variable",
+            exe: OILS,
+            argv: &[
+                b"/bin/oils-for-unix",
+                b"osh",
+                b"-c",
+                b"echo before; : ${undefined_var?boom}; echo not-reached",
+            ],
+            stdout: b"before\n",
+            stderr_tail: b"[ -c flag ]:1: fatal: Var undefined_var is unset: 'boom'",
+            status: 1,
+        },
+        Case {
+            label: "3 YSH: json write",
+            exe: YSH,
+            argv: &[b"/bin/ysh", b"-c", b"json write ({x: 42})"],
+            stdout: b"{\n  \"x\": 42\n}\n",
+            stderr_tail: b"",
+            status: 0,
+        },
+        Case {
+            label: "4 YSH: an exception from a division by zero",
+            exe: YSH,
+            argv: &[b"/bin/ysh", b"-c", b"var x = 1 / 0"],
+            stdout: b"",
+            stderr_tail: b"[ -c flag ]:1: fatal: Divide by zero",
+            status: 3,
+        },
+    ];
+
+    if pathz_missing(RUNG, &[OILS_ON_IMAGE, YSH_ON_IMAGE]) {
+        return Ok(());
+    }
+    serial_println!("[spawn] Running {} test...", RUNG);
+    let oils = crate::fs::Vfs::read_file(OILS_ON_IMAGE)?;
+    let ysh = crate::fs::Vfs::read_file(YSH_ON_IMAGE)?;
+
+    for case in CASES {
+        let elf = if case.exe == YSH { &ysh } else { &oils };
+        let (status, out, err) = oils_invoke(elf, case.exe, case.argv)?;
+        // Without its trailing newlines.
+        let kept = err
+            .iter()
+            .rposition(|&b| b != b'\n')
+            .map_or(0, |last| last.saturating_add(1));
+        let err_trimmed = err.get(..kept).unwrap_or(&[]);
+        let stderr_ok = if case.stderr_tail.is_empty() {
+            err.is_empty()
+        } else {
+            err_trimmed.ends_with(case.stderr_tail)
+        };
+        if status != Some(case.status) || out.as_slice() != case.stdout || !stderr_ok {
+            serial_println!(
+                "[spawn]   FAIL: Oils {} -- status {:?} (want {}), stdout `{}`, stderr `{}`",
+                case.label,
+                status,
+                case.status,
+                out.escape_ascii(),
+                err.escape_ascii()
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    serial_println!(
+        "[spawn]   {} (OSH's substitution, status and extended globs; C++ exceptions from \
+         OSH and YSH; YSH's JSON writer): OK",
+        RUNG
+    );
+    Ok(())
 }
 
 /// **CPython 3.12.3**, cross-compiled from source and linked against **our own

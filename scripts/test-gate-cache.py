@@ -123,6 +123,14 @@ def main() -> int:
     removed = gitenv.scrub_environ()
     if removed:
         print(f"(ignoring the repository this suite was started in: {', '.join(removed)})")
+    # The same for the boot test's outcome log. This suite runs inside a boot's
+    # tooling phase, and every driver it starts appended its fixture outcomes
+    # -- label "t", one of them a deliberate VERIFY-FAILED -- to the log that
+    # boot summarises. rq43's summary said a verification had failed and the
+    # cache was off, when neither was true (2026-10-02). The one case that
+    # wants a log passes its own.
+    if os.environ.pop("GATE_CACHE_LOG", None) is not None:
+        print("(ignoring the outcome log of the boot this suite runs in)")
     fx = Fixture()
     try:
         cases(fx)

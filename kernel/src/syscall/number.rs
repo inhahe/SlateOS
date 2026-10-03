@@ -4259,6 +4259,17 @@ pub const FS_DIR_ENTRY_SIZE: usize = 264;
 
 // ---------------------------------------------------------------------------
 // Networking syscalls (800–999)
+//
+// The handles `SYS_TCP_CONNECT`, `SYS_TCP_ACCEPT`, `SYS_TCP_BIND` and
+// `SYS_UDP_BIND` return are the caller's (`net::native_socket`, since
+// 2026-10-02): opaque numbers from a counter that never repeats, from 1, and
+// usable only by a process that holds one -- another process naming the same
+// number gets `InvalidHandle`, as does a handle whose socket has ended.
+// A fork, or a spawn passing it on (`fd_handle_type::TCP_SOCKET`/
+// `UDP_SOCKET`), adds a holder; each holder's close, exit or exec drops
+// one; the last closes the socket. Until then a handle was the socket's
+// slot index, which any process with the `Socket` capability could count
+// through and use.
 // ---------------------------------------------------------------------------
 
 /// Open a TCP connection to a remote host.
@@ -4364,7 +4375,9 @@ pub const SYS_UDP_BIND: u64 = 810;
 
 /// Send a UDP datagram.
 ///
-/// `arg0`: socket handle (for source port) OR 0 (use ephemeral port).
+/// `arg0`: the sending socket's handle, whose port is the source port. (Doc
+///         until 2026-10-02 said 0 meant "an ephemeral port"; it never did
+///         -- 0 named slot 0 -- and now names nothing: `InvalidHandle`.)
 /// `arg1`: destination IPv4 address (u32, network byte order).
 /// `arg2`: destination port.
 /// `arg3`: pointer to data buffer.
@@ -6491,6 +6504,41 @@ pub const SYS_FS_DEFER_LIST: u64 = 1127;
 /// `NotPermitted`. `NotFound` for no such entry. `File` capability with
 /// `DELETE`.
 pub const SYS_FS_DEFER_CANCEL: u64 = 1128;
+
+// UDP over IPv6, and the multicast options (1129-1134): `net::udp`. What a
+// native responder on a multicast group -- mDNS on 224.0.0.251 and ff02::fb
+// -- needs beyond the IPv4 calls (design-decisions 1532): IPv6 datagrams, an
+// IPv6 group to join, and the TTL and loop settings Linux keeps per socket.
+// Handles are the networking section's: the caller's, from `SYS_UDP_BIND`.
+
+/// `SYS_UDP_SEND6(handle, addr_ptr, port, buf, len)` -- send a datagram from
+/// socket `handle` to the IPv6 address at `addr_ptr` (16 bytes, network
+/// order) and `port`. To a group, the socket's multicast hop limit applies
+/// and, unless its loop option is off, this machine's members of the group
+/// get it too.
+pub const SYS_UDP_SEND6: u64 = 1129;
+/// `SYS_UDP_RECV6(handle, buf, cap, src_ptr, flags)` -- `SYS_UDP_RECV`, for
+/// the socket's IPv6 datagrams. `src_ptr`, unless null, gets 18 bytes: the
+/// source address (16, network order), then the source port (2,
+/// little-endian, as `SYS_UDP_RECV`'s). `flags`: `MSG_PEEK` (0x02),
+/// `MSG_TRUNC` (0x20). `WouldBlock` with none queued.
+pub const SYS_UDP_RECV6: u64 = 1130;
+/// `SYS_UDP_MCAST_JOIN6(handle, group_ptr)` -- join the IPv6 group at
+/// `group_ptr` (16 bytes, in `ff00::/8`), as `SYS_UDP_MCAST_JOIN` joins an
+/// IPv4 one: the socket gets what is sent to the group on its port.
+pub const SYS_UDP_MCAST_JOIN6: u64 = 1131;
+/// `SYS_UDP_MCAST_LEAVE6(handle, group_ptr)` -- leave it.
+pub const SYS_UDP_MCAST_LEAVE6: u64 = 1132;
+/// `SYS_UDP_SET_OPTION(handle, option, value)` -- set one of the socket's
+/// multicast options, as Linux's `setsockopt` reads it: 1 the IPv4 TTL
+/// (0-255, or -1 for the default, 1), 2 IPv4 loop (0 off, anything else
+/// on), 3 the IPv6 hop limit (0-255, or -1 for 1), 4 IPv6 loop (0 or 1). A
+/// TTL or hop limit of 0 keeps a datagram on this machine. `InvalidArgument`
+/// for an option that does not exist or a value it does not take.
+pub const SYS_UDP_SET_OPTION: u64 = 1133;
+/// `SYS_UDP_GET_OPTION(handle, option)` -- the option's value: a TTL or hop
+/// limit, or 1/0 for a loop setting.
+pub const SYS_UDP_GET_OPTION: u64 = 1134;
 
 /// Bytes [`SYS_UNIX_NAME`] writes: kind, length, 108 bytes of name.
 pub const UNIX_ADDR_LEN: usize = 116;

@@ -44,6 +44,7 @@ pub mod lldp;
 pub mod mdns;
 pub mod mld;
 pub mod nat;
+pub mod native_socket;
 pub mod ndisc;
 pub mod netcat;
 pub mod netstack_client;
@@ -388,6 +389,7 @@ pub fn self_test() -> KernelResult<()> {
     icmpv6::self_test()?;
     arp::self_test()?;
     udp::self_test()?;
+    native_socket::self_test()?;
     dns::self_test()?;
     dhcp::self_test()?;
     frag::self_test()?;

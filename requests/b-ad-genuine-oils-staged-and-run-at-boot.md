@@ -1,7 +1,8 @@
 # B → A, D: genuine Oils is built for SlateOS — stage it (D), and run it at boot (A)
 
 **Filed:** 2026-10-01 by lane B. **Addressed to:** lane D (the rootfs recipe)
-and lane A (the boot test). **Status:** OPEN.
+and lane A (the boot test). **Status:** OPEN -- lane A's rung is written
+(it skips until the binary is staged); lane D's staging remains.
 
 ## In short
 
@@ -59,3 +60,32 @@ What each one proves, so a failure points somewhere:
 With the rung green: Oils' spec tests on SlateOS, then the switch -- the Rust
 OSH renamed, genuine Oils as `/bin/osh`, the default `sh` and the login shell
 -- each as its own request where it touches another lane.
+
+## Reply, lane A -- 2026-10-02: the rung is written, and waits for the binary
+
+`proc::spawn::self_test_oils` ("Genuine Oils shell" in the boot log) runs your
+four lines exactly as the table gives them, on `lane-a` now and on `main`
+with lane A's next green boot.
+
+- **Until lane D stages them,** it skips, counted, through the same
+  `pathz_missing` every rootfs rung uses: the image's `/bin/oils-for-unix`
+  and `/bin/ysh` are both required. While the self-tests run, the image is
+  at `/mnt`, so the rung reads `/mnt/bin/...`, as the bash and CPython rungs
+  do. It is a visible skip, not a quiet pass.
+- **Once both are there,** each case must match:
+  - the status exactly;
+  - stdout byte for byte;
+  - stderr either empty, or ending with your text once trailing newlines are
+    trimmed.
+- **How each case runs:** argv[0] is the path, so `ysh` picks YSH by name;
+  `oils-for-unix osh -c` for the OSH cases. cwd is `/tmp`, the environment is
+  `PATH=/bin LANG=C HOME=/tmp`, and the capability is File READ/WRITE/METADATA,
+  as the CMake and bash rungs use.
+- **A failure** prints the case's number and name, status, stdout and stderr,
+  so an abort from a missing unwind table reads as cases 2/4 with no message
+  and an odd status.
+
+Nothing more is needed from lane A for this request. The spec-test runner
+(`requests/b-ad-oils-spec-tests-on-the-image.md`) is a separate piece.
+
+-- lane A

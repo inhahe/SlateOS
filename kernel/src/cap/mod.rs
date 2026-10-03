@@ -409,6 +409,17 @@ pub enum ResourceType {
     /// what a name allows is the filesystem's to say (write permission on the
     /// directory to bind, on the node to connect).
     UnixSocket = 33,
+
+    /// A handle for one of the kernel's own TCP connections, TCP listeners
+    /// or UDP sockets (`net::native_socket`), as the native `SYS_TCP_*` and
+    /// `SYS_UDP_*` calls give them out.
+    ///
+    /// Recorded in each holder's `ipc_handles`, so that only a holder can
+    /// use one, a fork or a spawn that passes it on adds a holder, and a
+    /// close, an exit or an exec drops one -- the last closing the socket.
+    /// Not a capability anything is gated on: making a socket at all is
+    /// `Socket`'s (11) to allow.
+    NativeSocket = 34,
 }
 
 impl ResourceType {
@@ -418,7 +429,7 @@ impl ResourceType {
     /// variant count. Consumers that need "every type" iterate `1..=LAST`
     /// rather than keeping their own list — see
     /// [`groups::test_admin_grants_every_resource_type`](crate::cap::groups).
-    pub const LAST: u16 = Self::UnixSocket as u16;
+    pub const LAST: u16 = Self::NativeSocket as u16;
 
     /// This type's wire discriminant, as sent to userspace.
     ///
@@ -502,7 +513,8 @@ impl ResourceType {
             | Self::InputDevice
             | Self::BlockDevice
             | Self::Semaphore
-            | Self::UnixSocket => self as u16,
+            | Self::UnixSocket
+            | Self::NativeSocket => self as u16,
         }
     }
 
@@ -572,6 +584,7 @@ impl ResourceType {
             31 => Self::BlockDevice,
             32 => Self::Semaphore,
             33 => Self::UnixSocket,
+            34 => Self::NativeSocket,
             _ => return None,
         };
         Some(ty)
@@ -853,13 +866,17 @@ fn test_cap_entry_info_abi() -> KernelResult<()> {
     //    33 since 2026-10-02: `UnixSocket`, likewise a held object, and Linux
     //    gates no Unix-domain socket on a capability -- told to lane D in
     //    requests/a-d-resource-type-33-is-unixsocket.md.
-    if ResourceType::LAST != 33 {
+    //    34 since 2026-10-02: `NativeSocket`, the handle a process holds for
+    //    one of the kernel's own TCP or UDP sockets -- a held object, which
+    //    implies no Linux capability; told to lane D in
+    //    requests/a-d-resource-type-34-is-nativesocket.md.
+    if ResourceType::LAST != 34 {
         serial_println!(
-            "[cap]   FAIL: ResourceType::LAST is {}, pinned at 33 — a new resource type \
+            "[cap]   FAIL: ResourceType::LAST is {}, pinned at 34 — a new resource type \
              was appended. That is fine, but the wire ABI just grew: bump the pin here, \
              and ask lane D whether the new type implies a Linux capability. If it does, \
              posix/src/sys_capability.rs needs a rule; if it does not — which is the usual \
-             answer, that file names seven of our thirty-three types — it needs nothing, and \
+             answer, that file names seven of our thirty-four types — it needs nothing, and \
              adding it anyway would make capget() report a CAP_* the kernel will refuse. \
              Ask either way: no compiler here can see that tree.",
             ResourceType::LAST

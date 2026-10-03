@@ -6347,6 +6347,30 @@ fn resolve_fault_inner(
         return false;
     }
 
+    // A swapped-out frame comes back from swap, each 4 KiB part with the
+    // flags its entry kept (`mm::swap::swap_in_page`) -- never demand-paged
+    // anew over its swap entries, which replaced the data with zeros and
+    // leaked the slot. Until 2026-10-03 the #PF handler alone looked for swap
+    // first, and the kernel faulting a page in on a process's behalf (a
+    // syscall's buffer, `process_vm_readv`) came straight here.
+    let swapped = pml4_phys != 0 && {
+        // SAFETY: `pml4_phys` is the process's own PML4, read through the
+        // HHDM.
+        unsafe { crate::mm::swap::is_swapped(pml4_phys, VirtAddr::new(frame_base)) }
+    };
+    if swapped {
+        drop(table);
+        // SAFETY: as above; a part of the frame holds a swap entry.
+        return match unsafe { crate::mm::swap::swap_in_page(pml4_phys, VirtAddr::new(frame_base)) }
+        {
+            Ok(kept) => {
+                crate::mm::swap::register_reclaimable(pml4_phys, frame_base, kept);
+                true
+            }
+            Err(_) => false,
+        };
+    }
+
     // Decide how to populate the new frame.  Anonymous/Stack pages are
     // left zeroed; FileBacked pages are filled from the backing file.
     // Guard/Fixed faults are never resolvable here.
@@ -8420,6 +8444,7 @@ pub fn self_test() -> KernelResult<()> {
     test_reset_linux_state_for_exec()?;
     test_prot_none()?;
     test_fault_with_the_table_held()?;
+    test_fault_swaps_in()?;
     test_rlimits()?;
     test_canonical_path()?;
 
@@ -8858,6 +8883,90 @@ fn test_fault_with_the_table_held() -> KernelResult<()> {
     serial_println!(
         "[proc]   a fault met with the process table held is retried, not refused, and \
          resolves once it is free: OK"
+    );
+    Ok(())
+}
+
+/// A page the kernel faults in on a process's behalf -- a syscall's buffer,
+/// `process_vm_readv` -- comes back from swap when it is there
+/// ([`resolve_fault`]), with its data. Until 2026-10-03 the resolver
+/// demand-paged a page of zeros over the swap entry, which only the #PF
+/// handler looked for.
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+fn test_fault_swaps_in() -> KernelResult<()> {
+    use crate::mm::page_table::{self, PageFlags, VirtAddr};
+
+    fn fail(pid: ProcessId, what: &str) -> KernelResult<()> {
+        serial_println!("[proc]   FAIL: fault from swap: {}", what);
+        destroy(pid);
+        Err(KernelError::InternalError)
+    }
+    let frame = crate::mm::frame::FRAME_SIZE as u64;
+    let pattern = |i: u64| (i % 241) as u8;
+
+    let pid = create("fault-swap-test", 0);
+    set_running(pid)?;
+    let Some(pml4) = get_pml4(pid).filter(|&p| p != 0) else {
+        return fail(pid, "the test process has no PML4");
+    };
+    let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
+    let base: u64 = 0x0000_0032_0000_0000; // clear of the other fault tests'
+    let flags = PageFlags::PRESENT
+        | PageFlags::WRITABLE
+        | PageFlags::USER_ACCESSIBLE
+        | PageFlags::NO_EXECUTE;
+    if add_vma(
+        pid,
+        Vma {
+            start: base,
+            end: base + frame,
+            kind: VmaKind::Anonymous,
+            flags,
+        },
+    )
+    .is_err()
+    {
+        return fail(pid, "add_vma");
+    }
+
+    // Populate the page, and fill it.
+    if resolve_fault(pid, base, 1 << 2, true) != FaultOutcome::Resolved {
+        return fail(pid, "the first touch did not demand-page");
+    }
+    let Some(phys) = page_table::translate(pml4, VirtAddr::new(base)) else {
+        return fail(pid, "the populated page is not mapped");
+    };
+    for i in 0..frame {
+        // SAFETY: the frame just mapped, through the HHDM, in bounds.
+        unsafe { ((phys + hhdm + i) as *mut u8).write(pattern(i)) };
+    }
+
+    // Out to swap; then the kernel faults it in for a read in its second part.
+    // SAFETY: the test process's own PML4, the page mapped.
+    if let Err(e) = unsafe { crate::mm::swap::swap_out_page(pml4, VirtAddr::new(base)) } {
+        serial_println!("[proc]   (swap-out gave {:?})", e);
+        return fail(pid, "swap-out");
+    }
+    let outcome = resolve_fault(pid, base + 5000, 1 << 2, true);
+    let back = page_table::translate(pml4, VirtAddr::new(base));
+    let data_ok = back.is_some_and(|phys| {
+        (0..frame).all(|i| {
+            // SAFETY: the frame swap-in mapped, through the HHDM, in bounds.
+            unsafe { ((phys + hhdm + i) as *const u8).read() == pattern(i) }
+        })
+    });
+    destroy(pid);
+    if outcome != FaultOutcome::Resolved || !data_ok {
+        serial_println!(
+            "[proc]   FAIL: fault from swap: resolved {:?}; data came back {}",
+            outcome,
+            data_ok
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[proc]   a page the kernel faults in from swap comes back with its data, not \
+         zeros: OK"
     );
     Ok(())
 }

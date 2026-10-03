@@ -404,16 +404,6 @@ pub unsafe fn mark_cow(pml4_phys: u64, virt: VirtAddr) -> KernelResult<()> {
 /// Number of page table entries per table (PML4/PDPT/PD/PT).
 const ENTRIES_PER_TABLE: usize = 512;
 
-/// Default flags applied when a swapped-out page is faulted back in.
-///
-/// Mirrors the page-fault handler's swap-in path (`idt.rs`), which does
-/// not track per-page protection and restores pages as user RW + NX.
-/// fork() uses the same defaults when it must bring a swapped-out parent
-/// page back to RAM before sharing it copy-on-write.
-fn swap_in_default_flags() -> PageFlags {
-    PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER_ACCESSIBLE | PageFlags::NO_EXECUTE
-}
-
 /// Compose a user-half virtual address from its four page-table indices.
 ///
 /// Only valid for the user half (`pml4_idx < 256`), where bit 47 is 0 and
@@ -642,25 +632,19 @@ unsafe fn clone_user_half(parent_pml4: u64, child_pml4: u64, hhdm: u64) -> Kerne
                 for base_pt_idx in (0..ENTRIES_PER_TABLE).step_by(HW_PAGES_PER_FRAME) {
                     let group_virt = compose_virt(pml4_idx, pdpt_idx, pd_idx, base_pt_idx);
 
-                    // SAFETY: pt valid, base_pt_idx < 512.
-                    let base_pte = unsafe { page_table::read_entry(pt, base_pt_idx, hhdm) };
+                    let virt = VirtAddr::new(group_virt);
 
                     // Swapped-out frame: bring it back to RAM (in the
-                    // parent) before sharing.  A 16 KiB frame is swapped as
-                    // a unit, so the base PTE carrying a swap entry means
-                    // the whole group is swapped.
-                    if !base_pte.is_present() && base_pte.is_swap() {
-                        let virt = VirtAddr::new(group_virt);
-                        // SAFETY: parent_pml4 valid, PTE holds a swap entry.
-                        unsafe {
-                            super::swap::swap_in_page(parent_pml4, virt, swap_in_default_flags())?;
-                        }
+                    // parent) before sharing, each part as it was. A 16 KiB
+                    // frame is swapped as a unit, but any part may be the one
+                    // still naming the slot (one unmapped since gave its entry
+                    // up), so every part is looked at (`swap::is_swapped`).
+                    // SAFETY: parent_pml4 is valid (the caller's contract).
+                    if unsafe { super::swap::is_swapped(parent_pml4, virt) } {
+                        // SAFETY: parent_pml4 valid, a part holds a swap entry.
+                        let flags = unsafe { super::swap::swap_in_page(parent_pml4, virt)? };
                         // Re-register so the page can be evicted again.
-                        super::swap::register_reclaimable(
-                            parent_pml4,
-                            group_virt,
-                            swap_in_default_flags(),
-                        );
+                        super::swap::register_reclaimable(parent_pml4, group_virt, flags);
                     }
 
                     // SAFETY: all tables valid; group_virt is the group base.

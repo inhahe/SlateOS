@@ -339,7 +339,6 @@ impl PageFlags {
 
     /// No flags set.
     #[must_use]
-    #[allow(dead_code)] // Constructor for page table operations.
     pub const fn empty() -> Self {
         Self(0)
     }
@@ -1932,8 +1931,11 @@ pub unsafe fn change_user_protection(
 ///
 /// Walks the page table hierarchy and returns the raw PTE value for
 /// the leaf entry at `virt`.  Unlike [`translate`], this function
-/// does NOT require the entry to be present — it returns the raw
-/// value even for non-present (swap) entries.
+/// returns present entries only. Until 2026-10-03 this paragraph said the
+/// opposite -- "it returns the raw value even for non-present (swap)
+/// entries" -- and `mm::swap` believed it, so swap-in never found the entry
+/// it was looking for. For a frame's entries in whatever state, swap entries
+/// included, use [`read_frame_ptes`].
 ///
 /// Handles 4 KiB, 2 MiB (huge), and 1 GiB (huge) page sizes:
 /// if a huge page is encountered, its PTE is returned directly.
@@ -1985,6 +1987,86 @@ pub fn read_leaf_pte(pml4_phys: u64, virt: VirtAddr) -> Option<PageTableEntry> {
     if pte.is_present() { Some(pte) } else { None }
 }
 
+/// The page table holding the four 4 KiB entries of the 16 KiB frame at
+/// `virt`, and the index of the first of them, found without creating
+/// anything. `None` when `virt` is not canonical or frame-aligned, or the
+/// walk meets a huge page or no table: nothing was ever mapped there.
+fn frame_group(pml4_phys: u64, virt: VirtAddr, hhdm: u64) -> Option<(u64, usize)> {
+    if !virt.is_canonical() || !virt.is_frame_aligned() {
+        return None;
+    }
+    // SAFETY for the three reads: `pml4_phys` is valid (the callers'
+    // contract), each table is the one its present parent entry names, and
+    // indices taken from a `VirtAddr` are below 512.
+    let pml4e = unsafe { read_entry(pml4_phys, virt.pml4_index(), hhdm) };
+    if !pml4e.is_present() {
+        return None;
+    }
+    let pdpte = unsafe { read_entry(pml4e.phys_addr(), virt.pdpt_index(), hhdm) };
+    if !pdpte.is_present() || pdpte.is_huge() {
+        return None;
+    }
+    let pde = unsafe { read_entry(pdpte.phys_addr(), virt.pd_index(), hhdm) };
+    if !pde.is_present() || pde.is_huge() {
+        return None;
+    }
+    Some((pde.phys_addr(), virt.pt_index()))
+}
+
+/// The four 4 KiB entries of the 16 KiB frame at `virt`, whatever state
+/// each is in: present, empty, or a swap entry. `None` when there is no page
+/// table for them, or `virt` is not a canonical frame address.
+///
+/// [`read_leaf_pte`] answers present entries only; this is for a caller that
+/// must see a frame's parts as a group, swap entries included (`mm::swap`).
+/// The caller must guarantee `pml4_phys` is a valid PML4, as for
+/// [`read_leaf_pte`].
+#[must_use]
+pub fn read_frame_ptes(
+    pml4_phys: u64,
+    virt: VirtAddr,
+) -> Option<[PageTableEntry; HW_PAGES_PER_FRAME]> {
+    let hhdm = hhdm()?;
+    let (pt, base) = frame_group(pml4_phys, virt, hhdm)?;
+    let mut entries = [PageTableEntry::EMPTY; HW_PAGES_PER_FRAME];
+    for (i, entry) in entries.iter_mut().enumerate() {
+        // SAFETY: `pt` is the table a present PD entry names, and `base` is
+        // a multiple of 4 below 512, so `base + i` stays inside it.
+        *entry = unsafe { read_entry(pt, base.saturating_add(i), hhdm) };
+    }
+    Some(entries)
+}
+
+/// Replace one of the four 4 KiB entries of the 16 KiB frame at `virt` --
+/// part `part`, 0 to 3 -- with `new`, and return what it was, in one atomic
+/// exchange.
+///
+/// # Errors
+///
+/// `InvalidAddress` when there is no page table for the frame or `part` is
+/// not below 4 ([`read_frame_ptes`]); `NotSupported` before the HHDM exists.
+///
+/// # Safety
+///
+/// `pml4_phys` must be a valid PML4 the caller may change and `new` an entry
+/// it may install there. The caller flushes the TLB for what it replaced
+/// before freeing anything that entry mapped.
+pub unsafe fn exchange_frame_pte(
+    pml4_phys: u64,
+    virt: VirtAddr,
+    part: usize,
+    new: PageTableEntry,
+) -> KernelResult<PageTableEntry> {
+    let hhdm = hhdm().ok_or(KernelError::NotSupported)?;
+    let (pt, base) = frame_group(pml4_phys, virt, hhdm).ok_or(KernelError::InvalidAddress)?;
+    if part >= HW_PAGES_PER_FRAME {
+        return Err(KernelError::InvalidAddress);
+    }
+    // SAFETY: as `read_frame_ptes`: inside the table; the caller may write.
+    let entry = unsafe { entry_atomic(pt, base.saturating_add(part), hhdm) };
+    Ok(PageTableEntry(entry.swap(new.raw(), Ordering::AcqRel)))
+}
+
 /// The physical address of the byte at `virt` in the address space
 /// `pml4_phys`, if and only if `virt` lies on a present 4 KiB leaf marked
 /// [`PageFlags::SHARED`].
@@ -2030,71 +2112,6 @@ pub fn shared_phys(pml4_phys: u64, virt: VirtAddr) -> Option<u64> {
     // page_offset() < 4096 and phys_addr() is 4 KiB-aligned below 2^52, so
     // this cannot overflow; checked anyway rather than asserted.
     pte.phys_addr().checked_add(virt.page_offset() as u64)
-}
-
-/// Write a swap entry into all 4 leaf PTEs for a 16 KiB frame.
-///
-/// Used by the swap subsystem to mark a frame as swapped-out.  All
-/// 4 hardware page PTEs are set to the same swap entry so that a
-/// page fault on any of the 4 KiB pages within the frame can find
-/// the swap slot index.
-///
-/// Intermediate page table levels must already exist (the frame was
-/// previously mapped, so they do).
-///
-/// # Safety
-///
-/// - `pml4_phys` must be a valid PML4 table.
-/// - The existing PTEs must be NOT present (the physical frame should
-///   have already been unmapped).
-/// - The caller must flush the TLB afterward.
-#[allow(clippy::arithmetic_side_effects)]
-pub unsafe fn write_swap_entries(
-    pml4_phys: u64,
-    virt: VirtAddr,
-    entry: PageTableEntry,
-) -> KernelResult<()> {
-    let hhdm = hhdm().ok_or(KernelError::NotSupported)?;
-
-    if !virt.is_frame_aligned() {
-        return Err(KernelError::BadAlignment);
-    }
-    if !virt.is_canonical() {
-        return Err(KernelError::InvalidAddress);
-    }
-
-    // Walk to PT (no creation — must already exist).
-    // SAFETY for all read_entry calls: pml4_phys valid per fn safety
-    // contract; each subsequent table address is from a present parent
-    // entry.  Indices from canonical VirtAddr are always 0..511.
-    let pml4e = unsafe { read_entry(pml4_phys, virt.pml4_index(), hhdm) };
-    if !pml4e.is_present() {
-        return Err(KernelError::InvalidAddress);
-    }
-
-    let pdpte = unsafe { read_entry(pml4e.phys_addr(), virt.pdpt_index(), hhdm) };
-    if !pdpte.is_present() || pdpte.is_huge() {
-        return Err(KernelError::InvalidAddress);
-    }
-
-    let pde = unsafe { read_entry(pdpte.phys_addr(), virt.pd_index(), hhdm) };
-    if !pde.is_present() || pde.is_huge() {
-        return Err(KernelError::InvalidAddress);
-    }
-
-    let pt = pde.phys_addr();
-    let base_pt_index = virt.pt_index();
-
-    // Write the swap entry into all 4 PTEs.
-    for i in 0..HW_PAGES_PER_FRAME {
-        // SAFETY: pt valid, index < 512 (base_pt_index is aligned to
-        // a 4-entry group within the 512-entry table).
-        unsafe {
-            write_entry(pt, base_pt_index + i, entry, hhdm);
-        }
-    }
-
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -2428,6 +2445,13 @@ pub unsafe fn clear_user_address_space(pml4_phys: u64) {
                     let mut seen: [u64; HW_PAGES_PER_FRAME] = [0; HW_PAGES_PER_FRAME];
                     let mut seen_count = 0usize;
                     let mut any_present = false;
+                    // The swap slots the group's swap entries name, with how
+                    // many name each: they go with this table, and each gives
+                    // its slot back (`swap::release_swap_parts`). Until
+                    // 2026-10-03 teardown skipped them as not present, and
+                    // every swapped page of an exiting process leaked its slot.
+                    let mut swapped: [(u32, u8); HW_PAGES_PER_FRAME] = [(0, 0); HW_PAGES_PER_FRAME];
+                    let mut swapped_count = 0usize;
 
                     for sub in 0..HW_PAGES_PER_FRAME {
                         // base_pt_idx is a multiple of 4 and sub < 4, so the
@@ -2436,6 +2460,23 @@ pub unsafe fn clear_user_address_space(pml4_phys: u64) {
                         let pt_idx = base_pt_idx.saturating_add(sub);
                         // SAFETY: pt_phys is from present pde; pt_idx < 512.
                         let pte = unsafe { read_entry(pt_phys, pt_idx, hhdm) };
+                        if let Some(entry) = super::swap::SwapEntry::from_pte_raw(pte.raw()) {
+                            let slot = entry.slot();
+                            match swapped
+                                .iter_mut()
+                                .take(swapped_count)
+                                .find(|(s, _)| *s == slot)
+                            {
+                                Some((_, n)) => *n = n.saturating_add(1),
+                                None => {
+                                    if let Some(free) = swapped.get_mut(swapped_count) {
+                                        *free = (slot, 1);
+                                        swapped_count = swapped_count.saturating_add(1);
+                                    }
+                                }
+                            }
+                            continue;
+                        }
                         if !pte.is_present() {
                             continue;
                         }
@@ -2454,6 +2495,10 @@ pub unsafe fn clear_user_address_space(pml4_phys: u64) {
                                 seen_count = seen_count.saturating_add(1);
                             }
                         }
+                    }
+
+                    for &(slot, count) in swapped.iter().take(swapped_count) {
+                        super::swap::release_swap_parts(slot, count);
                     }
 
                     if !any_present {

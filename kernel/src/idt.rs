@@ -3671,15 +3671,12 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
 
             // SAFETY: pml4 is the current process's page table (from CR3).
             if unsafe { mm::swap::is_swapped(pml4, virt) } {
-                // The page is swapped out — need to restore it.
-                // Determine the flags from the VMA, or use a safe default.
-                let flags = mm::page_table::PageFlags::PRESENT
-                    | mm::page_table::PageFlags::WRITABLE
-                    | mm::page_table::PageFlags::USER_ACCESSIBLE
-                    | mm::page_table::PageFlags::NO_EXECUTE;
-
+                // The page is swapped out — need to restore it, each 4 KiB
+                // part with the flags its swap entry kept. (Until 2026-10-03
+                // every part came back writable and non-executable, whatever
+                // it had been; and the swap entry was never found at all.)
                 // SAFETY: pml4 is valid, PTE contains a swap entry.
-                if unsafe { mm::swap::swap_in_page(pml4, virt, flags) }.is_ok() {
+                if let Ok(flags) = unsafe { mm::swap::swap_in_page(pml4, virt) } {
                     // Re-register the restored page as reclaimable so it
                     // can be swapped out again if memory pressure returns.
                     mm::swap::register_reclaimable(pml4, virt.as_u64(), flags);

@@ -1350,8 +1350,17 @@ pub fn write_user_items<T: Copy>(user_dst: u64, items: &[T]) -> KernelResult<()>
 /// never freed.  `free_frame` is refcount-aware, so a frame still mapped by
 /// another address space (CoW, shared memory) survives.
 ///
-/// Returns the number of 4 KiB pages that were mapped and are now unmapped;
-/// absent pages are skipped, so the call is idempotent.
+/// # Swapped-out pages
+///
+/// A page whose frame is in swap has a swap entry where its PTE was: it is
+/// cleared like a present one, and gives its share of the swap slot back
+/// ([`crate::mm::swap::release_swap_pte`]; the slot is freed with the last
+/// part that named it). Until 2026-10-03 such a page was skipped as absent,
+/// leaking the slot and leaving the entry behind.
+///
+/// Returns the number of 4 KiB pages that were mapped -- present, or in
+/// swap -- and are now unmapped; absent pages are skipped, so the call is
+/// idempotent.
 pub fn unmap_user_range(pml4: u64, start: u64, end: u64) -> usize {
     use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
     use crate::mm::tlb_gather::TlbGather;
@@ -1391,6 +1400,15 @@ pub fn unmap_user_range(pml4: u64, start: u64, end: u64) -> usize {
                     }
                     gather.add_flush_only(va);
                 }
+            }
+        } else {
+            // SAFETY: `pml4` is the caller's live page table and `va` a user
+            // address below USER_SPACE_END, as for `unmap_4k` above.
+            let released = unsafe { crate::mm::swap::release_swap_pte(pml4, va) };
+            if released {
+                // A swap entry maps no frame: nothing for the gather to
+                // flush or free.
+                unmapped = unmapped.saturating_add(1);
             }
         }
         va = match va.checked_add(hw) {

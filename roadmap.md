@@ -2865,7 +2865,8 @@ word; text inside them that says "lane C" is history.
   text and test Ctrl somewhere without Alt (notes' body, and every field on
   `TextInput::edit_key`, wait on the request above). *The Alt/Super guard:*
   done 2026-10-03 for all sixty programs of the 2026-09-29 survey, each with
-  a test and mutation rows (`known-issues/E-a-key-held-with-alt-or-the-windows-key-works-a-programs-bare-key-binding.md`
+  a test and mutation rows, published to main 2026-10-03
+  (`known-issues-resolved/E-a-key-held-with-alt-or-the-windows-key-works-a-programs-bare-key-binding.md`
   lists them); most had the AltGr-as-Ctrl fault too and many typed a
   command's letter, both fixed alongside; and `textline::apply_key` and
   `TextArea::apply_key` themselves now refuse Alt's and the Windows key's

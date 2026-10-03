@@ -14,9 +14,8 @@
 //! so that this program would not have to grow a second one.
 //!
 //! TAR, TAR.GZ, TAR.BZ2 and TAR.XZ, via [`tararchive`] and the workspace's
-//! `deflate`, `bzip2` and `xz`: listed, extracted, tested, and -- all but
-//! TAR.XZ, until `xz` has its compressor -- written back, a member added or
-//! deleted, a new archive created. A TAR is read in place like a ZIP; a
+//! `deflate`, `bzip2` and `xz`: listed, extracted, tested, and written back,
+//! a member added or deleted, a new archive created. A TAR is read in place like a ZIP; a
 //! compressed TAR is one stream over the whole archive, so it is decompressed
 //! into memory (under the same [`MAX_ARCHIVE_BYTES`] as everything else) and
 //! rewritten whole. What the bytes are decides, not the name: a gzipped
@@ -444,11 +443,13 @@ fn decompress_tar_within(
 }
 
 /// A compressed TAR's bytes for the TAR `tar`: gzip at its default level,
-/// bzip2 at `bzip2 -9`, as the command-line tools write them by default.
+/// bzip2 at `bzip2 -9`, xz at `xz -6`, as the command-line tools write them
+/// by default -- for bzip2 and xz, byte for byte.
 fn compress_tar(format: ArchiveFormat, tar: &[u8]) -> Result<Vec<u8>, SaveError> {
     match format {
         ArchiveFormat::TarGz => Ok(deflate::gzip(tar)),
         ArchiveFormat::TarBz2 => Ok(bzip2::compress(tar, bzip2::Level::BEST)),
+        ArchiveFormat::TarXz => Ok(xz::compress(tar, xz::Preset::DEFAULT)),
         format => Err(SaveError::Unwritable { format }),
     }
 }
@@ -1806,7 +1807,7 @@ fn save_tar(
 
 /// Write an empty archive at `path`, in the format its name says -- a ZIP
 /// when it names none. An empty TAR is its two closing blocks; an empty
-/// TAR.GZ or TAR.BZ2, those compressed.
+/// TAR.GZ, TAR.BZ2 or TAR.XZ, those compressed.
 ///
 /// It wrote an empty ZIP whatever the name, so a new `backup.tar` was a ZIP
 /// under a TAR's name, which nothing then opened as either.
@@ -1820,10 +1821,10 @@ pub fn create_empty(path: &Path) -> Result<(), SaveError> {
     let bytes = match ArchiveFormat::from_path(path) {
         None | Some(ArchiveFormat::Zip) => ziparchive::create(&[]),
         Some(ArchiveFormat::Tar) => empty_tar.to_vec(),
-        Some(format @ (ArchiveFormat::TarGz | ArchiveFormat::TarBz2)) => {
+        Some(format @ (ArchiveFormat::TarGz | ArchiveFormat::TarBz2 | ArchiveFormat::TarXz)) => {
             compress_tar(format, &empty_tar)?
         }
-        Some(format @ (ArchiveFormat::TarXz | ArchiveFormat::SevenZip)) => {
+        Some(format @ ArchiveFormat::SevenZip) => {
             return Err(SaveError::Unwritable { format });
         }
     };
@@ -3368,7 +3369,8 @@ mod tests {
     /// A TAR.XZ that GNU tar and xz 5.2.5 wrote (`tests/data/real.tar.xz`:
     /// `tar --format=ustar -cf - docs top.bin | xz -6`, the folder holding
     /// `docs/readme.txt`, "read me first", and `top.bin`, 1300 bytes of 7):
-    /// decompressed, listed and extracted, whatever it is called.
+    /// decompressed, listed and extracted, whatever it is called -- and
+    /// compressed again, the same bytes.
     #[test]
     fn a_tar_xz_that_xz_wrote_is_listed_and_extracted() {
         let dir = scratch("txz");
@@ -3400,13 +3402,10 @@ mod tests {
             open(&path),
             Err(ArchiveError::Xz(xz::Error::UnexpectedEnd))
         ));
-        // Until `xz` has a compressor, a new TAR.XZ is refused in words.
-        match create_empty(&dir.join("new.tar.xz")) {
-            Err(e @ SaveError::Unwritable { .. }) => {
-                assert!(e.to_string().contains("TAR.XZ"), "{e}");
-            }
-            other => panic!("expected TAR.XZ to be refused, got {other:?}"),
-        }
+        // Written back, it is what `xz -6` wrote: the archive manager writes
+        // a TAR.XZ as the command-line tools do, byte for byte.
+        let tar = xz::decompress(real).unwrap();
+        assert_eq!(compress_tar(ArchiveFormat::TarXz, &tar).unwrap(), real);
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -3528,9 +3527,9 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
-    /// Adding to a TAR, deleting from it, and the same for a TAR.GZ and a
-    /// TAR.BZ2: the file is rewritten in its own format, and reads back as the
-    /// list said.
+    /// Adding to a TAR, deleting from it, and the same for a TAR.GZ, a TAR.BZ2
+    /// and a TAR.XZ: the file is rewritten in its own format, and reads back
+    /// as the list said.
     #[test]
     fn a_tar_and_a_compressed_tar_are_rewritten_in_their_own_format() {
         let dir = scratch("tar-save");
@@ -3538,6 +3537,7 @@ mod tests {
             ("bundle.tar", ArchiveFormat::Tar),
             ("bundle.tar.gz", ArchiveFormat::TarGz),
             ("bundle.tar.bz2", ArchiveFormat::TarBz2),
+            ("bundle.tar.xz", ArchiveFormat::TarXz),
         ] {
             let path = dir.join(name);
             let bytes = tar_fixture();
@@ -3546,6 +3546,7 @@ mod tests {
                 match format {
                     ArchiveFormat::TarGz => deflate::gzip(&bytes),
                     ArchiveFormat::TarBz2 => bzip2::compress(&bytes, bzip2::Level::BEST),
+                    ArchiveFormat::TarXz => xz::compress(&bytes, xz::Preset::DEFAULT),
                     _ => bytes,
                 },
             )
@@ -3610,6 +3611,7 @@ mod tests {
             ("new.tar", ArchiveFormat::Tar),
             ("new.tar.gz", ArchiveFormat::TarGz),
             ("new.tar.bz2", ArchiveFormat::TarBz2),
+            ("new.tar.xz", ArchiveFormat::TarXz),
             ("new.zip", ArchiveFormat::Zip),
         ] {
             let path = dir.join(name);
@@ -3624,14 +3626,8 @@ mod tests {
             }
             other => panic!("expected 7z to be refused, got {other:?}"),
         }
-        match create_empty(&dir.join("new.tar.xz")) {
-            Err(e @ SaveError::Unwritable { .. }) => {
-                assert!(e.to_string().contains("TAR.XZ"), "{e}");
-            }
-            other => panic!("expected TAR.XZ to be refused, got {other:?}"),
-        }
         assert!(
-            !dir.join("new.tar.xz").exists(),
+            !dir.join("new.7z").exists(),
             "a refused archive left a file behind"
         );
         fs::remove_dir_all(&dir).ok();

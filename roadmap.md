@@ -3149,9 +3149,11 @@ word; text inside them that says "lane C" is history.
   to lane A (`requests/e-a-the-bzip2-crate-is-ready-for-the-kernel-shim.md`,
   `requests/e-a-the-xz-crate-is-ready-and-xz-compress-loses-files.md` --
   the second reports that the kernel's `xz_compress` writes unreadable
-  streams past 64 KiB compressed). **Next:** liblzma's encoder (match
-  finders, the fast and normal optimizers, presets 0-9 and extreme),
-  byte-identical to `xz`, then TAR.XZ written; `sevenz/` (7z: LZMA, LZMA2,
+  streams past 64 KiB compressed). Then liblzma's encoder in `xz/`: every
+  match finder, the fast and normal choosers, every preset and extreme
+  preset, `.xz`, `.lzma` and raw -- held to `xz` 5.2.5's bytes for 136
+  settings and inputs -- and the archive manager writes TAR.XZ through it.
+  **Next:** `sevenz/` (7z: LZMA, LZMA2,
   BZip2, Deflate, BCJ, Delta; names kept as UTF-16 units), then the
   archive manager opens 7z.
 

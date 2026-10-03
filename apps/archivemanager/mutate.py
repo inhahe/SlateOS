@@ -8,9 +8,9 @@ The table covers what changed on 2026-09-26: one table of names per format
 (`ArchiveFormat::patterns`), read by both the name detection and the file
 dialogs -- whose Open filter said `*.zip` alone after TAR and TAR.GZ could be
 opened -- and the 7z refusal, by name and by the bytes when the name says TAR.
-Since then: the compressed TARs, TAR.BZ2 (2026-10-03, read and written) and
-TAR.XZ (read; written once the `xz` crate has a compressor), and the cap
-each is decompressed under.
+Since then: the compressed TARs, TAR.BZ2 and TAR.XZ (2026-10-03, read and
+written, TAR.XZ as `xz -6` writes it), and the cap each is decompressed
+under.
 
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
@@ -80,15 +80,15 @@ MAIN = [
         [TXZ_READ],
     ),
     (
-        "TAR.XZ is taken for writable",
-        "        matches!(self, Self::Zip | Self::Tar | Self::TarGz | Self::TarBz2)",
-        "        matches!(self, Self::Zip | Self::Tar | Self::TarGz | Self::TarBz2 | Self::TarXz)",
+        "TAR.XZ is not writable",
+        "        self.readable()\n    }\n\n    /// Whether this is a TAR inside",
+        "        self.readable() && self != Self::TarXz\n    }\n\n    /// Whether this is a TAR inside",
         [DIALOGS],
     ),
     (
         "TAR.BZ2 is not writable",
-        "        matches!(self, Self::Zip | Self::Tar | Self::TarGz | Self::TarBz2)",
-        "        matches!(self, Self::Zip | Self::Tar | Self::TarGz)",
+        "        self.readable()\n    }\n\n    /// Whether this is a TAR inside",
+        "        self.readable() && self != Self::TarBz2\n    }\n\n    /// Whether this is a TAR inside",
         [DIALOGS],
     ),
     (
@@ -244,10 +244,22 @@ BACKEND = [
         ['a_bzipped_tar_is_decompressed_and_listed_whatever_it_is_called'],
     ),
     (
-        'a new .tar.bz2 cannot be created',
-        '        Some(format @ (ArchiveFormat::TarGz | ArchiveFormat::TarBz2)) => {\n            compress_tar(format, &empty_tar)?',
-        '        Some(format @ (ArchiveFormat::TarGz | ArchiveFormat::TarBz2)) => {\n            return Err(SaveError::Unwritable { format });',
+        'a new compressed TAR cannot be created',
+        '        Some(format @ (ArchiveFormat::TarGz | ArchiveFormat::TarBz2 | ArchiveFormat::TarXz)) => {\n            compress_tar(format, &empty_tar)?',
+        '        Some(format @ (ArchiveFormat::TarGz | ArchiveFormat::TarBz2 | ArchiveFormat::TarXz)) => {\n            return Err(SaveError::Unwritable { format });',
         ['a_new_archive_is_written_in_the_format_its_name_says'],
+    ),
+    (
+        'a tar.xz is saved gzipped',
+        '        ArchiveFormat::TarXz => Ok(xz::compress(tar, xz::Preset::DEFAULT)),',
+        '        ArchiveFormat::TarXz => Ok(deflate::gzip(tar)),',
+        ['a_tar_and_a_compressed_tar_are_rewritten_in_their_own_format', TXZ_READ],
+    ),
+    (
+        'a tar.xz is saved at another level',
+        '        ArchiveFormat::TarXz => Ok(xz::compress(tar, xz::Preset::DEFAULT)),',
+        '        ArchiveFormat::TarXz => Ok(xz::compress(tar, xz::Preset::new(9).unwrap_or(xz::Preset::DEFAULT))),',
+        [TXZ_READ],
     ),
     (
         'a .tar.xz is not decompressed',

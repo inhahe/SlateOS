@@ -1,7 +1,7 @@
 //! Slate OS Archive Manager
 //!
 //! Graphical archive/compressed file manager supporting multiple formats:
-//! - ZIP, TAR, TAR.GZ and TAR.BZ2, read and written; TAR.XZ read; 7z
+//! - ZIP, TAR, TAR.GZ, TAR.BZ2 and TAR.XZ, read and written; 7z
 //!   recognised -- by name or by its bytes -- and refused by name
 //! - Browse archive contents in a tree view
 //! - Extract all, extract selected, extract to folder
@@ -34,9 +34,9 @@
 //!
 //! Uses the guitk library for UI rendering.
 //!
-//! Reading and writing are real for ZIP, TAR, TAR.GZ and TAR.BZ2, and
-//! reading for TAR.XZ, and live in [`backend`]; 7z is modelled but not
-//! parsed, and says so rather than pretending. Its reader is being ported out
+//! Reading and writing are real for ZIP, TAR, TAR.GZ, TAR.BZ2 and TAR.XZ,
+//! and live in [`backend`]; 7z is modelled but not parsed, and says so
+//! rather than pretending. Its reader is being ported out
 //! of the kernel, where a module of a binary crate cannot be reached by any
 //! program, as bzip2's and xz's were
 //! (`requests/e-a-bzip2-xz-and-7z-are-trapped-in-the-kernel-binary.md`).
@@ -115,10 +115,10 @@ impl ArchiveFormat {
         )
     }
 
-    /// Whether this build can write an archive in this format: the ones it
-    /// reads, less TAR.XZ until the `xz` crate has its compressor.
+    /// Whether this build can write an archive in this format -- today, the
+    /// same ones it reads.
     pub fn writable(self) -> bool {
-        matches!(self, Self::Zip | Self::Tar | Self::TarGz | Self::TarBz2)
+        self.readable()
     }
 
     /// Whether this is a TAR inside one compressed stream: decompressed
@@ -3951,18 +3951,16 @@ mod tests {
         }
         assert!(!shows(open, "notes.txt"), "control: the filter filters");
         let new = DialogPurpose::NewArchive;
-        for name in ["old.tar.gz", "old.tar.bz2"] {
+        for name in ["old.tar.gz", "old.tar.bz2", "old.tar.xz"] {
             assert!(
                 shows(new, name),
                 "the New dialog hides {name}, which it writes"
             );
         }
-        for name in ["old.7z", "old.tar.xz"] {
-            assert!(
-                !shows(new, name),
-                "the New dialog offers {name}, which it cannot write"
-            );
-        }
+        assert!(
+            !shows(new, "old.7z"),
+            "the New dialog offers a 7z, which it cannot write"
+        );
     }
 
     #[test]

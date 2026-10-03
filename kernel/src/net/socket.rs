@@ -253,6 +253,12 @@ struct SocketInner {
     /// yet (an explicit `bind(2)` or the implicit ephemeral auto-bind on the
     /// first `sendto`/`recvfrom`, matching Linux). Meaningless for a stream socket.
     bound: bool,
+    /// Datagram sockets only: whether the daemon holds an *unbound* socket for
+    /// this one — opened by the first multicast `setsockopt` before any bind
+    /// ([`dgram_setopt`]), since Linux takes those options before `bind(2)`.
+    /// The bind that follows gives that socket its port. Implies nothing once
+    /// `bound` is set.
+    opened: bool,
     /// Datagram sockets only: the bound local port (for `getsockname`). `0` until
     /// bound.
     local_port: u16,
@@ -372,6 +378,7 @@ fn create_kind(kind: SockKind, domain: u16) -> KernelResult<SocketHandle> {
         kind,
         domain,
         bound: false,
+        opened: false,
         local_port: 0,
         dgram_peer: None,
         state: SockState::Created,
@@ -1310,6 +1317,85 @@ fn ensure_bound(guard: &mut SocketInner) -> KernelResult<()> {
     Ok(())
 }
 
+/// The socket as [`netipc::sockopt`] needs to know it: its family and
+/// whether it is a stream socket.
+///
+/// # Errors
+///
+/// `InvalidHandle` — closed handle.
+pub fn sockopt_shape(handle: SocketHandle) -> KernelResult<netipc::sockopt::Socket> {
+    let inner = inner_of(handle)?;
+    let guard = inner.lock();
+    Ok(netipc::sockopt::Socket {
+        v6: guard.domain == AF_INET6,
+        stream: guard.kind == SockKind::Stream,
+    })
+}
+
+/// Set one of a datagram socket's multicast options: the daemon request a
+/// `setsockopt(2)` at `IPPROTO_IP`/`IPPROTO_IPV6` became
+/// ([`netipc::sockopt::parse_set`]).
+///
+/// Linux takes these before `bind(2)`, and a program may well join its group
+/// first and bind after; so a socket the daemon holds nothing for yet is
+/// opened there *unbound* ([`NetstackConn::udp_open`]) rather than bound
+/// early, which would make the program's own `bind` fail. Returns
+/// `Ok(Ok(()))`, or `Ok(Err(errno))` with the daemon's refusal as a positive
+/// Linux errno, to hand to the caller as it is.
+///
+/// # Errors
+///
+/// - `InvalidHandle` — closed handle.
+/// - `InvalidArgument` — not a datagram socket.
+/// - `ResourceExhausted` — the daemon's socket table is full.
+/// - protocol faults propagated from [`NetstackConn::udp_setopt`].
+pub fn dgram_setopt(
+    handle: SocketHandle,
+    set: netipc::sockopt::Set,
+) -> KernelResult<Result<(), i32>> {
+    let inner = inner_of(handle)?;
+    let mut guard = inner.lock();
+    if guard.kind != SockKind::Dgram {
+        return Err(KernelError::InvalidArgument);
+    }
+    if !guard.bound && !guard.opened {
+        guard.owned_conn_mut()?.udp_open()?;
+        guard.opened = true;
+    }
+    let (option, value, buf, len) = match set {
+        netipc::sockopt::Set::Scalar { option, value } => (option, value, [0u8; 16], 0),
+        netipc::sockopt::Set::Group {
+            option,
+            window,
+            len,
+        } => (option, 0, window, len),
+    };
+    let window = buf.get(..len).ok_or(KernelError::InternalError)?;
+    guard.owned_conn_mut()?.udp_setopt(option, value, window)
+}
+
+/// Read one of a datagram socket's scalar multicast options
+/// ([`netipc::sockopt::Get::Ask`]). A socket the daemon holds nothing for
+/// yet has every option at its default, which is answered without creating
+/// anything: a read must not be what makes the daemon allocate.
+///
+/// # Errors
+///
+/// - `InvalidHandle` — closed handle.
+/// - `InvalidArgument` — not a datagram socket, or `option` has no value.
+/// - protocol faults propagated from [`NetstackConn::udp_getopt`].
+pub fn dgram_getopt(handle: SocketHandle, option: u16) -> KernelResult<i32> {
+    let inner = inner_of(handle)?;
+    let mut guard = inner.lock();
+    if guard.kind != SockKind::Dgram {
+        return Err(KernelError::InvalidArgument);
+    }
+    if !guard.bound && !guard.opened {
+        return netipc::sockopt::default_value(option).ok_or(KernelError::InvalidArgument);
+    }
+    guard.owned_conn_mut()?.udp_getopt(option)
+}
+
 /// Send `buf` as a single datagram to `ip:port` from a datagram socket. Returns the
 /// number of bytes accepted (a datagram is all-or-nothing, so this equals
 /// `buf.len()` on success). Auto-binds an ephemeral local port on first use.
@@ -2008,6 +2094,7 @@ pub fn accept(handle: SocketHandle) -> KernelResult<(SocketHandle, AcceptedPeer)
         kind: SockKind::Stream,
         domain,
         bound: false,
+        opened: false,
         local_port: 0,
         dgram_peer: None,
         state: SockState::Connected,

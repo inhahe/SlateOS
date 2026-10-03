@@ -524,7 +524,26 @@ fn query_if_info() -> Option<IfInfo> {
 // of truth for frame layout and the RFC 1071 checksum. This daemon only wires
 // those parsers/builders to the raw-frame syscalls and the interface config.
 
-use netproto::{arp, dns, ethernet, icmp, icmpv6, ipv4, ipv6, tcp, udp};
+use netproto::{arp, dns, ethernet, icmp, icmpv6, igmp, ipv4, ipv6, mcast, mld, tcp, udp};
+
+/// Most multicast groups one UDP socket can join (Linux allows 20 by
+/// default, `net.ipv4.igmp_max_memberships`).
+const MAX_SOCK_GROUPS: usize = 8;
+/// Most multicast groups the host can be in at once, over every socket.
+const MAX_HOST_GROUPS: usize = 32;
+
+// The kernel answers `getsockopt` for a socket the daemon holds nothing for
+// yet from `netipc::sockopt::default_value`; a new socket here starts from
+// `mcast::SocketGroups::new`. The two must be the same values.
+const _: () = {
+    use netipc::ring as r;
+    use netipc::sockopt::default_value;
+    let d = mcast::SocketGroups::<1>::new();
+    assert!(matches!(default_value(r::UDP_OPT_MCAST_TTL), Some(v) if v == d.ttl as i32));
+    assert!(matches!(default_value(r::UDP_OPT_MCAST_HOPS), Some(v) if v == d.hops as i32));
+    assert!(matches!(default_value(r::UDP_OPT_MCAST_LOOP4), Some(v) if v == d.loop4 as i32));
+    assert!(matches!(default_value(r::UDP_OPT_MCAST_LOOP6), Some(v) if v == d.loop6 as i32));
+};
 
 /// Maximum standard Ethernet frame we handle (jumbo frames are out of scope).
 const MAX_FRAME: usize = 1522;
@@ -956,6 +975,21 @@ fn send_ipv4(
     l4: &[u8],
     id: u16,
 ) -> bool {
+    send_ipv4_ttl(me, next_hop_mac, dst_ip, proto, l4, id, 64)
+}
+
+/// [`send_ipv4`] with an explicit TTL: a multicast send uses its socket's
+/// (`IP_MULTICAST_TTL`, default 1) and the group's Ethernet address.
+fn send_ipv4_ttl(
+    me: &IfInfo,
+    dst_mac: &[u8; 6],
+    dst_ip: &[u8; 4],
+    proto: u8,
+    l4: &[u8],
+    id: u16,
+    ttl: u8,
+) -> bool {
+    let next_hop_mac = dst_mac;
     let mut frame = [0u8; MAX_FRAME];
     let l4_off = ethernet::HEADER_LEN + ipv4::MIN_HEADER_LEN;
     let total = match l4_off.checked_add(l4.len()) {
@@ -967,7 +1001,7 @@ fn send_ipv4(
         dscp_ecn: 0,
         id,
         flags_frag: 0x4000, // Don't Fragment
-        ttl: 64,
+        ttl,
         protocol: proto,
         src: me.ip,
         dst: *dst_ip,
@@ -1019,6 +1053,21 @@ fn send_ipv6(
     next_header: u8,
     l4: &[u8],
 ) -> bool {
+    send_ipv6_hops(me, next_hop_mac, dst_ip6, next_header, l4, 64)
+}
+
+/// [`send_ipv6`] with an explicit hop limit: a multicast send uses its
+/// socket's (`IPV6_MULTICAST_HOPS`, default 1) and the group's Ethernet
+/// address.
+fn send_ipv6_hops(
+    me: &IfInfo,
+    dst_mac: &[u8; 6],
+    dst_ip6: &[u8; 16],
+    next_header: u8,
+    l4: &[u8],
+    hop_limit: u8,
+) -> bool {
+    let next_hop_mac = dst_mac;
     let mut frame = [0u8; MAX_FRAME];
     let l4_off = ethernet::HEADER_LEN + ipv6::HEADER_LEN;
     let total = match l4_off.checked_add(l4.len()) {
@@ -1030,7 +1079,7 @@ fn send_ipv6(
         traffic_class: 0,
         flow_label: 0,
         next_header,
-        hop_limit: 64,
+        hop_limit,
         src: me.ip6,
         dst: *dst_ip6,
     }
@@ -1252,6 +1301,9 @@ struct UdpRx {
     src_port: u16,
     dst_port: u16,
     payload_len: usize,
+    /// The multicast group the datagram was sent to, when it was sent to one:
+    /// it goes only to a socket that joined the group.
+    group: Option<mcast::Group>,
 }
 
 /// Classify one frame [`recv_any`] read off the NIC: if it is a UDP datagram
@@ -1268,7 +1320,10 @@ fn parse_udp(me: &IfInfo, bytes: &[u8], pl: &mut [u8]) -> Option<UdpRx> {
     match eth.ethertype {
         ethernet::ETHERTYPE_IPV4 => {
             let ip = ipv4::Packet::parse(eth.payload)?;
-            if ip.protocol != ipv4::PROTO_UDP || ip.dst != me.ip {
+            // Ours, or a multicast group's: `pump` gives a group's datagram
+            // only to a socket that joined it.
+            let group = igmp::is_multicast(&ip.dst).then_some(mcast::Group::V4(ip.dst));
+            if ip.protocol != ipv4::PROTO_UDP || (ip.dst != me.ip && group.is_none()) {
                 return None;
             }
             let dg = udp::Datagram::parse(ip.payload, &ip.src, &ip.dst)?;
@@ -1283,11 +1338,13 @@ fn parse_udp(me: &IfInfo, bytes: &[u8], pl: &mut [u8]) -> Option<UdpRx> {
                 src_port: dg.src_port,
                 dst_port: dg.dst_port,
                 payload_len: cplen,
+                group,
             })
         }
         ethernet::ETHERTYPE_IPV6 => {
             let ip = ipv6::Packet::parse(eth.payload)?;
-            if ip.next_header != ipv4::PROTO_UDP || ip.dst != me.ip6 {
+            let group = mld::is_multicast(&ip.dst).then_some(mcast::Group::V6(ip.dst));
+            if ip.next_header != ipv4::PROTO_UDP || (ip.dst != me.ip6 && group.is_none()) {
                 return None;
             }
             let dg = udp::Datagram::parse_v6(ip.payload, &ip.src, &ip.dst)?;
@@ -1300,6 +1357,7 @@ fn parse_udp(me: &IfInfo, bytes: &[u8], pl: &mut [u8]) -> Option<UdpRx> {
                 src_port: dg.src_port,
                 dst_port: dg.dst_port,
                 payload_len: cplen,
+                group,
             })
         }
         _ => None,
@@ -2794,6 +2852,13 @@ fn key_session(k: Key) -> u32 {
 
 /// One frame off the NIC, classified for [`pump`].
 enum Rx {
+    /// A router's membership query (IGMP, or MLD when `v6`): the host reports
+    /// the groups it asks about -- every group of its family when `about` is
+    /// `None`.
+    Query {
+        about: Option<mcast::Group>,
+        v6: bool,
+    },
     /// No frame was waiting (`WOULD_BLOCK`), or the read failed: draining is done.
     Drained,
     /// A TCP segment addressed to us.
@@ -2825,7 +2890,43 @@ fn recv_any(me: &IfInfo, frame: &mut [u8], tcp_pl: &mut [u8], udp_pl: &mut [u8])
     }
     match parse_udp(me, bytes, udp_pl) {
         Some(dg) => Rx::Udp(dg),
-        None => Rx::Other,
+        None => parse_query(bytes).unwrap_or(Rx::Other),
+    }
+}
+
+/// Classify a frame as a router's membership query: an IGMP Membership
+/// Query, or an MLD Multicast Listener Query behind its Hop-by-Hop header.
+/// `None` for anything else.
+fn parse_query(bytes: &[u8]) -> Option<Rx> {
+    let eth = ethernet::Frame::parse(bytes)?;
+    match eth.ethertype {
+        ethernet::ETHERTYPE_IPV4 => {
+            let ip = ipv4::Packet::parse(eth.payload)?;
+            if ip.protocol != igmp::PROTO_IGMP || !igmp::is_multicast(&ip.dst) {
+                return None;
+            }
+            let msg = igmp::parse(ip.payload)?;
+            (msg.kind == igmp::TYPE_QUERY).then(|| Rx::Query {
+                about: (!msg.is_general_query()).then_some(mcast::Group::V4(msg.group)),
+                v6: false,
+            })
+        }
+        ethernet::ETHERTYPE_IPV6 => {
+            let ip = ipv6::Packet::parse(eth.payload)?;
+            // MLD travels behind a Hop-by-Hop header: next header 0, whose own
+            // next header must be ICMPv6, and whose length is in eight-byte
+            // units past the first eight.
+            if ip.next_header != 0 || ip.payload.first() != Some(&58) {
+                return None;
+            }
+            let hbh_len = usize::from(*ip.payload.get(1)?).checked_add(1)?.checked_mul(8)?;
+            let msg = mld::parse(ip.payload.get(hbh_len..)?, &ip.src, &ip.dst)?;
+            (msg.kind == mld::TYPE_QUERY).then(|| Rx::Query {
+                about: (!msg.is_general_query()).then_some(mcast::Group::V6(msg.group)),
+                v6: true,
+            })
+        }
+        _ => None,
     }
 }
 
@@ -2891,8 +2992,11 @@ fn pump(net: &mut Net, me: &IfInfo, next_hop_mac: &[u8; 6]) -> bool {
             }
             Rx::Udp(dg) => {
                 any = true;
-                // A datagram to an unbound port is dropped (no ICMP port-unreachable yet).
-                if let Some(sock) = net.udp.by_port(dg.dst_port) {
+                // A datagram to an unbound port is dropped (no ICMP port-unreachable yet),
+                // and one to a group only reaches a socket that joined it.
+                if let Some(sock) = net.udp.by_port(dg.dst_port)
+                    && dg.group.is_none_or(|g| sock.mcast.contains(&g))
+                {
                     let n = dg.payload_len.min(udp_pl.len());
                     sock.push(
                         dg.family,
@@ -2900,6 +3004,15 @@ fn pump(net: &mut Net, me: &IfInfo, next_hop_mac: &[u8; 6]) -> bool {
                         dg.src_port,
                         udp_pl.get(..n).unwrap_or(&[]),
                     );
+                }
+            }
+            Rx::Query { about, v6 } => {
+                any = true;
+                // Report at once rather than after a random delay up to the
+                // query's maximum: a host may (RFC 2236 3), and one host's
+                // reports are few.
+                for group in net.mcast.answer(about, v6) {
+                    send_membership(me, group, true);
                 }
             }
         }
@@ -3138,6 +3251,9 @@ impl UdpDatagram {
 /// [`pump`] and drained by `OP_UDP_RECV`.
 struct UdpSock {
     local_port: u16,
+    /// The groups the socket has joined and its multicast send settings
+    /// (`OP_UDP_SETOPT`), with Linux's defaults.
+    mcast: mcast::SocketGroups<MAX_SOCK_GROUPS>,
     /// Fixed-capacity FIFO ring of buffered datagrams.
     q: [UdpDatagram; UDP_QLEN],
     /// Index of the oldest buffered datagram.
@@ -3151,6 +3267,7 @@ impl UdpSock {
     fn new(local_port: u16) -> Self {
         Self {
             local_port,
+            mcast: mcast::SocketGroups::new(),
             q: [UdpDatagram::empty(); UDP_QLEN],
             head: 0,
             count: 0,
@@ -3216,14 +3333,23 @@ impl UdpSocks {
         }
     }
 
-    /// Bind a new datagram socket under `conn_id` to `port` (`0` = pick an unused
-    /// ephemeral port). Returns the bound local port, or a negative
+    /// Bind the datagram socket under `conn_id` to `port` (`0` = pick an unused
+    /// ephemeral port): create it, or give the unbound one [`open`](Self::open)
+    /// made its port, keeping the options it was given and the groups it
+    /// joined meanwhile. Returns the bound local port, or a negative
     /// [`netipc::ring`] errno sentinel: [`ERR_ADDR_IN_USE`](netipc::ring::ERR_ADDR_IN_USE)
-    /// if `port` is already bound (or `conn_id` is a duplicate), `-1` if the table
-    /// is full.
+    /// if `port` is already bound (or the socket under `conn_id` already has a
+    /// port), `-1` if the table is full. A refused bind leaves an unbound
+    /// socket as it was.
     fn bind(&mut self, conn_id: Key, port: u16) -> i32 {
-        if self.slots.iter().flatten().any(|(id, _)| *id == conn_id) {
-            return netipc::ring::ERR_ADDR_IN_USE; // duplicate conn_id
+        let existing = self
+            .slots
+            .iter()
+            .flatten()
+            .find(|(id, _)| *id == conn_id)
+            .map(|(_, s)| s.local_port);
+        if existing.is_some_and(|p| p != 0) {
+            return netipc::ring::ERR_ADDR_IN_USE; // bound already
         }
         let local = if port == 0 {
             match self.pick_ephemeral() {
@@ -3236,10 +3362,38 @@ impl UdpSocks {
             }
             port
         };
+        if existing.is_some() {
+            return match self.entry_mut(conn_id) {
+                Some(sock) => {
+                    sock.local_port = local;
+                    i32::from(local)
+                }
+                None => -1, // just seen: unreachable, but not worth a panic
+            };
+        }
         match self.slots.iter_mut().find(|s| s.is_none()) {
             Some(slot) => {
                 *slot = Some((conn_id, UdpSock::new(local)));
                 i32::from(local)
+            }
+            None => -1, // table full
+        }
+    }
+
+    /// Create the datagram socket under `conn_id` without a port
+    /// ([`UDP_BIND_UNBOUND`](netipc::ring::UDP_BIND_UNBOUND)): Linux's socket
+    /// between `socket(2)` and `bind(2)`, which may set options and join
+    /// groups but sends and receives nothing until [`bind`](Self::bind) gives
+    /// it a port. Returns `0`, [`ERR_ADDR_IN_USE`](netipc::ring::ERR_ADDR_IN_USE)
+    /// for a `conn_id` already in use, or `-1` if the table is full.
+    fn open(&mut self, conn_id: Key) -> i32 {
+        if self.slots.iter().flatten().any(|(id, _)| *id == conn_id) {
+            return netipc::ring::ERR_ADDR_IN_USE;
+        }
+        match self.slots.iter_mut().find(|s| s.is_none()) {
+            Some(slot) => {
+                *slot = Some((conn_id, UdpSock::new(0)));
+                0
             }
             None => -1, // table full
         }
@@ -3259,8 +3413,14 @@ impl UdpSocks {
         (UDP_EPHEMERAL_BASE..=u16::MAX).find(|&p| !self.port_in_use(p))
     }
 
-    /// Borrow the socket bound under `conn_id`, if any.
+    /// Borrow the socket bound under `conn_id`, if it has a port: what sends
+    /// and receives need. An unbound socket is "not bound" to them.
     fn get_mut(&mut self, conn_id: Key) -> Option<&mut UdpSock> {
+        self.entry_mut(conn_id).filter(|s| s.local_port != 0)
+    }
+
+    /// Borrow the socket under `conn_id`, bound or not: what its options need.
+    fn entry_mut(&mut self, conn_id: Key) -> Option<&mut UdpSock> {
         self.slots
             .iter_mut()
             .filter_map(|s| s.as_mut())
@@ -3269,8 +3429,13 @@ impl UdpSocks {
     }
 
     /// Borrow the socket bound to local `port` (the routing lookup [`pump`]
-    /// uses to deliver an inbound datagram to its owner).
+    /// uses to deliver an inbound datagram to its owner). Port 0 is no one's:
+    /// an unbound socket's port reads 0, and a datagram to port 0 must not
+    /// reach it.
     fn by_port(&mut self, port: u16) -> Option<&mut UdpSock> {
+        if port == 0 {
+            return None;
+        }
         self.slots
             .iter_mut()
             .filter_map(|s| s.as_mut())
@@ -3278,17 +3443,16 @@ impl UdpSocks {
             .map(|(_, s)| s)
     }
 
-    /// Remove the socket bound under `conn_id` (its `close(2)`), freeing the slot.
-    /// Returns `true` if a socket was present. UDP is connectionless, so this just
-    /// drops the buffer — no teardown handshake.
-    fn remove(&mut self, conn_id: Key) -> bool {
-        for slot in &mut self.slots {
-            if slot.as_ref().is_some_and(|(id, _)| *id == conn_id) {
-                *slot = None;
-                return true;
-            }
-        }
-        false
+    /// Remove the socket bound under `conn_id` (its `close(2)`), freeing the
+    /// slot, and hand it back so the caller can leave the groups it was in
+    /// ([`leave_all`]). UDP is connectionless, so there is no teardown
+    /// handshake.
+    fn take(&mut self, conn_id: Key) -> Option<UdpSock> {
+        let slot = self
+            .slots
+            .iter_mut()
+            .find(|slot| slot.as_ref().is_some_and(|(id, _)| *id == conn_id))?;
+        slot.take().map(|(_, sock)| sock)
     }
 }
 
@@ -3306,28 +3470,39 @@ fn udp_sock_send(
     payload: &[u8],
     id: u16,
 ) -> i32 {
+    udp_send_from(me, next_hop_mac, sock.local_port, dst_ip, dst_port, payload, id, 64)
+}
+
+/// [`udp_sock_send`] from local port `src_port`, to Ethernet address
+/// `dst_mac`, with TTL `ttl`: what a multicast send needs, the socket having
+/// been let go so its group's members can be reached ([`deliver_locally`]).
+#[allow(clippy::too_many_arguments)]
+fn udp_send_from(
+    me: &IfInfo,
+    dst_mac: &[u8; 6],
+    src_port: u16,
+    dst_ip: &[u8; 4],
+    dst_port: u16,
+    payload: &[u8],
+    id: u16,
+    ttl: u8,
+) -> i32 {
     if payload.len() > UDP_DGRAM_MAX {
         return netipc::ring::ERR_MSG_SIZE;
     }
     let mut dgram = [0u8; MAX_FRAME - (ethernet::HEADER_LEN + ipv4::MIN_HEADER_LEN)];
-    let dlen = match udp::write(
-        &mut dgram,
-        &me.ip,
-        dst_ip,
-        sock.local_port,
-        dst_port,
-        payload,
-    ) {
+    let dlen = match udp::write(&mut dgram, &me.ip, dst_ip, src_port, dst_port, payload) {
         Some(n) => n,
         None => return -1,
     };
-    if !send_ipv4(
+    if !send_ipv4_ttl(
         me,
-        next_hop_mac,
+        dst_mac,
         dst_ip,
         ipv4::PROTO_UDP,
         &dgram[..dlen],
         id,
+        ttl,
     ) {
         return -1;
     }
@@ -3349,25 +3524,279 @@ fn udp_sock_send6(
     dst_port: u16,
     payload: &[u8],
 ) -> i32 {
+    udp_send6_from(me, next_hop_mac, sock.local_port, dst_ip6, dst_port, payload, 64)
+}
+
+/// [`udp_sock_send6`] from `src_port`, to `dst_mac`, with hop limit
+/// `hop_limit`: the IPv6 counterpart of [`udp_send_from`].
+fn udp_send6_from(
+    me: &IfInfo,
+    dst_mac: &[u8; 6],
+    src_port: u16,
+    dst_ip6: &[u8; 16],
+    dst_port: u16,
+    payload: &[u8],
+    hop_limit: u8,
+) -> i32 {
     if payload.len() > UDP_DGRAM_MAX {
         return netipc::ring::ERR_MSG_SIZE;
     }
     let mut dgram = [0u8; MAX_FRAME - (ethernet::HEADER_LEN + ipv6::HEADER_LEN)];
-    let dlen = match udp::write_v6(
-        &mut dgram,
-        &me.ip6,
-        dst_ip6,
-        sock.local_port,
-        dst_port,
-        payload,
-    ) {
+    let dlen = match udp::write_v6(&mut dgram, &me.ip6, dst_ip6, src_port, dst_port, payload) {
         Some(n) => n,
         None => return -1,
     };
-    if !send_ipv6(me, next_hop_mac, dst_ip6, ipv4::PROTO_UDP, &dgram[..dlen]) {
+    if !send_ipv6_hops(
+        me,
+        dst_mac,
+        dst_ip6,
+        ipv4::PROTO_UDP,
+        &dgram[..dlen],
+        hop_limit,
+    ) {
         return -1;
     }
     i32::try_from(payload.len()).unwrap_or(i32::MAX)
+}
+
+/// Send the announcement `a` asks for ([`mcast::Announce`]).
+fn announce(me: &IfInfo, a: mcast::Announce) {
+    match a {
+        mcast::Announce::Nothing => {}
+        mcast::Announce::Report(g) => {
+            send_membership(me, g, true);
+        }
+        mcast::Announce::Leave(g) => {
+            send_membership(me, g, false);
+        }
+    }
+}
+
+/// A socket's groups, left as it goes: each is uncounted, and announced as
+/// left when it was the last socket in it.
+fn leave_all(
+    host: &mut mcast::HostGroups<MAX_HOST_GROUPS>,
+    sock: &mcast::SocketGroups<MAX_SOCK_GROUPS>,
+    me: &IfInfo,
+) {
+    for g in sock.iter() {
+        announce(me, host.leave(&g));
+    }
+}
+
+/// Transmit a membership report (`report`) or leave for `group`: IGMPv2 for
+/// IPv4 (RFC 2236), MLDv1 for IPv6 (RFC 2710), with TTL / hop limit 1 and a
+/// Router Alert, to the group itself (report) or to all routers (leave).
+fn send_membership(me: &IfInfo, group: mcast::Group, report: bool) -> bool {
+    let mut frame = [0u8; MAX_FRAME];
+    match group {
+        mcast::Group::V4(g) => {
+            let dst = if report { g } else { igmp::ALL_ROUTERS };
+            let l4_off = ethernet::HEADER_LEN + ipv4::ROUTER_ALERT_HEADER_LEN;
+            let Some(msg) = frame.get_mut(l4_off..) else {
+                return false;
+            };
+            let written = if report {
+                igmp::write_report(msg, &g)
+            } else {
+                igmp::write_leave(msg, &g)
+            };
+            let Some(n) = written else {
+                return false;
+            };
+            let ip_hdr = ipv4::Builder {
+                dscp_ecn: 0xC0, // network control, as Linux sends IGMP
+                id: 0,
+                flags_frag: 0x4000,
+                ttl: 1,
+                protocol: igmp::PROTO_IGMP,
+                src: me.ip,
+                dst,
+            }
+            .build_header_router_alert(n as u16);
+            frame[ethernet::HEADER_LEN..l4_off].copy_from_slice(&ip_hdr);
+            ethernet::write_header(
+                &mut frame,
+                &igmp::multicast_mac(&dst),
+                &me.mac,
+                ethernet::ETHERTYPE_IPV4,
+            );
+            raw_tx(&frame[..l4_off + n]) >= 0
+        }
+        mcast::Group::V6(g) => {
+            let dst = if report {
+                g
+            } else {
+                icmpv6::ALL_ROUTERS_LINK_LOCAL
+            };
+            let hbh_off = ethernet::HEADER_LEN + ipv6::HEADER_LEN;
+            let msg_off = hbh_off + mld::HOP_BY_HOP_ROUTER_ALERT.len();
+            let Some(msg) = frame.get_mut(msg_off..) else {
+                return false;
+            };
+            let written = if report {
+                mld::write_report(msg, &me.ip6, &g)
+            } else {
+                mld::write_done(msg, &me.ip6, &g)
+            };
+            let Some(n) = written else {
+                return false;
+            };
+            frame[hbh_off..msg_off].copy_from_slice(&mld::HOP_BY_HOP_ROUTER_ALERT);
+            let ip_hdr = ipv6::Builder {
+                traffic_class: 0,
+                flow_label: 0,
+                next_header: 0, // Hop-by-Hop, carrying the Router Alert
+                hop_limit: 1,
+                src: me.ip6,
+                dst,
+            }
+            .build_header((mld::HOP_BY_HOP_ROUTER_ALERT.len() + n) as u16);
+            frame[ethernet::HEADER_LEN..hbh_off].copy_from_slice(&ip_hdr);
+            ethernet::write_header(
+                &mut frame,
+                &mld::multicast_mac(&dst),
+                &me.mac,
+                ethernet::ETHERTYPE_IPV6,
+            );
+            raw_tx(&frame[..msg_off + n]) >= 0
+        }
+    }
+}
+
+/// Deliver a datagram this host sent to `group` to the local socket on
+/// `dst_port` that joined it: the loop `IP_MULTICAST_LOOP` /
+/// `IPV6_MULTICAST_LOOP` keep on by default. The sender itself is a member
+/// like any other.
+fn deliver_locally(
+    udp: &mut UdpSocks,
+    group: mcast::Group,
+    src: [u8; 16],
+    src_port: u16,
+    dst_port: u16,
+    payload: &[u8],
+) {
+    let family = match group {
+        mcast::Group::V4(_) => netipc::ring::UDP_AF_INET,
+        mcast::Group::V6(_) => netipc::ring::UDP_AF_INET6,
+    };
+    if let Some(sock) = udp.by_port(dst_port)
+        && sock.mcast.contains(&group)
+    {
+        sock.push(family, src, src_port, payload);
+    }
+}
+
+/// Map a refused join or leave to the errno Linux gives the same call.
+fn refused_errno(r: mcast::Refused) -> i32 {
+    match r {
+        mcast::Refused::NotMulticast => netipc::ring::ERR_INVALID,
+        mcast::Refused::AlreadyIn => netipc::ring::ERR_ADDR_IN_USE,
+        mcast::Refused::NotIn => netipc::ring::ERR_ADDR_NOT_AVAIL,
+        mcast::Refused::Full => netipc::ring::ERR_NO_BUFS,
+    }
+}
+
+/// Serve [`netipc::ring::OP_UDP_SETOPT`] for the socket at `k`: `option`
+/// with scalar `value`, or the group in `window` for a join or leave.
+fn udp_setopt(net: &mut Net, me: &IfInfo, k: Key, option: u16, value: u32, window: &[u8]) -> i32 {
+    use netipc::ring as r;
+    let Net { udp, mcast, .. } = net;
+    let Some(sock) = udp.entry_mut(k) else {
+        return -1; // no such socket
+    };
+    // An IPv4 membership may name the interface by address: "any", or the
+    // host's own. Joining on another has no device (ENODEV); leaving on one
+    // finds no membership (EADDRNOTAVAIL), as Linux's search does.
+    let iface = window.get(4..8).unwrap_or(&[0; 4]);
+    if iface != [0; 4] && iface != me.ip {
+        match option {
+            r::UDP_OPT_MCAST_JOIN4 => return r::ERR_NO_DEVICE,
+            r::UDP_OPT_MCAST_LEAVE4 => return r::ERR_ADDR_NOT_AVAIL,
+            _ => {}
+        }
+    }
+    let group = match option {
+        r::UDP_OPT_MCAST_JOIN4 | r::UDP_OPT_MCAST_LEAVE4 => window
+            .get(..4)
+            .and_then(|g| <[u8; 4]>::try_from(g).ok())
+            .map(mcast::Group::V4),
+        r::UDP_OPT_MCAST_JOIN6 | r::UDP_OPT_MCAST_LEAVE6 => window
+            .get(..16)
+            .and_then(|g| <[u8; 16]>::try_from(g).ok())
+            .map(mcast::Group::V6),
+        _ => None,
+    };
+    let byte = u8::try_from(value).ok();
+    let flag = match value {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    };
+    match option {
+        r::UDP_OPT_MCAST_JOIN4 | r::UDP_OPT_MCAST_JOIN6 => {
+            let Some(g) = group else {
+                return r::ERR_INVALID;
+            };
+            if let Err(e) = sock.mcast.join(g) {
+                return refused_errno(e);
+            }
+            match mcast.join(g) {
+                Ok(a) => {
+                    announce(me, a);
+                    0
+                }
+                Err(e) => {
+                    // The host has no room for it: the socket is not in it
+                    // either. Its own leave cannot fail, it just joined.
+                    let _ = sock.mcast.leave(&g);
+                    refused_errno(e)
+                }
+            }
+        }
+        r::UDP_OPT_MCAST_LEAVE4 | r::UDP_OPT_MCAST_LEAVE6 => {
+            let Some(g) = group else {
+                return r::ERR_INVALID;
+            };
+            if let Err(e) = sock.mcast.leave(&g) {
+                return refused_errno(e);
+            }
+            announce(me, mcast.leave(&g));
+            0
+        }
+        r::UDP_OPT_MCAST_TTL => byte.map_or(r::ERR_INVALID, |v| {
+            sock.mcast.ttl = v;
+            0
+        }),
+        r::UDP_OPT_MCAST_HOPS => byte.map_or(r::ERR_INVALID, |v| {
+            sock.mcast.hops = v;
+            0
+        }),
+        r::UDP_OPT_MCAST_LOOP4 => flag.map_or(r::ERR_INVALID, |v| {
+            sock.mcast.loop4 = v;
+            0
+        }),
+        r::UDP_OPT_MCAST_LOOP6 => flag.map_or(r::ERR_INVALID, |v| {
+            sock.mcast.loop6 = v;
+            0
+        }),
+        _ => r::ERR_INVALID,
+    }
+}
+
+/// Serve [`netipc::ring::OP_UDP_GETOPT`] for the socket at `k`.
+fn udp_getopt(net: &mut Net, k: Key, option: u16) -> i32 {
+    use netipc::ring as r;
+    let Some(sock) = net.udp.entry_mut(k) else {
+        return -1; // no such socket
+    };
+    match option {
+        r::UDP_OPT_MCAST_TTL => i32::from(sock.mcast.ttl),
+        r::UDP_OPT_MCAST_HOPS => i32::from(sock.mcast.hops),
+        r::UDP_OPT_MCAST_LOOP4 => i32::from(sock.mcast.loop4),
+        r::UDP_OPT_MCAST_LOOP6 => i32::from(sock.mcast.loop6),
+        _ => r::ERR_INVALID,
+    }
 }
 
 /// Maximum concurrent listening sockets one ring session can hold.
@@ -3646,6 +4075,9 @@ struct Net {
     conns: RingConns,
     listeners: Listeners,
     udp: UdpSocks,
+    /// The multicast groups the host is in on behalf of its UDP sockets, each
+    /// with how many are in it (`OP_UDP_SETOPT`).
+    mcast: mcast::HostGroups<MAX_HOST_GROUPS>,
     /// Connections their owner has closed, lingering to answer their peers.
     closing: Closing,
 }
@@ -3758,6 +4190,7 @@ impl Net {
             conns: RingConns::new(),
             listeners: Listeners::new(),
             udp: UdpSocks::new(),
+            mcast: mcast::HostGroups::new(),
             closing: Closing::new(),
         }
     }
@@ -3789,12 +4222,14 @@ impl Net {
                 l.close_all(me, closing);
             }
         }
-        for slot in &mut self.udp.slots {
+        let Self { udp, mcast, .. } = self;
+        for slot in &mut udp.slots {
             if slot
                 .as_ref()
                 .is_some_and(|(k, _)| key_session(*k) == session)
+                && let Some((_, sock)) = slot.take()
             {
-                *slot = None;
+                leave_all(mcast, &sock.mcast, me);
             }
         }
     }
@@ -4115,14 +4550,19 @@ fn ring_tcp_process(
                 // session (OP_STOP); with one ring for every socket the session
                 // is never stopped, so a closed listening socket must be
                 // removable on its own, its unaccepted connections with it.
-                None if net.udp.remove(key(id_space, sqe.conn_id)) => 0,
-                None if net
-                    .listeners
-                    .remove(key(id_space, sqe.conn_id), me, &mut net.closing) =>
-                {
-                    0
+                None => {
+                    let k = key(id_space, sqe.conn_id);
+                    if let Some(sock) = net.udp.take(k) {
+                        // Its groups go with it, announced as the last member
+                        // of each leaves.
+                        leave_all(&mut net.mcast, &sock.mcast, me);
+                        0
+                    } else if net.listeners.remove(k, me, &mut net.closing) {
+                        0
+                    } else {
+                        -1
+                    }
                 }
-                None => -1,
             },
             netipc::ring::OP_LISTEN => {
                 // Bind a listener id to a local port (low 16 bits of aux).
@@ -4194,8 +4634,38 @@ fn ring_tcp_process(
             netipc::ring::OP_UDP_BIND => {
                 // Create/bind a datagram socket under conn_id. Low 16 bits of aux
                 // are the requested local port (0 = ephemeral); OP_CLOSE unbinds it.
+                // With UDP_BIND_UNBOUND it is created without a port, for the
+                // options a program sets before bind(2).
                 let port = (sqe.aux & 0xFFFF) as u16;
-                net.udp.bind(key(id_space, sqe.conn_id), port)
+                let k = key(id_space, sqe.conn_id);
+                if sqe.aux & netipc::ring::UDP_BIND_UNBOUND != 0 {
+                    net.udp.open(k)
+                } else {
+                    net.udp.bind(k, port)
+                }
+            }
+            netipc::ring::OP_UDP_SETOPT => {
+                // A multicast option: the scalar value in aux, a join or leave's
+                // group in the data window (struct ip_mreq / ipv6_mreq).
+                let (option, value) = netipc::ring::Sqe::unpack_udp_opt(sqe.aux);
+                let mut window = [0u8; netipc::ring::UDP_MREQ6_LEN];
+                let want = (sqe.data_len as usize).min(window.len());
+                if want > 0 && !ring.read_data(sqe.data_off as usize, &mut window[..want]) {
+                    -1
+                } else {
+                    udp_setopt(
+                        net,
+                        me,
+                        key(id_space, sqe.conn_id),
+                        option,
+                        value,
+                        &window[..want],
+                    )
+                }
+            }
+            netipc::ring::OP_UDP_GETOPT => {
+                let (option, _) = netipc::ring::Sqe::unpack_udp_opt(sqe.aux);
+                udp_getopt(net, key(id_space, sqe.conn_id), option)
             }
             netipc::ring::OP_UDP_SEND => {
                 // Send one datagram from the bound socket to aux=[dst_ip:4][port_be:2].
@@ -4217,7 +4687,43 @@ fn ring_tcp_process(
                 if plen == usize::MAX {
                     -1
                 } else {
-                    match net.udp.get_mut(key(id_space, sqe.conn_id)) {
+                    let k = key(id_space, sqe.conn_id);
+                    match net.udp.get_mut(k) {
+                        None => -1, // not bound
+                        Some(sock) if igmp::is_multicast(&dst_ip) => {
+                            // To a group: the socket's TTL, the group's
+                            // Ethernet address, and a copy for this machine's
+                            // members unless the loop is off. TTL 0 stays here.
+                            let (src_port, ttl, lp) =
+                                (sock.local_port, sock.mcast.ttl, sock.mcast.loop4);
+                            let sent = if ttl == 0 {
+                                i32::try_from(plen).unwrap_or(i32::MAX)
+                            } else {
+                                udp_send_from(
+                                    me,
+                                    &igmp::multicast_mac(&dst_ip),
+                                    src_port,
+                                    &dst_ip,
+                                    dst_port,
+                                    &buf[..plen],
+                                    id,
+                                    ttl,
+                                )
+                            };
+                            if lp && sent >= 0 {
+                                let mut src = [0u8; 16];
+                                src[..4].copy_from_slice(&me.ip);
+                                deliver_locally(
+                                    &mut net.udp,
+                                    mcast::Group::V4(dst_ip),
+                                    src,
+                                    src_port,
+                                    dst_port,
+                                    &buf[..plen],
+                                );
+                            }
+                            sent
+                        }
                         Some(sock) => udp_sock_send(
                             me,
                             next_hop_mac,
@@ -4227,7 +4733,6 @@ fn ring_tcp_process(
                             &buf[..plen],
                             id,
                         ),
-                        None => -1, // not bound
                     }
                 }
             }
@@ -4250,10 +4755,40 @@ fn ring_tcp_process(
                         -1
                     } else {
                         match net.udp.get_mut(key(id_space, sqe.conn_id)) {
+                            None => -1, // not bound
+                            Some(sock) if mld::is_multicast(&hdr) => {
+                                // As OP_UDP_SEND's group case, with the hop
+                                // limit and IPv6's loop.
+                                let (src_port, hops, lp) =
+                                    (sock.local_port, sock.mcast.hops, sock.mcast.loop6);
+                                let sent = if hops == 0 {
+                                    i32::try_from(plen).unwrap_or(i32::MAX)
+                                } else {
+                                    udp_send6_from(
+                                        me,
+                                        &mld::multicast_mac(&hdr),
+                                        src_port,
+                                        &hdr,
+                                        dst_port,
+                                        &buf[..plen],
+                                        hops,
+                                    )
+                                };
+                                if lp && sent >= 0 {
+                                    deliver_locally(
+                                        &mut net.udp,
+                                        mcast::Group::V6(hdr),
+                                        me.ip6,
+                                        src_port,
+                                        dst_port,
+                                        &buf[..plen],
+                                    );
+                                }
+                                sent
+                            }
                             Some(sock) => {
                                 udp_sock_send6(me, next_hop_mac, sock, &hdr, dst_port, &buf[..plen])
                             }
-                            None => -1, // not bound
                         }
                     }
                 }

@@ -925,6 +925,9 @@ impl NetstackConn {
     /// - [`KernelError::ResourceExhausted`] — the daemon's socket table is full.
     /// - a control-protocol fault (see [`connect`](Self::connect)).
     pub fn udp_bind(&mut self, port: u16) -> KernelResult<u16> {
+        // An unbound socket `udp_open` made is in the daemon already: a refused
+        // bind leaves it there, so must leave it recorded for teardown too.
+        let opened = self.installed.contains(&self.conn_id);
         Self::reserve_install(&mut self.installed)?;
         // Recorded before the round-trip, as in `connect`.
         Self::install(&mut self.installed, self.conn_id);
@@ -938,19 +941,139 @@ impl NetstackConn {
             ..netipc::ring::Sqe::default()
         };
         let res = ring.submit_and_reap(&sqe)?;
-        if res == netipc::ring::ERR_ADDR_IN_USE {
+        if res < 0 && !opened {
             Self::uninstall(&mut self.installed, self.conn_id);
+        }
+        if res == netipc::ring::ERR_ADDR_IN_USE {
             return Err(KernelError::AddrInUse);
         }
         if res < 0 {
             // Table full (daemon `-1`) or any other bind failure.
-            Self::uninstall(&mut self.installed, self.conn_id);
             return Err(KernelError::ResourceExhausted);
         }
         // A bound UDP socket holds a daemon-side slot, recorded above so teardown
         // emits the OP_CLOSE that unbinds it (the daemon routes OP_CLOSE to
-        // `udp.remove` when the id isn't a TCP connection).
+        // `udp.take` when the id isn't a TCP connection).
         u16::try_from(res).map_err(|_| KernelError::InternalError)
+    }
+
+    /// Create the daemon-side UDP socket **without a port**
+    /// (daemon [`OP_UDP_BIND`](netipc::ring::OP_UDP_BIND) with
+    /// [`UDP_BIND_UNBOUND`](netipc::ring::UDP_BIND_UNBOUND)): what a socket
+    /// needs to take multicast options before `bind(2)`, as Linux's does. A
+    /// later [`udp_bind`](Self::udp_bind) gives it its port, keeping its
+    /// options and groups. Teardown closes it like a bound one.
+    ///
+    /// # Errors
+    ///
+    /// - [`KernelError::ResourceExhausted`] — the daemon's socket table is full.
+    /// - [`KernelError::AddrInUse`] — the daemon already holds a socket under
+    ///   this id (a caller bug: open it once).
+    /// - a control-protocol fault (see [`connect`](Self::connect)).
+    pub fn udp_open(&mut self) -> KernelResult<()> {
+        Self::reserve_install(&mut self.installed)?;
+        Self::install(&mut self.installed, self.conn_id);
+        let mut ring = RingGuard::acquire(&mut self.ring)?;
+        let ud = ring.next_ud();
+        let sqe = netipc::ring::Sqe {
+            op: netipc::ring::OP_UDP_BIND,
+            conn_id: self.conn_id,
+            user_data: ud,
+            aux: netipc::ring::UDP_BIND_UNBOUND,
+            ..netipc::ring::Sqe::default()
+        };
+        let res = ring.submit_and_reap(&sqe)?;
+        match res {
+            0 => Ok(()),
+            // Whatever is under this id was there before: not ours to forget.
+            netipc::ring::ERR_ADDR_IN_USE => Err(KernelError::AddrInUse),
+            _ => {
+                Self::uninstall(&mut self.installed, self.conn_id);
+                Err(KernelError::ResourceExhausted)
+            }
+        }
+    }
+
+    /// Set one of the UDP socket's multicast options
+    /// (daemon [`OP_UDP_SETOPT`](netipc::ring::OP_UDP_SETOPT)): the scalar
+    /// `value`, or the group in `window` for a join or leave
+    /// ([`netipc::sockopt::Set`]). The socket must exist in the daemon —
+    /// bound, or [opened](Self::udp_open).
+    ///
+    /// Returns `Ok(Ok(()))`, or `Ok(Err(errno))` with the positive Linux errno
+    /// the daemon refused it with (`EINVAL`, `EADDRINUSE`, `EADDRNOTAVAIL`,
+    /// `ENOBUFS`, `ENODEV`), which the socket layer hands to the caller as
+    /// it is: these are Linux's own answers to the same call, and have no
+    /// [`KernelError`] of their own.
+    ///
+    /// # Errors
+    ///
+    /// - [`KernelError::MsgSize`] — `window` is larger than the ring's
+    ///   send window (a caller bug: a group window is at most 16 bytes).
+    /// - [`KernelError::InternalError`] — the daemon holds no socket under
+    ///   this id, or answered something no setsockopt can.
+    /// - a control-protocol fault (see [`connect`](Self::connect)).
+    pub fn udp_setopt(
+        &mut self,
+        option: u16,
+        value: u32,
+        window: &[u8],
+    ) -> KernelResult<Result<(), i32>> {
+        let mut ring = RingGuard::acquire(&mut self.ring)?;
+        if window.len() > SND_CAP as usize {
+            return Err(KernelError::MsgSize);
+        }
+        if !window.is_empty() && !ring.write_data(SND_OFF as usize, window) {
+            return Err(KernelError::InternalError);
+        }
+        let data_len = u32::try_from(window.len()).map_err(|_| KernelError::InternalError)?;
+        let ud = ring.next_ud();
+        let sqe = netipc::ring::Sqe {
+            op: netipc::ring::OP_UDP_SETOPT,
+            conn_id: self.conn_id,
+            data_off: SND_OFF,
+            data_len,
+            user_data: ud,
+            aux: netipc::ring::Sqe::pack_udp_opt(option, value),
+        };
+        let res = ring.submit_and_reap(&sqe)?;
+        match res {
+            0 => Ok(Ok(())),
+            netipc::ring::ERR_INVALID
+            | netipc::ring::ERR_ADDR_IN_USE
+            | netipc::ring::ERR_ADDR_NOT_AVAIL
+            | netipc::ring::ERR_NO_BUFS
+            | netipc::ring::ERR_NO_DEVICE => Ok(Err(res.saturating_neg())),
+            _ => Err(KernelError::InternalError),
+        }
+    }
+
+    /// Read one of the UDP socket's scalar multicast options back
+    /// (daemon [`OP_UDP_GETOPT`](netipc::ring::OP_UDP_GETOPT)). The socket
+    /// must exist in the daemon, as for [`udp_setopt`](Self::udp_setopt).
+    ///
+    /// # Errors
+    ///
+    /// - [`KernelError::InvalidArgument`] — `option` has no value to read.
+    /// - [`KernelError::InternalError`] — the daemon holds no socket under
+    ///   this id.
+    /// - a control-protocol fault (see [`connect`](Self::connect)).
+    pub fn udp_getopt(&mut self, option: u16) -> KernelResult<i32> {
+        let mut ring = RingGuard::acquire(&mut self.ring)?;
+        let ud = ring.next_ud();
+        let sqe = netipc::ring::Sqe {
+            op: netipc::ring::OP_UDP_GETOPT,
+            conn_id: self.conn_id,
+            user_data: ud,
+            aux: netipc::ring::Sqe::pack_udp_opt(option, 0),
+            ..netipc::ring::Sqe::default()
+        };
+        let res = ring.submit_and_reap(&sqe)?;
+        match res {
+            v if v >= 0 => Ok(v),
+            netipc::ring::ERR_INVALID => Err(KernelError::InvalidArgument),
+            _ => Err(KernelError::InternalError),
+        }
     }
 
     /// Send one UDP datagram from the bound socket to `ip:port`
@@ -2047,6 +2170,286 @@ pub fn self_test_udp_connect() -> KernelResult<Option<()>> {
          SOCK_DGRAM connect parity"
     );
     Ok(Some(()))
+}
+
+/// Boot self-test: UDP **multicast** end to end through the
+/// [`crate::net::socket`] layer the Linux `setsockopt`/`getsockopt` use, and
+/// the daemon's group membership, delivery and send options behind it.
+///
+/// Every send uses TTL / hop limit 0, so nothing leaves the machine: what
+/// comes back is the daemon's loop to its own members (`IP_MULTICAST_LOOP`,
+/// on by default), which makes the test deterministic. In order, for IPv4:
+///
+/// 1. An unbound socket reads its TTL as the default (1) without the daemon
+///    creating anything; setting it to 0 opens the daemon's socket
+///    *unbound*, and reads back 0.
+/// 2. Joining the group before `bind(2)` succeeds (as Linux allows); joining
+///    again is `EADDRINUSE`; joining on an interface address that is not the
+///    host's is `ENODEV`; a unicast "group" is `EINVAL`.
+/// 3. `bind` gives the open socket its port, keeping the membership: a send
+///    to the group comes back to it, from its own port.
+/// 4. A second socket, opened by a join, refused a `bind` to the same port
+///    (`EADDRINUSE`), still has its daemon socket -- the `udp_bind`
+///    bookkeeping must not forget it -- and closing it leaves the first
+///    socket's membership intact.
+/// 5. With the loop off, the send does not come back; after leaving the
+///    group, nor does it with the loop on, and leaving again is
+///    `EADDRNOTAVAIL`.
+///
+/// Then for IPv6: join before bind, hop limit 0 read back, bind, and the
+/// send to the group comes back as an `AF_INET6` datagram.
+///
+/// Returns `Ok(Some(()))` when every step held, `Ok(None)` with no NIC (the
+/// daemon then has no interface to be a member on), `Err` on any break.
+///
+/// # Errors
+///
+/// A step that answered wrongly is [`KernelError::InternalError`], after a
+/// serial line naming it; a control-protocol fault propagates as itself.
+pub fn self_test_udp_multicast() -> KernelResult<Option<()>> {
+    use crate::net::socket;
+    if crate::net::interface::mac().0 == [0u8; 6] {
+        return Ok(None);
+    }
+    let h = socket::create_dgram(2)?;
+    let v4 = multicast_v4_steps(h);
+    socket::close(h);
+    v4?;
+    let h6 = socket::create_dgram(10)?;
+    let v6 = multicast_v6_steps(h6);
+    socket::close(h6);
+    v6?;
+    crate::serial_println!(
+        "[netstack-client]   UDP multicast proven: options before bind, join refusals \
+         (EADDRINUSE/ENODEV/EINVAL), group send looped back on v4 and v6, loop-off and \
+         leave stop it, a refused bind keeps its open socket"
+    );
+    Ok(Some(()))
+}
+
+/// Ports and groups of [`self_test_udp_multicast`], apart from every other
+/// self-test's.
+const MCAST_PORT: u16 = 9330;
+const MCAST_PORT6: u16 = 9332;
+const MCAST_GROUP4: [u8; 4] = [239, 255, 77, 1];
+const MCAST_GROUP6: [u8; 16] = [0xFF, 0x15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x51, 0x57];
+const MCAST_PAYLOAD: &[u8] = b"slate-udp:multicast-loop";
+
+/// An IPv4 join (or leave) of `group` on the interface with address `iface`.
+fn mcast_group4(group: [u8; 4], iface: [u8; 4], join: bool) -> netipc::sockopt::Set {
+    let mut window = [0u8; 16];
+    window[..4].copy_from_slice(&group);
+    window[4..8].copy_from_slice(&iface);
+    netipc::sockopt::Set::Group {
+        option: if join {
+            netipc::ring::UDP_OPT_MCAST_JOIN4
+        } else {
+            netipc::ring::UDP_OPT_MCAST_LEAVE4
+        },
+        window,
+        len: netipc::ring::UDP_MREQ4_LEN,
+    }
+}
+
+/// A scalar multicast option.
+fn mcast_scalar(option: u16, value: u32) -> netipc::sockopt::Set {
+    netipc::sockopt::Set::Scalar { option, value }
+}
+
+/// Set `set` on `h` and check the daemon's answer is `want` (`Err` holding
+/// the positive errno).
+fn mcast_expect_set(
+    h: crate::net::socket::SocketHandle,
+    what: &str,
+    set: netipc::sockopt::Set,
+    want: Result<(), i32>,
+) -> KernelResult<()> {
+    match crate::net::socket::dgram_setopt(h, set) {
+        Ok(got) if got == want => Ok(()),
+        Ok(got) => {
+            crate::serial_println!(
+                "[netstack-client]   multicast: {} answered {:?}, want {:?}",
+                what,
+                got,
+                want
+            );
+            Err(KernelError::InternalError)
+        }
+        Err(e) => {
+            crate::serial_println!("[netstack-client]   multicast: {} failed: {:?}", what, e);
+            Err(e)
+        }
+    }
+}
+
+/// Read option `option` of `h` and check it is `want`.
+fn mcast_expect_get(
+    h: crate::net::socket::SocketHandle,
+    what: &str,
+    option: u16,
+    want: i32,
+) -> KernelResult<()> {
+    let got = crate::net::socket::dgram_getopt(h, option)?;
+    if got == want {
+        return Ok(());
+    }
+    crate::serial_println!("[netstack-client]   multicast: {} read {}, want {}", what, got, want);
+    Err(KernelError::InternalError)
+}
+
+/// Whether the datagram [`MCAST_PAYLOAD`] from port `port` of family `family`
+/// is (`true`) or is not (`false`) waiting on `h`, polling a few times: the
+/// daemon queues a looped-back datagram while it serves the send, so the
+/// first poll finds it, and the rest only guard against a slow pump.
+fn mcast_arrives(h: crate::net::socket::SocketHandle, family: u16, port: u16) -> KernelResult<bool> {
+    let mut buf = [0u8; 64];
+    for _ in 0..8u32 {
+        match crate::net::socket::dgram_recv_from(h, &mut buf, true) {
+            Ok((n, fam, _src, src_port)) => {
+                let len = usize::try_from(n).unwrap_or(0).min(buf.len());
+                if fam == family && src_port == port && buf.get(..len) == Some(MCAST_PAYLOAD) {
+                    return Ok(true);
+                }
+                crate::serial_println!(
+                    "[netstack-client]   multicast: a stray datagram ({} bytes, family {}, \
+                     port {}) -- ignored",
+                    len,
+                    fam,
+                    src_port
+                );
+            }
+            Err(KernelError::WouldBlock) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(false)
+}
+
+/// Fail with `what` unless `got == want`.
+fn mcast_check(what: &str, got: bool, want: bool) -> KernelResult<()> {
+    if got == want {
+        return Ok(());
+    }
+    crate::serial_println!(
+        "[netstack-client]   multicast: {} -- the datagram {} arrive",
+        what,
+        if want { "did not" } else { "did" }
+    );
+    Err(KernelError::InternalError)
+}
+
+/// The IPv4 steps of [`self_test_udp_multicast`] on the fresh socket `h`.
+fn multicast_v4_steps(h: crate::net::socket::SocketHandle) -> KernelResult<()> {
+    use crate::net::socket;
+    use netipc::ring as r;
+    let af = netipc::ring::UDP_AF_INET;
+    // 1. Options on an unbound socket.
+    mcast_expect_get(h, "default TTL", r::UDP_OPT_MCAST_TTL, 1)?;
+    mcast_expect_set(h, "TTL 0", mcast_scalar(r::UDP_OPT_MCAST_TTL, 0), Ok(()))?;
+    mcast_expect_get(h, "TTL set unbound", r::UDP_OPT_MCAST_TTL, 0)?;
+    // 2. Joins before bind, and the daemon's refusals.
+    let join = mcast_group4(MCAST_GROUP4, [0; 4], true);
+    mcast_expect_set(h, "join", join, Ok(()))?;
+    mcast_expect_set(h, "join twice", join, Err(r::ERR_ADDR_IN_USE.saturating_neg()))?;
+    mcast_expect_set(
+        h,
+        "join on a foreign address",
+        mcast_group4([239, 255, 77, 2], [192, 0, 2, 1], true),
+        Err(r::ERR_NO_DEVICE.saturating_neg()),
+    )?;
+    mcast_expect_set(
+        h,
+        "join a unicast address",
+        mcast_group4([10, 0, 0, 1], [0; 4], true),
+        Err(r::ERR_INVALID.saturating_neg()),
+    )?;
+    // 3. Bind keeps the membership; the send loops back.
+    let port = socket::dgram_bind(h, MCAST_PORT)?;
+    if port != MCAST_PORT {
+        crate::serial_println!("[netstack-client]   multicast: bind gave port {}", port);
+        return Err(KernelError::InternalError);
+    }
+    socket::dgram_send_to(h, &MCAST_GROUP4, MCAST_PORT, MCAST_PAYLOAD)?;
+    mcast_check("send to the group", mcast_arrives(h, af, MCAST_PORT)?, true)?;
+    // 4. A refused bind keeps its open socket.
+    let h2 = socket::create_dgram(2)?;
+    let second = multicast_refused_bind(h2);
+    socket::close(h2);
+    second?;
+    socket::dgram_send_to(h, &MCAST_GROUP4, MCAST_PORT, MCAST_PAYLOAD)?;
+    mcast_check("send after the second socket closed", mcast_arrives(h, af, MCAST_PORT)?, true)?;
+    // 5. Loop off, then leave.
+    mcast_expect_set(h, "loop off", mcast_scalar(r::UDP_OPT_MCAST_LOOP4, 0), Ok(()))?;
+    mcast_expect_get(h, "loop read back", r::UDP_OPT_MCAST_LOOP4, 0)?;
+    socket::dgram_send_to(h, &MCAST_GROUP4, MCAST_PORT, MCAST_PAYLOAD)?;
+    mcast_check("send with the loop off", mcast_arrives(h, af, MCAST_PORT)?, false)?;
+    mcast_expect_set(h, "loop on", mcast_scalar(r::UDP_OPT_MCAST_LOOP4, 1), Ok(()))?;
+    let leave = mcast_group4(MCAST_GROUP4, [0; 4], false);
+    mcast_expect_set(h, "leave", leave, Ok(()))?;
+    mcast_expect_set(h, "leave twice", leave, Err(r::ERR_ADDR_NOT_AVAIL.saturating_neg()))?;
+    socket::dgram_send_to(h, &MCAST_GROUP4, MCAST_PORT, MCAST_PAYLOAD)?;
+    mcast_check("send after leaving", mcast_arrives(h, af, MCAST_PORT)?, false)
+}
+
+/// Step 4 of [`self_test_udp_multicast`]: `h2` joins the group (opening its
+/// daemon socket unbound), is refused [`MCAST_PORT`], and must still have
+/// that socket -- reading an option from it answers from the daemon.
+fn multicast_refused_bind(h2: crate::net::socket::SocketHandle) -> KernelResult<()> {
+    use crate::net::socket;
+    let join = mcast_group4(MCAST_GROUP4, [0; 4], true);
+    mcast_expect_set(h2, "second socket's join", join, Ok(()))?;
+    match socket::dgram_bind(h2, MCAST_PORT) {
+        Err(KernelError::AddrInUse) => {}
+        other => {
+            crate::serial_println!(
+                "[netstack-client]   multicast: second bind to a taken port answered {:?}",
+                other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    // The daemon still holds the socket, membership and all: a second join
+    // is refused as a duplicate, which only a live daemon socket can say.
+    mcast_expect_set(
+        h2,
+        "second socket's join after the refused bind",
+        join,
+        Err(netipc::ring::ERR_ADDR_IN_USE.saturating_neg()),
+    )?;
+    mcast_expect_get(h2, "second socket's TTL", netipc::ring::UDP_OPT_MCAST_TTL, 1)
+}
+
+/// The IPv6 steps of [`self_test_udp_multicast`] on the fresh `AF_INET6`
+/// socket `h`.
+fn multicast_v6_steps(h: crate::net::socket::SocketHandle) -> KernelResult<()> {
+    use crate::net::socket;
+    use netipc::ring as r;
+    let join = netipc::sockopt::Set::Group {
+        option: r::UDP_OPT_MCAST_JOIN6,
+        window: MCAST_GROUP6,
+        len: r::UDP_MREQ6_LEN,
+    };
+    mcast_expect_set(h, "v6 join", join, Ok(()))?;
+    mcast_expect_set(h, "hop limit 0", mcast_scalar(r::UDP_OPT_MCAST_HOPS, 0), Ok(()))?;
+    mcast_expect_get(h, "hop limit read back", r::UDP_OPT_MCAST_HOPS, 0)?;
+    mcast_expect_get(h, "default v6 loop", r::UDP_OPT_MCAST_LOOP6, 1)?;
+    let port = socket::dgram_bind(h, MCAST_PORT6)?;
+    if port != MCAST_PORT6 {
+        crate::serial_println!("[netstack-client]   multicast: v6 bind gave port {}", port);
+        return Err(KernelError::InternalError);
+    }
+    socket::dgram_send_to6(h, &MCAST_GROUP6, MCAST_PORT6, MCAST_PAYLOAD)?;
+    mcast_check(
+        "v6 send to the group",
+        mcast_arrives(h, netipc::ring::UDP_AF_INET6, MCAST_PORT6)?,
+        true,
+    )?;
+    let leave = netipc::sockopt::Set::Group {
+        option: r::UDP_OPT_MCAST_LEAVE6,
+        window: MCAST_GROUP6,
+        len: r::UDP_MREQ6_LEN,
+    };
+    mcast_expect_set(h, "v6 leave", leave, Ok(()))
 }
 
 /// Boot self-test: prove that a **non-blocking** receive on a freshly-connected

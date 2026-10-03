@@ -3868,9 +3868,23 @@ _Port ext4 first. Don't write a custom filesystem._
         loops back to this machine's members, and TTL 0 keeps it local.
         `SYS_UDP_SEND` sends from the socket's namespace. Lane D maps libc's
         options onto these (`requests/a-d-native-udp-multicast-options-and-ipv6.md`).
-      - [ ] The Linux ABI half: the `IPPROTO_IP`/`IPPROTO_IPV6` options on the
-        netstack daemon's sockets (`setsockopt`, a ring op the daemon
-        answers).
+      - [-] The Linux ABI half, on `lane-a-wip` (2026-10-03), awaiting a boot:
+        `IP_ADD_MEMBERSHIP`/`IP_DROP_MEMBERSHIP` (`ip_mreq` and `ip_mreqn`),
+        `IP_MULTICAST_TTL`/`LOOP`, `IPV6_JOIN_GROUP`/`LEAVE_GROUP`,
+        `IPV6_MULTICAST_HOPS`/`LOOP` through `setsockopt`/`getsockopt` on the
+        daemon's sockets, every errno as Linux's (`netipc::sockopt`, 14
+        tests). The daemon's ring ops `OP_UDP_SETOPT`/`GETOPT` keep per-socket
+        groups and settings and a host table, send IGMPv2/MLDv1 reports and
+        leaves (Router Alert, TTL 1), answer routers' queries, deliver a
+        group's datagrams only to members, and send to a group with the
+        socket's TTL and the group's MAC, looping a copy to local members.
+        Options set before `bind` get an unbound daemon socket
+        (design-decisions 1535). Boot check:
+        `netstack_client::self_test_udp_multicast`.
+      - [ ] Wire multicast on e1000/e1000e and rtl8139: both drivers drop
+        every multicast frame (known-issues
+        `A-E1000-AND-RTL8139-DROP-EVERY-MULTICAST-FRAME`); a raw-NIC
+        multicast filter the daemon sets.
 - [-] `[A]` Later: WiFi (requires wireless driver + wpa_supplicant port)
   - [x] `net80211` crate: `no_std`, allocation-free 802.11 wire format — MAC
     header and frame-control parsing, management-frame bodies (beacon, probe,

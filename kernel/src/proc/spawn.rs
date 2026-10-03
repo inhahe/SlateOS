@@ -5770,6 +5770,32 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
         }
     }
 
+    // UDP multicast (design-decisions §1532): the socket options the Linux
+    // setsockopt/getsockopt translate to, group membership in the daemon, and
+    // the daemon's loop to its own members -- every send at TTL 0, so the
+    // check never touches the wire and an error is a real break.
+    match crate::net::netstack_client::self_test_udp_multicast() {
+        Ok(Some(())) => serial_println!(
+            "[spawn]   persistent netstack udp-multicast: joins, options and the group loop \
+             behave as Linux's -- UDP multicast proven"
+        ),
+        Ok(None) => {
+            serial_println!("[spawn]   persistent netstack udp-multicast: no NIC MAC — check skipped");
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: persistent netstack udp-multicast ({:?}) — a multicast \
+                 option, membership or group delivery misbehaved",
+                e
+            );
+            crate::selftest::report_debug(
+                "persistent netstack udp-multicast",
+                crate::selftest::Severity::Diagnostic,
+                Err::<(), _>(e),
+            );
+        }
+    }
+
     // Ring-3 socket-syscall HTTP capstone (netstack Phase 5.6, deferred from 5.5;
     // see todo.txt Judgment Calls 2026-07-14). Everything above drives the
     // daemon-backed socket path from *kernel* context via the `NetstackConn`

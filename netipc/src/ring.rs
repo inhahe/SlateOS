@@ -197,7 +197,15 @@ pub const OP_SHUTDOWN: u8 = 0x0B;
 /// on success — so the kernel learns the ephemeral port for `getsockname` — or a
 /// negative errno (`ERR_ADDR_IN_USE` if the port is already bound). Migration
 /// Phase 5, UDP `SOCK_DGRAM` support.
+///
+/// With [`UDP_BIND_UNBOUND`] set in `aux` it creates the socket *without* a
+/// port -- Linux's state between `socket(2)` and `bind(2)`, which a program
+/// may spend setting options and joining groups -- and completes with `0`.
+/// Such a socket sends and receives nothing. A later `OP_UDP_BIND` on the
+/// same `conn_id`, without the flag, gives it its port.
 pub const OP_UDP_BIND: u8 = 0x0C;
+/// [`OP_UDP_BIND`] `aux` flag: create the socket unbound (no local port).
+pub const UDP_BIND_UNBOUND: u64 = 1 << 16;
 /// Send one **UDP datagram** from the socket named by `conn_id` to the
 /// destination packed in `aux` (`[ip:4][port_be:2]`, see [`Sqe::pack_endpoint`]).
 /// The payload is the SQE data window (`data_off`/`data_len`). Completion
@@ -227,23 +235,31 @@ pub const OP_UDP_RECV: u8 = 0x0E;
 /// (big-endian, matching the port half of [`Sqe::pack_endpoint`]). Completion
 /// `result` semantics match [`OP_UDP_SEND`]: payload bytes sent (`≥ 0`) or a
 /// negative errno ([`ERR_MSG_SIZE`] for an oversized datagram). Migration Phase 5,
-/// AF_INET6 UDP `SOCK_DGRAM` support.
+/// `AF_INET6` UDP `SOCK_DGRAM` support.
 pub const OP_UDP_SEND6: u8 = 0x0F;
 /// Set one of a UDP socket's **multicast options**: the Linux ABI's
 /// `setsockopt` at `IPPROTO_IP`/`IPPROTO_IPV6` on a daemon-backed
 /// `SOCK_DGRAM` socket. An mDNS responder needs them (design-decisions
 /// §1532). `aux` holds the option and, for a scalar one, its value
 /// ([`Sqe::pack_udp_opt`]). A group join or leave carries the group in the
-/// data window: `[group:4][interface:4]` for the IPv4 ones (`struct
-/// ip_mreq`, [`UDP_MREQ4_LEN`]), `[group:16][ifindex:4 LE]` for the IPv6
-/// ones (`struct ipv6_mreq`, [`UDP_MREQ6_LEN`]).
+/// data window: `[group:4][interface address:4]` for the IPv4 ones
+/// ([`UDP_MREQ4_LEN`]), the 16-byte group for the IPv6 ones
+/// ([`UDP_MREQ6_LEN`]). The kernel has already settled the interface
+/// *index* a `struct ip_mreqn` or `struct ipv6_mreq` names
+/// ([`crate::sockopt`]); an IPv4 address is the daemon's to check, as only
+/// it knows the host's.
+///
+/// The socket may be unbound ([`UDP_BIND_UNBOUND`]): Linux takes these
+/// options before `bind(2)`.
 ///
 /// Completion `result` is `0`, or a negative errno: [`ERR_ADDR_IN_USE`]
 /// joining a group the socket is in already (as Linux answers),
 /// [`ERR_ADDR_NOT_AVAIL`] leaving one it is not in, [`ERR_NO_BUFS`] past the
-/// socket's group limit, [`ERR_INVALID`] for a group that is not multicast
-/// or a value out of range. The kernel has already turned Linux's `-1`
-/// ("the default") into the default, so a scalar value is always 0-255.
+/// socket's or the host's group limit, [`ERR_NO_DEVICE`] joining on an
+/// interface address that is not the host's, [`ERR_INVALID`] for a group
+/// that is not multicast or a value out of range. The kernel has already
+/// turned Linux's `-1` ("the default") into the default, so a scalar value
+/// is always 0-255.
 pub const OP_UDP_SETOPT: u8 = 0x10;
 /// Read one of a UDP socket's scalar multicast options back
 /// (`getsockopt`). `aux` holds the option ([`Sqe::pack_udp_opt`], value 0).
@@ -271,10 +287,11 @@ pub const UDP_OPT_MCAST_HOPS: u16 = 7;
 /// Whether the socket's IPv6 multicast sends loop back
 /// (`IPV6_MULTICAST_LOOP`): 0 or 1, default 1.
 pub const UDP_OPT_MCAST_LOOP6: u16 = 8;
-/// Length of an IPv4 join or leave's data window: `[group:4][interface:4]`.
+/// Length of an IPv4 join or leave's data window:
+/// `[group:4][interface address:4]`, the address `0.0.0.0` for "any".
 pub const UDP_MREQ4_LEN: usize = 8;
-/// Length of an IPv6 join or leave's data window: `[group:16][ifindex:4]`.
-pub const UDP_MREQ6_LEN: usize = 20;
+/// Length of an IPv6 join or leave's data window: the 16-byte group.
+pub const UDP_MREQ6_LEN: usize = 16;
 
 // ---------------------------------------------------------------------------
 // Op flags (carried in [`Sqe::aux`]) and result sentinels
@@ -395,12 +412,17 @@ pub const ERR_MSG_SIZE: i32 = -90;
 pub const ERR_TIMED_OUT: i32 = -110;
 
 /// Completion `result` sentinel (`-EADDRNOTAVAIL`): an [`OP_UDP_SETOPT`]
-/// leave named a group the socket is not in.
+/// leave named a group the socket is not in, or an interface it did not join
+/// on.
 pub const ERR_ADDR_NOT_AVAIL: i32 = -99;
 
 /// Completion `result` sentinel (`-ENOBUFS`): an [`OP_UDP_SETOPT`] join
-/// past the socket's group limit.
+/// past the socket's or the host's group limit.
 pub const ERR_NO_BUFS: i32 = -105;
+
+/// Completion `result` sentinel (`-ENODEV`): an [`OP_UDP_SETOPT`] join
+/// named an interface address that is not the host's.
+pub const ERR_NO_DEVICE: i32 = -19;
 
 /// Completion `result` sentinel (`-EINVAL`): an [`OP_UDP_SETOPT`] or
 /// [`OP_UDP_GETOPT`] the socket cannot take -- a group that is not a
@@ -743,7 +765,9 @@ mod tests {
             ERR_TIMED_OUT,
             ERR_ADDR_NOT_AVAIL,
             ERR_NO_BUFS,
+            ERR_NO_DEVICE,
             ERR_INVALID,
+            -1,
         ];
         for (i, a) in errnos.iter().enumerate() {
             assert!(*a < 0);
@@ -752,7 +776,17 @@ mod tests {
             }
         }
         assert_ne!(OP_UDP_SETOPT, OP_UDP_GETOPT);
-        assert!(OP_UDP_SETOPT > OP_UDP_SEND6);
+        const { assert!(OP_UDP_SETOPT > OP_UDP_SEND6) };
+    }
+
+    #[test]
+    fn the_unbound_flag_leaves_the_port_bits_alone() {
+        // OP_UDP_BIND's port is aux's low 16 bits: the flag must sit above
+        // them, so "unbound" can never read as a port, nor a port as it.
+        assert_eq!(UDP_BIND_UNBOUND & 0xFFFF, 0);
+        assert_ne!(UDP_BIND_UNBOUND, 0);
+        let port = u64::from(5353_u16);
+        assert_eq!((UDP_BIND_UNBOUND | port) & 0xFFFF, port);
     }
 
     #[test]
@@ -822,8 +856,8 @@ mod tests {
         // combined mask never looks like a negative errno.
         assert_ne!(POLL_READABLE, POLL_WRITABLE);
         assert_eq!(POLL_READABLE & POLL_WRITABLE, 0);
-        assert!(POLL_READABLE > 0 && POLL_WRITABLE > 0);
-        assert!(POLL_READABLE | POLL_WRITABLE > 0);
+        // Both positive and non-overlapping, so their union is positive too.
+        const { assert!(POLL_READABLE > 0 && POLL_WRITABLE > 0) };
         // A daemon readiness bitmask is non-negative, unlike the -1 error / EAGAIN.
         assert_ne!(POLL_READABLE | POLL_WRITABLE, ERR_WOULD_BLOCK);
         assert_ne!(POLL_READABLE | POLL_WRITABLE, -1);
@@ -856,7 +890,7 @@ mod tests {
         assert_ne!(ERR_IN_PROGRESS, -1);
         assert_ne!(ERR_IN_PROGRESS, ERR_WOULD_BLOCK);
         // POLL_ERR is a distinct, positive, non-overlapping readiness bit.
-        assert!(POLL_ERR > 0);
+        const { assert!(POLL_ERR > 0) };
         assert_eq!(POLL_ERR & (POLL_READABLE | POLL_WRITABLE), 0);
     }
 
@@ -1025,7 +1059,7 @@ mod tests {
         ] {
             assert_ne!(ERR_TIMED_OUT, other);
         }
-        assert!(ERR_TIMED_OUT < 0, "a completion error is negative");
+        const { assert!(ERR_TIMED_OUT < 0, "a completion error is negative") };
     }
 
     #[test]
@@ -1170,6 +1204,6 @@ mod tests {
             }
         }
         // Scalars fit within the first cache line.
-        assert!(OFF_DATA_LEN + 4 <= CACHE_LINE);
+        const { assert!(OFF_DATA_LEN + 4 <= CACHE_LINE) };
     }
 }

@@ -25,6 +25,7 @@
 #![forbid(unsafe_code)]
 
 pub mod ring;
+pub mod sockopt;
 
 // ---------------------------------------------------------------------------
 // Opcodes (first request byte) and status codes (first reply byte).

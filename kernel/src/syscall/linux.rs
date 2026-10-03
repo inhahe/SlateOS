@@ -42608,6 +42608,11 @@ fn sys_setsockopt(args: &SyscallArgs) -> SyscallResult {
         && let Ok(entry) = lookup_caller_fd(fd)
         && entry.kind == HandleKind::Socket
     {
+        // The multicast options are real: translated and carried out by the
+        // daemon, Linux's errnos and all.
+        if netipc::sockopt::is_multicast_option(level, optname) {
+            return socket_set_multicast(&entry, level, optname, args.arg3, optlen);
+        }
         let accepted = match level {
             // SOL_SOCKET: common client toggles + buffer-size hints.  All are
             // no-ops for our daemon (fixed buffers, no keepalive/linger yet),
@@ -42729,6 +42734,9 @@ fn sys_getsockopt(args: &SyscallArgs) -> SyscallResult {
         // Our fixed per-direction buffer size hint (bytes).  Chosen to be a
         // plausible non-zero value so callers sizing reads/writes off it behave.
         const BUF_HINT: i32 = 65536;
+        if netipc::sockopt::is_multicast_option(level, optname) {
+            return socket_get_multicast(&entry, level, optname, args.arg3, args.arg4);
+        }
         let value: i32 = match level {
             l if l == sol::SOL_SOCKET => match optname {
                 so::SO_TYPE => so::SOCK_STREAM,
@@ -42765,6 +42773,112 @@ fn sys_getsockopt(args: &SyscallArgs) -> SyscallResult {
     // optval is optional (we'd need to read *optlen to know how much
     // to validate — skip the buffer check in kernel context).
     linux_err(errno::EBADF)
+}
+
+/// `setsockopt(2)` of a multicast option (`IP_ADD_MEMBERSHIP`,
+/// `IP_MULTICAST_TTL`, `IPV6_JOIN_GROUP`, ...) on a daemon-backed socket:
+/// translated by [`netipc::sockopt::parse_set`], carried out by the daemon.
+/// The caller has checked `optlen >= 0` and that `optval` is readable for
+/// `optlen` bytes; only what the option's struct needs is copied.
+fn socket_set_multicast(
+    entry: &FdEntry,
+    level: i32,
+    optname: i32,
+    optval: u64,
+    optlen: i32,
+) -> SyscallResult {
+    let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
+    let shape = match crate::net::socket::sockopt_shape(h) {
+        Ok(s) => s,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+    let len = usize::try_from(optlen).unwrap_or(0);
+    let n = len.min(netipc::sockopt::MAX_OPTVAL);
+    let mut raw = [0u8; netipc::sockopt::MAX_OPTVAL];
+    if n > 0 {
+        // SAFETY: `n` <= MAX_OPTVAL bytes into a MAX_OPTVAL-byte buffer; the
+        // caller validated optval readable for `optlen` (>= `n`) bytes, and
+        // copy_from_user re-checks.
+        if let Err(e) = unsafe { crate::mm::user::copy_from_user(optval, raw.as_mut_ptr(), n) } {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    let set = match netipc::sockopt::parse_set(
+        level,
+        optname,
+        raw.get(..n).unwrap_or(&[]),
+        len,
+        shape,
+    ) {
+        Ok(s) => s,
+        Err(errno) => return linux_err(errno),
+    };
+    match crate::net::socket::dgram_setopt(h, set) {
+        Ok(Ok(())) => SyscallResult::ok(0),
+        Ok(Err(errno)) => linux_err(errno),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
+/// `getsockopt(2)` of a multicast option on a daemon-backed socket
+/// ([`netipc::sockopt::get_option`]), written back by Linux's rules for the
+/// level ([`netipc::sockopt::encode_get`]). The caller has validated
+/// `optlen_ptr` for a four-byte read and write.
+fn socket_get_multicast(
+    entry: &FdEntry,
+    level: i32,
+    optname: i32,
+    optval: u64,
+    optlen_ptr: u64,
+) -> SyscallResult {
+    use netipc::sockopt::Get;
+    let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
+    let shape = match crate::net::socket::sockopt_shape(h) {
+        Ok(s) => s,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+    // Linux reads *optlen before it looks at the option, and at SOL_IP
+    // refuses a negative one first of all.
+    let mut room_raw = [0u8; 4];
+    // SAFETY: four bytes into a four-byte buffer; the caller validated the
+    // source, and copy_from_user re-checks.
+    if let Err(e) = unsafe { crate::mm::user::copy_from_user(optlen_ptr, room_raw.as_mut_ptr(), 4) }
+    {
+        return linux_err(linux_errno_for(e));
+    }
+    let room = i32::from_ne_bytes(room_raw);
+    let ipv4 = level == netipc::sockopt::SOL_IP;
+    if ipv4 && room < 0 {
+        return linux_err(errno::EINVAL);
+    }
+    let value = match netipc::sockopt::get_option(level, optname, shape) {
+        Ok(Get::Fixed(v)) => v,
+        Ok(Get::Ask(option)) => match crate::net::socket::dgram_getopt(h, option) {
+            Ok(v) => v,
+            Err(e) => return linux_err(linux_errno_for(e)),
+        },
+        Err(errno) => return linux_err(errno),
+    };
+    let (bytes, n) = match netipc::sockopt::encode_get(value, room, ipv4) {
+        Ok(out) => out,
+        Err(errno) => return linux_err(errno),
+    };
+    if n > 0 {
+        if optval == 0 {
+            return linux_err(errno::EFAULT);
+        }
+        // SAFETY: `n` <= 4 initialised bytes of `bytes`; copy_to_user
+        // validates the destination.
+        if let Err(e) = unsafe { crate::mm::user::copy_to_user(bytes.as_ptr(), optval, n) } {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    let written = u32::try_from(n).unwrap_or(0).to_ne_bytes();
+    // SAFETY: four initialised bytes; the caller validated the destination.
+    if let Err(e) = unsafe { crate::mm::user::copy_to_user(written.as_ptr(), optlen_ptr, 4) } {
+        return linux_err(linux_errno_for(e));
+    }
+    SyscallResult::ok(0)
 }
 
 /// `getsockopt(2)` on an `AF_UNIX` descriptor: `SO_TYPE`, `SO_DOMAIN`,

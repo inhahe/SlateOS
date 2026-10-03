@@ -3692,6 +3692,11 @@ pub enum EventNotification {
         x: i32,
         y: i32,
         kind: MouseEventKind,
+        /// The modifier keys held when the event was handled -- taken then,
+        /// not when the notification is sent, so a Ctrl let go later in the
+        /// same tick cannot change what the click said. See
+        /// `guiremote::InputEvent::modifiers` for why a click carries them.
+        modifiers: Modifiers,
     },
     /// Window close was requested (close button clicked).
     WindowClose { window_id: WindowId },
@@ -3794,12 +3799,16 @@ fn wire_event(n: EventNotification) -> guiremote::InputEvent {
                 text,
             },
             scancode,
-        ),
+        )
+        // On the envelope too, so every key and pointer event says what was
+        // held in the same place.
+        .with_modifiers(modifiers),
         EventNotification::MouseEvent {
             window_id,
             x,
             y,
             kind,
+            modifiers,
         } => guiremote::InputEvent::new(
             window_id.0,
             ClientEvent::Mouse(ClientMouseEvent {
@@ -3812,7 +3821,8 @@ fn wire_event(n: EventNotification) -> guiremote::InputEvent {
                 y: y as f32,
                 kind: wire_mouse_kind(kind),
             }),
-        ),
+        )
+        .with_modifiers(modifiers),
         EventNotification::WindowClose { window_id } => {
             guiremote::InputEvent::new(window_id.0, ClientEvent::CloseRequested)
         }
@@ -9242,12 +9252,17 @@ impl Compositor {
     fn notify_pointer(&mut self, window_id: WindowId, x: i32, y: i32, kind: MouseEventKind) {
         if let Some(win) = self.window_ref(window_id) {
             let (local_x, local_y) = win.local_point(x, y);
+            // Whatever the keyboard holds now, whichever window has its focus:
+            // the window being clicked is often not the one that was told the
+            // keys went down.
+            let modifiers = self.modifiers.modifiers();
             self.pending_notifications
                 .push_back(EventNotification::MouseEvent {
                     window_id,
                     x: local_x,
                     y: local_y,
                     kind,
+                    modifiers,
                 });
         }
     }
@@ -24784,6 +24799,57 @@ mod tests {
             .filter(|(id, kind)| *id == a && kind.starts_with("ButtonPress"))
             .count();
         assert_eq!(presses, 1);
+    }
+
+    /// A click says which modifiers were held, even to a window that was never
+    /// told the key went down: Ctrl pressed while one window has the keyboard,
+    /// then a click on another, reaches the other as a Ctrl+click -- the
+    /// desktop's case, whose surface almost never has the keyboard.
+    #[test]
+    fn a_click_carries_the_modifiers_held_even_to_a_window_without_the_keyboard() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let a = window_at_point(&mut comp, 50, 100, 150, 150);
+        let b = window_at_point(&mut comp, 400, 100, 150, 150);
+        comp.focus_window(a);
+        // Left Ctrl, down while `a` has the keyboard.
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x1D,
+            character: None,
+        });
+        button_down(&mut comp, MouseButton::Right, 450, 150);
+        comp.handle_input(InputEvent::KeyUp { scancode: 0x1D });
+        button_up(&mut comp, MouseButton::Right, 450, 150);
+
+        let to_b: Vec<EventNotification> = comp
+            .drain_notifications()
+            .into_iter()
+            .filter(|n| {
+                matches!(
+                    n,
+                    EventNotification::MouseEvent {
+                        window_id,
+                        kind: MouseEventKind::ButtonPress(_) | MouseEventKind::ButtonRelease(_),
+                        ..
+                    } if *window_id == b
+                )
+            })
+            .collect();
+        let held: Vec<Modifiers> = to_b
+            .iter()
+            .filter_map(|n| match n {
+                EventNotification::MouseEvent { modifiers, .. } => Some(*modifiers),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            held,
+            vec![Modifiers::ctrl(), Modifiers::NONE],
+            "the press was made with Ctrl down and the release after it came up"
+        );
+        // And it survives the translation to what the client is sent.
+        let sent = to_b.into_iter().map(wire_event).collect::<Vec<_>>();
+        assert_eq!(sent[0].modifiers, Modifiers::ctrl());
+        assert_eq!(sent[1].modifiers, Modifiers::NONE);
     }
 
     /// A release whose press no window saw goes nowhere, rather than to

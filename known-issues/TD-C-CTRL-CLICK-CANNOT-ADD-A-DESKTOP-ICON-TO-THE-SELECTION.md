@@ -1,6 +1,9 @@
 ## TD-C-CTRL-CLICK-CANNOT-ADD-A-DESKTOP-ICON-TO-THE-SELECTION
 
-**Status:** OPEN — 2026-09-25. Waits on lane F for one field:
+**Status:** OPEN — 2026-09-25. Lane F's field is in (2026-10-03, input
+protocol 9): every pointer event carries the modifiers held, read as
+`oswindow::EventLoop::modifiers()` while handling it. What remains is lane C's
+half, passing `ctrl` to the icon layer; see the reply in
 `requests/c-f-a-pointer-event-cannot-say-ctrl-is-held.md`.
 
 **In short:** On the desktop, Ctrl+click replaces the icon selection instead

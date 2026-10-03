@@ -884,6 +884,9 @@ pub struct EventLoop<T: Transport> {
     waker: Option<Waker>,
     /// Presses so far, for recognising a double click. See [`Clicks`].
     clicks: Clicks,
+    /// The modifier keys held when the compositor handled the key or pointer
+    /// event last returned. See [`EventLoop::modifiers`].
+    modifiers: Modifiers,
 }
 
 /// Two presses of one button in one window, close together in time and on
@@ -1020,6 +1023,7 @@ impl<T: Transport> EventLoop<T> {
             woken: None,
             waker: None,
             clicks: Clicks::new(),
+            modifiers: Modifiers::NONE,
         }
     }
 
@@ -1899,6 +1903,21 @@ impl<T: Transport> EventLoop<T> {
         self.conn.wait()
     }
 
+    /// The modifier keys held when the compositor handled the key or pointer
+    /// event most recently returned by [`Self::poll`] (and so handed to a
+    /// [`Self::run`] handler).
+    ///
+    /// For a click: Ctrl+click adds to a selection, Shift+click extends one.
+    /// Read it while handling the event; the next key or pointer event replaces
+    /// it, and other events leave it as it was. It is the compositor's answer,
+    /// not one assembled from this program's key events, so it is right for a
+    /// click on a window that did not have the keyboard when Ctrl went down --
+    /// the desktop's own surface, nearly always.
+    #[must_use]
+    pub const fn modifiers(&self) -> Modifiers {
+        self.modifiers
+    }
+
     /// Read whatever is available and take the next event, if any.
     ///
     /// Returns `Ok(None)` when nothing is waiting — the ordinary state of an
@@ -1925,6 +1944,12 @@ impl<T: Transport> EventLoop<T> {
             // Folded in before the application sees it, so a handler that asks
             // the window how big it is during a `Resize` gets the new answer.
             window.apply(&ev.event);
+            // Only from the events the compositor stamps: a resize or a tick
+            // carries none, and taking its empty set would make a Ctrl held
+            // across a resize read as let go.
+            if matches!(ev.event, Event::Mouse(_) | Event::Key(_)) {
+                self.modifiers = ev.modifiers;
+            }
             // A press that completes a double click is followed at once by the
             // double click itself, as its own event: consumers are written for
             // both orders (the file dialog's list opens on either), and every
@@ -1953,6 +1978,8 @@ impl<T: Transport> EventLoop<T> {
                         }),
                     );
                     double.time = ev.time;
+                    // The press's own: a Ctrl+double-click is one.
+                    double.modifiers = ev.modifiers;
                     self.pending.push_front(double);
                 }
             }
@@ -3318,6 +3345,45 @@ mod tests {
         assert_eq!(
             server.borrow_mut().asked(),
             vec!["GetHeldModifiers", "GetHeldModifiers"]
+        );
+    }
+
+    /// A click's modifiers are the ones the compositor stamped on it, read
+    /// while handling it -- a Ctrl+click on a window that never saw the Ctrl
+    /// go down -- and an event the compositor does not stamp leaves them be.
+    #[test]
+    fn a_click_s_modifiers_are_the_ones_the_compositor_stamped() {
+        let (mut events, server) = wired();
+        let id = open(&mut events, "A");
+        assert_eq!(events.modifiers(), Modifiers::NONE);
+        server.borrow_mut().send_input(&[
+            InputEvent::new(
+                id,
+                Event::Mouse(MouseEvent {
+                    x: 3.0,
+                    y: 4.0,
+                    kind: MouseEventKind::Press(MouseButton::Left),
+                }),
+            )
+            .with_modifiers(Modifiers::ctrl()),
+            InputEvent::new(
+                id,
+                Event::Resize {
+                    width: 300,
+                    height: 200,
+                },
+            ),
+        ]);
+
+        let (_, press) = events.poll().unwrap().expect("the press");
+        assert!(matches!(press, Event::Mouse(_)), "{press:?}");
+        assert_eq!(events.modifiers(), Modifiers::ctrl());
+        let (_, resize) = events.poll().unwrap().expect("the resize");
+        assert!(matches!(resize, Event::Resize { .. }), "{resize:?}");
+        assert_eq!(
+            events.modifiers(),
+            Modifiers::ctrl(),
+            "a resize carries no modifiers, and taking its empty set would read as Ctrl let go"
         );
     }
 

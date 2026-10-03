@@ -5638,6 +5638,11 @@ pub struct Compositor {
     tray_icons: Vec<guiremote::tray::TrayIcon>,
     /// The buffer `route_tray_list` encodes into, reused across ticks.
     tray_list_scratch: Vec<u8>,
+    /// What is on the clipboard: the last text a focused window copied, or
+    /// `None` before anything has been. Held here, as an X server or a Wayland
+    /// compositor holds the selection, so a copy outlives the program it came
+    /// from and a paste needs no connection but the one every window has.
+    clipboard: Option<String>,
     /// Events addressed to a *connection* rather than to a window.
     ///
     /// The window-addressed queue cannot carry these: `route_input` delivers a
@@ -5930,6 +5935,7 @@ impl Compositor {
             input_epoch: Instant::now(),
             window_list_scratch: Vec::new(),
             tray_icons: Vec::new(),
+            clipboard: None,
             tray_list_scratch: Vec::new(),
             pending_client_events: Vec::new(),
             modifiers: ModifierState::new(),
@@ -6092,6 +6098,27 @@ impl Compositor {
         self.tray_icons
             .push(guiremote::tray::TrayIcon::new(owner, id, glyph, tooltip));
         true
+    }
+
+    /// Put `text` on the clipboard, replacing what was there.
+    ///
+    /// The compositor's own record. Who may do this -- a client whose window
+    /// has the keyboard focus -- is decided where the request arrives, which is
+    /// the only place that knows which client sent it.
+    pub fn set_clipboard(&mut self, text: String) {
+        self.clipboard = Some(text);
+    }
+
+    /// What is on the clipboard, or `None` before anything has been copied.
+    #[must_use]
+    pub fn clipboard(&self) -> Option<&str> {
+        self.clipboard.as_deref()
+    }
+
+    /// The window with the keyboard focus, if any.
+    #[must_use]
+    pub const fn focused_window(&self) -> Option<WindowId> {
+        self.focused_window
     }
 
     /// Take one icon out of the tray.

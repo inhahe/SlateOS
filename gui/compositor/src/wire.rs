@@ -595,6 +595,14 @@ fn to_compositor_request(
                 message: "tray requests are link-level".to_string(),
             });
         }
+        // Link-level as well: whether the sender may touch the clipboard
+        // depends on whether its window has the focus, and a
+        // `CompositorRequest` carries no sender.
+        RequestBody::SetClipboard { .. } | RequestBody::GetClipboard => {
+            return Err(ResponseBody::Error {
+                message: "clipboard requests are link-level".to_string(),
+            });
+        }
         // The one window request that is deliberately *not* resolved against
         // the sender's own windows: a taskbar button exists to act on somebody
         // else's window, so `resolve` would refuse every legitimate use. What
@@ -882,6 +890,20 @@ impl Compositor {
         Ok(served)
     }
 
+    /// The refusal to send a client that may not touch the clipboard now, or
+    /// `None` if it may: it must own the window with the keyboard focus.
+    ///
+    /// The same answer whether the client has no window focused or no windows
+    /// at all, so a refusal tells a program nothing about anyone else's.
+    fn clipboard_refusal(&self, link: &ClientLink) -> Option<ResponseBody> {
+        if self.focused_window().is_some_and(|id| link.owns(id)) {
+            return None;
+        }
+        Some(ResponseBody::Error {
+            message: "the clipboard is for the window with the keyboard focus".to_string(),
+        })
+    }
+
     /// Dispatch a batch of control requests and append the replies.
     fn answer_requests(&mut self, link: &mut ClientLink, requests: &[Request]) {
         let mut replies = Vec::with_capacity(requests.len());
@@ -934,6 +956,30 @@ impl Compositor {
                         }
                         Err(refusal) => refusal,
                     };
+                    replies.push(Response::new(req.seq, body));
+                    continue;
+                }
+                // The clipboard verbs, answered here because the rule for both
+                // needs the connection and the compositor at once: only a
+                // client whose window has the keyboard focus may copy or paste.
+                // A background program that could read the clipboard would
+                // collect the passwords people copy; one that could set it
+                // could swap an address the user just copied for its own.
+                RequestBody::SetClipboard { text } => {
+                    let body = match self.clipboard_refusal(link) {
+                        Some(refusal) => refusal,
+                        None => {
+                            self.set_clipboard(text.clone());
+                            ResponseBody::Ok
+                        }
+                    };
+                    replies.push(Response::new(req.seq, body));
+                    continue;
+                }
+                RequestBody::GetClipboard => {
+                    let body = self.clipboard_refusal(link).unwrap_or_else(|| {
+                        ResponseBody::Clipboard(self.clipboard().map(str::to_owned))
+                    });
                     replies.push(Response::new(req.seq, body));
                     continue;
                 }
@@ -1444,6 +1490,86 @@ mod tests {
             .window_ref(WindowId::from_raw(theirs))
             .expect("still there");
         assert_eq!(victim.title, "Theirs");
+    }
+
+    /// Copy in one program, paste in another: the clipboard is the
+    /// compositor's, and each program reaches it while its window has the
+    /// keyboard -- and only then.
+    #[test]
+    fn a_copy_in_one_program_is_pasted_in_another_once_it_has_the_focus() {
+        let (mut comp, mut writer) = wired();
+        let mut reader = ClientLink::new(99);
+        let source = open(&mut comp, &mut writer, "Source");
+        let target = open(&mut comp, &mut reader, "Target");
+        let one = |comp: &mut Compositor, link: &mut ClientLink, body: RequestBody| {
+            exchange(comp, link, vec![body])
+                .pop()
+                .map(|response| response.body)
+        };
+
+        comp.focus_window(WindowId::from_raw(source));
+        assert_eq!(
+            one(&mut comp, &mut writer, RequestBody::GetClipboard),
+            Some(ResponseBody::Clipboard(None)),
+            "nothing copied yet is not an empty copy"
+        );
+        assert_eq!(
+            one(
+                &mut comp,
+                &mut writer,
+                RequestBody::SetClipboard {
+                    text: "hunter2".to_string()
+                }
+            ),
+            Some(ResponseBody::Ok)
+        );
+        // The other program, in the background: no paste.
+        assert!(matches!(
+            one(&mut comp, &mut reader, RequestBody::GetClipboard),
+            Some(ResponseBody::Error { .. })
+        ));
+
+        comp.focus_window(WindowId::from_raw(target));
+        assert_eq!(
+            one(&mut comp, &mut reader, RequestBody::GetClipboard),
+            Some(ResponseBody::Clipboard(Some("hunter2".to_string())))
+        );
+        // And the first program, now in the background, cannot read it back.
+        assert!(matches!(
+            one(&mut comp, &mut writer, RequestBody::GetClipboard),
+            Some(ResponseBody::Error { .. })
+        ));
+    }
+
+    /// A program in the background cannot set the clipboard: it could replace
+    /// an address the user just copied with its own before they paste it.
+    #[test]
+    fn a_program_in_the_background_cannot_set_the_clipboard() {
+        let (mut comp, mut user) = wired();
+        let mut lurker = ClientLink::new(99);
+        let working = open(&mut comp, &mut user, "Wallet");
+        let _hidden = open(&mut comp, &mut lurker, "Lurker");
+        comp.focus_window(WindowId::from_raw(working));
+        exchange(
+            &mut comp,
+            &mut user,
+            vec![RequestBody::SetClipboard {
+                text: "the real address".to_string(),
+            }],
+        );
+
+        let refused = exchange(
+            &mut comp,
+            &mut lurker,
+            vec![RequestBody::SetClipboard {
+                text: "the attacker's address".to_string(),
+            }],
+        );
+        assert!(
+            matches!(refused[0].body, ResponseBody::Error { .. }),
+            "{refused:?}"
+        );
+        assert_eq!(comp.clipboard(), Some("the real address"));
     }
 
     /// A program asks for attention for its own windows only: one asking for

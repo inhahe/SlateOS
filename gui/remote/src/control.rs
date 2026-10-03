@@ -129,7 +129,11 @@ pub const RESPONSE_MAGIC: [u8; 4] = *b"CRSP";
 /// **21** — [`RequestBody::RequestAttention`] (tag `0x2C`), by which a window
 /// asks for the user's attention, shown in the window list's
 /// `demands_attention`. Incompatible on 2's terms.
-pub const CONTROL_VERSION: u8 = 21;
+/// **22** — the clipboard: [`RequestBody::SetClipboard`] (tag `0x2D`),
+/// [`RequestBody::GetClipboard`] (tag `0x2E`) and its answer
+/// [`ResponseBody::Clipboard`] (response tag `0x07`). Incompatible on 2's
+/// terms in both directions.
+pub const CONTROL_VERSION: u8 = 22;
 
 /// Control-frame header: magic + version + flags + message count.
 const CONTROL_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -1268,6 +1272,32 @@ pub enum RequestBody {
     /// Asking for attention, not for focus: nothing here raises the window or
     /// moves the keyboard to it. The user decides whether to look.
     RequestAttention { window: u64, wanted: bool },
+    /// Put `text` on the clipboard: a copy or a cut. Answered with
+    /// [`ResponseBody::Ok`], or an error if refused.
+    ///
+    /// The compositor holds the clipboard, as the X server and a Wayland
+    /// compositor do, so copying in one program and pasting in another needs
+    /// no connection besides the one every window already has.
+    ///
+    /// **Only from a client whose window has the keyboard focus.** A copy is
+    /// something the user does in the window they are working in; a program in
+    /// the background that could set the clipboard could replace an address the
+    /// user just copied with one of its own before they paste it. Refused
+    /// otherwise.
+    ///
+    /// Text only, for now: formats beside text (HTML, images) are a MIME-typed
+    /// list on a later version. At most [`MAX_STRING_LEN`](crate::MAX_STRING_LEN)
+    /// bytes, as any string on this wire.
+    SetClipboard { text: String },
+    /// What is on the clipboard: a paste. Answered with
+    /// [`ResponseBody::Clipboard`].
+    ///
+    /// **Only for a client whose window has the keyboard focus**, for
+    /// [`SetClipboard`](Self::SetClipboard)'s reason the other way round: what
+    /// a person copies is often a password, and a program in the background
+    /// that could read the clipboard whenever it liked would collect them.
+    /// Refused otherwise.
+    GetClipboard,
     /// Recover the display from whatever has gone wrong with it: the same full
     /// redraw as the compositor's own Ctrl+Super+R.
     ///
@@ -1537,6 +1567,8 @@ enum RequestTag {
     AnnounceSettings = 0x2A,
     GetHeldModifiers = 0x2B,
     RequestAttention = 0x2C,
+    SetClipboard = 0x2D,
+    GetClipboard = 0x2E,
 }
 
 impl RequestTag {
@@ -1585,6 +1617,8 @@ impl RequestTag {
             0x2A => Self::AnnounceSettings,
             0x2B => Self::GetHeldModifiers,
             0x2C => Self::RequestAttention,
+            0x2D => Self::SetClipboard,
+            0x2E => Self::GetClipboard,
             0x20 => Self::UngrabModifierChord,
             _ => return None,
         })
@@ -1654,6 +1688,10 @@ pub enum ResponseBody {
     /// One byte on the wire, in the same encoding key events use, so a bit
     /// this version does not define is refused here as it is there.
     Modifiers(Modifiers),
+    /// Answer to [`RequestBody::GetClipboard`]: the text on the clipboard, or
+    /// `None` when nothing has been copied this session. An empty copy is
+    /// `Some("")`: something was copied, and it was nothing.
+    Clipboard(Option<String>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1665,6 +1703,7 @@ enum ResponseTag {
     Display = 0x04,
     WorkArea = 0x05,
     Modifiers = 0x06,
+    Clipboard = 0x07,
 }
 
 impl ResponseTag {
@@ -1676,6 +1715,7 @@ impl ResponseTag {
             0x04 => Self::Display,
             0x05 => Self::WorkArea,
             0x06 => Self::Modifiers,
+            0x07 => Self::Clipboard,
             _ => return None,
         })
     }
@@ -1920,6 +1960,11 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
             write_u64(out, *window);
             out.push(u8::from(*wanted));
         }
+        RequestBody::SetClipboard { text } => {
+            out.push(RequestTag::SetClipboard as u8);
+            write_string(out, text);
+        }
+        RequestBody::GetClipboard => out.push(RequestTag::GetClipboard as u8),
         RequestBody::RecoverDisplay => out.push(RequestTag::RecoverDisplay as u8),
         RequestBody::ShellControl { window, action } => {
             out.push(RequestTag::ShellControl as u8);
@@ -2063,6 +2108,16 @@ fn encode_response_body(out: &mut Vec<u8>, body: &ResponseBody) {
         ResponseBody::Modifiers(modifiers) => {
             out.push(ResponseTag::Modifiers as u8);
             out.push(crate::input::encode_modifiers(*modifiers));
+        }
+        ResponseBody::Clipboard(text) => {
+            out.push(ResponseTag::Clipboard as u8);
+            match text {
+                Some(text) => {
+                    out.push(1);
+                    write_string(out, text);
+                }
+                None => out.push(0),
+            }
         }
     }
 }
@@ -2347,6 +2402,10 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
             window: r.read_u64()?,
             wanted: read_bool(r)?,
         },
+        RequestTag::SetClipboard => RequestBody::SetClipboard {
+            text: r.read_string()?,
+        },
+        RequestTag::GetClipboard => RequestBody::GetClipboard,
         RequestTag::RecoverDisplay => RequestBody::RecoverDisplay,
         RequestTag::ShellControl => {
             let window = r.read_u64()?;
@@ -2510,6 +2569,11 @@ fn decode_response_body(r: &mut Reader<'_>) -> Result<ResponseBody, DecodeError>
         ResponseTag::Modifiers => {
             ResponseBody::Modifiers(crate::input::decode_modifiers(r.read_u8()?)?)
         }
+        ResponseTag::Clipboard => ResponseBody::Clipboard(if read_bool(r)? {
+            Some(r.read_string()?)
+        } else {
+            None
+        }),
     })
 }
 
@@ -2778,6 +2842,20 @@ mod tests {
                     wanted: false,
                 },
             ),
+            // A copy of nothing is still a copy; and text is not ASCII.
+            Request::new(
+                31,
+                RequestBody::SetClipboard {
+                    text: "copied — ✓".to_string(),
+                },
+            ),
+            Request::new(
+                32,
+                RequestBody::SetClipboard {
+                    text: String::new(),
+                },
+            ),
+            Request::new(33, RequestBody::GetClipboard),
         ];
         assert_eq!(round_trip_requests(&reqs), reqs);
     }
@@ -3063,8 +3141,18 @@ mod tests {
         );
         assert_eq!(
             RequestTag::from_byte(0x2D),
+            Some(RequestTag::SetClipboard),
+            "0x2D was taken by SetClipboard in control version 22"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x2E),
+            Some(RequestTag::GetClipboard),
+            "0x2E was taken by GetClipboard in control version 22"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x2F),
             None,
-            "0x2D is the next free tag"
+            "0x2F is the next free tag"
         );
     }
 
@@ -3442,6 +3530,12 @@ mod tests {
                     ..Modifiers::NONE
                 }),
             ),
+            // Three different answers a paste can get: text, an empty copy,
+            // and nothing copied at all. A codec that wrote an absent text as
+            // an empty one would collapse the last two.
+            Response::new(7, ResponseBody::Clipboard(Some("pasted ✓".to_string()))),
+            Response::new(8, ResponseBody::Clipboard(Some(String::new()))),
+            Response::new(9, ResponseBody::Clipboard(None)),
         ];
         assert_eq!(round_trip_responses(&resps), resps);
     }

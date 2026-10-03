@@ -1096,7 +1096,8 @@ impl<T: Transport> EventLoop<T> {
             ResponseBody::Ok
             | ResponseBody::WindowCreated { .. }
             | ResponseBody::WorkArea { .. }
-            | ResponseBody::Modifiers(_) => Err(ClientError::Mismatched),
+            | ResponseBody::Modifiers(_)
+            | ResponseBody::Clipboard(_) => Err(ClientError::Mismatched),
         }
     }
 
@@ -1126,7 +1127,60 @@ impl<T: Transport> EventLoop<T> {
             ResponseBody::Ok
             | ResponseBody::WindowCreated { .. }
             | ResponseBody::Display(_)
-            | ResponseBody::WorkArea { .. } => Err(ClientError::Mismatched),
+            | ResponseBody::WorkArea { .. }
+            | ResponseBody::Clipboard(_) => Err(ClientError::Mismatched),
+        }
+    }
+
+    /// Put `text` on the clipboard: what a copy or a cut does.
+    ///
+    /// The clipboard is the compositor's, so text copied here is what a paste
+    /// in any other program gets. Allowed only while one of this program's
+    /// windows has the keyboard focus: a copy is something the user does in
+    /// the window they are working in, and a program in the background that
+    /// could set the clipboard could swap what the user just copied.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::round_trip`], plus [`ClientError::Refused`] if no
+    /// window of this program has the focus, or if `text` is longer than the
+    /// protocol carries ([`guiremote::MAX_STRING_LEN`], 4 MiB). That last one is
+    /// refused here, before anything is sent: a string over the limit would
+    /// fail the compositor's decoder and cost this program its connection.
+    pub fn set_clipboard(&mut self, text: &str) -> Result<(), Error<T>> {
+        if u32::try_from(text.len()).map_or(true, |len| len > guiremote::MAX_STRING_LEN) {
+            return Err(ClientError::Refused(format!(
+                "{} bytes is more than the clipboard carries ({} bytes at most)",
+                text.len(),
+                guiremote::MAX_STRING_LEN
+            )));
+        }
+        self.conn.confirm(RequestBody::SetClipboard {
+            text: text.to_owned(),
+        })
+    }
+
+    /// What is on the clipboard: what a paste inserts. `None` when nothing has
+    /// been copied this session.
+    ///
+    /// Allowed only while one of this program's windows has the keyboard
+    /// focus, for [`Self::set_clipboard`]'s reason the other way round: what
+    /// people copy is often a password.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::round_trip`], plus [`ClientError::Refused`] if no
+    /// window of this program has the focus, and [`ClientError::Mismatched`]
+    /// if the answer is not the clipboard.
+    pub fn clipboard(&mut self) -> Result<Option<String>, Error<T>> {
+        match self.conn.round_trip(RequestBody::GetClipboard)? {
+            ResponseBody::Clipboard(text) => Ok(text),
+            ResponseBody::Error { message } => Err(ClientError::Refused(message)),
+            ResponseBody::Ok
+            | ResponseBody::WindowCreated { .. }
+            | ResponseBody::Display(_)
+            | ResponseBody::WorkArea { .. }
+            | ResponseBody::Modifiers(_) => Err(ClientError::Mismatched),
         }
     }
 
@@ -2245,6 +2299,10 @@ pub mod testing {
         /// ([`EventLoop::held_modifiers`]). None by default; a test of a shell
         /// that starts differently with Shift held sets it.
         pub held: Modifiers,
+        /// The clipboard this desktop keeps: set by a client's copy, read by
+        /// its paste. Unlike the compositor it does not check focus -- that
+        /// rule is the compositor's, tested there.
+        pub clipboard: Option<String>,
         /// Input to deliver, one batch per turn.
         pub script: VecDeque<Vec<InputEvent>>,
         /// The config-directory turn, held for as long as this desktop exists.
@@ -2289,6 +2347,7 @@ pub mod testing {
                 submitted: Vec::new(),
                 refuse: None,
                 held: Modifiers::NONE,
+                clipboard: None,
                 script: VecDeque::new(),
                 #[cfg(test)]
                 _config_turn: settingsfile::testing::config_turn(),
@@ -2386,6 +2445,13 @@ pub mod testing {
                             scale_factor: 1.5,
                         }),
                         RequestBody::GetHeldModifiers => ResponseBody::Modifiers(self.held),
+                        RequestBody::SetClipboard { text } => {
+                            self.clipboard = Some(text.clone());
+                            ResponseBody::Ok
+                        }
+                        RequestBody::GetClipboard => {
+                            ResponseBody::Clipboard(self.clipboard.clone())
+                        }
                         _ => ResponseBody::Ok,
                     }
                 };
@@ -2544,6 +2610,8 @@ pub mod testing {
                 RequestBody::GetDisplayInfo => "GetDisplayInfo",
                 RequestBody::GetHeldModifiers => "GetHeldModifiers",
                 RequestBody::RequestAttention { .. } => "RequestAttention",
+                RequestBody::SetClipboard { .. } => "SetClipboard",
+                RequestBody::GetClipboard => "GetClipboard",
                 RequestBody::SubscribeWindowList { .. } => "SubscribeWindowList",
                 RequestBody::SetTrayIcon { .. } => "SetTrayIcon",
                 RequestBody::RemoveTrayIcon { .. } => "RemoveTrayIcon",
@@ -3416,6 +3484,45 @@ mod tests {
             events.modifiers(),
             Modifiers::ctrl(),
             "a resize carries no modifiers, and taking its empty set would read as Ctrl let go"
+        );
+    }
+
+    /// A copy goes to the compositor and a paste comes back from it, so what
+    /// one program copies is what another pastes.
+    #[test]
+    fn a_copy_reaches_the_compositor_and_a_paste_comes_back_from_it() {
+        let (mut events, server) = wired();
+        let _ = open(&mut events, "Editor");
+        assert_eq!(events.clipboard().unwrap(), None);
+        events.set_clipboard("copied text").unwrap();
+        assert_eq!(
+            server.borrow().clipboard.as_deref(),
+            Some("copied text"),
+            "the copy did not reach the compositor"
+        );
+        // Another program's copy, made while this one was in the background.
+        server.borrow_mut().clipboard = Some("from elsewhere".to_string());
+        assert_eq!(
+            events.clipboard().unwrap().as_deref(),
+            Some("from elsewhere")
+        );
+    }
+
+    /// A copy longer than the protocol carries is refused before anything is
+    /// sent: on the wire it would fail the compositor's decoder and cost the
+    /// program its connection.
+    #[test]
+    fn a_copy_too_long_to_carry_is_refused_before_it_is_sent() {
+        let (mut events, server) = wired();
+        let _ = open(&mut events, "Editor");
+        let huge = "x".repeat(guiremote::MAX_STRING_LEN as usize + 1);
+        assert!(matches!(
+            events.set_clipboard(&huge),
+            Err(ClientError::Refused(_))
+        ));
+        assert!(
+            !server.borrow_mut().asked().contains(&"SetClipboard"),
+            "the oversized copy was sent anyway"
         );
     }
 

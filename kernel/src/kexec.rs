@@ -40,7 +40,8 @@
 
 use crate::error::{KernelError, KernelResult};
 use crate::limine::{MemmapEntry, memmap_type};
-use crate::mm::frame::FRAME_SIZE;
+use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
+use crate::mm::page_table::{PageFlags, PageTableEntry, VirtAddr};
 
 // ---------------------------------------------------------------------------
 // ELF constants
@@ -721,6 +722,305 @@ pub fn build_memmap_response(
 }
 
 // ---------------------------------------------------------------------------
+// Handoff page tables
+// ---------------------------------------------------------------------------
+
+/// A 4 KiB hardware page.
+const SIZE_4K: u64 = 0x1000;
+/// A 2 MiB page (one PD entry).
+const SIZE_2M: u64 = 0x20_0000;
+/// A 1 GiB page (one PDPT entry).
+const SIZE_1G: u64 = 0x4000_0000;
+
+/// The page tables the new kernel starts on, and the frames they occupy.
+///
+/// These reproduce what Limine hands a kernel: the higher-half direct map at the
+/// running kernel's own HHDM offset (so the trampoline, running through the HHDM,
+/// stays valid across the `CR3` switch), and the new image mapped at its linked
+/// addresses, each segment with its own permissions, pointing at the contiguous
+/// destination. The direct-map leaves are left executable (NX clear) exactly as
+/// Limine leaves them; the new kernel hardens its own direct map at boot.
+pub struct HandoffTables {
+    /// Physical address of the PML4 — what the trampoline loads into `CR3`.
+    pub pml4_phys: u64,
+    /// Every frame these tables occupy, so the handoff can exclude them from the
+    /// image destination and free them if it is abandoned before the jump.
+    pub frames: alloc::vec::Vec<PhysFrame>,
+}
+
+impl HandoffTables {
+    /// Free every table frame — for abandoning a prepared handoff before the
+    /// jump. After a successful jump the new kernel owns this memory instead.
+    ///
+    /// # Safety
+    ///
+    /// No CPU may be using these tables (`CR3` must not point into them).
+    pub unsafe fn free(self) {
+        for f in self.frames {
+            // SAFETY: each frame came from `alloc_frame_zeroed` in this module,
+            // and the caller guarantees it is not the active `CR3`. A free error
+            // on this abandon path is not actionable, so it is dropped.
+            let _ = unsafe { frame::free_frame(f) };
+        }
+    }
+}
+
+/// Allocate a zeroed frame for a page table, recording it for cleanup.
+fn alloc_table(frames: &mut alloc::vec::Vec<PhysFrame>) -> KernelResult<u64> {
+    let f = frame::alloc_frame_zeroed()?;
+    frames.push(f);
+    Ok(f.addr())
+}
+
+/// Write a page-table entry at `table_phys[index]`, reached through the HHDM.
+///
+/// # Safety
+///
+/// `table_phys` must be a table frame this module allocated, `hhdm` must map it,
+/// and `index` must be `< 512`.
+// `index < 512`, so `index * 8 < 4096` and the HHDM add stays in-range; the
+// cast of a < 512 index to u64 cannot truncate.
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+unsafe fn write_entry(table_phys: u64, index: usize, entry: PageTableEntry, hhdm: u64) {
+    let addr = table_phys + hhdm + (index as u64) * 8;
+    // SAFETY: the address is within a live, HHDM-mapped table frame (caller).
+    unsafe { core::ptr::write_volatile(addr as *mut u64, entry.raw()) };
+}
+
+/// Read the page-table entry at `table_phys[index]`, reached through the HHDM.
+///
+/// # Safety
+///
+/// As [`write_entry`].
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+unsafe fn read_entry(table_phys: u64, index: usize, hhdm: u64) -> PageTableEntry {
+    let addr = table_phys + hhdm + (index as u64) * 8;
+    // SAFETY: the address is within a live, HHDM-mapped table frame (caller).
+    PageTableEntry::from_raw(unsafe { core::ptr::read_volatile(addr as *const u64) })
+}
+
+/// Return the present child table under `table_phys[index]`, creating it if
+/// absent. Intermediate entries permit user and write; the leaf's flags decide
+/// the actual access.
+///
+/// # Safety
+///
+/// As [`write_entry`]; `frames` collects any newly allocated table.
+unsafe fn next_table(
+    table_phys: u64,
+    index: usize,
+    hhdm: u64,
+    frames: &mut alloc::vec::Vec<PhysFrame>,
+) -> KernelResult<u64> {
+    // SAFETY: caller's contract on table_phys/hhdm/index.
+    let existing = unsafe { read_entry(table_phys, index, hhdm) };
+    if existing.is_present() {
+        if existing.is_huge() {
+            // A huge mapping already covers this range; we cannot descend into it.
+            return Err(KernelError::InvalidArgument);
+        }
+        return Ok(existing.phys_addr());
+    }
+    let child = alloc_table(frames)?;
+    let flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER_ACCESSIBLE;
+    // SAFETY: as above; `child` is a fresh 4 KiB-aligned table frame.
+    unsafe { write_entry(table_phys, index, PageTableEntry::new(child, flags), hhdm) };
+    Ok(child)
+}
+
+/// Map a 4 KiB page `virt -> phys` with `flags` (PRESENT is added).
+///
+/// # Safety
+///
+/// As [`write_entry`]; `pml4` must be a table frame this module allocated.
+unsafe fn map_4k(
+    pml4: u64,
+    virt: u64,
+    phys: u64,
+    flags: PageFlags,
+    hhdm: u64,
+    frames: &mut alloc::vec::Vec<PhysFrame>,
+) -> KernelResult<()> {
+    let va = VirtAddr::new(virt);
+    // SAFETY: caller's contract; each level is created or descended in turn.
+    unsafe {
+        let pdpt = next_table(pml4, va.pml4_index(), hhdm, frames)?;
+        let pd = next_table(pdpt, va.pdpt_index(), hhdm, frames)?;
+        let pt = next_table(pd, va.pd_index(), hhdm, frames)?;
+        write_entry(
+            pt,
+            va.pt_index(),
+            PageTableEntry::new(phys, flags | PageFlags::PRESENT),
+            hhdm,
+        );
+    }
+    Ok(())
+}
+
+/// Map one huge page `virt -> phys` at the PDPT level (1 GiB) or PD level (2 MiB).
+///
+/// # Safety
+///
+/// As [`map_4k`].
+unsafe fn map_huge(
+    pml4: u64,
+    virt: u64,
+    phys: u64,
+    flags: PageFlags,
+    one_gib: bool,
+    hhdm: u64,
+    frames: &mut alloc::vec::Vec<PhysFrame>,
+) -> KernelResult<()> {
+    let va = VirtAddr::new(virt);
+    let leaf_flags = flags | PageFlags::PRESENT | PageFlags::HUGE_PAGE;
+    // SAFETY: caller's contract; huge leaf sits at the PDPT (1 GiB) or PD (2 MiB).
+    unsafe {
+        let pdpt = next_table(pml4, va.pml4_index(), hhdm, frames)?;
+        if one_gib {
+            write_entry(pdpt, va.pdpt_index(), PageTableEntry::new(phys, leaf_flags), hhdm);
+        } else {
+            let pd = next_table(pdpt, va.pdpt_index(), hhdm, frames)?;
+            write_entry(pd, va.pd_index(), PageTableEntry::new(phys, leaf_flags), hhdm);
+        }
+    }
+    Ok(())
+}
+
+/// Populate a fresh PML4 with the handoff mappings, returning its physical
+/// address. On any error the caller frees `frames`.
+fn try_build_tables(
+    frames: &mut alloc::vec::Vec<PhysFrame>,
+    parsed: &ParsedKernel,
+    dest_base: u64,
+    hhdm: u64,
+    max_phys: u64,
+) -> KernelResult<u64> {
+    let pml4 = alloc_table(frames)?;
+
+    // The higher-half direct map: all physical RAM up to `max_phys`, with the
+    // largest page the CPU supports, writable and executable as Limine leaves it.
+    let one_gib = crate::cpu::features().is_some_and(|f| f.page_1g);
+    let step = if one_gib { SIZE_1G } else { SIZE_2M };
+    let limit = max_phys
+        .checked_next_multiple_of(step)
+        .ok_or(KernelError::InvalidArgument)?;
+    let hhdm_flags = PageFlags::PRESENT | PageFlags::WRITABLE;
+    let mut p = 0u64;
+    while p < limit {
+        let virt = hhdm.checked_add(p).ok_or(KernelError::InvalidArgument)?;
+        // SAFETY: pml4 and its descendants are freshly allocated tables this
+        // module owns, all reachable through `hhdm`.
+        unsafe { map_huge(pml4, virt, p, hhdm_flags, one_gib, hhdm, frames)? };
+        p = p.checked_add(step).ok_or(KernelError::InvalidArgument)?;
+    }
+
+    // The new image: 4 KiB pages at its linked addresses, each segment with its
+    // own permissions, pointing at the contiguous destination.
+    for seg in parsed.segments() {
+        let seg_start = seg.vaddr & !(SIZE_4K.wrapping_sub(1));
+        let seg_top = seg
+            .vaddr
+            .checked_add(seg.memsz)
+            .and_then(|t| t.checked_next_multiple_of(SIZE_4K))
+            .ok_or(KernelError::InvalidArgument)?;
+        let mut v = seg_start;
+        while v < seg_top {
+            let image_off = v
+                .checked_sub(parsed.min_vaddr)
+                .ok_or(KernelError::InvalidArgument)?;
+            let phys = dest_base
+                .checked_add(image_off)
+                .ok_or(KernelError::InvalidArgument)?;
+            let mut flags = PageFlags::empty();
+            if seg.writable {
+                flags |= PageFlags::WRITABLE;
+            }
+            if !seg.executable {
+                flags |= PageFlags::NO_EXECUTE;
+            }
+            // SAFETY: as above.
+            unsafe { map_4k(pml4, v, phys, flags, hhdm, frames)? };
+            v = v.checked_add(SIZE_4K).ok_or(KernelError::InvalidArgument)?;
+        }
+    }
+
+    Ok(pml4)
+}
+
+/// Build the page tables the new kernel will start on.
+///
+/// `dest_base` is where the handoff places the image (physically contiguous),
+/// `hhdm` the direct-map offset to reproduce (the running kernel's own, so one
+/// trampoline address is valid in both tables), and `max_phys` the top of
+/// physical RAM to direct-map. On failure every frame allocated so far is freed.
+///
+/// # Errors
+///
+/// [`KernelError::OutOfMemory`] if a table frame cannot be allocated, or
+/// [`KernelError::InvalidArgument`] if an address computation overflows.
+pub fn build_handoff_tables(
+    parsed: &ParsedKernel,
+    dest_base: u64,
+    hhdm: u64,
+    max_phys: u64,
+) -> KernelResult<HandoffTables> {
+    let mut frames: alloc::vec::Vec<PhysFrame> = alloc::vec::Vec::new();
+    match try_build_tables(&mut frames, parsed, dest_base, hhdm, max_phys) {
+        Ok(pml4_phys) => Ok(HandoffTables {
+            pml4_phys,
+            frames,
+        }),
+        Err(e) => {
+            for f in frames.drain(..) {
+                // SAFETY: these tables are installed nowhere (no CPU uses them);
+                // a free error while unwinding an allocation failure is not
+                // actionable, so it is dropped.
+                let _ = unsafe { frame::free_frame(f) };
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Follow the handoff tables for `virt`, returning the mapped physical address
+/// and leaf flags, or `None` if unmapped. Used by the self-test to confirm a
+/// built mapping resolves; the page size is folded into the returned physical
+/// address (the leaf's frame base plus the in-page offset).
+///
+/// # Safety
+///
+/// `pml4` must be a table built by [`build_handoff_tables`], reachable via `hhdm`.
+unsafe fn translate(pml4: u64, virt: u64, hhdm: u64) -> Option<(u64, PageFlags)> {
+    let va = VirtAddr::new(virt);
+    // SAFETY: caller's contract; each level is present-checked before descent.
+    unsafe {
+        let pml4e = read_entry(pml4, va.pml4_index(), hhdm);
+        if !pml4e.is_present() {
+            return None;
+        }
+        let pdpte = read_entry(pml4e.phys_addr(), va.pdpt_index(), hhdm);
+        if !pdpte.is_present() {
+            return None;
+        }
+        if pdpte.is_huge() {
+            return Some((pdpte.phys_addr(), pdpte.flags()));
+        }
+        let pde = read_entry(pdpte.phys_addr(), va.pd_index(), hhdm);
+        if !pde.is_present() {
+            return None;
+        }
+        if pde.is_huge() {
+            return Some((pde.phys_addr(), pde.flags()));
+        }
+        let pte = read_entry(pde.phys_addr(), va.pt_index(), hhdm);
+        if !pte.is_present() {
+            return None;
+        }
+        Some((pte.phys_addr(), pte.flags()))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 
@@ -956,6 +1256,79 @@ pub fn self_test() -> KernelResult<()> {
         Some(0xffff_ffff_8000_0000),
         "executable-address virtual_base"
     );
+
+    // ---- handoff page tables ----
+    // Build real tables (needs the frame allocator, so this runs at boot) for the
+    // fabricated two-segment image, confirm a few translations, then free them.
+    if let Some(real_hhdm) = crate::mm::page_table::hhdm() {
+        const DEST_BASE: u64 = 0x0100_0000; // a frame-aligned stand-in destination
+        // Direct-map a single page's worth of physical RAM: rounds up to one
+        // huge page, keeping the test's table count tiny.
+        let tables = build_handoff_tables(&parsed, DEST_BASE, real_hhdm, SIZE_4K)
+            .map_err(|e| {
+                crate::serial_println!("  FAIL: build_handoff_tables: {:?}", e);
+                KernelError::InternalError
+            })?;
+        let pml4 = tables.pml4_phys;
+
+        // The direct map: hhdm+0 -> physical 0, writable, executable (NX clear).
+        // SAFETY: `pml4` is the table just built, reachable via `real_hhdm`.
+        let dm = unsafe { translate(pml4, real_hhdm, real_hhdm) };
+        match dm {
+            Some((phys, flags)) => {
+                selftest::check_eq!(phys, 0, "direct map hhdm+0 -> phys 0");
+                selftest::check!(
+                    flags.contains(PageFlags::WRITABLE) && !flags.contains(PageFlags::NO_EXECUTE),
+                    "direct map is writable and executable"
+                );
+            }
+            None => {
+                crate::serial_println!("  FAIL: direct map hhdm+0 is unmapped");
+                // SAFETY: nothing uses these tables.
+                unsafe { tables.free() };
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // The R-X segment maps to the destination base, executable, read-only.
+        // SAFETY: as above.
+        let seg_a_map = unsafe { translate(pml4, TEST_VADDR_A, real_hhdm) };
+        selftest::check_eq!(
+            seg_a_map.map(|(p, _)| p),
+            Some(DEST_BASE),
+            "R-X segment maps to the destination base"
+        );
+        if let Some((_, flags)) = seg_a_map {
+            selftest::check!(
+                !flags.contains(PageFlags::WRITABLE) && !flags.contains(PageFlags::NO_EXECUTE),
+                "R-X segment is read-only and executable"
+            );
+        }
+
+        // The RW- segment maps to dest + its image offset, writable, non-exec.
+        // SAFETY: as above.
+        let seg_b_map = unsafe { translate(pml4, TEST_VADDR_B, real_hhdm) };
+        let seg_b_off = TEST_VADDR_B.wrapping_sub(TEST_VADDR_A);
+        selftest::check_eq!(
+            seg_b_map.map(|(p, _)| p),
+            Some(DEST_BASE.wrapping_add(seg_b_off)),
+            "RW- segment maps to dest + offset"
+        );
+        if let Some((_, flags)) = seg_b_map {
+            selftest::check!(
+                flags.contains(PageFlags::WRITABLE) && flags.contains(PageFlags::NO_EXECUTE),
+                "RW- segment is writable and non-executable"
+            );
+        }
+
+        // An address in neither the direct map nor the image is unmapped.
+        // SAFETY: as above.
+        let gap = unsafe { translate(pml4, 0xffff_ffff_9000_0000, real_hhdm) };
+        selftest::check!(gap.is_none(), "an unmapped address translates to None");
+
+        // SAFETY: these tables were never installed in CR3, so freeing is safe.
+        unsafe { tables.free() };
+    }
 
     Ok(())
 }

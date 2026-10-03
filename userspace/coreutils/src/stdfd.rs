@@ -727,6 +727,24 @@ pub fn read(fd: i32, buf: &mut [u8]) -> io::Result<usize> {
     imp::read_fd(fd, buf)
 }
 
+/// Descriptor 0 as an [`io::Read`]: [`read`] on it, and nothing buffered.
+///
+/// The drop-in for `io::stdin()` in a program that has to see a closed
+/// standard input. `std`'s answers `EBADF` with end of input (see [`read`]),
+/// which made `cat <&-` print nothing and exit 0 where GNU says
+/// `cat: -: Bad file descriptor` -- see `known-issues/`
+/// `B-COREUTILS-A-CLOSED-STANDARD-INPUT-READS-AS-EMPTY`. Put a
+/// `BufReader` in front of it where the program reads lines. It never closes
+/// descriptor 0: [`close_stdin`] does that, where upstream does.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RawStdin;
+
+impl io::Read for RawStdin {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        crate::stdfd::read(0, buf)
+    }
+}
+
 /// `lseek (fd, delta, SEEK_CUR)` on a descriptor this process does not own:
 /// what stdio does at `exit` to give back what it read ahead of a shared
 /// standard input. See [`crate::stdio::StdioReader`].

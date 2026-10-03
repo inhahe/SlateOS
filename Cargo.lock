@@ -3261,6 +3261,7 @@ dependencies = [
  "gamechrome",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]
@@ -3289,6 +3290,7 @@ dependencies = [
  "safeio",
  "settingsfile",
  "textfmt",
+ "textline",
  "unsaved",
 ]
 

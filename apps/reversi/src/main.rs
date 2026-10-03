@@ -1589,9 +1589,16 @@ fn union(a: Rect, b: Rect) -> Rect {
 /// is the same key the window delivers.
 fn handle_event(app: &mut ReversiApp, event: &Event) -> EventResult {
     match event {
+        // Every binding is on the key itself, so a key is the game's only with
+        // nothing but Shift held: a chord with Ctrl, Alt or the Windows key is
+        // the window's or the desktop's and arrives carrying its key -- Alt+N
+        // threw the game in play away.
         Event::Key(KeyEvent {
-            key, pressed: true, ..
-        }) => app.handle_key(*key),
+            key,
+            pressed: true,
+            modifiers,
+            ..
+        }) if textline::is_plain(*modifiers) => app.handle_key(*key),
         Event::Mouse(MouseEvent {
             x,
             y,
@@ -1633,13 +1640,15 @@ impl App for ReversiApp {
         if matches!(event, Event::CloseRequested) {
             return Response::Exit;
         }
+        // A plain Escape: Alt+Escape is the desktop's, and closed the game.
         if matches!(
             event,
             Event::Key(KeyEvent {
                 key: Key::Escape,
                 pressed: true,
+                modifiers,
                 ..
-            })
+            }) if textline::is_plain(*modifiers)
         ) {
             return Response::Exit;
         }
@@ -2895,6 +2904,80 @@ mod tests {
             "the board moved under the search"
         );
         assert_eq!(app.cursor, before, "the cursor moved on white's turn");
+    }
+
+    /// **A key held with Ctrl, Alt or the Windows key is not the game's**:
+    /// Alt+N threw the game in play away and Alt+Escape closed the window,
+    /// each chord arriving carrying its key.
+    ///
+    /// Each key is asserted as it is pressed: Up and Down undo each other.
+    #[test]
+    fn a_key_held_with_a_modifier_is_not_the_games() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let key = |k: Key, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: String::new(),
+            })
+        };
+        let mut app = ReversiApp::new();
+        app.cursor = Pos::new(2, 3);
+        app.handle_key(Key::Enter);
+        assert!(
+            !app.move_history.is_empty(),
+            "the fixture did not play a move"
+        );
+        let state = |app: &ReversiApp| {
+            (
+                app.board.clone(),
+                app.cursor,
+                app.current_turn,
+                app.move_history.len(),
+                app.notice.clone(),
+                app.phase,
+            )
+        };
+        let before = state(&app);
+        for held in [
+            Modifiers::ctrl(),
+            Modifiers::alt(),
+            Modifiers::super_key(),
+            altgr,
+        ] {
+            for k in [
+                Key::N,
+                Key::Up,
+                Key::Down,
+                Key::Left,
+                Key::Right,
+                Key::Enter,
+                Key::Space,
+            ] {
+                assert_eq!(
+                    handle_event(&mut app, &key(k, held)),
+                    EventResult::Ignored,
+                    "{held:?} {k:?} was taken"
+                );
+                assert_eq!(state(&app), before, "{held:?} {k:?} changed the game");
+            }
+            assert!(
+                !matches!(app.on_event(&key(Key::Escape, held)), Response::Exit),
+                "{held:?} Escape closed the game"
+            );
+        }
+        assert!(
+            matches!(
+                app.on_event(&key(Key::Escape, Modifiers::NONE)),
+                Response::Exit
+            ),
+            "control: Escape closes it"
+        );
     }
 
     #[test]

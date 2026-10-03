@@ -543,6 +543,19 @@ pub trait FileSystem: Send {
     /// Return the filesystem type name (e.g., `"fat16"`, `"ext4"`).
     fn fs_type(&self) -> &str;
 
+    /// Whether a path resolution through this filesystem may be kept in
+    /// the VFS path cache (`VFS_DCACHE`): whether the same path names the
+    /// same thing for every caller, and goes on doing so until a VFS
+    /// operation changes it -- which is when the cache is invalidated.
+    ///
+    /// `false` for procfs. Its `self` link names the caller, its process
+    /// directories appear and go as processes do, and its `cwd`, `root`,
+    /// `exe` and `fd/<n>` links follow the process -- Linux revalidates
+    /// procfs dentries on every lookup for the same reasons.
+    fn dcache_safe(&self) -> bool {
+        true
+    }
+
     /// List entries in a directory.
     ///
     /// `path` is `"/"` for the root directory, `"/subdir"` for a
@@ -1131,6 +1144,19 @@ pub trait FileSystem: Send {
     /// Default implementation falls back to `stat()`.
     fn lstat(&mut self, path: &Path) -> KernelResult<DirEntry> {
         self.stat(path)
+    }
+
+    /// The type of the entry at `path`, without following a final
+    /// symlink: all that path resolution needs from each component it
+    /// walks (`Vfs::resolve_inner`).
+    ///
+    /// Defaults to [`lstat`](Self::lstat)'s. A filesystem whose `lstat`
+    /// does more work than that answer needs overrides it: procfs makes a
+    /// file's contents to report its size, and a procfs walk is never
+    /// cached ([`dcache_safe`](Self::dcache_safe)), so resolution would
+    /// make every file it opens twice.
+    fn entry_type(&mut self, path: &Path) -> KernelResult<EntryType> {
+        self.lstat(path).map(|e| e.entry_type)
     }
 
     /// Return filesystem space and configuration information.
@@ -2943,7 +2969,7 @@ impl Vfs {
     fn resolve_follow(path: &Path) -> KernelResult<PathBuf> {
         let norm = Self::resolve_prologue(path)?;
 
-        // Check VFS dcache first — avoids component-by-component lstat walk.
+        // Check VFS dcache first -- avoids component-by-component lstat walk.
         {
             let mut dcache = VFS_DCACHE.lock();
             match dcache.lookup(&norm, true) {
@@ -2953,20 +2979,26 @@ impl Vfs {
             }
         }
 
-        match Self::resolve_inner(&norm, true, 0, false, None) {
+        // A walk through a filesystem whose answers depend on the caller or
+        // on time (`FileSystem::dcache_safe`) is not kept, either way: until
+        // 2026-10-03 `/etc/mtab`, a link to `/proc/self/mounts`, was cached
+        // as whichever caller resolved it first had it, and every later
+        // caller read that answer (rq42 and rq43's `/etc/mtab` self-test).
+        let mut uncacheable = false;
+        match Self::resolve_inner(&norm, true, 0, false, None, &mut uncacheable) {
             Ok(resolved) => {
                 // Cache the positive result for future lookups.
-                {
+                if !uncacheable {
                     let mut dcache = VFS_DCACHE.lock();
                     dcache.insert(&norm, true, &resolved);
                 }
                 Ok(resolved)
             }
             Err(KernelError::NotFound) => {
-                // Cache the negative result — this path's parent chain is
-                // broken (a non-final component doesn't exist).  Future
+                // Cache the negative result -- this path's parent chain is
+                // broken (a non-final component doesn't exist) -- so future
                 // lookups can short-circuit without walking the filesystem.
-                {
+                if !uncacheable {
                     let mut dcache = VFS_DCACHE.lock();
                     dcache.insert_negative(&norm, true);
                 }
@@ -2983,7 +3015,7 @@ impl Vfs {
     fn resolve_no_follow(path: &Path) -> KernelResult<PathBuf> {
         let norm = Self::resolve_prologue(path)?;
 
-        // Check VFS dcache first.
+        // Check VFS dcache first -- avoids component-by-component lstat walk.
         {
             let mut dcache = VFS_DCACHE.lock();
             match dcache.lookup(&norm, false) {
@@ -2993,18 +3025,22 @@ impl Vfs {
             }
         }
 
-        match Self::resolve_inner(&norm, false, 0, false, None) {
+        // As `resolve_follow`: a walk through procfs is not kept.
+        let mut uncacheable = false;
+        match Self::resolve_inner(&norm, false, 0, false, None, &mut uncacheable) {
             Ok(resolved) => {
-                // Cache the positive result.
-                {
+                // Cache the positive result for future lookups.
+                if !uncacheable {
                     let mut dcache = VFS_DCACHE.lock();
                     dcache.insert(&norm, false, &resolved);
                 }
                 Ok(resolved)
             }
             Err(KernelError::NotFound) => {
-                // Cache the negative result.
-                {
+                // Cache the negative result -- this path's parent chain is
+                // broken (a non-final component doesn't exist) -- so future
+                // lookups can short-circuit without walking the filesystem.
+                if !uncacheable {
                     let mut dcache = VFS_DCACHE.lock();
                     dcache.insert_negative(&norm, false);
                 }
@@ -3034,7 +3070,8 @@ impl Vfs {
 
         validate_path(path)?;
         let norm = normalize_path(path);
-        Self::resolve_inner(&norm, true, 0, true, None)
+        // Not cached, so whether the walk could have been does not matter.
+        Self::resolve_inner(&norm, true, 0, true, None, &mut false)
     }
 
     /// Resolve `rel` relative to `base`, refusing any escape from `base`.
@@ -3098,7 +3135,8 @@ impl Vfs {
             return Err(KernelError::CrossDevice);
         }
 
-        Self::resolve_inner(&norm, follow_last, 0, no_symlinks, Some(&base))
+        // Not cached, so whether the walk could have been does not matter.
+        Self::resolve_inner(&norm, follow_last, 0, no_symlinks, Some(&base), &mut false)
     }
 
     /// The half of `RESOLVE_BENEATH` that is decidable without a base.
@@ -3210,6 +3248,7 @@ impl Vfs {
         depth: usize,
         no_symlinks: bool,
         beneath: Option<&Path>,
+        uncacheable: &mut bool,
     ) -> KernelResult<PathBuf> {
         if depth > Self::MAX_SYMLINK_DEPTH {
             return Err(KernelError::TooManyLinks);
@@ -3236,13 +3275,21 @@ impl Vfs {
             if !is_last || follow_last || no_symlinks {
                 let entry_type = {
                     match resolve_mount(&resolved) {
-                        Ok((fs, _id, _opts, relative)) => match fs.lock().lstat(&relative) {
-                            Ok(e) => Some(e.entry_type),
-                            // Last component may not exist yet (creating a
-                            // new file/dir/symlink).
-                            Err(KernelError::NotFound) if is_last => None,
-                            Err(e) => return Err(e),
-                        },
+                        Ok((fs, _id, _opts, relative)) => {
+                            let mut fs = fs.lock();
+                            // Set before the lookup, so a failure inside such
+                            // a filesystem is not cached either.
+                            if !fs.dcache_safe() {
+                                *uncacheable = true;
+                            }
+                            match fs.entry_type(&relative) {
+                                Ok(t) => Some(t),
+                                // Last component may not exist yet (creating a
+                                // new file/dir/symlink).
+                                Err(KernelError::NotFound) if is_last => None,
+                                Err(e) => return Err(e),
+                            }
+                        }
                         Err(KernelError::NotFound) if is_last => None,
                         Err(e) => return Err(e),
                     }
@@ -3311,6 +3358,7 @@ impl Vfs {
                         depth.saturating_add(1),
                         no_symlinks,
                         beneath,
+                        uncacheable,
                     );
                 }
             }

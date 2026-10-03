@@ -3086,9 +3086,14 @@ impl TorrentApp {
     }
 
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        // A key on its own is taken plain, nothing held but Shift: a chord
+        // with Alt or the Windows key is the window's or the desktop's and
+        // arrives carrying its key -- Alt+Delete removed the selected
+        // transfer and Alt+Space paused it.
+        let plain = textline::is_plain(key.modifiers);
         // Above the Ctrl branch, which returns for every Ctrl chord: placed
         // after it, Ctrl+P would pause every transfer from behind the card.
-        if key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift) {
+        if plain && (key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift)) {
             self.show_help = !self.show_help;
             return EventResult::Consumed;
         }
@@ -3096,7 +3101,7 @@ impl TorrentApp {
             // Modal. Delete removes the selected transfer, and doing that
             // from behind a list the reader is consulting is the reason this
             // does not let keys through.
-            if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
+            if plain && matches!(key.key, Key::Escape | Key::Enter) {
                 self.show_help = false;
             }
             return EventResult::Consumed;
@@ -3110,7 +3115,9 @@ impl TorrentApp {
         if self.search_active {
             return self.handle_search_key(key);
         }
-        if key.modifiers.ctrl {
+        // A Ctrl chord, not Ctrl held: AltGr arrives as Ctrl+Alt, and AltGr+P
+        // -- whatever the layout types there -- paused every transfer.
+        if textline::is_ctrl_chord(key.modifiers) {
             return match key.key {
                 Key::U => {
                     self.open_magnet_dialog();
@@ -3142,6 +3149,9 @@ impl TorrentApp {
                 }
                 _ => EventResult::Ignored,
             };
+        }
+        if !plain {
+            return EventResult::Ignored;
         }
 
         match key.key {
@@ -4992,14 +5002,16 @@ impl TorrentApp {
         }
     }
 
-    /// Keys while the magnet dialog is up.
+    /// Keys while the magnet dialog is up. Its Enter and Escape are plain --
+    /// Alt+Enter added the link -- and the field knows a command from typing.
     fn handle_dialog_key(&mut self, key: &KeyEvent) -> EventResult {
+        let plain = textline::is_plain(key.modifiers);
         match key.key {
-            Key::Escape => {
+            Key::Escape if plain => {
                 self.close_magnet_dialog();
                 EventResult::Consumed
             }
-            Key::Enter => {
+            Key::Enter if plain => {
                 if self.magnet_input.text().trim().is_empty() {
                     return EventResult::Ignored;
                 }
@@ -5043,23 +5055,28 @@ impl TorrentApp {
     }
 
     /// Keys while the search box has them.
+    ///
+    /// Its own keys are plain, and it types what was typed: AltGr, which
+    /// arrives as Ctrl+Alt, typed nothing, and Alt+X typed an `x`.
+    /// Backspace is refused only to Alt and the Windows key.
     fn handle_search_key(&mut self, key: &KeyEvent) -> EventResult {
+        let plain = textline::is_plain(key.modifiers);
         match key.key {
-            Key::Escape => {
+            Key::Escape if plain => {
                 self.search_active = false;
                 self.search_query.clear();
             }
-            Key::Enter | Key::Tab => self.search_active = false,
-            Key::Backspace => {
+            Key::Enter | Key::Tab if plain => self.search_active = false,
+            Key::Backspace if !textline::is_alt_or_windows_chord(key.modifiers) => {
                 if self.search_query.pop().is_none() {
                     return EventResult::Ignored;
                 }
             }
             _ => {
-                if key.modifiers.ctrl {
+                if !textline::types_into_field(key) {
                     return EventResult::Ignored;
                 }
-                let typed: String = key.text.chars().filter(|c| !c.is_control()).collect();
+                let typed: String = key.typed().collect();
                 if typed.is_empty() {
                     return EventResult::Ignored;
                 }
@@ -5954,6 +5971,103 @@ about anything -- it drew {} text command(s)",
             app.handle_event(&press(Key::Down));
         }
         assert_eq!(app.selected_torrent, ids.last().copied());
+    }
+
+    /// **A chord is neither a torrent key nor typing, and AltGr is not
+    /// Ctrl**: a chord with Alt or the Windows key carries its key --
+    /// Alt+Delete removed the selected transfer, Alt+2 changed the filter,
+    /// Alt+Tab the tab and Alt+S the download order, and Alt+X typed an `x`
+    /// into the search; and AltGr, which arrives as Ctrl+Alt, opened the
+    /// magnet dialog on AltGr+U and typed nothing into the search.
+    ///
+    /// Space and Ctrl+P and Ctrl+R are left out: they start and stop
+    /// transfers, which talk to a tracker.
+    #[test]
+    fn a_chord_is_neither_a_torrent_key_nor_typing() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let chord = |k: Key, text: &str, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: text.to_owned(),
+            })
+        };
+        let mut app = seeded();
+        app.handle_event(&press(Key::Down));
+        assert!(app.selected_torrent.is_some(), "control: a selection");
+        let state = |app: &TorrentApp| {
+            (
+                (app.torrents.len(), app.selected_torrent, app.active_tab),
+                (app.filter, app.sort_column, app.sort_ascending),
+                app.torrents
+                    .iter()
+                    .map(|t| (t.sequential_download, t.label.clone()))
+                    .collect::<Vec<_>>(),
+                (
+                    app.search_active,
+                    app.show_add_dialog,
+                    app.picker.is_open(),
+                    app.show_help,
+                ),
+            )
+        };
+        let before = state(&app);
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for k in [
+                Key::Delete,
+                Key::Num2,
+                Key::Tab,
+                Key::S,
+                Key::L,
+                Key::C,
+                Key::Down,
+                Key::Enter,
+                Key::Slash,
+                Key::F1,
+                Key::U,
+                Key::O,
+            ] {
+                assert_eq!(
+                    app.handle_event(&chord(k, "", m)),
+                    EventResult::Ignored,
+                    "{m:?} {k:?} was taken"
+                );
+                assert_eq!(state(&app), before, "{m:?} {k:?} changed the list");
+            }
+        }
+
+        // The search types what was typed, AltGr's `@` among it.
+        app.handle_event(&press(Key::Slash));
+        assert!(app.search_active, "control: / opens the search");
+        app.handle_event(&chord(Key::X, "x", Modifiers::alt()));
+        app.handle_event(&chord(Key::X, "x", Modifiers::super_key()));
+        app.handle_event(&chord(Key::Q, "@", altgr));
+        app.handle_event(&chord(Key::Backspace, "", Modifiers::alt()));
+        app.handle_event(&chord(Key::Enter, "", Modifiers::alt()));
+        app.handle_event(&chord(Key::Escape, "", Modifiers::super_key()));
+        assert!(app.search_active, "a chorded Enter or Escape closed it");
+        assert_eq!(app.search_query, "@", "a command's letter, or AltGr lost");
+        app.handle_event(&press(Key::Escape));
+
+        // The magnet dialog's Enter and Escape are plain.
+        app.handle_event(&key_ev(Key::U, true));
+        assert!(app.show_add_dialog, "control: Ctrl+U opens it");
+        app.handle_event(&chord(Key::Escape, "", Modifiers::alt()));
+        assert!(app.show_add_dialog, "Alt+Escape closed it");
+        app.handle_event(&chord(Key::Enter, "", Modifiers::super_key()));
+        assert!(app.show_add_dialog, "Windows+Enter answered it");
+
+        // And the list of keys.
+        app.handle_event(&press(Key::Escape));
+        app.handle_event(&press(Key::F1));
+        assert!(app.show_help, "control: F1 raises it");
+        app.handle_event(&chord(Key::Escape, "", Modifiers::alt()));
+        assert!(app.show_help, "Alt+Escape put it away");
     }
 
     /// Delete removes the entry and keeps the files: deleting someone's

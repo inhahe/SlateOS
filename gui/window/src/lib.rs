@@ -1060,6 +1060,37 @@ impl<T: Transport> EventLoop<T> {
             ResponseBody::Error { message } => Err(ClientError::Refused(message)),
             ResponseBody::Ok
             | ResponseBody::WindowCreated { .. }
+            | ResponseBody::WorkArea { .. }
+            | ResponseBody::Modifiers(_) => Err(ClientError::Mismatched),
+        }
+    }
+
+    /// Ask the compositor which modifier keys are held right now, on any
+    /// keyboard.
+    ///
+    /// For a shell deciding something as it starts -- whether Shift is held to
+    /// stop an automatic sign-in (`design-decisions.md` §1427). Asked rather
+    /// than waited for: a key that was already down when this program
+    /// connected is never sent to it as an event, and a key down before the
+    /// compositor opened the keyboard counts too.
+    ///
+    /// A shell's question: an ordinary application has no business polling
+    /// the keyboard, and a compositor that can tell a shell from other
+    /// programs will refuse it. An application learns the modifiers from the
+    /// key events its own windows are sent.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::round_trip`], plus [`ClientError::Refused`] if the
+    /// compositor declined and [`ClientError::Mismatched`] if the answer is
+    /// not a set of modifiers.
+    pub fn held_modifiers(&mut self) -> Result<Modifiers, Error<T>> {
+        match self.conn.round_trip(RequestBody::GetHeldModifiers)? {
+            ResponseBody::Modifiers(held) => Ok(held),
+            ResponseBody::Error { message } => Err(ClientError::Refused(message)),
+            ResponseBody::Ok
+            | ResponseBody::WindowCreated { .. }
+            | ResponseBody::Display(_)
             | ResponseBody::WorkArea { .. } => Err(ClientError::Mismatched),
         }
     }
@@ -2135,7 +2166,7 @@ pub mod testing {
     use guiremote::submit::decode_submit;
     use guiremote::window_list::WindowInfo;
 
-    use crate::{EventLoop, Transport};
+    use crate::{EventLoop, Modifiers, Transport};
 
     /// The compositor's side of the pipe.
     ///
@@ -2152,6 +2183,10 @@ pub mod testing {
         pub submitted: Vec<(u64, usize)>,
         /// When set, every request is refused with this message.
         pub refuse: Option<String>,
+        /// The modifier keys this desktop says are held, when asked
+        /// ([`EventLoop::held_modifiers`]). None by default; a test of a shell
+        /// that starts differently with Shift held sets it.
+        pub held: Modifiers,
         /// Input to deliver, one batch per turn.
         pub script: VecDeque<Vec<InputEvent>>,
         /// The config-directory turn, held for as long as this desktop exists.
@@ -2195,6 +2230,7 @@ pub mod testing {
                 seen: Vec::new(),
                 submitted: Vec::new(),
                 refuse: None,
+                held: Modifiers::NONE,
                 script: VecDeque::new(),
                 #[cfg(test)]
                 _config_turn: settingsfile::testing::config_turn(),
@@ -2291,6 +2327,7 @@ pub mod testing {
                             refresh_rate: 144,
                             scale_factor: 1.5,
                         }),
+                        RequestBody::GetHeldModifiers => ResponseBody::Modifiers(self.held),
                         _ => ResponseBody::Ok,
                     }
                 };
@@ -2447,6 +2484,7 @@ pub mod testing {
                 RequestBody::ShellSetSizeLimits { .. } => "ShellSetSizeLimits",
                 RequestBody::ShellSetWindowPolicy { .. } => "ShellSetWindowPolicy",
                 RequestBody::GetDisplayInfo => "GetDisplayInfo",
+                RequestBody::GetHeldModifiers => "GetHeldModifiers",
                 RequestBody::SubscribeWindowList { .. } => "SubscribeWindowList",
                 RequestBody::SetTrayIcon { .. } => "SetTrayIcon",
                 RequestBody::RemoveTrayIcon { .. } => "RemoveTrayIcon",
@@ -3254,6 +3292,45 @@ mod tests {
         assert_eq!(info.height, 1440);
         assert_eq!(info.refresh_rate, 144);
         assert!((info.scale_factor - 1.5).abs() < f32::EPSILON);
+    }
+
+    /// The modifiers held are the compositor's answer, asked for and sent
+    /// over the wire, not anything this side remembers from key events --
+    /// a key down before the program connected was never sent to it.
+    #[test]
+    fn the_held_modifiers_come_from_the_compositor() {
+        let (mut events, server) = wired();
+        assert_eq!(events.held_modifiers().unwrap(), Modifiers::NONE);
+
+        server.borrow_mut().held = Modifiers {
+            shift: true,
+            alt: true,
+            ..Modifiers::NONE
+        };
+        assert_eq!(
+            events.held_modifiers().unwrap(),
+            Modifiers {
+                shift: true,
+                alt: true,
+                ..Modifiers::NONE
+            }
+        );
+        assert_eq!(
+            server.borrow_mut().asked(),
+            vec!["GetHeldModifiers", "GetHeldModifiers"]
+        );
+    }
+
+    /// A compositor that will not say -- because it can tell this program is
+    /// not the shell -- is an error to the caller, not "nothing held".
+    #[test]
+    fn a_refused_held_modifiers_question_is_an_error_and_not_no_keys() {
+        let (mut events, server) = wired();
+        server.borrow_mut().refuse = Some("not the shell".to_string());
+        let err = events
+            .held_modifiers()
+            .expect_err("a refusal must not read as no key held");
+        assert!(matches!(err, ClientError::Refused(ref why) if why == "not the shell"));
     }
 
     #[test]

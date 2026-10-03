@@ -539,6 +539,14 @@ fn to_compositor_request(
             }
         }
         RequestBody::GetDisplayInfo => CompositorRequest::GetDisplayInfo,
+        // A shell's, because the answer is a fact about the keyboard rather
+        // than about anything the sender owns: a program free to ask could
+        // poll it and learn when the user holds Shift in another program's
+        // password field. Names no window, so there is nothing to resolve.
+        RequestBody::GetHeldModifiers => {
+            link.require_shell()?;
+            CompositorRequest::GetHeldModifiers
+        }
         // Unlike every window request above there is no `link.resolve` on
         // either of these, and nothing to resolve: a reload names no window and
         // carries no settings, so there is no ownership question to ask. They
@@ -784,6 +792,7 @@ fn to_response_body(response: CompositorResponse) -> ResponseBody {
             width,
             height,
         },
+        CompositorResponse::Modifiers(modifiers) => ResponseBody::Modifiers(modifiers),
         CompositorResponse::StreamStarted { .. } | CompositorResponse::StreamFrame { .. } => {
             ResponseBody::Error {
                 message: "stream responses have no client-facing wire form".to_string(),
@@ -1352,6 +1361,41 @@ mod tests {
         assert_eq!(win.title, "Renamed");
         assert_eq!((win.x, win.y), (300, 40));
         assert!((win.opacity - 0.5).abs() < f32::EPSILON);
+    }
+
+    /// The held-modifiers question is answered from the state every key is
+    /// folded into -- here a Shift that went down before anyone asked, as one
+    /// held while the desktop starts does (the evdev source reads it from the
+    /// device and hands it over as a press before the first client is
+    /// answered).
+    #[test]
+    fn the_held_modifiers_are_the_ones_the_compositor_saw_go_down() {
+        let (mut comp, mut link) = wired();
+        let ask = |comp: &mut Compositor, link: &mut ClientLink| {
+            exchange(comp, link, vec![RequestBody::GetHeldModifiers])
+                .pop()
+                .map(|response| response.body)
+        };
+        assert_eq!(
+            ask(&mut comp, &mut link),
+            Some(ResponseBody::Modifiers(Modifiers::NONE))
+        );
+
+        comp.handle_input(crate::InputEvent::KeyDown {
+            scancode: 0x2A,
+            character: None,
+        });
+        assert_eq!(
+            ask(&mut comp, &mut link),
+            Some(ResponseBody::Modifiers(Modifiers::shift()))
+        );
+
+        comp.handle_input(crate::InputEvent::KeyUp { scancode: 0x2A });
+        assert_eq!(
+            ask(&mut comp, &mut link),
+            Some(ResponseBody::Modifiers(Modifiers::NONE)),
+            "a released Shift is not still reported held"
+        );
     }
 
     #[test]

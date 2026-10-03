@@ -122,7 +122,11 @@ pub const RESPONSE_MAGIC: [u8; 4] = *b"CRSP";
 /// to any program's own settings file reaches every open window, relayed as
 /// input version 8's `SettingsGroup::Program`. Incompatible on 2's terms: an
 /// unknown tag stops the decoder.
-pub const CONTROL_VERSION: u8 = 19;
+/// **20** — [`RequestBody::GetHeldModifiers`] (tag `0x2B`), by which a shell
+/// asks which modifier keys are down, and its answer
+/// [`ResponseBody::Modifiers`] (response tag `0x06`). Incompatible on 2's
+/// terms in both directions: an unknown tag stops either decoder.
+pub const CONTROL_VERSION: u8 = 20;
 
 /// Control-frame header: magic + version + flags + message count.
 const CONTROL_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -1226,6 +1230,27 @@ pub enum RequestBody {
     /// else here: it cannot name a path, only a file in the settings folder.
     /// Answered with [`ResponseBody::Ok`], whatever the file says.
     AnnounceSettings { name: SettingsName },
+    /// Which modifier keys are down now, on any keyboard. Answered with
+    /// [`ResponseBody::Modifiers`].
+    ///
+    /// For a shell deciding something as it starts: holding Shift while the
+    /// machine starts shows the login screen instead of signing in by itself
+    /// (`design-decisions.md` §1427). A question rather than an event, because
+    /// the answer is needed before the first frame, and a client that connects
+    /// with a key already down is sent no event for it. A key that was down
+    /// before the compositor opened its keyboard counts: the compositor reads
+    /// each device's key state when it opens it.
+    ///
+    /// Keys physically held, sides collapsed as in every key event. A
+    /// sticky-keys latch is not a held key and is not reported.
+    ///
+    /// A shell's request. A program able to ask at will could poll the
+    /// keyboard and learn when the user presses Shift in another program's
+    /// password field -- the key-state query X11 is remembered for. So it goes
+    /// through the compositor's shell check, which, like that of every other
+    /// shell-only request, refuses nobody until the kernel can say who a
+    /// connection is.
+    GetHeldModifiers,
     /// Recover the display from whatever has gone wrong with it: the same full
     /// redraw as the compositor's own Ctrl+Super+R.
     ///
@@ -1493,6 +1518,7 @@ enum RequestTag {
     RecoverDisplay = 0x28,
     PatchImage = 0x29,
     AnnounceSettings = 0x2A,
+    GetHeldModifiers = 0x2B,
 }
 
 impl RequestTag {
@@ -1539,6 +1565,7 @@ impl RequestTag {
             0x28 => Self::RecoverDisplay,
             0x29 => Self::PatchImage,
             0x2A => Self::AnnounceSettings,
+            0x2B => Self::GetHeldModifiers,
             0x20 => Self::UngrabModifierChord,
             _ => return None,
         })
@@ -1602,6 +1629,12 @@ pub enum ResponseBody {
         width: u32,
         height: u32,
     },
+    /// Answer to [`RequestBody::GetHeldModifiers`]: the modifier keys down
+    /// when the compositor answered.
+    ///
+    /// One byte on the wire, in the same encoding key events use, so a bit
+    /// this version does not define is refused here as it is there.
+    Modifiers(Modifiers),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1612,6 +1645,7 @@ enum ResponseTag {
     Error = 0x03,
     Display = 0x04,
     WorkArea = 0x05,
+    Modifiers = 0x06,
 }
 
 impl ResponseTag {
@@ -1622,6 +1656,7 @@ impl ResponseTag {
             0x03 => Self::Error,
             0x04 => Self::Display,
             0x05 => Self::WorkArea,
+            0x06 => Self::Modifiers,
             _ => return None,
         })
     }
@@ -1860,6 +1895,7 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
             out.push(RequestTag::AnnounceSettings as u8);
             write_settings_name(out, *name);
         }
+        RequestBody::GetHeldModifiers => out.push(RequestTag::GetHeldModifiers as u8),
         RequestBody::RecoverDisplay => out.push(RequestTag::RecoverDisplay as u8),
         RequestBody::ShellControl { window, action } => {
             out.push(RequestTag::ShellControl as u8);
@@ -1999,6 +2035,10 @@ fn encode_response_body(out: &mut Vec<u8>, body: &ResponseBody) {
             write_i32(out, *y);
             write_u32(out, *width);
             write_u32(out, *height);
+        }
+        ResponseBody::Modifiers(modifiers) => {
+            out.push(ResponseTag::Modifiers as u8);
+            out.push(crate::input::encode_modifiers(*modifiers));
         }
     }
 }
@@ -2278,6 +2318,7 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
         RequestTag::AnnounceSettings => RequestBody::AnnounceSettings {
             name: read_settings_name(r)?,
         },
+        RequestTag::GetHeldModifiers => RequestBody::GetHeldModifiers,
         RequestTag::RecoverDisplay => RequestBody::RecoverDisplay,
         RequestTag::ShellControl => {
             let window = r.read_u64()?;
@@ -2437,6 +2478,9 @@ fn decode_response_body(r: &mut Reader<'_>) -> Result<ResponseBody, DecodeError>
                 width,
                 height,
             }
+        }
+        ResponseTag::Modifiers => {
+            ResponseBody::Modifiers(crate::input::decode_modifiers(r.read_u8()?)?)
         }
     })
 }
@@ -2690,8 +2734,54 @@ mod tests {
                     name: SettingsName::new(b"appearance").unwrap(),
                 },
             ),
+            Request::new(28, RequestBody::GetHeldModifiers),
         ];
         assert_eq!(round_trip_requests(&reqs), reqs);
+    }
+
+    /// The held-modifiers question carries nothing, and its answer is every
+    /// combination of the four keys -- each bit its own, so an encoder that
+    /// crossed two of them fails here.
+    #[test]
+    fn the_held_modifiers_question_is_a_tag_and_its_answer_one_byte() {
+        let asked = encode_requests(&[Request::new(1, RequestBody::GetHeldModifiers)]);
+        assert_eq!(
+            asked.len(),
+            CONTROL_HEADER_LEN + 4 + 1,
+            "a header, a seq and a tag: the question names no key and no window"
+        );
+
+        for bits in 0u8..16 {
+            let held = Modifiers {
+                shift: bits & 1 != 0,
+                ctrl: bits & 2 != 0,
+                alt: bits & 4 != 0,
+                super_key: bits & 8 != 0,
+            };
+            let answer = vec![Response::new(
+                u32::from(bits),
+                ResponseBody::Modifiers(held),
+            )];
+            let bytes = encode_responses(&answer);
+            assert_eq!(bytes.len(), CONTROL_HEADER_LEN + 4 + 1 + 1, "{held:?}");
+            assert_eq!(round_trip_responses(&answer), answer);
+        }
+    }
+
+    /// A bit the encoding does not define is refused, as it is in a key
+    /// event: a newer compositor's fifth modifier must not read as no key.
+    #[test]
+    fn a_held_modifiers_answer_with_an_undefined_bit_is_refused() {
+        let mut bytes = encode_responses(&[Response::new(
+            1,
+            ResponseBody::Modifiers(Modifiers::shift()),
+        )]);
+        let last = bytes.len() - 1;
+        bytes[last] |= 0x80;
+        assert_eq!(
+            decode_responses(&bytes).err(),
+            Some(DecodeError::ReservedFlags(bytes[last]))
+        );
     }
 
     /// An announcement names a file in the settings folder and nothing else:
@@ -2920,8 +3010,13 @@ mod tests {
         );
         assert_eq!(
             RequestTag::from_byte(0x2B),
+            Some(RequestTag::GetHeldModifiers),
+            "0x2B was taken by GetHeldModifiers in control version 20"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x2C),
             None,
-            "0x2B is the next free tag"
+            "0x2C is the next free tag"
         );
     }
 
@@ -3280,6 +3375,23 @@ mod tests {
                     height: 2160,
                     refresh_rate: 144,
                     scale_factor: 1.5,
+                }),
+            ),
+            Response::new(
+                5,
+                ResponseBody::WorkArea {
+                    x: -1920,
+                    y: 0,
+                    width: 1920,
+                    height: 1040,
+                },
+            ),
+            Response::new(
+                6,
+                ResponseBody::Modifiers(Modifiers {
+                    shift: true,
+                    super_key: true,
+                    ..Modifiers::NONE
                 }),
             ),
         ];

@@ -3455,6 +3455,10 @@ pub enum CompositorRequest {
     },
     /// Query display information.
     GetDisplayInfo,
+    /// Which modifier keys are held now, answered with
+    /// [`CompositorResponse::Modifiers`]. A shell's question: see
+    /// [`guiremote::control::RequestBody::GetHeldModifiers`].
+    GetHeldModifiers,
     /// Re-read the user's `appearance.yaml` and adopt whatever it now says.
     ///
     /// Carries no settings: see
@@ -3649,6 +3653,9 @@ pub enum CompositorResponse {
         width: u32,
         height: u32,
     },
+    /// The modifier keys held. Answer to
+    /// [`CompositorRequest::GetHeldModifiers`].
+    Modifiers(Modifiers),
 }
 
 /// Notifications sent from the compositor to clients (events).
@@ -10503,6 +10510,11 @@ impl Compositor {
                     }
                 }
             }
+            // The keys every keyboard reports down, folded into the modifier
+            // state by `handle_input` -- including any a device was already
+            // holding when it was opened, which the evdev source reads then
+            // and hands over before the first client is answered.
+            CompositorRequest::GetHeldModifiers => CompositorResponse::Modifiers(self.modifiers()),
             CompositorRequest::ReloadAppearance => {
                 self.settings_rewritten(SettingsGroup::Appearance);
                 // `Ok` whether or not anything changed. The client is being

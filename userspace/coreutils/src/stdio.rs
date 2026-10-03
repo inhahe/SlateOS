@@ -599,6 +599,20 @@ impl StdioReader {
         }
     }
 
+    /// `getc`: the next byte, taken. `None` at the end of the file.
+    ///
+    /// # Errors
+    ///
+    /// As [`StdioReader::read_until`].
+    pub fn getc(&mut self) -> io::Result<Option<u8>> {
+        if !self.underflow()? {
+            return Ok(None);
+        }
+        let byte = self.buf.get(self.pos).copied();
+        self.pos = self.pos.saturating_add(1);
+        Ok(byte)
+    }
+
     /// `getc` then `ungetc`: the next byte, left where it is. `None` at the
     /// end of the file.
     ///

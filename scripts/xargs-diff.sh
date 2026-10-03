@@ -202,6 +202,14 @@ compare() {
   if [ "$stdin" = "-" ]; then
     $runner ours "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
     $runner gnu  "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
+  elif [ "$stdin" = "<&-" ]; then
+    # Standard input closed: gnulib's `close_stdin` reports it at exit.
+    $runner ours "$@" <&- >"$o_bin" 2>"$o_err"; o_rc=$?
+    $runner gnu  "$@" <&- >"$g_bin" 2>"$g_err"; g_rc=$?
+  elif [ "${stdin#<}" != "$stdin" ]; then
+    # Standard input redirected from a path -- a directory, whose reads fail.
+    $runner ours "$@" <"${stdin#<}" >"$o_bin" 2>"$o_err"; o_rc=$?
+    $runner gnu  "$@" <"${stdin#<}" >"$g_bin" 2>"$g_err"; g_rc=$?
   else
     printf '%b' "$stdin" | $runner ours "$@" >"$o_bin" 2>"$o_err"; o_rc=$?
     printf '%b' "$stdin" | $runner gnu  "$@" >"$g_bin" 2>"$g_err"; g_rc=$?
@@ -774,6 +782,24 @@ compare "$long\n" run_side -s 1000 -x argv; report "one 5000-byte arg | xargs -s
 manydelim=$(seq 1 2000 | tr '\n' ',')
 compare "$manydelim" run_side -d , argv; report "2000 comma args | xargs -d , argv"
 compare "$manydelim" run_side -d , -s 200 argv; report "2000 comma args | xargs -d , -s 200 argv"
+
+# --- standard input that cannot be read ---------------------------------------
+# A read error is only the end of the input to xargs (`getc` returns EOF and
+# nothing asks `ferror`), so the command still runs -- once, with no arguments
+# -- and gnulib's `close_stdin` reports the failed stream at exit:
+# `xargs: error closing file: Bad file descriptor` for a closed descriptor,
+# `xargs: error closing file` with no reason for a directory, whose close
+# succeeds; status 1 either way. Under `-a` standard input is never read, and a
+# closed one is not reported. Ours read a closed descriptor as an empty file
+# and exited 0 until 2026-10-03.
+printf 'one two\n' > "$fixtures/args"
+compare '<&-' run_side argv; report "xargs argv <&-"
+compare '<&-' run_side -r argv; report "xargs -r argv <&-"
+compare '<&-' run_side -0 argv; report "xargs -0 argv <&-"
+compare "<$fixtures" run_side argv; report "xargs argv < dir"
+compare "<$fixtures" run_side -r argv; report "xargs -r argv < dir"
+compare '<&-' run_side -a "$fixtures/args" argv; report "xargs -a args argv <&-"
+compare "<$fixtures" run_side -a "$fixtures/args" argv; report "xargs -a args argv < dir"
 
 # --- differ on purpose --------------------------------------------------------
 # `--help`'s body matches GNU's; what follows it does not, and must not. GNU

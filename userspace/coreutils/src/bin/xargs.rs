@@ -81,6 +81,7 @@ use coreutils::errmsg::strerror;
 use coreutils::getopt::{Opt, Program, Report, Takes};
 use coreutils::quote::{Style, os_bytes, os_from_bytes, quote};
 use coreutils::stdfd;
+use coreutils::stdio::StdioReader;
 use std::ffi::OsString;
 use std::io::{BufReader, Read};
 use std::process::{Child, Command, Stdio};
@@ -252,7 +253,7 @@ struct Xargs {
     /// `xargs -a ''` must attempt to open the empty name and fail.
     input_file: Vec<u8>,
     /// The input `FILE *`: stdin, or `-a`'s file.
-    input: BufReader<Box<dyn Read>>,
+    input: InputStream,
     /// Upstream's `initial_args`: true while the words of argv are being
     /// pushed, false once the first item from the input has been.
     initial_args: bool,
@@ -309,7 +310,19 @@ fn main() {
     // may still override the status with 123.
     xargs.original_exit_value = status;
     xargs.wait_for_proc_all();
+    let status = xargs.close_stdin(status);
     stdfd::exit_now(status, status)
+}
+
+/// Upstream's `input_stream`.
+enum InputStream {
+    /// Before `run` opens the real one.
+    Unopened,
+    /// Standard input, as C's `stdin`: read a block at a time, with the error
+    /// flag `close_stdin` reports and the read-ahead it gives back.
+    Stdin(StdioReader),
+    /// `-a FILE`.
+    File(BufReader<std::fs::File>),
 }
 
 impl Xargs {
@@ -336,7 +349,7 @@ impl Xargs {
                 smallest_failed_arg_count: 0,
             },
             input_file: b"-".to_vec(),
-            input: BufReader::new(Box::new(std::io::empty())),
+            input: InputStream::Unopened,
             initial_args: true,
             read_eof: false,
             read_string_mode: false,
@@ -417,7 +430,35 @@ impl Xargs {
     /// last), then the status it may have replaced.
     fn exit_via_atexit(&mut self, status: u8) -> ! {
         self.wait_for_proc_all();
+        let status = self.close_stdin(status);
         stdfd::exit_now(status, status)
+    }
+
+    /// gnulib's `close_stdin`, which upstream registers first and so runs
+    /// last, after the reaper. It gives a seekable standard input back what
+    /// was read ahead of it, so `{ xargs -E stop; cat; } < file` leaves `cat`
+    /// the lines after `stop`; and it reports a stream on which a read failed
+    /// -- measured, `xargs <&-` runs the command once and then says
+    /// `xargs: error closing file: Bad file descriptor`, status 1. Under `-a`
+    /// standard input was never read, and a closed one is not reported.
+    fn close_stdin(&mut self, status: u8) -> u8 {
+        let stdin = match std::mem::replace(&mut self.input, InputStream::Unopened) {
+            InputStream::Stdin(stdin) => stdin,
+            InputStream::File(_) | InputStream::Unopened => StdioReader::stdin(),
+        };
+        match stdin.close_stdin() {
+            Ok(()) => status,
+            Err(reason) => {
+                match reason {
+                    Some(e) => {
+                        Self::warn_raw(&format!("xargs: error closing file: {}", strerror(&e)));
+                    }
+                    None => Self::warn_raw("xargs: error closing file"),
+                }
+                // `_exit (exit_failure)`.
+                1
+            }
+        }
     }
 }
 // ---- the readers --------------------------------------------------------
@@ -440,10 +481,21 @@ impl Xargs {
     /// runs the command once with no arguments instead of complaining about
     /// EISDIR: the open succeeds and every read fails.
     fn getc(&mut self) -> i32 {
-        let mut byte = [0u8; 1];
-        match self.input.read(&mut byte) {
-            Ok(1) => i32::from(byte[0]),
-            _ => -1,
+        match &mut self.input {
+            // The error is not lost: the stream remembers it (`ferror`), and
+            // `close_stdin` reports it at exit.
+            InputStream::Stdin(stdin) => match stdin.getc() {
+                Ok(Some(byte)) => i32::from(byte),
+                Ok(None) | Err(_) => -1,
+            },
+            InputStream::File(file) => {
+                let mut byte = [0u8; 1];
+                match file.read(&mut byte) {
+                    Ok(1) => i32::from(byte[0]),
+                    _ => -1,
+                }
+            }
+            InputStream::Unopened => -1,
         }
     }
 
@@ -1737,11 +1789,11 @@ impl Xargs {
 
         let input_file = self.input_file.clone();
         if input_file == b"-" {
-            self.input = BufReader::new(Box::new(std::io::stdin()));
+            self.input = InputStream::Stdin(StdioReader::stdin());
         } else {
             self.keep_stdin = true; // see prep_child_for_exec
             match std::fs::File::open(os_from_bytes(&input_file)) {
-                Ok(file) => self.input = BufReader::new(Box::new(file)),
+                Ok(file) => self.input = InputStream::File(BufReader::new(file)),
                 Err(e) => {
                     let text = format!("Cannot open input file {}", quote(&input_file));
                     self.die_errno(XARGS_FAILURE, &text, &e);

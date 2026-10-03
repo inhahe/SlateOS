@@ -20,11 +20,11 @@ use crate::common::{
     ALLOW_32X32, ALTREF_FRAME, BILINEAR, BLOCK_SIZE_GROUPS, CLASS0_SIZE, COEF_BANDS,
     COMP_INTER_CONTEXTS, COMPOUND_REFERENCE, EIGHTTAP, EIGHTTAP_SHARP, EIGHTTAP_SMOOTH,
     GOLDEN_FRAME, INTER_MODE_CONTEXTS, INTRA_INTER_CONTEXTS, INTRA_MODES, InterpFilter, LAST_FRAME,
-    MAX_SEGMENTS, MI_BLOCK_SIZE_LOG2, MV_CLASSES, MV_FP_SIZE, MV_JOINTS, MV_OFFSET_BITS,
-    PARTITION_CONTEXTS, PARTITION_TYPES, PLANE_TYPES, REF_CONTEXTS, REF_TYPES,
-    REFERENCE_MODE_SELECT, RefFrame, ReferenceMode, SEG_LVL_ALT_Q, SEG_LVL_MAX, SINGLE_REFERENCE,
-    SWITCHABLE, SWITCHABLE_FILTER_CONTEXTS, SWITCHABLE_FILTERS, TX_MODE_SELECT, TX_SIZE_CONTEXTS,
-    TxMode, UNCONSTRAINED_NODES, band_coeff_contexts,
+    MAX_SEGMENTS, MB_MODE_COUNT, MI_BLOCK_SIZE_LOG2, MV_CLASSES, MV_FP_SIZE, MV_JOINTS,
+    MV_OFFSET_BITS, PARTITION_CONTEXTS, PARTITION_TYPES, PLANE_TYPES, REF_CONTEXTS, REF_TYPES,
+    REFERENCE_MODE_SELECT, RefFrame, ReferenceMode, SEG_LVL_ALT_LF, SEG_LVL_ALT_Q, SEG_LVL_MAX,
+    SINGLE_REFERENCE, SWITCHABLE, SWITCHABLE_FILTER_CONTEXTS, SWITCHABLE_FILTERS, TX_MODE_SELECT,
+    TX_SIZE_CONTEXTS, TxMode, UNCONSTRAINED_NODES, band_coeff_contexts,
 };
 use crate::probs::{FrameContext, diff_update_prob, update_mv_probs};
 use crate::tables;
@@ -206,7 +206,110 @@ impl LoopFilterParams {
             }
         }
     }
+
+    /// The thresholds each filter level filters with at this frame's
+    /// sharpness: libvpx's `update_sharpness`, with the high-variance
+    /// thresholds `vp9_loop_filter_init` sets beside them.
+    ///
+    /// libvpx caches these and recomputes them when the sharpness changes;
+    /// they depend on nothing else, so computing them for each frame gives
+    /// the same numbers.
+    #[allow(
+        clippy::arithmetic_side_effects,
+        reason = "lvl is at most 63 and sharpness at most 7, so every value fits a u8: mblim is at most 2 * 65 + 63"
+    )]
+    #[must_use]
+    pub fn limits(&self) -> LimitTable {
+        let sharpness = i32::from(self.sharpness_level);
+        core::array::from_fn(|lvl| {
+            let lvl = lvl as i32;
+            let mut inside = lvl >> (i32::from(sharpness > 0) + i32::from(sharpness > 4));
+            if sharpness > 0 && inside > 9 - sharpness {
+                inside = 9 - sharpness;
+            }
+            inside = inside.max(1);
+            FilterLimits {
+                mblim: (2 * (lvl + 2) + inside) as u8,
+                lim: inside as u8,
+                hev_thr: (lvl >> 4) as u8,
+            }
+        })
+    }
+
+    /// The filter level of a block, by its segment, its reference frame
+    /// (intra included) and whether it moves: libvpx's
+    /// `vp9_loop_filter_frame_init`, the table `get_filter_level` reads.
+    ///
+    /// The second column of the intra row is never read -- an intra block's
+    /// mode always selects the first -- and is left zero, as libvpx leaves
+    /// it unwritten.
+    #[must_use]
+    pub fn levels(&self, seg: &Segmentation) -> LevelTable {
+        let default = i32::from(self.filter_level);
+        // Deltas count double for levels of 32 and up.
+        let scale = 1i32 << (default >> 5);
+        let clamp = |v: i32| v.clamp(0, MAX_LOOP_FILTER) as u8;
+        let mut table = [[[0u8; MAX_MODE_LF_DELTAS]; MAX_REF_LF_DELTAS]; MAX_SEGMENTS];
+        for (seg_id, levels) in (0u8..).zip(table.iter_mut()) {
+            let mut lvl_seg = default;
+            if seg.feature_active(seg_id, SEG_LVL_ALT_LF) {
+                let data = seg.data(seg_id, SEG_LVL_ALT_LF);
+                lvl_seg = clamp(if seg.abs_delta {
+                    data
+                } else {
+                    default.saturating_add(data)
+                })
+                .into();
+            }
+            if !self.mode_ref_delta_enabled {
+                *levels = [[clamp(lvl_seg); MAX_MODE_LF_DELTAS]; MAX_REF_LF_DELTAS];
+                continue;
+            }
+            let delta = |d: i8| i32::from(d).saturating_mul(scale);
+            if let (Some(intra), Some(&d)) = (levels.first_mut(), self.ref_deltas.first()) {
+                intra[0] = clamp(lvl_seg.saturating_add(delta(d)));
+            }
+            for (by_mode, &ref_delta) in levels.iter_mut().zip(&self.ref_deltas).skip(1) {
+                for (lvl, &mode_delta) in by_mode.iter_mut().zip(&self.mode_deltas) {
+                    *lvl = clamp(
+                        lvl_seg
+                            .saturating_add(delta(ref_delta))
+                            .saturating_add(delta(mode_delta)),
+                    );
+                }
+            }
+        }
+        table
+    }
 }
+
+/// How many reference-frame deltas there are: intra, last, golden, altref.
+pub const MAX_REF_LF_DELTAS: usize = 4;
+/// How many mode deltas there are: zero motion, and other inter modes.
+pub const MAX_MODE_LF_DELTAS: usize = 2;
+
+/// The thresholds one filter level filters an edge with: libvpx's
+/// `loop_filter_thresh`, one value where libvpx repeats it across a SIMD
+/// vector.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FilterLimits {
+    /// The largest step across the edge that is still filtered.
+    pub mblim: u8,
+    /// The largest step between neighbours on either side.
+    pub lim: u8,
+    /// The step above which an edge has high variance and is filtered less.
+    pub hev_thr: u8,
+}
+
+/// Thresholds for every filter level, 0 to 63.
+pub type LimitTable = [FilterLimits; MAX_LOOP_FILTER as usize + 1];
+
+/// Filter levels by segment, reference frame and mode class.
+pub type LevelTable = [[[u8; MAX_MODE_LF_DELTAS]; MAX_REF_LF_DELTAS]; MAX_SEGMENTS];
+
+/// The class of each mode for the loop filter's mode deltas: 1 for an inter
+/// mode that moves, 0 for everything else. libvpx's `mode_lf_lut`.
+pub const MODE_LF_LUT: [u8; MB_MODE_COUNT] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 1];
 
 // --- Quantisers -----------------------------------------------------------------
 
@@ -905,6 +1008,112 @@ mod tests {
         assert_eq!(seg.qindex(2, 100), 77);
         seg.enabled = false;
         assert_eq!(seg.qindex(2, 100), 100, "segmentation off");
+    }
+
+    #[test]
+    fn filter_limits_follow_libvpx_update_sharpness() {
+        let mut lf = LoopFilterParams::default();
+        let t = lf.limits();
+        // Sharpness 0: the inside limit is the level, at least 1.
+        assert_eq!(
+            t[0],
+            FilterLimits {
+                mblim: 5,
+                lim: 1,
+                hev_thr: 0
+            }
+        );
+        assert_eq!(
+            t[40],
+            FilterLimits {
+                mblim: 124,
+                lim: 40,
+                hev_thr: 2
+            }
+        );
+        assert_eq!(
+            t[63],
+            FilterLimits {
+                mblim: 193,
+                lim: 63,
+                hev_thr: 3
+            }
+        );
+        // Sharpness 5 shifts the level down by two and caps it at 9 - 5.
+        lf.sharpness_level = 5;
+        let t = lf.limits();
+        assert_eq!(t[40].lim, 4);
+        assert_eq!(t[8].lim, 2);
+        assert_eq!(t[2].lim, 1, "at least 1");
+        assert_eq!(t[40].mblim, 2 * 42 + 4);
+        // Sharpness 1 shifts by one and caps at 8.
+        lf.sharpness_level = 1;
+        assert_eq!(lf.limits()[10].lim, 5);
+        assert_eq!(lf.limits()[40].lim, 8);
+    }
+
+    #[test]
+    fn filter_levels_apply_deltas_scaled_by_level() {
+        let mut lf = LoopFilterParams {
+            filter_level: 20,
+            ..LoopFilterParams::default()
+        };
+        lf.set_default_deltas();
+        lf.mode_deltas = [0, 3];
+        let seg = Segmentation::default();
+        let t = lf.levels(&seg);
+        // Intra +1, last 0, golden and altref -1; moving modes +3.
+        assert_eq!(t[0][0][0], 21);
+        assert_eq!(t[0][1], [20, 23]);
+        assert_eq!(t[0][3], [19, 22]);
+        // From 32 up the deltas count double.
+        lf.filter_level = 40;
+        let t = lf.levels(&seg);
+        assert_eq!(t[5][0][0], 42);
+        assert_eq!(t[5][2], [38, 44]);
+        // Clamped to the filter's range.
+        lf.filter_level = 63;
+        assert_eq!(lf.levels(&seg)[0][1][1], 63);
+    }
+
+    #[test]
+    fn filter_levels_follow_segments_and_can_ignore_deltas() {
+        let mut lf = LoopFilterParams {
+            filter_level: 30,
+            ..LoopFilterParams::default()
+        };
+        lf.set_default_deltas();
+        let mut seg = Segmentation {
+            enabled: true,
+            ..Segmentation::default()
+        };
+        seg.feature_mask[3] = 1 << SEG_LVL_ALT_LF;
+        seg.feature_data[3][SEG_LVL_ALT_LF] = -10;
+        let t = lf.levels(&seg);
+        assert_eq!(t[3][1], [20, 20], "segment 3 adds -10");
+        assert_eq!(t[2][1], [30, 30]);
+        seg.abs_delta = true;
+        seg.feature_data[3][SEG_LVL_ALT_LF] = 7;
+        assert_eq!(lf.levels(&seg)[3][0][0], 8, "absolute 7, intra +1");
+        lf.mode_ref_delta_enabled = false;
+        let t = lf.levels(&seg);
+        assert_eq!(
+            t[3],
+            [[7, 7]; 4],
+            "no deltas: every entry the segment level"
+        );
+        assert_eq!(t[0], [[30, 30]; 4]);
+    }
+
+    #[test]
+    fn mode_classes_mark_the_moving_inter_modes() {
+        use crate::common::{DC_PRED, NEARESTMV, NEARMV, NEWMV, TM_PRED, ZEROMV};
+        assert_eq!(MODE_LF_LUT[usize::from(DC_PRED)], 0);
+        assert_eq!(MODE_LF_LUT[usize::from(TM_PRED)], 0);
+        assert_eq!(MODE_LF_LUT[usize::from(ZEROMV)], 0);
+        for m in [NEARESTMV, NEARMV, NEWMV] {
+            assert_eq!(MODE_LF_LUT[usize::from(m)], 1);
+        }
     }
 
     #[test]

@@ -6562,6 +6562,34 @@ pub fn build_linux_exit_elf(exit_code: u8) -> alloc::vec::Vec<u8> {
     buf
 }
 
+/// [`build_linux_exit_elf`]'s image, with a program that never ends by itself:
+///
+/// ```text
+///   mov eax, 34          ; B8 22 00 00 00 -- Linux SYS_pause
+///   syscall              ; 0F 05
+///   jmp  -9              ; EB F7 -- and again, whatever pause answered
+/// ```
+///
+/// For a self-test that must look at a spawned process before it can exit.
+/// A process frees its memory as it exits (`pcb::release_address_space`), so a
+/// program that exits at once could take its image away mid-look. Same
+/// headers and segment as the exit program, so a layout fact proved of one
+/// holds for the other. The rung stops it with `spawn::teardown_fixture`.
+#[must_use]
+pub fn build_linux_pause_elf() -> alloc::vec::Vec<u8> {
+    let mut buf = build_linux_exit_elf(0);
+    // The exit program's code: 16 bytes at file offset 120.
+    const CODE: usize = 120;
+    const LOOP: [u8; 9] = [0xB8, 0x22, 0x00, 0x00, 0x00, 0x0F, 0x05, 0xEB, 0xF7];
+    if let Some(code) = buf.get_mut(CODE..CODE.saturating_add(16)) {
+        code.fill(0xCC);
+        if let Some(head) = code.get_mut(..LOOP.len()) {
+            head.copy_from_slice(&LOOP);
+        }
+    }
+    buf
+}
+
 /// Build a **Linux-ABI** `ET_EXEC` launcher ELF that `execveat(2)`s a target
 /// program, used to test the `execveat` exec path end-to-end from ring 3.
 ///

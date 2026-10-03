@@ -6804,12 +6804,135 @@ fn destroy_process_resources(
     }
 }
 
-/// Address spaces whose teardown waits on threads killed while they ran:
-/// each PML4 with the threads that may still be executing on it.
+/// Address spaces whose teardown waits: on threads killed while they ran,
+/// or on a pin ([`AsPin`]). Each PML4 with the threads that may still be
+/// executing on it.
 ///
 /// Leaf lock: nothing is taken while it is held ([`crate::sched::task_is_on_cpu`]
 /// reads atomics only).
 static DEFERRED_ADDRESS_SPACES: Mutex<Vec<(u64, Vec<TaskId>)>> = Mutex::new(Vec::new());
+
+/// The pins on process address spaces, by PML4, with how many each has
+/// ([`AsPin`]). A free waits until its count is gone
+/// ([`free_address_space_when_unused`], [`free_deferred_address_spaces`]).
+///
+/// Taken under [`PROCESS_TABLE`] by [`pin_address_space`], and alone
+/// everywhere else; nothing is taken while it is held.
+static ADDRESS_SPACE_PINS: Mutex<BTreeMap<u64, usize>> = Mutex::named(BTreeMap::new(), b"as_pins");
+
+/// A hold on a process's address space -- Linux's `mmget_not_zero`/`mmput`.
+/// While one lives, the page tables and frames it names are not freed,
+/// whatever becomes of the process meanwhile. The process may exit, its
+/// address space be released at its zombie transition
+/// ([`release_address_space`]), or the process be reaped.
+///
+/// For a caller that walks *another* process's page tables after letting
+/// go of the process table: `process_vm_readv`/`writev`. Until 2026-10-02
+/// that caller held the bare PML4, and a reap on another CPU could free
+/// the tables under its walk. A process's own threads need no pin: an
+/// address space is not freed while a thread of it can still run on it.
+///
+/// It keeps the tables, not what is mapped in them. The process may still
+/// unmap a page while the holder reads it
+/// (`known-issues` `TD-A-CROSS-PROCESS-COPY-RACES-THE-TARGETS-OWN-UNMAP`).
+#[must_use]
+pub struct AsPin {
+    pml4: u64,
+}
+
+impl AsPin {
+    /// The pinned address space's PML4, by physical address.
+    #[must_use]
+    pub fn pml4(&self) -> u64 {
+        self.pml4
+    }
+}
+
+impl Drop for AsPin {
+    fn drop(&mut self) {
+        let last = {
+            let mut pins = ADDRESS_SPACE_PINS.lock();
+            match pins.get_mut(&self.pml4) {
+                Some(count) if *count > 1 => {
+                    *count = count.saturating_sub(1);
+                    false
+                }
+                Some(_) => {
+                    pins.remove(&self.pml4);
+                    true
+                }
+                // Every pin is counted before it exists (`pin_address_space`).
+                None => false,
+            }
+        };
+        // A free that waited for this pin can go now; if this runs before
+        // the free has queued itself, the idle loop's retry finds it.
+        if last {
+            free_deferred_address_spaces();
+        }
+    }
+}
+
+/// Pin `pid`'s address space ([`AsPin`]). `None` for a process that is not
+/// in the table, or that has no address space: never given one, or
+/// released at its exit ([`release_address_space`]).
+pub fn pin_address_space(pid: ProcessId) -> Option<AsPin> {
+    let table = PROCESS_TABLE.lock();
+    let pml4 = table.get(&pid).map(|p| p.pml4_phys).filter(|&p| p != 0)?;
+    // Counted before the table's lock is let go: a release or a reap takes
+    // the PML4 out of the table under that lock, and finds this pin after.
+    let mut pins = ADDRESS_SPACE_PINS.lock();
+    let count = pins.entry(pml4).or_insert(0);
+    *count = count.saturating_add(1);
+    Some(AsPin { pml4 })
+}
+
+/// Whether any [`AsPin`] holds `pml4`.
+fn address_space_pinned(pml4: u64) -> bool {
+    ADDRESS_SPACE_PINS.lock().contains_key(&pml4)
+}
+
+/// Release `pid`'s address space as it becomes a zombie -- Linux's
+/// `exit_mm`. Its mappings' file references are dropped, and its page tables
+/// and frames freed as soon as no CPU and no [`AsPin`] can still be on them
+/// ([`free_address_space_when_unused`]). The PML4, the VMAs and the
+/// address-space charge leave the process record, so a zombie's
+/// `/proc/<pid>/maps`, `statm` and `stat` sizes read empty, as Linux's do.
+///
+/// Until 2026-10-02 none of it went until the reap ([`destroy`]): a zombie
+/// whose parent never waited kept every page it had
+/// (`TD-A-ZOMBIE-KEEPS-ITS-MEMORY-UNTIL-REAPED`). Nothing if `pid` is not a
+/// zombie, or has nothing left to release.
+///
+/// Called by `thread::on_thread_exit` after the zombie transition and after
+/// [`exit_close_fds`], so a handle whose close unmaps from these tables
+/// does it while they exist. Every thread of the process is off them by
+/// then, or recorded in [`Process::killed_on_cpu`].
+pub fn release_address_space(pid: ProcessId) {
+    let (pml4, vmas, killed_on_cpu) = {
+        let mut table = PROCESS_TABLE.lock();
+        let Some(p) = table.get_mut(&pid) else {
+            return;
+        };
+        if p.state != ProcessState::Zombie {
+            return;
+        }
+        p.linux_as_bytes = 0;
+        p.brk_start = 0;
+        p.brk_current = 0;
+        (
+            core::mem::take(&mut p.pml4_phys),
+            core::mem::take(&mut p.vmas),
+            core::mem::take(&mut p.killed_on_cpu),
+        )
+    };
+    for vma in &vmas {
+        vma_release_backing(vma);
+    }
+    if pml4 != 0 {
+        free_address_space_when_unused(pml4, killed_on_cpu);
+    }
+}
 
 /// Free process address space `pml4_phys` -- its DMA buffers, mapped frames,
 /// page tables and the PML4 itself -- as soon as no CPU can still be running on
@@ -6840,13 +6963,27 @@ fn free_address_space_when_unused(pml4_phys: u64, killed_on_cpu: Vec<TaskId>) {
             .push((pml4_phys, killed_on_cpu));
         return;
     }
+    // No new pin can appear: the PML4 has already left the process table,
+    // which is where `pin_address_space` finds one.
+    if address_space_pinned(pml4_phys) {
+        crate::serial_println!(
+            "[proc] address space {:#x} waits for a cross-process reader's pin",
+            pml4_phys
+        );
+        DEFERRED_ADDRESS_SPACES
+            .lock()
+            .push((pml4_phys, killed_on_cpu));
+        return;
+    }
     free_address_space(pml4_phys);
 }
 
 /// Free every deferred address space ([`DEFERRED_ADDRESS_SPACES`]) whose
-/// killed threads have all left their CPUs. Returns how many it freed.
+/// killed threads have all left their CPUs and which no [`AsPin`] holds.
+/// Returns how many it freed.
 ///
-/// Called before each new teardown, and by the boot thread's idle loop at the
+/// Called before each new teardown, when an address space's last pin goes,
+/// and by the boot thread's idle loop at the
 /// cadence it reaps dead tasks, so a deferral is bounded by that loop even on a
 /// machine where nothing else exits.
 pub fn free_deferred_address_spaces() -> usize {
@@ -6867,10 +7004,19 @@ pub fn free_deferred_address_spaces() -> usize {
         });
         ready
     };
-    for &pml4 in &ready {
-        free_address_space(pml4);
+    // Pins are asked outside the list's lock, which is never held with
+    // theirs. A space still pinned goes back on the list; its last pin's
+    // drop, or the idle loop's next retry, frees it.
+    let mut freed = 0usize;
+    for pml4 in ready {
+        if address_space_pinned(pml4) {
+            DEFERRED_ADDRESS_SPACES.lock().push((pml4, Vec::new()));
+        } else {
+            free_address_space(pml4);
+            freed = freed.saturating_add(1);
+        }
     }
-    ready.len()
+    freed
 }
 
 /// Free a process address space no CPU can be running on.
@@ -8090,6 +8236,7 @@ pub fn self_test() -> KernelResult<()> {
     test_inherit_job()?;
     test_may_inspect()?;
     test_deferred_address_space()?;
+    test_address_space_pin_and_release()?;
     test_cpu_time_accounting()?;
     test_io_accounting()?;
     test_job_control_state()?;
@@ -10077,6 +10224,70 @@ fn test_deferred_address_space() -> KernelResult<()> {
     }
     serial_println!(
         "[proc]   address space of a thread killed on a CPU: freed only after it leaves: OK"
+    );
+    Ok(())
+}
+
+/// [`release_address_space`] frees a process's address space at its zombie
+/// transition, and only then; an [`AsPin`] taken before holds it past the
+/// release, on [`DEFERRED_ADDRESS_SPACES`], until the pin goes; and a
+/// released space cannot be pinned again.
+fn test_address_space_pin_and_release() -> KernelResult<()> {
+    /// A task id no task has: the process's stand-in thread.
+    const STAND_IN: TaskId = 0x00A5_0000_0001;
+
+    fn queued(pml4: u64) -> bool {
+        DEFERRED_ADDRESS_SPACES
+            .lock()
+            .iter()
+            .any(|(p, _)| *p == pml4)
+    }
+
+    let pid = create("as-pin-test", 0);
+    set_running(pid)?;
+    add_thread(pid, STAND_IN)?;
+    let Some(pin) = pin_address_space(pid) else {
+        serial_println!("[proc]   FAIL: address-space pin: a live process's could not be pinned");
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    };
+    let pml4 = pin.pml4();
+
+    // Not a zombie yet: nothing is released.
+    release_address_space(pid);
+    let kept_while_live = get_pml4(pid) == Some(pml4);
+
+    // The last thread goes; the zombie's memory is released, but the pin
+    // holds the tables.
+    let (zombie, _wake, _any) = remove_thread(pid, STAND_IN, ThreadExitAccounting::default())?;
+    release_address_space(pid);
+    let released = get_pml4(pid) == Some(0)
+        && list_vmas(pid).is_some_and(|v| v.is_empty())
+        && linux_as_used(pid) == Some(0);
+    let held = queued(pml4);
+    let unpinnable = pin_address_space(pid).is_none();
+
+    // The last pin goes: the free happens now.
+    drop(pin);
+    let freed = !queued(pml4);
+    destroy(pid);
+
+    if !(kept_while_live && zombie && released && held && unpinnable && freed) {
+        serial_println!(
+            "[proc]   FAIL: address-space pin: kept while live {} zombie {} released {} \
+             held {} unpinnable {} freed {}",
+            kept_while_live,
+            zombie,
+            released,
+            held,
+            unpinnable,
+            freed
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[proc]   address space released at a zombie's exit, and a pin holds it until it \
+         goes: OK"
     );
     Ok(())
 }

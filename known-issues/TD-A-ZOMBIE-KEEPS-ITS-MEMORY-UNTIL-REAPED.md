@@ -1,6 +1,10 @@
 ## TD-A-ZOMBIE-KEEPS-ITS-MEMORY-UNTIL-REAPED (lane A, 2026-10-02) — OPEN
 
-**Status:** OPEN
+**Status:** OPEN -- fixed on `lane-a-wip`, awaiting a boot on main:
+`pcb::release_address_space` frees a zombie's memory at its exit, behind
+`pcb::AsPin`, the pin a cross-process reader holds so that the free waits for
+it. The procfs memory files read empty for a zombie. Tested by pcb's
+`test_address_space_pin_and_release` and the "Zombie /proc directory" rung.
 
 **In short:** when a Linux process exits, its memory is freed immediately.
 What remains until the parent waits for it (a zombie, "a finished process

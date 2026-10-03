@@ -2674,6 +2674,11 @@ fn build_pid_status(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
 /// does not reflect a process rewriting its own `argv[]` at runtime
 /// (`setproctitle`); it reports the argv as captured at spawn.
 fn gen_pid_cmdline(task_id: u64) -> KernelResult<Vec<u8>> {
+    // 0. A zombie's arguments went with its memory ([`is_zombie`]).
+    if is_zombie(task_id) {
+        return Ok(Vec::new());
+    }
+
     // 1. Full argv from the persistent snapshot.
     if let Some(argv) = crate::proc::pcb::get_proc_argv(task_id) {
         if !argv.is_empty() {
@@ -2722,6 +2727,10 @@ fn gen_pid_cmdline(task_id: u64) -> KernelResult<Vec<u8>> {
 /// environment).
 fn gen_pid_environ(task_id: u64) -> KernelResult<Vec<u8>> {
     let envp = crate::proc::pcb::get_proc_envp(task_id).ok_or(KernelError::NotFound)?;
+    // A zombie's environment went with its memory ([`is_zombie`]).
+    if is_zombie(task_id) {
+        return Ok(Vec::new());
+    }
     let cap = envp.iter().map(|e| e.len().saturating_add(1)).sum();
     let mut data = Vec::with_capacity(cap);
     for entry in &envp {
@@ -2751,6 +2760,10 @@ fn gen_pid_auxv(task_id: u64) -> KernelResult<Vec<u8>> {
     // empty file) by probing a field every live process has.
     if crate::proc::pcb::get_proc_envp(task_id).is_none() {
         return Err(KernelError::NotFound);
+    }
+    // A zombie's vector went with its memory ([`is_zombie`]).
+    if is_zombie(task_id) {
+        return Ok(Vec::new());
     }
     Ok(crate::proc::pcb::linux_saved_auxv(task_id).unwrap_or_default())
 }
@@ -14022,6 +14035,15 @@ fn proc_task(id: u64) -> Option<crate::sched::TaskInfo> {
     crate::sched::task_info(id).or_else(|| crate::proc::pcb::exited_leader(id))
 }
 
+/// Whether `id` is a zombie: a process that has exited and not been reaped.
+/// Its memory and its files are gone (`pcb::release_address_space`,
+/// `pcb::exit_close_fds`), so what Linux reads from them -- `cmdline`,
+/// `environ`, `auxv` -- reads empty, and the `exe`, `cwd` and `root` links
+/// name nothing, as Linux's do once `exit_mm` and `exit_fs` have run.
+fn is_zombie(id: u64) -> bool {
+    crate::proc::pcb::state(id) == Some(crate::proc::pcb::ProcessState::Zombie)
+}
+
 /// The directory `/proc/self` names: the calling process's id -- its main
 /// thread's task id, so the directory that is the process -- or, for a
 /// kernel task with no process, its own id. Until 2026-10-01 this was the
@@ -15329,6 +15351,10 @@ impl FileSystem for ProcFs {
             return Err(KernelError::PermissionDenied);
         }
         match link {
+            // A zombie runs nothing from nowhere ([`is_zombie`]).
+            ProcPath::PidLink(pid, "root" | "cwd" | "exe") if is_zombie(pid) => {
+                Err(KernelError::NotFound)
+            }
             ProcPath::PidLink(pid, "root") => {
                 if !pid_dir_exists(pid) {
                     return Err(KernelError::NotFound);

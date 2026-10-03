@@ -28489,8 +28489,14 @@ fn process_vm_impl(args: &SyscallArgs, is_write: bool) -> SyscallResult {
     // via the SMAP copy primitives); a non-zero value routes the *remote*
     // side of each copy through the HHDM `_as` primitives against that
     // page table.
-    let mut target_pml4: u64 = 0;
-    if !same_addr_space {
+    // The pin is held until the copy is done: the target's page tables are
+    // walked with no lock held, and its reap -- or its exit, which releases
+    // them (`pcb::release_address_space`) -- may run on another CPU
+    // meanwhile. Until 2026-10-02 this held the bare PML4, and such a free
+    // left the walk in freed tables.
+    let target_pin: Option<crate::proc::pcb::AsPin> = if same_addr_space {
+        None
+    } else {
         // caller is Some here: a None caller forces same_addr_space=true
         // (kernel-context self-test), so we never reach this arm with
         // caller==None.  Be defensive anyway.
@@ -28517,13 +28523,15 @@ fn process_vm_impl(args: &SyscallArgs, is_write: bool) -> SyscallResult {
             // means the target task does not exist).
             return linux_err(errno::EPERM);
         }
-        match crate::proc::pcb::get_pml4(owner) {
-            Some(p) if p != 0 => target_pml4 = p,
-            // Owner exists in the process table but has no page table
-            // (exiting / never fully constructed) — treat as gone.
-            _ => return linux_err(errno::ESRCH),
-        }
-    }
+        // No address space: exited -- its memory released -- or never fully
+        // constructed. Gone, as Linux's mm_access finds no mm.
+        let Some(pin) = crate::proc::pcb::pin_address_space(owner) else {
+            return linux_err(errno::ESRCH);
+        };
+        Some(pin)
+    };
+    // `target_pml4 == 0` means "same address space", as above.
+    let target_pml4 = target_pin.as_ref().map_or(0, crate::proc::pcb::AsPin::pml4);
 
     // Nothing to do if either side has zero entries; matches Linux
     // (returns 0 = no bytes moved).

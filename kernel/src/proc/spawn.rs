@@ -22984,7 +22984,10 @@ pub fn self_test_linux_scm_rights() -> KernelResult<()> {
 /// - `/proc` lists it;
 /// - `stat` is `<pid> (<name>) Z ...` with a start time;
 /// - `status` says `State:\tZ (zombie)`, `comm` is its name, `wchan` is `0`;
-/// - a process-wide file, `mounts`, is still served.
+/// - a process-wide file, `mounts`, is still served;
+/// - its memory is gone, released at its exit as Linux's `exit_mm` does:
+///   nothing to pin, `maps` empty, `statm` zeros, `stat` vsize 0, `cmdline`
+///   and `environ` empty, no `exe`.
 ///
 /// Reaped, the directory is gone and unlisted. Until 2026-10-02 a zombie's
 /// directory went with its first thread's task at the scheduler's next reap
@@ -23067,6 +23070,44 @@ pub fn self_test_zombie_keeps_proc_dir() -> KernelResult<()> {
         {
             return fail("mounts has no line for the root mount");
         }
+
+        // Its memory went at its exit, as Linux's does in `exit_mm`
+        // (`pcb::release_address_space`), and with it what is read from it.
+        if pcb::pin_address_space(pid).is_some() {
+            return fail("its address space outlived its exit");
+        }
+        if read("maps").ok().as_deref() != Some(b"".as_slice()) {
+            return fail("maps is not empty");
+        }
+        let statm = read("statm").unwrap_or_default();
+        let statm_fields: alloc::vec::Vec<&[u8]> = statm
+            .split(|&b| b == b' ' || b == b'\n')
+            .filter(|f| !f.is_empty())
+            .collect();
+        if statm_fields.len() != 7 || statm_fields.iter().any(|&f| f != b"0") {
+            return fail("statm is not seven zeros");
+        }
+        // Field 23, vsize: the 21st of the fields after the `)`.
+        let vsize = stat
+            .rsplit(|&b| b == b')')
+            .next()
+            .and_then(|rest| rest.split(|&b| b == b' ').filter(|f| !f.is_empty()).nth(20));
+        if vsize != Some(b"0".as_slice()) {
+            return fail("stat's vsize is not 0");
+        }
+        if read("cmdline").ok().as_deref() != Some(b"".as_slice()) {
+            return fail("cmdline is not empty");
+        }
+        if read("environ").ok().as_deref() != Some(b"".as_slice()) {
+            return fail("environ is not empty");
+        }
+        match crate::fs::Vfs::readlink(alloc::format!("{dir}/exe")) {
+            Err(KernelError::NotFound) => {}
+            other => {
+                serial_println!("[spawn]   its exe link reads {:?}", other);
+                return fail("exe still names a file");
+            }
+        }
         Ok(())
     }
 
@@ -23145,7 +23186,8 @@ pub fn self_test_zombie_keeps_proc_dir() -> KernelResult<()> {
     serial_println!(
         "[spawn]   zombie /proc directory (listed, stat `Z` with its name and start time, \
          status, comm, wchan 0 and mounts from the process's own record after its thread \
-         was freed; gone with the reap): OK"
+         was freed; its memory released at exit -- maps, statm, vsize, cmdline, environ \
+         and exe empty; gone with the reap): OK"
     );
     Ok(())
 }
@@ -23292,14 +23334,17 @@ pub fn self_test_main_phdr() -> KernelResult<()> {
         return fail("headers in a segment were not found at its address plus the bias");
     }
 
-    // Copied: a real spawn of a program whose segment leaves them out.
-    let exe = elf::build_linux_exit_elf(0);
+    // Copied: a real spawn of a program whose segment leaves them out -- one
+    // that does not end by itself, since a process frees its memory as it
+    // exits (`pcb::release_address_space`) and an exit program could take
+    // the page away before it was read.
+    let exe = elf::build_linux_pause_elf();
     let exe_elf = elf::ElfFile::parse(&exe)?;
     let Some(table) = exe_elf.phdr_table_bytes() else {
-        return fail("the exit test ELF has no program-header table");
+        return fail("the pause test ELF has no program-header table");
     };
     if crate::proc::linux_stack::phdr_vaddr(&exe_elf).is_some() {
-        return fail("the exit test ELF's segment holds its headers; the copy path is untested");
+        return fail("the pause test ELF's segment holds its headers; the copy path is untested");
     }
     let argv: &[&[u8]] = &[b"spawn-test-phdr"];
     let options = SpawnOptions {
@@ -23317,9 +23362,9 @@ pub fn self_test_main_phdr() -> KernelResult<()> {
     let spawned = spawn_process(&exe, &options)?;
     let recorded = pcb::main_phdr(spawned.pid);
     let mut copy = alloc::vec![0u8; table.len()];
-    let read = pcb::get_pml4(spawned.pid)
+    let read = pcb::pin_address_space(spawned.pid)
         .ok_or(KernelError::NoSuchProcess)
-        .and_then(|pml4| crate::mm::user::copy_from_user_as(pml4, PHDR_COPY_VADDR, &mut copy));
+        .and_then(|pin| crate::mm::user::copy_from_user_as(pin.pml4(), PHDR_COPY_VADDR, &mut copy));
     let auxv = pcb::linux_saved_auxv(spawned.pid).unwrap_or_default();
     let le = |s: &[u8]| -> Option<u64> { Some(u64::from_le_bytes(s.try_into().ok()?)) };
     let at_phdr = auxv

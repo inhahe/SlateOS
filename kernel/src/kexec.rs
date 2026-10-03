@@ -42,6 +42,7 @@ use crate::error::{KernelError, KernelResult};
 use crate::limine::{MemmapEntry, memmap_type};
 use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
 use crate::mm::page_table::{PageFlags, PageTableEntry, VirtAddr};
+use core::arch::{asm, global_asm};
 
 // ---------------------------------------------------------------------------
 // ELF constants
@@ -1758,6 +1759,313 @@ pub unsafe fn quiesce() {
 }
 
 // ---------------------------------------------------------------------------
+// Trampoline and the jump
+// ---------------------------------------------------------------------------
+
+// The handoff trampoline: a position-independent, pure-64-bit blob run from a
+// control frame's HHDM alias (valid in both the old and new page tables, which
+// share the HHDM offset). It copies the staged image to its contiguous
+// destination, loads a fresh GDT and an empty IDT, switches to the new page
+// tables, sets a fresh stack, zeroes the general registers and jumps to the new
+// kernel's entry -- the state Limine hands a kernel. `rdi` points at a parameter
+// block (the offsets below). CR0/CR4/EFER/PAT are left as the running kernel has
+// them: all valid long-mode state the new kernel re-initialises as it would from
+// a Limine boot, and keeping EFER.NXE set is what makes the handoff tables' NX
+// bits legal. See `todo.txt` (kexec 5a) and design-decisions §1536.
+global_asm!(
+    ".global kexec_trampoline_start",
+    "kexec_trampoline_start:",
+    "cld",
+    "mov r15, rdi", // r15 = params
+    "mov r14, [r15 + 0x10]", // r14 = hhdm
+    // Copy the staged image: for each CopyOp{src_phys, dst_phys, len}.
+    "mov r13, [r15 + 0x00]", // r13 = copy_count
+    "mov r12, [r15 + 0x08]", // r12 = copy_list (HHDM)
+    "2:",
+    "test r13, r13",
+    "jz 3f",
+    "mov rsi, [r12 + 0x00]", // src_phys
+    "add rsi, r14", // + hhdm
+    "mov rdi, [r12 + 0x08]", // dst_phys
+    "add rdi, r14", // + hhdm
+    "mov rcx, [r12 + 0x10]", // len
+    "rep movsb",
+    "add r12, 24",
+    "dec r13",
+    "jmp 2b",
+    "3:",
+    // Load the handoff GDT and an empty IDT.
+    "mov rax, [r15 + 0x30]", // gdtr_ptr
+    "lgdt [rax]",
+    "mov rax, [r15 + 0x38]", // idtr_ptr
+    "lidt [rax]",
+    // Reload the data segments (selector 0x30), then CS (0x28) via a far return.
+    "mov ax, 0x30",
+    "mov ds, ax",
+    "mov es, ax",
+    "mov fs, ax",
+    "mov gs, ax",
+    "mov ss, ax",
+    "lea rax, [rip + 4f]",
+    "push 0x28",
+    "push rax",
+    "retfq",
+    "4:",
+    // Switch to the new page tables (the blob keeps running via the HHDM, which
+    // the new tables also map at the same offset).
+    "mov rax, [r15 + 0x18]", // new_cr3
+    "mov cr3, rax",
+    // Fresh stack with Limine's 0 return address.
+    "mov rsp, [r15 + 0x28]",
+    "sub rsp, 8",
+    "mov qword ptr [rsp], 0",
+    // Entry point in rax, zero every other general register, and jump.
+    "mov rax, [r15 + 0x20]",
+    "xor rbx, rbx",
+    "xor rcx, rcx",
+    "xor rdx, rdx",
+    "xor rsi, rsi",
+    "xor rdi, rdi",
+    "xor rbp, rbp",
+    "xor r8, r8",
+    "xor r9, r9",
+    "xor r10, r10",
+    "xor r11, r11",
+    "xor r12, r12",
+    "xor r13, r13",
+    "xor r14, r14",
+    "xor r15, r15",
+    "jmp rax",
+    ".global kexec_trampoline_end",
+    "kexec_trampoline_end:",
+);
+
+unsafe extern "C" {
+    /// First byte of the trampoline blob (a linker symbol, not readable data).
+    static kexec_trampoline_start: u8;
+    /// One past the last byte of the trampoline blob.
+    static kexec_trampoline_end: u8;
+}
+
+/// The handoff GDT the trampoline loads: Limine's seven descriptors, so a new
+/// kernel that assumes Limine's selectors (CS `0x28`, data `0x30`) is satisfied.
+/// The 16- and 32-bit entries are never used in long mode but keep the layout
+/// identical to what Limine presents.
+const HANDOFF_GDT: [u64; 7] = [
+    0,
+    0x0000_9B00_0000_FFFF, // 0x08 16-bit code
+    0x0000_9300_0000_FFFF, // 0x10 16-bit data
+    0x00CF_9B00_0000_FFFF, // 0x18 32-bit code
+    0x00CF_9300_0000_FFFF, // 0x20 32-bit data
+    0x0020_9B00_0000_0000, // 0x28 64-bit code
+    0x0000_9300_0000_0000, // 0x30 64-bit data
+];
+
+/// The trampoline blob as bytes, to copy into the control frame.
+fn trampoline_bytes() -> &'static [u8] {
+    let start = (&raw const kexec_trampoline_start).addr();
+    let end = (&raw const kexec_trampoline_end).addr();
+    let len = end.saturating_sub(start);
+    // SAFETY: the two linker symbols bound a contiguous run of our own `.text`
+    // (the `global_asm!` above); the bytes are live for the kernel's lifetime.
+    unsafe { core::slice::from_raw_parts(start as *const u8, len) }
+}
+
+/// The smallest buddy order whose block holds `bytes`, capped at the allocator's
+/// maximum (`BUDDY_MAX_ORDER`).
+// `order` stays below `BUDDY_MAX_ORDER` (10), so `FRAME_SIZE << order` is at most
+// 16 MiB and cannot overflow a `usize`.
+#[allow(clippy::arithmetic_side_effects)]
+fn order_for(bytes: usize) -> usize {
+    let mut order = 0usize;
+    while order < crate::mm::frame::BUDDY_MAX_ORDER && (FRAME_SIZE << order) < bytes {
+        order = order.saturating_add(1);
+    }
+    order
+}
+
+/// Round `n` up to a multiple of 16.
+fn align16(n: usize) -> usize {
+    n.saturating_add(15) & !15usize
+}
+
+/// Write a `u64` at `base_virt + off` (possibly unaligned).
+///
+/// # Safety
+///
+/// `base_virt + off .. + 8` must be within a mapped, writable region this code
+/// owns.
+unsafe fn put_u64(base_virt: u64, off: usize, val: u64) {
+    let at = base_virt.wrapping_add(off as u64) as *mut u64;
+    // SAFETY: caller's contract; unaligned because some fields follow a u16.
+    unsafe { core::ptr::write_unaligned(at, val) };
+}
+
+/// Write a `u16` at `base_virt + off`.
+///
+/// # Safety
+///
+/// As [`put_u64`], for two bytes.
+unsafe fn put_u16(base_virt: u64, off: usize, val: u16) {
+    let at = base_virt.wrapping_add(off as u64) as *mut u16;
+    // SAFETY: caller's contract.
+    unsafe { core::ptr::write_unaligned(at, val) };
+}
+
+impl PreparedHandoff {
+    /// Perform the handoff: build the trampoline control region, quiesce the
+    /// machine, and jump into the new kernel. **Does not return on success.**
+    ///
+    /// Returns a [`KernelError`] only if preparation fails *before* the machine
+    /// is quiesced (so the system is unharmed and the handoff has been freed);
+    /// once [`quiesce`] runs there is no way back and the function diverges.
+    ///
+    /// # Safety
+    ///
+    /// Only the bootstrap CPU may call this, and the caller is committing to the
+    /// restart: on success the old kernel ceases to exist. The prepared handoff's
+    /// page tables and responses become the new kernel's.
+    // The arithmetic is over small offsets within one freshly-allocated region
+    // and the casts are usize<->u64 on a 64-bit target; both are checked by the
+    // layout and the final `region_size >= needed` guard.
+    #[allow(dead_code, clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+    pub unsafe fn execute(self) -> KernelError {
+        let Some(hhdm) = crate::mm::page_table::hhdm() else {
+            // SAFETY: nothing has been quiesced; free the prepared handoff.
+            unsafe { self.free() };
+            return KernelError::NotSupported;
+        };
+
+        let blob = trampoline_bytes();
+        let blob_len = blob.len();
+        let count = self.staged.copy_ops.len();
+
+        // Lay the control region out: blob, params, GDT, GDTR, IDTR, the copy
+        // list, then a stack at the top.
+        let params_off = align16(blob_len);
+        let gdt_off = params_off + 64;
+        let gdtr_off = gdt_off + 56;
+        let idtr_off = gdtr_off + 16;
+        let copy_list_off = align16(idtr_off + 16);
+        let copy_list_bytes = count.saturating_mul(24);
+        let stack_bottom = align16(copy_list_off + copy_list_bytes);
+        const STACK_SIZE: usize = 0x1_0000; // 64 KiB, as Limine gives
+        let needed = stack_bottom.saturating_add(STACK_SIZE);
+
+        let order = order_for(needed);
+        let region = match frame::alloc_order(order) {
+            Ok(f) => f,
+            Err(e) => {
+                // SAFETY: nothing quiesced.
+                unsafe { self.free() };
+                return e;
+            }
+        };
+        let region_phys = region.addr();
+        let region_virt = region_phys.wrapping_add(hhdm);
+        let region_size = FRAME_U64 << order;
+
+        // Guard the layout actually fits (it will for any real kernel).
+        if (region_size as usize) < needed {
+            // SAFETY: the region and handoff are unused; free both.
+            unsafe {
+                let _ = frame::free_order(region, order);
+                self.free();
+            }
+            return KernelError::OutOfMemory;
+        }
+
+        // The destination the trampoline copies into must not overlap the control
+        // region, or the copy would clobber the trampoline or its data.
+        let dest_end = self
+            .staged
+            .copy_ops
+            .iter()
+            .map(|o| o.dst_phys.saturating_add(o.len))
+            .max()
+            .unwrap_or(self.dest_base);
+        let dest = PhysRange {
+            start: self.dest_base,
+            end: dest_end,
+        };
+        let region_range = PhysRange {
+            start: region_phys,
+            end: region_phys.wrapping_add(region_size),
+        };
+        if region_range.overlaps(dest) {
+            // SAFETY: nothing quiesced; free the region and the handoff.
+            unsafe {
+                let _ = frame::free_order(region, order);
+                self.free();
+            }
+            return KernelError::InvalidArgument;
+        }
+
+        // Fill the control region.
+        // SAFETY: `region_virt` is the HHDM view of a fresh contiguous allocation
+        // we own exclusively, `region_size >= needed` bytes long; every offset
+        // below is within `needed`.
+        unsafe {
+            core::ptr::copy_nonoverlapping(blob.as_ptr(), region_virt as *mut u8, blob_len);
+            for (i, &entry) in HANDOFF_GDT.iter().enumerate() {
+                put_u64(region_virt, gdt_off + i * 8, entry);
+            }
+            let gdt_hhdm = region_phys.wrapping_add(gdt_off as u64).wrapping_add(hhdm);
+            put_u16(region_virt, gdtr_off, 0x37); // 7*8 - 1
+            put_u64(region_virt, gdtr_off + 2, gdt_hhdm);
+            put_u16(region_virt, idtr_off, 0); // empty IDT
+            put_u64(region_virt, idtr_off + 2, 0);
+            for (i, op) in self.staged.copy_ops.iter().enumerate() {
+                let base = copy_list_off + i * 24;
+                put_u64(region_virt, base, op.src_phys);
+                put_u64(region_virt, base + 8, op.dst_phys);
+                put_u64(region_virt, base + 16, op.len);
+            }
+            // Parameter block (offsets match the trampoline's reads).
+            put_u64(region_virt, params_off, count as u64);
+            put_u64(
+                region_virt,
+                params_off + 0x08,
+                region_phys.wrapping_add(copy_list_off as u64).wrapping_add(hhdm),
+            );
+            put_u64(region_virt, params_off + 0x10, hhdm);
+            put_u64(region_virt, params_off + 0x18, self.tables.pml4_phys);
+            put_u64(region_virt, params_off + 0x20, self.entry);
+            put_u64(region_virt, params_off + 0x28, region_virt.wrapping_add(region_size));
+            put_u64(
+                region_virt,
+                params_off + 0x30,
+                region_phys.wrapping_add(gdtr_off as u64).wrapping_add(hhdm),
+            );
+            put_u64(
+                region_virt,
+                params_off + 0x38,
+                region_phys.wrapping_add(idtr_off as u64).wrapping_add(hhdm),
+            );
+        }
+
+        let params_hhdm = region_virt.wrapping_add(params_off as u64);
+        let blob_hhdm = region_virt;
+
+        // Point of no return: stop the machine, then jump. The handoff's frames
+        // (tables, staged image, responses) and this control region become the
+        // new kernel's; nothing here is freed.
+        // SAFETY: only the BSP reaches here, the control region and new tables are
+        // built, and the trampoline never returns to this address space.
+        unsafe {
+            quiesce();
+            asm!(
+                "mov rdi, {params}",
+                "jmp {blob}",
+                params = in(reg) params_hhdm,
+                blob = in(reg) blob_hhdm,
+                options(noreturn),
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 
@@ -2235,7 +2543,47 @@ pub fn self_test() -> KernelResult<()> {
         }
     }
 
+    // ---- trampoline helpers (the jump itself is harness-validated) ----
+    // The blob assembled and is non-empty; the layout helpers compute as expected;
+    // the GDT has Limine's 64-bit code/data selectors.
+    selftest::check!(!trampoline_bytes().is_empty(), "trampoline blob assembled");
+    selftest::check_eq!(order_for(1), 0, "order_for(1) is 0");
+    selftest::check_eq!(order_for(FRAME_SIZE), 0, "order_for(one frame) is 0");
+    selftest::check_eq!(order_for(FRAME_SIZE.saturating_add(1)), 1, "order_for(frame+1) is 1");
+    selftest::check_eq!(align16(1), 16, "align16(1) is 16");
+    selftest::check_eq!(align16(16), 16, "align16(16) is 16");
+    selftest::check_eq!(align16(17), 32, "align16(17) is 32");
+    selftest::check_eq!(
+        HANDOFF_GDT.get(5),
+        Some(&0x0020_9B00_0000_0000),
+        "GDT 64-bit code descriptor (CS 0x28)"
+    );
+    selftest::check_eq!(
+        HANDOFF_GDT.get(6),
+        Some(&0x0000_9300_0000_0000),
+        "GDT 64-bit data descriptor (0x30)"
+    );
+    // put_u16/put_u64 round-trip through a local buffer (no real frame needed).
+    let mut scratch = [0u8; 32];
+    let scratch_virt = scratch.as_mut_ptr() as u64;
+    // SAFETY: writes land within the 32-byte stack buffer (offsets 0 and 2..10).
+    unsafe {
+        put_u16(scratch_virt, 0, 0x1234);
+        put_u64(scratch_virt, 2, 0xDEAD_BEEF_CAFE_F00D);
+    }
+    selftest::check_eq!(le_u16_bytes(&scratch, 0), 0x1234, "put_u16 round-trip");
+    selftest::check_eq!(
+        le_u64(&scratch, 2),
+        Some(0xDEAD_BEEF_CAFE_F00D),
+        "put_u64 round-trip (unaligned)"
+    );
+
     Ok(())
+}
+
+/// Read a little-endian `u16` at `off` for the self-test's `put_u16` check.
+fn le_u16_bytes(buf: &[u8], off: usize) -> u16 {
+    le_u16(buf, off).unwrap_or(0)
 }
 
 // Fabricated-ELF parameters, shared between the builder and the assertions.

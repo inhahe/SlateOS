@@ -263,10 +263,80 @@ impl<'a> Scan<'a> {
     }
 }
 
+/// `strtoull(s, &end, 16)`: the value, how many bytes it took, and whether
+/// it overflowed -- glibc's `ERANGE`, after which the value is `ULLONG_MAX`.
+///
+/// Leading spaces and a sign are allowed, and a `0x` or `0X` before the
+/// digits. A `0x` with no hexadecimal digit after it is glibc's one special
+/// case: the `0` is the number, and the end is left pointing at the `x` --
+/// so `0x` and `0xg` take one byte, not zero and not two. With no digits at
+/// all nothing is taken, the sign and spaces included. A minus sign negates
+/// in `unsigned long long`, as for [`strtoul`].
+#[must_use]
+pub fn strtoull_hex(s: &[u8]) -> (u64, usize, bool) {
+    let (mut at, neg) = prefix(s);
+    let rest = s.get(at..).unwrap_or_default();
+    let hex_prefix = matches!(rest, [b'0', b'x' | b'X', ..]);
+    if hex_prefix {
+        at = at.saturating_add(2);
+    }
+    let mut mag: u64 = 0;
+    let mut overflow = false;
+    let mut n = 0usize;
+    for &d in s.get(at..).unwrap_or_default() {
+        let v = match d {
+            b'0'..=b'9' => d.wrapping_sub(b'0'),
+            b'a'..=b'f' => d.wrapping_sub(b'a').wrapping_add(10),
+            b'A'..=b'F' => d.wrapping_sub(b'A').wrapping_add(10),
+            _ => break,
+        };
+        match mag
+            .checked_mul(16)
+            .and_then(|m| m.checked_add(u64::from(v)))
+        {
+            Some(m) => mag = m,
+            None => overflow = true,
+        }
+        n = n.saturating_add(1);
+    }
+    if n == 0 {
+        // No digits: `noconv`. After a `0x`, the `0` was the number.
+        return if hex_prefix {
+            (0, at.saturating_sub(1), false)
+        } else {
+            (0, 0, false)
+        };
+    }
+    let value = if overflow {
+        u64::MAX
+    } else if neg {
+        mag.wrapping_neg()
+    } else {
+        mag
+    };
+    (value, at.saturating_add(n), overflow)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strtoull_hex_reads_what_glibc_reads() {
+        assert_eq!(strtoull_hex(b"00000000000004a3"), (0x4a3, 16, false));
+        assert_eq!(strtoull_hex(b"FFFFFFFFFFFFFFFF"), (u64::MAX, 16, false));
+        assert_eq!(strtoull_hex(b"1FFFFFFFFFFFFFFFF"), (u64::MAX, 17, true));
+        assert_eq!(strtoull_hex(b"0x1f"), (0x1f, 4, false));
+        assert_eq!(strtoull_hex(b" -1"), (u64::MAX, 3, false));
+        assert_eq!(strtoull_hex(b"12\nSigBlk"), (0x12, 2, false));
+        // The `0x` special case, and no number at all.
+        assert_eq!(strtoull_hex(b"0x"), (0, 1, false));
+        assert_eq!(strtoull_hex(b"0xg"), (0, 1, false));
+        assert_eq!(strtoull_hex(b"-"), (0, 0, false));
+        assert_eq!(strtoull_hex(b""), (0, 0, false));
+        assert_eq!(strtoull_hex(b"g"), (0, 0, false));
+    }
 
     #[test]
     fn strtol_reads_what_glibc_reads() {

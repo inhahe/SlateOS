@@ -640,17 +640,26 @@ macro_rules! diag {
 /// The report's own delivery is not checked, because there is nowhere left to
 /// say so.
 pub fn write_error(program: &str, err: &io::Error) {
+    write_error_bytes(program.as_bytes(), err);
+}
+
+/// [`write_error`] for a program named by bytes: one whose name is
+/// `argv[0]`'s, as procps' programs print it (`program_invocation_short_name`),
+/// and so need not be text.
+pub fn write_error_bytes(program: &[u8], err: &io::Error) {
+    let mut line = program.to_vec();
+    if is_earlier_failure(err) {
+        // `errno` was zeroed by `close_stream`: `error (0, 0, ...)` prints
+        // no reason. See [`Stream::finish`].
+        line.extend_from_slice(b": write error\n");
+    } else {
+        line.extend_from_slice(format!(": write error: {}\n", strerror(err)).as_bytes());
+    }
     // Through `diag_bytes`, so that this failing counts as a lost diagnostic
     // like any other. It makes no difference to the status when stdout is what
     // failed — the caller is already returning a failure — but it does when
     // some other stream is, and it costs nothing to be consistent.
-    if is_earlier_failure(err) {
-        // `errno` was zeroed by `close_stream`: `error (0, 0, ...)` prints
-        // no reason. See [`Stream::finish`].
-        diag_bytes(format!("{program}: write error\n").as_bytes());
-    } else {
-        diag_bytes(format!("{program}: write error: {}\n", strerror(err)).as_bytes());
-    }
+    diag_bytes(&line);
 }
 
 /// A write failed before the stream was closed, and the close itself did not:
@@ -749,11 +758,19 @@ pub fn close_stdout(program: &str, out: Stream, earned: ExitCode) -> ExitCode {
 /// and it overrides `earned` in both directions — measured, `tty x` is 2 with
 /// a working stderr and 3 without one.
 pub fn close_stdout_with(program: &str, out: Stream, earned: ExitCode, failure: u8) -> ExitCode {
+    close_stdout_bytes(program.as_bytes(), out, earned, failure)
+}
+
+/// [`close_stdout_with`] for a program named by bytes -- see
+/// [`write_error_bytes`]. procps' `close_stdout` is gnulib's in all that
+/// matters here: silent for a reader that left (`EPIPE`), `write error`
+/// otherwise, and `failure` for that or for a lost diagnostic.
+pub fn close_stdout_bytes(program: &[u8], out: Stream, earned: ExitCode, failure: u8) -> ExitCode {
     let after_stdout = match out.finish() {
         Ok(()) => earned,
         Err(e) if reader_gone(&e) => earned,
         Err(e) => {
-            write_error(program, &e);
+            write_error_bytes(program, &e);
             ExitCode::from(failure)
         }
     };

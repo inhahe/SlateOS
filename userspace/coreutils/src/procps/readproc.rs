@@ -128,6 +128,10 @@ pub struct Proc {
     pub cmd: Option<Vec<u8>>,
     pub cmdline: Option<Vec<u8>>,
     pub environ: Option<Vec<u8>>,
+    /// `cgroup` as `file2strvec` splits it: one string per line, unescaped,
+    /// with the empty string the file's final newline leaves at the end; or
+    /// `["-"]` for a file that cannot be read or is empty. `pgrep --cgroup`'s.
+    pub cgroup_v: Option<Vec<Vec<u8>>>,
     pub cgroup: Option<Vec<u8>>,
     pub cgname: Option<Vec<u8>>,
     pub exe: Option<Vec<u8>>,
@@ -163,6 +167,9 @@ pub struct Fill {
     pub supgrp: bool,
     pub environ: bool,
     pub cmdline: bool,
+    /// `PROC_FILLCGROUP`: [`Proc::cgroup_v`].
+    pub cgroup_v: bool,
+    /// `PROC_EDITCGRPCVT`: [`Proc::cgroup`] and [`Proc::cgname`].
     pub cgroup: bool,
     pub oom: bool,
     pub ns: bool,
@@ -201,9 +208,6 @@ pub const SMAPS: [&[u8]; 20] = [
 pub const SMAP_PSS: usize = 1;
 pub const SMAP_PRIVATE_CLEAN: usize = 7;
 pub const SMAP_PRIVATE_DIRTY: usize = 8;
-
-/// `ns_names`, in `procps_ns_read_pid`'s order.
-pub const NS_NAMES: [&str; 8] = ["cgroup", "ipc", "mnt", "net", "pid", "time", "user", "uts"];
 
 /// A C string's text: everything before the first NUL.
 #[must_use]
@@ -761,26 +765,71 @@ fn autogroup_fill(dir: &Path, p: &mut Proc) {
     }
 }
 
-/// `stat`'s inode number for `path`, following links.
-#[cfg(unix)]
-fn inode(path: &Path) -> Option<u64> {
-    use std::os::unix::fs::MetadataExt;
-    fs::metadata(path).ok().map(|m| m.ino())
-}
-
-/// The host build has no inodes; it never reads a real `/proc`.
-#[cfg(not(unix))]
-fn inode(_path: &Path) -> Option<u64> {
-    None
-}
-
-/// `procps_ns_read_pid`: each namespace's inode, 0 where `stat` fails.
-fn ns_read_pid(root: &Path, tid: i32, ns: &mut [u64; 8]) {
-    if tid < 1 {
-        return;
+/// `procps_ns_read_pid (p->tid, &p->ns)`, whose `-EINVAL` for a PID below 1
+/// upstream ignores -- leaving the zeros the record started with.
+fn ns_fill(root: &Path, tid: i32, ns: &mut [u64; 8]) {
+    if let Some(read) = super::namespace::ns_read_pid(root, tid) {
+        *ns = read;
     }
-    for (slot, name) in ns.iter_mut().zip(NS_NAMES) {
-        *slot = inode(&root.join(format!("{tid}/ns/{name}"))).unwrap_or(0);
+}
+
+/// How much `file2strvec` asks `read` for at a time: `sizeof buf - 1`.
+const STRVEC_CHUNK: usize = 2047;
+
+/// `file2strvec`: a file split into strings at each NUL and each newline, as
+/// `PROC_FILLCGROUP` reads `cgroup` (and `PROC_FILLENV`, `PROC_FILLARG` read
+/// their files, though no port here asks for those).
+///
+/// Every terminator ends one string, so a file ending in a newline has an
+/// empty last string, and an empty line in the middle is an empty string
+/// there -- which matters to a caller that stops at the first empty one, as
+/// `pgrep --cgroup` does. A last byte that is not NUL has one added after it.
+///
+/// `None` is upstream's NULL: a file that cannot be opened, holds nothing, or
+/// fails to read part way. The reading is upstream's loop, which stops at the
+/// first read that returns less than it asked for rather than at end of file;
+/// on `/proc`, where one read returns at most a page, those can differ.
+fn file2strvec(path: &Path) -> Option<Vec<Vec<u8>>> {
+    let mut file = fs::File::open(path).ok()?;
+    let mut data: Vec<u8> = Vec::new();
+    let mut buf = [0u8; STRVEC_CHUNK];
+    loop {
+        // An error of any kind -- `EINTR` included, as C's `read` reports it --
+        // ends the loop with `n < 0`, which discards everything read.
+        let n = file.read(&mut buf).ok()?;
+        let end_of_file = n < STRVEC_CHUNK;
+        if n == 0 && data.is_empty() {
+            // Nothing read now, nothing read before.
+            return None;
+        }
+        let chunk = buf.get(..n).unwrap_or_default();
+        data.extend_from_slice(chunk);
+        let last_not_nul = data.last().is_some_and(|&b| b != 0);
+        if end_of_file && last_not_nul {
+            data.push(0);
+        }
+        if end_of_file {
+            break;
+        }
+    }
+    let mut out = Vec::new();
+    let mut cur = Vec::new();
+    for &b in &data {
+        if b == 0 || b == b'\n' {
+            out.push(std::mem::take(&mut cur));
+        } else {
+            cur.push(b);
+        }
+    }
+    Some(out)
+}
+
+/// `PROC_FILLCGROUP`: `cgroup` by [`file2strvec`], or `vectorize_dash_rc`'s
+/// one-string vector `-` where that returns NULL.
+fn cgroup_strvec(dir: &Path) -> Vec<Vec<u8>> {
+    match file2strvec(&dir.join("cgroup")) {
+        Some(v) => v,
+        None => vec![b"-".to_vec()],
     }
 }
 
@@ -909,6 +958,9 @@ impl Reader {
         if self.fill.cmdline {
             p.cmdline = Some(self.cmdline_cvt(path, p));
         }
+        if self.fill.cgroup_v {
+            p.cgroup_v = Some(cgroup_strvec(path));
+        }
         if self.fill.cgroup {
             let (cg, name) = cgroup_cvt(path, self.utf8);
             p.cgroup = Some(cg);
@@ -923,7 +975,7 @@ impl Reader {
             }
         }
         if self.fill.ns {
-            ns_read_pid(&self.root, p.tid, &mut p.ns);
+            ns_fill(&self.root, p.tid, &mut p.ns);
         }
         if self.fill.systemd {
             p.sd = Some(b"?".to_vec());
@@ -970,6 +1022,9 @@ impl Reader {
         if self.fill.environ {
             t.environ = Some(environ_cvt(path, self.utf8));
         }
+        if self.fill.cgroup_v {
+            t.cgroup_v = Some(cgroup_strvec(path));
+        }
         if self.fill.cgroup {
             let (cg, name) = cgroup_cvt(path, self.utf8);
             t.cgroup = Some(cg);
@@ -990,7 +1045,7 @@ impl Reader {
             }
         }
         if self.fill.ns {
-            ns_read_pid(&self.root, t.tid, &mut t.ns);
+            ns_fill(&self.root, t.tid, &mut t.ns);
         }
         if self.fill.lxc {
             t.lxcname = Some(lxc_name(path));

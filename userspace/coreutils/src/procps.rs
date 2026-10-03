@@ -1,4 +1,4 @@
-//! procps-ng 4.0.4's library: the pieces `uptime`, `w` and `ps` share.
+//! procps-ng 4.0.4's library: the pieces `uptime`, `w`, `ps` and `pgrep` share.
 //!
 //! procps' programs are thin over `libproc2`. The line `uptime` prints is the
 //! first line `w` prints, and both come from one function in
@@ -6,7 +6,7 @@
 //! `library/readproc.c` by way of `library/pids.c`, which is where `ps` gets
 //! its columns too. This module is those library functions, transcribed, so
 //! that programs here which read the same file read it with one function --
-//! as the programs there do. `w` and `ps` read `/proc/<pid>` through
+//! as the programs there do. `w`, `ps` and `pgrep` read `/proc/<pid>` through
 //! [`readproc`] alone.
 //!
 //! | here | procps-ng 4.0.4 |
@@ -23,6 +23,9 @@
 //! | [`devname`] | `library/devname.c`: a terminal's number to its name |
 //! | [`pwcache`] | `library/pwcache.c`: user and group names by number |
 //! | [`sysinfo`] | `procps_pid_length`, `btime` from `procps_stat_new`, `MemTotal`, `procps_uptime`, `lookup_wchan` |
+//! | [`namespace`] | `library/namespace.c`: a process's namespaces, by inode |
+//! | [`cvt`] | C's `double`-to-integer casts as gcc compiles them for x86-64 |
+//! | [`signals`] | `local/signals.c`'s `signal_name_to_number`, procps' own spellings of a signal |
 //!
 //! # Why `fscanf`, and not `str::parse`
 //!
@@ -38,10 +41,13 @@ use std::io;
 
 use localtime::Tm;
 
+pub mod cvt;
 pub mod devname;
+pub mod namespace;
 pub mod pwcache;
 pub mod readproc;
 pub mod scanf;
+pub mod signals;
 pub mod sysinfo;
 use procinfo::ProcFs;
 

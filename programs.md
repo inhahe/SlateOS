@@ -11,9 +11,9 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**451 programs; 88 on the image, 6 carried inside the kernel.**
+**452 programs; 88 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 296
+## Userland utilities and services (`userspace/`, lane B) -- 297
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
@@ -198,10 +198,11 @@ two disagree.
 | `paste` | Write corresponding lines of several files side by side. | yes | `coreutils` |  |
 | `patch` | Apply a diff file to originals. | yes | `coreutils` |  |
 | `pathchk` | Check whether file names are valid or portable. |  | `coreutils` |  |
-| `pgrep` | Process Grep / Kill Utility |  |  |  |
+| `pgrep` | Look up processes by name and other attributes. |  | `coreutils` |  |
 | `ping` | ICMP Ping Utility |  |  |  |
 | `pinky` | A lightweight `finger`: who is logged in, or what is known about named users. |  | `coreutils` |  |
 | `pkg` | Slate OS package manager. |  |  |  |
+| `pkill` | Signal processes chosen by name and other attributes. |  | `coreutils` |  |
 | `polkit` | PolicyKit Authorization Framework |  |  |  |
 | `powerctl` | Power Management Utility | yes |  |  |
 | `pr` | Paginate or columnate files for printing. |  | `coreutils` |  |

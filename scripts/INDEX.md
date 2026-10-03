@@ -311,6 +311,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/paste-probe.py` | Ad-hoc measurement of GNU `paste`. Not part of the build; kept only so the |
 | `scripts/patch-diff.sh` | Differential test: our `patch` against GNU patch. |
 | `scripts/pathchk-diff.sh` | pathchk-diff.sh — compare our `pathchk` against GNU's, inside WSL. |
+| `scripts/pgrep-diff.sh` | Differential test: our `pgrep`, `pkill` and `pidwait` against procps-ng |
 | `scripts/pinky-diff.sh` | pinky-diff.sh — compare our `pinky` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/pkgconf-spike/run.sh` | Cross-compile upstream pkgconf and link it against SlateOS's own libc.a. |
 | `scripts/positional-model-limits.py` | Where the positional contamination model can and cannot see, derived from its code. |
@@ -335,7 +336,8 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/probe-env-split-options.sh` | Round 3 of the -S measurement: are OPTIONS inside the split string honoured? |
 | `scripts/probe-env-split-string.sh` | Measure GNU env's -S/--split-string grammar. NOT a gate and not a harness -- |
 | `scripts/probe-tcc-hosted.sh` | Probe: what files does tcc open to compile+link a hosted dynamic glibc program? |
-| `scripts/procps-ref.sh` | Builds procps-ng 4.0.4's `w` and `ps` from the release, for harnesses whose |
+| `scripts/procps-ref.sh` | Builds procps-ng 4.0.4's `w`, `ps`, `pgrep`, `pkill` and `pidwait` from the |
+| `scripts/procps_fixture.py` | Fake /proc trees for the procps differential harnesses. |
 | `scripts/proctree.py` | proctree.py — launch a child process so that its *whole tree* can be killed. |
 | `scripts/program-catalogue.py` | The catalogue of every program the workspace builds: `programs.md`. |
 | `scripts/prune-build-cache.py` | Prune the parts of a cargo `target/` that no recent build has used. |
@@ -517,4 +519,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_507 scripts._
+_509 scripts._

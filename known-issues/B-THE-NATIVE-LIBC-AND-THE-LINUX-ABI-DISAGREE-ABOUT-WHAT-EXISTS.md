@@ -100,8 +100,18 @@ test compares the two answers for the same call.
    wants step 2's decision first rather than being done opportunistically.
 
 **Trigger.** Step 1 is done. Step 2 is worth raising with the operator only if
-a port actually needs one of these; none does today (CPython, bash and make
-link clean without them), which is why this is filed rather than escalated.
+a port actually needs one of these; none did (CPython, bash and make link clean
+without them), which is why this was filed rather than escalated.
+
+**The trigger fired for `pidfd_open` on 2026-10-03.** procps-ng's `pidwait`
+is ported (`userspace/coreutils/src/pgrep.rs`, measured by
+`scripts/pgrep-diff.sh`) and waits with nothing else: `pidfd_open` on each
+process, the descriptors in one epoll set, `epoll_wait` until each reports its
+process gone. It is not built for SlateOS while the native call is `ENOSYS`.
+`pidfd_open` is the member of row one this entry already called the easy yes,
+so it went straight to the lanes that own the change, as
+`requests/b-ad-pidwait-needs-pidfd-open-on-the-native-abi.md`; the rest of
+row one still waits for a port of its own.
 Note that the audit turned up a reason to answer step 2 with "no" for at least
 one member of row one — see the `kcmp` entry immediately below.
 

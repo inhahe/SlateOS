@@ -3698,11 +3698,22 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
         // regions created by SYS_MMAP with MAP_LAZY).
         let task_id = sched::current_task_id();
         let pid = crate::proc::thread::owner_process(task_id).unwrap_or(0);
-        if pid != 0 && crate::proc::pcb::try_resolve_fault(pid, cr2, error) {
-            mm::fault::record_user_resolved();
-            // Minor fault: demand-zero / CoW resolved without I/O.
-            sched::account_fault(task_id, false);
-            return; // Demand-paged successfully — retry the instruction.
+        if pid != 0 {
+            // Not waiting for the process table here (interrupts are off in
+            // this handler): a busy table returns to the access, which faults
+            // again with interrupts having come and gone in between. Until
+            // 2026-10-03 a busy table was taken as an unresolvable fault, and
+            // the process was sent SIGSEGV for a page it had every right to.
+            match crate::proc::pcb::resolve_fault(pid, cr2, error, false) {
+                crate::proc::pcb::FaultOutcome::Resolved => {
+                    mm::fault::record_user_resolved();
+                    // Minor fault: demand-zero / CoW resolved without I/O.
+                    sched::account_fault(task_id, false);
+                    return; // Demand-paged successfully — retry the instruction.
+                }
+                crate::proc::pcb::FaultOutcome::Busy => return,
+                crate::proc::pcb::FaultOutcome::Unresolvable => {}
+            }
         }
 
         // Second, try stack growth (stack VMAs are handled separately

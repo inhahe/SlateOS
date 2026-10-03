@@ -6178,20 +6178,84 @@ fn resolve_subpaged_fault(
     true
 }
 
-/// Resolve a user-space page fault against a process's VMA list.
-///
-/// Called from the page fault handler (IDT vector 14) when a user-mode
-/// fault occurs on a lazy-allocated region.  This function:
+/// What [`resolve_fault`] made of a page fault.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaultOutcome {
+    /// The page is there now: run the access again.
+    Resolved,
+    /// Nothing the kernel can do: no region covers the address, or the
+    /// access is one it does not allow.
+    Unresolvable,
+    /// The process table was held elsewhere, and the caller asked not to
+    /// wait for it: nothing is known yet, so try again.
+    Busy,
+}
+
+/// Resolve a page fault in `pid`'s address space against its VMA list:
+/// break a copy-on-write share, or populate a committed page that is not
+/// there yet (demand paging), as the hardware fault would have.
 ///
 /// 1. Looks up the faulting address in the process's VMA list.
 /// 2. Checks permissions against the error code.
 /// 3. For Anonymous VMAs: allocates a frame, zeroes it, maps it.
 ///
-/// Uses `try_lock()` to avoid deadlock if the process table is already
-/// held (e.g., from a syscall that triggered a fault).
+/// **The process table being held is not an answer.** Both paths read
+/// the table, and another CPU holding it says nothing about the fault.
+/// Until 2026-10-03 the resolver only tried the lock and reported a
+/// busy table as an unresolvable fault, so a program could be killed
+/// with `SIGSEGV` for a copy-on-write write after `fork`, and a syscall
+/// given a fresh buffer could fail with `EFAULT`, whenever another CPU
+/// happened to hold the table.
 ///
-/// Returns `true` if the fault was resolved, `false` if not.
+/// - `wait`: wait for the table, unless the calling task holds it
+///   already (a kernel path that faulted under it), in which case
+///   waiting could never end and the fault is `Busy`. For callers in
+///   thread context ([`try_resolve_fault`]).
+/// - not `wait`: `Busy` at once. For the #PF handler on a fault from user
+///   mode, which returns and lets the access fault again: interrupts
+///   come back between the attempts, so a holder that is itself waiting
+///   on this CPU (a TLB shootdown, say) is never waited on with them off.
+pub fn resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64, wait: bool) -> FaultOutcome {
+    let mut busy = false;
+    if resolve_fault_inner(pid, fault_addr, error_code, wait, &mut busy) {
+        FaultOutcome::Resolved
+    } else if busy {
+        FaultOutcome::Busy
+    } else {
+        FaultOutcome::Unresolvable
+    }
+}
+
+/// [`resolve_fault`] for a caller in thread context: waits for the process
+/// table, and is `true` only if the fault was resolved.
 pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bool {
+    resolve_fault(pid, fault_addr, error_code, true) == FaultOutcome::Resolved
+}
+
+/// The process table, for [`resolve_fault`]: at once when it is free; with
+/// `wait`, after waiting for it, unless the calling task holds it already.
+/// `None` is "busy".
+fn lock_table_for_fault(
+    wait: bool,
+) -> Option<crate::sync::MutexGuard<'static, BTreeMap<ProcessId, Process>>> {
+    if let Some(table) = PROCESS_TABLE.try_lock() {
+        return Some(table);
+    }
+    if wait && !PROCESS_TABLE.held_by_current_task() {
+        return Some(PROCESS_TABLE.lock());
+    }
+    None
+}
+
+/// [`resolve_fault`]'s body: `true` when resolved; `false` with `busy` set
+/// when the table could not be had (see [`lock_table_for_fault`]).
+fn resolve_fault_inner(
+    pid: ProcessId,
+    fault_addr: u64,
+    error_code: u64,
+    wait: bool,
+    busy: &mut bool,
+) -> bool {
     use crate::mm::fault::PageFaultError;
     use crate::mm::frame::{self, FRAME_SIZE};
     use crate::mm::page_table::{self, PageFlags, VirtAddr};
@@ -6208,7 +6272,8 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
     // A present page with the COW bit set means this page is shared
     // and needs to be copied on first write.
     if error.is_present() && error.is_write() {
-        let Some(table) = PROCESS_TABLE.try_lock() else {
+        let Some(table) = lock_table_for_fault(wait) else {
+            *busy = true;
             return false;
         };
         let Some(proc) = table.get(&pid) else {
@@ -6230,9 +6295,10 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
         return false;
     }
 
-    // Try to acquire the process table lock.  If it's already held,
-    // we can't resolve (avoid deadlock).
-    let Some(table) = PROCESS_TABLE.try_lock() else {
+    // The process table, for the VMA lookup (see `resolve_fault` on why a
+    // busy table is not an unresolvable fault).
+    let Some(table) = lock_table_for_fault(wait) else {
+        *busy = true;
         return false;
     };
     let Some(proc) = table.get(&pid) else {
@@ -8353,6 +8419,7 @@ pub fn self_test() -> KernelResult<()> {
     test_reserve_unmapped_area()?;
     test_reset_linux_state_for_exec()?;
     test_prot_none()?;
+    test_fault_with_the_table_held()?;
     test_rlimits()?;
     test_canonical_path()?;
 
@@ -8717,6 +8784,81 @@ fn test_prot_none() -> KernelResult<()> {
 
     destroy(pid);
     serial_println!("[proc]   real PROT_NONE (resolver gate + mprotect round-trip): OK");
+    Ok(())
+}
+
+/// A fault met with the process table held is `Busy`, not `Unresolvable`
+/// ([`resolve_fault`]): the #PF handler retries it rather than killing the
+/// process, and a waiting caller that holds the table itself gets an answer
+/// rather than a self-deadlock. Once the table is free, the same fault
+/// resolves.
+///
+/// Both holds are this task's: for the no-wait call it stands for another
+/// CPU holding the table, and for the waiting call it is the caller's own.
+/// A wait for another CPU's hold needs a second CPU, and is
+/// `PROCESS_TABLE.lock()`.
+fn test_fault_with_the_table_held() -> KernelResult<()> {
+    use crate::mm::page_table::PageFlags;
+
+    let frame = crate::mm::frame::FRAME_SIZE as u64;
+    let pid = create("fault-busy-test", 0);
+    set_running(pid)?;
+    if get_pml4(pid).is_none_or(|p| p == 0) {
+        serial_println!("[proc]   FAIL: busy-table fault test process has no PML4");
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
+
+    // A committed anonymous frame, not populated yet: a read of it
+    // demand-pages.
+    let base: u64 = 0x0000_0031_0000_0000; // clear of test_prot_none's window
+    let flags = PageFlags::PRESENT
+        | PageFlags::WRITABLE
+        | PageFlags::USER_ACCESSIBLE
+        | PageFlags::NO_EXECUTE;
+    if let Err(e) = add_vma(
+        pid,
+        Vma {
+            start: base,
+            end: base.saturating_add(frame),
+            kind: VmaKind::Anonymous,
+            flags,
+        },
+    ) {
+        serial_println!("[proc]   FAIL: busy-table fault add_vma {:?}", e);
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
+
+    // A user read fault: not present, not a write.
+    let read_fault = 1 << 2;
+    let (no_wait, waiting_holder) = {
+        let _table = PROCESS_TABLE.lock();
+        (
+            resolve_fault(pid, base, read_fault, false),
+            resolve_fault(pid, base, read_fault, true),
+        )
+    };
+    let free = resolve_fault(pid, base, read_fault, false);
+    destroy(pid);
+
+    if no_wait != FaultOutcome::Busy
+        || waiting_holder != FaultOutcome::Busy
+        || free != FaultOutcome::Resolved
+    {
+        serial_println!(
+            "[proc]   FAIL: busy-table fault: table held, no wait {:?}; table held by the \
+             waiter {:?}; table free {:?} (want Busy, Busy, Resolved)",
+            no_wait,
+            waiting_holder,
+            free
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[proc]   a fault met with the process table held is retried, not refused, and \
+         resolves once it is free: OK"
+    );
     Ok(())
 }
 

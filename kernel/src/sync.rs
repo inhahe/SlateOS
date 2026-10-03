@@ -532,6 +532,23 @@ impl<T> Mutex<T> {
         report_spin_stall(self.name, self.addr(), &self.owner, iters, elapsed_cycles);
     }
 
+    /// Whether the calling task holds this lock: the one case in which
+    /// waiting for it can never end (and [`Self::lock`] panics as a
+    /// self-deadlock). For a caller that would wait for the lock rather than
+    /// fail, and must tell a hopeless wait from a short one
+    /// (`proc::pcb::resolve_fault`).
+    ///
+    /// Exact for the caller's own holds, although the owner stamp is
+    /// otherwise diagnostic: the holder writes it after acquiring and clears
+    /// it before releasing, preemption is off for the whole hold, and no
+    /// other task writes it meanwhile. An interrupt handler is answered for
+    /// the task it interrupted, which is the right answer: it runs on that
+    /// task's CPU, under that task's holds.
+    #[must_use]
+    pub fn held_by_current_task(&self) -> bool {
+        self.owner.load(Ordering::Relaxed) == crate::sched::current_task_id()
+    }
+
     /// Try to acquire the lock without blocking.
     ///
     /// If successful, records the acquisition with lockdep.

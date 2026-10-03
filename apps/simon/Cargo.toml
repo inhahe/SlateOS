@@ -8,6 +8,8 @@ edition = "2024"
 gamechrome = { path = "../gamechrome" }
 guitk = { path = "../../gui/toolkit" }
 oswindow = { path = "../../gui/window" }
+# `is_plain`: a key held with Ctrl, Alt or the Windows key is not the game's.
+textline = { path = "../textline" }
 
 [dev-dependencies]
 # `palette_check`: the window is drawn from the palette.

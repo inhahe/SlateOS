@@ -1882,8 +1882,9 @@ pub fn key_intent(ev: &KeyEvent) -> Option<Intent> {
         return None;
     }
     // Ctrl and Alt combinations belong to the window, not to the game: a Ctrl+S
-    // that changes the speed is a Ctrl+S the desktop cannot have.
-    if ev.modifiers.ctrl || ev.modifiers.alt {
+    // that changes the speed is a Ctrl+S the desktop cannot have. So do the
+    // Windows key's, which are the desktop's: Windows+N dealt a new game.
+    if !textline::is_plain(ev.modifiers) {
         return None;
     }
     match ev.key {
@@ -4261,20 +4262,27 @@ mod tests {
     }
 
     #[test]
-    fn the_window_keeps_its_ctrl_and_alt_combinations() {
+    fn the_window_and_the_desktop_keep_their_combinations() {
         // A Ctrl+S that changes the speed is a Ctrl+S the desktop cannot have.
-        // The game had exactly that before the rewrite.
-        let alt = Modifiers {
+        // The game had exactly that before the rewrite -- and, after it, with
+        // the Windows key: Windows+N dealt a new game.
+        let altgr = Modifiers {
             alt: true,
-            ..Modifiers::default()
+            ..Modifiers::ctrl()
         };
         for key in EVERY_KEY {
             assert_eq!(key_intent(&probe::ctrl(key)), None, "Ctrl+{key:?} plays");
-            assert_eq!(
-                key_intent(&probe::press_with(key, alt)),
-                None,
-                "Alt+{key:?} plays"
-            );
+            for (held, name) in [
+                (Modifiers::alt(), "Alt"),
+                (Modifiers::super_key(), "Windows"),
+                (altgr, "AltGr"),
+            ] {
+                assert_eq!(
+                    key_intent(&probe::press_with(key, held)),
+                    None,
+                    "{name}+{key:?} plays"
+                );
+            }
         }
         let mut app = game();
         let before = app.speed;

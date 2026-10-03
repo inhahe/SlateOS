@@ -177,9 +177,9 @@ start_session() {
 }
 
 stop_sessions() {
-  local s line sid p
+  local s sid p
   for s in $sessions; do
-    if [ -s "$work/$s.info" ] && read -r line sid <"$work/$s.info"; then
+    if [ -s "$work/$s.info" ] && read -r _ sid <"$work/$s.info"; then
       # Every process of the session, each by its own PID: these are the
       # processes this harness started and nothing else.
       for p in $(ps -o pid= -s "$sid" 2>/dev/null); do
@@ -217,17 +217,18 @@ for s in $sessions; do
 done
 sleep 1
 for s in $sessions; do
-  if ! read -r line pid <"$work/$s.info"; then
+  if ! read -r _ pid <"$work/$s.info" || [ -z "$pid" ]; then
     echo "w-diff: session $s did not start" >&2
     exit 1
   fi
-  eval "${s}_line=\$line ${s}_pid=\$pid"
 done
-# shellcheck disable=SC2154 # set by the eval above
-{
-  L1=$s1_line P1=$s1_pid L2=$s2_line P2=$s2_pid L3=$s3_line P3=$s3_pid
-  L4=$s4_line P4=$s4_pid L5=$s5_line P5=$s5_pid L6=$s6_line P6=$s6_pid
-}
+# Each session's terminal (less /dev/) and leader, as session.py printed them.
+read -r L1 P1 <"$work/s1.info"
+read -r L2 P2 <"$work/s2.info"
+read -r L3 P3 <"$work/s3.info"
+read -r L4 P4 <"$work/s4.info"
+read -r L5 P5 <"$work/s5.info"
+read -r L6 P6 <"$work/s6.info"
 
 # The terminals' access times, re-set before every case: the idle times are
 # then three days, two and a half hours, and the future (`?`).

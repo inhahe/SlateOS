@@ -9,9 +9,10 @@ the release the port's LZMA SDK 26.00 sources are from. Run from Windows:
 
 What it writes, beside itself:
 
-- `input/`: the tree every archive is made of -- text, random bytes,
+- `input.txt`: the tree every archive is made of -- text, random bytes,
   machine-code-like bytes, an empty file, an empty folder, a name that is not
-  ASCII -- generated, so it is the same every time.
+  ASCII -- one line an entry, with each file's size and FNV-1a hash. The tree
+  is generated, built in `input/` while the archives are made, and removed.
 - `made/`: archives of `input/` made by 7-Zip with each method, filter and
   option the reader is to handle, and `made.txt`: how each was made and what
   `7z t` said.
@@ -140,6 +141,13 @@ def verdict(archive: pathlib.Path) -> str:
     return "ERR " + (",".join(sorted(kinds)) or f"exit{r.returncode}")
 
 
+def fnv(data: bytes) -> int:
+    h = 0xCBF29CE484222325
+    for b in data:
+        h = ((h ^ b) * 0x100000001B3) & MASK64
+    return h
+
+
 def write_tree(root: pathlib.Path, tree) -> None:
     if root.exists():
         shutil.rmtree(root)
@@ -173,6 +181,10 @@ def main() -> None:
 
     src = HERE / "input"
     write_tree(src, TREE)
+    listing = ["# D path | F size fnv64 path -- the tree every archive in made/ holds"]
+    for path, data in sorted(TREE):
+        listing.append(f"D {path}" if data is None else f"F {len(data)} {fnv(data):016x} {path}")
+    (HERE / "input.txt").write_text("\n".join(listing) + "\n", encoding="utf-8", newline="\n")
 
     made = HERE / "made"
     if made.exists():
@@ -189,6 +201,7 @@ def main() -> None:
         archive = make(name, SMALL[name], small_src, made)
         lines.append(f"{archive.name} {verdict(archive)} -- {' '.join(SMALL[name])}")
     shutil.rmtree(small_src)
+    shutil.rmtree(src)
     (HERE / "made.txt").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
 
     out = ["# == archive, then: position xor verdict -- 7z t's"]

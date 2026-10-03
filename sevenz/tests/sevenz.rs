@@ -17,26 +17,46 @@ fn read(rel: &str) -> Vec<u8> {
     std::fs::read(data_dir().join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"))
 }
 
-/// The input tree's files, by archive path (`/` between components).
-fn inputs() -> Vec<(String, Option<Vec<u8>>)> {
-    let root = data_dir().join("input");
-    let mut out = Vec::new();
-    let mut stack = vec![root.clone()];
-    while let Some(dir) = stack.pop() {
-        for e in std::fs::read_dir(&dir).unwrap() {
-            let e = e.unwrap();
-            let path = e.path();
-            let rel = path
-                .strip_prefix(&root)
-                .unwrap()
-                .to_string_lossy()
-                .replace('\\', "/");
-            if path.is_dir() {
-                out.push((rel, None));
-                stack.push(path);
-            } else {
-                out.push((rel, Some(std::fs::read(&path).unwrap())));
+/// FNV-1a, 64-bit: `generate.py`'s `fnv`.
+fn fnv(data: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in data {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// The input tree (`input.txt`), by archive path: a folder, or a file's
+/// size and hash.
+fn inputs() -> Vec<(String, Option<(usize, u64)>)> {
+    let list = std::fs::read_to_string(data_dir().join("input.txt")).unwrap();
+    let mut out: Vec<_> = list
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .map(|l| match l.split_once(' ').unwrap() {
+            ("D", path) => (path.to_owned(), None),
+            ("F", rest) => {
+                let mut f = rest.splitn(3, ' ');
+                let size = f.next().unwrap().parse().unwrap();
+                let hash = u64::from_str_radix(f.next().unwrap(), 16).unwrap();
+                (f.next().unwrap().to_owned(), Some((size, hash)))
             }
+            other => panic!("input.txt: {other:?}"),
+        })
+        .collect();
+    // The archive lists each folder a file is in, too.
+    let mut dirs = Vec::new();
+    for (path, _) in &out {
+        let mut p = path.as_str();
+        while let Some((parent, _)) = p.rsplit_once('/') {
+            dirs.push(parent.to_owned());
+            p = parent;
+        }
+    }
+    for d in dirs {
+        if !out.iter().any(|(p, _)| *p == d) {
+            out.push((d, None));
         }
     }
     out.sort();
@@ -74,7 +94,7 @@ fn archives_7zip_made_are_read() {
                 continue;
             }
             match entry.read(1 << 24) {
-                Ok(bytes) => got.push((path, Some(bytes))),
+                Ok(bytes) => got.push((path, Some((bytes.len(), fnv(&bytes))))),
                 Err(Error::Unsupported | Error::PasswordRequired) => {
                     unsupported = true;
                     break;

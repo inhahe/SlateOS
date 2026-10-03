@@ -2681,15 +2681,24 @@ fn test_dir_type_conversions() -> KernelResult<()> {
         crate::serial_println!("[ext4-vfs]   FAIL: SOCK type");
         return Err(KernelError::InternalError);
     }
-    // Types the VFS has no `EntryType` for fall back to File.  More than one
-    // is checked because the fallback is a catch-all `_` arm: one of them
-    // passing does not show the others are not matched earlier by mistake,
-    // and UNKNOWN (0) in particular is the value a directory entry carries
-    // when the filesystem was built without the filetype feature.
-    if dir_type_to_entry_type(dir_type::CHRDEV) != EntryType::File {
-        crate::serial_println!("[ext4-vfs]   FAIL: CHRDEV fallback");
+    // Device nodes are devices since 2026-10-03 (the device-number work: a
+    // CHRDEV/BLKDEV directory entry reads as a device so `ls -l` and `[ -c ]`
+    // are right on an ext4 volume), where they read as File before.
+    if dir_type_to_entry_type(dir_type::CHRDEV) != EntryType::CharDevice {
+        crate::serial_println!("[ext4-vfs]   FAIL: CHRDEV type");
         return Err(KernelError::InternalError);
     }
+    if dir_type_to_entry_type(dir_type::BLKDEV) != EntryType::BlockDevice {
+        crate::serial_println!("[ext4-vfs]   FAIL: BLKDEV type");
+        return Err(KernelError::InternalError);
+    }
+    // Types the VFS still has no `EntryType` for fall back to File.  More than
+    // one is checked because the fallback is a catch-all `_` arm: one of them
+    // passing does not show the others are not matched earlier by mistake,
+    // and UNKNOWN (0) in particular is the value a directory entry carries
+    // when the filesystem was built without the filetype feature. (A FIFO has
+    // no `EntryType` yet: known-issues
+    // A-NO-NAMED-PIPES-AND-EXT4-DEVICE-NODES-READ-AS-FILES.)
     if dir_type_to_entry_type(dir_type::FIFO) != EntryType::File {
         crate::serial_println!("[ext4-vfs]   FAIL: FIFO fallback");
         return Err(KernelError::InternalError);
@@ -2716,12 +2725,18 @@ fn test_dir_type_conversions() -> KernelResult<()> {
         crate::serial_println!("[ext4-vfs]   FAIL: mode SOCK");
         return Err(KernelError::InternalError);
     }
-    // Modes with no `EntryType` fall back to File — same catch-all reasoning
-    // as the dir_type arm above.
-    if mode_to_entry_type(file_type::S_IFBLK) != EntryType::File {
-        crate::serial_println!("[ext4-vfs]   FAIL: mode BLK fallback");
+    // Device-node modes read as devices since 2026-10-03, matching the
+    // dir_type arms above.
+    if mode_to_entry_type(file_type::S_IFCHR) != EntryType::CharDevice {
+        crate::serial_println!("[ext4-vfs]   FAIL: mode CHR");
         return Err(KernelError::InternalError);
     }
+    if mode_to_entry_type(file_type::S_IFBLK) != EntryType::BlockDevice {
+        crate::serial_println!("[ext4-vfs]   FAIL: mode BLK");
+        return Err(KernelError::InternalError);
+    }
+    // A FIFO mode still falls back to File — same catch-all reasoning as the
+    // dir_type arm above.
     if mode_to_entry_type(file_type::S_IFIFO) != EntryType::File {
         crate::serial_println!("[ext4-vfs]   FAIL: mode FIFO fallback");
         return Err(KernelError::InternalError);

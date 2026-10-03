@@ -155,6 +155,17 @@ impl StdioFile {
         self.buf.len()
     }
 
+    /// The file under a stream made by [`StdioFile::from_file`], while it is
+    /// open -- `fileno`, for the `fchown` and `fchmod` a caller makes before
+    /// closing it. `None` for a standard descriptor and after the close.
+    #[must_use]
+    pub fn file(&self) -> Option<&std::fs::File> {
+        match &self.sink {
+            Sink::File(f) => Some(f),
+            _ => None,
+        }
+    }
+
     /// `fwrite (data, 1, data.len (), fp)`: every byte accepted, or the error
     /// of the `write(2)` that stopped short.
     ///

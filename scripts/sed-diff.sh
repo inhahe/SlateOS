@@ -548,6 +548,139 @@ run_inplace '-i on a - operand'   -i 's/a/A/' -
 run_inplace '-i on a directory'   -i 's/a/A/' adir
 run_inplace '-i, dir then file'   -i 's/a/A/' adir abc.txt
 
+# --- what -i does to the file system ------------------------------------------------
+#
+# GNU writes the edit to a new file beside the old one -- `DIR/sedXXXXXX` --
+# gives it the old one's owner and mode, renames the old one to the backup if
+# there is one, and renames the new one over the name. So the edit is a *new
+# file*: a hard link keeps the old text, a symbolic link is replaced by a file
+# (unless `--follow-symlinks`), a read-only file in a writable directory can be
+# edited and a writable one in a read-only directory cannot, and the backup is
+# the original itself. This port used to rewrite the file where it stood and got
+# every one of those the other way round. `fs_case CMD` runs CMD in a fresh
+# world on each side and compares what it printed (temporary names folded to
+# `sedXXXXXX`), its status, and the world afterwards: contents, modes, link
+# counts, link targets, and anything left lying about.
+fs_world() {
+  rm -rf "$1"; mkdir "$1"
+  ( cd "$1" || exit 1
+    printf 'a\nb\n' > f; chmod 640 f
+    printf 'a\nb\n' > g; ln g hard
+    printf 'a\nt\n' > target; ln -s target link; ln -s link link2
+    mkdir d; ln -s ../target d/up
+    ln -s nosuch dangling
+    printf 'a\n' > ro; chmod 444 ro
+    mkdir ud; printf 'a\n' > ud/x; chmod 555 ud )
+}
+
+fs_state() {
+  ( cd "$1" && find . -mindepth 1 | LC_ALL=C sort | while read -r x; do
+      case $x in ./sed??????) x=./sedXXXXXX ;; esac
+      if [ -L "$x" ]; then printf '%s -> %s\n' "$x" "$(readlink "$x")"
+      elif [ -d "$x" ]; then printf '%s/ %s\n' "$x" "$(stat -c %a "$x")"
+      else printf '%s %s %s\n' "$x" "$(stat -c '%a %h' "$x")" "$(od -An -tx1 <"$x" | tr -s ' \n' ' ')"
+      fi
+    done )
+}
+
+fs_case() {
+  local o_all g_all o_rc g_rc side
+  for side in ours gnu; do
+    fs_world "$DIFF_TMP/fs-$side"
+    ( cd "$DIFF_TMP/fs-$side" && env PATH="$bindir/$side:$PATH" bash -c "$1" ) </dev/null \
+      >"$DIFF_TMP/fs-$side.out" 2>&1
+    echo "$?" >"$DIFF_TMP/fs-$side.rc"
+  done
+  o_all="$(sed 's/sed[A-Za-z0-9]\{6\}/sedXXXXXX/g' "$DIFF_TMP/fs-ours.out"; fs_state "$DIFF_TMP/fs-ours")"
+  g_all="$(sed 's/sed[A-Za-z0-9]\{6\}/sedXXXXXX/g' "$DIFF_TMP/fs-gnu.out"; fs_state "$DIFF_TMP/fs-gnu")"
+  o_rc=$(cat "$DIFF_TMP/fs-ours.rc"); g_rc=$(cat "$DIFF_TMP/fs-gnu.rc")
+  chmod -R u+w "$DIFF_TMP/fs-ours" "$DIFF_TMP/fs-gnu" 2>/dev/null
+  rm -rf "$DIFF_TMP/fs-ours" "$DIFF_TMP/fs-gnu" "$DIFF_TMP"/fs-*.out "$DIFF_TMP"/fs-*.rc
+  if [ "$o_all" = "$g_all" ] && [ "$o_rc" = "$g_rc" ]; then
+    pass=$((pass+1))
+    [ -n "${VERBOSE:-}" ] && printf 'OK   [fs] %s\n' "$1"
+  else
+    fail=$((fail+1))
+    printf 'DIFF [fs] %s\n' "$1"
+    printf '  ours (rc=%s) %s\n' "$o_rc" "$(printf '%s' "$o_all" | tr '\n' '|')"
+    printf '  gnu  (rc=%s) %s\n' "$g_rc" "$(printf '%s' "$g_all" | tr '\n' '|')"
+  fi
+  return 0
+}
+
+fs_case 'sed -i s/a/X/ f'
+fs_case 'sed -i s/a/X/ g'
+fs_case 'sed -i.bak s/a/X/ g'
+fs_case 'sed -i.bak s/a/X/ f'
+fs_case 'sed -i s/a/X/ link'
+fs_case 'sed -i.bak s/a/X/ link'
+fs_case 'sed -i --follow-symlinks s/a/X/ link2'
+fs_case 'sed --follow-symlinks -i.bak s/a/X/ link2'
+fs_case 'sed -i --follow-symlinks s/a/X/ d/up'
+fs_case 'sed -i s/a/X/ dangling'
+fs_case 'sed -i --follow-symlinks s/a/X/ dangling'
+fs_case 'sed -i s/a/X/ ro'
+fs_case 'sed -i s/a/X/ ud/x'
+fs_case 'sed -n -i p f nosuch g'
+fs_case 'sed -i 1q f g'
+fs_case "sed -i 'w /dev/stdout' f"
+fs_case 'sed -i s/a/X/ /dev/null'
+# `--follow-symlinks` outside `-i`: what `F` names, and the end of the run for a
+# name that cannot be followed -- before it would have been `can't read`.
+fs_case 'sed --follow-symlinks -n F link2 d/up'
+fs_case 'sed -n F link2 d/up'
+fs_case 'sed --follow-symlinks p dangling'
+fs_case 'sed --follow-symlinks p nosuch'
+fs_case 'sed p nosuch'
+
+# A disk that fills part-way through the edit: GNU stops at the write that
+# failed, removes its temporary file, and leaves the original as it was. Each
+# side runs in a user and mount namespace of its own on a 16 KiB tmpfs, as
+# `tar-diff.sh` section 11 does, and the cases are skipped where that cannot be
+# had.
+full_case() {
+  local side o g
+  for side in ours gnu; do
+    rm -rf "$DIFF_TMP/full-$side"; mkdir "$DIFF_TMP/full-$side"
+    # Inside: mount the tmpfs over the directory, step into it, make the
+    # file, run the case, and record what it said, its status, the file's
+    # checksum and whatever is left beside it -- one directory up, outside the
+    # tmpfs. Folded and compared out here, where `sed` is the system's and
+    # not the side under test.
+    ( cd "$DIFF_TMP/full-$side" && PATH="$bindir/$side:$PATH" \
+      diff_run timeout -k 2 60 unshare -mUr --propagation private sh -c '
+        mount -t tmpfs -o size=16k none "$PWD" || exit 125
+        cd "$PWD" || exit 125
+        head -c 9000 /dev/zero | tr "\0" a | fold -w 99 > f
+        sh -c "$1" >"../$2.out" 2>&1; echo "$?" >"../$2.rc"
+        md5sum f | cut -c1-8 >"../$2.sum"
+        ls -A >"../$2.left"
+      ' _ "$1" "full-$side" )
+  done
+  o=$(cd "$DIFF_TMP" && cat full-ours.out full-ours.rc full-ours.sum full-ours.left 2>/dev/null \
+        | sed 's/sed[A-Za-z0-9]\{6\}/sedXXXXXX/g')
+  g=$(cd "$DIFF_TMP" && cat full-gnu.out full-gnu.rc full-gnu.sum full-gnu.left 2>/dev/null \
+        | sed 's/sed[A-Za-z0-9]\{6\}/sedXXXXXX/g')
+  local ran=no
+  [ -s "$DIFF_TMP/full-ours.rc" ] && [ -s "$DIFF_TMP/full-gnu.rc" ] && ran=yes
+  rm -rf "$DIFF_TMP"/full-*
+  if [ "$ran" = yes ] && [ "$o" = "$g" ]; then
+    pass=$((pass+1))
+    [ -n "${VERBOSE:-}" ] && printf 'OK   [full] %s\n' "$1"
+  else
+    fail=$((fail+1))
+    printf 'DIFF [full] %s\n  ours %s\n  gnu  %s\n' "$1" "$(printf '%s' "$o" | tr '\n' '|')" \
+      "$(printf '%s' "$g" | tr '\n' '|')"
+  fi
+  return 0
+}
+if ! unshare -mUr true 2>/dev/null; then
+  echo "SKIP the full-disk -i cases: no user and mount namespace can be made here"
+else
+  full_case 'sed -i s/a/b/ f'
+  full_case 'sed -i.bak s/a/b/ f'
+fi
+
 # --- w, W and the `s///w` flag ------------------------------------------------
 #
 # The file a `w` writes is the whole output of these cases, so it has to be

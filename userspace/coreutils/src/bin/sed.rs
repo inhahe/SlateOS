@@ -11,6 +11,7 @@
 //! | `-e S` | add S to the script; may be repeated |
 //! | `-f F` | add the contents of file F to the script |
 //! | `-i[SUF]` | edit each file in place, keeping a `SUF` backup if given |
+//! | `--follow-symlinks` | read, and under `-i` edit, the file a link finally names |
 //! | `-E` / `-r` | patterns are Extended regular expressions |
 //! | `-s` | treat the files as separate streams rather than one |
 //! | `-z` | lines are separated by NUL rather than newline |
@@ -23,9 +24,9 @@
 //! Long options are resolved by [`coreutils::getopt`], so they abbreviate to
 //! any unambiguous prefix as every GNU utility's do: `--expr=p` works and
 //! `--s` is refused as ambiguous between `--silent`, `--sandbox` and
-//! `--separate`. `--posix` and `--follow-symlinks` are accepted and do nothing
-//! yet, and neither does `POSIXLY_CORRECT` beyond where option parsing stops;
-//! see `known-issues.md` → `TD-B-SED-HAS-NO-POSIX-MODE-AND-NO-FOLLOW-SYMLINKS`.
+//! `--separate`. `--posix` is accepted and does nothing yet, and neither does
+//! `POSIXLY_CORRECT` beyond where option parsing stops; see `known-issues.md`
+//! → `TD-B-SED-HAS-NO-POSIX-MODE-AND-NO-FOLLOW-SYMLINKS`.
 //!
 //! Exit status: 0 normally, 1 for a bad script or usage, 2 for an input file
 //! that could not be opened (the rest are still processed), 4 for a failure
@@ -96,6 +97,17 @@
 //! started by `e` -- starts just after the last line sed took. A file that
 //! opens and then cannot be read ends the run; one that will not open is
 //! reported and skipped. See [`Input`] and [`STDIN`].
+//!
+//! ## Editing in place
+//!
+//! `-i` writes each file's edit to a new file beside it, `DIR/sedXXXXXX`,
+//! gives that the old file's owner and mode, renames the old one to the backup
+//! if there is to be one, and renames the new one over the name -- so the name
+//! always holds a whole file, and a run that fails, or a disk that fills,
+//! leaves the original untouched and removes the new one. The edit is a new
+//! file, with what follows from that: a hard link keeps the old text, a
+//! symbolic link is replaced by a file unless `--follow-symlinks`, and it is
+//! the directory that must be writable, not the file. See [`InPlace`].
 
 use std::cell::RefCell;
 use std::cmp::Ordering;
@@ -1961,6 +1973,18 @@ impl Input {
         }
     }
 
+    /// An input over a file already open -- `-i`, which has to look at the
+    /// file before the edit can begin. `name` is what a read error calls it;
+    /// `shown` is what `F` prints, GNU's `in_file_name`, which
+    /// `--follow-symlinks` may have resolved.
+    fn opened(name: OsString, shown: OsString, file: File, sep: u8) -> Input {
+        let mut input = Input::new(Vec::new(), sep, false, false);
+        input.cur = Some(Reader::File(StdioReader::from_file(file)));
+        input.cur_name = name;
+        input.cur_file = Rc::new(shown);
+        input
+    }
+
     /// GNU's `open_next_file`: open one operand, and say so if it will not.
     /// The name is taken first, as GNU's `in_file_name` is, whether or not the
     /// open succeeds.
@@ -1979,6 +2003,11 @@ impl Input {
             self.cur = Some(Reader::Stdin(stdin));
             self.cur_name = OsString::from("stdin");
             return true;
+        }
+        // GNU's `in_file_name = follow_symlink (name)`: what `F` names, and
+        // a name that cannot be followed ends the run before the open.
+        if follow_symlinks() {
+            self.cur_file = Rc::new(follow_symlink(&path));
         }
         match File::open(&path) {
             Ok(f) => {
@@ -2077,6 +2106,305 @@ impl Input {
     }
 }
 
+// ------------------------------------------------------- editing in place
+
+thread_local! {
+    /// The temporary file an in-place edit is writing, until it is renamed
+    /// over the file it replaces: GNU's `G_file_to_unlink`, removed by the
+    /// `atexit` handler if the run ends first -- so a script that fails, or a
+    /// disk that fills, leaves the original as it was and no stray file
+    /// beside it.
+    static CLEANUP: RefCell<Option<OsString>> = const { RefCell::new(None) };
+}
+
+/// Remove the temporary file an edit left unfinished: see [`CLEANUP`].
+fn remove_cleanup_file() {
+    CLEANUP.with(|c| {
+        if let Some(path) = c.borrow_mut().take() {
+            // Ignored, as GNU's `unlink` there is: the run is ending, and
+            // there is nobody left to tell.
+            drop(fs::remove_file(path));
+        }
+    });
+}
+
+/// `--follow-symlinks`: resolve an operand's symbolic links before reading
+/// it, and under `-i` edit the file at the end of them rather than replacing
+/// the link. GNU's `follow_symlinks`, a global there too.
+static FOLLOW_SYMLINKS: AtomicBool = AtomicBool::new(false);
+
+fn follow_symlinks() -> bool {
+    FOLLOW_SYMLINKS.load(AtomicOrdering::Relaxed)
+}
+
+/// GNU's `__eloop_threshold`: how many links a name may pass through before
+/// it is a loop. `sysconf (_SC_SYMLOOP_MAX)` is no answer on Linux, and
+/// gnulib's floor is 40.
+const ELOOP_THRESHOLD: usize = 40;
+
+/// Whether `readlink` failed because the name is not a link -- `EINVAL` --
+/// which is where following stops.
+#[cfg(unix)]
+fn not_a_link(e: &io::Error) -> bool {
+    /// `EINVAL`.
+    const EINVAL: i32 = 22;
+    e.raw_os_error() == Some(EINVAL)
+}
+
+/// Off unix nothing is followed: every name is taken as it stands.
+#[cfg(not(unix))]
+fn not_a_link(_e: &io::Error) -> bool {
+    true
+}
+
+/// GNU sed's `follow_symlink`: the name `name` finally stands for, found by
+/// replacing the name with what its link holds until it is not a link. The
+/// replacement is textual -- a relative link is taken relative to the
+/// directory part of the name that held it, so `d/up -> ../t` gives `d/../t`,
+/// measured -- and a link that cannot be read, including one whose target
+/// does not exist, ends the run, as a loop does. `sed --follow-symlinks p
+/// nosuch` is `couldn't readlink nosuch: No such file or directory`, status 4,
+/// rather than `can't read`.
+fn follow_symlink(name: &OsStr) -> OsString {
+    let mut current = os_bytes(name).into_owned();
+    let mut links = 0usize;
+    loop {
+        let held = match fs::read_link(os_from_bytes(&current)) {
+            Ok(held) => held,
+            Err(e) if not_a_link(&e) => return os_from_bytes(&current),
+            Err(e) => panic_path(
+                "sed: couldn't readlink ",
+                &os_from_bytes(&current),
+                &format!(": {}", strerror(&e)),
+            ),
+        };
+        if links >= ELOOP_THRESHOLD {
+            /// `ELOOP`.
+            const ELOOP: i32 = 40;
+            panic_path(
+                "sed: couldn't follow symlink ",
+                name,
+                &format!(": {}", strerror(&io::Error::from_raw_os_error(ELOOP))),
+            );
+        }
+        links = links.saturating_add(1);
+        let held = os_bytes(held.as_os_str()).into_owned();
+        current = match current.iter().rposition(|&b| b == b'/') {
+            // Relative, and not from the working directory: beside the link.
+            Some(slash) if held.first() != Some(&b'/') => {
+                let mut joined = current.get(..=slash).unwrap_or_default().to_vec();
+                joined.extend_from_slice(&held);
+                joined
+            }
+            // Absolute, or a link in the working directory: the link's
+            // contents are the whole new name.
+            _ => held,
+        };
+    }
+}
+
+/// glibc's `mkostemp` on `DIR/sedXXXXXX` under `umask (0077)`: a new file only
+/// this user can read, its six `X`s replaced by letters and digits, and
+/// another name tried if that one is taken. The name, and the file or the
+/// error -- whose message GNU gives with the name it last tried.
+fn make_temp(dir: &[u8]) -> (Vec<u8>, io::Result<File>) {
+    const LETTERS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    /// glibc tries every name there is; this many is already absurd.
+    const ATTEMPTS: usize = 1000;
+    let mut random = coreutils::randint::RandRead::open(None).ok();
+    // Mixed in, so a source that will not give bytes still varies the name.
+    let mut fallback = u64::from(std::process::id())
+        ^ std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::from(d.subsec_nanos()));
+    let mut name = Vec::new();
+    for _ in 0..ATTEMPTS {
+        let mut bytes = [0u8; 6];
+        if random.as_mut().is_none_or(|r| r.read(&mut bytes).is_err()) {
+            for b in &mut bytes {
+                fallback = fallback
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                *b = fallback.to_le_bytes().get(7).copied().unwrap_or(0);
+            }
+        }
+        name = dir.to_vec();
+        name.extend_from_slice(b"/sed");
+        for b in bytes {
+            let at = usize::from(b).checked_rem(LETTERS.len()).unwrap_or(0);
+            name.push(LETTERS.get(at).copied().unwrap_or(b'X'));
+        }
+        match create_private(&os_from_bytes(&name)) {
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            other => return (name, other),
+        }
+    }
+    (name, Err(io::Error::from(io::ErrorKind::AlreadyExists)))
+}
+
+/// A new file, readable and writable by this user only.
+#[cfg(unix)]
+fn create_private(path: &OsStr) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn create_private(path: &OsStr) -> io::Result<File> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+}
+
+/// One file being edited in place: GNU's `open_next_file` and `closedown`
+/// with `in_place_extension` set.
+///
+/// The edit is written to a new file beside the old one and renamed over it,
+/// so at every moment the name holds either the whole old file or the whole
+/// new one. That is also what decides what the edit *is*: a new file, which
+/// breaks a hard link -- the other name keeps the old text -- replaces a
+/// symbolic link rather than writing through it (unless
+/// `--follow-symlinks`), needs a writable directory and not a writable file,
+/// and leaves a backup that is the original file itself, renamed. All
+/// measured against GNU sed 4.9; this port used to rewrite the file where it
+/// stood, which got every one of those the other way round and could leave a
+/// file half-written on a full disk.
+struct InPlace {
+    /// The name being replaced: GNU's `in_file_name`.
+    target: OsString,
+    /// The temporary file's name, `DIR/sedXXXXXX`.
+    temp: OsString,
+    /// The temporary file's stream, on [`OPEN`] while the edit runs.
+    out: Shared,
+    /// The original's owner, group and mode, for the new file.
+    meta: fs::Metadata,
+}
+
+impl InPlace {
+    /// Check `input` can be edited and make the file the edit goes to. Each
+    /// refusal ends the run, as GNU's `panic` does.
+    fn begin(target: &OsStr, input: &File) -> InPlace {
+        use std::io::IsTerminal;
+
+        if input.is_terminal() {
+            panic_path("sed: couldn't edit ", target, ": is a terminal");
+        }
+        let meta = match input.metadata() {
+            Ok(m) if m.is_file() => m,
+            _ => panic_path("sed: couldn't edit ", target, ": not a regular file"),
+        };
+        // GNU's `tmpdir`: the name up to its last slash, or `.`.
+        let name = os_bytes(target);
+        let dir = match name.iter().rposition(|&b| b == b'/') {
+            Some(slash) => name.get(..slash).unwrap_or_default().to_vec(),
+            None => b".".to_vec(),
+        };
+        let (temp, made) = make_temp(&dir);
+        let file = match made {
+            Ok(f) => f,
+            Err(e) => panic_path(
+                "sed: couldn't open temporary file ",
+                &os_from_bytes(&temp),
+                &format!(": {}", strerror(&e)),
+            ),
+        };
+        let temp = os_from_bytes(&temp);
+        CLEANUP.with(|c| *c.borrow_mut() = Some(temp.clone()));
+        let out = register(StdioFile::from_file(file), &os_bytes(&temp));
+        InPlace {
+            target: target.to_os_string(),
+            temp,
+            out,
+            meta,
+        }
+    }
+
+    /// GNU's `closedown`: the new file given the old one's owner and mode,
+    /// closed -- its flush and close checked -- the old one renamed to the
+    /// backup if there is to be one, and the new one renamed over it.
+    fn finish(self, suffix: &OsStr) {
+        self.copy_ownership();
+        // Off the list of open files first, as GNU's `ck_fclose` takes it off
+        // before closing: the end of the run must not close it again.
+        unregister(&self.out);
+        if let Err(e) = ck_fclose(&self.out) {
+            let mut line = b"sed: ".to_vec();
+            line.extend_from_slice(&failure_message(&e));
+            line.push(b'\n');
+            stdfd::diag_bytes(&line);
+            exit_quietly(EXIT_PANIC);
+        }
+        if let Some(backup) = backup_name(&self.target, suffix)
+            && let Err(e) = fs::rename(&self.target, &backup)
+        {
+            panic_path(
+                "sed: cannot rename ",
+                &self.target,
+                &format!(": {}", strerror(&e)),
+            );
+        }
+        if let Err(e) = fs::rename(&self.temp, &self.target) {
+            panic_path(
+                "sed: cannot rename ",
+                &self.temp,
+                &format!(": {}", strerror(&e)),
+            );
+        }
+        // Renamed: nothing to remove any more.
+        CLEANUP.with(|c| *c.borrow_mut() = None);
+    }
+
+    /// `fchown` to the original's owner and group -- or, failing that, to its
+    /// group alone; neither failure is reported -- then gnulib's `copy_acl`,
+    /// which here is the mode, set last because a change of owner can clear
+    /// the set-id bits. A failure to set the mode is reported and the edit
+    /// goes on, as gnulib's is.
+    #[cfg(unix)]
+    fn copy_ownership(&self) {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let Ok(out) = self.out.try_borrow() else {
+            return;
+        };
+        let Some(file) = out.file.file() else {
+            return;
+        };
+        if std::os::unix::fs::fchown(file, Some(self.meta.uid()), Some(self.meta.gid())).is_err() {
+            // Ignored, as GNU ignores it: a user may give a file to a group
+            // they are in, and not to another user.
+            drop(std::os::unix::fs::fchown(file, None, Some(self.meta.gid())));
+        }
+        let mode = fs::Permissions::from_mode(self.meta.mode() & 0o7777);
+        if let Err(e) = file.set_permissions(mode) {
+            diag!(
+                "sed: preserving permissions for {}: {}",
+                coreutils::quote::quote(&os_bytes(&self.temp)),
+                strerror(&e)
+            );
+        }
+    }
+
+    /// No owners off unix, and of the mode only what the platform keeps --
+    /// on the Windows host, whether the file is read-only.
+    #[cfg(not(unix))]
+    fn copy_ownership(&self) {
+        let Ok(out) = self.out.try_borrow() else {
+            return;
+        };
+        if let Some(file) = out.file.file() {
+            // Ignored: a build that exists to run unit tests on, where the
+            // flag is the whole of what could be copied.
+            drop(file.set_permissions(self.meta.permissions()));
+        }
+    }
+}
+
 // ---------------------------------------------------------------- the output
 
 /// One of sed's output files: a stdio stream, and the name GNU sed's messages
@@ -2127,6 +2455,11 @@ fn register(file: StdioFile, name: &[u8]) -> Shared {
     shared
 }
 
+/// Take a file off [`OPEN`], once something else is closing it.
+fn unregister(f: &Shared) {
+    OPEN.with(|open| open.borrow_mut().retain(|g| !Rc::ptr_eq(g, f)));
+}
+
 /// Standard output, made on first use and put at the *front* of [`OPEN`]
 /// whenever that is: glibc's `stdout` is on its list of streams from the
 /// start, behind every file opened later, so `exit` flushes it last.
@@ -2158,6 +2491,7 @@ fn exit_quietly(code: i32) -> ! {
         }
     });
     give_back_stdin();
+    remove_cleanup_file();
     process::exit(code)
 }
 
@@ -4055,6 +4389,8 @@ struct SedArgs {
     debug: bool,
     /// `-u`: flush every output line as it is written. See [`UNBUFFERED`].
     unbuffered: bool,
+    /// `--follow-symlinks`. See [`FOLLOW_SYMLINKS`].
+    follow_symlinks: bool,
     /// `-l N`, defaulting to [`DEFAULT_LINE_LEN`]; 0 means never wrap.
     line_len: usize,
     /// `Some(suffix)` for `-i`; an empty suffix means no backup.
@@ -4074,6 +4410,7 @@ impl Default for SedArgs {
             sandbox: false,
             debug: false,
             unbuffered: false,
+            follow_symlinks: false,
             line_len: DEFAULT_LINE_LEN,
             in_place: None,
             script_parts: Vec::new(),
@@ -4139,11 +4476,12 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             Opt::Long("sandbox", _) => out.sandbox = true,
             Opt::Long("debug", _) => out.debug = true,
             Opt::Short(b'u', _) | Opt::Long("unbuffered", _) => out.unbuffered = true,
+            Opt::Long("follow-symlinks", _) => out.follow_symlinks = true,
             // Accepted and ignored. `-b` asks for binary mode, which is the
-            // only mode there is here: nothing translates CR+LF. The other two
-            // are not done yet: known-issues.md ->
+            // only mode there is here: nothing translates CR+LF. `--posix` is
+            // not done yet: known-issues.md ->
             // TD-B-SED-HAS-NO-POSIX-MODE-AND-NO-FOLLOW-SYMLINKS.
-            Opt::Long("binary" | "posix" | "follow-symlinks", _) => {}
+            Opt::Long("binary" | "posix", _) => {}
             Opt::Short(b'i', value) | Opt::Long("in-place", value) => {
                 // `-i` takes an *optional* value, so it is never the next word:
                 // GNU reads `sed -i backup f` as an in-place edit of `backup`
@@ -4396,6 +4734,7 @@ fn main() {
         }
     };
     UNBUFFERED.store(parsed.unbuffered, AtomicOrdering::Relaxed);
+    FOLLOW_SYMLINKS.store(parsed.follow_symlinks, AtomicOrdering::Relaxed);
 
     let (script_text, segments) = match collect_script(&parsed.script_parts) {
         Ok(s) => s,
@@ -4627,61 +4966,42 @@ impl Job<'_> {
         status(None, bad)
     }
 
-    /// `-i`: the output of each file replaces it.
-    ///
-    /// The result is built in memory and written once, so a script that fails
-    /// part-way through does not leave the file half-edited.
+    /// `-i`: each file's output replaces it, through a temporary file beside
+    /// it -- see [`InPlace`].
     fn in_place(&mut self, files: &[OsString], suffix: &OsStr) -> i32 {
         let mut bad = false;
         for path in files {
+            // GNU's `in_file_name`: under `--follow-symlinks` the file at the
+            // end of the links, which is then the one replaced; otherwise the
+            // name as given, so that a link is replaced by a file. Resolved
+            // before the open, so a name that cannot be followed ends the run
+            // rather than being `can't read`.
+            let target = if follow_symlinks() {
+                follow_symlink(path)
+            } else {
+                path.clone()
+            };
             // A `-` operand is a file named `-`, not standard input: there is
             // no way to rewrite a stream in place, so it gets no special case
             // and fails as any missing file would.
-            match File::open(path) {
+            let file = match File::open(path) {
+                Ok(f) => f,
                 Err(e) => {
                     diag_path("sed: can't read ", path, &format!(": {}", strerror(&e)));
                     bad = true;
                     continue;
                 }
-                // A directory opens happily and then fails to read, which
-                // would end the run with a confusing "read error". Refusing
-                // anything that is not a regular file names the real problem.
-                Ok(f) => match f.metadata() {
-                    Ok(m) if !m.is_file() => {
-                        panic_path("sed: couldn't edit ", path, ": not a regular file");
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        diag_path("sed: can't read ", path, &format!(": {}", strerror(&e)));
-                        bad = true;
-                        continue;
-                    }
-                },
-            }
+            };
             // `-i` implies `-s`, including for the `R` sources. See `separate`.
             rewind_rfiles(&mut self.rfiles);
-            let mut buf: Vec<u8> = Vec::new();
-            // `false`: the `File::open` above already treated a `-` operand as
-            // a file, and the reader has to agree — otherwise `-i` on a file
-            // named `-` would open it, then read standard input into it.
-            // Buffered whatever `-u` says: GNU sets an input unbuffered only
-            // on the way to standard output, and `-i` is not that.
-            let mut input = Input::new(vec![path.clone()], self.sep, false, false);
+            let edit = InPlace::begin(&target, &file);
+            let mut input = Input::opened(path.clone(), target, file, self.sep);
+            let mut sink = FileDest(Rc::clone(&edit.out));
             // A debt of its own, which ends with the file.
-            let (quit, exec_err) = self.run_one(&mut input, &mut buf, &mut false);
+            let (quit, exec_err) = self.run_one(&mut input, &mut sink, &mut false);
             bad = bad || input.had_error || exec_err;
-
-            if let Some(backup) = backup_name(path, suffix)
-                && let Err(e) = fs::copy(path, &backup)
-            {
-                diag_path("sed: cannot back up ", path, &format!(": {}", strerror(&e)));
-                bad = true;
-                continue;
-            }
-            if let Err(e) = fs::write(path, &buf) {
-                diag_path("sed: couldn't write ", path, &format!(": {}", strerror(&e)));
-                bad = true;
-            }
+            drop(input);
+            edit.finish(suffix);
             if let Some(code) = quit {
                 return status(Some(code), bad);
             }
@@ -5321,6 +5641,58 @@ mod tests {
         job.run_one(&mut inp, &mut sink, &mut owed);
         assert_eq!(sink, b"b\nc\n");
         assert!(!owed);
+    }
+
+    /// The names in `dir`, sorted.
+    fn names_in(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// `sed -iSUFFIX script f` over `f` in its own directory.
+    fn edit_in_place(script: &[u8], f: &std::path::Path, suffix: &str) -> i32 {
+        let compiled = compile(script, false).unwrap();
+        let mut job = Job {
+            script: &compiled,
+            wfiles: Vec::new(),
+            rfiles: Vec::new(),
+            suppress: false,
+            sep: b'\n',
+            trace: None,
+        };
+        job.in_place(&[f.as_os_str().to_os_string()], OsStr::new(suffix))
+    }
+
+    #[test]
+    fn an_edit_in_place_is_a_new_file_and_a_hard_link_keeps_the_old_one() {
+        // GNU writes the edit to a new file and renames it over the name, so
+        // another name for the old file still holds the old text -- measured;
+        // this port used to rewrite the file where it stood, changing both.
+        let dir = ScratchDir::new("sed-inplace-link");
+        let f = dir.path("f");
+        let hard = dir.path("hard");
+        fs::write(&f, b"a\nb\n").unwrap();
+        fs::hard_link(&f, &hard).unwrap();
+        assert_eq!(edit_in_place(b"s/a/X/", &f, ""), 0);
+        assert_eq!(fs::read(&f).unwrap(), b"X\nb\n");
+        assert_eq!(fs::read(&hard).unwrap(), b"a\nb\n");
+        // The temporary file was renamed, not left beside them.
+        assert_eq!(names_in(dir.dir()), ["f", "hard"]);
+    }
+
+    #[test]
+    fn an_edit_in_place_with_a_suffix_keeps_the_original_as_the_backup() {
+        let dir = ScratchDir::new("sed-inplace-backup");
+        let f = dir.path("f");
+        fs::write(&f, b"a\n").unwrap();
+        assert_eq!(edit_in_place(b"s/a/X/", &f, ".bak"), 0);
+        assert_eq!(fs::read(&f).unwrap(), b"X\n");
+        assert_eq!(fs::read(dir.path("f.bak")).unwrap(), b"a\n");
+        assert_eq!(names_in(dir.dir()), ["f", "f.bak"]);
     }
 
     #[test]

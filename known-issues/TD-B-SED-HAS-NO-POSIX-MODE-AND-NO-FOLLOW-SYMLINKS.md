@@ -1,6 +1,6 @@
 ## TD-B-SED-HAS-NO-POSIX-MODE-AND-NO-FOLLOW-SYMLINKS (lane B, 2026-10-03)
 
-**Status:** OPEN
+**Status:** OPEN -- the `--follow-symlinks` half is FIXED 2026-10-03 (`B-SED-I-REWROTE-FILES-WHERE-THEY-STOOD`); `--posix` and `POSIXLY_CORRECT` remain.
 
 **In short:** GNU sed has three levels of strictness -- its default, the one
 it switches to when the environment variable `POSIXLY_CORRECT` is set, and
@@ -9,9 +9,8 @@ does nothing with it, and reads `POSIXLY_CORRECT` only where option parsing
 stops. So a script that GNU refuses under `--posix` runs here, and a few
 things behave differently under `POSIXLY_CORRECT` -- `w /dev/stdout` is the
 measured one: GNU opens the name as a file there, ours still treats it as
-standard output. `--follow-symlinks` is likewise accepted and ignored: `-i`
-on a symbolic link should edit the file it points to, and ours replaces the
-link with a file.
+standard output. (`--follow-symlinks` was likewise accepted and ignored until
+2026-10-03; it is now GNU's.)
 
 ### What GNU sed 4.9 does, by mode
 
@@ -35,14 +34,10 @@ read:
 | an incomplete command at the end of the script | allowed | `incomplete command` |
 | a regex the DFA warns about, e.g. `[:alpha:]` outside a bracket (`dfawarn`) | accepted -- by default it is refused | refused, as by default (the test is the variable, not the mode) |
 
-And `--follow-symlinks` (`open_next_file`, `follow_symlink` in `utils.c`):
-with `-i`, the file edited and replaced is the link's final target, so the
-link survives; without it, `-i` renames a new file over the link.
-
 ### Where it bites here
 
 `userspace/coreutils/src/bin/sed.rs`: the option arm
-`Opt::Long("binary" | "posix" | "follow-symlinks", _) => {}`, and
+`Opt::Long("binary" | "posix", _) => {}`, and
 `open_wfiles`/`open_rfiles`, which treat the three special names specially
 whatever the mode. Measured: `POSIXLY_CORRECT=1 sed 'w /dev/stdout'` on
 `a\nb` (no final newline) prints `a\nba\nb` in GNU -- the `w` file is a second
@@ -54,5 +49,5 @@ A `Posixicity` enum computed in `main` exactly as GNU computes it, threaded
 into the compiler (refusals, address forms, `a/i/c`, escapes, `l N`), the
 regex syntax flags (`ere` already has the BRE/ERE GNU-operator switches), the
 special-file table, `N` at end of input, and the replacement's case
-conversions; `--follow-symlinks` resolving the operand before `-i` opens it.
+conversions.
 Each row of the table above becomes a `sed-diff.sh` case under both modes.

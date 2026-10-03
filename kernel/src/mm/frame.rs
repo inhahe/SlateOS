@@ -81,6 +81,31 @@ pub const PAGES_PER_FRAME: usize = FRAME_SIZE / 4096;
 /// Order 10 = 1024 frames = 16 MiB.
 const MAX_ORDER: usize = 10;
 
+/// The top of the ISA DMA zone: the first 16 MiB, all an ISA device (and a
+/// `DmaConstraint::Below16M` driver) can address -- Linux's `ZONE_DMA`.
+///
+/// A general allocation uses it only when nothing above it is free
+/// ([`BuddyAllocator::alloc_inner`]): its blocks sit at the tail of every
+/// free list ([`BuddyAllocator::push_free`]), and the search takes a block
+/// above the zone at any order first. Until 2026-10-02 nothing kept it, so
+/// by late boot ordinary allocations had used it up and a `Below16M`
+/// request failed with 2.9 GB free (rq43, the DMA self-test).
+///
+/// A block of `MAX_ORDER` is 16 MiB and naturally aligned, so no block
+/// straddles the boundary.
+const DMA_ZONE_END: u64 = 0x100_0000;
+
+/// Whether the `2^order`-frame block at `addr` lies inside the ISA DMA zone.
+const fn in_dma_zone(addr: u64, order: usize) -> bool {
+    match (FRAME_SIZE as u64).checked_shl(order as u32) {
+        Some(size) => match addr.checked_add(size) {
+            Some(end) => end <= DMA_ZONE_END,
+            None => false,
+        },
+        None => false,
+    }
+}
+
 /// Page-info value indicating the frame is allocated (or not part of
 /// usable memory).
 const INFO_ALLOCATED: u8 = 0xFF;
@@ -507,13 +532,21 @@ struct FreeNode {
 struct FreeList {
     /// Physical address of the first free block (0 = empty list).
     head: u64,
+    /// Physical address of the last free block (0 = empty list). Blocks
+    /// inside the ISA DMA zone are kept here, behind every block above it
+    /// ([`DMA_ZONE_END`]).
+    tail: u64,
     /// Number of blocks on this list.
     count: usize,
 }
 
 impl FreeList {
     const fn new() -> Self {
-        Self { head: 0, count: 0 }
+        Self {
+            head: 0,
+            tail: 0,
+            count: 0,
+        }
     }
 }
 
@@ -659,6 +692,13 @@ impl BuddyAllocator {
     )]
     fn push_free(&mut self, addr: u64, order: usize) {
         debug_assert!(order <= MAX_ORDER);
+        // A block inside the ISA DMA zone goes to the back of the line, so
+        // that what a general allocation pops is above it ([`DMA_ZONE_END`]).
+        let old_tail = self.free_lists[order].tail;
+        if in_dma_zone(addr, order) && old_tail != 0 {
+            self.append_free(addr, order, old_tail);
+            return;
+        }
         let node_ptr = self.phys_to_virt(addr).cast::<FreeNode>();
         let old_head = self.free_lists[order].head;
 
@@ -682,10 +722,41 @@ impl BuddyAllocator {
         }
 
         self.free_lists[order].head = addr;
+        if old_head == 0 {
+            self.free_lists[order].tail = addr;
+        }
         self.free_lists[order].count = self.free_lists[order].count.saturating_add(1);
 
         // Mark this frame as free at the given order.
         let idx = self.frame_index(addr);
+        self.set_info(idx, order as u8);
+    }
+
+    /// Put `addr` at the tail of its order's free list, after `old_tail`
+    /// (non-zero: the list is not empty) -- [`Self::push_free`]'s place for a
+    /// block inside the ISA DMA zone.
+    // cast_ptr_alignment: as push_free -- frame addresses are 16 KiB aligned.
+    #[allow(clippy::indexing_slicing, clippy::cast_ptr_alignment)]
+    fn append_free(&mut self, addr: u64, order: usize, old_tail: u64) {
+        let node_ptr = self.phys_to_virt(addr).cast::<FreeNode>();
+        // SAFETY: `addr` points to a free block of at least FRAME_SIZE bytes
+        // in usable physical memory; the HHDM mapping covers all of it, and
+        // the spinlock gives exclusive access.
+        unsafe {
+            node_ptr.write(FreeNode {
+                next: 0,
+                prev: old_tail,
+            });
+        }
+        let old_tail_ptr = self.phys_to_virt(old_tail).cast::<FreeNode>();
+        // SAFETY: old_tail is the last free block on this order's list.
+        unsafe {
+            (*old_tail_ptr).next = addr;
+        }
+        self.free_lists[order].tail = addr;
+        self.free_lists[order].count = self.free_lists[order].count.saturating_add(1);
+        let idx = self.frame_index(addr);
+        #[allow(clippy::cast_possible_truncation)] // order <= MAX_ORDER
         self.set_info(idx, order as u8);
     }
 
@@ -723,6 +794,9 @@ impl BuddyAllocator {
             unsafe {
                 (*next_ptr).prev = prev;
             }
+        } else {
+            // This block was the list's tail.
+            self.free_lists[order].tail = prev;
         }
 
         self.free_lists[order].count = self.free_lists[order].count.saturating_sub(1);
@@ -796,18 +870,20 @@ impl BuddyAllocator {
             return Err(KernelError::InvalidArgument);
         }
 
-        // Walk up to find the smallest order with a free block.
-        let mut source_order = order;
-        while source_order <= MAX_ORDER {
-            if self.free_lists[source_order].head != 0 {
-                break;
-            }
-            source_order += 1;
-        }
-
-        if source_order > MAX_ORDER {
+        // The smallest order with a free block above the ISA DMA zone -- a
+        // list's head is above it whenever any of its blocks is, since the
+        // zone's blocks are kept at the tail ([`Self::push_free`]). Only when
+        // there is none at any order does the zone give one up, as Linux
+        // falls back to ZONE_DMA last ([`DMA_ZONE_END`]).
+        let above_zone = (order..=MAX_ORDER).find(|&o| {
+            let head = self.free_lists[o].head;
+            head != 0 && !in_dma_zone(head, o)
+        });
+        let Some(mut source_order) =
+            above_zone.or_else(|| (order..=MAX_ORDER).find(|&o| self.free_lists[o].head != 0))
+        else {
             return Err(KernelError::OutOfMemory);
-        }
+        };
 
         // Pop from the source order's list.
         let addr = self
@@ -2527,6 +2603,14 @@ pub unsafe fn free_frame(frame: PhysFrame) -> KernelResult<()> {
             }
         }
 
+        // A frame inside the ISA DMA zone goes back to the buddy lists, where it
+        // waits at the tail for the allocations that need it (`DMA_ZONE_END`),
+        // not into a cache the next ordinary allocation takes from.
+        if in_dma_zone(frame.addr(), 0) {
+            // SAFETY: Caller guarantees frame was validly allocated.
+            return unsafe { free_order(frame, 0) };
+        }
+
         // Zero-on-free: zero the frame before returning it to the free
         // pool.  Done with interrupts ENABLED (before the cli below) so
         // timer interrupts aren't blocked during the ~3µs memset.
@@ -2749,18 +2833,20 @@ pub fn try_stats() -> Option<FrameAllocStats> {
 ///
 /// Detects (a) cycles / over-long lists (capped traversal), (b) a node
 /// count that disagrees with `FreeList::count`, (c) a node whose
-/// `page_info` order does not match the list it sits on, and (d) broken
-/// `prev`/`next` back-links.  Returns `Ok(())` if all lists are sound,
-/// or `Err((order, reason))` for the first problem found.
+/// `page_info` order does not match the list it sits on, (d) broken
+/// `prev`/`next` back-links, (e) a `tail` that is not the last node, and (f)
+/// a block above the ISA DMA zone behind one inside it ([`DMA_ZONE_END`]).
+/// Returns `Ok(())` if all lists are sound, or `Err((order, reason))` for the
+/// first problem found.
 ///
 /// Walking dereferences `FreeNode`s through the HHDM under the allocator
 /// lock; safe because the lock grants exclusive access.
 ///
-/// Retained as debugging infrastructure for the open MM boot-hang (see
-/// todo.txt "ADVANCED DIAGNOSIS").  Currently has no callers in the boot
-/// path; `#[allow(dead_code)]` keeps the binary build warning-free.
-#[allow(dead_code)]
-#[allow(clippy::indexing_slicing)]
+/// Debugging infrastructure for the open MM boot-hang (see todo.txt
+/// "ADVANCED DIAGNOSIS"), and the frame self-test's check of the zone order
+/// (`test_dma_zone_kept`).
+// cast_ptr_alignment: as push_free -- frame addresses are 16 KiB aligned.
+#[allow(clippy::indexing_slicing, clippy::cast_ptr_alignment)]
 pub fn validate_free_lists() -> Result<(), (usize, &'static str)> {
     let Some(allocator) = ALLOCATOR.get() else {
         return Ok(());
@@ -2805,6 +2891,23 @@ pub fn validate_free_lists() -> Result<(), (usize, &'static str)> {
 
             if seen != expected {
                 return Err((order, "node count disagrees with FreeList::count"));
+            }
+            if guard.free_lists[order].tail != prev {
+                return Err((order, "tail is not the last node"));
+            }
+            // Every block inside the ISA DMA zone is behind every block above
+            // it ([`DMA_ZONE_END`]).
+            let mut addr = guard.free_lists[order].head;
+            let mut in_zone = false;
+            while addr != 0 {
+                let low = in_dma_zone(addr, order);
+                if in_zone && !low {
+                    return Err((order, "a block above the DMA zone behind one inside it"));
+                }
+                in_zone = low;
+                let node_ptr = guard.phys_to_virt(addr).cast::<FreeNode>();
+                // SAFETY: as the walk above.
+                addr = unsafe { (*node_ptr).next };
             }
         }
 
@@ -3044,6 +3147,9 @@ pub fn self_test() -> KernelResult<()> {
     // -- Test 7: Zero-on-free mode (sysctl mm.zero_on_alloc=1) -------------
     test_zero_on_free_inner(&mut skips)?;
 
+    // -- Test 8: The ISA DMA zone is kept for the allocations that need it --
+    test_dma_zone_kept()?;
+
     skips.report("[mm]");
     serial_println!("[mm] Frame allocator self-test PASSED{}", skips.suffix());
     Ok(())
@@ -3152,6 +3258,65 @@ fn test_zeroed_alloc_inner(skips: &mut crate::fs::selftest::Skips) -> KernelResu
 
 /// Test per-CPU cache behavior: rapid alloc/free pattern should hit
 /// the per-CPU path (no contention, no global lock).
+/// The ISA DMA zone is kept for the allocations that need it
+/// ([`DMA_ZONE_END`]): with frames free above it, ordinary allocations --
+/// single frames through the per-CPU caches and a multi-frame block through
+/// the buddy lists -- never land inside it, while a `Below16M` request does.
+/// The free lists keep every zone block behind every block above it
+/// ([`validate_free_lists`]), and a zone frame freed goes back to them
+/// rather than to a cache.
+fn test_dma_zone_kept() -> KernelResult<()> {
+    /// Enough single frames to empty and refill a per-CPU cache.
+    const SINGLES: usize = 96;
+
+    let mut singles = alloc::vec::Vec::with_capacity(SINGLES);
+    for _ in 0..SINGLES {
+        singles.push(alloc_frame()?);
+    }
+    let block = alloc_order(3)?;
+    let ordinary_in_zone = singles
+        .iter()
+        .chain(core::iter::once(&block))
+        .filter(|f| f.addr() < DMA_ZONE_END)
+        .count();
+    let zone_frame = alloc_order_constrained(0, DMA_ZONE_END);
+    let zone_ok = zone_frame.as_ref().is_ok_and(|f| f.addr() < DMA_ZONE_END);
+    // Freed: it must go back to the lists, behind the blocks above it.
+    if let Ok(f) = zone_frame {
+        // SAFETY: allocated just above and not aliased.
+        unsafe { free_frame(f)? };
+    }
+    let lists = validate_free_lists();
+    for f in singles {
+        // SAFETY: allocated just above and not aliased.
+        unsafe { free_frame(f)? };
+    }
+    // SAFETY: allocated just above and not aliased.
+    unsafe { free_order(block, 3)? };
+
+    if ordinary_in_zone != 0 {
+        serial_println!(
+            "[mm]   FAIL: {} of {} ordinary allocations landed in the ISA DMA zone",
+            ordinary_in_zone,
+            SINGLES.saturating_add(1)
+        );
+        return Err(KernelError::InternalError);
+    }
+    if !zone_ok {
+        serial_println!("[mm]   FAIL: a Below16M frame could not be had");
+        return Err(KernelError::InternalError);
+    }
+    if let Err((order, why)) = lists {
+        serial_println!("[mm]   FAIL: free list of order {}: {}", order, why);
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[mm]   ISA DMA zone: ordinary allocations stay above it, a Below16M one gets \
+         a frame inside it, and every free list keeps the zone at its tail: OK"
+    );
+    Ok(())
+}
+
 fn test_pcpu_cache() -> KernelResult<()> {
     let initial = stats().ok_or(KernelError::NotSupported)?;
 

@@ -101,9 +101,7 @@ impl KexecError {
     #[must_use]
     pub fn as_kernel_error(self) -> KernelError {
         match self {
-            Self::BadImage | Self::TooManySegments | Self::Overflow => {
-                KernelError::InvalidArgument
-            }
+            Self::BadImage | Self::TooManySegments | Self::Overflow => KernelError::InvalidArgument,
             Self::NoDestination => KernelError::OutOfMemory,
         }
     }
@@ -247,7 +245,8 @@ pub fn parse_kernel_elf(image: &[u8]) -> Result<ParsedKernel, KexecError> {
     }
 
     let entry = le_u64(image, E_ENTRY_OFF).ok_or(BadImage)?;
-    let phoff = usize::try_from(le_u64(image, E_PHOFF_OFF).ok_or(BadImage)?).map_err(|_| Overflow)?;
+    let phoff =
+        usize::try_from(le_u64(image, E_PHOFF_OFF).ok_or(BadImage)?).map_err(|_| Overflow)?;
     let phentsize = usize::from(le_u16(image, E_PHENTSIZE_OFF).ok_or(BadImage)?);
     let phnum = usize::from(le_u16(image, E_PHNUM_OFF).ok_or(BadImage)?);
     if phentsize < PHENT_MIN {
@@ -440,10 +439,7 @@ pub fn plan_destination(
 ///
 /// [`KexecError::NoDestination`] if no usable region is large enough, or
 /// [`KexecError::Overflow`] on an address computation overflow.
-pub fn plan_destination_high(
-    memory_map: &[&MemmapEntry],
-    needed: u64,
-) -> Result<u64, KexecError> {
+pub fn plan_destination_high(memory_map: &[&MemmapEntry], needed: u64) -> Result<u64, KexecError> {
     let frame = FRAME_U64;
     let needed = align_up(needed, frame).ok_or(KexecError::Overflow)?;
     if needed == 0 {
@@ -589,8 +585,9 @@ pub fn find_request_sites(image: &[u8]) -> RequestSites {
     // Bound the scan to the marker window. `find_last_aligned` gives the last
     // start marker; the end marker is the first one after it.
     let start = find_last_aligned(image, &REQUESTS_START_MARKER, 0, image.len());
-    let scan_from =
-        start.map_or(0, |s| s.saturating_add(REQUESTS_START_MARKER.len().saturating_mul(8)));
+    let scan_from = start.map_or(0, |s| {
+        s.saturating_add(REQUESTS_START_MARKER.len().saturating_mul(8))
+    });
     let scan_to = find_last_aligned(image, &REQUESTS_END_MARKER, scan_from, image.len())
         .unwrap_or(image.len());
 
@@ -773,7 +770,10 @@ pub fn build_memmap_response(
     // The response: revision, entry_count, entries_ptr.
     let (off, ptr) = arena.reserve(24, 8)?;
     arena.put(off, &0u64.to_le_bytes())?;
-    arena.put(off.checked_add(8)?, &u64::try_from(entries.len()).ok()?.to_le_bytes())?;
+    arena.put(
+        off.checked_add(8)?,
+        &u64::try_from(entries.len()).ok()?.to_le_bytes(),
+    )?;
     arena.put(off.checked_add(16)?, &array_ptr.to_le_bytes())?;
     Some(ptr)
 }
@@ -934,10 +934,20 @@ unsafe fn map_huge(
     unsafe {
         let pdpt = next_table(pml4, va.pml4_index(), hhdm, frames)?;
         if one_gib {
-            write_entry(pdpt, va.pdpt_index(), PageTableEntry::new(phys, leaf_flags), hhdm);
+            write_entry(
+                pdpt,
+                va.pdpt_index(),
+                PageTableEntry::new(phys, leaf_flags),
+                hhdm,
+            );
         } else {
             let pd = next_table(pdpt, va.pdpt_index(), hhdm, frames)?;
-            write_entry(pd, va.pd_index(), PageTableEntry::new(phys, leaf_flags), hhdm);
+            write_entry(
+                pd,
+                va.pd_index(),
+                PageTableEntry::new(phys, leaf_flags),
+                hhdm,
+            );
         }
     }
     Ok(())
@@ -1023,10 +1033,7 @@ pub fn build_handoff_tables(
 ) -> KernelResult<HandoffTables> {
     let mut frames: alloc::vec::Vec<PhysFrame> = alloc::vec::Vec::new();
     match try_build_tables(&mut frames, parsed, dest_base, hhdm, max_phys) {
-        Ok(pml4_phys) => Ok(HandoffTables {
-            pml4_phys,
-            frames,
-        }),
+        Ok(pml4_phys) => Ok(HandoffTables { pml4_phys, frames }),
         Err(e) => {
             for f in frames.drain(..) {
                 // SAFETY: these tables are installed nowhere (no CPU uses them);
@@ -1181,9 +1188,14 @@ fn stage_segments(
 ) -> KernelResult<()> {
     for seg in parsed.segments() {
         let dst_start = dest_base
-            .checked_add(seg.vaddr.checked_sub(parsed.min_vaddr).ok_or(KernelError::InvalidArgument)?)
+            .checked_add(
+                seg.vaddr
+                    .checked_sub(parsed.min_vaddr)
+                    .ok_or(KernelError::InvalidArgument)?,
+            )
             .ok_or(KernelError::InvalidArgument)?;
-        let file_off = usize::try_from(seg.file_offset).map_err(|_| KernelError::InvalidArgument)?;
+        let file_off =
+            usize::try_from(seg.file_offset).map_err(|_| KernelError::InvalidArgument)?;
         let filesz = usize::try_from(seg.filesz).map_err(|_| KernelError::InvalidArgument)?;
 
         let mut done: u64 = 0;
@@ -1215,11 +1227,7 @@ fn stage_segments(
                 // here (so mapped and owned), and `to_copy <= FRAME_SIZE`, so the
                 // write stays within that frame.
                 unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        src.as_ptr(),
-                        dst_virt as *mut u8,
-                        to_copy,
-                    );
+                    core::ptr::copy_nonoverlapping(src.as_ptr(), dst_virt as *mut u8, to_copy);
                 }
             }
 
@@ -1230,7 +1238,9 @@ fn stage_segments(
                     .ok_or(KernelError::InvalidArgument)?,
                 len: chunk,
             });
-            done = done.checked_add(chunk).ok_or(KernelError::InvalidArgument)?;
+            done = done
+                .checked_add(chunk)
+                .ok_or(KernelError::InvalidArgument)?;
         }
     }
     Ok(())
@@ -1404,7 +1414,11 @@ pub fn patch_requests(
     patch_one(image, sites.hhdm, responses.hhdm)?;
     patch_one(image, sites.framebuffer, responses.framebuffer)?;
     patch_one(image, sites.rsdp, responses.rsdp)?;
-    patch_one(image, sites.executable_address, responses.executable_address)?;
+    patch_one(
+        image,
+        sites.executable_address,
+        responses.executable_address,
+    )?;
     patch_one(image, sites.kernel_file, responses.kernel_file)?;
     Ok(())
 }
@@ -1585,8 +1599,7 @@ pub fn prepare_handoff(
 ) -> KernelResult<PreparedHandoff> {
     let parsed = parse_kernel_elf(image).map_err(KexecError::as_kernel_error)?;
     let span = parsed.image_span().ok_or(KernelError::InvalidArgument)?;
-    let dest_base =
-        plan_destination_high(memory_map, span).map_err(KexecError::as_kernel_error)?;
+    let dest_base = plan_destination_high(memory_map, span).map_err(KexecError::as_kernel_error)?;
 
     let tables = build_handoff_tables(&parsed, dest_base, hhdm, max_phys)?;
 
@@ -1776,7 +1789,7 @@ global_asm!(
     ".global kexec_trampoline_start",
     "kexec_trampoline_start:",
     "cld",
-    "mov r15, rdi", // r15 = params
+    "mov r15, rdi",          // r15 = params
     "mov r14, [r15 + 0x10]", // r14 = hhdm
     // Copy the staged image: for each CopyOp{src_phys, dst_phys, len}.
     "mov r13, [r15 + 0x00]", // r13 = copy_count
@@ -1785,9 +1798,9 @@ global_asm!(
     "test r13, r13",
     "jz 3f",
     "mov rsi, [r12 + 0x00]", // src_phys
-    "add rsi, r14", // + hhdm
+    "add rsi, r14",          // + hhdm
     "mov rdi, [r12 + 0x08]", // dst_phys
-    "add rdi, r14", // + hhdm
+    "add rdi, r14",          // + hhdm
     "mov rcx, [r12 + 0x10]", // len
     "rep movsb",
     "add r12, 24",
@@ -2026,12 +2039,18 @@ impl PreparedHandoff {
             put_u64(
                 region_virt,
                 params_off + 0x08,
-                region_phys.wrapping_add(copy_list_off as u64).wrapping_add(hhdm),
+                region_phys
+                    .wrapping_add(copy_list_off as u64)
+                    .wrapping_add(hhdm),
             );
             put_u64(region_virt, params_off + 0x10, hhdm);
             put_u64(region_virt, params_off + 0x18, self.tables.pml4_phys);
             put_u64(region_virt, params_off + 0x20, self.entry);
-            put_u64(region_virt, params_off + 0x28, region_virt.wrapping_add(region_size));
+            put_u64(
+                region_virt,
+                params_off + 0x28,
+                region_virt.wrapping_add(region_size),
+            );
             put_u64(
                 region_virt,
                 params_off + 0x30,
@@ -2135,10 +2154,17 @@ pub fn self_test() -> KernelResult<()> {
     );
     selftest::check_eq!(
         parsed.image_span(),
-        Some(TEST_VADDR_B.wrapping_add(TEST_MEMSZ_B).wrapping_sub(TEST_VADDR_A)),
+        Some(
+            TEST_VADDR_B
+                .wrapping_add(TEST_MEMSZ_B)
+                .wrapping_sub(TEST_VADDR_A)
+        ),
         "image span"
     );
-    let seg_a = parsed.segments().first().ok_or(KernelError::InternalError)?;
+    let seg_a = parsed
+        .segments()
+        .first()
+        .ok_or(KernelError::InternalError)?;
     selftest::check!(seg_a.executable && !seg_a.writable, "segment A is R-X");
     let seg_b = parsed.segments().get(1).ok_or(KernelError::InternalError)?;
     selftest::check!(seg_b.writable && !seg_b.executable, "segment B is RW-");
@@ -2209,7 +2235,11 @@ pub fn self_test() -> KernelResult<()> {
         crate::serial_println!("  FAIL: plan_destination_high found nothing: {:?}", e);
         KernelError::InternalError
     })?;
-    selftest::check_eq!(dst_high, frame.wrapping_mul(98), "high placement sits at the top");
+    selftest::check_eq!(
+        dst_high,
+        frame.wrapping_mul(98),
+        "high placement sits at the top"
+    );
     selftest::check!(
         plan_destination_high(&map, frame.wrapping_mul(1000)).is_err(),
         "an over-large high request has no destination"
@@ -2249,7 +2279,9 @@ pub fn self_test() -> KernelResult<()> {
     // at BASE_REVISION_WORD_OFFSET.
     if let Some(off) = sites.hhdm {
         selftest::check!(
-            off.saturating_add(REQUEST_RESPONSE_OFFSET).saturating_add(8) <= reqimg.len(),
+            off.saturating_add(REQUEST_RESPONSE_OFFSET)
+                .saturating_add(8)
+                <= reqimg.len(),
             "the HHDM request's response field is within the image"
         );
         selftest::check_eq!(
@@ -2273,7 +2305,9 @@ pub fn self_test() -> KernelResult<()> {
     // Content outside the marker window is ignored: a stray request magic placed
     // after the end marker must not be picked up.
     selftest::check!(
-        find_request_sites(&build_request_image_with_stray_after_end()).memmap.is_none(),
+        find_request_sites(&build_request_image_with_stray_after_end())
+            .memmap
+            .is_none(),
         "a request past the end marker is out of the window"
     );
 
@@ -2293,7 +2327,8 @@ pub fn self_test() -> KernelResult<()> {
         let mut arena = HandoffArena::new(&mut staging, FAKE_PHYS, FAKE_HHDM);
         let hhdm = build_hhdm_response(&mut arena, FAKE_HHDM).ok_or(KernelError::InternalError)?;
         let mm = build_memmap_response(&mut arena, &entries).ok_or(KernelError::InternalError)?;
-        let rsdp = build_rsdp_response(&mut arena, 0x000f_e000).ok_or(KernelError::InternalError)?;
+        let rsdp =
+            build_rsdp_response(&mut arena, 0x000f_e000).ok_or(KernelError::InternalError)?;
         let ea = build_executable_address_response(&mut arena, 0x0100_0000, 0xffff_ffff_8000_0000)
             .ok_or(KernelError::InternalError)?;
         (hhdm, mm, rsdp, ea, arena.used())
@@ -2302,7 +2337,11 @@ pub fn self_test() -> KernelResult<()> {
 
     // HHDM response: revision 0 then the offset.
     let hhdm_off = to_off(hhdm_ptr);
-    selftest::check_eq!(le_u64(&staging, hhdm_off), Some(0), "HHDM response revision");
+    selftest::check_eq!(
+        le_u64(&staging, hhdm_off),
+        Some(0),
+        "HHDM response revision"
+    );
     selftest::check_eq!(
         le_u64(&staging, hhdm_off.saturating_add(8)),
         Some(FAKE_HHDM),
@@ -2311,7 +2350,11 @@ pub fn self_test() -> KernelResult<()> {
 
     // Memmap response: two entries reachable through the pointer array.
     let mm_off = to_off(mm_ptr);
-    selftest::check_eq!(le_u64(&staging, mm_off), Some(0), "memmap response revision");
+    selftest::check_eq!(
+        le_u64(&staging, mm_off),
+        Some(0),
+        "memmap response revision"
+    );
     selftest::check_eq!(
         le_u64(&staging, mm_off.saturating_add(8)),
         Some(2),
@@ -2319,9 +2362,10 @@ pub fn self_test() -> KernelResult<()> {
     );
     // entries_ptr -> the pointer array; pointer[1] -> the second entry; whose
     // (base, length, type) round-trips.
-    let array_ptr = le_u64(&staging, mm_off.saturating_add(16)).ok_or(KernelError::InternalError)?;
-    let entry1_ptr = le_u64(&staging, to_off(array_ptr).saturating_add(8))
-        .ok_or(KernelError::InternalError)?;
+    let array_ptr =
+        le_u64(&staging, mm_off.saturating_add(16)).ok_or(KernelError::InternalError)?;
+    let entry1_ptr =
+        le_u64(&staging, to_off(array_ptr).saturating_add(8)).ok_or(KernelError::InternalError)?;
     let entry1_off = to_off(entry1_ptr);
     selftest::check_eq!(le_u64(&staging, entry1_off), Some(0x1000), "entry 1 base");
     selftest::check_eq!(
@@ -2360,11 +2404,10 @@ pub fn self_test() -> KernelResult<()> {
         const DEST_BASE: u64 = 0x0100_0000; // a frame-aligned stand-in destination
         // Direct-map a single page's worth of physical RAM: rounds up to one
         // huge page, keeping the test's table count tiny.
-        let tables = build_handoff_tables(&parsed, DEST_BASE, real_hhdm, SIZE_4K)
-            .map_err(|e| {
-                crate::serial_println!("  FAIL: build_handoff_tables: {:?}", e);
-                KernelError::InternalError
-            })?;
+        let tables = build_handoff_tables(&parsed, DEST_BASE, real_hhdm, SIZE_4K).map_err(|e| {
+            crate::serial_println!("  FAIL: build_handoff_tables: {:?}", e);
+            KernelError::InternalError
+        })?;
         let pml4 = tables.pml4_phys;
 
         // The direct map: hhdm+0 -> physical 0, writable, executable (NX clear).
@@ -2465,7 +2508,11 @@ pub fn self_test() -> KernelResult<()> {
     }
 
     // ---- the adjusted memory map (pure) ----
-    let fw0 = MemmapEntry { base: 0, length: 0x10000, type_: memmap_type::USABLE };
+    let fw0 = MemmapEntry {
+        base: 0,
+        length: 0x10000,
+        type_: memmap_type::USABLE,
+    };
     // The old kernel image, and old bootloader-reclaimable, both become usable.
     let fw1 = MemmapEntry {
         base: 0x10000,
@@ -2489,8 +2536,20 @@ pub fn self_test() -> KernelResult<()> {
     };
     let fw: [&MemmapEntry; 5] = [&fw0, &fw1, &fw2, &fw3, &fw4];
     let overlays = [
-        (PhysRange { start: 0x1000, end: 0x5000 }, memmap_type::EXECUTABLE_AND_MODULES),
-        (PhysRange { start: 0x5000, end: 0x6000 }, memmap_type::BOOTLOADER_RECLAIMABLE),
+        (
+            PhysRange {
+                start: 0x1000,
+                end: 0x5000,
+            },
+            memmap_type::EXECUTABLE_AND_MODULES,
+        ),
+        (
+            PhysRange {
+                start: 0x5000,
+                end: 0x6000,
+            },
+            memmap_type::BOOTLOADER_RECLAIMABLE,
+        ),
     ];
     let adjusted = adjust_memory_map(&fw, &overlays);
     let expected: [(u64, u64, u64); 6] = [
@@ -2585,7 +2644,11 @@ pub fn self_test() -> KernelResult<()> {
     selftest::check!(!trampoline_bytes().is_empty(), "trampoline blob assembled");
     selftest::check_eq!(order_for(1), 0, "order_for(1) is 0");
     selftest::check_eq!(order_for(FRAME_SIZE), 0, "order_for(one frame) is 0");
-    selftest::check_eq!(order_for(FRAME_SIZE.saturating_add(1)), 1, "order_for(frame+1) is 1");
+    selftest::check_eq!(
+        order_for(FRAME_SIZE.saturating_add(1)),
+        1,
+        "order_for(frame+1) is 1"
+    );
     selftest::check_eq!(align16(1), 16, "align16(1) is 16");
     selftest::check_eq!(align16(16), 16, "align16(16) is 16");
     selftest::check_eq!(align16(17), 32, "align16(17) is 32");

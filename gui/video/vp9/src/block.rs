@@ -57,7 +57,7 @@ use crate::common::{
     ZEROMV,
 };
 use crate::detokenize::{self, BlockCounts, Scan};
-use crate::frame::{AnyFrame, FrameBuf, Pixel};
+use crate::frame::{AnyBuffers, AnyFrame, Buffers, FrameBuf, Pixel};
 use crate::header::{self, Segmentation};
 use crate::idct;
 use crate::inter::{self, McScratch, ScaleFactors};
@@ -352,6 +352,7 @@ pub(crate) fn decode_tiles(
     data: &[u8],
     frame: &mut AnyFrame,
     threads: usize,
+    scratch: &mut AnyBuffers,
 ) -> Result<Decoded, Error> {
     let tile_cols = 1usize << info.log2_tile_cols;
     let tile_rows = 1usize << info.log2_tile_rows;
@@ -364,11 +365,11 @@ pub(crate) fn decode_tiles(
     match frame {
         AnyFrame::Eight(f) => {
             let shared = Shared::new(info, fc, refs, prev_mvs, last_seg_map, &buffers, f)?;
-            decode_tiles_t(shared, sinks, f, threads)
+            decode_tiles_t(shared, sinks, f, threads, &mut scratch.eight)
         }
         AnyFrame::High(f) => {
             let shared = Shared::new(info, fc, refs, prev_mvs, last_seg_map, &buffers, f)?;
-            decode_tiles_t(shared, sinks, f, threads)
+            decode_tiles_t(shared, sinks, f, threads, &mut scratch.high)
         }
     }
 }
@@ -448,12 +449,13 @@ fn decode_tiles_t<P: Pixel>(
     sinks: Sinks<'_>,
     frame: &mut FrameBuf<P>,
     threads: usize,
+    scratch: &mut Buffers<P>,
 ) -> Result<Decoded, Error> {
     let info = shared.info;
     let tile_cols = 1usize << info.log2_tile_cols;
     let workers = threads.clamp(1, tile_cols);
     if workers > 1 {
-        return decode_columns_threaded(shared, sinks, frame, workers);
+        return decode_columns_threaded(shared, sinks, frame, workers, scratch);
     }
     // One decoder over every tile column in turn, straight into the frame.
     // Tile columns are independent, so taking them a column at a time rather
@@ -505,7 +507,12 @@ struct Column<P: Pixel> {
 }
 
 impl<P: Pixel> Column<P> {
-    fn new(shared: &Shared<'_, P>, frame: &FrameBuf<P>, tile_col: usize) -> Result<Self, Error> {
+    fn new(
+        shared: &Shared<'_, P>,
+        frame: &FrameBuf<P>,
+        tile_col: usize,
+        scratch: &mut Buffers<P>,
+    ) -> Result<Self, Error> {
         let info = shared.info;
         let tile = shared.tile_cols(tile_col);
         let cols = Columns {
@@ -520,7 +527,7 @@ impl<P: Pixel> Column<P> {
             tile_col,
             cols,
             x0,
-            strip: frame.strip(x1.saturating_sub(x0))?,
+            strip: scratch.strip(frame, x1.saturating_sub(x0))?,
             mi: None,
             mvs: vec![MvRef::default(); cols.width * info.mi_rows],
             seg: vec![0; cols.width * info.mi_rows],
@@ -554,6 +561,7 @@ fn decode_columns_threaded<P: Pixel>(
     sinks: Sinks<'_>,
     frame: &mut FrameBuf<P>,
     workers: usize,
+    scratch: &mut Buffers<P>,
 ) -> Result<Decoded, Error> {
     let info = shared.info;
     let tile_cols = 1usize << info.log2_tile_cols;
@@ -563,7 +571,7 @@ fn decode_columns_threaded<P: Pixel>(
     let mut dealt: Vec<Vec<Column<P>>> = (0..workers).map(|_| Vec::new()).collect();
     for tile_col in 0..tile_cols {
         if let Some(hand) = dealt.get_mut(tile_col % workers) {
-            hand.push(Column::new(&shared, frame, tile_col)?);
+            hand.push(Column::new(&shared, frame, tile_col, scratch)?);
         }
     }
     let hands: Vec<Mutex<Vec<Column<P>>>> = dealt.into_iter().map(Mutex::new).collect();
@@ -652,6 +660,7 @@ fn decode_columns_threaded<P: Pixel>(
                 .ok_or(Error::Corrupt("a tile column was not decoded"))?,
         )?;
         end_of_data = column.end;
+        scratch.give_strip(column.strip);
     }
     Ok(Decoded { mi, end_of_data })
 }

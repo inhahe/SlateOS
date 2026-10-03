@@ -235,6 +235,24 @@ impl<P: Pixel> FrameBuf<P> {
         })
     }
 
+    /// Whether `strip` is a strip `width` wide of this frame's rows and
+    /// format, as [`Self::strip`] makes them.
+    fn strip_fits(&self, strip: &Self, width: usize) -> bool {
+        (strip.ss_x, strip.ss_y, strip.bit_depth) == (self.ss_x, self.ss_y, self.bit_depth)
+            && strip
+                .planes
+                .iter()
+                .zip(&self.planes)
+                .enumerate()
+                .all(|(i, (s, p))| {
+                    let w = if i == 0 { width } else { width >> self.ss_x };
+                    s.stride == w
+                        && s.alloc_height == p.alloc_height
+                        && Some(s.data.len()) == w.checked_mul(p.alloc_height)
+                        && (s.height, s.crop_height) == (p.height, p.crop_height)
+                })
+    }
+
     /// Copy a strip made by [`Self::strip`] back in at luma pixel `x0`.
     pub(crate) fn paste(&mut self, strip: &Self, x0: usize) {
         for (i, (dst, src)) in self.planes.iter_mut().zip(&strip.planes).enumerate() {
@@ -253,6 +271,77 @@ impl<P: Pixel> FrameBuf<P> {
             }
         }
     }
+}
+
+/// Buffers a frame's decoding borrows and gives back, kept by the decoder
+/// from frame to frame so that they are not allocated -- and cleared by the
+/// kernel -- for every frame: tile columns' strips, and the loop filter's
+/// copies of its bands. What a buffer held before is never read: decoding
+/// writes every sample before it reads it, and the bands are copies.
+#[derive(Debug)]
+pub(crate) struct Buffers<P> {
+    strips: Vec<FrameBuf<P>>,
+    rows: Vec<Vec<P>>,
+}
+
+impl<P> Default for Buffers<P> {
+    fn default() -> Self {
+        Self {
+            strips: Vec::new(),
+            rows: Vec::new(),
+        }
+    }
+}
+
+/// How many of each kind of buffer [`Buffers`] keeps: enough for a 16K
+/// frame's 64 tile columns and 272 superblock rows of three planes.
+const BUFFERS_KEPT: usize = 1024;
+
+impl<P: Pixel> Buffers<P> {
+    /// A strip `width` wide of `frame`'s rows and format (see
+    /// [`FrameBuf::strip`]): one given back earlier if one fits, else new.
+    pub(crate) fn strip(
+        &mut self,
+        frame: &FrameBuf<P>,
+        width: usize,
+    ) -> Result<FrameBuf<P>, Error> {
+        match self.strips.iter().position(|s| frame.strip_fits(s, width)) {
+            Some(i) => {
+                let FrameBuf { planes, .. } = self.strips.swap_remove(i);
+                Ok(FrameBuf { planes, ..*frame })
+            }
+            None => frame.strip(width),
+        }
+    }
+
+    /// Give a strip back.
+    pub(crate) fn give_strip(&mut self, strip: FrameBuf<P>) {
+        if self.strips.len() < BUFFERS_KEPT {
+            self.strips.push(strip);
+        }
+    }
+
+    /// An empty vector to fill: one given back earlier, its allocation kept,
+    /// or a new one.
+    pub(crate) fn rows(&mut self) -> Vec<P> {
+        let mut v = self.rows.pop().unwrap_or_default();
+        v.clear();
+        v
+    }
+
+    /// Give a vector back.
+    pub(crate) fn give_rows(&mut self, v: Vec<P>) {
+        if self.rows.len() < BUFFERS_KEPT {
+            self.rows.push(v);
+        }
+    }
+}
+
+/// [`Buffers`] for either sample type.
+#[derive(Debug, Default)]
+pub(crate) struct AnyBuffers {
+    pub eight: Buffers<u8>,
+    pub high: Buffers<u16>,
 }
 
 /// A frame of either sample type, as the reference slots hold them.

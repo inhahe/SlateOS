@@ -46,7 +46,7 @@ use crate::block::{Decoded, MiGrid, ModeInfo, uv_tx_size};
 use crate::common::{BLOCK_SIZES, BlockSize, MI_BLOCK_SIZE, TX_4X4, TX_8X8, TX_16X16, TX_32X32};
 use std::sync::mpsc::{Receiver, Sender};
 
-use crate::frame::{AnyFrame, FrameBuf, Pixel, Plane};
+use crate::frame::{AnyBuffers, AnyFrame, Buffers, FrameBuf, Pixel, Plane};
 use crate::header::{FilterLimits, LevelTable, LimitTable, MODE_LF_LUT};
 use crate::tables;
 
@@ -317,10 +317,15 @@ pub(crate) fn filter_frame(
     levels: &LevelTable,
     limits: &LimitTable,
     threads: usize,
+    scratch: &mut AnyBuffers,
 ) {
     match frame {
-        AnyFrame::Eight(f) => filter_frame_t(f, &decoded.mi, levels, limits, threads),
-        AnyFrame::High(f) => filter_frame_t(f, &decoded.mi, levels, limits, threads),
+        AnyFrame::Eight(f) => {
+            filter_frame_t(f, &decoded.mi, levels, limits, threads, &mut scratch.eight);
+        }
+        AnyFrame::High(f) => {
+            filter_frame_t(f, &decoded.mi, levels, limits, threads, &mut scratch.high);
+        }
     }
 }
 
@@ -330,12 +335,13 @@ fn filter_frame_t<P: Pixel>(
     levels: &LevelTable,
     limits: &LimitTable,
     threads: usize,
+    scratch: &mut Buffers<P>,
 ) {
     let plan = Plan::new(frame, mi, levels, limits);
     // Two rows a thread at least: fewer, and starting the threads costs more
     // than they save.
     let workers = threads.min(plan.sb_rows / 2);
-    if workers > 1 && filter_rows_threaded(frame, &plan, workers).is_some() {
+    if workers > 1 && filter_rows_threaded(frame, &plan, workers, scratch).is_some() {
         return;
     }
     let [y, u, v] = &mut frame.planes;
@@ -506,6 +512,7 @@ fn filter_rows_threaded<P: Pixel>(
     frame: &mut FrameBuf<P>,
     plan: &Plan<'_>,
     workers: usize,
+    scratch: &mut Buffers<P>,
 ) -> Option<()> {
     let (ss_x, ss_y) = plan.ss;
     let geometry: Geometry = core::array::from_fn(|plane| {
@@ -522,19 +529,30 @@ fn filter_rows_threaded<P: Pixel>(
             senders.push(Some(tx));
             receivers.push(Some(rx));
         }
+        // Each thread's empty buffers for its bands' copies, from the pool.
+        let mut empties: Vec<Vec<[Vec<P>; 3]>> = (0..workers)
+            .map(|t| {
+                (t..plan.sb_rows)
+                    .step_by(workers)
+                    .map(|_| [scratch.rows(), scratch.rows(), scratch.rows()])
+                    .collect()
+            })
+            .collect();
         // `Err` if a thread could not start; otherwise each thread's bands,
         // `None` from a thread that lost step.
         let outcomes: Result<Vec<Option<Vec<Band<P>>>>, ()> = std::thread::scope(|scope| {
             let mut handles = Vec::with_capacity(workers);
             for t in 0..workers {
+                let mine = empties.get_mut(t).map(core::mem::take).unwrap_or_default();
                 let tx = senders.get_mut(t).and_then(Option::take);
                 let rx = receivers
                     .get_mut((t + workers - 1) % workers)
                     .and_then(Option::take);
                 let started = match (tx, rx) {
                     (Some(tx), Some(rx)) => {
-                        let work =
-                            move || filter_band_rows(frame, plan, geometry, t, workers, &tx, &rx);
+                        let work = move || {
+                            filter_band_rows(frame, plan, geometry, (t, workers), mine, (&tx, &rx))
+                        };
                         std::thread::Builder::new().spawn_scoped(scope, work).ok()
                     }
                     _ => None,
@@ -613,6 +631,11 @@ fn filter_rows_threaded<P: Pixel>(
                 .copy_from_slice(above);
         }
     }
+    for band in bands {
+        for rows in band.planes {
+            scratch.give_rows(rows);
+        }
+    }
     Some(())
 }
 
@@ -623,15 +646,14 @@ fn filter_band_rows<P: Pixel>(
     frame: &FrameBuf<P>,
     plan: &Plan<'_>,
     geometry: Geometry,
-    t: usize,
-    workers: usize,
-    tx: &Sender<Tail<P>>,
-    rx: &Receiver<Tail<P>>,
+    (t, workers): (usize, usize),
+    mut empties: Vec<[Vec<P>; 3]>,
+    (tx, rx): (&Sender<Tail<P>>, &Receiver<Tail<P>>),
 ) -> Option<Vec<Band<P>>> {
     let mut out = Vec::new();
     for sb_row in (t..plan.sb_rows).step_by(workers) {
         let apron = if sb_row > 0 { TAIL } else { 0 };
-        let mut planes: [Vec<P>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+        let mut planes: [Vec<P>; 3] = empties.pop().unwrap_or_default();
         for ((copy, plane), &(stride, band_h, _)) in
             planes.iter_mut().zip(&frame.planes).zip(&geometry)
         {

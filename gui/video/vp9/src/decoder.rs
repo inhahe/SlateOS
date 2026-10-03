@@ -36,7 +36,7 @@ use crate::common::{
     InterpFilter, MAX_REF_FRAMES, MAX_SEGMENTS, REF_FRAMES, REFS_PER_FRAME, RefFrame,
     ReferenceMode, SINGLE_REFERENCE, SWITCHABLE, TX_MODE_SELECT, TxMode,
 };
-use crate::frame::{AnyFrame, FrameBuf, Pixel};
+use crate::frame::{AnyBuffers, AnyFrame, FrameBuf, Pixel};
 use crate::header::{self, ColorConfig, LoopFilterParams, Quantization, Segmentation, StreamInfo};
 use crate::inter::ScaleFactors;
 use crate::loopfilter;
@@ -209,7 +209,18 @@ pub struct Decoder {
     /// after each frame that has segmentation on.
     seg_maps: [Vec<u8>; 2],
     cur_seg_map: usize,
+    /// Every frame this decoder made that may be decoded into again: one
+    /// that nothing else holds -- no reference slot, no picture the caller
+    /// kept -- is taken for the next frame of its size, rather than a new
+    /// one allocated and cleared.
+    pool: Vec<Arc<AnyFrame>>,
+    /// Buffers the threads borrow, kept likewise.
+    scratch: AnyBuffers,
 }
+
+/// How many frames nothing holds the pool keeps for later: a frame needs
+/// one; a spare covers a packet that shows a frame the caller then keeps.
+const POOL_SPARES: usize = 2;
 
 impl Default for Decoder {
     fn default() -> Self {
@@ -281,6 +292,8 @@ impl Decoder {
             prev_mvs: Vec::new(),
             seg_maps: [Vec::new(), Vec::new()],
             cur_seg_map: 0,
+            pool: Vec::new(),
+            scratch: AnyBuffers::default(),
         }
     }
 
@@ -458,7 +471,9 @@ impl Decoder {
             count: !self.frame_parallel_decoding_mode,
         };
 
-        let mut frame = self.new_frame()?;
+        let mut frame_arc = self.take_frame()?;
+        let frame = Arc::get_mut(&mut frame_arc)
+            .ok_or(Error::Corrupt("a frame being decoded is held elsewhere"))?;
         let refs: Vec<Option<RefInfo<'_>>> = self
             .frame_refs
             .iter()
@@ -494,17 +509,19 @@ impl Decoder {
             &mut cur_mvs,
             &mut counts,
             tiles,
-            &mut frame,
+            frame,
             self.threads,
+            &mut self.scratch,
         )?;
 
         if self.lf.filter_level != 0 {
             loopfilter::filter_frame(
-                &mut frame,
+                frame,
                 &decoded,
                 &self.lf.levels(&self.seg),
                 &self.lf.limits(),
                 self.threads,
+                &mut self.scratch,
             );
         }
         let used = offset + first_partition + decoded.end_of_data;
@@ -547,7 +564,8 @@ impl Decoder {
         }
 
         // swap_frame_buffers.
-        let frame = Arc::new(frame);
+        let frame = frame_arc;
+        self.pool.push(Arc::clone(&frame));
         for (i, slot) in self.ref_frame_map.iter_mut().enumerate() {
             if self.refresh_frame_flags & (1 << i) != 0 {
                 *slot = Some(Arc::clone(&frame));
@@ -589,7 +607,49 @@ impl Decoder {
         }
     }
 
-    /// A frame to decode into, of the current size and format.
+    /// A frame to decode into, of the current size and format: one from the
+    /// pool that nothing else holds, or a new one. Frames of another size
+    /// that nothing holds, and spares past [`POOL_SPARES`], are let go.
+    fn take_frame(&mut self) -> Result<Arc<AnyFrame>, Error> {
+        let c = self.color;
+        let fits = |f: &AnyFrame| {
+            let (w, h, ss, bd) = match f {
+                AnyFrame::Eight(f) => (f.width, f.height, (f.ss_x, f.ss_y), f.bit_depth),
+                AnyFrame::High(f) => (f.width, f.height, (f.ss_x, f.ss_y), f.bit_depth),
+            };
+            (w, h, ss, bd) == (self.width, self.height, (c.ss_x, c.ss_y), c.bit_depth)
+        };
+        let free = |f: &Arc<AnyFrame>| Arc::strong_count(f) == 1 && Arc::weak_count(f) == 0;
+        let taken = self
+            .pool
+            .iter()
+            .position(|f| free(f) && fits(f))
+            .map(|i| self.pool.swap_remove(i));
+        let mut spares = 0;
+        self.pool.retain(|f| {
+            if !free(f) {
+                return true;
+            }
+            if !fits(f) || spares >= POOL_SPARES {
+                return false;
+            }
+            spares += 1;
+            true
+        });
+        let Some(mut frame) = taken else {
+            return Ok(Arc::new(self.new_frame()?));
+        };
+        let f =
+            Arc::get_mut(&mut frame).ok_or(Error::Corrupt("a pooled frame is held elsewhere"))?;
+        let (rw, rh) = (self.render_width, self.render_height);
+        match f {
+            AnyFrame::Eight(f) => reuse(f, &c, rw, rh),
+            AnyFrame::High(f) => reuse(f, &c, rw, rh),
+        }
+        Ok(frame)
+    }
+
+    /// A new frame to decode into, of the current size and format.
     fn new_frame(&self) -> Result<AnyFrame, Error> {
         let c = &self.color;
         let mut frame = if c.bit_depth == 8 {
@@ -898,6 +958,21 @@ impl Decoder {
             return Err(Error::Corrupt("the frame's compressed header is corrupt"));
         }
         Ok((tx_mode, reference_mode, fixed, var))
+    }
+}
+
+/// Make a pooled frame ready to decode into. Its samples are what the last
+/// frame decoded into it left: decoding writes every sample anything reads
+/// before reading it, as libvpx's own reuse of its buffers depends on. Debug
+/// builds fill it with garbage first, so the conformance tests would see a
+/// sample read before it is written.
+fn reuse<P: Pixel>(f: &mut FrameBuf<P>, c: &ColorConfig, rw: u32, rh: u32) {
+    set_meta(f, c, rw, rh);
+    if cfg!(debug_assertions) {
+        let garbage = P::from_int(0x5a);
+        for plane in &mut f.planes {
+            plane.data.fill(garbage);
+        }
     }
 }
 

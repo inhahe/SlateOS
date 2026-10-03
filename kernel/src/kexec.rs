@@ -1021,14 +1021,176 @@ unsafe fn translate(pml4: u64, virt: u64, hhdm: u64) -> Option<(u64, PageFlags)>
 }
 
 // ---------------------------------------------------------------------------
+// Staging the image
+// ---------------------------------------------------------------------------
+
+/// One copy the trampoline performs just before the jump: `len` bytes from
+/// `src_phys` (a staged source frame) to `dst_phys` (the contiguous
+/// destination). Kept small and `Copy` so the whole page list is a plain `Vec`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CopyOp {
+    /// Physical address of the staged bytes.
+    pub src_phys: u64,
+    /// Physical address they are copied to at handoff.
+    pub dst_phys: u64,
+    /// Number of bytes to copy.
+    pub len: u64,
+}
+
+/// The image staged for handoff: the source frames holding its segment bytes,
+/// and the page list the trampoline replays to place them at the contiguous
+/// destination.
+///
+/// The bytes are staged in ordinary (possibly scattered) frames and copied to
+/// the destination *last*, by the trampoline — because the destination may
+/// overlap the running kernel, which is dead only once the jump is made.
+pub struct StagedImage {
+    /// Frames holding the staged segment bytes (filesz copied, the rest zero).
+    pub source_frames: alloc::vec::Vec<PhysFrame>,
+    /// Source-to-destination copies, in ascending destination order.
+    pub copy_ops: alloc::vec::Vec<CopyOp>,
+}
+
+impl StagedImage {
+    /// Free every staged source frame — for abandoning a prepared handoff
+    /// before the jump.
+    ///
+    /// # Safety
+    ///
+    /// No handoff may be in progress reading these frames.
+    pub unsafe fn free(self) {
+        for f in self.source_frames {
+            // SAFETY: each frame came from `alloc_frame_zeroed` here and is not
+            // in use per the contract above; a free error is not actionable.
+            let _ = unsafe { frame::free_frame(f) };
+        }
+    }
+}
+
+/// Stage a kernel image's segments into frames and build the copy list that
+/// places them at `dest_base` (plus each segment's offset from `min_vaddr`).
+///
+/// Each segment is split into [`FRAME_SIZE`] chunks; one zeroed frame is
+/// allocated per chunk, the segment's file bytes for that chunk copied in (the
+/// rest left zero, which is the BSS), and one [`CopyOp`] recorded. The frames
+/// need not be contiguous: the trampoline copies each to its destination.
+///
+/// On any failure every frame allocated so far is freed.
+///
+/// # Errors
+///
+/// [`KernelError::OutOfMemory`] if a frame cannot be allocated, or
+/// [`KernelError::InvalidArgument`] if a size or address computation overflows,
+/// or a segment's file bytes lie outside `image`.
+pub fn stage_image(
+    image: &[u8],
+    parsed: &ParsedKernel,
+    dest_base: u64,
+    hhdm: u64,
+) -> KernelResult<StagedImage> {
+    let mut source_frames: alloc::vec::Vec<PhysFrame> = alloc::vec::Vec::new();
+    let mut copy_ops: alloc::vec::Vec<CopyOp> = alloc::vec::Vec::new();
+    match stage_segments(
+        image,
+        parsed,
+        dest_base,
+        hhdm,
+        &mut source_frames,
+        &mut copy_ops,
+    ) {
+        Ok(()) => Ok(StagedImage {
+            source_frames,
+            copy_ops,
+        }),
+        Err(e) => {
+            for f in source_frames.drain(..) {
+                // SAFETY: these frames are used by nothing; freeing on the error
+                // path cannot race, and a free error is not actionable.
+                let _ = unsafe { frame::free_frame(f) };
+            }
+            Err(e)
+        }
+    }
+}
+
+/// The body of [`stage_image`]; the caller frees `source_frames` on error.
+fn stage_segments(
+    image: &[u8],
+    parsed: &ParsedKernel,
+    dest_base: u64,
+    hhdm: u64,
+    source_frames: &mut alloc::vec::Vec<PhysFrame>,
+    copy_ops: &mut alloc::vec::Vec<CopyOp>,
+) -> KernelResult<()> {
+    for seg in parsed.segments() {
+        let dst_start = dest_base
+            .checked_add(seg.vaddr.checked_sub(parsed.min_vaddr).ok_or(KernelError::InvalidArgument)?)
+            .ok_or(KernelError::InvalidArgument)?;
+        let file_off = usize::try_from(seg.file_offset).map_err(|_| KernelError::InvalidArgument)?;
+        let filesz = usize::try_from(seg.filesz).map_err(|_| KernelError::InvalidArgument)?;
+
+        let mut done: u64 = 0;
+        while done < seg.memsz {
+            let chunk = FRAME_U64.min(seg.memsz.saturating_sub(done));
+            let f = frame::alloc_frame_zeroed()?;
+            source_frames.push(f);
+
+            // Copy the file-backed portion of this chunk; the rest stays zero.
+            let done_usize = usize::try_from(done).map_err(|_| KernelError::InvalidArgument)?;
+            let file_present = filesz.saturating_sub(done_usize); // file bytes left
+            let chunk_usize = usize::try_from(chunk).map_err(|_| KernelError::InvalidArgument)?;
+            let to_copy = file_present.min(chunk_usize);
+            if to_copy > 0 {
+                let src_start = file_off
+                    .checked_add(done_usize)
+                    .ok_or(KernelError::InvalidArgument)?;
+                let src_end = src_start
+                    .checked_add(to_copy)
+                    .ok_or(KernelError::InvalidArgument)?;
+                let src = image
+                    .get(src_start..src_end)
+                    .ok_or(KernelError::InvalidArgument)?;
+                let dst_virt = f
+                    .addr()
+                    .checked_add(hhdm)
+                    .ok_or(KernelError::InvalidArgument)?;
+                // SAFETY: `dst_virt` is the HHDM view of a frame just allocated
+                // here (so mapped and owned), and `to_copy <= FRAME_SIZE`, so the
+                // write stays within that frame.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        src.as_ptr(),
+                        dst_virt as *mut u8,
+                        to_copy,
+                    );
+                }
+            }
+
+            copy_ops.push(CopyOp {
+                src_phys: f.addr(),
+                dst_phys: dst_start
+                    .checked_add(done)
+                    .ok_or(KernelError::InvalidArgument)?,
+                len: chunk,
+            });
+            done = done.checked_add(chunk).ok_or(KernelError::InvalidArgument)?;
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 
-/// Exercise ELF parsing and destination planning on fabricated inputs.
+/// Exercise the kexec loader on fabricated inputs: ELF parsing, destination
+/// planning, Limine request discovery and response building, and -- when the
+/// frame allocator is up (so, at boot) -- building real handoff page tables and
+/// staging the image, each verified then freed.
 ///
-/// Diagnostic: these are pure functions, so a failure means the loader would
-/// mis-read an image or place the new kernel on memory it still needs — a bug
-/// to surface, but it cannot affect a kernel that never invokes `power.reload`.
+/// Diagnostic: a failure means the loader would mis-read an image, place the new
+/// kernel on memory it still needs, or build a bad handoff -- a bug to surface,
+/// but it cannot affect a kernel that never invokes `power.reload`.
 pub fn self_test() -> KernelResult<()> {
     use crate::selftest;
 
@@ -1328,6 +1490,44 @@ pub fn self_test() -> KernelResult<()> {
 
         // SAFETY: these tables were never installed in CR3, so freeing is safe.
         unsafe { tables.free() };
+
+        // ---- staging the image ----
+        // Each fabricated segment fits in one 16 KiB frame, so staging yields two
+        // source frames and two copy ops placing them at the destination.
+        let staged = stage_image(&image, &parsed, DEST_BASE, real_hhdm).map_err(|e| {
+            crate::serial_println!("  FAIL: stage_image: {:?}", e);
+            KernelError::InternalError
+        })?;
+        selftest::check_eq!(staged.source_frames.len(), 2, "two staged source frames");
+        selftest::check_eq!(staged.copy_ops.len(), 2, "two copy ops");
+        if let Some(op0) = staged.copy_ops.first() {
+            selftest::check_eq!(op0.dst_phys, DEST_BASE, "R-X segment copies to dest base");
+            selftest::check_eq!(op0.len, TEST_MEMSZ_A, "R-X copy length is its memsz");
+        }
+        if let Some(op1) = staged.copy_ops.get(1) {
+            selftest::check_eq!(
+                op1.dst_phys,
+                DEST_BASE.wrapping_add(TEST_VADDR_B.wrapping_sub(TEST_VADDR_A)),
+                "RW- segment copies to dest + offset"
+            );
+            selftest::check_eq!(op1.len, TEST_MEMSZ_B, "RW- copy length is its memsz");
+        }
+        // The first source frame carries the file byte at offset 0, BSS zero after.
+        if let Some(frame0) = staged.source_frames.first() {
+            let base = frame0.addr().wrapping_add(real_hhdm);
+            // SAFETY: the frame was just allocated and staged by this module, and
+            // `base` is its HHDM view; reading the first two bytes stays within it.
+            let (b0, b1) = unsafe {
+                (
+                    core::ptr::read_volatile(base as *const u8),
+                    core::ptr::read_volatile((base.wrapping_add(1)) as *const u8),
+                )
+            };
+            selftest::check_eq!(b0, TEST_CONTENT_BYTE, "staged file byte copied");
+            selftest::check_eq!(b1, 0, "staged BSS is zero");
+        }
+        // SAFETY: nothing is reading these frames.
+        unsafe { staged.free() };
     }
 
     Ok(())
@@ -1339,6 +1539,9 @@ const TEST_VADDR_A: u64 = 0xffff_ffff_8000_0000;
 const TEST_MEMSZ_A: u64 = 0x1000;
 const TEST_VADDR_B: u64 = 0xffff_ffff_8000_2000;
 const TEST_MEMSZ_B: u64 = 0x2000;
+/// The one file-content byte both fabricated segments carry, distinct from the
+/// zero fill so the staging self-test can tell a copied byte from the BSS.
+const TEST_CONTENT_BYTE: u8 = 0xAB;
 
 /// Build a minimal but valid x86-64 ELF64 image with two `PT_LOAD` segments
 /// (one R-X, one RW-), for [`self_test`].
@@ -1360,6 +1563,7 @@ fn build_test_elf() -> alloc::vec::Vec<u8> {
 
     // Header + two program headers + one byte of segment file content.
     let mut buf = vec![0u8; data_off + 1];
+    buf[data_off] = TEST_CONTENT_BYTE;
 
     // e_ident
     buf[0..4].copy_from_slice(&ELF_MAGIC);

@@ -88,6 +88,10 @@ printf 'z'                              > lone.txt
 seq 1 3000                              > big.txt
 # A directory, which opens and then cannot be read.
 mkdir -p rdir
+# For the regex dialects: a stray `)`, a `\w`, a colon, a tab.
+printf 'ab w)\n'                       > wparen.txt
+printf 'a:\n'                          > colon.txt
+printf 'a\tb\n'                        > tabbed.txt
 head -c 5000 /dev/zero | tr '\0' x     > long.txt
 printf '\n'                            >> long.txt
 
@@ -1423,6 +1427,130 @@ usage_case --version=x
 # `Report bugs to:` block, exactly as every other utility here does.
 xfail_case 'help omits the GNU bug-report block' --help
 xfail_case 'version names SlateOS' --version
+
+# --- the compiler's refusals --------------------------------------------------
+#
+# Addresses a command does not take, and the forms GNU reads as addresses only
+# to refuse them. Each is refused one past the character that settles it, as
+# GNU's `bad_prog` counts. Measured, sed 4.9; until 2026-10-03 this port
+# accepted `1,2q` and `1:a`, called `+3p` an unknown command and `1,p` a
+# missing address, and had no `0r`.
+run_case -e '1,2q' abc.txt
+run_case -e '1,2Q' abc.txt
+run_case -e '1,2!q' abc.txt
+run_case -e '/a/,/b/q' abc.txt
+run_case -e '1:a' abc.txt
+run_case -e '{p;1}' abc.txt
+run_case -e '1#x' abc.txt
+run_case -e '1 #x' abc.txt
+run_case -n -e '!#x' -e p abc.txt
+run_case -e '1,p' abc.txt
+run_case -e '1, p' abc.txt
+run_case -n -e '1,' -e p abc.txt
+run_case -e '+3p' abc.txt
+run_case -e '~3p' abc.txt
+# `+0` and `~0` as a first address are GNU's `ADDR_IS_NULL`, every line.
+run_case -e '+0p' abc.txt
+run_case -e '~0p' abc.txt
+run_case -e '+0,2p' abc.txt
+run_case -e '+p' abc.txt
+run_case -n -e '1 ~ 2p' nums.txt
+run_case -n -e '1,+ 1p' nums.txt
+# A `first~step` end closes the range on the first line it names -- tested on
+# the line the range starts on, too.
+run_case -n -e '1,2~3p' nums.txt
+run_case -n -e '2,0~2p' nums.txt
+run_case -n -e '2,1~2p' nums.txt
+# `0rFILE` puts the file before the first line, written there and then.
+run_case '0r def.txt' abc.txt
+run_case '0r def.txt' empty.txt
+run_case -s '0r def.txt' abc.txt nonl.txt
+run_case --debug '0r def.txt' abc.txt
+run_case '0,/a/r def.txt' abc.txt
+# GNU compiles `L` and then dies running it: `INTERNAL ERROR: Bad cmd L`,
+# status 4. That is a bug in a command 4.9 removed, and an error before
+# anything is read is the kinder answer.
+xfail_case 'L is refused while the script is read, not when it runs' L abc.txt
+
+# --- M: multi-line matching -------------------------------------------------------
+#
+# `M` makes `^` and `$` match at a newline inside the pattern space, and keeps
+# `.` and `[^...]` from matching one -- except that under `-z` the anchors stay
+# at the ends, GNU setting `newline_anchor` only for a newline separator. This
+# port refused `M` until 2026-10-03.
+run_case -n -e 'N;N;s/^b$/X/M' -e p abc.txt
+run_case -n -e 'N;N;s/^b$/X/' -e p abc.txt
+run_case -n -e 'N;N;s/a.b/X/M' -e p abc.txt
+run_case -n -e 'N;N;s/a.b/X/' -e p abc.txt
+run_case -n -e 'N;N;s/[^x]b/X/M' -e p abc.txt
+run_case -n -e '$!N;/^b/Mp' abc.txt
+run_case -n -e '/A/I,/C/Ip' abc.txt
+run_case -n -e '/a/ I p' abc.txt
+run_case -e 's/a/X/mg' abc.txt
+run_case -e 's//X/M' abc.txt
+run_case -z 'N;N;s/^b/X/M' abc.txt
+run_case --debug -n '/a/IMp;s/a/b/mg' abc.txt
+
+# --- the regex dialect sed hands glibc ----------------------------------------------
+#
+# GNU sed clears `RE_UNMATCHED_RIGHT_PAREN_ORD` in its default mode, so an
+# unmatched `)` is an error in `-E` (and `\)` in a basic expression); and dfa.c
+# refuses a bracket that looks like a class without the class's brackets,
+# unless `POSIXLY_CORRECT` is set.
+run_case -E 's/w)/X/' wparen.txt
+run_case 's/w\)/X/' wparen.txt
+run_case 's/[:alpha:]/X/' colon.txt
+run_case 's/[[:alpha:]]/X/' colon.txt
+run_case 's/[:a]/X/' colon.txt
+run_case -e 's/[:alpha:]/X/' -e 'Z' colon.txt
+
+# --- --posix -----------------------------------------------------------------------
+#
+# Every GNU extension refused, or read as POSIX reads it: the extra commands
+# and flags, the extra address forms, `a` text without its backslash, the
+# numbers of `l` and `q`, `\w` and `\|`, the case conversions of a
+# replacement. See TD-B-SED-HAS-NO-POSIX-MODE-AND-NO-FOLLOW-SYMLINKS for the
+# table this follows.
+for script in 's/a/X/I' 's/a/X/m' 's/a/X/e' '/a/Ip' '/a/Mp' '1~2p' '1,+1p' \
+    '1,~2p' '0,/a/p' '+0p' 'e echo' F v z L Q T 'R def.txt' 'W out' '1,2a X' \
+    '1,2i X' '1,2l' '1,2=' '1,2r def.txt' 'a X' 'a\' 'l 5' 'q 5' 's/a/\U&/' \
+    's/\(a\)/\L\1/' 's/a\|b/X/g' 's/\w/X/g' '1,2{p;}' '$!N' 's/a/\2/' \
+    '0r def.txt'; do
+  run_case --posix -e "$script" abc.txt
+done
+run_case --posix -E 's/\w/X/g' wparen.txt
+run_case --posix -E 's/w)/X/' wparen.txt
+run_case --posix 's/w\)/X/' wparen.txt
+run_case --posix 's/[:alpha:]/X/' colon.txt
+run_case --posix -e 'a\' -e 'foo' abc.txt
+run_case --posix -e 'a foo\' -e 'bar' abc.txt
+printf 'a\\\nfoo\\' > incomplete.sed
+run_case --posix -f incomplete.sed abc.txt
+run_case -f incomplete.sed abc.txt
+ENVV=(POSIXLY_CORRECT=1)
+run_case --posix 's/[:alpha:]/X/' colon.txt
+ENVV=()
+
+# --- POSIXLY_CORRECT as sed reads it ---------------------------------------------
+#
+# The extensions stay; `N` on the last line prints nothing, `w /dev/stdout`
+# is a file, a bracket's escapes are left to the regex compiler, a missing
+# group in the replacement is empty rather than refused, an unmatched `)` is a
+# character, and dfa.c's complaint is excused. `v` switches it all back.
+ENVV=(POSIXLY_CORRECT=1)
+for script in 's/a/X/I' '/a/Ip' '1~2p' F 's/a/\U&/' 's/a/\2/' N '$!N' 'N;N' \
+    'v;N;N' 's/\t/X/'; do
+  run_case -e "$script" abc.txt
+done
+run_case 's/[\t]/X/' tabbed.txt
+run_case 's/\t/X/' tabbed.txt
+run_case -E 's/w)/X/' wparen.txt
+run_case 's/w\)/X/' wparen.txt
+run_case 's/[:alpha:]/X/' colon.txt
+run_case 'w /dev/stdout' nonl.txt
+run_case 'v;w /dev/stdout' nonl.txt
+run_case -e 'w /dev/stdout' -e v -e 'w /dev/stdout' nonl.txt
+ENVV=()
 
 # --- POSIXLY_CORRECT -----------------------------------------------------------
 # glibc's getopt ends option parsing at the first operand while it is set -- to

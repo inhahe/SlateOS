@@ -19,14 +19,19 @@
 //! | `-b` | accepted and ignored: nothing here translates CR+LF |
 //! | `-l N` | the width `l` wraps at; 0 never wraps, and the default is 70 |
 //! | `--sandbox` | refuse `r`, `R`, `w`, `W` and `s///w` while compiling |
+//! | `--posix` | refuse or read as POSIX does every GNU extension |
 //! | `--` | end of options; what follows is a file |
 //!
 //! Long options are resolved by [`coreutils::getopt`], so they abbreviate to
 //! any unambiguous prefix as every GNU utility's do: `--expr=p` works and
 //! `--s` is refused as ambiguous between `--silent`, `--sandbox` and
-//! `--separate`. `--posix` is accepted and does nothing yet, and neither does
-//! `POSIXLY_CORRECT` beyond where option parsing stops; see `known-issues.md`
-//! → `TD-B-SED-HAS-NO-POSIX-MODE-AND-NO-FOLLOW-SYMLINKS`.
+//! `--separate`.
+//!
+//! `POSIXLY_CORRECT` in the environment selects GNU's middle mode, which
+//! keeps the extensions and changes a handful of behaviours to POSIX's --
+//! `N` on the last line prints nothing, `w /dev/stdout` is a file -- and
+//! `--posix` the strict one. A `v` command switches back to the default. See
+//! [`Posixicity`].
 //!
 //! Exit status: 0 normally, 1 for a bad script or usage, 2 for an input file
 //! that could not be opened (the rest are still processed), 4 for a failure
@@ -225,6 +230,11 @@ enum Addr {
     Re(Option<Rc<Regex>>),
     /// GNU's `first~step`.
     Step(usize, usize),
+    /// `+0` or `~0` written as a *first* address: GNU's `ADDR_IS_NULL`, which
+    /// matches every line -- `sed '+0p'` prints each line twice. (`+N` and
+    /// `~N` with N above zero are refused there; as a second address they are
+    /// [`EndAddr::Plus`] and [`EndAddr::Multiple`].)
+    Null,
 }
 
 /// The second half of a range, which may be relative to where the range began.
@@ -331,6 +341,10 @@ enum Action {
     InsertText(Vec<u8>),
     ChangeText(Vec<u8>),
     ReadFile(String),
+    /// `0rFILE`, compiled as `1rFILE` with the file written there and then
+    /// rather than queued -- so it comes out before the first line. GNU's
+    /// `readcmd.append == false`.
+    ReadFileNow(String),
     /// `R` — one line per cycle from a shared handle. See [`RFile`].
     ReadLine(usize),
     WriteFile(usize),
@@ -376,10 +390,15 @@ struct Command {
 
 struct Script {
     cmds: Vec<Command>,
-    wfiles: Vec<String>,
-    rfiles: Vec<String>,
+    wfiles: Vec<Target>,
+    rfiles: Vec<Target>,
     /// Set by a `#n` first line, which is POSIX's in-script spelling of `-n`.
     suppress: bool,
+    /// The [`Posixicity`] the script left the run in: the command line's,
+    /// unless a `v` switched it to `Extended`. It is a global in GNU, read
+    /// while running as well as while compiling -- `N` on the last line
+    /// prints only under `Extended` -- so a `v` anywhere changes it for all.
+    posix: Posixicity,
     /// Where a diagnostic raised *after* the script has been read points, as
     /// the bytes that go between `sed: ` and the message — or `None` when there
     /// is no script text to point into.
@@ -393,12 +412,72 @@ struct Script {
     end_loc: Option<Vec<u8>>,
 }
 
+/// What a `w` or `R` names: one of GNU's special streams, or a file.
+///
+/// Decided while the script is read, by the [`Posixicity`] in force at that
+/// point: outside `Extended` the three names are ordinary files, and a `v`
+/// part-way through makes the later ones special again. GNU's `get_openfile`.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum Target {
+    Stdin,
+    Stdout,
+    Stderr,
+    File(String),
+}
+
 // ---------------------------------------------------------------- the parser
+
+/// GNU sed's `posixicity`: how much of POSIX's letter a run keeps to.
+///
+/// `Extended` is the default, every GNU extension on. `Correct` is what
+/// `POSIXLY_CORRECT` in the environment selects: the extensions stay, and a
+/// handful of behaviours change to POSIX's -- `N` on the last line prints
+/// nothing, `w /dev/stdout` is a file like any other, an unmatched `)` is a
+/// character, and so on. `Basic` is `--posix`: every extension refused or
+/// read as POSIX reads it. A `v` command switches the rest of the script, and
+/// the run, back to `Extended`, as GNU's does. See
+/// `TD-B-SED-HAS-NO-POSIX-MODE-AND-NO-FOLLOW-SYMLINKS` for the table this
+/// follows, place by place.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Posixicity {
+    Extended,
+    Correct,
+    Basic,
+}
+
+/// The name of dfa.c's one complaint sed can see: a bracket written like a
+/// class without the class's own brackets. See [`ere::Warning::ConfusingBracket`].
+const CONFUSING_BRACKET: &str = "character class syntax is [[:space:]], not [:space:]";
 
 struct Parser<'a> {
     s: &'a [u8],
     i: usize,
     ere: bool,
+    /// See [`Posixicity`]. Changed part-way by `v`.
+    posix: Posixicity,
+    /// Whether dfa.c's warning about `[:alpha:]` ends the run: GNU's
+    /// `dfawarn` does unless `POSIXLY_CORRECT` is set -- the variable, not
+    /// the mode, so `--posix` alone does not excuse it.
+    dfa_warnings_fatal: bool,
+    /// The line separator, which decides whether `M` makes `^` and `$` match
+    /// at a newline: under `-z` it does not, as GNU's `newline_anchor` is
+    /// only set when the separator is a newline.
+    sep: u8,
+    /// A refusal that is not a syntax error in the script but the end of the
+    /// run: dfa.c's, which GNU makes with `panic` -- no location, status 4.
+    /// Set by [`Parser::compile`] and turned into its error by
+    /// [`compile_script`].
+    fatal: Option<&'static str>,
+    /// Whether the `a`, `i` or `c` text just read never finished: `a\` at the
+    /// very end, or a last line ending in a backslash. GNU's `pending_text`,
+    /// which `--posix` refuses as `incomplete command`.
+    pending_text: bool,
+    /// The offsets of the newlines that join one `-e` fragment or `-f` file
+    /// to the next. GNU compiles each fragment on its own, so where this
+    /// parser meets one of these GNU meets the end of its input -- which
+    /// matters to the few things that read past a line's end: `1,` and an
+    /// unfinished `a` text under `--posix`.
+    joints: Vec<usize>,
     /// The width `l` uses when it is given no number of its own: `-l N`, or 70.
     line_len: usize,
     /// `--sandbox`. It is the *parser* that enforces it, not the executor, so
@@ -412,8 +491,8 @@ struct Parser<'a> {
     /// The rendering of the command currently being read, cleared before each
     /// one and moved into its [`Command`] when it is built.
     dump: Vec<u8>,
-    wfiles: Vec<String>,
-    rfiles: Vec<String>,
+    wfiles: Vec<Target>,
+    rfiles: Vec<Target>,
 }
 
 impl Parser<'_> {
@@ -452,7 +531,7 @@ impl Parser<'_> {
             return;
         }
         self.dump.push(b'/');
-        let norm = sed_regex(pat).unwrap_or_else(|_| pat.to_vec());
+        let norm = sed_regex(pat, self.posix).unwrap_or_else(|_| pat.to_vec());
         for &b in &norm {
             if b == b'/' {
                 self.dump.extend_from_slice(b"\\/");
@@ -465,6 +544,12 @@ impl Parser<'_> {
 
     fn peek(&self) -> Option<u8> {
         self.s.get(self.i).copied()
+    }
+
+    /// Whether the parser is at the end of a fragment -- see
+    /// [`Parser::joints`] -- or of the script.
+    fn at_fragment_end(&self) -> bool {
+        self.peek().is_none() || self.joints.contains(&self.i)
     }
 
     fn bump(&mut self) -> Option<u8> {
@@ -643,25 +728,33 @@ impl Parser<'_> {
         }
     }
 
-    /// `I` after a pattern asks for case-insensitive matching.
-    fn re_flags(&mut self) -> Result<bool, String> {
-        let mut ci = false;
+    /// The modifiers after an address regex: `I`, case-insensitive, and `M`,
+    /// multi-line -- any number, in any order, blanks between, as GNU reads
+    /// each with `in_nonblank`. None under `--posix`, where the letter is left
+    /// for the command reader: `--posix '/a/Ip'` is `unknown command: `I'`.
+    fn re_flags(&mut self) -> (bool, bool) {
+        let (mut ci, mut multi) = (false, false);
+        if self.posix == Posixicity::Basic {
+            return (ci, multi);
+        }
         loop {
+            self.skip_blank();
             match self.peek() {
-                Some(b'I') => {
-                    self.i = self.i.saturating_add(1);
-                    ci = true;
-                }
-                // `M` makes `^`/`$` match at embedded newlines, which the
-                // engine cannot express. Refusing beats matching the wrong
-                // lines silently.
-                Some(b'M') => return Err("the `M' regex modifier is not supported".to_string()),
-                _ => return Ok(ci),
+                Some(b'I') => ci = true,
+                Some(b'M') => multi = true,
+                _ => return (ci, multi),
             }
+            self.i = self.i.saturating_add(1);
         }
     }
 
-    fn compile(&self, pat: &[u8], ci: bool) -> Result<Option<Rc<Regex>>, String> {
+    /// Compile a pattern as GNU's `compile_regex_1` does, in the syntax the
+    /// [`Posixicity`] in force selects.
+    ///
+    /// `multi` is `M`: neither `.` nor `[^...]` matches a newline, and `^`
+    /// and `$` match next to one -- except under `-z`, where GNU leaves the
+    /// anchors at the ends of the pattern space.
+    fn compile(&mut self, pat: &[u8], ci: bool, multi: bool) -> Result<Option<Rc<Regex>>, String> {
         // An empty pattern is not an error: `s//X/` and `//d` re-use the last
         // regular expression that was *tried*, which is a run-time value — and
         // whether there was one is a run-time question too, which is why
@@ -671,7 +764,7 @@ impl Parser<'_> {
             // to was compiled elsewhere with modifiers of its own. This one *is*
             // decided here: GNU refuses `s//X/I` while reading the script, with
             // no input read and whatever else the script says.
-            if ci {
+            if ci || multi {
                 return Err("cannot specify modifiers on empty regexp".to_string());
             }
             return Ok(None);
@@ -679,14 +772,43 @@ impl Parser<'_> {
         // The one funnel every pattern passes through, which is why GNU's
         // byte-naming escapes are converted here rather than at each of the
         // three places a pattern is written.
-        let pat = &sed_regex(pat)?;
-        let r = if self.ere {
-            Regex::new_flags(pat, ci)
+        let pat = &sed_regex(pat, self.posix)?;
+        // GNU clears `RE_UNMATCHED_RIGHT_PAREN_ORD` in its default mode, so
+        // `sed -E 's/a)/X/'` is an error there and a literal `)` otherwise;
+        // `--posix` adds `RE_NO_GNU_OPS`, and for a basic expression
+        // `RE_LIMITED_OPS`.
+        let ord = self.posix != Posixicity::Extended;
+        let basic = self.posix == Posixicity::Basic;
+        let compiled = if self.ere {
+            let syntax = ere::Syntax {
+                unmatched_right_paren_ord: ord,
+                no_gnu_ops: basic,
+                ..ere::Syntax::POSIX_EXTENDED
+            };
+            let syntax = if multi { syntax.reg_newline() } else { syntax };
+            Regex::new_syntax_warn(pat, ci, syntax)
         } else {
-            bre::compile(pat, ci)
+            let syntax = bre::BreSyntax {
+                limited_ops: basic,
+                no_gnu_ops: basic,
+                unmatched_right_paren_ord: ord,
+                reg_newline: multi,
+                ..bre::BreSyntax::POSIX_BASIC
+            };
+            bre::compile_syntax_warn(pat, ci, syntax)
         };
-        match r {
-            Ok(re) => Ok(Some(Rc::new(re))),
+        match compiled {
+            Ok((re, warnings)) => {
+                // dfa.c's one complaint, which ends the run rather than the
+                // parse: see [`Parser::fatal`].
+                if self.dfa_warnings_fatal && warnings.contains(&ere::Warning::ConfusingBracket) {
+                    self.fatal = Some(CONFUSING_BRACKET);
+                    return Err(CONFUSING_BRACKET.to_string());
+                }
+                Ok(Some(Rc::new(
+                    re.with_newline_anchor(multi && self.sep == b'\n'),
+                )))
+            }
             // `e.message()`, not `e.detail`: GNU sed hands the pattern to glibc
             // and prints back verbatim whatever `re_compile_pattern` returned,
             // so the sentence after `char N:` is one of glibc's fourteen fixed
@@ -709,13 +831,7 @@ impl Parser<'_> {
             Some(b'/') => {
                 self.i = self.i.saturating_add(1);
                 let pat = self.take_until(b'/', true, "address regex")?;
-                let ci = self.re_flags()?;
-                let re = self.compile(&pat, ci)?;
-                self.d_re(&pat);
-                if ci {
-                    self.d(b"I");
-                }
-                Ok(Some(Addr::Re(re)))
+                self.address_regex(&pat).map(Some)
             }
             // `\cREc` — any delimiter, so a pattern full of slashes need not be
             // written full of backslashes.
@@ -725,17 +841,16 @@ impl Parser<'_> {
                     .bump()
                     .ok_or_else(|| "expected a delimiter after `\\'".to_string())?;
                 let pat = self.take_until(d, true, "address regex")?;
-                let ci = self.re_flags()?;
-                let re = self.compile(&pat, ci)?;
-                self.d_re(&pat);
-                if ci {
-                    self.d(b"I");
-                }
-                Ok(Some(Addr::Re(re)))
+                self.address_regex(&pat).map(Some)
             }
             Some(c) if c.is_ascii_digit() => {
                 let n = self.number()?;
-                if self.eat(b'~') {
+                // `first~step` is a GNU extension, and blanks may surround the
+                // `~` (GNU reads both sides with `in_nonblank`).
+                let save = self.i;
+                self.skip_blank();
+                if self.posix != Posixicity::Basic && self.eat(b'~') {
+                    self.skip_blank();
                     let step = self.number()?;
                     // A step of zero is no step at all, and GNU collapses it to
                     // the plain line number rather than carrying it — which is
@@ -749,6 +864,8 @@ impl Parser<'_> {
                         self.d_num(step);
                         return Ok(Some(Addr::Step(n, step)));
                     }
+                } else {
+                    self.i = save;
                 }
                 self.d_num(n);
                 Ok(Some(Addr::Line(n)))
@@ -757,8 +874,50 @@ impl Parser<'_> {
         }
     }
 
+    /// The modifiers and the compiled pattern of an address regex, `pat`
+    /// already read, and its `--debug` rendering: the pattern, then `I`, then
+    /// `M`, as GNU's `debug_print_regex_flags` orders them.
+    fn address_regex(&mut self, pat: &[u8]) -> Result<Addr, String> {
+        let (ci, multi) = self.re_flags();
+        let re = self.compile(pat, ci, multi)?;
+        self.d_re(pat);
+        if ci {
+            self.d(b"I");
+        }
+        if multi {
+            self.d(b"M");
+        }
+        Ok(Addr::Re(re))
+    }
+
+    /// `+N` or `~N`, the `+` or `~` already read: GNU's `in_integer
+    /// (in_nonblank ())`, blanks allowed before the digits and no digits
+    /// meaning zero.
+    fn step_number(&mut self) -> Result<usize, String> {
+        self.skip_blank();
+        self.number()
+    }
+
     fn parse_sel(&mut self) -> Result<Sel, String> {
-        let Some(a1) = self.parse_addr()? else {
+        // `+N` and `~N` are addresses to GNU's `compile_address` in either
+        // position, and refused as a first address only afterwards -- unless N
+        // is zero, which makes `ADDR_IS_NULL`, a first address that matches
+        // every line. Under `--posix` they are not addresses at all, and the
+        // `+` is then the unknown command.
+        let a1 = match self.peek() {
+            Some(op @ (b'+' | b'~')) if self.posix != Posixicity::Basic => {
+                self.i = self.i.saturating_add(1);
+                if self.step_number()? > 0 {
+                    return Err("invalid usage of +N or ~N as first address".to_string());
+                }
+                // GNU's `debug_print_addr` names it rather than spelling it.
+                let _ = op;
+                self.d(b"[ADDR-NULL]");
+                Some(Addr::Null)
+            }
+            _ => self.parse_addr()?,
+        };
+        let Some(a1) = a1 else {
             return Ok(Sel::Always);
         };
         self.skip_blank();
@@ -767,19 +926,26 @@ impl Parser<'_> {
         }
         self.d(b",");
         self.skip_blank();
-        let end = if self.eat(b'+') {
-            let n = self.number()?;
+        let gnu = self.posix != Posixicity::Basic;
+        let end = if gnu && self.eat(b'+') {
+            let n = self.step_number()?;
             self.d(b"+");
             self.d_num(n);
             EndAddr::Plus(n)
-        } else if self.eat(b'~') {
-            let n = self.number()?;
+        } else if gnu && self.eat(b'~') {
+            let n = self.step_number()?;
             self.d(b"~");
             self.d_num(n);
             EndAddr::Multiple(n)
         } else {
             let Some(a2) = self.parse_addr()? else {
-                return Err("expected an address after `,'".to_string());
+                // GNU's `BAD_COMMA`, reported one past the character that is
+                // not an address -- which `in_nonblank` had already read, unless
+                // it met the end of the fragment.
+                if !self.at_fragment_end() {
+                    self.i = self.i.saturating_add(1);
+                }
+                return Err("unexpected `,'".to_string());
             };
             EndAddr::Addr(a2)
         };
@@ -805,12 +971,19 @@ impl Parser<'_> {
     /// is why `sed -z 'a X'` ends the appended line with a newline and not with
     /// the NUL every other line ends with. See [`text_out`].
     fn parse_text(&mut self) -> Result<Vec<u8>, String> {
+        self.pending_text = false;
         self.skip_blank();
         // The end of the script is the one thing that cannot introduce text.
         // Everything else can, including a bare newline (`sed $'a\np'` appends
         // an empty line and then prints) and a bare backslash at the very end
         // (`sed 'a\'`, which appends nothing) — both measured, both accepted.
         if self.peek().is_none() {
+            return Err("expected \\ after `a', `c' or `i'".to_string());
+        }
+        // POSIX's spelling only, under `--posix`: the one-liner `a text` is
+        // refused, one past the character that should have been a backslash.
+        if self.posix == Posixicity::Basic && self.peek() != Some(b'\\') {
+            self.i = self.i.saturating_add(1);
             return Err("expected \\ after `a', `c' or `i'".to_string());
         }
         let mut out = Vec::new();
@@ -827,7 +1000,16 @@ impl Parser<'_> {
             // ending `a\` *and a newline* (appends one empty line). All
             // measured.
             match self.peek() {
-                None => return Ok(out),
+                None => {
+                    self.pending_text = true;
+                    return Ok(out);
+                }
+                // The end of an `-e` fragment: GNU's text waits for the next
+                // fragment, which `--posix` refuses -- see `pending_text`.
+                Some(b'\n') if self.posix == Posixicity::Basic && self.at_fragment_end() => {
+                    self.pending_text = true;
+                    return Ok(out);
+                }
                 Some(b'\n') => self.i = self.i.saturating_add(1),
                 Some(_) => {}
             }
@@ -842,8 +1024,18 @@ impl Parser<'_> {
                 out.push(c);
                 continue;
             }
+            // A backslash that ends a fragment continues the text into the
+            // next one in GNU's default mode, and is `incomplete command`
+            // under `--posix`; the parser stops there, where GNU's error points.
+            if self.posix == Posixicity::Basic && self.at_fragment_end() {
+                self.pending_text = true;
+                break;
+            }
             let esc = self.i;
-            let Some(n) = self.bump() else { break };
+            let Some(n) = self.bump() else {
+                self.pending_text = true;
+                break;
+            };
             if let Some(b) = control_byte(n) {
                 out.push(b);
                 continue;
@@ -915,11 +1107,26 @@ impl Parser<'_> {
     /// must produce one file holding both writes in order, not two handles
     /// racing to truncate each other.
     fn wfile(&mut self, path: String) -> usize {
-        if let Some(i) = self.wfiles.iter().position(|p| *p == path) {
+        let target = self.target(path);
+        if let Some(i) = self.wfiles.iter().position(|p| *p == target) {
             return i;
         }
-        self.wfiles.push(path);
+        self.wfiles.push(target);
         self.wfiles.len().saturating_sub(1)
+    }
+
+    /// GNU's `get_openfile`'s question: is this one of the three special
+    /// names, in the mode in force where the script names it?
+    fn target(&self, path: String) -> Target {
+        if self.posix != Posixicity::Extended {
+            return Target::File(path);
+        }
+        match path.as_str() {
+            "/dev/stdin" => Target::Stdin,
+            "/dev/stdout" => Target::Stdout,
+            "/dev/stderr" => Target::Stderr,
+            _ => Target::File(path),
+        }
     }
 
     /// Intern an `R` source, for the same reason [`Parser::wfile`] interns a
@@ -927,10 +1134,11 @@ impl Parser<'_> {
     /// naming one file share its read position, so in one cycle the first takes
     /// line 1 and the second line 2, rather than both taking line 1.
     fn rfile(&mut self, path: String) -> usize {
-        if let Some(i) = self.rfiles.iter().position(|p| *p == path) {
+        let target = self.target(path);
+        if let Some(i) = self.rfiles.iter().position(|p| *p == target) {
             return i;
         }
-        self.rfiles.push(path);
+        self.rfiles.push(target);
         self.rfiles.len().saturating_sub(1)
     }
 
@@ -985,8 +1193,12 @@ impl Parser<'_> {
         let mut occurrence = 0usize;
         let mut print = false;
         let mut ci = false;
+        let mut multi = false;
         let mut eval = false;
         let mut wfile = None;
+        // `i`, `m` and `e` are GNU extensions, refused under `--posix` with
+        // the same words as any unknown flag.
+        let gnu = self.posix != Posixicity::Basic;
         // Kept beside the interned index only for the `--debug` dump, which
         // prints the file name and not the slot it landed in.
         let mut wpath: Option<String> = None;
@@ -1013,21 +1225,21 @@ impl Parser<'_> {
                 }
                 // No multiple-use check on these two: GNU has none either, so
                 // `s/a/b/Ii` is accepted.
-                Some(b'i' | b'I') => {
+                Some(b'i' | b'I') if gnu => {
                     self.i = self.i.saturating_add(1);
                     ci = true;
                 }
                 // `e` reaches outside the script exactly as `e`, `r` and `w`
                 // do, so the sandbox refuses it with the same message — and
                 // refuses it here, at the flag, which is where GNU points.
-                Some(b'e') => {
+                Some(b'e') if gnu => {
                     self.i = self.i.saturating_add(1);
                     self.deny_in_sandbox()?;
                     eval = true;
                 }
-                Some(b'm' | b'M') => {
+                Some(b'm' | b'M') if gnu => {
                     self.i = self.i.saturating_add(1);
-                    return Err("the `M' flag of `s' is not supported".to_string());
+                    multi = true;
                 }
                 Some(c) if c.is_ascii_digit() => {
                     let seen = occurrence != 0;
@@ -1057,14 +1269,17 @@ impl Parser<'_> {
             }
         }
 
-        let re = self.compile(&pat, ci)?;
-        let repl = parse_replacement(&raw_repl)?;
+        let re = self.compile(&pat, ci, multi)?;
+        let repl = parse_replacement(&raw_repl, self.posix)?;
         // A `\N` naming a group the pattern does not have is refused, not
         // silently empty — and refused here, after the flags, because that is
         // where GNU reports it: `s/a/\9/w f.txt` says char 14, the end of the
         // whole command. Skipped when the pattern is empty, since `s//\1/` will
         // re-use a regular expression that is not known until run time.
-        if let Some(re) = re.as_deref() {
+        //
+        // GNU marks this one "not POSIXLY_CORRECT behavior" and makes it only
+        // in its default mode; elsewhere the missing group is simply empty.
+        if let Some(re) = re.as_deref().filter(|_| self.posix == Posixicity::Extended) {
             let groups = re.group_count();
             if let Some(n) = repl.iter().find_map(|r| match *r {
                 Rep::Group(n) if n > groups => Some(n),
@@ -1085,6 +1300,9 @@ impl Parser<'_> {
             self.dump.push(b'/');
             if ci {
                 self.dump.push(b'i');
+            }
+            if multi {
+                self.dump.push(b'm');
             }
             if global {
                 self.dump.push(b'g');
@@ -1173,8 +1391,13 @@ fn literal_for(c: u8) -> Vec<u8> {
 /// sed so that the two cannot disagree about what `\t` means -- and it is not
 /// the regex compiler's: like glibc's, that has no C escapes, which is why
 /// `grep '[\t]'` is a backslash or a `t` while sed's is a tab.
-fn sed_regex(raw: &[u8]) -> Result<Vec<u8>, String> {
-    ere::sed::regex(raw).map_err(|e| e.message().to_string())
+fn sed_regex(raw: &[u8], posix: Posixicity) -> Result<Vec<u8>, String> {
+    let converted = if posix == Posixicity::Extended {
+        ere::sed::regex(raw)
+    } else {
+        ere::sed::regex_posix(raw)
+    };
+    converted.map_err(|e| e.message().to_string())
 }
 
 /// `y` takes text, not a pattern, so only the escapes that name a byte apply.
@@ -1223,7 +1446,7 @@ fn unescape_y(raw: &[u8]) -> Result<Vec<u8>, String> {
 /// protection of the same byte works out: `s/a/\x26/` yields a `&` and not the
 /// whole match, and `s/a/\x5cn/` yields a backslash followed by an `n` and not
 /// a newline. Both measured.
-fn parse_replacement(raw: &[u8]) -> Result<Vec<Rep>, String> {
+fn parse_replacement(raw: &[u8], posix: Posixicity) -> Result<Vec<Rep>, String> {
     let mut parts: Vec<Rep> = Vec::new();
     let mut lit: Vec<u8> = Vec::new();
     let flush = |lit: &mut Vec<u8>, parts: &mut Vec<Rep>| {
@@ -1255,7 +1478,9 @@ fn parse_replacement(raw: &[u8]) -> Result<Vec<Rep>, String> {
                 flush(&mut lit, &mut parts);
                 parts.push(Rep::Group(usize::from(n.wrapping_sub(b'0'))));
             }
-            b'u' | b'l' | b'U' | b'L' | b'E' => {
+            // The case conversions are GNU's; under `--posix` a backslash before
+            // anything but a digit is that character, so `\U` is a `U`.
+            b'u' | b'l' | b'U' | b'L' | b'E' if posix != Posixicity::Basic => {
                 flush(&mut lit, &mut parts);
                 parts.push(Rep::Case(match n {
                     b'u' => CaseOp::OneUpper,
@@ -1449,10 +1674,50 @@ impl From<String> for ScriptFail {
     }
 }
 
-/// Compile a whole script.
-///
-/// The `-e` fragments and `-f` files are joined with newlines and parsed once,
-/// because a `{` may be opened in one fragment and closed in the next.
+/// What the command line and the environment say about how to read a script,
+/// beyond its text and the options [`compile_script`] already takes.
+#[derive(Clone, Copy)]
+struct Mode {
+    /// See [`Posixicity`].
+    posix: Posixicity,
+    /// The line separator: `\0` under `-z`.
+    sep: u8,
+    /// See [`Parser::dfa_warnings_fatal`].
+    dfa_warnings_fatal: bool,
+}
+
+impl Mode {
+    /// GNU's defaults: every extension, lines ending in a newline, and dfa.c's
+    /// complaint fatal.
+    #[cfg(test)]
+    const DEFAULT: Mode = Mode {
+        posix: Posixicity::Extended,
+        sep: b'\n',
+        dfa_warnings_fatal: true,
+    };
+
+    /// The mode the environment and the command line select: `--posix` is
+    /// `Basic` whatever else is set; `POSIXLY_CORRECT`, set to anything at
+    /// all, is `Correct` -- and also, separately, what excuses dfa.c's
+    /// complaint, under `--posix` too. GNU's `main` and `dfawarn`.
+    fn from_run(posix_option: bool, null_data: bool) -> Mode {
+        let posixly_correct = env::var_os("POSIXLY_CORRECT").is_some();
+        Mode {
+            posix: if posix_option {
+                Posixicity::Basic
+            } else if posixly_correct {
+                Posixicity::Correct
+            } else {
+                Posixicity::Extended
+            },
+            sep: if null_data { 0 } else { b'\n' },
+            dfa_warnings_fatal: !posixly_correct,
+        }
+    }
+}
+
+/// Compile a whole script in GNU's default [`Mode`], as the tests do.
+#[cfg(test)]
 fn compile_script(
     script: &[u8],
     segments: &[Segment],
@@ -1461,10 +1726,44 @@ fn compile_script(
     sandbox: bool,
     debug: bool,
 ) -> Result<Script, ScriptError> {
+    compile_script_mode(
+        script,
+        segments,
+        ere,
+        line_len,
+        sandbox,
+        debug,
+        Mode::DEFAULT,
+    )
+}
+
+/// Compile a whole script in `mode`.
+///
+/// The `-e` fragments and `-f` files are joined with newlines and parsed once,
+/// because a `{` may be opened in one fragment and closed in the next.
+fn compile_script_mode(
+    script: &[u8],
+    segments: &[Segment],
+    ere: bool,
+    line_len: usize,
+    sandbox: bool,
+    debug: bool,
+    mode: Mode,
+) -> Result<Script, ScriptError> {
     let mut p = Parser {
         s: script,
         i: 0,
         ere,
+        posix: mode.posix,
+        dfa_warnings_fatal: mode.dfa_warnings_fatal,
+        sep: mode.sep,
+        fatal: None,
+        pending_text: false,
+        joints: segments
+            .iter()
+            .skip(1)
+            .filter_map(|seg| seg.start.checked_sub(1))
+            .collect(),
         line_len,
         sandbox,
         debug,
@@ -1472,7 +1771,17 @@ fn compile_script(
         wfiles: Vec::new(),
         rfiles: Vec::new(),
     };
-    match parse_body(&mut p, script) {
+    let parsed = parse_body(&mut p, script);
+    // dfa.c's complaint is GNU's `panic`, not `bad_prog`: no location, and
+    // the status of a run that could not go on.
+    if let Some(msg) = p.fatal {
+        return Err(ScriptError {
+            pos: Pos::Nowhere,
+            msg: msg.as_bytes().to_vec(),
+            code: EXIT_PANIC,
+        });
+    }
+    match parsed {
         Ok(mut s) => {
             s.end_loc = locate(script, segments, Pos::AfterParse(script.len()));
             Ok(s)
@@ -1547,7 +1856,15 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
 
         let sel = p.parse_sel()?;
         p.skip_blank();
-        if sel.rejects_line_zero() {
+        // `0rFILE` is GNU's way to put a file before the first line: it is
+        // compiled as `1rFILE` with the file written at once rather than
+        // queued. Only bare -- no second address, no `!` -- and not under
+        // `--posix`, which refuses every line-0 address.
+        let prepend = matches!(sel, Sel::One(Addr::Line(0)))
+            && p.peek() == Some(b'r')
+            && p.posix != Posixicity::Basic;
+        let zero_range = matches!(sel, Sel::Range(Addr::Line(0), _));
+        if !prepend && (sel.rejects_line_zero() || (zero_range && p.posix == Posixicity::Basic)) {
             // GNU makes this check having already read the character that
             // follows the address — the `!` or the command letter — so the
             // offset it prints is one past it, except at the end of the script
@@ -1589,6 +1906,58 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
         let Some(c) = p.bump() else {
             return Err(ScriptFail::Syntax("missing command".to_string()));
         };
+        let ranged = matches!(sel, Sel::Range(..));
+        // `--posix` refuses the GNU commands outright and allows only one
+        // address on five that GNU lets take a range -- checked before the
+        // command is read any further, which is where GNU checks it.
+        if p.posix == Posixicity::Basic {
+            if matches!(
+                c,
+                b'e' | b'F' | b'v' | b'z' | b'L' | b'Q' | b'T' | b'R' | b'W'
+            ) {
+                return Err(ScriptFail::Syntax(format!(
+                    "unknown command: `{}'",
+                    c.escape_ascii()
+                )));
+            }
+            if ranged && matches!(c, b'a' | b'i' | b'l' | b'=' | b'r') {
+                return Err(ScriptFail::Syntax(
+                    "command only uses one address".to_string(),
+                ));
+            }
+        }
+        // A comment, a label and a block's end take no address at all, and
+        // `q` and `Q` one -- each refused one past the command letter.
+        let addressed = !matches!(sel, Sel::Always);
+        match c {
+            b'#' if addressed => {
+                return Err(ScriptFail::Syntax(
+                    "comments don't accept any addresses".to_string(),
+                ));
+            }
+            b':' if addressed => {
+                return Err(ScriptFail::Syntax(
+                    ": doesn't want any addresses".to_string(),
+                ));
+            }
+            b'}' if addressed && !open.is_empty() => {
+                return Err(ScriptFail::Syntax(
+                    "`}' doesn't want any addresses".to_string(),
+                ));
+            }
+            b'q' | b'Q' if ranged => {
+                return Err(ScriptFail::Syntax(
+                    "command only uses one address".to_string(),
+                ));
+            }
+            // `!` with no address, before a comment or a block's end: GNU
+            // reads them as it reads them anywhere.
+            b'#' => {
+                p.skip_to_eol();
+                continue;
+            }
+            _ => {}
+        }
         // `v` is not a command: it is a compile-time assertion that this sed is
         // new enough, and it leaves nothing behind to execute. That is visible
         // under `--debug`, whose program dump shows no line for it at all — not
@@ -1608,6 +1977,10 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
                     "expected newer version of sed".to_string(),
                 ));
             }
+            // GNU: "We compare the version and ignore POSIXLY_CORRECT" -- a
+            // script that asks for GNU sed gets all of it, from here on and
+            // for the whole run.
+            p.posix = Posixicity::Extended;
             continue;
         }
         let here = cmds.len();
@@ -1618,7 +1991,15 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
                 open.push((here, p.i.saturating_sub(1)));
                 Action::Block(0)
             }
-            b'}' => return Err(ScriptFail::Syntax("unexpected `}'".to_string())),
+            b'}' => {
+                let Some((start, _)) = open.pop() else {
+                    return Err(ScriptFail::Syntax("unexpected `}'".to_string()));
+                };
+                if let Some(cmd) = cmds.get_mut(start) {
+                    cmd.act = Action::Block(here.saturating_add(1));
+                }
+                Action::BlockEnd
+            }
             b':' => {
                 let name = p.parse_label();
                 if name.is_empty() {
@@ -1676,6 +2057,12 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
             }
             b'a' | b'i' | b'c' => {
                 let text = p.parse_text()?;
+                // Text that never finished -- `a\` at the end, or a last line
+                // ending in a backslash -- is allowed by GNU's default mode and
+                // is `incomplete command` under `--posix`.
+                if p.posix == Posixicity::Basic && p.pending_text {
+                    return Err(ScriptFail::Syntax("incomplete command".to_string()));
+                }
                 // `a\` and then the text, whichever spelling the script used —
                 // upstream normalizes the one-liner back to POSIX's form.
                 p.d(b"\\");
@@ -1693,7 +2080,11 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
                 // one. Upstream's asymmetry again, and measured.
                 p.d(b" ");
                 p.d(path.as_bytes());
-                Action::ReadFile(path)
+                if prepend {
+                    Action::ReadFileNow(path)
+                } else {
+                    Action::ReadFile(path)
+                }
             }
             b'R' => {
                 p.deny_in_sandbox()?;
@@ -1722,7 +2113,9 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
                 // Only a number the script *wrote* is dumped, and then always
                 // with a space: `l0` comes back as `l 0` while a bare `l` comes
                 // back as `l` and not as the `-l` width it resolved to.
-                let width = if p.peek().is_some_and(|d| d.is_ascii_digit()) {
+                let width = if p.posix != Posixicity::Basic
+                    && p.peek().is_some_and(|d| d.is_ascii_digit())
+                {
                     let n = p.number()?;
                     p.d(b" ");
                     p.d_num(n);
@@ -1734,7 +2127,9 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
             }
             b'q' | b'Q' => {
                 p.skip_blank();
-                let code = if p.peek().is_some_and(|d| d.is_ascii_digit()) {
+                let code = if p.posix != Posixicity::Basic
+                    && p.peek().is_some_and(|d| d.is_ascii_digit())
+                {
                     let n = p.number()?;
                     p.d(b" ");
                     p.d_num(n);
@@ -1779,11 +2174,23 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
         ) {
             p.end_of_cmd()?;
         }
+        let sel = if prepend {
+            Sel::One(Addr::Line(1))
+        } else {
+            sel
+        };
+        let mut dump = std::mem::take(&mut p.dump);
+        // GNU dumps the command it compiled, which says `1`.
+        if prepend && dump.first() == Some(&b'0') {
+            if let Some(first) = dump.first_mut() {
+                *first = b'1';
+            }
+        }
         cmds.push(Command {
             sel,
             negated,
             act,
-            dump: std::mem::take(&mut p.dump),
+            dump,
         });
     }
 
@@ -1825,6 +2232,7 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
 
     Ok(Script {
         cmds,
+        posix: p.posix,
         wfiles: std::mem::take(&mut p.wfiles),
         rfiles: std::mem::take(&mut p.rfiles),
         suppress,
@@ -2926,15 +3334,15 @@ struct WFile {
 /// long pipeline. And the handle has to outlive the per-file [`Exec`]: with
 /// `-s`, or with `-i` over several files, a target reopened per input file
 /// would truncate away what the previous file wrote.
-fn open_wfiles(paths: &[String]) -> Vec<WFile> {
-    paths
+fn open_wfiles(targets: &[Target]) -> Vec<WFile> {
+    targets
         .iter()
-        .map(|path| {
-            let target = match path.as_str() {
-                "/dev/stdout" => WTarget::Stdout,
-                "/dev/stderr" => WTarget::Stderr,
-                "/dev/stdin" => WTarget::Stdin,
-                _ => match File::create(path) {
+        .map(|t| {
+            let target = match t {
+                Target::Stdout => WTarget::Stdout,
+                Target::Stderr => WTarget::Stderr,
+                Target::Stdin => WTarget::Stdin,
+                Target::File(path) => match File::create(path) {
                     Ok(f) => WTarget::File(register(StdioFile::from_file(f), path.as_bytes())),
                     Err(e) => {
                         panic_out(&format!("couldn't open file {path}: {}", strerror(&e)));
@@ -2981,14 +3389,14 @@ enum RFile {
 /// reasons: the handle carries a read position that has to survive the
 /// per-input-file [`Exec`], or `R` would restart from line 1 on every input
 /// file even without `-s`.
-fn open_rfiles(paths: &[String]) -> Vec<RFile> {
-    paths
+fn open_rfiles(targets: &[Target]) -> Vec<RFile> {
+    targets
         .iter()
-        .map(|path| match path.as_str() {
-            "/dev/stdin" => RFile::Stdin,
-            "/dev/stdout" => RFile::WriteOnly("stdout"),
-            "/dev/stderr" => RFile::WriteOnly("stderr"),
-            _ => match File::open(path) {
+        .map(|t| match t {
+            Target::Stdin => RFile::Stdin,
+            Target::Stdout => RFile::WriteOnly("stdout"),
+            Target::Stderr => RFile::WriteOnly("stderr"),
+            Target::File(path) => match File::open(path) {
                 Ok(f) => RFile::File {
                     reader: StdioReader::from_file(f),
                     name: path.clone(),
@@ -3264,6 +3672,9 @@ struct Exec<'w> {
     /// a trace that disagreed with upstream's would be worse than one that
     /// shares its quirk. Starts at 0, where the program dump starts at 1.
     indent: usize,
+    /// The run's [`Posixicity`], which `N` on the last line asks: GNU prints
+    /// the pattern space there only in its default mode.
+    posix: Posixicity,
 }
 
 impl<'w> Exec<'w> {
@@ -3290,6 +3701,7 @@ impl<'w> Exec<'w> {
             ranges.push(RangeState { active, end_line });
         }
         Exec {
+            posix: script.posix,
             pattern: Vec::new(),
             hold: Vec::new(),
             line_num: 0,
@@ -3364,6 +3776,7 @@ impl<'w> Exec<'w> {
                 }
             }
             Addr::Re(r) => self.resolve(r.as_ref())?.find(&self.pattern)?.is_some(),
+            Addr::Null => true,
         })
     }
 
@@ -3393,6 +3806,14 @@ impl<'w> Exec<'w> {
                         .and_then(|q| q.checked_mul(*n))
                         .unwrap_or(usize::MAX),
                 ),
+                // GNU tests a `first~step` end on the line the range starts on
+                // too, so `2,0~2p` is line 2 alone. Measured.
+                EndAddr::Addr(a @ Addr::Step(..)) => {
+                    if self.addr_match(a, input)? {
+                        return Ok(true);
+                    }
+                    None
+                }
                 EndAddr::Addr(_) => None,
             };
             if let Some(r) = self.ranges.get_mut(pc) {
@@ -3405,7 +3826,8 @@ impl<'w> Exec<'w> {
         let close = match a2 {
             EndAddr::Addr(Addr::Last) => input.at_end(),
             EndAddr::Addr(Addr::Re(r)) => self.resolve(r.as_ref())?.find(&self.pattern)?.is_some(),
-            EndAddr::Addr(Addr::Step(_, _)) => false,
+            // Closed by the first line it names: `1,2~3p` is lines 1 and 2.
+            EndAddr::Addr(a @ Addr::Step(..)) => self.addr_match(a, input)?,
             _ => {
                 let end = self.ranges.get(pc).and_then(|r| r.end_line);
                 end.is_some_and(|e| self.line_num >= e)
@@ -3743,7 +4165,9 @@ impl<'w> Exec<'w> {
                     // `X` -- measured, and this port had them the other way
                     // round.
                     if input.at_end() {
-                        return Ok(Flow::Ended { print: true });
+                        return Ok(Flow::Ended {
+                            print: self.posix == Posixicity::Extended,
+                        });
                     }
                     self.dump_appends(out, false)?;
                     match input.next_line() {
@@ -3757,7 +4181,11 @@ impl<'w> Exec<'w> {
                         // GNU prints what it has rather than dropping it, which
                         // is what makes `sed '$!N;s/\n/ /'` join pairs of lines
                         // without losing an odd last one.
-                        None => return Ok(Flow::Ended { print: true }),
+                        None => {
+                            return Ok(Flow::Ended {
+                                print: self.posix == Posixicity::Extended,
+                            });
+                        }
                     }
                 }
                 Action::Hold => self.hold.clone_from(&self.pattern),
@@ -3798,6 +4226,9 @@ impl<'w> Exec<'w> {
                     return Ok(Flow::Deleted);
                 }
                 Action::ReadFile(path) => self.appends.push(Pending::File(path.clone())),
+                // Written straight out, with no separator owed paid first and
+                // no flush after, as GNU's `print_file` call there makes it.
+                Action::ReadFileNow(path) => print_file(path, out)?,
                 Action::ReadLine(idx) => {
                     // Read now, not at flush time. `R /dev/stdin` in a script
                     // whose input is a pipe interleaves with the cycle that
@@ -4391,6 +4822,8 @@ struct SedArgs {
     unbuffered: bool,
     /// `--follow-symlinks`. See [`FOLLOW_SYMLINKS`].
     follow_symlinks: bool,
+    /// `--posix`. See [`Posixicity`].
+    posix: bool,
     /// `-l N`, defaulting to [`DEFAULT_LINE_LEN`]; 0 means never wrap.
     line_len: usize,
     /// `Some(suffix)` for `-i`; an empty suffix means no backup.
@@ -4411,6 +4844,7 @@ impl Default for SedArgs {
             debug: false,
             unbuffered: false,
             follow_symlinks: false,
+            posix: false,
             line_len: DEFAULT_LINE_LEN,
             in_place: None,
             script_parts: Vec::new(),
@@ -4477,11 +4911,10 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             Opt::Long("debug", _) => out.debug = true,
             Opt::Short(b'u', _) | Opt::Long("unbuffered", _) => out.unbuffered = true,
             Opt::Long("follow-symlinks", _) => out.follow_symlinks = true,
-            // Accepted and ignored. `-b` asks for binary mode, which is the
-            // only mode there is here: nothing translates CR+LF. `--posix` is
-            // not done yet: known-issues.md ->
-            // TD-B-SED-HAS-NO-POSIX-MODE-AND-NO-FOLLOW-SYMLINKS.
-            Opt::Long("binary" | "posix", _) => {}
+            Opt::Long("posix", _) => out.posix = true,
+            // Accepted and ignored: binary mode is the only mode there is
+            // here, and nothing translates CR+LF.
+            Opt::Long("binary", _) => {}
             Opt::Short(b'i', value) | Opt::Long("in-place", value) => {
                 // `-i` takes an *optional* value, so it is never the next word:
                 // GNU reads `sed -i backup f` as an in-place edit of `backup`
@@ -4751,13 +5184,14 @@ fn main() {
         }
     };
 
-    let script = match compile_script(
+    let script = match compile_script_mode(
         &script_text,
         &segments,
         parsed.ere,
         parsed.line_len,
         parsed.sandbox,
         parsed.debug,
+        Mode::from_run(parsed.posix, parsed.null_data),
     ) {
         Ok(s) => s,
         Err(e) => {

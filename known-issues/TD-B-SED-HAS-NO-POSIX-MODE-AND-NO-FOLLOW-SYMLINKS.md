@@ -1,6 +1,6 @@
 ## TD-B-SED-HAS-NO-POSIX-MODE-AND-NO-FOLLOW-SYMLINKS (lane B, 2026-10-03)
 
-**Status:** OPEN -- the `--follow-symlinks` half is FIXED 2026-10-03 (`B-SED-I-REWROTE-FILES-WHERE-THEY-STOOD`); `--posix` and `POSIXLY_CORRECT` remain.
+**Status:** FIXED 2026-10-03 (lane B), boot confirmation pending -- `--follow-symlinks` in `B-SED-I-REWROTE-FILES-WHERE-THEY-STOOD`, the modes in the change described under "Fixed" below.
 
 **In short:** GNU sed has three levels of strictness -- its default, the one
 it switches to when the environment variable `POSIXLY_CORRECT` is set, and
@@ -43,11 +43,18 @@ whatever the mode. Measured: `POSIXLY_CORRECT=1 sed 'w /dev/stdout'` on
 `a\nb` (no final newline) prints `a\nba\nb` in GNU -- the `w` file is a second
 buffer, flushed first at exit -- and `a\na\nbb` here.
 
-### The proper fix
+### Fixed
 
-A `Posixicity` enum computed in `main` exactly as GNU computes it, threaded
-into the compiler (refusals, address forms, `a/i/c`, escapes, `l N`), the
-regex syntax flags (`ere` already has the BRE/ERE GNU-operator switches), the
-special-file table, `N` at end of input, and the replacement's case
-conversions.
-Each row of the table above becomes a `sed-diff.sh` case under both modes.
+`sed.rs`: a `Posixicity` computed as GNU's `main` computes it
+(`Mode::from_run`) and threaded through the parser -- every row above --
+with `v` switching the rest of the script and the run back to `Extended`;
+the special names decided per command by the mode in force there (`Target`);
+`N` at the end of the input asking the run's final mode; `ere::sed::
+regex_posix` for GNU's bracket-aware `normalize_text`; and the regex syntax
+bits through `ere` (`Syntax::unmatched_right_paren_ord`, `BreSyntax::
+{no_gnu_ops, unmatched_right_paren_ord, reg_newline}`). An `a` text left
+unfinished at the end of one `-e` is `incomplete command` there under
+`--posix`, as GNU compiles each fragment on its own.
+
+`scripts/sed-diff.sh`: 44 cases under `--posix` and 19 under
+`POSIXLY_CORRECT` (`ENVV`), each row of the table at least once.

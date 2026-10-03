@@ -1602,8 +1602,12 @@ impl FinanceApp {
         if !fields.contains(&self.field) {
             self.field = fields.first().copied().unwrap_or(FormField::Description);
         }
+        // The form's own keys are taken plain -- Alt+Enter saved it and
+        // Alt+Escape threw it away -- and anything else goes to the field,
+        // which knows a command from typing (`textline::apply_key`).
+        let plain = textline::is_plain(key.modifiers);
         match key.key {
-            Key::Tab => {
+            Key::Tab if plain => {
                 let at = fields.iter().position(|f| *f == self.field).unwrap_or(0);
                 let next = if key.modifiers.shift {
                     at.checked_sub(1).unwrap_or(fields.len().saturating_sub(1))
@@ -1613,17 +1617,17 @@ impl FinanceApp {
                 self.field = fields.get(next).copied().unwrap_or(self.field);
                 EventResult::Consumed
             }
-            Key::Enter => {
+            Key::Enter if plain => {
                 self.save_form();
                 EventResult::Consumed
             }
-            Key::Escape => {
+            Key::Escape if plain => {
                 self.form = None;
                 self.form_error = None;
                 self.status_msg = String::from("Cancelled");
                 EventResult::Consumed
             }
-            Key::Left | Key::Right | Key::Space if !self.field.is_text() => {
+            Key::Left | Key::Right | Key::Space if plain && !self.field.is_text() => {
                 if self.step_choice(self.field, key.key != Key::Left) {
                     EventResult::Consumed
                 } else {
@@ -2050,25 +2054,30 @@ impl FinanceApp {
         if !key.pressed {
             return EventResult::Ignored;
         }
-        let ctrl = key.modifiers.ctrl;
+        let plain = textline::is_plain(key.modifiers);
         let shift = key.modifiers.shift;
         // The list of keys, from anywhere; modal while it is up.
-        if key.key == Key::F1 {
+        if key.key == Key::F1 && plain {
             self.show_help = !self.show_help;
             return EventResult::Consumed;
         }
         if self.show_help {
-            if matches!(key.key, Key::Escape | Key::Enter) {
+            if plain && matches!(key.key, Key::Escape | Key::Enter) {
                 self.show_help = false;
                 return EventResult::Consumed;
             }
             return EventResult::Ignored;
         }
-        // A delete waiting on its answer takes the next key; only Y deletes.
+        // A delete waiting on its answer takes the next key; only Y deletes --
+        // a Y typed, plain or with AltGr, not a chord carrying its letter:
+        // Alt+Y deleted.
         if let Some(doomed) = self.pending_delete.take() {
-            let yes = key
-                .single_char()
-                .map_or(key.key == Key::Y, |c| c.eq_ignore_ascii_case(&'y'));
+            let typed_y = |c: char| c.eq_ignore_ascii_case(&'y');
+            let yes = if plain {
+                key.single_char().map_or(key.key == Key::Y, typed_y)
+            } else {
+                textline::types_into_field(key) && key.single_char().is_some_and(typed_y)
+            };
             if yes {
                 self.delete_doomed(doomed);
             } else {
@@ -2082,10 +2091,25 @@ impl FinanceApp {
         }
 
         // While searching, a typed character is search text and not a shortcut:
-        // a search for "1" must not be read as "switch to the dashboard".
-        if self.search_active && !ctrl && !key.text.is_empty() {
+        // a search for "1" must not be read as "switch to the dashboard". What
+        // a key typed: AltGr's among it -- refused, with Ctrl held -- and not a
+        // command's letter, which a chord carries.
+        if self.search_active && textline::types_into_field(key) {
             self.handle_search_text(&key.text);
             return EventResult::Consumed;
+        }
+
+        // Ctrl+D is the one Ctrl chord: Ctrl+C cycled the category filter
+        // as C does, the chord carrying its letter. A chord with Alt alone or
+        // the Windows key is the window's or the desktop's. AltGr counts by
+        // what it types, as a plain key by its character -- and AltGr that
+        // types nothing is not the letter under it.
+        let ctrl = textline::is_ctrl_chord(key.modifiers);
+        if ctrl && key.key != Key::D {
+            return EventResult::Ignored;
+        }
+        if !ctrl && !plain && !textline::types_into_field(key) {
+            return EventResult::Ignored;
         }
 
         let Some(name) = Self::key_name(key) else {
@@ -2123,10 +2147,12 @@ impl FinanceApp {
                 // Everything else is only interesting as the character typed,
                 // which is how the shortcuts below are written -- or, with no
                 // text on it (as a keystroke built from its key alone
-                // arrives), the character its key types.
+                // arrives), the character its key types. `typed`, not the raw
+                // text: Windows hands Ctrl+D over as the control character
+                // 0x04, which is no character and was read as one, so Ctrl+D
+                // did nothing on the development host.
                 let typed = key
-                    .text
-                    .chars()
+                    .typed()
                     .next()
                     .or_else(|| key_char(key.key, key.modifiers.shift))?;
                 return Some(typed.to_string());
@@ -5325,6 +5351,89 @@ mod tests {
         app.add_account("Everyday", AccountType::Checking, 10_000);
         app.screen = Screen::Transactions;
         app
+    }
+
+    /// **A chord is neither a finance key nor typing, and AltGr types**:
+    /// Alt+C and Ctrl+C cycled the category filter, the chord carrying its
+    /// letter, and an AltGr+C that typed nothing was the C under it; Alt+N
+    /// opened a form and Windows+2 changed the screen; Alt+Y answered
+    /// "delete?" with yes and Alt+Escape threw a form away; and the search
+    /// typed Alt+X's `x` but refused AltGr's `ś`. Ctrl+D still asks.
+    #[test]
+    fn a_chord_is_neither_a_finance_key_nor_typing() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let key = |k: Key, text: &str, modifiers: Modifiers| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        };
+        let mut app = FinanceApp::with_sample_data();
+        app.screen = Screen::Accounts;
+        let id = app.accounts[0].id;
+        app.selected_account = Some(id);
+        let (screen, month, filter) = (app.screen, app.view_month, app.category_filter);
+        for (k, text, m) in [
+            (Key::C, "c", Modifiers::alt()),
+            (Key::C, "c", Modifiers::ctrl()),
+            (Key::C, "", altgr),
+            (Key::D, "", altgr),
+            (Key::N, "n", Modifiers::alt()),
+            (Key::Num2, "2", Modifiers::super_key()),
+            (Key::Right, "", Modifiers::alt()),
+            (Key::Delete, "", Modifiers::alt()),
+            (Key::F1, "", Modifiers::alt()),
+        ] {
+            assert_eq!(
+                app.handle_key_event(&key(k, text, m)),
+                EventResult::Ignored,
+                "{m:?} {k:?} {text:?} was taken"
+            );
+        }
+        assert_eq!(app.screen, screen, "a chord changed the screen");
+        assert_eq!(app.view_month, month, "a chord changed the month");
+        assert_eq!(app.category_filter, filter, "a chord cycled the filter");
+        assert!(app.form.is_none(), "a chord opened a form");
+        assert!(app.pending_delete.is_none(), "a chord asked to delete");
+        assert!(!app.show_help, "a chord raised the keys");
+
+        // Ctrl+D asks; a chorded Y is no answer.
+        app.handle_key_event(&key(Key::D, "d", Modifiers::ctrl()));
+        assert_eq!(
+            app.pending_delete,
+            Some(Doomed::Account(id)),
+            "Ctrl+D no longer asks"
+        );
+        app.handle_key_event(&key(Key::Y, "y", Modifiers::alt()));
+        assert!(
+            app.accounts.iter().any(|a| a.id == id),
+            "Alt+Y deleted the account"
+        );
+
+        // A form's own keys are plain.
+        app.handle_key_event(&key(Key::N, "n", Modifiers::NONE));
+        assert!(app.form.is_some(), "control: N opens a form");
+        app.handle_key_event(&key(Key::Escape, "", Modifiers::alt()));
+        app.handle_key_event(&key(Key::Enter, "", Modifiers::alt()));
+        assert!(
+            app.form.is_some(),
+            "a chorded Escape or Enter closed the form"
+        );
+        app.handle_key_event(&key(Key::Escape, "", Modifiers::NONE));
+
+        // The search types what a key typed.
+        app.handle_key_event(&key(Key::Slash, "/", Modifiers::NONE));
+        assert!(app.search_active, "control: / searches");
+        app.handle_key_event(&key(Key::X, "x", Modifiers::alt()));
+        app.handle_key_event(&key(Key::S, "ś", altgr));
+        assert_eq!(
+            app.search_query, "ś",
+            "the search typed a command or refused AltGr's ś"
+        );
     }
 
     /// A left press at `(x, y)`.

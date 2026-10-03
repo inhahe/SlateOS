@@ -76,10 +76,7 @@ six differences into XPASS. Unit tests: `sed` 104 (3 new), `stdio` 7.
 
 ### Not covered here
 
-The input side has the same kind of gaps, measured and next: a closed
-standard input should be `read error on stdin: Bad file descriptor`; `q`
-should leave a seekable input positioned after the last line read; `-u`
-should read unbuffered; `R /dev/stdin` should share GNU's `stdin` stream and
-`r /dev/stdin` should re-open the name. And `--posix`/`POSIXLY_CORRECT`, under
-which the three names above are ordinary files again:
-`TD-B-SED-HAS-NO-POSIX-MODE-AND-NO-FOLLOW-SYMLINKS`.
+The input side had the same kind of gaps, fixed the same day:
+`B-SED-ATE-THE-REST-OF-A-SHARED-STANDARD-INPUT`. And `--posix` /
+`POSIXLY_CORRECT`, under which the three names above are ordinary files
+again: `TD-B-SED-HAS-NO-POSIX-MODE-AND-NO-FOLLOW-SYMLINKS`.

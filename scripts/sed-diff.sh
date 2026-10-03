@@ -83,6 +83,11 @@ printf 'a\0b\nB\0c\0'                   > nulsep.txt
 # written to a full disk depends on where stdio's buffer fills, and a line that
 # overflows it on its own is where a write fails rather than a flush.
 printf 'z'                              > lone.txt
+# Long enough that a block of it is not all of it: where a shared standard
+# input is left after sed stops depends on how much sed read ahead.
+seq 1 3000                              > big.txt
+# A directory, which opens and then cannot be read.
+mkdir -p rdir
 head -c 5000 /dev/zero | tr '\0' x     > long.txt
 printf '\n'                            >> long.txt
 
@@ -762,6 +767,100 @@ redir_case both -n 's/b/B/w /dev/stdin' abc.txt
 # and is printed.
 xfail_case 'a w file that fails at the final flush is named, not <unknown>' \
   -n 'w /dev/full' abc.txt
+
+# --- standard input, shared with whoever reads it next ---------------------------
+#
+# GNU sed reads standard input through glibc's `stdin`: a block at a time, or a
+# byte at a time under `-u`, and at `exit` it seeks back over what it read and
+# did not use -- if it can seek, and if the stream is buffered. So where the
+# *next* reader of the descriptor starts is part of what sed does: the rest of
+# a shell block, a child started by `e`. `shell_case SNIPPET` runs a shell
+# snippet with each side's sed first on PATH and compares everything it
+# prints, both streams merged, and its status.
+shell_case() {
+  local o_out g_out o_rc g_rc
+  o_out=$(mktemp); g_out=$(mktemp)
+  env PATH="$bindir/ours:$PATH" bash -c "$1" </dev/null >"$o_out" 2>&1; o_rc=$?
+  env PATH="$bindir/gnu:$PATH"  bash -c "$1" </dev/null >"$g_out" 2>&1; g_rc=$?
+  local o g
+  o=$(od -An -tx1 <"$o_out"); g=$(od -An -tx1 <"$g_out")
+  rm -f "$o_out" "$g_out"
+  if [ "$o" = "$g" ] && [ "$o_rc" = "$g_rc" ]; then
+    pass=$((pass+1))
+    [ -n "${VERBOSE:-}" ] && printf 'OK   [sh] %s\n' "$1"
+  else
+    fail=$((fail+1))
+    printf 'DIFF [sh] %s\n' "$1"
+    printf '  ours (rc=%s) %s\n' "$o_rc" "$(printf '%s' "$o" | tr -s ' \n' ' ')"
+    printf '  gnu  (rc=%s) %s\n' "$g_rc" "$(printf '%s' "$g" | tr -s ' \n' ' ')"
+  fi
+  return 0
+}
+
+# What is left for the next reader. A file is sought back to just after the
+# last line used; a pipe cannot be, and loses the block read ahead -- unless
+# `-u` read it a byte at a time. Under `-u` the byte `$` looked at is not given
+# back either (glibc does not sync an unbuffered stream), so `$!q` loses the
+# `2`. All measured; the old sed read ahead through Rust's own buffer and gave
+# nothing back.
+shell_case '{ sed 1q; cat; } < nums.txt'
+shell_case '{ sed -u 1q; cat; } < nums.txt'
+shell_case "{ sed '\$!q'; cat; } < nums.txt"
+shell_case "{ sed -u '\$!q'; cat; } < nums.txt"
+shell_case '{ sed -n 2p; cat; } < nums.txt'
+shell_case '{ sed 2q; cat; } < big.txt | wc -l'
+shell_case "{ sed -n '2{p;q}'; cat; } < big.txt | head -3"
+shell_case "printf '1\\n2\\n3\\n' | { sed -u 1q; cat; }"
+shell_case "printf '1\\n2\\n3\\n' | { sed 1q; cat; }"
+# A child started by `e` inherits standard input where sed's reading left it.
+# Under `-u` that is just after line 1, so `cat` prints the rest first.
+shell_case "sed '1e cat' < nums.txt"
+shell_case "sed -u '1e cat' < nums.txt"
+shell_case "printf '1\\n2\\n3\\n' | sed -u '1e cat'"
+# `R /dev/stdin` reads the same stream as an operand of `-`, so the two take
+# turns; `r /dev/stdin` opens the name again, which for a file starts from its
+# beginning every time and for a pipe reads what is left in it.
+shell_case "sed 'R /dev/stdin' - < abc.txt"
+shell_case "sed 'R /dev/stdin' def.txt < abc.txt"
+shell_case "sed -s 'R /dev/stdin' def.txt def.txt < abc.txt"
+shell_case "sed 'r /dev/stdin' def.txt < abc.txt"
+shell_case "printf 'x\\ny\\n' | sed 'r /dev/stdin' def.txt"
+# A second `-` reads on from where the first stopped, after `clearerr`.
+shell_case 'sed p - - < abc.txt'
+shell_case "sed -s -n '\$=' - - < abc.txt"
+# A closed standard input is a read error, when it is read -- and only then.
+shell_case 'sed p <&-'
+shell_case 'sed p - <&-'
+shell_case "sed -n '\$p' abc.txt <&-"
+shell_case "sed 'R /dev/stdin' abc.txt <&-"
+
+# --- `$`, `F` and the file boundary ------------------------------------------------
+#
+# `$` is answered by looking one byte ahead -- and at the end of a file, by
+# opening the next one to see whether it has a byte. From then on GNU's
+# `in_file_name` names the next file, so `F` does too: `sed -n '$!F' a b`
+# prints `a` and then `b`. A file that will not open is reported when `$`
+# reaches it, and one that opens but cannot be read counts as empty there.
+run_case -n '$!F' abc.txt def.txt
+run_case -n '$!F;F' abc.txt def.txt
+run_case -n '$!F' abc.txt nosuch.txt def.txt
+run_case --debug -n '$!F' abc.txt def.txt
+run_case -n '$p' abc.txt rdir
+run_case -n '$p' abc.txt rdir def.txt
+
+# --- reading that fails ------------------------------------------------------------
+#
+# A file that will not open is empty to `r` and `R`, by POSIX's rule; one that
+# opens and cannot be read ends the run, `r` after copying what it read.
+run_case 'R rdir' abc.txt
+run_case 'r rdir' abc.txt
+run_case '1r rdir' abc.txt
+run_case 'R nosuch.txt' abc.txt
+run_case p rdir
+run_case p abc.txt rdir def.txt
+# `/dev/stdout` and `/dev/stderr` are GNU's own streams, open for writing only.
+run_case 'R /dev/stdout' abc.txt
+run_case 'R /dev/stderr' abc.txt
 
 # --- reading a file back: r and R --------------------------------------------
 run_stdin abc.txt "1r def.txt"

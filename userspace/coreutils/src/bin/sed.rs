@@ -84,13 +84,25 @@
 //! `w /dev/stdout`, `w /dev/stderr` and `w /dev/stdin` are not opened: they
 //! are the process's own streams, each with a separator debt of its own. See
 //! [`WTarget`].
+//!
+//! ## Input
+//!
+//! Standard input is glibc's `stdin`: one stream for the whole run, read a
+//! block at a time -- a byte at a time under `-u` -- by every operand of `-`
+//! and by `R /dev/stdin`, in turn. Nothing is read ahead of the line being
+//! executed but the one byte `$` looks at, and at the end of the run the
+//! descriptor is sought back over what was read and not used, so the next
+//! reader of a shared standard input -- the rest of a shell block, a child
+//! started by `e` -- starts just after the last line sed took. A file that
+//! opens and then cannot be read ends the run; one that will not open is
+//! reported and skipped. See [`Input`] and [`STDIN`].
 
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, Read, Seek};
+use std::io::{self, Read};
 use std::process;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
@@ -99,7 +111,7 @@ use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::quote::{os_bytes, os_from_bytes};
 use coreutils::stdfd;
-use coreutils::stdio::StdioFile;
+use coreutils::stdio::{StdioFile, StdioReader};
 use ere::sed::{Named, RecursiveC, control_byte, named_byte};
 
 // The standard descriptors as the process was given them: a closed standard
@@ -1816,45 +1828,126 @@ struct Line {
     bytes: Vec<u8>,
     /// Whether the line ended with the separator, as opposed to end-of-file.
     had_sep: bool,
-    /// The operand this line came from, as it was written on the command line —
-    /// `-` for standard input, and interned so a million-line file costs one
-    /// copy of its name.
-    ///
-    /// It is stamped here rather than read from [`Input`] when it is wanted,
-    /// because the input reads one line *ahead*: by the time a line is being
-    /// executed, `Input`'s idea of the current file may already be the next
-    /// one. `F` and `--debug`'s `INPUT:` line would then name the wrong file at
-    /// every file boundary.
-    file: Rc<OsString>,
 }
 
-/// The lines of a list of files, read as one stream.
+thread_local! {
+    /// glibc's `stdin`: one stream for the whole run, read whenever an
+    /// operand is `-` and whenever `R /dev/stdin` asks for a line. GNU sed
+    /// reads both through the same `FILE` (`input->fp = stdin`), so they take
+    /// turns at one buffer -- `sed 'R /dev/stdin' -` pairs each line with the
+    /// *next* one, not with a second copy of the input. Measured.
+    static STDIN: Rc<RefCell<StdioReader>> = Rc::new(RefCell::new(StdioReader::stdin()));
+}
+
+/// Standard input's one stream. See [`STDIN`].
+fn stdin_stream() -> Rc<RefCell<StdioReader>> {
+    STDIN.with(Rc::clone)
+}
+
+/// What `exit` does for standard input once the output is flushed: glibc
+/// seeks a buffered stream back over what it read ahead and did not use, so
+/// the next reader of the descriptor starts just after the last line sed
+/// took. `{ sed 1q; cat; } < file` gives `cat` the rest of the file because of
+/// this, and `printf '1\n2\n' | { sed 1q; cat; }` gives it nothing, a pipe
+/// being unable to seek. See [`StdioReader::exit_sync`].
+fn give_back_stdin() {
+    STDIN.with(|s| {
+        if let Ok(mut s) = s.try_borrow_mut() {
+            s.exit_sync();
+        }
+    });
+}
+
+/// The error standard input's stream answers if something is already
+/// reading it -- which nothing here does while anything else is, so this is
+/// a guard rather than a case.
+fn stdin_busy() -> io::Error {
+    io::Error::other("standard input is already being read")
+}
+
+/// Whether a stream has a byte to give: `feof`, then `getc` and `ungetc`. A
+/// read that fails counts as the end, as GNU's `getc` returning `EOF` does.
+fn has_more(r: &mut StdioReader) -> bool {
+    !r.at_eof() && matches!(r.peek(), Ok(Some(_)))
+}
+
+/// The stream an input is being read through.
+enum Reader {
+    /// Standard input's one stream: see [`STDIN`].
+    Stdin(Rc<RefCell<StdioReader>>),
+    /// A file named on the command line, with a stream of its own.
+    File(StdioReader),
+    /// Bytes already in memory, standing in for standard input in the unit
+    /// tests.
+    #[cfg(test)]
+    Bytes(io::Cursor<Vec<u8>>),
+}
+
+impl Reader {
+    /// GNU's `ck_getdelim`.
+    fn read_until(&mut self, sep: u8, out: &mut Vec<u8>) -> io::Result<usize> {
+        match self {
+            Reader::Stdin(s) => s
+                .try_borrow_mut()
+                .map_err(|_| stdin_busy())?
+                .read_until(sep, out),
+            Reader::File(r) => r.read_until(sep, out),
+            #[cfg(test)]
+            Reader::Bytes(c) => io::BufRead::read_until(c, sep, out),
+        }
+    }
+
+    /// See [`has_more`].
+    fn has_more(&mut self) -> bool {
+        match self {
+            Reader::Stdin(s) => s.try_borrow_mut().is_ok_and(|mut s| has_more(&mut s)),
+            Reader::File(r) => has_more(r),
+            #[cfg(test)]
+            Reader::Bytes(c) => io::BufRead::fill_buf(c).is_ok_and(|b| !b.is_empty()),
+        }
+    }
+}
+
+/// The lines of a list of files, read as one stream -- GNU sed's `struct
+/// input`, with its `read_pattern_space`, `test_eof` and
+/// `last_file_with_data_p`.
 ///
-/// It reads one line ahead, because `$` cannot be answered without knowing
-/// whether anything follows — and with several files that question crosses a
-/// file boundary.
+/// Nothing is read ahead of the line being executed except what `$` asks
+/// for, and that is one byte: `$` is answered by looking at the next byte,
+/// as GNU's `getc` and `ungetc` do, and only when an address asks. Reading a
+/// whole line ahead, as this used to, is invisible in a file and visible in a
+/// pipe shared with someone else: under `-u`, `printf '1\n2\n3\n' | sed -u
+/// '1e cat'` hands `cat` the lines sed has not read, and a line taken early
+/// would be missing from them.
 struct Input {
     paths: Vec<OsString>,
     next_path: usize,
-    cur: Option<Box<dyn BufRead>>,
-    /// What to call the file now open, in a read-error diagnostic. Upstream
-    /// names standard input `stdin` there even though the operand was `-`.
+    cur: Option<Reader>,
+    /// What a read error calls the file now open: `stdin` for `-`, GNU's
+    /// `utils_fp_name`, and the operand otherwise.
     cur_name: OsString,
-    /// The *operand* the file now open was named by, which is what `F` and
-    /// `--debug` report — a different string from `cur_name` for standard
-    /// input, where upstream says `-` and `STDIN` respectively.
+    /// GNU's `in_file_name`: the operand most recently *opened*, which `F`
+    /// prints and `--debug` reports -- `-` for standard input, which the
+    /// trace spells `STDIN`. Most recently opened, not the one the current
+    /// line came from: a `$` test at the end of a file opens the next one to
+    /// see whether it has a line, and from then on `F` names that one. `sed -n
+    /// '$!F' a b` prints `a` and then `b`, measured; this port used to stamp
+    /// each line with its file and printed `a` twice.
     cur_file: Rc<OsString>,
     /// Whether a `-` operand means standard input. It does everywhere except
     /// under `-i`, where there is no sense in editing standard input in place
     /// and upstream therefore opens a file whose name is one dash.
     dash_is_stdin: bool,
-    peeked: Option<Line>,
+    /// `-u` outside `-i`: each input is read a byte at a time, GNU's
+    /// `setvbuf (input->fp, NULL, _IONBF, 0)`, so that no more is taken from a
+    /// shared descriptor than has been used.
+    unbuffered: bool,
     sep: u8,
     had_error: bool,
 }
 
 impl Input {
-    fn new(paths: Vec<OsString>, sep: u8, dash_is_stdin: bool) -> Input {
+    fn new(paths: Vec<OsString>, sep: u8, dash_is_stdin: bool, unbuffered: bool) -> Input {
         Input {
             paths,
             next_path: 0,
@@ -1862,85 +1955,125 @@ impl Input {
             cur_name: OsString::from("stdin"),
             cur_file: Rc::new(OsString::from("-")),
             dash_is_stdin,
-            peeked: None,
+            unbuffered,
             sep,
             had_error: false,
         }
     }
 
-    fn open_next(&mut self) -> bool {
-        while let Some(path) = self.paths.get(self.next_path) {
-            let path = path.clone();
-            self.next_path = self.next_path.saturating_add(1);
-            if path == "-" && self.dash_is_stdin {
-                self.cur = Some(Box::new(BufReader::new(io::stdin())));
-                self.cur_name = OsString::from("stdin");
-                self.cur_file = Rc::new(path);
-                return true;
-            }
-            match File::open(&path) {
-                Ok(f) => {
-                    self.cur = Some(Box::new(BufReader::new(f)));
-                    self.cur_file = Rc::new(path.clone());
-                    self.cur_name = path;
-                    return true;
-                }
-                Err(e) => {
-                    diag_path("sed: can't read ", &path, &format!(": {}", strerror(&e)));
-                    self.had_error = true;
+    /// GNU's `open_next_file`: open one operand, and say so if it will not.
+    /// The name is taken first, as GNU's `in_file_name` is, whether or not the
+    /// open succeeds.
+    fn open(&mut self, path: OsString) -> bool {
+        self.cur_file = Rc::new(path.clone());
+        if path == "-" && self.dash_is_stdin {
+            let stdin = stdin_stream();
+            if let Ok(mut s) = stdin.try_borrow_mut() {
+                // `clearerr (stdin)`: a second `-` reads again rather than
+                // inheriting the first one's end of file.
+                s.clear_error();
+                if self.unbuffered {
+                    s.set_unbuffered();
                 }
             }
+            self.cur = Some(Reader::Stdin(stdin));
+            self.cur_name = OsString::from("stdin");
+            return true;
         }
-        false
-    }
-
-    fn fill(&mut self) {
-        if self.peeked.is_some() {
-            return;
-        }
-        loop {
-            if self.cur.is_none() && !self.open_next() {
-                return;
+        match File::open(&path) {
+            Ok(f) => {
+                let mut r = StdioReader::from_file(f);
+                if self.unbuffered {
+                    r.set_unbuffered();
+                }
+                self.cur = Some(Reader::File(r));
+                self.cur_name = path;
+                true
             }
-            let Some(r) = self.cur.as_mut() else { return };
-            let mut buf = Vec::new();
-            match r.read_until(self.sep, &mut buf) {
-                Ok(0) => {
-                    self.cur = None;
-                }
-                Ok(_) => {
-                    let had_sep = buf.last() == Some(&self.sep);
-                    if had_sep {
-                        buf.pop();
-                    }
-                    self.peeked = Some(Line {
-                        bytes: buf,
-                        had_sep,
-                        file: Rc::clone(&self.cur_file),
-                    });
-                    return;
-                }
-                // A read that fails part-way through a file is not the same
-                // as a file that would not open: there is no sensible way to
-                // carry on with the rest of the stream, so this ends the run.
-                Err(e) => panic_path(
-                    "sed: read error on ",
-                    &self.cur_name,
-                    &format!(": {}", strerror(&e)),
-                ),
+            Err(e) => {
+                diag_path("sed: can't read ", &path, &format!(": {}", strerror(&e)));
+                self.had_error = true;
+                false
             }
         }
     }
 
+    /// GNU's `closedown` of an input that is not being edited in place: a
+    /// file is closed, and a failure to close it is fatal; standard input is
+    /// left open -- GNU's `ck_fclose` passes over a stream it never
+    /// registered, and the next `-`, or `R /dev/stdin`, reads on from it.
+    fn close_current(&mut self) {
+        if let Some(Reader::File(r)) = self.cur.take()
+            && let Err(e) = r.close()
+        {
+            panic_path(
+                "sed: couldn't close ",
+                &self.cur_name,
+                &format!(": {}", strerror(&e)),
+            );
+        }
+    }
+
+    /// GNU's `read_pattern_space`, less what it does to the program's state:
+    /// the next line, from the next operand that has one when the current
+    /// one runs out.
     fn next_line(&mut self) -> Option<Line> {
-        self.fill();
-        self.peeked.take()
+        loop {
+            if let Some(cur) = self.cur.as_mut() {
+                let sep = self.sep;
+                let mut buf = Vec::new();
+                match cur.read_until(sep, &mut buf) {
+                    Ok(0) => self.close_current(),
+                    Ok(_) => {
+                        let had_sep = buf.last() == Some(&sep);
+                        if had_sep {
+                            buf.pop();
+                        }
+                        return Some(Line {
+                            bytes: buf,
+                            had_sep,
+                        });
+                    }
+                    // A read that fails part-way through a file is not the
+                    // same as a file that would not open: there is no sensible
+                    // way to carry on with the rest of the stream, so this
+                    // ends the run.
+                    Err(e) => panic_path(
+                        "sed: read error on ",
+                        &self.cur_name,
+                        &format!(": {}", strerror(&e)),
+                    ),
+                }
+            }
+            let path = self.paths.get(self.next_path).cloned()?;
+            self.next_path = self.next_path.saturating_add(1);
+            self.open(path);
+        }
     }
 
-    /// Whether the line just handed out was the last one there will be.
+    /// GNU's `test_eof`: whether the line just read was the last there is.
     fn at_end(&mut self) -> bool {
-        self.fill();
-        self.peeked.is_none()
+        if self.cur.as_mut().is_some_and(Reader::has_more) {
+            return false;
+        }
+        self.last_file_with_data()
+    }
+
+    /// GNU's `last_file_with_data_p`: close what is open, then open each
+    /// remaining operand in turn until one has a byte to give -- saying
+    /// `can't read` about any that will not open now, when `$` is asked,
+    /// rather than when its turn would have come.
+    fn last_file_with_data(&mut self) -> bool {
+        loop {
+            self.close_current();
+            let Some(path) = self.paths.get(self.next_path).cloned() else {
+                return true;
+            };
+            self.next_path = self.next_path.saturating_add(1);
+            if self.open(path) && self.cur.as_mut().is_some_and(Reader::has_more) {
+                return false;
+            }
+        }
     }
 }
 
@@ -1975,9 +2108,14 @@ thread_local! {
     static STDOUT: RefCell<Option<Shared>> = const { RefCell::new(None) };
 }
 
-/// `-u`: every line flushed as it is written. GNU's `unbuffered`, a global
-/// there too.
+/// `-u`: every line flushed as it is written, and every input read a byte at
+/// a time. GNU's `unbuffered`, a global there too.
 static UNBUFFERED: AtomicBool = AtomicBool::new(false);
+
+/// Whether `-u` was given.
+fn unbuffered() -> bool {
+    UNBUFFERED.load(AtomicOrdering::Relaxed)
+}
 
 /// Start an output file and add it to [`OPEN`].
 fn register(file: StdioFile, name: &[u8]) -> Shared {
@@ -2019,6 +2157,7 @@ fn exit_quietly(code: i32) -> ! {
             }
         }
     });
+    give_back_stdin();
     process::exit(code)
 }
 
@@ -2332,11 +2471,17 @@ fn text_out(out: &mut Out, t: &[u8]) -> io::Result<()> {
 /// descriptor 1. That is what puts `sed -i 'e echo SIDE' f` into `f` instead of
 /// onto the terminal — measured, and the reason this cannot simply inherit.
 ///
+/// Inherited standard input has to be asked for: `Command::output` gives the
+/// child an empty one unless told otherwise, which is what this did until
+/// 2026-10-03 -- so `printf '1\n2\n3\n' | sed -u '1e cat'` printed `1 2 3`
+/// where GNU's `cat` takes the two lines sed has not read and prints `2 3 1`.
+///
 /// A command that *runs* and fails is not an error — upstream discards the exit
 /// status, so `sed 'e false'` succeeds. A shell that will not start at all is,
 /// and stops the run, because every later `e` would fail the same way.
 fn shell_capture(cmd: &[u8]) -> Vec<u8> {
     match coreutils::shell::shell_bytes(cmd)
+        .stdin(process::Stdio::inherit())
         .stderr(process::Stdio::inherit())
         .output()
     {
@@ -2470,15 +2615,30 @@ fn open_wfiles(paths: &[String]) -> Vec<WFile> {
         .collect()
 }
 
-/// One `R` source: a handle that yields a single line per execution.
+/// One `R` source, opened once for the run.
 ///
-/// A missing or unopenable file is `None` rather than an error. That is
+/// A missing or unopenable file gives nothing rather than an error. That is
 /// upstream's behaviour and it is deliberate on both sides: `R` is an
 /// inclusion, and a script that runs before its optional include exists should
 /// produce the text without it, not a diagnostic. (`r` agrees; `w` does not,
-/// because a write that goes nowhere loses data.)
-struct RFile {
-    r: Option<BufReader<File>>,
+/// because a write that goes nowhere loses data.) A file that opens and then
+/// cannot be *read* is another matter, and ends the run as GNU's does: `R dir`
+/// is `read error on dir: Is a directory`, measured, where this port used to
+/// say nothing.
+enum RFile {
+    /// Would not open.
+    Missing,
+    /// A file with a stream of its own.
+    File { reader: StdioReader, name: String },
+    /// `/dev/stdin`, one of GNU's `special_files`: standard input's one
+    /// stream, shared with an operand of `-` (see [`STDIN`]) -- so `sed 'R
+    /// /dev/stdin' -` pairs each line with the next, measured, where opening
+    /// the name read the input a second time.
+    Stdin,
+    /// `/dev/stdout` or `/dev/stderr`: streams open only for writing, so the
+    /// first `R` from one is a read error -- `read error on stdout: Bad file
+    /// descriptor`.
+    WriteOnly(&'static str),
 }
 
 /// Open every `R` source the script names, before a line of input is read.
@@ -2490,25 +2650,221 @@ struct RFile {
 fn open_rfiles(paths: &[String]) -> Vec<RFile> {
     paths
         .iter()
-        .map(|path| RFile {
-            r: File::open(path).ok().map(BufReader::new),
+        .map(|path| match path.as_str() {
+            "/dev/stdin" => RFile::Stdin,
+            "/dev/stdout" => RFile::WriteOnly("stdout"),
+            "/dev/stderr" => RFile::WriteOnly("stderr"),
+            _ => match File::open(path) {
+                Ok(f) => RFile::File {
+                    reader: StdioReader::from_file(f),
+                    name: path.clone(),
+                },
+                Err(_) => RFile::Missing,
+            },
         })
         .collect()
 }
 
-/// Return every `R` source to its first line.
+/// Return every `R` source to its first line: GNU's `rewind_read_files`.
 ///
 /// `-s` (and `-i`, which implies it) makes each input file a fresh stream, and
 /// upstream extends that to the `R` sources: `sed -s 'R inc' a b` pairs `inc`'s
 /// first lines with *both* files rather than continuing through it. A handle
 /// that cannot seek is left where it is, which is the best available answer for
-/// a pipe or a device.
+/// a pipe or a device. Standard input is not one of these -- GNU's special
+/// files are not on the list it rewinds -- and is not rewound.
 fn rewind_rfiles(rfiles: &mut [RFile]) {
     for f in rfiles {
-        if let Some(r) = f.r.as_mut() {
-            let _ = r.rewind();
+        if let RFile::File { reader, .. } = f {
+            reader.rewind();
         }
     }
+}
+
+/// One line from a stream for `R`: nothing once it has reached its end,
+/// which `R` does not read past (GNU's `!feof` test).
+fn line_from(r: &mut StdioReader, sep: u8) -> io::Result<Option<Vec<u8>>> {
+    if r.at_eof() {
+        return Ok(None);
+    }
+    let mut buf = Vec::new();
+    match r.read_until(sep, &mut buf)? {
+        0 => Ok(None),
+        _ => Ok(Some(buf)),
+    }
+}
+
+/// `R`'s line from `f`, if it has one. A read that fails ends the run,
+/// named as GNU's `ck_getdelim` names it.
+fn read_rfile(f: Option<&mut RFile>, sep: u8) -> Option<Vec<u8>> {
+    let (name, got): (&[u8], io::Result<Option<Vec<u8>>>) = match f? {
+        RFile::Missing => return None,
+        RFile::File { reader, name } => (name.as_bytes(), line_from(reader, sep)),
+        RFile::Stdin => {
+            let stdin = stdin_stream();
+            let got = match stdin.try_borrow_mut() {
+                Ok(mut s) => line_from(&mut s, sep),
+                Err(_) => Err(stdin_busy()),
+            };
+            return match got {
+                Ok(line) => line,
+                Err(e) => panic_out(&format!("read error on stdin: {}", strerror(&e))),
+            };
+        }
+        RFile::WriteOnly(name) => {
+            // glibc turns the stream to reading first, which writes out what
+            // standard output is holding -- and a failure there is the error
+            // reported -- and then refuses the read.
+            let refused = if *name == "stdout" {
+                stdout_file()
+                    .try_borrow_mut()
+                    .ok()
+                    .and_then(|mut f| f.file.flush().err())
+                    .unwrap_or_else(|| io::Error::from_raw_os_error(EBADF))
+            } else {
+                io::Error::from_raw_os_error(EBADF)
+            };
+            panic_out(&format!("read error on {name}: {}", strerror(&refused)));
+        }
+    };
+    match got {
+        Ok(line) => line,
+        Err(e) => panic_path(
+            "sed: read error on ",
+            &os_from_bytes(name),
+            &format!(": {}", strerror(&e)),
+        ),
+    }
+}
+
+/// Where `r` reads from: GNU's `print_file` opens the name afresh each time.
+enum RSource {
+    File(File),
+    /// Standing in for a re-open of `/dev/stdin`, where the platform's
+    /// `/dev/stdin` is not descriptor 0's file. On Linux it is -- a link to
+    /// `/proc/self/fd/0` -- and opening it opens that file again: a regular
+    /// file from its start, whatever descriptor 0's offset (`offset`), and a
+    /// pipe or a terminal as the same pipe or terminal (`None`). SlateOS's
+    /// devfs node is the console instead, which would make `cmd | sed '1r
+    /// /dev/stdin' f` insert nothing; this gives Linux's answer until it
+    /// gives it itself (`requests/b-a-dev-stdin-stdout-and-stderr-are-console-
+    /// nodes-not-the-callers-descriptors.md`), after which it is never chosen.
+    Reopened {
+        offset: Option<u64>,
+    },
+}
+
+impl RSource {
+    /// GNU's `ck_fopen (name, "r", false)`: `None` for a file that will not
+    /// open, which `r` treats as empty.
+    fn open(path: &str) -> Option<RSource> {
+        let file = File::open(path).ok()?;
+        if path == "/dev/stdin" && !is_descriptor_zero(&file) {
+            return RSource::reopen_stdin();
+        }
+        Some(RSource::File(file))
+    }
+
+    /// What opening `/dev/stdin` gives on Linux, from descriptor 0 itself.
+    /// `None` -- an empty file to `r` -- where there is no descriptor 0, as
+    /// Linux's open fails there.
+    fn reopen_stdin() -> Option<RSource> {
+        let meta = stdfd::metadata(0).ok()?;
+        let offset = (meta.is_file() || meta.is_dir()).then_some(0);
+        Some(RSource::Reopened { offset })
+    }
+
+    /// `fread` into `chunk`: as much as fits, stopping early only at the end
+    /// of the file or at a failure. The count, and the failure if there was
+    /// one.
+    fn fill(&mut self, chunk: &mut [u8]) -> (usize, Option<io::Error>) {
+        let mut got = 0usize;
+        while let Some(room) = chunk.get_mut(got..).filter(|r| !r.is_empty()) {
+            let read = match self {
+                RSource::File(f) => io::Read::read(f, room),
+                RSource::Reopened { offset: Some(at) } => stdfd::read_at(0, room, *at),
+                RSource::Reopened { offset: None } => stdfd::read(0, room),
+            };
+            match read {
+                Ok(0) => break,
+                Ok(n) => {
+                    got = got.saturating_add(n);
+                    if let RSource::Reopened { offset: Some(at) } = self {
+                        *at = at.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return (got, Some(e)),
+            }
+        }
+        (got, None)
+    }
+
+    /// `fclose`, whose failure GNU reports.
+    fn close(self) -> io::Result<()> {
+        match self {
+            RSource::File(f) => stdfd::close(f),
+            RSource::Reopened { .. } => Ok(()),
+        }
+    }
+}
+
+/// Whether `file` is descriptor 0's file: the same device, inode and type.
+#[cfg(unix)]
+fn is_descriptor_zero(file: &File) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    match (file.metadata(), stdfd::metadata(0)) {
+        (Ok(a), Ok(b)) => {
+            a.dev() == b.dev() && a.ino() == b.ino() && a.file_type() == b.file_type()
+        }
+        _ => false,
+    }
+}
+
+/// No device and inode to compare off unix, and no `/dev/stdin` to open
+/// either: whatever opened is what there is.
+#[cfg(not(unix))]
+fn is_descriptor_zero(_file: &File) -> bool {
+    true
+}
+
+/// GNU's `print_file`, for `r`: the file opened afresh and copied in
+/// 8192-byte pieces, one checked write each. A file that will not open is an
+/// empty one -- POSIX: "treated as if it were an empty file, causing no error
+/// condition" -- but one that opens and then cannot be read ends the run,
+/// after what was read before the failure has been written: `r dir` is `read
+/// error on dir: Is a directory`, measured, where this port used to say
+/// nothing.
+fn print_file(path: &str, out: &mut Out<'_>) -> io::Result<()> {
+    let Some(mut source) = RSource::open(path) else {
+        return Ok(());
+    };
+    let mut chunk = vec![0u8; FREAD_BUFFER_SIZE];
+    loop {
+        let (got, failed) = source.fill(&mut chunk);
+        if let Some(piece) = chunk.get(..got).filter(|p| !p.is_empty()) {
+            out.put(piece)?;
+        }
+        if let Some(e) = failed {
+            panic_path(
+                "sed: read error on ",
+                OsStr::new(path),
+                &format!(": {}", strerror(&e)),
+            );
+        }
+        if got < chunk.len() {
+            break;
+        }
+    }
+    if let Err(e) = source.close() {
+        panic_path(
+            "sed: couldn't close ",
+            OsStr::new(path),
+            &format!(": {}", strerror(&e)),
+        );
+    }
+    Ok(())
 }
 
 struct RangeState {
@@ -2555,10 +2911,6 @@ struct Exec<'w> {
     hold: Vec<u8>,
     line_num: usize,
     had_sep: bool,
-    /// The operand the current line came from, carried on the line itself
-    /// rather than read back from [`Input`] — see [`Line::file`] for why.
-    /// `F` prints it, and so does `--debug`'s `INPUT:` line.
-    file: Rc<OsString>,
     sub_made: bool,
     appends: Vec<Pending>,
     last_re: Option<Rc<Regex>>,
@@ -2608,7 +2960,6 @@ impl<'w> Exec<'w> {
             hold: Vec::new(),
             line_num: 0,
             had_sep: true,
-            file: Rc::new(OsString::from("-")),
             sub_made: false,
             appends: Vec::new(),
             last_re: None,
@@ -2849,24 +3200,7 @@ impl<'w> Exec<'w> {
         for p in std::mem::take(&mut self.appends) {
             match p {
                 Pending::Raw(t) => out.put(&t)?,
-                Pending::File(path) => {
-                    // GNU ignores a file it cannot read here: `r` is an
-                    // inclusion, and a missing one is not an error in a script
-                    // that may run before the file exists.
-                    let read = if path == "/dev/stdin" {
-                        let mut b = Vec::new();
-                        io::stdin().read_to_end(&mut b).map(|_| b)
-                    } else {
-                        fs::read(&path)
-                    };
-                    if let Ok(bytes) = read {
-                        // `print_file` copies through a buffer of this size,
-                        // one checked write per buffer.
-                        for chunk in bytes.chunks(FREAD_BUFFER_SIZE) {
-                            out.put(chunk)?;
-                        }
-                    }
-                }
+                Pending::File(path) => print_file(&path, out)?,
             }
         }
         out.line_done()
@@ -3060,7 +3394,6 @@ impl<'w> Exec<'w> {
                         Some(l) => {
                             self.pattern = l.bytes;
                             self.had_sep = l.had_sep;
-                            self.file = l.file;
                             self.line_num = self.line_num.saturating_add(1);
                             self.trace_pattern(out);
                         }
@@ -3084,7 +3417,6 @@ impl<'w> Exec<'w> {
                             self.pattern.push(out.sep);
                             self.pattern.extend_from_slice(&l.bytes);
                             self.had_sep = l.had_sep;
-                            self.file = l.file;
                             self.line_num = self.line_num.saturating_add(1);
                             self.trace_pattern(out);
                         }
@@ -3137,15 +3469,8 @@ impl<'w> Exec<'w> {
                     // whose input is a pipe interleaves with the cycle that
                     // asked for it, and deferring the read would reorder that.
                     let sep = out.sep;
-                    if let Some(r) = self.rfiles.get_mut(*idx).and_then(|f| f.r.as_mut()) {
-                        let mut buf = Vec::new();
-                        // A read failure is as silent as a missing file, for
-                        // the reason given on `RFile`. Exhaustion arrives here
-                        // as `Ok(0)` and is likewise a no-op, which is what
-                        // makes `R` on a short file simply stop contributing.
-                        if r.read_until(sep, &mut buf).is_ok() && !buf.is_empty() {
-                            self.appends.push(Pending::Raw(buf));
-                        }
+                    if let Some(line) = read_rfile(self.rfiles.get_mut(*idx), sep) {
+                        self.appends.push(Pending::Raw(line));
                     }
                 }
                 Action::WriteFile(idx) => {
@@ -3176,8 +3501,10 @@ impl<'w> Exec<'w> {
                 // Terminated by the output separator, not by a newline: under
                 // `-z` upstream writes `-\0` and not `-\n`, the same as `=`
                 // does. Measured.
+                // GNU's `in_file_name`, which is the file most recently opened
+                // -- see [`Input::cur_file`].
                 Action::FileName => {
-                    let name = os_bytes(&self.file).into_owned();
+                    let name = os_bytes(&input.cur_file).into_owned();
                     out.unchecked_line(&name)?;
                 }
                 Action::Execute(cmd) => {
@@ -3250,7 +3577,6 @@ impl<'w> Exec<'w> {
         while let Some(line) = input.next_line() {
             self.pattern = line.bytes;
             self.had_sep = line.had_sep;
-            self.file = line.file;
             self.line_num = self.line_num.saturating_add(1);
             self.sub_made = false;
 
@@ -3259,7 +3585,7 @@ impl<'w> Exec<'w> {
                 // `STDIN` — where `F`, which names the same thing, prints the
                 // `-`. Upstream spells them differently and so does this.
                 let mut t = Vec::from(&b"INPUT:   '"[..]);
-                let name = os_bytes(&self.file).into_owned();
+                let name = os_bytes(&input.cur_file).into_owned();
                 if name == b"-" {
                     t.extend_from_slice(b"STDIN");
                 } else {
@@ -4168,7 +4494,7 @@ fn main() {
 /// reader that left is the exception, as everywhere (§377).
 fn finish(status: i32) -> ! {
     match close_everything() {
-        Ok(()) => process::exit(status),
+        Ok(()) => exit_quietly(status),
         Err(e) if e.kind() == io::ErrorKind::BrokenPipe => exit_quietly(status),
         Err(e) => {
             let mut line = b"sed: ".to_vec();
@@ -4274,7 +4600,7 @@ impl Job<'_> {
     /// All the files as one stream: line numbers and `$` run across them.
     fn joined(&mut self, files: &[OsString]) -> i32 {
         let mut sink = FileDest(stdout_file());
-        let mut input = Input::new(files.to_vec(), self.sep, true);
+        let mut input = Input::new(files.to_vec(), self.sep, true, unbuffered());
         let (quit, exec_err) = self.run_one(&mut input, &mut sink, &mut false);
         status(quit, input.had_error || exec_err)
     }
@@ -4291,7 +4617,7 @@ impl Job<'_> {
             // with both files rather than running off the end of `inc` during
             // the first. See [`rewind_rfiles`].
             rewind_rfiles(&mut self.rfiles);
-            let mut input = Input::new(vec![path.clone()], self.sep, true);
+            let mut input = Input::new(vec![path.clone()], self.sep, true, unbuffered());
             let (quit, exec_err) = self.run_one(&mut input, &mut sink, &mut owed);
             bad = bad || input.had_error || exec_err;
             if let Some(code) = quit {
@@ -4338,7 +4664,9 @@ impl Job<'_> {
             // `false`: the `File::open` above already treated a `-` operand as
             // a file, and the reader has to agree — otherwise `-i` on a file
             // named `-` would open it, then read standard input into it.
-            let mut input = Input::new(vec![path.clone()], self.sep, false);
+            // Buffered whatever `-u` says: GNU sets an input unbuffered only
+            // on the way to standard output, and `-i` is not that.
+            let mut input = Input::new(vec![path.clone()], self.sep, false, false);
             // A debt of its own, which ends with the file.
             let (quit, exec_err) = self.run_one(&mut input, &mut buf, &mut false);
             bad = bad || input.had_error || exec_err;
@@ -4430,17 +4758,9 @@ mod tests {
     /// input a real run reads. Built by hand rather than through
     /// [`Input::new`], which only knows how to open paths.
     fn over(bytes: Vec<u8>, sep: u8) -> Input {
-        Input {
-            paths: Vec::new(),
-            next_path: 0,
-            cur_name: OsString::from("stdin"),
-            cur_file: Rc::new(OsString::from("-")),
-            dash_is_stdin: true,
-            cur: Some(Box::new(BufReader::new(io::Cursor::new(bytes)))),
-            peeked: None,
-            sep,
-            had_error: false,
-        }
+        let mut input = Input::new(Vec::new(), sep, true, false);
+        input.cur = Some(Reader::Bytes(io::Cursor::new(bytes)));
+        input
     }
 
     /// [`compile_script`] with what `main` passes for a bare `sed 'script'`:
@@ -5001,6 +5321,59 @@ mod tests {
         job.run_one(&mut inp, &mut sink, &mut owed);
         assert_eq!(sink, b"b\nc\n");
         assert!(!owed);
+    }
+
+    #[test]
+    fn a_dollar_test_at_the_end_of_a_file_opens_the_next_one() {
+        let dir = ScratchDir::new("sed-input-boundary");
+        let a = dir.path("a");
+        let b = dir.path("b");
+        fs::write(&a, b"a1\na2\n").unwrap();
+        fs::write(&b, b"b1\n").unwrap();
+        let mut input = Input::new(
+            vec![a.clone().into_os_string(), b.clone().into_os_string()],
+            b'\n',
+            true,
+            false,
+        );
+        assert_eq!(input.next_line().map(|l| l.bytes), Some(b"a1".to_vec()));
+        // A byte follows in `a`, so `a` is still the file `F` names.
+        assert!(!input.at_end());
+        assert_eq!(*input.cur_file, a.clone().into_os_string());
+        assert_eq!(input.next_line().map(|l| l.bytes), Some(b"a2".to_vec()));
+        // Nothing follows in `a`: `$` opens `b` to look, and from then on `b`
+        // is the file named -- GNU's `in_file_name`, measured.
+        assert!(!input.at_end());
+        assert_eq!(*input.cur_file, b.clone().into_os_string());
+        assert_eq!(input.next_line().map(|l| l.bytes), Some(b"b1".to_vec()));
+        assert!(input.at_end());
+        assert!(input.next_line().is_none());
+        assert!(!input.had_error);
+    }
+
+    #[test]
+    fn the_end_is_where_no_later_file_has_a_byte() {
+        let dir = ScratchDir::new("sed-input-end");
+        let a = dir.path("a");
+        let empty = dir.path("empty");
+        fs::write(&a, b"a1\n").unwrap();
+        fs::write(&empty, b"").unwrap();
+        let mut input = Input::new(
+            vec![
+                a.into_os_string(),
+                empty.into_os_string(),
+                dir.path("missing").into_os_string(),
+            ],
+            b'\n',
+            true,
+            false,
+        );
+        assert_eq!(input.next_line().map(|l| l.bytes), Some(b"a1".to_vec()));
+        // The empty file and the missing one are both passed over -- the
+        // missing one reported as it is reached -- and `a1` is the last line.
+        assert!(input.at_end());
+        assert!(input.had_error);
+        assert!(input.next_line().is_none());
     }
 
     /// What `script` fails with on its first write to standard input, or

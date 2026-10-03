@@ -355,6 +355,52 @@ mod imp {
         }
     }
 
+    /// A `File` that borrows `fd` rather than owning it, for the standard
+    /// library's `lseek` and `pread` wrappers. `None` for a negative number,
+    /// which `File::from_raw_fd` asserts it is never handed.
+    fn borrowed(fd: i32) -> Option<std::mem::ManuallyDrop<std::fs::File>> {
+        use std::os::fd::FromRawFd;
+
+        if fd < 0 {
+            return None;
+        }
+        // SAFETY: the two calls made on the result -- `lseek(2)` and
+        // `pread(2)` -- are defined for any `int` and report `EBADF` for one
+        // that is not open, as `metadata` above relies on for `fstat`.
+        // `ManuallyDrop` is what makes this a borrow: the `File` is never
+        // dropped, so it never closes a descriptor it does not own.
+        Some(std::mem::ManuallyDrop::new(unsafe {
+            std::fs::File::from_raw_fd(fd)
+        }))
+    }
+
+    pub fn seek_current(fd: i32, delta: i64) -> io::Result<u64> {
+        use std::io::{Seek, SeekFrom};
+
+        /// `EBADF`, for the negative number `borrowed` declines.
+        const EBADF: i32 = 9;
+        let Some(mut f) = borrowed(fd) else {
+            return Err(io::Error::from_raw_os_error(EBADF));
+        };
+        f.seek(SeekFrom::Current(delta))
+    }
+
+    pub fn read_at(fd: i32, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+        use std::os::unix::fs::FileExt;
+
+        /// `EBADF`, as in `seek_current`.
+        const EBADF: i32 = 9;
+        let Some(f) = borrowed(fd) else {
+            return Err(io::Error::from_raw_os_error(EBADF));
+        };
+        loop {
+            match f.read_at(buf, offset) {
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                other => return other,
+            }
+        }
+    }
+
     pub fn close_fd(fd: i32) -> io::Result<()> {
         // SAFETY: `close` is defined for any integer: it closes the
         // descriptor if it is open and answers `EBADF` if it is not. Every
@@ -448,6 +494,17 @@ mod imp {
             0 => io::stdin().read(buf),
             _ => Err(io::Error::from(io::ErrorKind::Unsupported)),
         }
+    }
+
+    /// No `lseek(2)` without libc, and nothing here to seek: the runtime's
+    /// standard input keeps its own position.
+    pub fn seek_current(_fd: i32, _delta: i64) -> io::Result<u64> {
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+
+    /// No `pread(2)` without libc either.
+    pub fn read_at(_fd: i32, _buf: &mut [u8], _offset: u64) -> io::Result<usize> {
+        Err(io::Error::from(io::ErrorKind::Unsupported))
     }
 
     /// The runtime's standard input is not this program's to close, and
@@ -668,6 +725,31 @@ pub fn write_some(fd: i32, bytes: &[u8]) -> io::Result<usize> {
 /// Whatever `read(2)` reports.
 pub fn read(fd: i32, buf: &mut [u8]) -> io::Result<usize> {
     imp::read_fd(fd, buf)
+}
+
+/// `lseek (fd, delta, SEEK_CUR)` on a descriptor this process does not own:
+/// what stdio does at `exit` to give back what it read ahead of a shared
+/// standard input. See [`crate::stdio::StdioReader`].
+///
+/// # Errors
+///
+/// Whatever `lseek(2)` reports -- `ESPIPE` for a pipe or a terminal, `EBADF`
+/// for a closed descriptor. Always an error off Linux.
+pub fn seek_current(fd: i32, delta: i64) -> io::Result<u64> {
+    imp::seek_current(fd, delta)
+}
+
+/// `pread(2)`: read at `offset` without moving the descriptor's position.
+///
+/// What re-opening a regular file reads -- a new open of it starts at offset
+/// 0 and leaves the old one's offset alone -- for a caller that has to
+/// stand in for a re-open the platform cannot make.
+///
+/// # Errors
+///
+/// Whatever `pread(2)` reports. Always an error off Linux.
+pub fn read_at(fd: i32, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+    imp::read_at(fd, buf, offset)
 }
 
 /// Close a file this process opened, reporting the failure that dropping it

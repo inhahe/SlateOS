@@ -94,14 +94,14 @@ MUTATIONS = [
     # -- matches --------------------------------------------------------------------------
     (
         "F3 does nothing",
-        "        if key.key == Key::F3 {",
-        "        if key.key == Key::F3 && false {",
+        "        if key.key == Key::F3 && plain {",
+        "        if key.key == Key::F3 && plain && false {",
         ["stepping_through_matches_brings_the_current_one_into_both_views"],
     ),
     (
         "Enter in the pattern does not step",
-        "                    Key::Down | Key::Enter => {",
-        "                    Key::Down => {",
+        "                    Key::Down | Key::Enter if plain => {",
+        "                    Key::Down if plain => {",
         ["enter_and_the_arrows_step_through_matches_from_the_pattern"],
     ),
     (
@@ -313,6 +313,66 @@ MUTATIONS = [
         '        before != self.library\n    }',
         '        false\n    }',
         ['the_library_follows_a_change_made_in_another_window'],
+    ),
+    (
+        'a chord raises the list of keys',
+        '        if key.key == Key::F1 && plain {',
+        '        if key.key == Key::F1 {',
+        ['a_chord_is_neither_a_tester_key_nor_typing'],
+    ),
+    (
+        'Alt+Escape puts the list of keys away',
+        '        if key.key == Key::Escape && plain && self.show_help {',
+        '        if key.key == Key::Escape && self.show_help {',
+        ['a_chord_is_neither_a_tester_key_nor_typing'],
+    ),
+    (
+        'a chord on F3 steps through the matches',
+        '        if key.key == Key::F3 && plain {',
+        '        if key.key == Key::F3 {',
+        ['a_chord_is_neither_a_tester_key_nor_typing'],
+    ),
+    (
+        'AltGr is taken for Ctrl',
+        '        if textline::is_ctrl_chord(key.modifiers)\n            && let Some(done) = self.handle_chord(key)',
+        '        if key.modifiers.ctrl\n            && let Some(done) = self.handle_chord(key)',
+        ['a_chord_is_neither_a_tester_key_nor_typing'],
+    ),
+    (
+        "a chord works the library's keys",
+        '            _ if !plain => false,\n',
+        '',
+        ['a_chord_is_neither_a_tester_key_nor_typing'],
+    ),
+    (
+        'Alt+Tab moves between the fields',
+        '        if key.key == Key::Tab && plain {',
+        '        if key.key == Key::Tab {',
+        ['a_chord_is_neither_a_tester_key_nor_typing'],
+    ),
+    (
+        'a chord steps to the next match from the pattern',
+        '                    Key::Down | Key::Enter if plain => {',
+        '                    Key::Down | Key::Enter => {',
+        ['a_chord_is_neither_a_tester_key_nor_typing'],
+    ),
+    (
+        'a chord steps to the previous match from the pattern',
+        '                    Key::Up if plain => {',
+        '                    Key::Up => {',
+        ['a_chord_is_neither_a_tester_key_nor_typing'],
+    ),
+    (
+        'Alt+Escape cancels the save',
+        '            Key::Escape if plain => {\n                self.save_name = None;',
+        '            Key::Escape => {\n                self.save_name = None;',
+        ['a_chord_is_neither_a_tester_key_nor_typing'],
+    ),
+    (
+        'Alt+Enter saves',
+        '            Key::Enter if plain => self.confirm_save(),',
+        '            Key::Enter => self.confirm_save(),',
+        ['a_chord_is_neither_a_tester_key_nor_typing'],
     ),
 ]
 

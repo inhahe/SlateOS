@@ -3818,18 +3818,23 @@ impl App {
     /// tester rather than a viewer: the pattern is recompiled on every edit, so
     /// the match list under it follows the keystroke.
     fn handle_key(&mut self, key: &KeyEvent) -> bool {
-        if key.key == Key::F1 {
+        // The named keys are taken plain, nothing held but Shift: a chord
+        // with Alt or the Windows key is the window's or the desktop's and
+        // arrives carrying its key -- Alt+Delete deleted a saved pattern.
+        // The fields know a command from typing themselves.
+        let plain = textline::is_plain(key.modifiers);
+        if key.key == Key::F1 && plain {
             self.show_help = !self.show_help;
             return true;
         }
-        if key.key == Key::Escape && self.show_help {
+        if key.key == Key::Escape && plain && self.show_help {
             self.show_help = false;
             return true;
         }
         if self.save_name.is_some() {
             return self.handle_save_key(key);
         }
-        if key.key == Key::F3 {
+        if key.key == Key::F3 && plain {
             if key.modifiers.shift {
                 self.prev_match();
             } else {
@@ -3837,13 +3842,17 @@ impl App {
             }
             return !self.matches.is_empty();
         }
-        if key.modifiers.ctrl
+        // A Ctrl chord, not Ctrl held: AltGr arrives as Ctrl+Alt and types
+        // into the field -- AltGr+I toggled case-insensitivity instead.
+        if textline::is_ctrl_chord(key.modifiers)
             && let Some(done) = self.handle_chord(key)
         {
             return done;
         }
         match self.active_tab {
             ActiveTab::Tester => self.handle_tester_key(key),
+            // A list's keys are named keys, and taken plain.
+            _ if !plain => false,
             ActiveTab::Library => self.handle_library_key(key),
             ActiveTab::Reference => self.handle_reference_key(key),
         }
@@ -3963,7 +3972,8 @@ impl App {
     }
 
     fn handle_tester_key(&mut self, key: &KeyEvent) -> bool {
-        if key.key == Key::Tab {
+        let plain = textline::is_plain(key.modifiers);
+        if key.key == Key::Tab && plain {
             // Cycles focus rather than inserting a tab: a regex tester's
             // fields are the whole interface, and Tab is how every form on
             // every desktop moves between them. Skips the replacement while
@@ -3977,11 +3987,11 @@ impl App {
                 match key.key {
                     // Up and Down have no meaning in a one-line box; they step
                     // through the matches, as they always did here.
-                    Key::Down | Key::Enter => {
+                    Key::Down | Key::Enter if plain => {
                         self.next_match();
                         return !self.matches.is_empty();
                     }
-                    Key::Up => {
+                    Key::Up if plain => {
                         self.prev_match();
                         return !self.matches.is_empty();
                     }
@@ -4083,13 +4093,15 @@ impl App {
 
     /// Keys while the save dialog is up: it has the keyboard.
     fn handle_save_key(&mut self, key: &KeyEvent) -> bool {
+        // The dialog's own keys are plain: Alt+Enter saved.
+        let plain = textline::is_plain(key.modifiers);
         match key.key {
-            Key::Escape => {
+            Key::Escape if plain => {
                 self.save_name = None;
                 self.save_error = None;
                 true
             }
-            Key::Enter => self.confirm_save(),
+            Key::Enter if plain => self.confirm_save(),
             _ => {
                 let clipboard = self.clipboard.clone();
                 let Some(name) = self.save_name.as_mut() else {
@@ -6884,5 +6896,109 @@ mod tests {
         let app = testing("a\\nb", "a\nb");
         assert_eq!(app.matches.len(), 1);
         assert!(texts(&app).contains(&"\"a\\nb\"".to_string()));
+    }
+
+    /// **A chord is not a tester key, and AltGr+S is not Ctrl+S**: Alt+Tab -- the
+    /// desktop's window switcher, arriving carrying its key -- moved between
+    /// the fields, Alt+Down stepped through the matches, Alt+Delete deleted a
+    /// saved pattern and Alt+Enter saved one; and AltGr+S -- a Polish `ś` --
+    /// asked to save the pattern, as Ctrl+S does, instead of typing into it.
+    ///
+    /// Each key is asserted as it is pressed: the matches go round, so a
+    /// step forward and a step back would end where they began.
+    #[test]
+    fn a_chord_is_neither_a_tester_key_nor_typing() {
+        use guitk::event::Modifiers;
+        settingsfile::testing::with_scratch_config("rt_chords", |_| {
+            let altgr = Modifiers {
+                alt: true,
+                ..Modifiers::ctrl()
+            };
+            let key = |k: Key, text: &str, modifiers: Modifiers| {
+                Event::Key(KeyEvent {
+                    key: k,
+                    pressed: true,
+                    modifiers,
+                    text: text.to_owned(),
+                })
+            };
+            let mut app = testing("a", "banana");
+            app.active_field = ActiveField::Pattern;
+            for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+                for k in [Key::F1, Key::F3, Key::Tab, Key::Enter, Key::Down, Key::Up] {
+                    assert!(!app.handle_event(&key(k, "", m)), "{m:?} {k:?} was taken");
+                    assert!(!app.show_help, "{m:?} {k:?} raised the keys");
+                    assert_eq!(
+                        app.active_field,
+                        ActiveField::Pattern,
+                        "{m:?} {k:?} moved between the fields"
+                    );
+                    assert_eq!(
+                        app.current_match_index, 0,
+                        "{m:?} {k:?} stepped through the matches"
+                    );
+                }
+            }
+
+            // AltGr's letters are typed, the ones Ctrl binds among them.
+            let flags = app.flags;
+            let filter = app.library_category_filter;
+            for (k, typed) in [(Key::S, "ś"), (Key::M, "µ"), (Key::L, "ł"), (Key::I, "í")] {
+                assert!(
+                    app.handle_event(&key(k, typed, altgr)),
+                    "AltGr+{k:?} typed nothing"
+                );
+                assert!(app.save_name.is_none(), "AltGr+{k:?} asked to save");
+                assert_eq!(app.flags, flags, "AltGr+{k:?} changed a flag");
+                assert_eq!(
+                    app.library_category_filter, filter,
+                    "AltGr+{k:?} changed the library's filter"
+                );
+            }
+            assert_eq!(app.pattern.text(), "aśµłí");
+
+            // The list of keys goes on a plain Escape only.
+            assert!(app.handle_event(&key(Key::F1, "", Modifiers::NONE)));
+            assert!(!app.handle_event(&key(Key::Escape, "", Modifiers::alt())));
+            assert!(app.show_help, "Alt+Escape put the list of keys away");
+            assert!(app.handle_event(&key(Key::Escape, "", Modifiers::NONE)));
+
+            // The save dialog's keys are plain too.
+            assert!(app.ask_to_save());
+            probe::type_str(&mut app, "kept");
+            assert!(!app.handle_event(&key(Key::Enter, "", Modifiers::alt())));
+            assert!(
+                !app.library.iter().any(|e| e.name == "kept"),
+                "Alt+Enter saved"
+            );
+            assert!(!app.handle_event(&key(Key::Escape, "", Modifiers::alt())));
+            assert!(app.save_name.is_some(), "Alt+Escape put the dialog away");
+            assert!(app.handle_event(&key(Key::Enter, "", Modifiers::NONE)));
+            let kept = app.library.iter().position(|e| e.name == "kept");
+            assert!(kept.is_some(), "Enter did not save");
+
+            // The library's keys: nothing a chord does reaches a saved pattern.
+            app.active_tab = ActiveTab::Library;
+            app.library_category_filter = Some(PatternCategory::Custom);
+            app.selected_library_entry = kept;
+            for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+                for k in [Key::Delete, Key::Down, Key::Up, Key::PageDown, Key::Enter] {
+                    assert!(!app.handle_event(&key(k, "", m)), "{m:?} {k:?} was taken");
+                    assert!(
+                        app.library.iter().any(|e| e.name == "kept"),
+                        "{m:?} {k:?} deleted the saved pattern"
+                    );
+                    assert_eq!(app.selected_library_entry, kept, "{m:?} {k:?} moved");
+                    assert_eq!(app.active_tab, ActiveTab::Library, "{m:?} {k:?} used it");
+                }
+            }
+
+            // Nor does one scroll the reference.
+            app.active_tab = ActiveTab::Reference;
+            app.reference_scroll = 0;
+            assert!(!app.handle_event(&key(Key::Down, "", Modifiers::alt())));
+            assert_eq!(app.reference_scroll, 0, "Alt+Down scrolled the reference");
+            assert!(app.handle_event(&key(Key::Down, "", Modifiers::NONE)));
+        });
     }
 }

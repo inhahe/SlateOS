@@ -709,6 +709,18 @@ codegen-units = 1
 opt-level = 3
 codegen-units = 1
 
+# vp9 (the VP9 decoder, `gui/video/vp9`) is written for the compiler to
+# vectorise -- its filters' widths are constants so that loops unroll into
+# SSE2 -- which `-Os` undoes. Counted with callgrind (exact instruction
+# counts, so other lanes' load does not disturb them) over the first 30
+# frames of libvpx's 1080p test vector: 21.98 G instructions at `-Os` with
+# 16 codegen units, 6.57 G at `-O3` with one. libvpx's own C decoder takes
+# 13.8 G. `gui/video/vp9/tests/bench.rs` is the committed benchmark. Lane F,
+# 2026-10-03.
+[profile.release.package.vp9]
+opt-level = 3
+codegen-units = 1
+
 # And in debug builds rav1d alone is optimised, keeping its debug assertions
 # (its `DisjointMut` overlap checks among them): unoptimised it takes 11 ms to
 # decode a 37x19 picture, which makes `imagecodec`'s tests that decode

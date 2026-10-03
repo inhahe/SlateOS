@@ -3662,10 +3662,17 @@ lane C's `guitk`.
     intra-only and show-existing frames. 91 small vectors are committed
     (`tests/data`); the rest are fetched by `tools/fetch_vectors.py` and run
     with `--ignored`.
-  - `[ ]` Threads: tile columns and loop-filter rows in parallel, as libvpx
-    does, one per core (§1332).
-  - `[ ]` Speed: a committed benchmark against libvpx, then whatever it says
-    is worth doing -- frame-buffer reuse first, then SIMD in Rust.
+  - `[-]` Threads, one per core (§1332). `[x]` Tile columns, each into a
+    strip of its own and put together in column order, so the pictures are
+    the same on any number of threads (the suite runs at 1 and 4). `[ ]` The
+    loop filter's superblock rows as libvpx's wavefront, which also helps
+    video with one tile column.
+  - `[-]` Speed. `[x]` A committed benchmark against libvpx
+    (`tests/bench.rs`); motion compensation and the loop filter rewritten to
+    vectorise for SSE2, exact in 16-bit lanes; `opt-level = 3` for the crate.
+    One thread on libvpx's 1080p vector: 32 fps, libvpx's C 17, its SIMD 77
+    (an i7-8700K). `[ ]` The loop filter's threads (above), frame-buffer
+    reuse, then the next profile.
   - `[ ]` The encoder, checked by decoding what it writes.
 
 - `[-]` `[F]` **AVIF pictures**, decided 2026-09-27 (§1333): a HEIF container reader

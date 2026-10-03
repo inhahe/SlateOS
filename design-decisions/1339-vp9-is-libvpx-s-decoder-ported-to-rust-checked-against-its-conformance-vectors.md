@@ -68,6 +68,27 @@ what libvpx's C does:
   lets a hostile stream ask for gigabytes. The port refuses frames over
   VP9's level 6.2 (8192 x 4352 samples) unless the caller raises the limit.
 
+**Speed, 2026-10-03.** The benchmark (`tests/bench.rs`) decided the first
+round. Counted with callgrind on 30 frames of libvpx's 1080p vector, the
+port began at 42.7 G instructions, 84% of them in motion compensation (a
+third of all in `memset`, from buffers zeroed per block). With its
+filters written so the compiler vectorises them for baseline x86-64 --
+block widths as constants, 8-bit sums taken exactly in 16-bit lanes, the
+loop filter eight lines at a time -- it takes 6.57 G; libvpx's C takes
+13.8 G. On one thread, 1080p decodes at 32 frames a second against
+libvpx's C at 17 and its SIMD at 77 (an i7-8700K). Tile columns now
+decode on threads, as libvpx's do. Two things from it:
+
+- **The crate is built at `opt-level = 3`** (root `Cargo.toml`): at the
+  workspace's `-Os` the same frames take 21.98 G instructions, 3.3 times
+  as many, since `-Os` undoes the unrolling the filters are written for.
+- **The rest of the gap to libvpx's SIMD is instructions SSE2 lacks**
+  (SSSE3's `pmaddubsw` multiplies bytes in pairs; AVX2 doubles the width).
+  Using them means choosing them at run time, which in Rust needs `unsafe`
+  -- in a crate that parses hostile input and forbids it today. Not taken
+  up while threads still have more to give; if it is, it is a question for
+  the operator, not a change to make quietly.
+
 **Alternatives.**
 
 | | For | Against |

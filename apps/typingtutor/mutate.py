@@ -384,6 +384,30 @@ MUTATIONS = [
         ".get(i).copied().unwrap_or(0.0);",
         ["nothing_is_painted_outside_the_window"],
     ),
+    (
+        "a chord works the tutor's keys",
+        '            _ if !textline::is_plain(event.modifiers) => EventResult::Ignored,\n',
+        '',
+        ['a_chord_is_neither_a_tutor_key_nor_typing'],
+    ),
+    (
+        'Alt+Escape throws the lesson away',
+        '        if event.key == Key::Escape && textline::is_plain(event.modifiers) {',
+        '        if event.key == Key::Escape {',
+        ['a_chord_is_neither_a_tutor_key_nor_typing'],
+    ),
+    (
+        'Alt+Backspace takes a letter back',
+        '        if event.key == Key::Backspace && !textline::is_alt_or_windows_chord(event.modifiers) {',
+        '        if event.key == Key::Backspace {',
+        ['a_chord_is_neither_a_tutor_key_nor_typing'],
+    ),
+    (
+        "a command's letter is scored as typing",
+        '        if !textline::types_into_field(event) {\n            return EventResult::Ignored;\n        }\n',
+        '',
+        ['a_chord_is_neither_a_tutor_key_nor_typing'],
+    ),
 ]
 
 if __name__ == "__main__":

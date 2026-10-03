@@ -219,6 +219,11 @@ members = [
     # accepts what `xz -d` accepts, held to liblzma's own test files and its
     # verdicts. no_std + alloc.
     "xz",
+    # 7z archives, read as 7-Zip reads them: a port of 7-Zip's own 7z reader
+    # from the public-domain LZMA SDK, decoding through `xz`, `bzip2` and
+    # `deflate`. Out of kernel/src/fs/sevenz.rs's place, for the request
+    # `bzip2` and `xz` came from. no_std + alloc.
+    "sevenz",
     # ZIP (APPNOTE 6.3.x) with Zip64, promoted out of `kernel/src/fs/zip.rs`
     # at lane C's request (`requests/c-a-zip-is-trapped-in-the-kernel-binary.md`)
     # -- the third time this same pattern has come up.

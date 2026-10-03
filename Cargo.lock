@@ -3498,6 +3498,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sevenz"
+version = "0.1.0"
+dependencies = [
+ "bzip2",
+ "crc32",
+ "deflate",
+ "xz",
+]
+
+[[package]]
 name = "sftp"
 version = "0.1.0"
 dependencies = [

@@ -12,6 +12,8 @@ randrange = { path = "../../randrange" }
 # a first hand into a struct and dropped it, so no die and no scorecard ever
 # reached a screen and no click ever arrived.
 oswindow = { path = "../../gui/window" }
+# `is_plain`: a key held with Ctrl, Alt or the Windows key is not the game's.
+textline = { path = "../textline" }
 
 [dev-dependencies]
 # `palette_check`: the window is drawn from the palette.

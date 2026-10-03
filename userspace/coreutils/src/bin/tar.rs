@@ -3739,7 +3739,10 @@ fn walk<F>(input: &mut dyn Read, label: &[u8], mut handle: F) -> Walked
 where
     F: FnMut(&Member, &mut dyn Read) -> Handled,
 {
-    let mut input = Counting { inner: input, bytes: 0 };
+    let mut input = Counting {
+        inner: input,
+        bytes: 0,
+    };
     let mut previous = Previous::Nothing;
     let mut failed = false;
     let ended = |failed: bool, lone_zero_block: Option<u64>| Walked {
@@ -5542,7 +5545,11 @@ fn must_be_dot_or_slash(name: &[u8]) -> bool {
                 i = i.saturating_add(1);
             } else if at(i.saturating_add(1)) == b'.' {
                 // `/.` or `/..`, followed by a slash, steps over that component.
-                let dots = if at(i.saturating_add(2)) == b'.' { 2 } else { 1 };
+                let dots = if at(i.saturating_add(2)) == b'.' {
+                    2
+                } else {
+                    1
+                };
                 if at(i.saturating_add(1).saturating_add(dots)) == b'/' {
                     i = i.saturating_add(dots).saturating_add(1);
                 } else {
@@ -9477,10 +9484,27 @@ mod tests {
             b"/./",
             b"/../",
         ] {
-            assert!(must_be_dot_or_slash(name), "{:?}", String::from_utf8_lossy(name));
+            assert!(
+                must_be_dot_or_slash(name),
+                "{:?}",
+                String::from_utf8_lossy(name)
+            );
         }
-        for name in [&b"a"[..], b"./a", b"/a", b"..", b"../", b"/.", b"/./.", b".a"] {
-            assert!(!must_be_dot_or_slash(name), "{:?}", String::from_utf8_lossy(name));
+        for name in [
+            &b"a"[..],
+            b"./a",
+            b"/a",
+            b"..",
+            b"../",
+            b"/.",
+            b"/./.",
+            b".a",
+        ] {
+            assert!(
+                !must_be_dot_or_slash(name),
+                "{:?}",
+                String::from_utf8_lossy(name)
+            );
         }
     }
 
@@ -9568,7 +9592,11 @@ mod tests {
         assert_eq!(a.same_permissions, Some(true));
         let a = run_args(&s(&["-x", "-p", "--no-same-permissions"])).unwrap();
         assert_eq!(a.same_permissions, Some(false));
-        assert!(run_args(&s(&["-x", "--numeric-owner"])).unwrap().numeric_owner);
+        assert!(
+            run_args(&s(&["-x", "--numeric-owner"]))
+                .unwrap()
+                .numeric_owner
+        );
         // Given nothing, nothing is decided here: the default is the
         // superuser's question, answered by `Ownership::resolve`.
         let a = run_args(&s(&["-x"])).unwrap();

@@ -4914,7 +4914,13 @@ _Port ext4 first. Don't write a custom filesystem._
   namespace over a fixture `/proc`, so a moving process table is a fixed one; `readproc`,
   `devname` and `pwcache` as `coreutils::procps`, which `w` now reads `/proc` through as well;
   the 275 format specifiers generated from `output.c`; and the second, BSD reading of the
-  arguments that makes `ps -aux` work);
+  arguments that makes `ps -aux` work); `pgrep` and `pkill` (2026-10-03, procps-ng 4.0.4's
+  `pgrep.c` -- one program that is `pgrep`, `pkill` or `pidwait` by the name it is started
+  under -- replacing `userspace/pgrep`, whose `pkill` forced every process it signalled for
+  want of the service it asked first (B-Q22's defect); `scripts/pgrep-diff.sh`: 430 cases
+  agree and 7 differ on purpose, in fixture worlds that include real processes for `pkill`
+  to signal and `pidwait` to wait for. `pidwait` is not built until the native ABI has
+  `pidfd_open`: `requests/b-ad-pidwait-needs-pidfd-open-on-the-native-abi.md`);
   and `nproc`,
   re-ported because the standalone crate that had it was not GNU's and is retired. The multi-personality crates that answered some of these
   names in part lost those branches (§1005: `getopt` printenv/sync/cksum, `pv` truncate and shred, `nproc` arch/pathchk/users, `shuf` numfmt and factor, `base64` base32, `finger` pinky).
@@ -5019,7 +5025,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] passwd: password management (SHA-256 hashing, /etc/shadow read/write, strength checking, lock/unlock/expire, password aging)
   - [x] bc: arbitrary-precision calculator (BigInt limbs, fixed-point decimal, variables, user functions, control flow, ibase/obase, -l math library)
   - [x] column: columnate text formatter (fill columns/rows, table mode, custom separators, right-align, column hiding, JSON output, East Asian width) -- since 2026-09-26 a port of util-linux 2.39.3's `column.c` laying its tables out through `smartcols` (column moves, tree re-parenting and `--table-column` properties added to the crate for it); `scripts/column-diff.sh`: 594 cases agree, 9 more where only upstream never finishes
-  - [x] pgrep/pkill: process grep/kill (regex matching, cmdline/UID/PPID/terminal filters, newest/oldest, signal sending, inverse match)
+  - [x] pgrep/pkill: procps-ng 4.0.4's, coreutils programs since 2026-10-03 (see the coreutils item; `scripts/pgrep-diff.sh`, 437 cases); `pidwait` waits on the native `pidfd_open`
   - [x] tac/rev: reverse line/character printer (custom separators, regex split, before/after mode, Unicode reversal)
   - [x] logger: util-linux 2.39.3 port (local/RFC 3164/RFC 5424 headers, structured data, octet counting, prio-prefix, Unix/UDP/TCP delivery, `--journald`, root `--id` credentials; `/dev/log` messages become journal records while SlateOS has no Unix-domain sockets — design-decisions §1033; checked by `scripts/logger-diff.sh`)
   - [x] timeout/nohup/nice/renice: process control (time-limited execution, hangup immunity, priority adjustment, duration parsing)

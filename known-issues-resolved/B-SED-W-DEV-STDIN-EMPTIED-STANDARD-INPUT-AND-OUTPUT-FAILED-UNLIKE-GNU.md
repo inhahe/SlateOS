@@ -1,6 +1,6 @@
 ## B-SED-W-DEV-STDIN-EMPTIED-STANDARD-INPUT-AND-OUTPUT-FAILED-UNLIKE-GNU (lane B, 2026-10-03)
 
-**Status:** FIXED 2026-10-03 (lane B), boot confirmation pending.
+**Status:** FIXED 2026-10-03 (lane B); boot-confirmed on main at 4e61afa2a (the boot of 47986142e passed).
 
 **In short:** two of these destroyed data. `sed 'w /dev/stdin' f < g`
 re-opened standard input for writing, so the file `g` was emptied and `f`'s

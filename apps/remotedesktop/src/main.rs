@@ -1881,6 +1881,12 @@ impl RemoteDesktopApp {
     }
 
     /// A key while the password prompt is open: it takes every key.
+    ///
+    /// Its Enter and Escape are plain, and it types what was typed: it took
+    /// a key's text whatever was held, so Alt+X put an `x` in the password
+    /// and Ctrl+V a `v` -- and the control character Tab carries. AltGr
+    /// types, as it must for a password with an `@` in it. Backspace is
+    /// refused only to Alt and the Windows key.
     fn handle_prompt_key(&mut self, key: &KeyEvent) -> EventResult {
         if !key.pressed {
             return EventResult::Consumed;
@@ -1888,21 +1894,26 @@ impl RemoteDesktopApp {
         let Some(prompt) = self.password_prompt.as_mut() else {
             return EventResult::Ignored;
         };
+        let plain = textline::is_plain(key.modifiers);
         match key.key {
-            Key::Escape => {
+            Key::Escape if plain => {
                 self.password_prompt = None;
                 self.status_message = Some(String::from("Not connected"));
             }
-            Key::Backspace => {
+            Key::Backspace if !textline::is_alt_or_windows_chord(key.modifiers) => {
                 prompt.text.pop();
             }
-            Key::Enter => {
+            Key::Enter if plain => {
                 let prompt = self.password_prompt.take();
                 if let Some(prompt) = prompt {
                     let _id = self.connect_vnc(prompt.profile_index, &prompt.text);
                 }
             }
-            _ => prompt.text.push_str(&key.text),
+            _ => {
+                if textline::types_into_field(key) {
+                    prompt.text.extend(key.typed());
+                }
+            }
         }
         EventResult::Consumed
     }
@@ -2493,43 +2504,42 @@ impl RemoteDesktopApp {
             return EventResult::Ignored;
         }
 
-        if key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift) {
+        // A key on its own is taken plain, nothing held but Shift: a chord
+        // with Alt or the Windows key is the window's or the desktop's and
+        // arrives carrying its key -- Alt+D disconnected the chosen session,
+        // Alt+Delete cleared the history, and Alt+Y answered "delete this
+        // profile?" with yes.
+        let plain = textline::is_plain(key.modifiers);
+        if plain && (key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift)) {
             self.show_help = !self.show_help;
             return EventResult::Consumed;
         }
         if self.show_help {
             // Modal. Letting keys through would mean disconnecting a session
             // the reader cannot see.
-            if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
+            if plain && matches!(key.key, Key::Escape | Key::Enter) {
                 self.show_help = false;
             }
             return EventResult::Consumed;
         }
 
-        // Fullscreen toggle check
+        // Fullscreen toggle check: the way out of a full screen, so it
+        // answers whatever is held with it.
         if key.key == self.escape_hotkey && self.fullscreen {
             self.toggle_fullscreen();
             return EventResult::Consumed;
         }
 
+        // Ctrl's chords: a Ctrl chord, not Ctrl held -- AltGr arrives as
+        // Ctrl+Alt, and AltGr+N made a new profile.
+        if textline::is_ctrl_chord(key.modifiers) {
+            return self.handle_ctrl_chord(key);
+        }
+        if !plain {
+            return EventResult::Ignored;
+        }
+
         match key.key {
-            // Tab navigation
-            Key::Num1 if key.modifiers.ctrl => {
-                self.current_view = MainView::Connections;
-                EventResult::Consumed
-            }
-            Key::Num2 if key.modifiers.ctrl => {
-                self.current_view = MainView::ActiveSessions;
-                EventResult::Consumed
-            }
-            Key::Num3 if key.modifiers.ctrl => {
-                self.current_view = MainView::FileTransfer;
-                EventResult::Consumed
-            }
-            Key::Num4 if key.modifiers.ctrl => {
-                self.current_view = MainView::History;
-                EventResult::Consumed
-            }
             // The detail tabs. Four were drawn with the active one
             // highlighted and nothing moved the selection, so
             // `render_detail_display`, `render_detail_input` and
@@ -2654,12 +2664,6 @@ impl RemoteDesktopApp {
                 self.status_message = Some("history cleared".to_string());
                 EventResult::Consumed
             }
-            // New profile
-            Key::N if key.modifiers.ctrl => {
-                let profile = ConnectionProfile::new_default(0);
-                let _id = self.add_profile(profile);
-                EventResult::Consumed
-            }
             // Connect selected profile
             Key::Enter
                 if self.current_view == MainView::Connections
@@ -2668,11 +2672,6 @@ impl RemoteDesktopApp {
                 if let Some(sel) = self.selected_profile {
                     let _id = self.connect_profile(sel);
                 }
-                EventResult::Consumed
-            }
-            // Screenshot
-            Key::S if key.modifiers.ctrl && key.modifiers.shift => {
-                let _name = self.capture_screenshot();
                 EventResult::Consumed
             }
             // Navigate profiles up/down
@@ -2695,6 +2694,26 @@ impl RemoteDesktopApp {
             }
             _ => EventResult::Ignored,
         }
+    }
+
+    /// Ctrl's chords: the four views, a new profile, and Ctrl+Shift+S's
+    /// screenshot of the remote screen.
+    fn handle_ctrl_chord(&mut self, key: &KeyEvent) -> EventResult {
+        match key.key {
+            Key::Num1 => self.current_view = MainView::Connections,
+            Key::Num2 => self.current_view = MainView::ActiveSessions,
+            Key::Num3 => self.current_view = MainView::FileTransfer,
+            Key::Num4 => self.current_view = MainView::History,
+            Key::N => {
+                let profile = ConnectionProfile::new_default(0);
+                let _id = self.add_profile(profile);
+            }
+            Key::S if key.modifiers.shift => {
+                let _name = self.capture_screenshot();
+            }
+            _ => return EventResult::Ignored,
+        }
+        EventResult::Consumed
     }
 
     // ========================================================================
@@ -6704,6 +6723,100 @@ mod tests {
     use crate::rfb::fake::{Step, handshake_none, server};
 
     /// An app with one VNC profile, for `127.0.0.1:port`.
+    /// **A chord is neither a remote-desktop key nor typing, and AltGr
+    /// types**: a chord with Alt or the Windows key carries its key --
+    /// Alt+D disconnected the chosen session, Alt+Delete cleared the history
+    /// and Alt+Y answered "delete this profile?" with yes; the password
+    /// prompt took any key's text, so Alt+X put an `x` in the password; and
+    /// AltGr+N made a new profile as Ctrl+N does.
+    #[test]
+    fn a_chord_is_neither_a_remote_desktop_key_nor_typing() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let chord = |k: Key, text: &str, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: text.to_owned(),
+            })
+        };
+        let mut app = RemoteDesktopApp::with_sample_data();
+        app.selected_profile = Some(0);
+        app.selected_session = Some(0);
+        let state = |app: &RemoteDesktopApp| {
+            (
+                (app.profiles.len(), app.selected_profile, app.confirm_delete),
+                (app.current_view, app.detail_tab, app.show_help),
+                (app.sessions.len(), app.history.len()),
+                app.sessions.iter().map(|s| s.state).collect::<Vec<_>>(),
+            )
+        };
+        for view in [
+            MainView::Connections,
+            MainView::ActiveSessions,
+            MainView::History,
+        ] {
+            app.current_view = view;
+            let before = (view, state(&app));
+            for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+                for k in [
+                    Key::D,
+                    Key::R,
+                    Key::Delete,
+                    Key::Left,
+                    Key::Down,
+                    Key::Z,
+                    Key::Q,
+                    Key::N,
+                    Key::Num2,
+                    Key::F1,
+                ] {
+                    assert_eq!(
+                        app.handle_event(&chord(k, "", m)),
+                        EventResult::Ignored,
+                        "{m:?} {k:?} was taken in {view:?}"
+                    );
+                    assert_eq!(
+                        (app.current_view, state(&app)),
+                        before,
+                        "{m:?} {k:?} changed the window in {view:?}"
+                    );
+                }
+            }
+        }
+
+        // The question before a profile goes answers plain keys only.
+        app.current_view = MainView::Connections;
+        app.handle_event(&chord(Key::Delete, "", Modifiers::NONE));
+        assert_eq!(app.confirm_delete, Some(0), "control: Delete asks");
+        for m in [Modifiers::alt(), Modifiers::super_key()] {
+            app.handle_event(&chord(Key::Y, "y", m));
+            app.handle_event(&chord(Key::Escape, "", m));
+            assert_eq!(app.confirm_delete, Some(0), "{m:?} answered it");
+        }
+        app.handle_event(&chord(Key::N, "n", Modifiers::NONE));
+
+        // The password prompt types what was typed, AltGr's `@` among it.
+        let mut app = vnc_app(9);
+        assert_eq!(app.connect_profile(0), None);
+        app.handle_event(&chord(Key::X, "x", Modifiers::alt()));
+        app.handle_event(&chord(Key::V, "v", Modifiers::ctrl()));
+        app.handle_event(&chord(Key::Tab, "\t", Modifiers::NONE));
+        app.handle_event(&chord(Key::Q, "@", altgr));
+        app.handle_event(&chord(Key::Backspace, "", Modifiers::alt()));
+        app.handle_event(&chord(Key::Escape, "", Modifiers::alt()));
+        app.handle_event(&chord(Key::Enter, "", Modifiers::super_key()));
+        assert_eq!(
+            app.password_prompt.as_ref().map(|p| p.text.as_str()),
+            Some("@"),
+            "the password took a command's letter, a tab, or lost AltGr's"
+        );
+        assert!(app.sessions.is_empty(), "a chorded Enter connected");
+    }
+
     fn vnc_app(port: u16) -> RemoteDesktopApp {
         let mut app = RemoteDesktopApp::new();
         let mut profile = ConnectionProfile::new_default(0);

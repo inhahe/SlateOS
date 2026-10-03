@@ -24,6 +24,10 @@ desktopentry = { path = "../../gui/desktopentry" }
 # About page shows them, which is where §815 puts a screen you open.
 notices = { path = "../../gui/notices" }
 guitk = { path = "../../gui/toolkit" }
+# The keys of a one-line field -- the search and the exclusion pattern -- and
+# whether a key is plain: the one table of them, where these two fields each
+# had a copy that took AltGr for Ctrl and typed a chord's letter.
+textline = { path = "../textline" }
 # The Personalization pages edit the same preferences the desktop shell paints
 # from, so they share one model and one file rather than each keeping a copy.
 # See known-issues.md TD-THREE-INDEPENDENT-APPEARANCE-MODELS.

@@ -583,6 +583,10 @@ pub struct SettingsState {
     /// that does all of that, and does it correctly for right-to-left text,
     /// which a hand-rolled one was never going to.
     pub exclusion_draft: TextInput,
+    /// What the last copy or cut in either field took: one for the window,
+    /// so a pattern copied from the search pastes into the exclusions. Each
+    /// field kept its own (`TextInput`'s), and a copy reached only itself.
+    clipboard: String,
     /// Which place on the page typing goes to, if any.
     focused_field: Option<FieldId>,
     /// What the open picker is being used for.
@@ -1745,6 +1749,7 @@ impl SettingsState {
             color_dialog: None,
             color_is_for: ColorPurpose::Accent,
             exclusion_draft: TextInput::new(),
+            clipboard: String::new(),
             focused_field: None,
             picker_is_for: PickerPurpose::Wallpaper,
 
@@ -2542,6 +2547,13 @@ const FIELD_WIDTH: f32 = 260.0;
 /// must measure at the size it was drawn at. A constant rather than two
 /// literals is what keeps them from drifting apart.
 const FIELD_FONT_SIZE: f32 = 13.0;
+
+/// The longest wallpaper exclusion pattern the field takes, in characters:
+/// room for a long path glob, and a stop for a paste of a whole file.
+const EXCLUSION_CAPACITY: usize = 1024;
+
+/// The longest query the settings search takes, in characters.
+const SEARCH_CAPACITY: usize = 256;
 
 /// How far below a row's top edge a button inside that row is drawn.
 const BUTTON_ROW_INSET_Y: f32 = 6.0;
@@ -6521,17 +6533,22 @@ impl SettingsState {
         if !evt.pressed {
             return EventResult::Ignored;
         }
+        // The window's own keys are taken plain, nothing held but Shift: a
+        // chord with Alt or the Windows key is the window's frame's or the
+        // desktop's and arrives carrying its key -- Alt+Down changed the
+        // category and Alt+Enter, in the exclusion field, added the pattern.
+        let plain = textline::is_plain(evt.modifiers);
 
         // Above the focused-field branch below, which takes the keyboard and
         // returns. Placed after it, the card could be raised from a page and
         // then not dismissed from a text box -- and on this window an
         // unclaimed keystroke is a setting.
-        if evt.key == Key::F1 {
+        if evt.key == Key::F1 && plain {
             self.show_help = !self.show_help;
             return EventResult::Consumed;
         }
         if self.show_help {
-            if matches!(evt.key, Key::Escape | Key::Enter | Key::F1) {
+            if plain && matches!(evt.key, Key::Escape | Key::Enter) {
                 self.show_help = false;
             }
             return EventResult::Consumed;
@@ -6540,170 +6557,79 @@ impl SettingsState {
         // A focused field takes the keyboard before the page does, for the
         // reason the modals do: on this window an unclaimed keystroke is a
         // setting. Ordered before the sidebar's search box because that one
-        // is reached with Ctrl+F, which still works — `types_text` is false
-        // for a chord.
+        // is reached with Ctrl+F, which the field passes on.
+        //
+        // Both fields' keys are `textline`'s, the one table of them. Each
+        // field had a copy of its own, and both copies matched Ctrl+A, C, X
+        // and V on Ctrl held -- so AltGr+A, a Polish `ą`, selected the whole
+        // pattern and AltGr+X, a Polish `ź`, cut it -- and typed the letter
+        // every other chord carries: Ctrl+F put an `f` in the pattern and
+        // never reached the search.
         if self.focused_field == Some(FieldId::ExclusionDraft) {
-            let shift = evt.modifiers.shift;
             match evt.key {
-                Key::Backspace => {
-                    self.exclusion_draft.backspace();
-                    return EventResult::Consumed;
-                }
-                Key::Delete => {
-                    self.exclusion_draft.delete();
-                    return EventResult::Consumed;
-                }
-                // The caret moves, and moves *visually*: `move_cursor_left`
-                // takes the font it is drawn at because on a line that mixes
-                // directions "one place left" is not "one character back".
-                // None of this existed while the draft was a `String`.
-                Key::Left => {
-                    self.exclusion_draft.move_cursor_left(
-                        shift,
-                        FIELD_FONT_SIZE,
-                        FontWeightHint::Regular,
-                    );
-                    return EventResult::Consumed;
-                }
-                Key::Right => {
-                    self.exclusion_draft.move_cursor_right(
-                        shift,
-                        FIELD_FONT_SIZE,
-                        FontWeightHint::Regular,
-                    );
-                    return EventResult::Consumed;
-                }
-                Key::Home => {
-                    self.exclusion_draft.move_home(shift);
-                    return EventResult::Consumed;
-                }
-                Key::End => {
-                    self.exclusion_draft.move_end(shift);
-                    return EventResult::Consumed;
-                }
-                Key::A if evt.modifiers.ctrl => {
-                    self.exclusion_draft.select_all();
-                    return EventResult::Consumed;
-                }
-                Key::C if evt.modifiers.ctrl => {
-                    self.exclusion_draft.copy();
-                    return EventResult::Consumed;
-                }
-                Key::X if evt.modifiers.ctrl => {
-                    self.exclusion_draft.cut();
-                    return EventResult::Consumed;
-                }
-                Key::V if evt.modifiers.ctrl => {
-                    self.exclusion_draft.paste();
-                    return EventResult::Consumed;
-                }
-                Key::Escape => {
-                    // Escape abandons the draft rather than merely unfocusing:
-                    // a half-typed glob left in the field would be added by the
-                    // next press of a button the user thought was unrelated.
+                // Escape abandons the draft rather than merely unfocusing:
+                // a half-typed glob left in the field would be added by the
+                // next press of a button the user thought was unrelated.
+                Key::Escape if plain => {
                     self.exclusion_draft.clear();
                     self.focused_field = None;
                     return EventResult::Consumed;
                 }
-                Key::Enter => {
+                Key::Enter if plain => {
                     self.add_exclusion();
                     return EventResult::Consumed;
                 }
                 _ => {
-                    if evt.types_text() {
-                        for ch in evt.typed() {
-                            self.exclusion_draft.insert_char(ch);
-                        }
+                    if Self::edit_line(
+                        &mut self.exclusion_draft,
+                        &mut self.clipboard,
+                        evt,
+                        EXCLUSION_CAPACITY,
+                    ) {
                         return EventResult::Consumed;
                     }
                 }
             }
         }
 
-        // Close dropdown on Escape
-        if evt.key == Key::Escape {
-            if self.open_dropdown.is_some() {
-                self.open_dropdown = None;
-                return EventResult::Consumed;
-            }
-            return EventResult::Ignored;
-        }
-
-        // Search focus with Ctrl+F
-        if evt.modifiers.ctrl && evt.key == Key::F {
-            self.search_focused = true;
+        // Escape closes an open dropdown before anything else hears it.
+        if evt.key == Key::Escape && plain && self.open_dropdown.is_some() {
+            self.open_dropdown = None;
             return EventResult::Consumed;
         }
 
-        // Text input for search
+        // Search focus with Ctrl+F: a Ctrl chord, not Ctrl held -- AltGr
+        // arrives as Ctrl+Alt. It takes the keyboard from the exclusion field,
+        // as a click on another control does; left there, the field kept it,
+        // and what was typed for the search went into the pattern.
+        if textline::is_ctrl_chord(evt.modifiers) && evt.key == Key::F {
+            self.search_focused = true;
+            self.focused_field = None;
+            return EventResult::Consumed;
+        }
+
+        // Text input for search. Its Escape, which leaves it and clears it,
+        // was never reached: the dropdown's Escape above answered every
+        // Escape, open dropdown or not.
         if self.search_focused {
-            match evt.key {
-                Key::Backspace => {
-                    self.search_query.backspace();
-                    return EventResult::Consumed;
-                }
-                Key::Delete => {
-                    self.search_query.delete();
-                    return EventResult::Consumed;
-                }
-                // The caret moves, and moves visually. None of this was
-                // reachable while the query was a `String`.
-                Key::Left => {
-                    self.search_query.move_cursor_left(
-                        evt.modifiers.shift,
-                        FIELD_FONT_SIZE,
-                        FontWeightHint::Regular,
-                    );
-                    return EventResult::Consumed;
-                }
-                Key::Right => {
-                    self.search_query.move_cursor_right(
-                        evt.modifiers.shift,
-                        FIELD_FONT_SIZE,
-                        FontWeightHint::Regular,
-                    );
-                    return EventResult::Consumed;
-                }
-                Key::Home => {
-                    self.search_query.move_home(evt.modifiers.shift);
-                    return EventResult::Consumed;
-                }
-                Key::End => {
-                    self.search_query.move_end(evt.modifiers.shift);
-                    return EventResult::Consumed;
-                }
-                Key::A if evt.modifiers.ctrl => {
-                    self.search_query.select_all();
-                    return EventResult::Consumed;
-                }
-                Key::C if evt.modifiers.ctrl => {
-                    self.search_query.copy();
-                    return EventResult::Consumed;
-                }
-                Key::X if evt.modifiers.ctrl => {
-                    self.search_query.cut();
-                    return EventResult::Consumed;
-                }
-                Key::V if evt.modifiers.ctrl => {
-                    self.search_query.paste();
-                    return EventResult::Consumed;
-                }
-                Key::Escape => {
-                    self.search_focused = false;
-                    self.search_query.clear();
-                    return EventResult::Consumed;
-                }
-                _ => {
-                    if evt.types_text() {
-                        for ch in evt.typed() {
-                            self.search_query.insert_char(ch);
-                        }
-                        return EventResult::Consumed;
-                    }
-                }
+            if evt.key == Key::Escape && plain {
+                self.search_focused = false;
+                self.search_query.clear();
+                return EventResult::Consumed;
+            }
+            if Self::edit_line(
+                &mut self.search_query,
+                &mut self.clipboard,
+                evt,
+                SEARCH_CAPACITY,
+            ) {
+                return EventResult::Consumed;
             }
         }
 
+        if !plain {
+            return EventResult::Ignored;
+        }
         // Category navigation with Up/Down when sidebar focused
         match evt.key {
             Key::Up => {
@@ -6732,6 +6658,23 @@ impl SettingsState {
             }
             _ => EventResult::Ignored,
         }
+    }
+
+    /// Apply `evt` to a one-line field with `textline`'s keys, keeping what a
+    /// copy or a cut took on the window's clipboard. Whether the field
+    /// answered the key: one it does not -- Tab, an arrow it has no use for,
+    /// a Ctrl chord other than A, C, X and V -- is the page's.
+    fn edit_line(
+        field: &mut TextInput,
+        clipboard: &mut String,
+        evt: &KeyEvent,
+        capacity: usize,
+    ) -> bool {
+        let edit = textline::apply_key(field, evt, capacity, clipboard, FIELD_FONT_SIZE);
+        if let Some(copied) = edit.copied {
+            *clipboard = copied;
+        }
+        edit.handled
     }
 
     /// Move the sidebar selection by `delta` categories, stopping at the ends.
@@ -10203,6 +10146,111 @@ mod tests {
     /// draw. Asserted through the key handler and then on the drawn commands,
     /// since "the model moved the caret" and "the user can see where it is"
     /// are separate claims and only the second is the feature.
+    /// **A chord is neither a settings key nor typing, and AltGr types**:
+    /// the two fields each had a key table of their own, matching Ctrl+A,
+    /// C, X and V on Ctrl held -- so AltGr+A, a Polish `ą`, selected the
+    /// pattern and AltGr+X, a Polish `ź`, cut it -- and typing the letter a
+    /// chord carries: Alt+X typed an `x`, and Ctrl+F an `f` that never
+    /// reached the search. Alt+Enter added the pattern, Alt+Down changed the
+    /// category, and Escape could not leave the search at all.
+    #[test]
+    fn a_chord_is_neither_a_settings_key_nor_typing() {
+        with_scratch_config("settings-chords", |_root| {
+            let altgr = Modifiers {
+                alt: true,
+                ..Modifiers::ctrl()
+            };
+            let chord = |k: Key, text: &str, modifiers: Modifiers| {
+                Event::Key(KeyEvent {
+                    key: k,
+                    pressed: true,
+                    modifiers,
+                    text: text.to_owned(),
+                })
+            };
+            let mut state = rotation_page();
+            let page = (state.current_category, state.current_page);
+            for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+                for k in [Key::Down, Key::Up, Key::Tab, Key::F1] {
+                    assert_eq!(state.handle_event(&chord(k, "", m)), EventResult::Ignored);
+                    assert_eq!(
+                        (state.current_category, state.current_page),
+                        page,
+                        "{m:?} {k:?} moved the page"
+                    );
+                    assert!(!state.show_help, "{m:?} {k:?} raised the list of keys");
+                }
+            }
+
+            // The exclusion pattern: what was typed, AltGr's letters among it.
+            let (x, y) = center_of(&state, RowHit::Focus(FieldId::ExclusionDraft)).expect("field");
+            state.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+            type_text(&mut state, "ab");
+            state.handle_event(&chord(Key::X, "x", Modifiers::alt()));
+            state.handle_event(&chord(Key::X, "x", Modifiers::super_key()));
+            state.handle_event(&chord(Key::A, "\u{105}", altgr));
+            state.handle_event(&chord(Key::X, "\u{17a}", altgr));
+            state.handle_event(&chord(Key::Left, "", Modifiers::super_key()));
+            assert_eq!(
+                state.exclusion_draft.text(),
+                "ab\u{105}\u{17a}",
+                "a command's letter was typed, or AltGr was taken for Ctrl"
+            );
+            state.handle_event(&chord(Key::Enter, "", Modifiers::alt()));
+            state.handle_event(&chord(Key::Escape, "", Modifiers::alt()));
+            assert!(
+                state.appearance.settings.wallpaper_exclusions.is_empty(),
+                "Alt+Enter added the pattern"
+            );
+            assert_eq!(
+                state.exclusion_draft.text(),
+                "ab\u{105}\u{17a}",
+                "Alt+Escape"
+            );
+
+            // Ctrl+F reaches the search, and takes the keyboard there.
+            state.handle_event(&chord(Key::F, "f", Modifiers::ctrl()));
+            assert!(state.search_focused, "Ctrl+F did not reach the search");
+            assert_eq!(
+                state.exclusion_draft.text(),
+                "ab\u{105}\u{17a}",
+                "Ctrl+F typed"
+            );
+            type_text(&mut state, "wall");
+            assert_eq!(
+                state.search_query.text(),
+                "wall",
+                "the search lost the keyboard"
+            );
+
+            // One clipboard: copied from the search, pasted into the pattern.
+            state.handle_event(&chord(Key::A, "a", Modifiers::ctrl()));
+            state.handle_event(&chord(Key::C, "c", Modifiers::ctrl()));
+            state.handle_event(&chord(Key::Escape, "", Modifiers::alt()));
+            assert!(state.search_focused, "Alt+Escape left the search");
+            state.handle_event(&key_press(Key::Escape));
+            assert!(!state.search_focused, "Escape could not leave the search");
+            assert!(state.search_query.text().is_empty(), "and clear it");
+            let (x, y) = center_of(&state, RowHit::Focus(FieldId::ExclusionDraft)).expect("field");
+            state.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+            state.handle_event(&key_press(Key::End));
+            state.handle_event(&chord(Key::V, "v", Modifiers::ctrl()));
+            assert_eq!(
+                state.exclusion_draft.text(),
+                "ab\u{105}\u{17a}wall",
+                "a copy in one field did not paste into the other"
+            );
+        });
+    }
+
     #[test]
     fn the_search_box_has_a_caret_and_draws_it() {
         with_scratch_config("settings-search-caret", |_root| {

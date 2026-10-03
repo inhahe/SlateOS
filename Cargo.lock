@@ -3463,6 +3463,7 @@ dependencies = [
  "quoting",
  "scratchdir",
  "settingsfile",
+ "textline",
  "yamldoc",
 ]
 

@@ -3548,19 +3548,29 @@ lane C's `guitk`.
     `open-questions.md` F-Q4 -- dav1d's assembly, or SIMD in Rust
     (known-issues.md, "[F] AVIF decoding has no committed benchmark").
 
-- `[F]` **A display transport over channel IPC** for local clients, beside
-  the TCP one (`gui/remote/src/socket.rs` planned it "when SlateOS's own
-  channel IPC becomes reachable from a userspace application", which it now
-  is). The point is the peer's identity: the kernel attests a channel's peer
-  (`SYS_CHANNEL_PEER_CRED`), a TCP peer cannot say what process it is, and
-  today's `client_pid` is a per-connection number. Unblocks the process
-  explorer's window picker (`requests/e-adf-what-the-process-explorer-still-cannot-ask.md`,
-  part 3), `open-questions.md` F-Q3's option B, and per-program (rather than
-  per-connection) grouping on the taskbar. **Blocked on lane A**
-  (`requests/f-a-a-channel-handle-can-be-guessed-and-any-process-can-use-it.md`):
-  a Linux-ABI program -- every Rust `std` one, the compositor included --
-  cannot reach channels at all; nothing can wait on channels beside sockets;
-  and until channel handles are unforgeable the peer's pid proves nothing.
+- `[-]` `[F]` **A display transport over channel IPC** for local clients,
+  beside the TCP one. The point is the peer's identity: the kernel attests a
+  channel's peer, a TCP peer cannot say what process it is, and `client_pid`
+  is a per-connection number. Unblocks the process explorer's window picker
+  (`requests/e-adf-what-the-process-explorer-still-cannot-ask.md`, part 3),
+  `open-questions.md` F-Q3's option B, per-program grouping on the taskbar,
+  and the shell gate (`TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE`).
+  design-decisions §1336.
+  - `[x]` The transport (`gui/remote/src/channel.rs`, `socket.rs`): a
+    `Socket` runs over TCP or a channel from the service registry, through
+    lane A's channel descriptors (`slate_service_*`, 1000-1005). The default
+    display on SlateOS is the service `org.slateos.Display`, with TCP only
+    when no compositor serves it; `SLATE_DISPLAY=service:NAME` names one.
+  - `[x]` The compositor serves both, records each local client's
+    kernel-attested pid, uid, gid and whether it holds the display service's
+    key (`ClientLink::peer`), and has the shell gate
+    (`--require-shell-key`).
+  - `[ ]` Live on SlateOS: lane A's descriptors reach `main` with lane A's
+    next green boot; then the session must grant the compositor `(Service,
+    WRITE)` and the shell the display service's key, and pass the flag
+    (`requests/f-bd-the-display-service-needs-two-grants-and-a-flag-from-the-session.md`).
+  - `[ ]` The window picker (e-adf part 3), and the attested pid in the
+    window list.
 
 - `[F]` Port FreeRDP (line ~5058)
 

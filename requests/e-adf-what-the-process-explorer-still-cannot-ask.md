@@ -2,7 +2,7 @@
 
 **Filed:** 2026-09-27 by lane E. **For:** lane A (`kernel/`), lane D
 (`posix/src/sched.rs`), lane F (`gui/compositor`, `gui/window`).
-**Status:** OPEN for lanes A and F -- part 3 (lane F) is blocked on a display transport that attests the client's pid; see "Lane F's answer" at the end. Lane D's interim half of part 2 (the setters refuse what they cannot apply) landed 2026-09-27 -- reply at the end.
+**Status:** OPEN for lanes A and F -- part 3 (lane F): the display transport that attests a client's pid is built (2026-10-03, design-decisions §1336) and goes live when lane A's channel descriptors reach `main`; the picker itself is lane F's next step -- see the end. Lane D's interim half of part 2 (the setters refuse what they cannot apply) landed 2026-09-27 -- reply at the end.
 
 **In short:** the operator answered C-Q17 (design-decisions §1423): the
 process explorer's finished-but-unreachable tools are to be wired up, not
@@ -152,3 +152,18 @@ with that window's title and its owner's attested pid -- nothing of its
 contents. Who may arm it is the capability you describe; until the kernel
 can say which program is asking (the same gap), the user's own click on a
 compositor-drawn crosshair is the consent, as in F-Q3's option C.
+
+## Lane F (2026-10-03) -- the transport is built; the picker is next
+
+On SlateOS a program now reaches the compositor through the display service
+`org.slateos.Display`, a kernel channel, whenever one is being served
+(`gui/remote/src/channel.rs`, `socket.rs`; design-decisions §1336). For each
+such connection the compositor records the pid, uid and gid the kernel gives
+(`ClientLink::peer`). A window opened by a program that connected over TCP
+has no attested owner, and the picker will say "not known" for it rather
+than give the per-connection number. It goes live with lane A's channel
+descriptors on `main`.
+
+What is left of part 3 is the picker request itself, as described above: arm
+a one-shot pick, draw the crosshair in the compositor, consume the next
+click, and answer with that window's title and its owner's attested pid.

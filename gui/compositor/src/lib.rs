@@ -107,7 +107,7 @@ mod deadkey;
 // and compositor events back into bytes. Everything above this line works in
 // terms of typed requests; `wire` is the only place that parses frames.
 mod wire;
-pub use wire::{ClientLink, WireError};
+pub use wire::{ClientLink, ShellGate, WireError};
 // The listening front end that owns the sockets `wire` deliberately does not.
 // `wire` is the translation, `server` is the plumbing; keeping them apart is
 // what lets the translation be tested without a network.

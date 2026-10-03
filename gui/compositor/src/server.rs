@@ -72,7 +72,7 @@ use inputsettings::InputSettings;
 use appearance::ColorFilter;
 
 use crate::present::{Frame, Headless, Present, earliest};
-use crate::wire::ClientLink;
+use crate::wire::{ClientLink, ShellGate};
 use crate::{Compositor, CursorCache, Display, PointerSprite, PointerState, WindowId};
 
 /// What a shown frame's pixels were made from: the compositor's picture (by
@@ -181,6 +181,31 @@ pub struct ServerStats {
     pub orphans_swept: u64,
 }
 
+/// How a new connection reads in the log: how it arrived and, when the kernel
+/// vouches for the peer, who that is.
+fn describe_peer(socket: &Socket, link: &ClientLink) -> String {
+    if let Some(peer) = link.peer() {
+        let key = match link.peer_holds_key() {
+            Some(true) => ", holding the display service's key",
+            Some(false) | None => "",
+        };
+        return format!(
+            "through the display service: pid {}, uid {}, gid {}{key}",
+            peer.pid, peer.uid, peer.gid
+        );
+    }
+    if socket.is_channel() {
+        // Not expected -- the kernel records every service connection -- and
+        // not a reason to refuse one either: the client is served anonymously.
+        return String::from("through the display service, which named no one");
+    }
+    match socket.peer_addr() {
+        Ok(addr) => format!("over TCP from {addr}"),
+        // Gone again before it could be asked; its first read will say so.
+        Err(e) => format!("over TCP from a peer that cannot be named ({e})"),
+    }
+}
+
 /// One connected client: a socket, and the protocol state for what arrives on
 /// it.
 struct Client {
@@ -241,6 +266,8 @@ pub struct Server {
     /// What the loop waits on between ticks, rebuilt before each wait and kept
     /// so that one wait allocates nothing after the first.
     waits: WaitSet,
+    /// Who may make the shell's requests, given to every link at accept.
+    shell_gate: ShellGate,
     /// Whether the last wait failed, so a failure is reported when it starts
     /// and when it stops rather than sixty times a second in between.
     wait_failing: bool,
@@ -299,6 +326,7 @@ impl Server {
             last_shown: None,
             listener_ready: true,
             waits: WaitSet::new(),
+            shell_gate: ShellGate::Open,
             wait_failing: false,
             force_new_serial: false,
             displays_asleep: false,
@@ -318,6 +346,16 @@ impl Server {
     /// If the socket is not bound.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.listener.local_addr()
+    }
+
+    /// Who may make the shell's requests: every connection's rule, from the
+    /// ones already accepted to the ones still to come, so the desktop never
+    /// has two at once.
+    pub fn set_shell_gate(&mut self, gate: ShellGate) {
+        self.shell_gate = gate;
+        for client in &mut self.clients {
+            client.link.set_shell_gate(gate);
+        }
     }
 
     /// How many clients are connected.
@@ -379,9 +417,16 @@ impl Server {
                 0 => 1,
                 n => n,
             };
+            let mut link = ClientLink::new(id);
+            link.attest(socket.peer_cred(), socket.peer_has_key());
+            link.set_shell_gate(self.shell_gate);
+            eprintln!(
+                "compositor: client {id} connected {}",
+                describe_peer(&socket, &link)
+            );
             self.clients.push(Client {
                 socket,
-                link: ClientLink::new(id),
+                link,
                 ending: None,
                 // A new connection may already have sent something; the wait
                 // that found the listener ready knew nothing about this socket.
@@ -1079,7 +1124,7 @@ impl Server {
         interval: Duration,
     ) {
         self.waits.clear();
-        let listener = self.waits.add_source(&self.listener);
+        let listener = self.listener.wait_on(&mut self.waits);
         let first_client = self.waits.len();
         for client in &self.clients {
             self.waits.add_source(&client.socket);
@@ -1093,7 +1138,7 @@ impl Server {
                     eprintln!("compositor: waiting for work succeeds again");
                     self.wait_failing = false;
                 }
-                self.listener_ready = self.waits.is_ready(listener);
+                self.listener_ready = listener.into_iter().any(|i| self.waits.is_ready(i));
                 for (offset, client) in self.clients.iter_mut().enumerate() {
                     client.readable = self.waits.is_ready(first_client.saturating_add(offset));
                 }
@@ -1436,6 +1481,53 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         panic!("both connections never arrived");
+    }
+
+    #[test]
+    fn a_tcp_client_is_anonymous_and_under_the_servers_gate() {
+        // TCP cannot say which process is at the other end, so nothing is
+        // claimed for it; and the gate it is under is the server's, set before
+        // or after it connected.
+        let (mut server, mut compositor, addr) = server();
+        let mut conn = dial(&mut server, &mut compositor, addr);
+        let link = &server.clients[0].link;
+        assert_eq!(link.peer(), None);
+        assert_eq!(link.peer_holds_key(), None);
+        assert_eq!(link.shell_gate(), ShellGate::Open);
+
+        let seq = conn
+            .send(RequestBody::SubscribeWindowList { subscribe: true })
+            .expect("send");
+        assert!(matches!(
+            await_reply(&mut server, &mut compositor, &mut conn, seq),
+            ResponseBody::Ok
+        ));
+
+        // Armed after it connected: it applies at once, not from the next
+        // connection on, so the desktop never has two rules.
+        server.set_shell_gate(ShellGate::KeyHolders);
+        let seq = conn
+            .send(RequestBody::SubscribeWindowList { subscribe: false })
+            .expect("send");
+        let reply = await_reply(&mut server, &mut compositor, &mut conn, seq);
+        assert!(
+            matches!(&reply, ResponseBody::Error { message } if message == crate::wire::NOT_THE_SHELL),
+            "{reply:?}"
+        );
+
+        // And a connection made afterwards is under it from the start.
+        let mut later = Connection::new(Socket::connect(addr).expect("connect"));
+        for _ in 0..1000 {
+            server.tick(&mut compositor).expect("tick");
+            if server.client_count() == 2 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(server.clients[1].link.shell_gate(), ShellGate::KeyHolders);
+        let seq = later.send(RequestBody::GetHeldModifiers).expect("send");
+        let reply = await_reply(&mut server, &mut compositor, &mut later, seq);
+        assert!(matches!(reply, ResponseBody::Error { .. }), "{reply:?}");
     }
 
     #[test]

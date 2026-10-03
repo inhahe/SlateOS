@@ -311,11 +311,18 @@ mod kernel {
         ret.and_then(|fd| RawFd::try_from(fd).map_err(|_| super::ENOSYS))
     }
 
+    /// A descriptor as a system call argument. A negative one -- closed --
+    /// becomes a number no descriptor has, so the kernel answers `EBADF`;
+    /// `unsigned_abs` would have turned `-1` into `1`, which is stdout.
+    fn fd_arg(fd: RawFd) -> u64 {
+        u64::try_from(fd).unwrap_or(u64::MAX)
+    }
+
     fn close(fd: RawFd) {
         // SAFETY: closing takes no pointer; a descriptor this module owns.
         // The result is dropped: there is nothing to do about a failed close,
         // and the descriptor is gone either way.
-        let _ = unsafe { syscall3(SYS_CLOSE, u64::from(fd.unsigned_abs()), 0, 0) };
+        let _ = unsafe { syscall3(SYS_CLOSE, fd_arg(fd), 0, 0) };
     }
 
     /// The descriptor's message limit, from `fstat`'s `st_blksize`.
@@ -323,14 +330,7 @@ mod kernel {
         let mut stat = [0u8; STAT_SIZE];
         // SAFETY: `stat` is `STAT_SIZE` writable bytes, the size of the x86-64
         // `struct stat` the kernel writes.
-        let ret = unsafe {
-            syscall3(
-                SYS_FSTAT,
-                u64::from(fd.unsigned_abs()),
-                stat.as_mut_ptr() as u64,
-                0,
-            )
-        };
+        let ret = unsafe { syscall3(SYS_FSTAT, fd_arg(fd), stat.as_mut_ptr() as u64, 0) };
         if decode(ret).is_err() {
             return 0;
         }
@@ -341,8 +341,27 @@ mod kernel {
             .unwrap_or(0)
     }
 
-    /// A descriptor's message pipe: the system calls behind [`MessagePipe`].
+    /// A descriptor this module owns -- closed when dropped, or before that by
+    /// [`Fd::close_now`] -- and the system calls behind [`MessagePipe`].
     struct Fd(RawFd);
+
+    impl Fd {
+        /// Close now rather than on drop. The number becomes `-1`, never a
+        /// stale one: a descriptor number is reused by the next open, and a
+        /// stale one would be some other file to a later call or wait.
+        fn close_now(&mut self) {
+            if self.0 >= 0 {
+                close(self.0);
+                self.0 = -1;
+            }
+        }
+    }
+
+    impl Drop for Fd {
+        fn drop(&mut self) {
+            self.close_now();
+        }
+    }
 
     impl MessagePipe for Fd {
         fn send(&mut self, message: &[u8]) -> Result<usize, Errno> {
@@ -350,7 +369,7 @@ mod kernel {
             let ret = unsafe {
                 syscall3(
                     SYS_WRITE,
-                    u64::from(self.0.unsigned_abs()),
+                    fd_arg(self.0),
                     message.as_ptr() as u64,
                     message.len() as u64,
                 )
@@ -363,7 +382,7 @@ mod kernel {
             let ret = unsafe {
                 syscall3(
                     SYS_READ,
-                    u64::from(self.0.unsigned_abs()),
+                    fd_arg(self.0),
                     buf.as_mut_ptr() as u64,
                     buf.len() as u64,
                 )
@@ -456,7 +475,7 @@ mod kernel {
             let ret = unsafe {
                 syscall3(
                     SLATE_CHANNEL_PEER_CRED,
-                    u64::from(self.fd.0.unsigned_abs()),
+                    fd_arg(self.fd.0),
                     out.as_mut_ptr() as u64,
                     0,
                 )
@@ -488,14 +507,7 @@ mod kernel {
         /// The kernel's errno, other than "no identity".
         pub fn peer_has_key(&self) -> io::Result<Option<bool>> {
             // SAFETY: the call takes no pointer.
-            let ret = unsafe {
-                syscall3(
-                    SLATE_CHANNEL_PEER_HAS_KEY,
-                    u64::from(self.fd.0.unsigned_abs()),
-                    0,
-                    0,
-                )
-            };
+            let ret = unsafe { syscall3(SLATE_CHANNEL_PEER_HAS_KEY, fd_arg(self.fd.0), 0, 0) };
             match decode(ret) {
                 Ok(holds) => Ok(Some(holds != 0)),
                 Err(ENODATA) => Ok(None),
@@ -503,15 +515,11 @@ mod kernel {
             }
         }
 
-        /// Hang up.
+        /// Hang up: the peer's next wait sees the channel close, as a TCP
+        /// peer sees a shutdown.
         pub fn close(&mut self) {
             self.open = false;
-        }
-    }
-
-    impl Drop for ChannelConn {
-        fn drop(&mut self) {
-            close(self.fd.0);
+            self.fd.close_now();
         }
     }
 
@@ -604,7 +612,7 @@ mod kernel {
 
     /// A service's listening end: accepts [`ChannelConn`]s.
     pub struct ChannelListener {
-        fd: RawFd,
+        fd: Fd,
     }
 
     impl ChannelListener {
@@ -625,7 +633,7 @@ mod kernel {
                 )
             };
             as_fd(decode(ret))
-                .map(|fd| Self { fd })
+                .map(|fd| Self { fd: Fd(fd) })
                 .map_err(io::Error::from_raw_os_error)
         }
 
@@ -636,14 +644,7 @@ mod kernel {
         /// The kernel's errno, other than "nobody waiting".
         pub fn accept(&self) -> io::Result<Option<ChannelConn>> {
             // SAFETY: the call takes no pointer.
-            let ret = unsafe {
-                syscall3(
-                    SLATE_SERVICE_ACCEPT,
-                    u64::from(self.fd.unsigned_abs()),
-                    FLAGS,
-                    0,
-                )
-            };
+            let ret = unsafe { syscall3(SLATE_SERVICE_ACCEPT, fd_arg(self.fd.0), FLAGS, 0) };
             match as_fd(decode(ret)) {
                 Ok(fd) => Ok(Some(ChannelConn::adopt(fd))),
                 Err(super::EAGAIN) => Ok(None),
@@ -652,16 +653,10 @@ mod kernel {
         }
     }
 
-    impl Drop for ChannelListener {
-        fn drop(&mut self) {
-            close(self.fd);
-        }
-    }
-
     impl AsWaitHandle for ChannelListener {
         /// Readable when a client is waiting to be accepted.
         fn wait_handle(&self) -> WaitHandle {
-            self.fd
+            self.fd.0
         }
     }
 }

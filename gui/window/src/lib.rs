@@ -131,10 +131,13 @@ pub type Link = guiremote::socket::Socket;
 
 /// Connect to the compositor named by the environment.
 ///
-/// The address comes from `SLATE_DISPLAY` if it is set and from
-/// [`guiremote::socket::DEFAULT_DISPLAY`] otherwise, so a program started from a
-/// normal session needs no arguments and a second compositor is reachable by
-/// setting one variable.
+/// The display comes from `SLATE_DISPLAY` if it is set -- a TCP address, or
+/// `service:NAME` for a SlateOS service -- and is the default display
+/// otherwise: on SlateOS the compositor's service, whose kernel-attested
+/// connection lets it know which program this is, and
+/// [`guiremote::socket::DEFAULT_DISPLAY`] over TCP when no compositor serves
+/// that. So a program started from a normal session needs no arguments, and a
+/// second compositor is reachable by setting one variable.
 ///
 /// # Errors
 ///
@@ -157,6 +160,20 @@ pub fn connect() -> std::io::Result<Link> {
 /// As [`connect`], minus the environment-variable failure.
 pub fn connect_to<A: std::net::ToSocketAddrs>(addr: A) -> std::io::Result<Link> {
     Link::connect(addr)
+}
+
+/// Connect to a display written as `SLATE_DISPLAY` writes one -- a TCP address
+/// or `service:NAME` -- ignoring the environment.
+///
+/// For a program whose command line names a display: the same words the
+/// variable takes then mean the same thing in both places.
+///
+/// # Errors
+///
+/// As [`connect_to`], and [`std::io::ErrorKind::Unsupported`] for a service
+/// named anywhere but SlateOS.
+pub fn connect_to_display(display: &str) -> std::io::Result<Link> {
+    Link::connect_to_display(display)
 }
 
 /// What can go wrong, for a given transport.

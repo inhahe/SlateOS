@@ -1091,15 +1091,18 @@ fn address_text(addr: Option<&str>) -> Result<String, String> {
 /// The message has already been printed to stderr; the [`ExitCode`] is what to
 /// return from `main`.
 fn dial(program: &str, display: Option<&str>) -> Result<Link, ExitCode> {
+    // `--display` takes what SLATE_DISPLAY takes, a service included, so the
+    // two ways of naming a display cannot come to mean different things.
     let dialled = match display {
-        Some(addr) => crate::connect_to(addr),
+        Some(addr) => crate::connect_to_display(addr),
         None => crate::connect(),
     };
     dialled.map_err(|e| {
         eprintln!("{program}: cannot reach the compositor: {e}");
         eprintln!("  A compositor must be running for {program} to have a window.");
         eprintln!("  Start one with `compositor`, or point {program} at an existing");
-        eprintln!("  display with `--display HOST:PORT` or the {DISPLAY_VAR} variable.");
+        eprintln!("  display with `--display HOST:PORT` (or `service:NAME`) or the");
+        eprintln!("  {DISPLAY_VAR} variable.");
         ExitCode::FAILURE
     })
 }

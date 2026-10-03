@@ -229,6 +229,52 @@ pub const OP_UDP_RECV: u8 = 0x0E;
 /// negative errno ([`ERR_MSG_SIZE`] for an oversized datagram). Migration Phase 5,
 /// AF_INET6 UDP `SOCK_DGRAM` support.
 pub const OP_UDP_SEND6: u8 = 0x0F;
+/// Set one of a UDP socket's **multicast options**: the Linux ABI's
+/// `setsockopt` at `IPPROTO_IP`/`IPPROTO_IPV6` on a daemon-backed
+/// `SOCK_DGRAM` socket. An mDNS responder needs them (design-decisions
+/// §1532). `aux` holds the option and, for a scalar one, its value
+/// ([`Sqe::pack_udp_opt`]). A group join or leave carries the group in the
+/// data window: `[group:4][interface:4]` for the IPv4 ones (`struct
+/// ip_mreq`, [`UDP_MREQ4_LEN`]), `[group:16][ifindex:4 LE]` for the IPv6
+/// ones (`struct ipv6_mreq`, [`UDP_MREQ6_LEN`]).
+///
+/// Completion `result` is `0`, or a negative errno: [`ERR_ADDR_IN_USE`]
+/// joining a group the socket is in already (as Linux answers),
+/// [`ERR_ADDR_NOT_AVAIL`] leaving one it is not in, [`ERR_NO_BUFS`] past the
+/// socket's group limit, [`ERR_INVALID`] for a group that is not multicast
+/// or a value out of range. The kernel has already turned Linux's `-1`
+/// ("the default") into the default, so a scalar value is always 0-255.
+pub const OP_UDP_SETOPT: u8 = 0x10;
+/// Read one of a UDP socket's scalar multicast options back
+/// (`getsockopt`). `aux` holds the option ([`Sqe::pack_udp_opt`], value 0).
+/// Completion `result` is the value (`≥ 0`), or [`ERR_INVALID`] for an
+/// option with no value to read (the joins and leaves).
+pub const OP_UDP_GETOPT: u8 = 0x11;
+
+/// [`OP_UDP_SETOPT`] option: join an IPv4 group (`IP_ADD_MEMBERSHIP`).
+pub const UDP_OPT_MCAST_JOIN4: u16 = 1;
+/// [`OP_UDP_SETOPT`] option: leave an IPv4 group (`IP_DROP_MEMBERSHIP`).
+pub const UDP_OPT_MCAST_LEAVE4: u16 = 2;
+/// [`OP_UDP_SETOPT`] option: join an IPv6 group (`IPV6_JOIN_GROUP`).
+pub const UDP_OPT_MCAST_JOIN6: u16 = 3;
+/// [`OP_UDP_SETOPT`] option: leave an IPv6 group (`IPV6_LEAVE_GROUP`).
+pub const UDP_OPT_MCAST_LEAVE6: u16 = 4;
+/// The TTL of the socket's IPv4 multicast sends (`IP_MULTICAST_TTL`):
+/// 0-255, default 1. 0 keeps a datagram on this machine.
+pub const UDP_OPT_MCAST_TTL: u16 = 5;
+/// Whether the socket's IPv4 multicast sends loop back to this machine's
+/// members (`IP_MULTICAST_LOOP`): 0 or 1, default 1.
+pub const UDP_OPT_MCAST_LOOP4: u16 = 6;
+/// The hop limit of the socket's IPv6 multicast sends
+/// (`IPV6_MULTICAST_HOPS`): 0-255, default 1.
+pub const UDP_OPT_MCAST_HOPS: u16 = 7;
+/// Whether the socket's IPv6 multicast sends loop back
+/// (`IPV6_MULTICAST_LOOP`): 0 or 1, default 1.
+pub const UDP_OPT_MCAST_LOOP6: u16 = 8;
+/// Length of an IPv4 join or leave's data window: `[group:4][interface:4]`.
+pub const UDP_MREQ4_LEN: usize = 8;
+/// Length of an IPv6 join or leave's data window: `[group:16][ifindex:4]`.
+pub const UDP_MREQ6_LEN: usize = 20;
 
 // ---------------------------------------------------------------------------
 // Op flags (carried in [`Sqe::aux`]) and result sentinels
@@ -348,6 +394,19 @@ pub const ERR_MSG_SIZE: i32 = -90;
 /// `0`, and a connection quiet for two seconds read as closed.
 pub const ERR_TIMED_OUT: i32 = -110;
 
+/// Completion `result` sentinel (`-EADDRNOTAVAIL`): an [`OP_UDP_SETOPT`]
+/// leave named a group the socket is not in.
+pub const ERR_ADDR_NOT_AVAIL: i32 = -99;
+
+/// Completion `result` sentinel (`-ENOBUFS`): an [`OP_UDP_SETOPT`] join
+/// past the socket's group limit.
+pub const ERR_NO_BUFS: i32 = -105;
+
+/// Completion `result` sentinel (`-EINVAL`): an [`OP_UDP_SETOPT`] or
+/// [`OP_UDP_GETOPT`] the socket cannot take -- a group that is not a
+/// multicast address, a value out of range, an option with no value.
+pub const ERR_INVALID: i32 = -22;
+
 /// [`OP_POLL`] readiness bit: the connection is **readable** — it has buffered
 /// in-order bytes waiting, or the peer has closed (so a `recv` would return `0`
 /// / EOF promptly). Mirrors the sense of Linux `POLLIN`.
@@ -429,6 +488,26 @@ impl Sqe {
     pub fn unpack_endpoint(aux: u64) -> ([u8; 4], u16) {
         let b = aux.to_le_bytes();
         ([b[0], b[1], b[2], b[3]], u16::from_be_bytes([b[4], b[5]]))
+    }
+
+    /// Pack an [`OP_UDP_SETOPT`]/[`OP_UDP_GETOPT`] operand into [`Sqe::aux`]:
+    /// the option (`UDP_OPT_*`) in the low 16 bits and a scalar value in the
+    /// next 32 -- zero for the joins and leaves, whose group rides in the
+    /// data window.
+    #[must_use]
+    pub fn pack_udp_opt(option: u16, value: u32) -> u64 {
+        u64::from(option) | (u64::from(value) << 16)
+    }
+
+    /// Unpack an operand packed with [`Sqe::pack_udp_opt`]:
+    /// `(option, value)`.
+    #[must_use]
+    pub fn unpack_udp_opt(aux: u64) -> (u16, u32) {
+        let b = aux.to_le_bytes();
+        (
+            u16::from_le_bytes([b[0], b[1]]),
+            u32::from_le_bytes([b[2], b[3], b[4], b[5]]),
+        )
     }
 
     /// Build the in-band source-address header the daemon prepends to an
@@ -613,6 +692,67 @@ mod tests {
     #[test]
     fn sqe_from_short_is_none() {
         assert!(Sqe::from_bytes(&[0u8; SQE_SIZE - 1]).is_none());
+    }
+
+    #[test]
+    fn a_udp_option_operand_round_trips_through_an_sqe() {
+        for (option, value) in [
+            (UDP_OPT_MCAST_TTL, 255),
+            (UDP_OPT_MCAST_LOOP4, 0),
+            (UDP_OPT_MCAST_HOPS, 1),
+            (UDP_OPT_MCAST_JOIN6, 0),
+            (u16::MAX, u32::MAX),
+        ] {
+            let sqe = Sqe {
+                op: OP_UDP_SETOPT,
+                conn_id: 7,
+                data_off: 0,
+                data_len: 0,
+                user_data: 1,
+                aux: Sqe::pack_udp_opt(option, value),
+            };
+            let back = Sqe::from_bytes(&sqe.to_bytes()).unwrap();
+            assert_eq!(Sqe::unpack_udp_opt(back.aux), (option, value));
+        }
+    }
+
+    #[test]
+    fn the_udp_option_codes_and_errnos_are_distinct() {
+        let options = [
+            UDP_OPT_MCAST_JOIN4,
+            UDP_OPT_MCAST_LEAVE4,
+            UDP_OPT_MCAST_JOIN6,
+            UDP_OPT_MCAST_LEAVE6,
+            UDP_OPT_MCAST_TTL,
+            UDP_OPT_MCAST_LOOP4,
+            UDP_OPT_MCAST_HOPS,
+            UDP_OPT_MCAST_LOOP6,
+        ];
+        for (i, a) in options.iter().enumerate() {
+            assert_ne!(*a, 0, "0 is no option");
+            for b in &options[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+        let errnos = [
+            ERR_WOULD_BLOCK,
+            ERR_IN_PROGRESS,
+            ERR_BROKEN_PIPE,
+            ERR_ADDR_IN_USE,
+            ERR_MSG_SIZE,
+            ERR_TIMED_OUT,
+            ERR_ADDR_NOT_AVAIL,
+            ERR_NO_BUFS,
+            ERR_INVALID,
+        ];
+        for (i, a) in errnos.iter().enumerate() {
+            assert!(*a < 0);
+            for b in &errnos[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+        assert_ne!(OP_UDP_SETOPT, OP_UDP_GETOPT);
+        assert!(OP_UDP_SETOPT > OP_UDP_SEND6);
     }
 
     #[test]

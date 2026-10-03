@@ -2884,6 +2884,7 @@ dependencies = [
  "randrange",
  "safeio",
  "settingsfile",
+ "textline",
 ]
 
 [[package]]

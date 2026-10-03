@@ -1662,6 +1662,15 @@ impl Pinball {
     }
 
     fn handle_key(&mut self, ke: &KeyEvent) -> EventResult {
+        // A key pressed with Ctrl, Alt or the Windows key is a chord -- the
+        // window's or the desktop's -- arriving carrying its key: Alt+N asked
+        // to throw the game away and Alt+Z flipped. Every binding is on the
+        // key itself, so a press is the table's only with nothing but Shift
+        // held (Shift is a flipper). A release always is: a flipper let go
+        // with Alt down must still come back.
+        if ke.pressed && !textline::is_plain(ke.modifiers) {
+            return EventResult::Ignored;
+        }
         // The flippers and the plunger answer the key coming up as well as
         // going down; everything else only its press.
         if ke.key == Key::F1 {
@@ -3454,6 +3463,59 @@ mod tests {
     /// table be driven from a seed the test chose.
     fn with_seed(seed: u64) -> Pinball {
         Pinball::with_rng(SeededRng::new(seed))
+    }
+
+    /// **A key pressed with Ctrl, Alt or the Windows key is not the
+    /// table's**: Alt+N asked to throw the game away and Alt+Z flipped, each
+    /// chord arriving carrying its key. A release is always the table's: a
+    /// flipper let go with Alt held comes back.
+    #[test]
+    fn a_key_pressed_with_a_modifier_is_not_the_tables() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let held = |key: Key, pressed: bool, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key,
+                pressed,
+                modifiers,
+                text: String::new(),
+            })
+        };
+        let mut app = test_app();
+        for m in [
+            Modifiers::ctrl(),
+            Modifiers::alt(),
+            Modifiers::super_key(),
+            altgr,
+        ] {
+            for key in [Key::N, Key::Z, Key::M, Key::P, Key::F1] {
+                assert_eq!(
+                    app.handle_event(&held(key, true, m)),
+                    EventResult::Ignored,
+                    "{m:?} {key:?} was taken"
+                );
+            }
+        }
+        assert!(
+            !app.confirm_new_game,
+            "a chord asked to throw the game away"
+        );
+        assert!(
+            !app.left_flipper.pressed && !app.right_flipper.pressed,
+            "a chord flipped"
+        );
+        assert!(!app.show_help, "a chord raised the keys");
+
+        // Pressed plainly, let go with Alt held: the flipper comes back.
+        app.handle_event(&key_press(Key::Z));
+        assert!(app.left_flipper.pressed, "control: Z flips");
+        app.handle_event(&held(Key::Z, false, Modifiers::alt()));
+        assert!(
+            !app.left_flipper.pressed,
+            "a release with Alt held kept the flipper up"
+        );
     }
 
     /// Helper to create a key press event.

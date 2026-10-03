@@ -303,6 +303,18 @@ MUTATIONS = [
         "            }\n            RenderCommand::PushTranslate",
         ["a_fitted_command_is_where_the_fit_says"],
     ),
+    (
+        "a key pressed with a modifier is the table's",
+        '        if ke.pressed && !textline::is_plain(ke.modifiers) {',
+        '        if false {',
+        ['a_key_pressed_with_a_modifier_is_not_the_tables'],
+    ),
+    (
+        "a release with a modifier held is not the table's",
+        '        if ke.pressed && !textline::is_plain(ke.modifiers) {',
+        '        if !textline::is_plain(ke.modifiers) {',
+        ['a_key_pressed_with_a_modifier_is_not_the_tables'],
+    ),
 ]
 
 if __name__ == "__main__":

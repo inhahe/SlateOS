@@ -1,5 +1,13 @@
 ## TD-B-WHO-S-W-MODE-CANNOT-BE-REACHED-BY-ANY-INVOCATION (lane B, 2026-09-10)
 
+**Status:** FIXED 2026-10-02 (lane B), boot-tested on main in `7950a0c0e`. `w` is no
+longer a mode of anything: it is procps-ng 4.0.4's program, ported into
+coreutils as its own executable (`userspace/coreutils/src/bin/w.rs`, measured
+by `scripts/w-diff.sh` -- 144 cases agree, and the `w` mode described below
+agreed on none of them). `userspace/who` is deleted, and `who` is GNU 9.4's.
+Neither the flag nor the `argv[0]` question below arises any more: each name
+is its own binary, which is what the coreutils manifest already stages.
+
 **In short:** `who` contains a complete `w` — the header line with uptime and
 load averages, the USER/TTY/FROM/LOGIN@/IDLE/JCPU/PCPU/WHAT columns, and the
 per-process CPU accounting behind them. None of it can run. The mode is turned

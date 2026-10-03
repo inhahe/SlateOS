@@ -1,5 +1,9 @@
 ## B-COREUTILS-UNAME-PARSES-ITS-OWN-OPTIONS (lane B, 2026-09-11)
 
+**Status:** FIXED 2026-09-11 in `4627beb44` (uname parses its options with
+`coreutils::getopt`); confirmed 2026-10-02 by `scripts/uname-diff.sh`, 89
+cases agreeing and none differing.
+
 `userspace/coreutils/src/bin/uname.rs` parses `argv` by hand rather than through
 `coreutils::getopt`, and the ten cases it fails in `scripts/uname-diff.sh` are
 all downstream of that one decision.

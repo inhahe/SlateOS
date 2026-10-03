@@ -5456,7 +5456,7 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
             // loopback inside one daemon session -- no upstream, no variance --
             // so an error is a real break. Diagnostic, not Integrity: the checks
             // after it still run.
-            crate::selftest::dispatch_debug(
+            crate::selftest::report_debug(
                 "persistent netstack listen/accept",
                 crate::selftest::Severity::Diagnostic,
                 Err::<(), _>(e),
@@ -5491,7 +5491,7 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
             // on `self-test failed`, never on a bare `FAIL:` or `WARNING:`), so a
             // regression here passed the boot. Diagnostic, not Integrity: the
             // checks after it still run.
-            crate::selftest::dispatch_debug(
+            crate::selftest::report_debug(
                 "net::socket server object layer",
                 crate::selftest::Severity::Diagnostic,
                 Err::<(), _>(e),
@@ -5538,7 +5538,7 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
             // Diagnostic rather than Integrity: it must fail the run, but
             // `halt_loop()` would stop every later self-test and cost a whole
             // boot's worth of information for each regression.
-            crate::selftest::dispatch_debug(
+            crate::selftest::report_debug(
                 "net::socket head-of-line",
                 crate::selftest::Severity::Diagnostic,
                 Err::<(), _>(e),
@@ -5564,7 +5564,7 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
                  for data sent after the old two-second cut-off",
                 e
             );
-            crate::selftest::dispatch_debug(
+            crate::selftest::report_debug(
                 "net::socket late data",
                 crate::selftest::Severity::Diagnostic,
                 Err::<(), _>(e),
@@ -5602,7 +5602,7 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
                     name,
                     e
                 );
-                crate::selftest::dispatch_debug(
+                crate::selftest::report_debug(
                     name,
                     crate::selftest::Severity::Diagnostic,
                     Err::<(), _>(e),
@@ -5625,7 +5625,7 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
                 "[spawn]   FAIL: ring-bench self-test ({:?}) — A-Q15's load harness no longer runs",
                 e
             );
-            crate::selftest::dispatch_debug(
+            crate::selftest::report_debug(
                 "ring-bench self-test",
                 crate::selftest::Severity::Diagnostic,
                 Err::<(), _>(e),
@@ -5655,7 +5655,7 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
             );
             // Fails the run -- loopback, so an error is a real break; see the
             // server object-layer check above for why a WARNING was not enough.
-            crate::selftest::dispatch_debug(
+            crate::selftest::report_debug(
                 "persistent netstack connect6",
                 crate::selftest::Severity::Diagnostic,
                 Err::<(), _>(e),
@@ -5684,7 +5684,7 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
             );
             // Fails the run -- loopback, so an error is a real break; see the
             // server object-layer check above for why a WARNING was not enough.
-            crate::selftest::dispatch_debug(
+            crate::selftest::report_debug(
                 "persistent netstack udp6",
                 crate::selftest::Severity::Diagnostic,
                 Err::<(), _>(e),
@@ -5702,7 +5702,7 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
         ),
         Err(e) => {
             serial_println!("[spawn]   FAIL: netstack socket wait loop ({:?})", e);
-            crate::selftest::dispatch_debug(
+            crate::selftest::report_debug(
                 "netstack socket wait loop",
                 crate::selftest::Severity::Diagnostic,
                 Err::<(), _>(e),
@@ -5728,7 +5728,7 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
                  datagram receive did not wait",
                 e
             );
-            crate::selftest::dispatch_debug(
+            crate::selftest::report_debug(
                 "persistent netstack blocking udp recv",
                 crate::selftest::Severity::Diagnostic,
                 Err::<(), _>(e),
@@ -5756,7 +5756,7 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
             );
             // Fails the run -- loopback, so an error is a real break; see the
             // server object-layer check above for why a WARNING was not enough.
-            crate::selftest::dispatch_debug(
+            crate::selftest::report_debug(
                 "persistent netstack udp-connect",
                 crate::selftest::Severity::Diagnostic,
                 Err::<(), _>(e),

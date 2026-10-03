@@ -136,6 +136,35 @@ def main() -> int:
 
     check("no answer is no pong", guest.ping(1, wait=0.5), False)
 
+    print("the guest's command line")
+    words = " ".join(guest.GUEST_CMDLINE_WORDS)
+    staged = (
+        "timeout: 3\n"
+        "/OS Kernel\n"
+        "    protocol: limine\n"
+        "    kernel_path: boot():/boot/kernel\n"
+        "    cmdline: sched.boot_deadline_ms=480000 selftest.keep_going=1\n"
+        "\n"
+        "/OS Kernel (recovery)\n"
+        "    kernel_path: boot():/boot/kernel\n"
+        "    cmdline: single recovery\n"
+    )
+    check("the boot test's cmdline: line gains the guest's words, the recovery entry none",
+          guest.guest_limine_conf(staged),
+          staged.replace("selftest.keep_going=1\n", "selftest.keep_going=1 " + words + "\n"))
+    bare = "/OS Kernel\n    kernel_path: boot():/boot/kernel\n/Other\n    cmdline: x\n"
+    check("an entry with no cmdline: gets one after its kernel_path:",
+          guest.guest_limine_conf(bare),
+          "/OS Kernel\n    kernel_path: boot():/boot/kernel\n    cmdline: " + words +
+          "\n/Other\n    cmdline: x\n")
+    check("the words are the two boot-test.sh refuses",
+          guest.GUEST_CMDLINE_WORDS, ("selftest.skip=1", "bench.skip=1"))
+    try:
+        guest.guest_limine_conf("/OS Kernel\n    protocol: limine\n")
+        check("an entry with no kernel_path: is refused", "accepted", "refused")
+    except guest.Usage:
+        check("an entry with no kernel_path: is refused", "refused", "refused")
+
     print()
     if failures:
         print(f"{len(failures)} FAILED: {', '.join(failures)}")

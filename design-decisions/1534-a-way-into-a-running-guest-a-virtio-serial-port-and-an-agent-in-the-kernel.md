@@ -43,3 +43,12 @@ program tried here holds what its fixture would at boot.
 **Limits:** two ports at most (the virtio descriptor pool, `ada::MAX_QUEUES`,
 holds 16 queues for every device together, and a port costs two); output comes
 back when a program ends, not as it runs; a `run` lasts at most an hour.
+
+**Added 2026-10-03: the guest runs no boot self-tests.** The agent starts
+after the whole self-test suite, about 13 minutes under emulation, and a test
+that halts stopped the guest before it answered at all. `guest.py start` now
+adds `selftest.skip=1 bench.skip=1` to the command line in its copy of the ESP:
+`selftest::dispatch` takes each test as a closure and does not run it, and the
+boot benchmarks are not started. `boot-test.sh` refuses `selftest.skip`, so a
+boot test cannot pass by running nothing. A guest therefore says nothing about
+whether the kernel is sound; that is the boot test's job.

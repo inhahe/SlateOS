@@ -11421,6 +11421,23 @@ pub(crate) fn teardown_fixture(pid: ProcessId, task_id: TaskId) {
     pcb::destroy(pid);
 }
 
+/// What a fixture that did not finish is doing, for its rung's failure line:
+/// its first thread's state and what it waits on (`/proc/<pid>/wchan`'s
+/// answer). Read before the fixture is torn down, while there is a task to
+/// ask. A run that only says "not a zombie" leaves the next boot to find out
+/// which call it sat in.
+pub(crate) fn unfinished_report(task_id: TaskId) -> alloc::string::String {
+    let wait = crate::sched::wait_of(task_id).map_or_else(
+        || alloc::string::String::from("nothing (no task)"),
+        |w| alloc::format!("{w}"),
+    );
+    alloc::format!(
+        "its thread {:?}, waiting on {}",
+        crate::sched::task_state(task_id),
+        wait
+    )
+}
+
 /// Where lane D lists the C fixtures [`self_test_ctest_generic`] runs:
 /// `services/ctest-generic.list`, staged by `scripts/create-ext4-rootfs.sh`.
 const CTEST_GENERIC_LIST: &str = "/mnt/tests/ctest-generic.list";
@@ -22832,15 +22849,17 @@ pub fn self_test_linux_unix_sockets() -> KernelResult<()> {
     }
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
+    let unfinished = unfinished_report(result.task_id);
     teardown_fixture(result.pid, result.task_id);
     // Gone already unless a step after the bind failed.
     let _ = crate::fs::Vfs::remove(NODE);
 
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
-            "[spawn]   FAIL: Unix-domain sockets (ring 3) -- not a zombie after {} yields, got {:?}",
+            "[spawn]   FAIL: Unix-domain sockets (ring 3) -- not a zombie after {} yields, got {:?}; {}",
             MAX_YIELDS,
-            state
+            state,
+            unfinished
         );
         return Err(KernelError::InternalError);
     }
@@ -22920,12 +22939,14 @@ pub fn self_test_linux_scm_rights() -> KernelResult<()> {
     }
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
+    let unfinished = unfinished_report(result.task_id);
     teardown_fixture(result.pid, result.task_id);
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
-            "[spawn]   FAIL: SCM_RIGHTS (ring 3) -- not a zombie after {} yields, got {:?}",
+            "[spawn]   FAIL: SCM_RIGHTS (ring 3) -- not a zombie after {} yields, got {:?}; {}",
             MAX_YIELDS,
-            state
+            state,
+            unfinished
         );
         return Err(KernelError::InternalError);
     }

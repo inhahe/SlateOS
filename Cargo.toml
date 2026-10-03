@@ -206,6 +206,13 @@ members = [
     # untrusted input, each its own attack surface, and a bug fixed in one is
     # not fixed in the other.
     "deflate",
+    # bzip2, ported from libbzip2 1.0.8 rather than promoted out of
+    # `kernel/src/fs/bzip2.rs` (`requests/e-a-bzip2-xz-and-7z-are-trapped-in-
+    # the-kernel-binary.md`): the kernel's copy, written rather than ported,
+    # compressed some inputs into streams no decoder accepts and read only the
+    # first of several concatenated streams. Its compressor writes libbzip2's
+    # exact bytes, which its fixtures check. no_std + alloc, no dependencies.
+    "bzip2",
     # ZIP (APPNOTE 6.3.x) with Zip64, promoted out of `kernel/src/fs/zip.rs`
     # at lane C's request (`requests/c-a-zip-is-trapped-in-the-kernel-binary.md`)
     # -- the third time this same pattern has come up.

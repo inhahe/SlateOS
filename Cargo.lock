@@ -366,6 +366,10 @@ name = "byteread"
 version = "0.1.0"
 
 [[package]]
+name = "bzip2"
+version = "0.1.0"
+
+[[package]]
 name = "c2rust-bitfields"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

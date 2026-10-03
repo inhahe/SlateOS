@@ -422,6 +422,155 @@ pub fn plan_destination(
 }
 
 // ---------------------------------------------------------------------------
+// Limine request discovery
+// ---------------------------------------------------------------------------
+
+/// The two leading id words common to every Limine request.
+const COMMON_MAGIC: [u64; 2] = [0xc7b1_dd30_df4c_8b88, 0x0a82_e883_a194_f07b];
+/// The four-word marker the kernel places before its request section.
+const REQUESTS_START_MARKER: [u64; 4] = [
+    0xf6b8_f4b3_9de7_d1ae,
+    0xfab9_1a69_40fc_b9cf,
+    0x785c_6ed0_15d3_e316,
+    0x181e_920a_7852_b9d9,
+];
+/// The two-word marker the kernel places after its request section.
+const REQUESTS_END_MARKER: [u64; 2] = [0xadc0_e053_1bb1_0d03, 0x9572_709f_3176_4c62];
+/// The base-revision tag's two magic words; a third word holds the revision,
+/// which the bootloader sets to 0 to signal the requested revision is supported.
+const BASE_REVISION_MAGIC: [u64; 2] = [0xf956_2b2d_5c95_a6c8, 0x6a7b_3849_4453_6bdc];
+
+/// Offset, within a request block, of the `revision` field (after `id[4]`).
+pub const REQUEST_REVISION_OFFSET: usize = 32;
+/// Offset, within a request block, of the `response` pointer (after `revision`).
+pub const REQUEST_RESPONSE_OFFSET: usize = 40;
+/// Offset, within the base-revision tag, of the revision word.
+pub const BASE_REVISION_WORD_OFFSET: usize = 16;
+
+/// Feature ids — the third and fourth id words — of the requests the kernel
+/// makes (`kernel/src/boot.rs`). Mirrors `crate::limine`; kept here so the
+/// loader is self-contained, and asserted equal where the two can be compared.
+mod feature_id {
+    pub const MEMMAP: [u64; 2] = [0x67cf_3d9d_378a_806f, 0xe304_acdf_c50c_3c62];
+    pub const HHDM: [u64; 2] = [0x48dc_f1cb_8ad2_b852, 0x6398_4e95_9a98_244b];
+    pub const FRAMEBUFFER: [u64; 2] = [0x9d58_27dc_d881_dd75, 0xa314_8604_f6fa_b11b];
+    pub const RSDP: [u64; 2] = [0xc5e7_7b6b_397e_7b43, 0x2763_7845_accd_cf3c];
+    pub const EXECUTABLE_ADDRESS: [u64; 2] = [0x71ba_7686_3cc5_5f63, 0xb264_4a48_c516_a487];
+    pub const KERNEL_FILE: [u64; 2] = [0xad97_e90e_83f1_ed67, 0x31eb_5d1c_5ff2_3b69];
+}
+
+/// Byte offsets, within a loaded image, of the Limine structures the handoff
+/// must fill. Each is the offset of the block's first id word (the base
+/// revision tag's first magic word); the response pointer lives at
+/// `offset + REQUEST_RESPONSE_OFFSET`, the base-revision word at
+/// `offset + BASE_REVISION_WORD_OFFSET`. `None` when the image carries no such
+/// request — the handoff then simply does not answer it, exactly as Limine
+/// leaves an unmade request's response pointer untouched.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RequestSites {
+    /// The base-revision tag.
+    pub base_revision: Option<usize>,
+    /// The memory-map request.
+    pub memmap: Option<usize>,
+    /// The HHDM request.
+    pub hhdm: Option<usize>,
+    /// The framebuffer request.
+    pub framebuffer: Option<usize>,
+    /// The RSDP request.
+    pub rsdp: Option<usize>,
+    /// The executable-address request.
+    pub executable_address: Option<usize>,
+    /// The kernel-file request.
+    pub kernel_file: Option<usize>,
+}
+
+/// Find `needle` (consecutive little-endian `u64` words) at an 8-byte-aligned
+/// offset within `image[from..to]`, returning the offset of the last match
+/// (Limine honours the *last* start marker, if an image carries several).
+fn find_last_aligned(image: &[u8], needle: &[u64], from: usize, to: usize) -> Option<usize> {
+    let span = needle.len().checked_mul(8)?;
+    let limit = to.min(image.len());
+    let mut found = None;
+    let mut off = from.checked_next_multiple_of(8)?;
+    while let Some(end) = off.checked_add(span) {
+        if end > limit {
+            break;
+        }
+        if words_match(image, off, needle) {
+            found = Some(off);
+        }
+        off = off.checked_add(8)?;
+    }
+    found
+}
+
+/// Whether `image` at `off` holds `needle`'s words, little-endian.
+fn words_match(image: &[u8], off: usize, needle: &[u64]) -> bool {
+    for (i, want) in needle.iter().enumerate() {
+        let at = match off.checked_add(i.saturating_mul(8)) {
+            Some(a) => a,
+            None => return false,
+        };
+        if le_u64(image, at) != Some(*want) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Locate the base-revision tag and the kernel's Limine requests within a
+/// loaded image.
+///
+/// The search is bounded to the window between the last requests-start marker
+/// and the first requests-end marker after it, as the protocol specifies
+/// (base-revision tags included). An image with no markers is scanned whole, so
+/// a hand-built or older image is still handled. Each request and the tag are
+/// identified by their magic at an 8-byte-aligned offset.
+#[must_use]
+pub fn find_request_sites(image: &[u8]) -> RequestSites {
+    // Bound the scan to the marker window. `find_last_aligned` gives the last
+    // start marker; the end marker is the first one after it.
+    let start = find_last_aligned(image, &REQUESTS_START_MARKER, 0, image.len());
+    let scan_from =
+        start.map_or(0, |s| s.saturating_add(REQUESTS_START_MARKER.len().saturating_mul(8)));
+    let scan_to = find_last_aligned(image, &REQUESTS_END_MARKER, scan_from, image.len())
+        .unwrap_or(image.len());
+
+    let mut sites = RequestSites::default();
+    let mut off = scan_from & !7usize;
+    while let Some(end) = off.checked_add(16) {
+        if end > scan_to {
+            break;
+        }
+        if words_match(image, off, &BASE_REVISION_MAGIC) {
+            sites.base_revision = Some(off);
+        } else if words_match(image, off, &COMMON_MAGIC) {
+            // A request: its feature id is the next two words.
+            if let Some(id_at) = off.checked_add(16) {
+                let fid = [
+                    le_u64(image, id_at).unwrap_or(0),
+                    le_u64(image, id_at.saturating_add(8)).unwrap_or(0),
+                ];
+                match fid {
+                    feature_id::MEMMAP => sites.memmap = Some(off),
+                    feature_id::HHDM => sites.hhdm = Some(off),
+                    feature_id::FRAMEBUFFER => sites.framebuffer = Some(off),
+                    feature_id::RSDP => sites.rsdp = Some(off),
+                    feature_id::EXECUTABLE_ADDRESS => sites.executable_address = Some(off),
+                    feature_id::KERNEL_FILE => sites.kernel_file = Some(off),
+                    _ => {}
+                }
+            }
+        }
+        off = match off.checked_add(8) {
+            Some(o) => o,
+            None => break,
+        };
+    }
+    sites
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 
@@ -532,6 +681,56 @@ pub fn self_test() -> KernelResult<()> {
         "no destination is out of memory"
     );
 
+    // ---- Limine request discovery ----
+    let (reqimg, want) = build_test_request_image();
+    let sites = find_request_sites(&reqimg);
+    selftest::check_eq!(sites.base_revision, want.base_revision, "base-revision tag");
+    selftest::check_eq!(sites.hhdm, want.hhdm, "HHDM request");
+    selftest::check_eq!(sites.rsdp, want.rsdp, "RSDP request");
+    selftest::check_eq!(sites.memmap, want.memmap, "memmap request");
+    selftest::check_eq!(
+        sites.executable_address,
+        want.executable_address,
+        "executable-address request"
+    );
+    // Requests the image does not carry are not invented.
+    selftest::check_eq!(sites.framebuffer, None, "no framebuffer request");
+    selftest::check_eq!(sites.kernel_file, None, "no kernel-file request");
+    // The response pointer the handoff would patch is reachable in the image,
+    // and the layout offsets point where the fabricated blocks put their fields:
+    // a request's revision word (0) sits at REQUEST_REVISION_OFFSET, its response
+    // pointer (0, unmade) just after, and the base-revision tag's revision (3)
+    // at BASE_REVISION_WORD_OFFSET.
+    if let Some(off) = sites.hhdm {
+        selftest::check!(
+            off.saturating_add(REQUEST_RESPONSE_OFFSET).saturating_add(8) <= reqimg.len(),
+            "the HHDM request's response field is within the image"
+        );
+        selftest::check_eq!(
+            le_u64(&reqimg, off.saturating_add(REQUEST_REVISION_OFFSET)),
+            Some(0),
+            "the request revision word is where REQUEST_REVISION_OFFSET says"
+        );
+        selftest::check_eq!(
+            le_u64(&reqimg, off.saturating_add(REQUEST_RESPONSE_OFFSET)),
+            Some(0),
+            "the request response pointer is unmade"
+        );
+    }
+    if let Some(off) = sites.base_revision {
+        selftest::check_eq!(
+            le_u64(&reqimg, off.saturating_add(BASE_REVISION_WORD_OFFSET)),
+            Some(3),
+            "the base-revision word is where BASE_REVISION_WORD_OFFSET says"
+        );
+    }
+    // Content outside the marker window is ignored: a stray request magic placed
+    // after the end marker must not be picked up.
+    selftest::check!(
+        find_request_sites(&build_request_image_with_stray_after_end()).memmap.is_none(),
+        "a request past the end marker is out of the window"
+    );
+
     Ok(())
 }
 
@@ -604,4 +803,70 @@ fn build_test_elf() -> alloc::vec::Vec<u8> {
     );
 
     buf
+}
+
+/// Append one Limine request block (common magic + feature id + zeroed revision
+/// and response) to a word buffer, for the request-discovery self-test.
+fn push_test_request(words: &mut alloc::vec::Vec<u64>, feature: [u64; 2]) {
+    words.push(COMMON_MAGIC[0]);
+    words.push(COMMON_MAGIC[1]);
+    words.push(feature[0]);
+    words.push(feature[1]);
+    words.push(0); // revision
+    words.push(0); // response pointer (what the handoff patches)
+}
+
+/// Flatten a word buffer to little-endian bytes.
+fn words_to_bytes(words: &[u64]) -> alloc::vec::Vec<u8> {
+    let mut bytes = alloc::vec::Vec::with_capacity(words.len().saturating_mul(8));
+    for w in words {
+        bytes.extend_from_slice(&w.to_le_bytes());
+    }
+    bytes
+}
+
+/// Build a fabricated loaded image — start marker, base-revision tag, four
+/// requests, end marker — and the [`RequestSites`] [`find_request_sites`] should
+/// return for it. Every block is 8-byte aligned because each word is 8 bytes.
+// Builds a buffer of known contents; `len * 8` cannot overflow here.
+#[allow(clippy::arithmetic_side_effects)]
+fn build_test_request_image() -> (alloc::vec::Vec<u8>, RequestSites) {
+    let mut words: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+    words.extend_from_slice(&REQUESTS_START_MARKER);
+    let base_off = words.len() * 8;
+    words.push(BASE_REVISION_MAGIC[0]);
+    words.push(BASE_REVISION_MAGIC[1]);
+    words.push(3); // requested base revision
+    let hhdm_off = words.len() * 8;
+    push_test_request(&mut words, feature_id::HHDM);
+    let rsdp_off = words.len() * 8;
+    push_test_request(&mut words, feature_id::RSDP);
+    let memmap_off = words.len() * 8;
+    push_test_request(&mut words, feature_id::MEMMAP);
+    let exec_off = words.len() * 8;
+    push_test_request(&mut words, feature_id::EXECUTABLE_ADDRESS);
+    words.extend_from_slice(&REQUESTS_END_MARKER);
+
+    let want = RequestSites {
+        base_revision: Some(base_off),
+        memmap: Some(memmap_off),
+        hhdm: Some(hhdm_off),
+        framebuffer: None,
+        rsdp: Some(rsdp_off),
+        executable_address: Some(exec_off),
+        kernel_file: None,
+    };
+    (words_to_bytes(&words), want)
+}
+
+/// Build an image with a stray request magic *after* the end marker, to prove
+/// [`find_request_sites`] honours the marker window.
+fn build_request_image_with_stray_after_end() -> alloc::vec::Vec<u8> {
+    let mut words: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+    words.extend_from_slice(&REQUESTS_START_MARKER);
+    push_test_request(&mut words, feature_id::HHDM);
+    words.extend_from_slice(&REQUESTS_END_MARKER);
+    // Past the end marker: must be ignored.
+    push_test_request(&mut words, feature_id::MEMMAP);
+    words_to_bytes(&words)
 }

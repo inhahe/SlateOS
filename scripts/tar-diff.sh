@@ -1392,7 +1392,489 @@ PREP=prep_two_dirs extract_case 'a delayed symlink in a non-final destination' \
   spec.tar -C d1 ./abs -C d2 ./f
 
 # ===========================================================================
-# 9. the known divergences
+# 9. the archive on a standard stream: `-f -`, no `-f`, and `TAPE`
+# ===========================================================================
+# `-` is standard output to `-c` and standard input to `-t` and `-x`, and it is
+# what no `-f` at all means -- unless `TAPE` names something else. Until
+# 2026-10-03 this tar took `-f -` for a file called `-`: `tar -cf - dir | ssh
+# host tar -xf -`, the reason the convention exists, wrote an archive named `-`
+# into the current directory and nothing into the pipe, and no case here could
+# see it, because every case named its archive.
+#
+# stream_create_case LABEL ARGS... -- `tar -c ARGS`, the archive on stdout.
+stream_create_case() {
+  local label="$1"; shift
+  local o_rc g_rc
+  rm -f o.tar g.tar
+  diff_run timeout -k 2 60 env PATH="$bindir/ours" tar -c "$@" \
+    </dev/null >o.tar 2>"$DIFF_TMP/o.err"; o_rc=$?
+  # shellcheck disable=SC2086  # GNUFMT is three separate words on purpose.
+  diff_run timeout -k 2 60 env PATH="$bindir/gnu" tar $GNUFMT -c "$@" \
+    </dev/null >g.tar 2>"$DIFF_TMP/g.err"; g_rc=$?
+  : >"$DIFF_TMP/o.out"; : >"$DIFF_TMP/g.out"
+  settle "$o_rc" "$g_rc" "archive:$(archive_delta o.tar g.tar)" 'archive:same'
+  report "stream: tar -c $* ($label)"
+}
+
+stream_create_case 'the archive on stdout'          -f - tree
+stream_create_case 'no -f at all is -f -'           tree
+stream_create_case 'the long spelling'              --file=- tree
+# The member list cannot go to stdout when the archive does, so it goes to
+# stderr -- at both lengths.
+stream_create_case 'with -v the list is on stderr'  -v -f - tree
+stream_create_case 'and with -vv'                   -vv -f - tree
+stream_create_case 'a member that is not there'     -f - tree/a.txt nosuch
+
+# stdin_case LABEL INPUT ARGS... -- `plain_case`, with stdin from INPUT.
+stdin_case() {
+  local label="$1" input="$2"; shift 2
+  local o_rc g_rc
+  diff_run timeout -k 2 60 env PATH="$bindir/ours" tar "$@" <"$input" >"$DIFF_TMP/o.out" 2>"$DIFF_TMP/o.err"
+  o_rc=$?
+  diff_run timeout -k 2 60 env PATH="$bindir/gnu" tar "$@" <"$input" >"$DIFF_TMP/g.out" 2>"$DIFF_TMP/g.err"
+  g_rc=$?
+  settle "$o_rc" "$g_rc"
+  report "stdin: tar $* <$input ($label)"
+}
+
+stdin_case 'list from -f -'               ref.tar -tf -
+stdin_case 'list with no -f'              ref.tar -t
+stdin_case 'a long listing from stdin'    ref.tar -tvf -
+stdin_case 'the long spelling'            ref.tar --list --file=-
+stdin_case 'a named member from stdin'    ref.tar -tf - tree/a.txt nosuch
+stdin_case 'an empty stdin'               /dev/null -tf -
+stdin_case 'stdin that is not an archive' tree/a.txt -tf -
+
+# extract_stdin_case LABEL ARCHIVE ARGS... -- `extract_case`, through `-f -`.
+extract_stdin_case() {
+  local label="$1" archive="$2"; shift 2
+  local o_rc g_rc o_man g_man
+  rm -rf od gd; mkdir od gd
+  ( cd od && diff_run timeout -k 2 60 env PATH="$bindir/ours" tar -xf - "$@" \
+      <"../$archive" >"$DIFF_TMP/o.out" 2>"$DIFF_TMP/o.err" ); o_rc=$?
+  ( cd gd && diff_run timeout -k 2 60 env PATH="$bindir/gnu" tar -xf - "$@" \
+      <"../$archive" >"$DIFF_TMP/g.out" 2>"$DIFF_TMP/g.err" ); g_rc=$?
+  o_man=$(manifest od); g_man=$(manifest gd)
+  settle "$o_rc" "$g_rc" "tree{$(printf '%s' "$o_man" | tr '\n' '|')}" \
+                         "tree{$(printf '%s' "$g_man" | tr '\n' '|')}"
+  report "extract from stdin: $label"
+}
+
+extract_stdin_case 'the whole archive'            ref.tar
+extract_stdin_case 'verbosely'                    ref.tar -v
+extract_stdin_case 'the hostile one'              spec.tar
+
+# A file whose name is `-` is a file once anything else is in the name: only
+# exactly `-` is the stream. What each side left behind is listed by GNU.
+dash_file_case() {
+  local o_rc g_rc o_made g_made
+  rm -f ./-
+  diff_run timeout -k 2 60 env PATH="$bindir/ours" tar -cf ./- tree/a.txt \
+    </dev/null >"$DIFF_TMP/o.out" 2>"$DIFF_TMP/o.err"; o_rc=$?
+  o_made=$("$gnu_real" -tf ./- 2>&1); rm -f ./-
+  diff_run timeout -k 2 60 env PATH="$bindir/gnu" tar -cf ./- tree/a.txt \
+    </dev/null >"$DIFF_TMP/g.out" 2>"$DIFF_TMP/g.err"; g_rc=$?
+  g_made=$("$gnu_real" -tf ./- 2>&1); rm -f ./-
+  settle "$o_rc" "$g_rc" "made{$o_made}" "made{$g_made}"
+  report 'stream: tar -cf ./- is a file called -, not stdout'
+}
+dash_file_case
+
+# `TAPE` is the archive when no `-f` is given, and only then. `-` in it is the
+# stream as much as on the command line, and an empty one is a name like any
+# other, which fails to open.
+ENVV=(TAPE=ref.tar)
+list_case 'TAPE names the archive'      -t
+list_case 'and the long listing'        -tv
+list_case 'an -f outranks TAPE'         -tf spec.tar
+ENVV=(TAPE=nosuch.tar)
+list_case 'TAPE naming nothing'         -t
+ENVV=(TAPE=)
+list_case 'an empty TAPE'               -t
+ENVV=(TAPE=-)
+list_case 'TAPE=- is stdin'             -t
+ENVV=()
+
+# Creating through `TAPE`: the archive lands in the file it names.
+tape_create_case() {
+  local o_rc g_rc
+  rm -f o.tar g.tar
+  diff_run timeout -k 2 60 env TAPE=o.tar PATH="$bindir/ours" tar -c tree \
+    </dev/null >"$DIFF_TMP/o.out" 2>"$DIFF_TMP/o.err"; o_rc=$?
+  # shellcheck disable=SC2086
+  diff_run timeout -k 2 60 env TAPE=g.tar PATH="$bindir/gnu" tar $GNUFMT -c tree \
+    </dev/null >"$DIFF_TMP/g.out" 2>"$DIFF_TMP/g.err"; g_rc=$?
+  settle "$o_rc" "$g_rc" "archive:$(archive_delta o.tar g.tar)" 'archive:same'
+  report 'stream: TAPE=X tar -c tree writes X'
+}
+tape_create_case
+
+# A second `-f` names a second volume, which needs `-M`, which this tar does
+# not have. Refused after the whole command line has been read -- so an unknown
+# option is still the complaint when there is one -- and before anything is
+# opened, so neither archive is created.
+plain_case 'two archives'                   -cf o2.tar -f p2.tar tree/a.txt
+plain_case 'the same archive twice'         -tf ref.tar -f ref.tar
+plain_case 'two archives, long'             --list --file=ref.tar --file=spec.tar
+plain_case 'two archives and no mode'       -f a.tar -f b.tar
+plain_case 'two archives, an unknown option' -f a.tar -f b.tar --frobnicate
+old_case   'two archives, old style'        cff o.tar p.tar src
+[ -e o2.tar ] || [ -e p2.tar ] && { fail=$((fail+1)); echo 'DIFF two archives: one of them was created'; }
+
+# ===========================================================================
+# 10. what cannot be written: the list, the archive, and stderr
+# ===========================================================================
+# GNU tar ends with
+#
+#   if (stdlis == stdout) close_stdout ();
+#   else if (ferror (stderr) || fclose (stderr) != 0) set_exit_status (2);
+#
+# so a member list that did not arrive is `tar: stdout: write error` and status
+# 2 -- with no reason, because each line is flushed, and fails, as it is
+# written -- and a diagnostic that did not arrive is status 2 as well. A write
+# of the *archive* that fails is fatal on the spot, and is worded by how far the
+# record got. None of it was compared before: every case above has a working
+# stdout and stderr. Ours exited 0 for most of these.
+#
+# GNU tar also opens a closed standard descriptor the wrong way round before it
+# does anything else (gnulib's `stdopen`), which is why a closed stdout is a
+# `write error` with no reason, and why `-cf - >&-` *succeeds*: descriptor 1 is
+# a read-only `/dev/null` by then, and an archive bound for `/dev/null` is not
+# written at all.
+#
+# redir_case LABEL REDIRECTIONS ARGS... -- `tar ARGS REDIRECTIONS`, through a
+# shell so that the redirections apply to tar alone. `$GNUARGS` goes to GNU's
+# side only (the format normalisation, for a case that creates), and `$PREP`
+# runs before each side.
+redir_case() {
+  local label="$1" redir="$2"; shift 2
+  local o_rc g_rc
+  [ -n "${PREP:-}" ] && "$PREP"
+  diff_run timeout -k 2 60 env PATH="$bindir/ours" sh -c "exec tar \"\$@\" $redir" sh "$@" \
+    </dev/null >"$DIFF_TMP/o.out" 2>"$DIFF_TMP/o.err"; o_rc=$?
+  [ -n "${PREP:-}" ] && "$PREP"
+  # shellcheck disable=SC2086  # GNUARGS is words on purpose.
+  diff_run timeout -k 2 60 env PATH="$bindir/gnu" sh -c "exec tar ${GNUARGS:-} \"\$@\" $redir" sh "$@" \
+    </dev/null >"$DIFF_TMP/g.out" 2>"$DIFF_TMP/g.err"; g_rc=$?
+  settle "$o_rc" "$g_rc"
+  report "unwritable: tar $* $redir ($label)"
+}
+
+# The member list, in each of the three modes.
+redir_case 'a list that cannot be written'        '>/dev/full' -tf ref.tar
+redir_case 'a long list that cannot be written'   '>/dev/full' -tvf ref.tar
+redir_case 'a list with nowhere to go'            '>&-'        -tf ref.tar
+redir_case 'the errors come first'                '>/dev/full' -tf ref.tar tree/a.txt nosuch
+redir_case 'nothing listed, nothing lost'         '>/dev/full' -tf ref.tar nosuch
+redir_case 'the list at -cv'                      '>/dev/full' -cvf o.tar tree
+redir_case 'the list at -cv, closed'              '>&-'        -cvf o.tar tree
+prep_xd() { rm -rf xd; mkdir xd; }
+PREP=prep_xd redir_case 'the list at -xv'         '>/dev/full' -xvf ref.tar -C xd
+PREP=prep_xd redir_case 'the list at -xv, closed' '>&-'        -xvf ref.tar -C xd
+# A run that dies of a fatal error is not checked afterwards: GNU exits inside
+# the failure, so a list lost before it is never mentioned.
+head -c 1100 ref.tar > trunc.tar
+redir_case 'lost, then truncated'                 '>/dev/full' -tf trunc.tar
+
+# The archive itself. The `-b 1` case fails at its first record, partway
+# through the operands, and so never reaches `nosuch`: the write is fatal.
+GNUARGS=$GNUFMT redir_case 'an archive that cannot be written' '' -cf /dev/full tree
+GNUARGS=$GNUFMT redir_case 'and verbosely'                     '' -cvf /dev/full tree
+GNUARGS=$GNUFMT redir_case 'fatal before the next operand'     '' -b 1 -cf /dev/full tree nosuch
+GNUARGS=$GNUFMT redir_case 'the archive on a full stdout'      '>/dev/full' -cf - tree
+GNUARGS=$GNUFMT redir_case 'and verbosely'                     '>/dev/full' -cvf - tree
+GNUARGS=$GNUFMT redir_case 'the archive on a closed stdout'    '>&-' -cf - tree
+
+# Standard error. Nothing written to it, nothing lost; a diagnostic lost is 2,
+# whichever stream the list was on.
+GNUARGS=$GNUFMT redir_case 'a notice that cannot be written'  '2>/dev/full' -cf o.tar "$work/tree/a.txt"
+GNUARGS=$GNUFMT redir_case 'a notice with nowhere to go'      '2>&-'        -cf o.tar "$work/tree/a.txt"
+GNUARGS=$GNUFMT redir_case 'a list on stderr, lost'           '2>/dev/full >/dev/null' -cvf - tree
+redir_case 'nothing said, nothing lost'                       '2>/dev/full' -tf ref.tar
+redir_case 'a missing member, unsaid'                         '2>/dev/full' -tf ref.tar nosuch
+redir_case 'both lost'                                        '>/dev/full 2>&-' -tf ref.tar
+# ...and the archive read from a closed stdin is a read error, not an empty one.
+redir_case 'an archive from a closed stdin'                   '<&-' -tf -
+# argp's help is never checked, so these succeed whatever happens to it.
+redir_case 'help with nowhere to go'   '>&-'        --help
+redir_case 'usage on a full stdout'    '>/dev/full' --usage
+redir_case 'a bad option, unsaid'      '2>&-'       --frobnicate
+
+# An archive that is `/dev/null` is not written at all, and the regular files
+# in it are not even opened -- so a file nobody can read is not an error.
+# Recognised by device and inode, not by name.
+plain_case '/dev/null: an unreadable file is fine'   -cf /dev/null noread/f
+plain_case '/dev/null: and the list still comes'     -cvf /dev/null noread
+plain_case '/dev/null: by another name'              -cf /dev/./null noread/f
+ln -sf /dev/null nullink
+plain_case '/dev/null: through a symlink'            -cf nullink noread/f
+plain_case '/dev/zero is not /dev/null'              -cf /dev/zero noread/f
+redir_case '/dev/null on stdout'          '>/dev/null' -cf - noread/f
+
+# ===========================================================================
+# 11. a disk that fills part-way through a record
+# ===========================================================================
+# GNU words a failed archive write by how much of the record went: none of it is
+# `Cannot write: <reason>`, part of it is `Wrote only N of M bytes`. `/dev/full`
+# can only produce the first. A 12 KiB tmpfs produces the second: the first
+# 10240-byte record fits, and the second gets the 2048 bytes left in the third
+# page. Each side runs in its own user and mount namespace, as `rm-diff.sh`'s
+# mount cases do, and the case is skipped, and says so, where that cannot be had.
+mkdir -p big
+head -c 30000 /dev/urandom > big/f
+touch -d '2020-01-02 03:04:05' big/f big
+full_side() {
+  local side=$1 res=$2; shift 2
+  rm -rf small; mkdir small
+  ( PATH="$bindir/$side:$PATH"
+    diff_run timeout -k 2 60 unshare -mUr --propagation private sh -c '
+      res=$1; shift
+      mount -t tmpfs -o size=12k none small || exit 125
+      tar "$@" >"$res.out" 2>"$res.err"
+      echo "$?" >"$res.rc"
+      ls -l small 2>&1 | awk "{print \$5, \$NF}" | LC_ALL=C sort >"$res.ls"
+    ' _ "$res" "$@" )
+}
+full_case() {
+  local label="$1"; shift
+  local o=$DIFF_TMP/fo g=$DIFF_TMP/fg f
+  rm -f "$o".* "$g".*
+  full_side ours "$o" "$@"
+  # shellcheck disable=SC2086
+  full_side gnu "$g" ${GNUARGS:-} "$@"
+  if ! [ -s "$o.rc" ] || ! [ -s "$g.rc" ]; then
+    AGREED=no
+    REPORT="  the namespace or the mount could not be set up"
+  else
+    AGREED=yes
+    for f in out err rc ls; do
+      cmp -s "$o.$f" "$g.$f" || AGREED=no
+    done
+    REPORT=$(printf '  ours: rc=%s err{%s} left{%s}\n  gnu : rc=%s err{%s} left{%s}' \
+      "$(cat "$o.rc")" "$(tr '\n' '|' <"$o.err")" "$(tr '\n' '|' <"$o.ls")" \
+      "$(cat "$g.rc")" "$(tr '\n' '|' <"$g.err")" "$(tr '\n' '|' <"$g.ls")")
+  fi
+  report "full disk: tar $* ($label)"
+}
+if ! unshare -mUr true 2>/dev/null; then
+  echo "SKIP section 11: no user and mount namespace can be made here"
+else
+  GNUARGS=$GNUFMT full_case 'a record that goes in part'   -cf small/a.tar big
+  GNUARGS=$GNUFMT full_case 'and verbosely'                -cvf small/a.tar big
+  GNUARGS=$GNUFMT full_case 'smaller records'              -b 4 -cf small/a.tar big
+fi
+
+# ===========================================================================
+# 12. a terminal
+# ===========================================================================
+# An archive on a standard stream is refused when that stream is a terminal: a
+# `tar -c dir` typed without `-f` would pour binary over the screen. Checked as
+# the archive is opened -- after the command line has been accepted, and after
+# the record size -- and only for the stream: a named archive is opened as
+# usual. Run under a pseudo-terminal; what comes back is the terminal's own
+# record of both streams.
+pty_case() {
+  local label="$1"; shift
+  local o_rc g_rc
+  rm -f o.tar g.tar
+  script -qec "env PATH=$bindir/ours tar $*" /dev/null </dev/null >"$DIFF_TMP/o.out" 2>&1
+  o_rc=$?
+  script -qec "env PATH=$bindir/gnu tar $*" /dev/null </dev/null >"$DIFF_TMP/g.out" 2>&1
+  g_rc=$?
+  : >"$DIFF_TMP/o.err"; : >"$DIFF_TMP/g.err"
+  settle "$o_rc" "$g_rc"
+  report "terminal: tar $* ($label)"
+}
+if ! command -v script >/dev/null 2>&1; then
+  echo "SKIP section 12: no script(1) to make a terminal with"
+else
+  pty_case 'writing an archive to it'          -c tree/a.txt
+  pty_case 'the same, said with -f -'          -cf - tree/a.txt
+  pty_case 'verbosely'                         -cv tree/a.txt
+  pty_case 'nothing to archive comes first'    -c
+  pty_case 'a member that is not there'        -c nosuch
+  pty_case 'the record size comes first'       --record-size=0 -c tree/a.txt
+  pty_case 'reading an archive from it'        -t
+  pty_case 'extracting from it'                -x
+  pty_case 'before a member is looked for'     -t nosuch
+  pty_case 'before a -C is entered'            -x -C nosuchdir
+  pty_case 'a named archive is not refused'    -tf ref.tar
+fi
+
+# ===========================================================================
+# 13. a damaged archive, and when a directory is finished with
+# ===========================================================================
+# GNU reports on an archive *as it reads it*: a block that is not a header is
+# announced where it is met, before the members after it, and everything about
+# the archive itself comes before the `Not found in archive` lines. This tar
+# kept it all for the end, which put the two in the opposite order. And a block
+# that is not a header is skipped -- GNU goes on to the next block that is one,
+# so a damaged archive still gives back the members after the damage, where this
+# tar stopped and reported every one of them missing.
+#
+# Fixtures, all made by GNU with one-block records so that a cut lands where it
+# is meant to: `dmg-lone.tar` ends in one zero block after members with data
+# (so the block GNU names counts the data blocks); `dmg-mid.tar` has a block of
+# noise spliced between two members; `dmg-junk.tar` is noise from the start.
+mkdir -p dmg/t
+printf 'a\n' > dmg/t/a; printf 'b\n' > dmg/t/b
+touch -d '2020-01-02 03:04:05' dmg/t/a dmg/t/b dmg/t
+( cd dmg && "$gnu_real" --format=ustar --sort=name -b1 -cf ../dmg-full.tar t )
+dmg_size=$(stat -c %s dmg-full.tar)
+head -c $((dmg_size - 512)) dmg-full.tar > dmg-lone.tar
+{ head -c 1536 dmg-full.tar
+  head -c 512 /dev/zero | tr '\0' '\245'
+  tail -c +1537 dmg-full.tar; } > dmg-mid.tar
+head -c 700 /dev/zero | tr '\0' 'g' > dmg-junk.tar
+
+plain_case 'a lone zero block, named counting data'   -tf dmg-lone.tar
+plain_case 'a lone zero block comes before Not found' -tf dmg-lone.tar nosuch
+plain_case 'and when a member was found first'        -tf dmg-lone.tar t/a nosuch
+plain_case 'noise from the start: both lines'         -tf dmg-junk.tar
+plain_case 'noise from the start, and Not found'      -tf dmg-junk.tar nosuch
+plain_case 'noise mid-archive: the rest is listed'    -tf dmg-mid.tar
+plain_case 'and verbosely'                            -tvf dmg-mid.tar
+plain_case 'a member after the noise is found'        -tf dmg-mid.tar t/b
+extract_case 'noise mid-archive: the rest is extracted' dmg-mid.tar
+extract_case 'a lone zero block, extracting'            dmg-lone.tar nosuch
+
+# A fatal stop part-way through an extraction still finishes what was started:
+# GNU's `fatal_exit` runs `extract_finish` first, so a directory already
+# extracted gets its stored mode and stamp. `tree/sub` is stored 0700 and dated
+# 2020, and is met before `tree/zero.txt`, whose `-C` cannot be entered; a run
+# that skipped the finishing would leave `tree/sub` as it was made.
+PREP=prep_one_dir extract_case 'a fatal -C still stamps what was extracted' ref.tar \
+  -C d1 tree/sub -C nosuchdir tree/zero.txt
+
+# GNU stamps a directory when the extraction *leaves* it, not at the end. Only
+# an archive out of the usual order can show the difference: `d/b` comes after
+# `f`, so `d` is stamped when `f` is met and then written into again -- and its
+# stored mtime is lost, in GNU's tar and so in ours.
+mkdir -p unsorted/d
+printf '1\n' > unsorted/d/a; printf '2\n' > unsorted/d/b; printf '3\n' > unsorted/f
+touch -d '2020-01-02 03:04:05' unsorted/d/a unsorted/d/b unsorted/f unsorted/d
+( cd unsorted && "$gnu_real" --format=ustar --no-recursion -cf ../unsorted.tar d d/a f d/b )
+extract_case 'a directory is stamped when the extraction leaves it' unsorted.tar
+# With `f` not asked for, nothing leaves `d` before `d/b` is written, so `d`
+# keeps its stored mtime: it is stamped at the end, after everything inside it.
+extract_case 'and kept when nothing outside it is asked for'       unsorted.tar d
+
+# ===========================================================================
+# 14. owners and modes, as root and not
+# ===========================================================================
+# Extracting as root, GNU gives every member the owner the archive records --
+# by *name* where this machine knows it, by number otherwise -- and restores
+# modes exactly, setuid bits and all, without the umask. As anyone else it does
+# neither, unless asked: `--same-owner`, `-p`. `--no-same-owner`,
+# `--no-same-permissions` and `--numeric-owner` move each the other way. This
+# tar did none of it: a backup restored as root came back owned by root.
+#
+# Root is a user namespace (`unshare -mUr`), where only the caller's own uid is
+# mapped -- to 0. So giving a member to `root` succeeds there and giving it to
+# uid 1000 fails with `Invalid argument`, on both sides alike, which is enough
+# to see which members each tar tried to give to whom, in which order, and
+# with what modes left behind. The fixtures are made by GNU with `--owner` and
+# `--group`, so the names and numbers in them are exactly what each case says.
+mkdir -p ownsrc/d
+printf 'a\n' > ownsrc/f; printf 'x\n' > ownsrc/suid; printf 'g\n' > ownsrc/d/g
+chmod 0777 ownsrc/f; chmod 4755 ownsrc/suid; chmod 0700 ownsrc/d
+ln ownsrc/f ownsrc/hard
+ln -s f ownsrc/rel
+ln -s /etc/passwd ownsrc/abs
+mkfifo ownsrc/pipe
+touch -d '2020-01-02 03:04:05' ownsrc/f ownsrc/suid ownsrc/d/g ownsrc/d ownsrc/pipe ownsrc
+touch -h -d '2019-05-06 07:08:09' ownsrc/rel ownsrc/abs
+own_make() { ( cd ownsrc && "$gnu_real" --format=ustar --sort=name "$@" -cf "../$OWNOUT" . ); }
+OWNOUT=own-root.tar     own_make --owner=root:0 --group=root:0
+OWNOUT=own-user.tar     own_make --owner="$(id -un):$(id -u)" --group="$(id -gn):$(id -g)"
+OWNOUT=own-unknown.tar  own_make --owner=nosuchuser:4321 --group=nosuchgroup:4321
+OWNOUT=own-mismatch.tar own_make --owner=root:4321 --group=root:4321
+
+# What a tree looks like with its owners: the manifest's columns plus `%u:%g`.
+own_manifest() {
+  ( cd "$1" 2>/dev/null || return 0
+    find . -mindepth 1 | LC_ALL=C sort | while IFS= read -r q; do
+      stat -c '%A %u:%g %n' -- "$q"
+    done )
+}
+
+# root_case LABEL ARGS... -- `tar ARGS` as root in a fresh directory, the tree
+# and its owners taken inside the namespace, where they mean something.
+root_side() {
+  local side=$1 res=$2; shift 2
+  rm -rf "$res.d"; mkdir "$res.d"
+  ( cd "$res.d" && PATH="$bindir/$side:$PATH" \
+    diff_run timeout -k 2 60 unshare -mUr sh -c '
+      res=$1; shift
+      tar "$@" >"$res.out" 2>"$res.err"; echo "$?" >"$res.rc"
+      find . -mindepth 1 | LC_ALL=C sort | while IFS= read -r q; do
+        stat -c "%A %u:%g %n" -- "$q"
+      done >"$res.tree"
+    ' _ "$res" "$@" )
+}
+root_case() {
+  local label="$1"; shift
+  local o=$DIFF_TMP/ro g=$DIFF_TMP/rg f
+  rm -rf "$o".* "$g".*
+  root_side ours "$o" "$@"
+  root_side gnu "$g" "$@"
+  if ! [ -s "$o.rc" ] || ! [ -s "$g.rc" ]; then
+    AGREED=no
+    REPORT="  the namespace could not be set up"
+  else
+    AGREED=yes
+    for f in out err rc tree; do
+      cmp -s "$o.$f" "$g.$f" || AGREED=no
+    done
+    REPORT=$(printf '  ours: rc=%s err{%s}\n        tree{%s}\n  gnu : rc=%s err{%s}\n        tree{%s}' \
+      "$(cat "$o.rc")" "$(tr '\n' '|' <"$o.err")" "$(tr '\n' '|' <"$o.tree")" \
+      "$(cat "$g.rc")" "$(tr '\n' '|' <"$g.err")" "$(tr '\n' '|' <"$g.tree")")
+  fi
+  report "as root: tar $* ($label)"
+}
+
+if ! unshare -mUr true 2>/dev/null; then
+  echo "SKIP section 14's root cases: no user namespace can be made here"
+else
+  root_case 'members owned by root'             -xf "$work/own-root.tar"
+  root_case 'owned by someone who cannot be'    -xf "$work/own-user.tar"
+  root_case 'and verbosely: errors between'     -xvf "$work/own-user.tar"
+  root_case 'names unknown here: the numbers'   -xf "$work/own-unknown.tar"
+  root_case 'a name beats its number'           -xf "$work/own-mismatch.tar"
+  root_case 'unless --numeric-owner'            --numeric-owner -xf "$work/own-mismatch.tar"
+  root_case 'not at all with --no-same-owner'   --no-same-owner -xf "$work/own-user.tar"
+  root_case 'the umask with --no-same-permissions' --no-same-permissions -xf "$work/own-root.tar"
+  root_case 'both off: an ordinary extraction'  --no-same-owner --no-same-permissions -xf "$work/own-user.tar"
+fi
+
+# As an ordinary user. Giving a file to yourself is allowed, and to root is not.
+own_case() {
+  local label="$1"; shift
+  local o_rc g_rc o_tree g_tree
+  rm -rf od gd; mkdir od gd
+  ( cd od && diff_run timeout -k 2 60 env PATH="$bindir/ours" tar "$@" \
+      </dev/null >"$DIFF_TMP/o.out" 2>"$DIFF_TMP/o.err" ); o_rc=$?
+  ( cd gd && diff_run timeout -k 2 60 env PATH="$bindir/gnu" tar "$@" \
+      </dev/null >"$DIFF_TMP/g.out" 2>"$DIFF_TMP/g.err" ); g_rc=$?
+  o_tree=$(own_manifest od); g_tree=$(own_manifest gd)
+  settle "$o_rc" "$g_rc" "tree{$(printf '%s' "$o_tree" | tr '\n' '|')}" \
+                         "tree{$(printf '%s' "$g_tree" | tr '\n' '|')}"
+  report "as a user: tar $* ($label)"
+}
+own_case 'nobody is given anything'           -xf "$work/own-root.tar"
+own_case '--same-owner, to root: refused'     --same-owner -xf "$work/own-root.tar"
+own_case '--same-owner, to yourself: fine'    --same-owner -xf "$work/own-user.tar"
+own_case '-p keeps setuid and skips the umask' -xpf "$work/own-root.tar"
+
+# `--numeric-owner` when listing and creating: numbers on the line, no names in
+# the header.
+list_case 'numbers instead of names'          --numeric-owner -tvf own-user.tar
+list_case 'and names otherwise'               -tvf own-user.tar
+create_case 'with --numeric-owner'            --numeric-owner tree
+create_case 'with --numeric-owner, -vv'       --numeric-owner -vv tree
+
+# ===========================================================================
+# 15. the known divergences
 # ===========================================================================
 plain_xcase \
   "GNU's -Z is compression, which this tar does not implement; the message is a refusal either way, and the wording of a refusal for an option we do not have is not something to copy" \
@@ -1401,6 +1883,10 @@ plain_xcase \
 plain_xcase \
   "both tars print help and exit 0; the texts differ because ours documents the options it has and GNU's documents 172 it has. Copying GNU's list would advertise options that do not work -- see design-decisions.md 703" \
   'a long option' --help
+
+plain_xcase \
+  "GNU credits a member to the first operand that covers it, so an operand inside an earlier one is reported 'Not found in archive' although its member was listed or extracted, and the run exits 2; ours credits every operand that covers a member -- see Selector::wants in tar.rs" \
+  'an operand inside an earlier one' -tf unsorted.tar d d/b
 
 # `uname`/`gname` were an xfail here until ours learned to fill them. They are
 # not a case of their own any more: `--numeric-owner` came out of GNUFMT at the

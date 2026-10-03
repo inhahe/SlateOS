@@ -1,5 +1,5 @@
 ### [B] TD-B-LS-ACCEPTS-HYPERLINK-WITHOUT-EMITTING-IT — filed 2026-08-22 (tech debt)
-**Status:** FIXED 2026-10-03 (lane B), boot confirmation pending. Both missing
+**Status:** FIXED 2026-10-03 (lane B), boot-tested on `main` at 469d88f2f. Both missing
 pieces had arrived since this was written -- `coreutils::canon` is gnulib's
 `canonicalize_filename_mode` (for `readlink` and `realpath`), and
 `libcall::hostname_into` is `gethostname` -- so `ls` now does what upstream

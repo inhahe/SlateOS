@@ -1657,14 +1657,26 @@ mod tests {
         root
     }
 
+    /// The PIDs `args` selects, in ascending order.
+    ///
+    /// Sorted, because the order they come out in is not the program's to
+    /// decide: upstream lists `/proc` in `readdir` order, and so does the port.
+    /// On a real `/proc` that is ascending, but these fixtures are ordinary
+    /// directories, and ext4 returns their entries in hash order -- these tests
+    /// passed on the Windows host, whose NTFS happens to sort, and failed under
+    /// Linux. Which processes are chosen is what is under test here; the order
+    /// is `scripts/pgrep-diff.sh`'s, where both programs read one directory.
     fn pids(name: &str, root: &Path, args: &[&str]) -> Vec<i64> {
         let mut p = prog(name, root);
         p.parse_opts(&os(args)).unwrap();
-        p.select_procs()
+        let mut got: Vec<i64> = p
+            .select_procs()
             .unwrap()
             .into_iter()
             .map(|e| e.num)
-            .collect()
+            .collect();
+        got.sort_unstable();
+        got
     }
 
     #[test]
@@ -1919,12 +1931,14 @@ mod tests {
         let root = world("names");
         let mut p = prog("pgrep", &root);
         p.parse_opts(&os(&["-a", "-u", "1000"])).unwrap();
-        let got: Vec<(i64, Vec<u8>)> = p
+        let mut got: Vec<(i64, Vec<u8>)> = p
             .select_procs()
             .unwrap()
             .into_iter()
             .map(|e| (e.num, e.str))
             .collect();
+        // In `readdir` order, which a fixture directory does not fix; see `pids`.
+        got.sort_unstable();
         assert_eq!(
             got,
             [

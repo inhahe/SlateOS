@@ -624,6 +624,54 @@ paste -d "$RS" "$labels" "$whys" "$work/ours.lines" "$work/gnu.lines" \
     }'
 rc=$?
 
+# --- `[`, and what it does when its output goes nowhere --------------------
+#
+# `[ --help` and `[ --version` are the only cases in which either spelling
+# writes to standard output, and upstream checks that write the way the rest of
+# coreutils does: `atexit (close_stdout)`, after `initialize_exit_failure
+# (TEST_FAILURE)`. So a help text lost to a full disk or a closed descriptor is
+# `[: write error: <reason>` and status 2. Ours used `print!`, which panicked on
+# the full disk -- status 134 -- and reported nothing for the closed descriptor.
+# The help text itself is not compared byte for byte: ours stops before GNU's
+# support links, as every port here does.
+#
+# Run through a second symlink, named `[`, beside each side's `test`: argv[0]
+# is the bare name on both, so both prefix `[:`.
+ln -sf "$(readlink -f "$bindir/ours/test")" "$bindir/ours/["
+ln -sf "$(dirname "$gnu_real")/[" "$bindir/gnu/["
+bpass=0; bfail=0
+bracket_case() {
+  local label=$1 redir=$2 o_rc g_rc; shift 2
+  PATH="$bindir/ours:$PATH" sh -c "exec env '[' \"\$@\" $redir" sh "$@" \
+    </dev/null >"$work/bo.out" 2>"$work/bo.err"; o_rc=$?
+  PATH="$bindir/gnu:$PATH" sh -c "exec env '[' \"\$@\" $redir" sh "$@" \
+    </dev/null >"$work/bg.out" 2>"$work/bg.err"; g_rc=$?
+  if [ "$o_rc" = "$g_rc" ] && cmp -s "$work/bo.out" "$work/bg.out" \
+       && cmp -s "$work/bo.err" "$work/bg.err"; then
+    bpass=$((bpass+1))
+    [ -n "${VERBOSE:-}" ] && printf 'OK   [ %s %s (%s)\n' "$*" "$redir" "$label"
+  else
+    bfail=$((bfail+1))
+    printf 'DIFF [ %s %s (%s)\n  ours: rc=%s err{%s} out{%s}\n  gnu : rc=%s err{%s} out{%s}\n' \
+      "$*" "$redir" "$label" \
+      "$o_rc" "$(tr '\n' '|' <"$work/bo.err")" "$(head -c 200 "$work/bo.out" | tr '\n' '|')" \
+      "$g_rc" "$(tr '\n' '|' <"$work/bg.err")" "$(head -c 200 "$work/bg.out" | tr '\n' '|')"
+  fi
+}
+bracket_case 'help on a full disk'          '>/dev/full' --help
+bracket_case 'version on a full disk'       '>/dev/full' --version
+bracket_case 'help with nowhere to go'      '>&-'        --help
+bracket_case 'version with nowhere to go'   '>&-'        --version
+bracket_case 'nothing written, nothing lost' '>&-'       1 -eq 1 ']'
+bracket_case 'false, nothing written'       '>/dev/full' 1 -eq 2 ']'
+bracket_case 'an error, said'               ''           x -eq 1 ']'
+bracket_case 'an error, unsaid'             '2>/dev/full' x -eq 1 ']'
+bracket_case 'an error with nowhere to go'  '2>&-'       x -eq 1 ']'
+bracket_case 'the missing ]'                ''           1 -eq 1
+bracket_case 'help, and stderr unwritable'  '2>/dev/full >/dev/null' --help
+printf '[: %d passed, %d differed\n' "$bpass" "$bfail"
+[ "$bfail" -eq 0 ] || rc=1
+
 # --- not covered, and why ------------------------------------------------------
 #
 # `-t` is tested only for the answers that do not depend on the terminal: both
@@ -631,7 +679,8 @@ rc=$?
 # and what is being compared is the *argument handling*, not the tty detection.
 #
 # `[` — the same program under its other name, where the final `]` is mandatory
-# — is not exercised here. It is now reachable in principle (a second symlink in
-# each side's `PATH` directory would do it) but is currently covered by unit
-# tests in `test.rs` instead.
+# — is exercised only for what it alone does: its `--help` and `--version`, and
+# what becomes of them and of its diagnostics when they cannot be written (the
+# section above). The expression rules it shares with `test` are the rest of
+# this file's, through `test`.
 exit "$rc"

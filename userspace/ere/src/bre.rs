@@ -92,6 +92,22 @@ pub struct BreSyntax {
     /// A backwards range (`[z-a]`) is empty rather than refused -- glibc's
     /// syntax without `RE_NO_EMPTY_RANGES`; see [`Syntax::empty_ranges`].
     pub empty_ranges: bool,
+    /// `\w \W \s \S \b \B \< \>` and the buffer anchors are the
+    /// characters after the backslash, not operators: glibc's
+    /// `RE_NO_GNU_OPS`, which GNU sed sets under `--posix`. See
+    /// [`Syntax::no_gnu_ops`].
+    pub no_gnu_ops: bool,
+    /// A `\)` that closes no group is the character `)` rather than the error
+    /// `Unmatched ) or \)`: glibc's `RE_UNMATCHED_RIGHT_PAREN_ORD`, which no
+    /// basic syntax has by default and GNU sed sets under `POSIXLY_CORRECT`
+    /// and `--posix`. Measured, sed 4.9: `POSIXLY_CORRECT=1 sed 's/a\)/X/'`
+    /// turns `a)` into `X`.
+    pub unmatched_right_paren_ord: bool,
+    /// `regcomp`'s `REG_NEWLINE`, as far as it is a matter of syntax: neither
+    /// `.` nor a `[^...]` bracket matches a newline. GNU sed's `M` modifier
+    /// sets it; see [`Syntax::reg_newline`], and [`Regex::with_newline_anchor`]
+    /// for the anchors, which are the compiled regex's business.
+    pub reg_newline: bool,
 }
 
 impl BreSyntax {
@@ -101,6 +117,9 @@ impl BreSyntax {
         context_invalid_dup: true,
         limited_ops: false,
         empty_ranges: false,
+        no_gnu_ops: false,
+        unmatched_right_paren_ord: false,
+        reg_newline: false,
     };
 
     /// GNU grep's basic syntax, glibc's `RE_SYNTAX_GREP`, and find's `grep`
@@ -109,6 +128,9 @@ impl BreSyntax {
         context_invalid_dup: false,
         limited_ops: false,
         empty_ranges: false,
+        no_gnu_ops: false,
+        unmatched_right_paren_ord: false,
+        reg_newline: false,
     };
 
     /// GNU coreutils' -- `expr`, `csplit` and `nl` all set it: POSIX basic
@@ -117,6 +139,9 @@ impl BreSyntax {
         context_invalid_dup: false,
         limited_ops: false,
         empty_ranges: true,
+        no_gnu_ops: false,
+        unmatched_right_paren_ord: false,
+        reg_newline: false,
     };
 
     /// `RE_SYNTAX_POSIX_MINIMAL_BASIC`, find's `posix-minimal-basic` type: no
@@ -125,6 +150,9 @@ impl BreSyntax {
         context_invalid_dup: false,
         limited_ops: true,
         empty_ranges: false,
+        no_gnu_ops: false,
+        unmatched_right_paren_ord: false,
+        reg_newline: false,
     };
 }
 
@@ -142,12 +170,31 @@ pub fn compile(pattern: BStr<'_>, ci: bool) -> Result<Regex, EreError> {
 /// # Errors
 /// Returns the translation's error, or the ERE engine's, whichever stops first.
 pub fn compile_syntax(pattern: BStr<'_>, ci: bool, syntax: BreSyntax) -> Result<Regex, EreError> {
+    compile_syntax_warn(pattern, ci, syntax).map(|(re, _)| re)
+}
+
+/// [`compile_syntax`], keeping the engine's [`crate::Warning`]s -- of which a
+/// basic expression can raise only [`crate::Warning::ConfusingBracket`].
+///
+/// # Errors
+/// As [`compile_syntax`].
+pub fn compile_syntax_warn(
+    pattern: BStr<'_>,
+    ci: bool,
+    syntax: BreSyntax,
+) -> Result<(Regex, Vec<crate::Warning>), EreError> {
     let ere = to_ere_syntax(pattern, syntax)?;
     let engine = Syntax {
         empty_ranges: syntax.empty_ranges,
+        no_gnu_ops: syntax.no_gnu_ops,
         ..Syntax::POSIX_EXTENDED
     };
-    Regex::new_syntax(&ere, ci, engine)
+    let engine = if syntax.reg_newline {
+        engine.reg_newline()
+    } else {
+        engine
+    };
+    Regex::new_syntax_warn(&ere, ci, engine)
 }
 
 /// Translate a POSIX BRE into the equivalent ERE, in glibc's POSIX basic
@@ -219,6 +266,13 @@ pub fn to_ere_syntax(pattern: BStr<'_>, syntax: BreSyntax) -> Result<Str, EreErr
                         depth = depth.saturating_add(1);
                         prev_atom = false;
                         at_start = true;
+                    }
+                    // `RE_UNMATCHED_RIGHT_PAREN_ORD`: a `\)` closing nothing is
+                    // the character.
+                    Some(')') if depth == 0 && syntax.unmatched_right_paren_ord => {
+                        out.extend_from_slice(br"\)");
+                        prev_atom = true;
+                        at_start = false;
                     }
                     Some(')') => {
                         if depth == 0 {
@@ -564,6 +618,34 @@ mod tests {
             .unwrap()
             .is_match(subject.as_bytes())
             .unwrap()
+    }
+
+    /// What GNU sed's `--posix` adds to its basic syntax: `RE_NO_GNU_OPS`,
+    /// `RE_LIMITED_OPS` and `RE_UNMATCHED_RIGHT_PAREN_ORD`. Measured, sed 4.9:
+    /// `--posix 's/\w/X/g'` on `ab w` gives `ab X`, and `POSIXLY_CORRECT=1
+    /// sed 's/a\)/X/'` on `a)` gives `X`.
+    #[test]
+    fn the_posix_bits_make_the_gnu_operators_and_a_stray_paren_characters() {
+        let posix = BreSyntax {
+            limited_ops: true,
+            no_gnu_ops: true,
+            unmatched_right_paren_ord: true,
+            ..BreSyntax::POSIX_BASIC
+        };
+        let hit = |bre: &[u8], subject: &[u8], syntax: BreSyntax| {
+            compile_syntax(bre, false, syntax)
+                .unwrap()
+                .is_match(subject)
+                .unwrap()
+        };
+        assert!(hit(br"a\)", b"a)", posix));
+        assert!(hit(br"\w", b"w", posix));
+        assert!(!hit(br"\w", b"a", posix));
+        assert!(hit(br"a\|b", b"a|b", posix));
+        // The default basic syntax keeps all three as GNU's.
+        assert!(compile_syntax(br"a\)", false, BreSyntax::POSIX_BASIC).is_err());
+        assert!(hit(br"\w", b"a", BreSyntax::POSIX_BASIC));
+        assert!(hit(br"a\|b", b"b", BreSyntax::POSIX_BASIC));
     }
 
     #[test]

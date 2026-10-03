@@ -1,5 +1,21 @@
 ## TD-B-RM-ONE-FILE-SYSTEM-AND-PRESERVE-ROOT-ALL-ARE-IMPLEMENTED-BUT-UNCERTIFIED (lane B, 2026-08-30)
 
+**Status:** FIXED 2026-10-03 (lane B), boot confirmation pending -- certified,
+and nothing needed changing. `scripts/rm-diff.sh` section 16b does what this
+entry proposed: each side runs in its own `unshare -mUr` namespace with
+`tree/sub` a tmpfs mount, and the program's output, its status and what is
+left of the tree (mount included) are taken inside the namespace, before the
+mount vanishes with it. Fifteen cases -- `--one-file-system` across the mount
+and on the mount point itself, `--preserve-root=all` on a mount-point operand,
+a plain operand, a tree holding one, and alongside `--one-file-system`,
+`--preserve-root` and `--no-preserve-root`, with and without `-r` and `-d` --
+all agree with GNU 9.4: 211 of 211. Checked by hand that the reference does
+meet the mount (`skipping 'tree/sub', since it's on a different device`,
+`Device or resource busy`, `and --preserve-root=all is in effect`), so the
+agreement is not two programs that never saw it.
+
+*The entry as filed:*
+
 **In short:** `rm` has two options that only mean anything when a *mount point*
 is involved — a place in the directory tree where a second disk (or a second
 filesystem of any kind) is attached. `--one-file-system` says "delete this

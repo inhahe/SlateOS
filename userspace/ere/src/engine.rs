@@ -700,6 +700,15 @@ pub struct Syntax {
     /// glibc's `RE_HAT_LISTS_NOT_NEWLINE`, which only `REG_NEWLINE` sets among
     /// the dialects here; see [`Syntax::reg_newline`].
     pub hat_lists_not_newline: bool,
+    /// A `)` that closes no group is the character `)`. Without it, it is an
+    /// error: `Unmatched ) or \)`.
+    ///
+    /// glibc's `RE_UNMATCHED_RIGHT_PAREN_ORD`, which `RE_SYNTAX_POSIX_EXTENDED`
+    /// and every dialect here sets -- `grep -E 'a)'`, `find -regex`, awk and
+    /// bash's `=~` all match the text `a)` -- and which GNU sed clears in its
+    /// default mode: `sed -E 's/a)/X/'` is `Unmatched ) or \)`, measured, sed
+    /// 4.9. Under `POSIXLY_CORRECT` or `--posix` sed sets it again.
+    pub unmatched_right_paren_ord: bool,
 }
 
 impl Syntax {
@@ -715,6 +724,7 @@ impl Syntax {
         no_backrefs: false,
         dot_not_newline: false,
         hat_lists_not_newline: false,
+        unmatched_right_paren_ord: true,
     };
 
     /// `RE_SYNTAX_EGREP` as GNU `grep -E` applies it.
@@ -729,6 +739,7 @@ impl Syntax {
         no_backrefs: false,
         dot_not_newline: false,
         hat_lists_not_newline: false,
+        unmatched_right_paren_ord: true,
     };
 
     /// `RE_SYNTAX_GNU_AWK`, findutils' `gnu-awk` type: POSIX-extended with a
@@ -746,6 +757,7 @@ impl Syntax {
         no_backrefs: false,
         dot_not_newline: false,
         hat_lists_not_newline: false,
+        unmatched_right_paren_ord: true,
     };
 
     /// `RE_SYNTAX_AWK`, findutils' `awk` type: traditional awk's regexes --
@@ -762,6 +774,7 @@ impl Syntax {
         no_backrefs: true,
         dot_not_newline: false,
         hat_lists_not_newline: false,
+        unmatched_right_paren_ord: true,
     };
 
     /// `RE_SYNTAX_POSIX_AWK`: what `gawk --posix` compiles a regex with, and so
@@ -783,6 +796,7 @@ impl Syntax {
         no_backrefs: false,
         dot_not_newline: false,
         hat_lists_not_newline: false,
+        unmatched_right_paren_ord: true,
     };
 
     /// This syntax as POSIX `regcomp` adjusts it for `REG_NEWLINE`: neither `.`
@@ -863,6 +877,17 @@ pub enum Warning {
     /// not (the `a` is the atom the branch needed). An empty group *is* an
     /// atom, so `()*` is silent. All measured against grep 3.11.
     QuantifierAtStart(Quantifier),
+    /// A bracket expression that looks like a character class written without
+    /// its outer brackets: `[:alpha:]`, which is the set `:`, `a`, `l`, `p`,
+    /// `h`, and almost never what was meant.
+    ///
+    /// dfa.c's `colon_warning_state`: the bracket opens with `:` (after any
+    /// `^`), closes with `:`, has something else between, and holds no range.
+    /// Every GNU program that compiles through dfa.c refuses it -- grep with
+    /// `character class syntax is [[:space:]], not [:space:]`, status 2, and
+    /// sed the same, status 4, unless `POSIXLY_CORRECT` is set. Measured, grep
+    /// 3.11 and sed 4.9: `[:a]`, `[::]` and `[:a-z:]` are all let through.
+    ConfusingBracket,
 }
 
 /// One bound of a `{m,n}` interval as [`EParser::fetch_number`] read it.
@@ -1031,6 +1056,12 @@ impl EParser {
         while let Some(c) = self.peek() {
             if c == '|' || (c == ')' && self.depth > 0) {
                 break;
+            }
+            if c == ')' && !self.syntax.unmatched_right_paren_ord {
+                return Err(EreError::new(
+                    RegCode::UnmatchedRightParen,
+                    b"unmatched ) in regex".to_vec(),
+                ));
             }
             parts.push(self.parse_repeat()?);
         }
@@ -1522,6 +1553,11 @@ impl EParser {
         let mut ranges: Vec<(Ch, Ch)> = Vec::new();
         let mut posix: Vec<PosixClass> = Vec::new();
         let mut first = true;
+        // dfa.c's `colon_warning_state`, for [`Warning::ConfusingBracket`]: 1
+        // if the bracket opens with `:`, 2 while the member just read is `:`,
+        // 4 once any other member has been read, 8 once there has been a
+        // range. Exactly 7 is `[:name:]` without its outer brackets.
+        let mut colon: u8 = u8::from(self.peek_ascii() == Some(':'));
         loop {
             let Some(c) = self.peek() else {
                 return Err(EreError::new(
@@ -1540,6 +1576,7 @@ impl EParser {
                 break;
             }
             first = false;
+            colon &= !2;
 
             // POSIX named class `[:name:]`. A class name is ASCII letters, so
             // the scan below can never stop inside a multi-byte character.
@@ -1583,6 +1620,7 @@ impl EParser {
                 && self.chars.get(self.pos.saturating_add(1)).is_some()
             {
                 self.bump(1); // consume '-'
+                colon |= 8;
                 let hi = self.class_char()?;
                 if lo <= hi {
                     ranges.push((lo, hi));
@@ -1603,8 +1641,12 @@ impl EParser {
                 // Otherwise the range is empty and adds nothing; see
                 // [`Syntax::empty_ranges`].
             } else {
+                colon |= if lo.as_ascii() == Some(':') { 2 } else { 4 };
                 ranges.push((lo, lo));
             }
+        }
+        if colon == 7 {
+            self.warnings.push(Warning::ConfusingBracket);
         }
         if negated && self.syntax.hat_lists_not_newline {
             // Excluded from the negation by being a member of what it negates.
@@ -4230,6 +4272,49 @@ mod tests {
     /// halves are one behaviour and are tested as one. Every row is a measured
     /// `grep -E` run against grep 3.11: the pattern was fed one line on stdin
     /// and stderr compared verbatim.
+    /// dfa.c's `colon_warning_state`, row by row as grep 3.11 and sed 4.9
+    /// answer: a bracket that opens and closes with `:`, has something else
+    /// between, and holds no range.
+    #[test]
+    fn a_class_written_without_its_outer_brackets_is_reported() {
+        let confusing = |pat: &str| {
+            Regex::new_syntax_warn(pat.as_bytes(), false, Syntax::POSIX_EXTENDED)
+                .unwrap_or_else(|e| panic!("{pat:?} should compile: {e:?}"))
+                .1
+                .contains(&Warning::ConfusingBracket)
+        };
+        for pat in ["[:alpha:]", "[^:alpha:]", "a[:space:]b", "[:x:]"] {
+            assert!(confusing(pat), "{pat}");
+        }
+        for pat in [
+            "[[:alpha:]]",
+            "[:a]",
+            "[a:]",
+            "[::]",
+            "[:a-z:]",
+            "[:]",
+            ":alpha:",
+        ] {
+            assert!(!confusing(pat), "{pat}");
+        }
+    }
+
+    /// `RE_UNMATCHED_RIGHT_PAREN_ORD`: on in every dialect here, off in GNU
+    /// sed's default mode, where `sed -E 's/a)/X/'` is an error.
+    #[test]
+    fn an_unmatched_close_paren_is_a_character_unless_the_syntax_says_not() {
+        let lit = Regex::new_syntax(b"a)", false, Syntax::POSIX_EXTENDED).unwrap();
+        assert!(lit.is_match(b"a)").unwrap());
+        let strict = Syntax {
+            unmatched_right_paren_ord: false,
+            ..Syntax::POSIX_EXTENDED
+        };
+        let e = Regex::new_syntax(b"a)", false, strict).unwrap_err();
+        assert_eq!(e.message(), r"Unmatched ) or \)");
+        // A `)` that does close a group is unaffected.
+        assert!(Regex::new_syntax(b"(a)", false, strict).is_ok());
+    }
+
     #[test]
     fn egrep_reports_a_quantifier_with_nothing_before_it() {
         use Quantifier::{Interval, Plus, Question, Star};
@@ -4238,7 +4323,10 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{pat:?} should compile: {e:?}"))
                 .1
                 .into_iter()
-                .map(|Warning::QuantifierAtStart(q)| q)
+                .filter_map(|w| match w {
+                    Warning::QuantifierAtStart(q) => Some(q),
+                    Warning::ConfusingBracket => None,
+                })
                 .collect::<Vec<_>>()
         };
 

@@ -594,6 +594,22 @@ grep -E -e '*a' -e '*b' braces
 # BRE, and -F escapes it.
 grep -G '*a' braces
 grep -F '*a' braces
+# dfa.c refuses a bracket that is a class written without the class's own
+# brackets -- `[:alpha:]` is the set of `:`, `a`, `l`, `p` and `h` -- with
+# status 2, after any warning before it, in either dialect and whatever
+# POSIXLY_CORRECT says; -F never reaches dfa.c. `[:a]`, `[::]` and a range are
+# let through. Measured, grep 3.11; this grep searched for the set until
+# 2026-10-03.
+grep '[:alpha:]' mixed
+grep -E '[:alpha:]' mixed
+grep '[^:digit:]' mixed
+grep -e x -e '[:alpha:]' mixed
+grep -E -e '*a' -e '[:alpha:]' braces
+POSIXLY_CORRECT=1 grep '[:alpha:]' mixed
+grep -F '[:alpha:]' mixed
+grep '[:a]' mixed
+grep '[:a-z:]' mixed
+grep '[[:alpha:]]' mixed
 # RE_INVALID_INTERVAL_ORD: a `{` that does not open a well-formed interval is a
 # literal brace.
 grep -E 'a{b}' braces

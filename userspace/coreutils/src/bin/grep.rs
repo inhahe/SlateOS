@@ -1963,6 +1963,21 @@ fn quote_ere(literal: &[u8]) -> Vec<u8> {
     out
 }
 
+/// One thing to say about the patterns before searching.
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+enum Note {
+    /// A warning, which the search survives: `warning: * at start of
+    /// expression`.
+    Warning(String),
+    /// dfa.c's refusal of a pattern glibc accepted -- `character class syntax
+    /// is [[:space:]], not [:space:]` -- printed after whatever warnings came
+    /// before it, and then status 2 with nothing searched. GNU grep 3.11
+    /// refuses `[:alpha:]` so whether or not `POSIXLY_CORRECT` is set, and
+    /// under `-F`, which never reaches dfa.c, not at all. Measured. See
+    /// [`ere::Warning::ConfusingBracket`].
+    Fatal(&'static str),
+}
+
 /// A pattern that will not compile: which one, by its place in the list, and
 /// glibc's sentence for why -- which is all upstream prints of it, after the
 /// `FILE:LINE:` of a pattern that came from a `-f` file.
@@ -1988,7 +2003,7 @@ struct Refused {
 fn compile_patterns(
     patterns: &[Vec<u8>],
     opts: &Options,
-) -> Result<(Vec<Pat>, Vec<String>), Vec<Refused>> {
+) -> Result<(Vec<Pat>, Vec<Note>), Vec<Refused>> {
     let mut out = Vec::with_capacity(patterns.len());
     let mut warnings = Vec::new();
     let mut refused = Vec::new();
@@ -2015,8 +2030,10 @@ fn compile_patterns(
             // grep's own basic syntax, which is not sed's: a repetition may
             // repeat a repetition (`a**`), and a `\{` with nothing before it
             // is the character. See `ere::bre::BreSyntax`.
-            Syntax::Basic => bre::compile_syntax(p, opts.ignore_case, bre::BreSyntax::GREP)
-                .map(|re| (re, Vec::new())),
+            //
+            // A basic expression can still raise dfa.c's one fatal note, a
+            // bracket like `[:alpha:]`, so its warnings are kept too.
+            Syntax::Basic => bre::compile_syntax_warn(p, opts.ignore_case, bre::BreSyntax::GREP),
             // `-E` is *egrep* syntax, which is not the POSIX-extended syntax
             // the same engine gives `osh`, `find -regextype posix-extended`
             // and `awk`. The two differ on what happens to nonsense: GNU
@@ -2040,7 +2057,10 @@ fn compile_patterns(
                 // operator. Measured.
                 warnings.extend(warned.into_iter().map(|w| match w {
                     ere::Warning::QuantifierAtStart(q) => {
-                        format!("warning: {} at start of expression", q.token())
+                        Note::Warning(format!("warning: {} at start of expression", q.token()))
+                    }
+                    ere::Warning::ConfusingBracket => {
+                        Note::Fatal("character class syntax is [[:space:]], not [:space:]")
                     }
                 }));
                 out.push(Pat::Re(re));
@@ -2668,8 +2688,14 @@ fn run_main() -> ExitCode {
             // 1 on the search as usual. `-q` and `-s` do not suppress these
             // either — `-s` is about unreadable files and `-q` about the
             // selected lines, and neither is about the pattern. Measured.
-            for w in warnings {
-                diag!("grep: {w}");
+            for note in warnings {
+                match note {
+                    Note::Warning(w) => diag!("grep: {w}"),
+                    Note::Fatal(m) => {
+                        diag!("grep: {m}");
+                        return ExitCode::from(2);
+                    }
+                }
             }
             p
         }
@@ -3940,7 +3966,15 @@ mod tests {
     /// the `grep: ` prefix `main` adds.
     fn pat_warnings(patterns: &[&str], opts: &Options) -> Vec<String> {
         let owned: Vec<Vec<u8>> = patterns.iter().map(|p| p.as_bytes().to_vec()).collect();
-        compile_patterns(&owned, opts).unwrap().1
+        compile_patterns(&owned, opts)
+            .unwrap()
+            .1
+            .into_iter()
+            .map(|n| match n {
+                Note::Warning(w) => w,
+                Note::Fatal(m) => format!("FATAL {m}"),
+            })
+            .collect()
     }
 
     /// The `unwrap` is the assertion: a test pattern that exhausted the
@@ -6524,6 +6558,40 @@ mod tests {
                 "{syntax:?} has no operator to complain about"
             );
         }
+    }
+
+    /// dfa.c's one fatal note: a bracket like `[:alpha:]` is refused in both
+    /// regex syntaxes and not under `-F`, which never reaches dfa.c, and comes
+    /// after the warnings before it. Measured, grep 3.11: status 2.
+    #[test]
+    fn a_class_without_its_outer_brackets_is_refused() {
+        let fatal = "FATAL character class syntax is [[:space:]], not [:space:]";
+        for syntax in [Syntax::Basic, Syntax::Extended] {
+            let o = &Options {
+                syntax,
+                ..Options::default()
+            };
+            assert_eq!(pat_warnings(&["[:alpha:]"], o), vec![fatal], "{syntax:?}");
+            assert_eq!(
+                pat_warnings(&["x", "[^:digit:]"], o),
+                vec![fatal],
+                "{syntax:?}"
+            );
+            assert!(pat_warnings(&["[[:alpha:]]", "[:a]", "[:a-z:]"], o).is_empty());
+        }
+        let fixed = &Options {
+            syntax: Syntax::Fixed,
+            ..Options::default()
+        };
+        assert!(pat_warnings(&["[:alpha:]"], fixed).is_empty());
+        let e = &Options {
+            syntax: Syntax::Extended,
+            ..Options::default()
+        };
+        assert_eq!(
+            pat_warnings(&["*a", "[:alpha:]"], e),
+            vec!["warning: * at start of expression", fatal]
+        );
     }
 
     /// A warned-about pattern is compiled and run like any other.

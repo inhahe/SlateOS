@@ -179,10 +179,98 @@ pub fn regex(raw: &[u8]) -> Result<Vec<u8>, RecursiveC> {
     Ok(out)
 }
 
+/// [`regex`] as GNU sed runs it outside its default mode -- under
+/// `POSIXLY_CORRECT` or `--posix` -- where `normalize_text` keeps track of
+/// bracket expressions and leaves everything inside one alone, as POSIX says a
+/// bracket's backslash is an ordinary member. So `[\t]` is a backslash or a
+/// `t` there, where the default reads a tab: measured, sed 4.9,
+/// `POSIXLY_CORRECT=1 sed 's/[\t]/X/'` leaves `a<TAB>b` as it was.
+///
+/// The tracking is GNU's `bracket_state`, character for character: `[` opens
+/// a bracket, `[` followed by `:`, `.` or `=` opens one of the three
+/// constructs inside it, the matching `:]`, `.]` or `=]` closes that, and a
+/// `]` otherwise closes the bracket. It is cruder than the regex compiler's
+/// own reading -- a `]` straight after `[` closes it here -- and that is
+/// reproduced, not corrected, because it decides which escapes are converted.
+///
+/// # Errors
+/// [`RecursiveC`] for `\c\` outside a bracket.
+pub fn regex_posix(raw: &[u8]) -> Result<Vec<u8>, RecursiveC> {
+    /// Outside any bracket.
+    const OUTSIDE: u8 = 0;
+    /// Inside a bracket, outside `[:`, `[.` and `[=`.
+    const INSIDE: u8 = 1;
+    let mut out = Vec::with_capacity(raw.len());
+    // `OUTSIDE`, `INSIDE`, or the `:`, `.` or `=` of the construct open.
+    let mut state = OUTSIDE;
+    let mut i = 0usize;
+    while let Some(&c) = raw.get(i) {
+        let next = raw.get(i.saturating_add(1)).copied();
+        if c == b'\\'
+            && state == OUTSIDE
+            && let Some(n) = next
+        {
+            i = i.saturating_add(1);
+            if let Some(b) = control_byte(n) {
+                out.push(b);
+                i = i.saturating_add(1);
+                continue;
+            }
+            match named_byte(raw, i) {
+                Some(Named::Byte(b, after)) => {
+                    out.push(b);
+                    i = after;
+                }
+                Some(Named::Backslash(after)) => {
+                    out.push(b'\\');
+                    i = after;
+                }
+                Some(Named::Recursive) => return Err(RecursiveC),
+                None => {
+                    out.push(b'\\');
+                    out.push(n);
+                    i = i.saturating_add(1);
+                }
+            }
+            continue;
+        }
+        let prev = i.checked_sub(1).and_then(|j| raw.get(j)).copied();
+        let before_prev = i.checked_sub(2).and_then(|j| raw.get(j)).copied();
+        match c {
+            b'[' if state == OUTSIDE => state = INSIDE,
+            b':' | b'.' | b'=' if state == INSIDE && prev == Some(b'[') => state = c,
+            b']' if state == INSIDE => state = OUTSIDE,
+            b']' if state != OUTSIDE && before_prev != Some(state) && prev == Some(state) => {
+                state = INSIDE;
+            }
+            _ => {}
+        }
+        out.push(c);
+        i = i.saturating_add(1);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::bre;
+
+    /// Outside the default mode, nothing inside a bracket is converted --
+    /// and everything outside one still is. Measured, sed 4.9 under
+    /// `POSIXLY_CORRECT`.
+    #[test]
+    fn posix_mode_leaves_a_brackets_escapes_alone() {
+        assert_eq!(regex_posix(br"[\t]").unwrap(), br"[\t]");
+        assert_eq!(regex_posix(br"\t[\t]\t").unwrap(), b"\t[\\t]\t");
+        // A class inside the bracket does not close it at its own `]`.
+        assert_eq!(
+            regex_posix(br"[[:alpha:]\n]\n").unwrap(),
+            b"[[:alpha:]\\n]\n"
+        );
+        // The default mode converts both.
+        assert_eq!(regex(br"[\t]").unwrap(), b"[\t]");
+    }
 
     /// Every row measured against GNU sed 4.9.
     #[test]

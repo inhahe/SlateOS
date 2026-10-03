@@ -493,6 +493,60 @@ MUTATIONS = [
         '        if ev.key == Key::Escape {',
         ['a_chord_is_neither_a_viewer_key_nor_typing'],
     ),
+    (
+        'the root does not open by itself',
+        '        tree.set_expanded(&[NodeKey::Root], true, &nothing);\n',
+        '        let _ = &nothing;\n',
+        ['tree_build_simple_object', 'tree_expand_shows_children'],
+    ),
+    (
+        'a repeated key is one node',
+        '                        *nth = nth.saturating_add(1);\n',
+        '',
+        ['a_repeated_key_is_two_nodes'],
+    ),
+    (
+        'a match is not marked',
+        '        let label_tone = if self.matches.iter().any(|m| m.as_slice() == path) {',
+        '        let label_tone = if self.matches.is_empty() && !self.matches.is_empty() {',
+        ['a_search_match_is_marked'],
+    ),
+    (
+        'the next match is not revealed',
+        '        self.with_tree(|tree, source| tree.reveal(&path, source));',
+        '        self.with_tree(|tree, source| tree.refresh(source));',
+        ['the_next_match_is_opened_selected_and_scrolled_to'],
+    ),
+    (
+        'an edit starts from the text the tree shows',
+        '            .then(|| minify_json(value));',
+        '            .then(|| leaf_display(value).0);',
+        ['enter_and_enter_again_leaves_a_value_as_it_was'],
+    ),
+    (
+        'the value being edited is drawn nowhere',
+        '        self.render_tree_edit(cmds, doc);\n',
+        '',
+        ['the_value_being_edited_is_drawn_over_its_row'],
+    ),
+    (
+        'the row under the pointer is not followed',
+        '        self.tree_hover = match event.kind {\n            MouseEventKind::Leave => None,\n            _ => hover,\n        };',
+        '        let _ = hover;',
+        ['a_move_onto_another_row_redraws_and_one_within_it_does_not'],
+    ),
+    (
+        'a double-click on a value edits nothing',
+        '            if let TreeEvent::Activated(path) = happened {\n                self.activate_node(&path);\n            }',
+        '            let _ = happened;',
+        ['a_click_selects_and_a_double_click_opens_or_edits'],
+    ),
+    (
+        'the tree is drawn under the find bar',
+        '            top += SEARCH_BAR_HEIGHT;\n',
+        '',
+        ['the_find_bar_takes_its_own_clicks'],
+    ),
 ]
 
 if __name__ == "__main__":

@@ -85,9 +85,9 @@ decode on threads, as libvpx's do. Two things from it:
 - **The rest of the gap to libvpx's SIMD is instructions SSE2 lacks**
   (SSSE3's `pmaddubsw` multiplies bytes in pairs; AVX2 doubles the width).
   Using them means choosing them at run time, which in Rust needs `unsafe`
-  -- in a crate that parses hostile input and forbids it today. Not taken
-  up while threads still have more to give; if it is, it is a question for
-  the operator, not a change to make quietly.
+  -- in a crate that parses hostile input and forbids it today. Put to the
+  operator as `open-questions/F-Q5.md` once threads had given what they
+  could, rather than changed quietly.
 
 **Alternatives.**
 

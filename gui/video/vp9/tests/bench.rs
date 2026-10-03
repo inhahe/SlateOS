@@ -10,7 +10,7 @@
 //! -- printing frames per second for four of libvpx's vectors, on one thread
 //! and on as many as the machine has cores: a 1080p film of 217 frames in
 //! one tile column, which only one thread can decode; a 1080p one in 4x4
-//! tiles and one in eight tile columns, which threads share; and a CIF one
+//! tiles and a 4K one in eight tile columns, which threads share; and a CIF one
 //! at the finest quantiser, where coefficient decoding dominates. A short
 //! vector is decoded over and over, the decoder made fresh each pass as a
 //! player would make it, until a pass of passes has taken half a second;

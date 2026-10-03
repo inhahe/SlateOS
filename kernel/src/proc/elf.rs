@@ -9764,12 +9764,13 @@ pub fn build_munmap_abi_test_elf() -> alloc::vec::Vec<u8> {
 /// in-limit length from the same unmapped pointer and must get
 /// `InvalidAddress`: the gate refuses sizes, not everything.
 ///
-/// The channel probes send on a channel the program makes first: a channel
-/// call refuses a handle its caller does not hold before anything else
-/// (`require_ipc_handle`), so a size gate is reached only through a real one.
-/// The UDP probes' handle is bogus on purpose: their answers are decided
-/// before the handle is looked up, which is itself part of what is pinned.
-/// `0x40`: the channel could not be made.
+/// The probes send on objects the program makes first: a channel call refuses
+/// a handle its caller does not hold before anything else
+/// (`require_ipc_handle`), and so, since 2026-10-02, does a native socket call
+/// (`net::native_socket`, which made socket handles their holders'), so a size
+/// gate is reached only through a real handle. The gate still comes before
+/// any copy of the payload, which is what is pinned. `0x40`: the channel
+/// could not be made; `0x49`: the UDP socket could not be bound.
 ///
 /// | Code | Call | Length | Expect |
 /// |---|---|---|---|
@@ -9777,9 +9778,9 @@ pub fn build_munmap_abi_test_elf() -> alloc::vec::Vec<u8> {
 /// | `0x42` | `channel_send_timeout` (208) | 64 KiB + 1 | `-302` |
 /// | `0x43` | `channel_send_blocking` (209) | 64 KiB + 1 | `-302` |
 /// | `0x44` | `channel_send_caps` (206), no caps | 64 KiB + 1 | `-302` |
-/// | `0x45` | `udp_send` (811) | 65,528 (one over) | `-3` InvalidArgument |
+/// | `0x45` | `udp_send` (811), own socket | 65,528 (one over) | `-3` InvalidArgument |
 /// | `0x46` | `channel_send` | 16 | `-101` InvalidAddress (control) |
-/// | `0x47` | `udp_send` | 16 | `-101` (control) |
+/// | `0x47` | `udp_send`, own socket | 16 | `-101` (control) |
 /// | `0x48` | `channel_send` | exactly 64 KiB | `-101`: the limit is inclusive |
 #[must_use]
 #[allow(
@@ -9798,9 +9799,12 @@ pub fn build_sizegate_abi_test_elf() -> alloc::vec::Vec<u8> {
     const EINVAL: i32 = -3;
     const EFAULT: i32 = -101;
     const UNMAPPED: u64 = 0x0000_0030_0000_0000;
-    const BOGUS_HANDLE: u64 = 0xFFFF_FFF0;
     /// Stands for the channel endpoint the program made (rbx), in `probe`.
     const OWN_CHANNEL: u64 = u64::MAX;
+    /// Stands for the UDP socket the program bound (r12), in `probe`.
+    const OWN_UDP: u64 = u64::MAX - 1;
+    /// The port that socket is bound to: one no other self-test uses.
+    const UDP_PORT: u32 = 47_900;
     const MAX_MESSAGE: u64 = 64 * 1024;
     const MAX_UDP_PAYLOAD: u64 = 65_535 - 8;
 
@@ -9823,9 +9827,26 @@ pub fn build_sizegate_abi_test_elf() -> alloc::vec::Vec<u8> {
     code.push(0xCC); // int3
     code.extend_from_slice(&[0x48, 0x89, 0xC3]); // mov rbx, rax
 
+    // A UDP socket of the program's own, its handle kept in r12, for the same
+    // reason: `udp_send` refuses a handle its caller does not hold before it
+    // looks at the length. Until rq46 these probes used a bogus handle, and
+    // 0x45 got InvalidHandle (rq45).
+    code.push(0xBF); // mov edi, UDP_PORT
+    code.extend_from_slice(&UDP_PORT.to_le_bytes());
+    code.extend_from_slice(&[0xB8, 0x2A, 0x03, 0x00, 0x00]); // mov eax, 810 (SYS_UDP_BIND)
+    code.extend_from_slice(&[0x0F, 0x05]); // syscall
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
+    code.extend_from_slice(&[0x79, 0x0D]); // jns +13 -- over the exit block
+    code.push(0xBF); // mov edi, 0x49
+    code.extend_from_slice(&0x49u32.to_le_bytes());
+    code.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]); // mov eax, SYS_EXIT
+    code.extend_from_slice(&[0x0F, 0x05]); // syscall
+    code.push(0xCC); // int3
+    code.extend_from_slice(&[0x49, 0x89, 0xC4]); // mov r12, rax
+
     /// `syscall(nr, rdi, rsi, rdx, r10, r8)`; if `rax != expect`, `exit(fail)`.
     /// `rdi` is `regs[0]`, or the channel endpoint in rbx when `regs[0]` is
-    /// `OWN_CHANNEL`.
+    /// `OWN_CHANNEL`, or the UDP socket in r12 when it is `OWN_UDP`.
     fn probe(code: &mut alloc::vec::Vec<u8>, nr: u32, regs: [u64; 5], expect: i32, fail: u32) {
         // movabs rdi / rsi / rdx / r10 / r8, imm64
         for (prefix, value) in [
@@ -9837,6 +9858,10 @@ pub fn build_sizegate_abi_test_elf() -> alloc::vec::Vec<u8> {
         ] {
             if prefix == [0x48, 0xBF] && value == OWN_CHANNEL {
                 code.extend_from_slice(&[0x48, 0x89, 0xDF]); // mov rdi, rbx
+                continue;
+            }
+            if prefix == [0x48, 0xBF] && value == OWN_UDP {
+                code.extend_from_slice(&[0x4C, 0x89, 0xE7]); // mov rdi, r12
                 continue;
             }
             code.extend_from_slice(&prefix);
@@ -9887,7 +9912,7 @@ pub fn build_sizegate_abi_test_elf() -> alloc::vec::Vec<u8> {
     probe(
         &mut code,
         811,
-        [BOGUS_HANDLE, 0x7F00_0001, 1, UNMAPPED, MAX_UDP_PAYLOAD + 1],
+        [OWN_UDP, 0x7F00_0001, 1, UNMAPPED, MAX_UDP_PAYLOAD + 1],
         EINVAL,
         0x45,
     );
@@ -9901,7 +9926,7 @@ pub fn build_sizegate_abi_test_elf() -> alloc::vec::Vec<u8> {
     probe(
         &mut code,
         811,
-        [BOGUS_HANDLE, 0x7F00_0001, 1, UNMAPPED, 16],
+        [OWN_UDP, 0x7F00_0001, 1, UNMAPPED, 16],
         EFAULT,
         0x47,
     );

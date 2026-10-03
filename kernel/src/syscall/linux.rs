@@ -39604,6 +39604,12 @@ fn unix_bind(entry: &FdEntry, addr_ptr: u64, addr_len: i32) -> SyscallResult {
                 Ok(p) => p,
                 Err(r) => return r,
             };
+            // Binding to a path makes a filesystem node, which needs the same
+            // authority as `mknod(S_IFSOCK)` and `unlink` of it: until
+            // 2026-10-03 a process holding only file read could create one.
+            if let Err(r) = require_fs_write() {
+                return r;
+            }
             // Linux makes the node `S_IFSOCK | 0777` less the umask.
             match unix_socket::bind_path(h, &path, given, linux_create_mode(0o777)) {
                 Ok(()) => SyscallResult::ok(0),

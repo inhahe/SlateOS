@@ -8783,6 +8783,9 @@ pub fn sys_unix_bind(args: &super::dispatch::SyscallArgs) -> super::dispatch::Sy
         match unix_name_arg(args.arg1, args.arg2, args.arg4)? {
             UnixNameArg::Abstract(name) => crate::ipc::unix_socket::bind_abstract(h, &name),
             UnixNameArg::Path(path) => {
+                // A node in the filesystem, so file write authority, as
+                // making or removing any other node needs.
+                require_cap_type(ResourceType::File, crate::cap::Rights::WRITE)?;
                 let mode = u16::try_from(args.arg3 & 0o7777).unwrap_or(0);
                 let reported = path.as_bytes().to_vec();
                 crate::ipc::unix_socket::bind_path(h, &path, reported, mode)

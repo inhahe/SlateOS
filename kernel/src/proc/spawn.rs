@@ -22874,11 +22874,13 @@ pub fn self_test_linux_unix_sockets() -> KernelResult<()> {
     let exe_elf = elf::build_linux_unix_socket_test_elf();
     let argv: &[&[u8]] = &[b"spawn-test-unix-sockets"];
     let envp: &[&[u8]] = &[b"PATH=/bin"];
-    // A File READ capability, for the one plain file the program opens: `/`,
-    // the descriptor that is not a socket. Spawned with none, its open was
-    // refused and the run ended at 0xFA without reaching the ENOTSOCK probes it
-    // was there for (rq42, 2026-10-02).
-    let caps = [(ResourceType::File, 0u64, Rights::READ)];
+    // File READ, for the one plain file the program opens: `/`, the
+    // descriptor that is not a socket. Spawned with none, its open was refused
+    // and the run ended at 0xFA without reaching the ENOTSOCK probes it was
+    // there for (rq42, 2026-10-02). And File WRITE, because the by-path probes
+    // make a node in /tmp (`bind`) and remove it (`unlink`): with READ alone the
+    // unlink was refused at 0xE7 (rq45), and since 2026-10-03 the bind is too.
+    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
     let options = SpawnOptions {
         name: "spawn-test-unix-sockets",
         parent: 0,
@@ -26044,8 +26046,9 @@ pub fn self_test_sizegate_abi() -> KernelResult<()> {
     // `udp_send` checks for a Socket capability before anything else, so
     // without one probes 0x45 and 0x47 measure that check and never reach the
     // gate. rq13, this rung's first boot, failed at 0x45 for exactly that
-    // reason. With the capability, every answer below is decided before the
-    // (bogus) handle is looked up, which is what the probes pin.
+    // reason. With the capability, the probe binds a socket of its own and
+    // every answer below is decided before a byte of payload is read, which
+    // is what the probes pin.
     let caps = [(ResourceType::Socket, 0u64, Rights::WRITE)];
     let options = SpawnOptions {
         name: "spawn-test-sizegate",

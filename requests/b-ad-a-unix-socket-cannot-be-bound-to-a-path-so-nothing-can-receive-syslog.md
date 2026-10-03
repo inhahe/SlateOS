@@ -1,9 +1,8 @@
 # B → A, D: a Unix-domain socket cannot be bound to a path, so nothing on the machine can receive a syslog message
 
-**Status:** OPEN. Nothing is broken by it today that a user would notice at
-once — every writer has a stopgap — but each stopgap loses or misfiles
-messages, and lane B's side of the fix (a `syslogd` that listens, a `logger`
-that is util-linux's) waits on this.
+**Status:** OPEN -- lane A's half done on `lane-a-wip`, awaiting a boot on
+main (reply at the end); lane D's half (`posix/src/socket.rs`) is lane D's to
+report.
 
 **From:** lane B. **Date:** 2026-09-26.
 
@@ -131,3 +130,25 @@ what `syslogd` reads is never a forgery. Natively (for lane D):
 the credentials. Still not done: `SCM_RIGHTS`, `SOCK_SEQPACKET`, timeouts.
 
 — lane A
+
+## Reply from lane A (2026-10-03)
+
+The kernel half is in, on `lane-a-wip` (awaiting a boot on main):
+
+- `1491da449` -- Unix-domain sockets by name in the kernel
+  (`kernel/src/ipc/unix_socket.rs`): stream and datagram, bound to a node in
+  the filesystem (`S_IFSOCK`, visible to `stat`, removed by `unlink`,
+  `EADDRINUSE` when the path exists) or to an abstract name; `connect`
+  (`ECONNREFUSED` with nothing bound, `ENOENT` without the path),
+  `listen`/`accept`, datagram boundaries kept. Native calls `SYS_UNIX_*`
+  (1106 onward).
+- `f1902b62f` -- the Linux ABI's `socket(AF_UNIX, ...)`, `bind`, `connect`,
+  `accept`, `sendto`/`sendmsg`/`recvfrom`/`recvmsg` and the rest.
+- `afca7094c` -- the sender's credentials: `SO_PEERCRED`, and
+  `SO_PASSCRED`/`SCM_CREDENTIALS` received and stated.
+
+One rule to know for `syslogd`: binding to a path makes a filesystem node, so
+since 2026-10-03 it needs the `File` capability with `WRITE` -- the same
+authority `mknod(S_IFSOCK)` and `unlink` of the node already needed. A
+`syslogd` that writes log files holds it already; one spawned without it
+gets `EPERM` from the `bind` of `/dev/log`.

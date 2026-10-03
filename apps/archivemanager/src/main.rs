@@ -1,8 +1,8 @@
 //! Slate OS Archive Manager
 //!
 //! Graphical archive/compressed file manager supporting multiple formats:
-//! - ZIP, TAR, TAR.GZ and TAR.BZ2, read and written; TAR.XZ and 7z
-//!   recognised -- by name or by their bytes -- and refused by name
+//! - ZIP, TAR, TAR.GZ and TAR.BZ2, read and written; TAR.XZ read; 7z
+//!   recognised -- by name or by its bytes -- and refused by name
 //! - Browse archive contents in a tree view
 //! - Extract all, extract selected, extract to folder
 //! - Create a new, empty archive, then add files to it
@@ -34,11 +34,12 @@
 //!
 //! Uses the guitk library for UI rendering.
 //!
-//! Reading and writing are real for ZIP, TAR, TAR.GZ and TAR.BZ2, and live
-//! in [`backend`]; TAR.XZ and 7z are modelled but not parsed, and say so
-//! rather than pretending. Their decoders are being ported out of the kernel,
-//! where a module of a binary crate cannot be reached by any program, as
-//! bzip2's was (`requests/e-a-bzip2-xz-and-7z-are-trapped-in-the-kernel-binary.md`).
+//! Reading and writing are real for ZIP, TAR, TAR.GZ and TAR.BZ2, and
+//! reading for TAR.XZ, and live in [`backend`]; 7z is modelled but not
+//! parsed, and says so rather than pretending. Its reader is being ported out
+//! of the kernel, where a module of a binary crate cannot be reached by any
+//! program, as bzip2's and xz's were
+//! (`requests/e-a-bzip2-xz-and-7z-are-trapped-in-the-kernel-binary.md`).
 
 mod backend;
 
@@ -104,17 +105,20 @@ impl ArchiveFormat {
         }
     }
 
-    /// Whether this build can read an archive in this format. TAR.XZ and 7z
-    /// are recognised and refused by name: their decoders are still in the
-    /// kernel, where no program can reach them.
+    /// Whether this build can read an archive in this format. 7z is
+    /// recognised and refused by name: its reader is still in the kernel,
+    /// where no program can reach it.
     pub fn readable(self) -> bool {
-        matches!(self, Self::Zip | Self::Tar | Self::TarGz | Self::TarBz2)
+        matches!(
+            self,
+            Self::Zip | Self::Tar | Self::TarGz | Self::TarBz2 | Self::TarXz
+        )
     }
 
-    /// Whether this build can write an archive in this format -- today, the
-    /// same ones it reads.
+    /// Whether this build can write an archive in this format: the ones it
+    /// reads, less TAR.XZ until the `xz` crate has its compressor.
     pub fn writable(self) -> bool {
-        self.readable()
+        matches!(self, Self::Zip | Self::Tar | Self::TarGz | Self::TarBz2)
     }
 
     /// Whether this is a TAR inside one compressed stream: decompressed
@@ -2932,8 +2936,8 @@ impl AppState {
         let start = self.last_directory.clone();
         let mut dialog = match purpose {
             // Every name the program recognises, the ones it refuses among
-            // them: a `.tar.xz` hidden from the list reads as a file that is
-            // not there, while one chosen is told why it cannot be opened.
+            // them: a `.7z` hidden from the list reads as a file that is not
+            // there, while one chosen is told why it cannot be opened.
             DialogPurpose::OpenArchive => FileDialog::open()
                 .with_filter("Archives", &ArchiveFormat::patterns_where(|_| true))
                 .with_initial_path(&start),

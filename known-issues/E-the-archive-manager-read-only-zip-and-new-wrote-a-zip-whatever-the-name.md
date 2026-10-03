@@ -1,5 +1,5 @@
 ### [E] The archive manager read only ZIP, and "New" wrote a ZIP whatever the name -- 2026-09-26
-**Status:** FIXED for TAR and TAR.GZ (lane E, 2026-09-26), and for TAR.BZ2 (2026-10-03: read and written through the new `bzip2` crate, a port of libbzip2 1.0.8). OPEN for TAR.XZ and 7z -- refused by name, and by their bytes when the name says TAR. Lane A agreed lane E would port the codecs out of the kernel (`requests/e-a-bzip2-xz-and-7z-are-trapped-in-the-kernel-binary.md`); `xz` and `sevenz` follow `bzip2`.
+**Status:** FIXED for TAR and TAR.GZ (lane E, 2026-09-26), and for TAR.BZ2 (2026-10-03: read and written through the new `bzip2` crate, a port of libbzip2 1.0.8). TAR.XZ is read (2026-10-03, through the new `xz` crate, a port of liblzma 5.2.5's decoder) but not yet written: New and Save refuse it by name until `xz` has liblzma's encoder, lane E's next task. OPEN for 7z -- refused by name, and by its bytes when the name says TAR. Lane A agreed lane E would port the codecs out of the kernel (`requests/e-a-bzip2-xz-and-7z-are-trapped-in-the-kernel-binary.md`); `sevenz` follows `bzip2` and `xz`.
 
 **Also fixed 2026-09-26: the Open dialog showed only ZIP files.** Its filter
 was `*.zip` alone, written when ZIP was all the program read, so once TAR and

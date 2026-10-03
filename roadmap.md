@@ -3136,6 +3136,25 @@ word; text inside them that says "lane C" is history.
   a command says it was not sent. The window says "plain text" while
   connected (see E-Q2). Tested end to end against a loopback server.
 
+- `[-]` `[E]` **The archive codecs leave the kernel binary** — 2026-10-03,
+  lane A's answer to `requests/e-a-bzip2-xz-and-7z-are-trapped-in-the-kernel-binary.md`:
+  lane E ports the codecs into root crates any program can link, and lane A
+  switches the kernel's `fs/` copies to shims. Each is a port of the
+  reference implementation, held to that implementation's own output and
+  verdicts by its tests. **Done:** `bzip2/` (libbzip2 1.0.8, compressor
+  byte-identical, decoder verdict-identical on 2,943 corruptions), and the
+  archive manager reads and writes TAR.BZ2 through it; `xz/` decoders
+  (liblzma 5.2.5: `.xz` with every check and filter, `.lzma`, raw
+  LZMA/LZMA2), and the archive manager reads TAR.XZ through it. Both handed
+  to lane A (`requests/e-a-the-bzip2-crate-is-ready-for-the-kernel-shim.md`,
+  `requests/e-a-the-xz-crate-is-ready-and-xz-compress-loses-files.md` --
+  the second reports that the kernel's `xz_compress` writes unreadable
+  streams past 64 KiB compressed). **Next:** liblzma's encoder (match
+  finders, the fast and normal optimizers, presets 0-9 and extreme),
+  byte-identical to `xz`, then TAR.XZ written; `sevenz/` (7z: LZMA, LZMA2,
+  BZip2, Deflate, BCJ, Delta; names kept as UTF-16 units), then the
+  archive manager opens 7z.
+
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;
 bug-hunt sweeps over it are standing work between features (this was lane
 C's standing note before the split). **Baseline, 2026-09-24:** every `apps/*`

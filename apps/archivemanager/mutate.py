@@ -7,8 +7,10 @@ program is not testing the program.
 The table covers what changed on 2026-09-26: one table of names per format
 (`ArchiveFormat::patterns`), read by both the name detection and the file
 dialogs -- whose Open filter said `*.zip` alone after TAR and TAR.GZ could be
-opened -- and the TAR.XZ, TAR.BZ2 and 7z refusals, by name and by the bytes
-when the name says TAR.
+opened -- and the 7z refusal, by name and by the bytes when the name says TAR.
+Since then: the compressed TARs, TAR.BZ2 (2026-10-03, read and written) and
+TAR.XZ (read; written once the `xz` crate has a compressor), and the cap
+each is decompressed under.
 
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
@@ -32,6 +34,19 @@ DIALOGS = "the_dialogs_list_what_the_program_recognises_and_writes"
 # backend.rs
 REFUSED = "opening_something_that_is_not_an_archive_says_which_thing_it_is_not"
 GZIPPED = "a_gzipped_tar_is_inflated_and_listed_whatever_it_is_called"
+TXZ_READ = "a_tar_xz_that_xz_wrote_is_listed_and_extracted"
+BUDGET = "a_compressed_tar_past_the_budget_is_too_big_not_damaged"
+
+
+def cap_arm(variant, error, verb):
+    """The `Display` arm that names a decoder's cap as this program's."""
+    return (
+        f"            Self::{variant}({error}::Error::OutputTooLarge) => write!(\n"
+        "                f,\n"
+        f'                "it {verb} to more than {{}}, the most this program reads",\n'
+        "                guitk::bytes::iec(MAX_ARCHIVE_BYTES)\n"
+        "            ),\n"
+    )
 
 MAIN = [
     (
@@ -53,10 +68,28 @@ MAIN = [
         [CASE, OWN],
     ),
     (
-        "TAR.XZ is taken for readable",
+        "7z is taken for readable",
+        "            Self::Zip | Self::Tar | Self::TarGz | Self::TarBz2 | Self::TarXz\n",
+        "            Self::Zip | Self::Tar | Self::TarGz | Self::TarBz2 | Self::TarXz | Self::SevenZip\n",
+        [REFUSED],
+    ),
+    (
+        "TAR.XZ is not readable",
+        "            Self::Zip | Self::Tar | Self::TarGz | Self::TarBz2 | Self::TarXz\n",
+        "            Self::Zip | Self::Tar | Self::TarGz | Self::TarBz2\n",
+        [TXZ_READ],
+    ),
+    (
+        "TAR.XZ is taken for writable",
+        "        matches!(self, Self::Zip | Self::Tar | Self::TarGz | Self::TarBz2)",
+        "        matches!(self, Self::Zip | Self::Tar | Self::TarGz | Self::TarBz2 | Self::TarXz)",
+        [DIALOGS],
+    ),
+    (
+        "TAR.BZ2 is not writable",
+        "        matches!(self, Self::Zip | Self::Tar | Self::TarGz | Self::TarBz2)",
         "        matches!(self, Self::Zip | Self::Tar | Self::TarGz)",
-        "        matches!(self, Self::Zip | Self::Tar | Self::TarGz | Self::TarXz)",
-        [DIALOGS, REFUSED],
+        [DIALOGS],
     ),
     (
         "the filter keeps every format",
@@ -150,8 +183,8 @@ MAIN = [
     ),
     (
         'TAR.BZ2 is not readable',
-        '        matches!(self, Self::Zip | Self::Tar | Self::TarGz | Self::TarBz2)',
-        '        matches!(self, Self::Zip | Self::Tar | Self::TarGz)',
+        "            Self::Zip | Self::Tar | Self::TarGz | Self::TarBz2 | Self::TarXz\n",
+        "            Self::Zip | Self::Tar | Self::TarGz | Self::TarXz\n",
         ['a_bzipped_tar_is_decompressed_and_listed_whatever_it_is_called', 'a_tar_and_a_compressed_tar_are_rewritten_in_their_own_format'],
     ),
 ]
@@ -163,12 +196,11 @@ BACKEND = [
         "",
         [REFUSED],
     ),
-    (
-        "a wrapper this build cannot undo is parsed as a TAR",
-        "    if let Some(format) = wrapped.filter(|f| !f.readable()) {",
-        "    if let Some(format) = wrapped.filter(|_| false) {",
-        [REFUSED],
-    ),
+    # No row for `open`'s early refusal of a 7z under a TAR's name: since
+    # TAR.XZ became readable, `decompress_tar` refuses 7z in the same words,
+    # so removing the early check changes nothing a test can see -- it only
+    # stops the file being read before it is refused (an equivalent mutant;
+    # backend.rs says why the check stays).
     (
         "gzip is not recognised by its bytes",
         "        [0x1F, 0x8B, ..] => Some(ArchiveFormat::TarGz),",
@@ -216,6 +248,54 @@ BACKEND = [
         '        Some(format @ (ArchiveFormat::TarGz | ArchiveFormat::TarBz2)) => {\n            compress_tar(format, &empty_tar)?',
         '        Some(format @ (ArchiveFormat::TarGz | ArchiveFormat::TarBz2)) => {\n            return Err(SaveError::Unwritable { format });',
         ['a_new_archive_is_written_in_the_format_its_name_says'],
+    ),
+    (
+        'a .tar.xz is not decompressed',
+        '        ArchiveFormat::TarXz => xz::decompress_limited(compressed, limit).map_err(ArchiveError::Xz),',
+        '        ArchiveFormat::TarXz => Err(ArchiveError::NotYetReadable { format: ArchiveFormat::TarXz }),',
+        [TXZ_READ, REFUSED, BUDGET],
+    ),
+    (
+        "an xz member's method says Stored",
+        '        tararchive::Kind::File if format == ArchiveFormat::TarXz => String::from("XZ"),\n',
+        '',
+        [TXZ_READ],
+    ),
+    (
+        "xz decompresses past the cap it is given",
+        '        ArchiveFormat::TarXz => xz::decompress_limited(compressed, limit).map_err(ArchiveError::Xz),',
+        '        ArchiveFormat::TarXz => xz::decompress(compressed).map_err(ArchiveError::Xz),',
+        [BUDGET],
+    ),
+    (
+        "bzip2 decompresses past the cap it is given",
+        '            bzip2::decompress_limited(compressed, limit).map_err(ArchiveError::Bzip2)',
+        '            bzip2::decompress(compressed).map_err(ArchiveError::Bzip2)',
+        [BUDGET],
+    ),
+    (
+        "gzip inflates past the cap it is given",
+        '            deflate::gunzip_limited(compressed, limit).map_err(ArchiveError::Gzip)',
+        '            deflate::gunzip_limited(compressed, usize::MAX).map_err(ArchiveError::Gzip)',
+        [BUDGET],
+    ),
+    (
+        "xz's cap is told as damage",
+        cap_arm("Xz", "xz", "decompresses"),
+        "",
+        [BUDGET],
+    ),
+    (
+        "bzip2's cap is told as damage",
+        cap_arm("Bzip2", "bzip2", "decompresses"),
+        "",
+        [BUDGET],
+    ),
+    (
+        "gzip's cap is told as damage",
+        cap_arm("Gzip", "deflate", "inflates"),
+        "",
+        [BUDGET],
     ),
 ]
 

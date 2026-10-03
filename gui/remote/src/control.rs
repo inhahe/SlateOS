@@ -136,7 +136,12 @@ pub const RESPONSE_MAGIC: [u8; 4] = *b"CRSP";
 /// **23** — [`RequestBody::SleepDisplays`] (tag `0x2F`), answered when the
 /// displays wake, and [`RequestBody::WakeDisplays`] (tag `0x30`).
 /// Incompatible on 2's terms.
-pub const CONTROL_VERSION: u8 = 23;
+/// **24** — the window picker: [`RequestBody::PickWindow`] (tag `0x31`),
+/// answered once the user has clicked a window or given up, with
+/// [`ResponseBody::Picked`] (response tag `0x08`); and
+/// [`RequestBody::CancelPick`] (tag `0x32`). Incompatible on 2's terms in
+/// both directions.
+pub const CONTROL_VERSION: u8 = 24;
 
 /// Control-frame header: magic + version + flags + message count.
 const CONTROL_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -1327,6 +1332,30 @@ pub enum RequestBody {
     /// [`SleepDisplays`](Self::SleepDisplays). Answered with
     /// [`ResponseBody::Ok`], asleep or not. A shell's request: an alarm, a call.
     WakeDisplays,
+    /// Let the user point at a window. The pointer becomes a crosshair, drawn
+    /// by the compositor so that no program can fake the mode, and the next
+    /// click is taken by the pick instead of reaching the window it lands
+    /// on. The answer, [`ResponseBody::Picked`], names that window: its title,
+    /// its program and the process that opened it -- nothing of its contents.
+    ///
+    /// Answered when the user has clicked or given up, which may be long
+    /// after, so -- as for [`SleepDisplays`](Self::SleepDisplays) -- send it
+    /// with [`Connection::send`](crate::client::Connection::send) and collect
+    /// the answer with [`take_reply`](crate::client::Connection::take_reply).
+    /// Escape, any other mouse button, or [`CancelPick`](Self::CancelPick)
+    /// gives up, answered `Picked(None)`; so does a click where there is no
+    /// window.
+    ///
+    /// Allowed only while one of the asker's windows has the keyboard focus
+    /// -- the window whose button the user just pressed to start the pick --
+    /// so a program in the background cannot turn the user's next click into
+    /// an answer for itself. One pick at a time on the whole desktop: asking
+    /// while another program's pick is open is refused, and asking again
+    /// while one's own is open answers the earlier request `Picked(None)`.
+    PickWindow,
+    /// Give up this connection's [`PickWindow`](Self::PickWindow): its answer
+    /// is then `Picked(None)`. Answered `Ok` whether or not a pick was open.
+    CancelPick,
     /// Recover the display from whatever has gone wrong with it: the same full
     /// redraw as the compositor's own Ctrl+Super+R.
     ///
@@ -1600,6 +1629,8 @@ enum RequestTag {
     GetClipboard = 0x2E,
     SleepDisplays = 0x2F,
     WakeDisplays = 0x30,
+    PickWindow = 0x31,
+    CancelPick = 0x32,
 }
 
 impl RequestTag {
@@ -1652,6 +1683,8 @@ impl RequestTag {
             0x2E => Self::GetClipboard,
             0x2F => Self::SleepDisplays,
             0x30 => Self::WakeDisplays,
+            0x31 => Self::PickWindow,
+            0x32 => Self::CancelPick,
             0x20 => Self::UngrabModifierChord,
             _ => return None,
         })
@@ -1725,6 +1758,25 @@ pub enum ResponseBody {
     /// `None` when nothing has been copied this session. An empty copy is
     /// `Some("")`: something was copied, and it was nothing.
     Clipboard(Option<String>),
+    /// Answer to [`RequestBody::PickWindow`]: the window the user clicked, or
+    /// `None` when they gave up or clicked where there is no window.
+    Picked(Option<PickedWindow>),
+}
+
+/// The window a user picked ([`RequestBody::PickWindow`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PickedWindow {
+    /// The compositor's id for it.
+    pub window: u64,
+    /// Its title, as its program last set it.
+    pub title: String,
+    /// Which program it belongs to, as the program declares it; empty when it
+    /// declared nothing.
+    pub app_id: String,
+    /// The process that opened it, as the kernel names it: `None` when that
+    /// program reached the compositor over TCP, which cannot say. Never the
+    /// per-connection number the window list carries as its `pid`.
+    pub pid: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1737,6 +1789,7 @@ enum ResponseTag {
     WorkArea = 0x05,
     Modifiers = 0x06,
     Clipboard = 0x07,
+    Picked = 0x08,
 }
 
 impl ResponseTag {
@@ -1749,6 +1802,7 @@ impl ResponseTag {
             0x05 => Self::WorkArea,
             0x06 => Self::Modifiers,
             0x07 => Self::Clipboard,
+            0x08 => Self::Picked,
             _ => return None,
         })
     }
@@ -2000,6 +2054,8 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
         RequestBody::GetClipboard => out.push(RequestTag::GetClipboard as u8),
         RequestBody::SleepDisplays => out.push(RequestTag::SleepDisplays as u8),
         RequestBody::WakeDisplays => out.push(RequestTag::WakeDisplays as u8),
+        RequestBody::PickWindow => out.push(RequestTag::PickWindow as u8),
+        RequestBody::CancelPick => out.push(RequestTag::CancelPick as u8),
         RequestBody::RecoverDisplay => out.push(RequestTag::RecoverDisplay as u8),
         RequestBody::ShellControl { window, action } => {
             out.push(RequestTag::ShellControl as u8);
@@ -2150,6 +2206,25 @@ fn encode_response_body(out: &mut Vec<u8>, body: &ResponseBody) {
                 Some(text) => {
                     out.push(1);
                     write_string(out, text);
+                }
+                None => out.push(0),
+            }
+        }
+        ResponseBody::Picked(picked) => {
+            out.push(ResponseTag::Picked as u8);
+            match picked {
+                Some(picked) => {
+                    out.push(1);
+                    write_u64(out, picked.window);
+                    write_string(out, &picked.title);
+                    write_string(out, &picked.app_id);
+                    match picked.pid {
+                        Some(pid) => {
+                            out.push(1);
+                            write_u32(out, pid);
+                        }
+                        None => out.push(0),
+                    }
                 }
                 None => out.push(0),
             }
@@ -2443,6 +2518,8 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
         RequestTag::GetClipboard => RequestBody::GetClipboard,
         RequestTag::SleepDisplays => RequestBody::SleepDisplays,
         RequestTag::WakeDisplays => RequestBody::WakeDisplays,
+        RequestTag::PickWindow => RequestBody::PickWindow,
+        RequestTag::CancelPick => RequestBody::CancelPick,
         RequestTag::RecoverDisplay => RequestBody::RecoverDisplay,
         RequestTag::ShellControl => {
             let window = r.read_u64()?;
@@ -2608,6 +2685,20 @@ fn decode_response_body(r: &mut Reader<'_>) -> Result<ResponseBody, DecodeError>
         }
         ResponseTag::Clipboard => ResponseBody::Clipboard(if read_bool(r)? {
             Some(r.read_string()?)
+        } else {
+            None
+        }),
+        ResponseTag::Picked => ResponseBody::Picked(if read_bool(r)? {
+            Some(PickedWindow {
+                window: r.read_u64()?,
+                title: r.read_string()?,
+                app_id: r.read_string()?,
+                pid: if read_bool(r)? {
+                    Some(r.read_u32()?)
+                } else {
+                    None
+                },
+            })
         } else {
             None
         }),
@@ -2895,6 +2986,8 @@ mod tests {
             Request::new(33, RequestBody::GetClipboard),
             Request::new(34, RequestBody::SleepDisplays),
             Request::new(35, RequestBody::WakeDisplays),
+            Request::new(36, RequestBody::PickWindow),
+            Request::new(37, RequestBody::CancelPick),
         ];
         assert_eq!(round_trip_requests(&reqs), reqs);
     }
@@ -3200,8 +3293,18 @@ mod tests {
         );
         assert_eq!(
             RequestTag::from_byte(0x31),
+            Some(RequestTag::PickWindow),
+            "0x31 was taken by PickWindow in control version 24"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x32),
+            Some(RequestTag::CancelPick),
+            "0x32 was taken by CancelPick in control version 24"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x33),
             None,
-            "0x31 is the next free tag"
+            "0x33 is the next free tag"
         );
     }
 
@@ -3585,8 +3688,40 @@ mod tests {
             Response::new(7, ResponseBody::Clipboard(Some("pasted ✓".to_string()))),
             Response::new(8, ResponseBody::Clipboard(Some(String::new()))),
             Response::new(9, ResponseBody::Clipboard(None)),
+            // A pick: a window whose program the kernel named, one it could
+            // not, an empty title and app id, and nothing picked. A codec that
+            // wrote an absent pid as zero would name process 0.
+            Response::new(
+                10,
+                ResponseBody::Picked(Some(PickedWindow {
+                    window: u64::MAX,
+                    title: "notes.txt — Editor".to_string(),
+                    app_id: "org.slateos.Editor".to_string(),
+                    pid: Some(4321),
+                })),
+            ),
+            Response::new(
+                11,
+                ResponseBody::Picked(Some(PickedWindow {
+                    window: 7,
+                    title: String::new(),
+                    app_id: String::new(),
+                    pid: None,
+                })),
+            ),
+            Response::new(12, ResponseBody::Picked(None)),
         ];
         assert_eq!(round_trip_responses(&resps), resps);
+    }
+
+    #[test]
+    fn a_response_tag_past_picked_is_refused() {
+        assert_eq!(ResponseTag::from_byte(0x08), Some(ResponseTag::Picked));
+        assert_eq!(
+            ResponseTag::from_byte(0x09),
+            None,
+            "0x09 is the next free tag"
+        );
     }
 
     #[test]

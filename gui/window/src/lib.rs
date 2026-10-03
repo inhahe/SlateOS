@@ -86,7 +86,7 @@ use guiremote::control::{
 pub use guiremote::client::{ClientError as ConnectionError, Transport as ConnectionTransport};
 pub use guiremote::control::{
     BlurKind, BufferFormat as PixelFormat, CursorShape as Cursor, DisplayInfo as Display, Layer,
-    ShellControlAction, WindowSpec as Spec,
+    PickedWindow, ShellControlAction, WindowSpec as Spec,
 };
 /// What a shell learns about the windows it does not own. See
 /// [`EventLoop::watch_desktop`].
@@ -213,6 +213,23 @@ pub enum EventResponse {
 #[must_use = "the wake is reported through it"]
 pub struct DisplaySleep {
     seq: u32,
+}
+
+/// A window pick in progress: what [`EventLoop::pick_window`] returns, to
+/// hand to [`EventLoop::picked`] as the loop goes round.
+#[derive(Debug)]
+pub struct WindowPick {
+    seq: u32,
+}
+
+/// What a window pick came to ([`EventLoop::picked`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PickOutcome {
+    /// The user clicked this window.
+    Window(PickedWindow),
+    /// The user gave up -- Escape, another mouse button,
+    /// [`EventLoop::cancel_pick`] -- or clicked where there is no window.
+    Nothing,
 }
 
 /// What [`EventLoop::run_batched`] is handing over.
@@ -1125,7 +1142,8 @@ impl<T: Transport> EventLoop<T> {
             | ResponseBody::WindowCreated { .. }
             | ResponseBody::WorkArea { .. }
             | ResponseBody::Modifiers(_)
-            | ResponseBody::Clipboard(_) => Err(ClientError::Mismatched),
+            | ResponseBody::Clipboard(_)
+            | ResponseBody::Picked(_) => Err(ClientError::Mismatched),
         }
     }
 
@@ -1156,7 +1174,8 @@ impl<T: Transport> EventLoop<T> {
             | ResponseBody::WindowCreated { .. }
             | ResponseBody::Display(_)
             | ResponseBody::WorkArea { .. }
-            | ResponseBody::Clipboard(_) => Err(ClientError::Mismatched),
+            | ResponseBody::Clipboard(_)
+            | ResponseBody::Picked(_) => Err(ClientError::Mismatched),
         }
     }
 
@@ -1231,7 +1250,8 @@ impl<T: Transport> EventLoop<T> {
                 | ResponseBody::Display(_)
                 | ResponseBody::WorkArea { .. }
                 | ResponseBody::Modifiers(_)
-                | ResponseBody::Clipboard(_),
+                | ResponseBody::Clipboard(_)
+                | ResponseBody::Picked(_),
             ) => Err(ClientError::Mismatched),
         }
     }
@@ -1244,6 +1264,61 @@ impl<T: Transport> EventLoop<T> {
     /// As [`Connection::confirm`].
     pub fn wake_displays(&mut self) -> Result<(), Error<T>> {
         self.conn.confirm(RequestBody::WakeDisplays)
+    }
+
+    /// Let the user click a window to name it: the pointer becomes the
+    /// compositor's crosshair, and the next click is taken by the pick
+    /// instead of reaching the window. [`Self::picked`] reports what it came
+    /// to: the window's title, program and process -- nothing of its contents.
+    ///
+    /// Only while one of this program's windows has the keyboard focus, as
+    /// it does when the user has just pressed its "pick" button, and only one
+    /// program's pick at a time.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::send`]. A refusal arrives through [`Self::picked`].
+    pub fn pick_window(&mut self) -> Result<WindowPick, Error<T>> {
+        let seq = self.conn.send(RequestBody::PickWindow)?;
+        Ok(WindowPick { seq })
+    }
+
+    /// What `pick` came to, once: `None` until the user has clicked or given
+    /// up, then the outcome, then `None` again.
+    ///
+    /// Reads nothing itself, as [`Self::displays_woke`] does not.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError::Refused`] if the compositor would not start the pick
+    /// -- no window of this program had the focus, or another program's pick
+    /// was open -- and [`ClientError::Mismatched`] for an answer that is not
+    /// one.
+    pub fn picked(&mut self, pick: &WindowPick) -> Result<Option<PickOutcome>, Error<T>> {
+        match self.conn.take_reply(pick.seq) {
+            None => Ok(None),
+            Some(ResponseBody::Picked(Some(window))) => Ok(Some(PickOutcome::Window(window))),
+            Some(ResponseBody::Picked(None)) => Ok(Some(PickOutcome::Nothing)),
+            Some(ResponseBody::Error { message }) => Err(ClientError::Refused(message)),
+            Some(
+                ResponseBody::Ok
+                | ResponseBody::WindowCreated { .. }
+                | ResponseBody::Display(_)
+                | ResponseBody::WorkArea { .. }
+                | ResponseBody::Modifiers(_)
+                | ResponseBody::Clipboard(_),
+            ) => Err(ClientError::Mismatched),
+        }
+    }
+
+    /// Give up this program's pick, if it has one open; it is then reported
+    /// as [`PickOutcome::Nothing`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn cancel_pick(&mut self) -> Result<(), Error<T>> {
+        self.conn.confirm(RequestBody::CancelPick)
     }
 
     /// What is on the clipboard: what a paste inserts. `None` when nothing has
@@ -1266,7 +1341,8 @@ impl<T: Transport> EventLoop<T> {
             | ResponseBody::WindowCreated { .. }
             | ResponseBody::Display(_)
             | ResponseBody::WorkArea { .. }
-            | ResponseBody::Modifiers(_) => Err(ClientError::Mismatched),
+            | ResponseBody::Modifiers(_)
+            | ResponseBody::Picked(_) => Err(ClientError::Mismatched),
         }
     }
 
@@ -2394,6 +2470,10 @@ pub mod testing {
         /// [`Self::wake_displays`], which stands in for the user touching a
         /// key.
         pub sleeping: Vec<u32>,
+        /// The open pick's request, by sequence number: answered by
+        /// [`Self::answer_pick`], which stands in for the user's click, or as
+        /// given up by a `CancelPick`.
+        pub picking: Option<u32>,
         /// Input to deliver, one batch per turn.
         pub script: VecDeque<Vec<InputEvent>>,
         /// The config-directory turn, held for as long as this desktop exists.
@@ -2440,6 +2520,7 @@ pub mod testing {
                 held: Modifiers::NONE,
                 clipboard: None,
                 sleeping: Vec::new(),
+                picking: None,
                 script: VecDeque::new(),
                 #[cfg(test)]
                 _config_turn: settingsfile::testing::config_turn(),
@@ -2558,6 +2639,22 @@ pub mod testing {
                             );
                             ResponseBody::Ok
                         }
+                        // Answered at the click, as the compositor answers it.
+                        // Unlike it, any client may pick: the focus rule is
+                        // the compositor's, tested there.
+                        RequestBody::PickWindow => {
+                            if let Some(earlier) = self.picking.replace(req.seq) {
+                                replies.push(Response::new(earlier, ResponseBody::Picked(None)));
+                            }
+                            self.seen.push(req);
+                            continue;
+                        }
+                        RequestBody::CancelPick => {
+                            if let Some(seq) = self.picking.take() {
+                                replies.push(Response::new(seq, ResponseBody::Picked(None)));
+                            }
+                            ResponseBody::Ok
+                        }
                         _ => ResponseBody::Ok,
                     }
                 };
@@ -2569,6 +2666,20 @@ pub mod testing {
             }
             self.pipe.write(&encode_responses(&replies)).unwrap();
             true
+        }
+
+        /// Answer the open pick as the user's click would: with the window
+        /// clicked, or `None` for giving up. Nothing happens if no pick is
+        /// open.
+        ///
+        /// # Panics
+        ///
+        /// As [`Self::send_input`].
+        pub fn answer_pick(&mut self, window: Option<crate::PickedWindow>) {
+            if let Some(seq) = self.picking.take() {
+                let reply = Response::new(seq, ResponseBody::Picked(window));
+                self.pipe.write(&encode_responses(&[reply])).unwrap();
+            }
         }
 
         /// Wake the displays, as a key press would: every waiting sleep
@@ -2737,6 +2848,8 @@ pub mod testing {
                 RequestBody::GetClipboard => "GetClipboard",
                 RequestBody::SleepDisplays => "SleepDisplays",
                 RequestBody::WakeDisplays => "WakeDisplays",
+                RequestBody::PickWindow => "PickWindow",
+                RequestBody::CancelPick => "CancelPick",
                 RequestBody::SubscribeWindowList { .. } => "SubscribeWindowList",
                 RequestBody::SetTrayIcon { .. } => "SetTrayIcon",
                 RequestBody::RemoveTrayIcon { .. } => "RemoveTrayIcon",
@@ -3633,6 +3746,52 @@ mod tests {
             "the wake was reported twice"
         );
         assert_eq!(server.borrow_mut().asked(), vec!["SleepDisplays"]);
+    }
+
+    /// A pick is answered when the user clicks, with the window clicked,
+    /// and reported once.
+    #[test]
+    fn a_pick_is_answered_by_the_click_and_reported_once() {
+        let (mut events, server) = wired();
+        let pick = events.pick_window().unwrap();
+        server.borrow_mut().serve();
+        events.poll().unwrap();
+        assert_eq!(
+            events.picked(&pick).unwrap(),
+            None,
+            "picked before the click"
+        );
+
+        let window = PickedWindow {
+            window: 9,
+            title: String::from("notes.txt"),
+            app_id: String::from("org.slateos.Editor"),
+            pid: Some(4321),
+        };
+        server.borrow_mut().answer_pick(Some(window.clone()));
+        events.poll().unwrap();
+        assert_eq!(
+            events.picked(&pick).unwrap(),
+            Some(PickOutcome::Window(window))
+        );
+        assert_eq!(events.picked(&pick).unwrap(), None, "reported twice");
+        assert_eq!(server.borrow_mut().asked(), vec!["PickWindow"]);
+    }
+
+    /// Giving up is an outcome, not silence: a program waiting on a pick
+    /// hears that it is over.
+    #[test]
+    fn a_cancelled_pick_is_reported_as_nothing_picked() {
+        let (mut events, server) = wired();
+        let pick = events.pick_window().unwrap();
+        server.borrow_mut().serve();
+        events.cancel_pick().unwrap();
+        events.poll().unwrap();
+        assert_eq!(events.picked(&pick).unwrap(), Some(PickOutcome::Nothing));
+        assert_eq!(
+            server.borrow_mut().asked(),
+            vec!["PickWindow", "CancelPick"]
+        );
     }
 
     /// A copy goes to the compositor and a paste comes back from it, so what

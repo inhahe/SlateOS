@@ -135,7 +135,7 @@ pub use guiremote::control::Layer;
 // Same reason: `CompositorRequest::ShellControl` carries one, so a caller
 // building that request must be able to name it.
 pub use guiremote::control::ShellControlAction;
-use guiremote::control::{BlurKind, StackTier, WindowPolicy, WindowSpec};
+use guiremote::control::{BlurKind, PickedWindow, StackTier, WindowPolicy, WindowSpec};
 // Re-exported for the same reason as `WindowInfo` below: `Window::reserved_edge`
 // holds one and `reserve_edge` takes one, and a panel that has to reach past the
 // compositor to name the edge it is anchored to is naming a different type from
@@ -1037,8 +1037,14 @@ pub struct Window {
     pub tier: StackTier,
     /// Window opacity (0.0 = fully transparent, 1.0 = fully opaque).
     pub opacity: f32,
-    /// Process ID of the client that owns this window.
+    /// The connection that opened it: the per-connection id that routing
+    /// and reaping go by (`ClientLink::client_pid`). Not a process id -- one
+    /// process may hold two connections.
     pub client_pid: u64,
+    /// The process that opened it, as the kernel names the connection's
+    /// peer; `None` for a window opened over TCP, which cannot say. What a
+    /// window pick reports ([`Compositor::arm_pick`]).
+    pub owner_pid: Option<u32>,
     /// The most recently submitted render tree from the client.
     pub render_tree: RenderTree,
     /// An attached shared pixel buffer (DMA-BUF path). When `Some`, the
@@ -1231,6 +1237,7 @@ impl Window {
             blur_behind: spec.blur_behind,
             opacity: DEFAULT_OPACITY,
             client_pid,
+            owner_pid: None,
             render_tree: RenderTree::new(),
             buffer: None,
             images: HashMap::new(),
@@ -3417,7 +3424,13 @@ pub enum CompositorRequest {
     /// no matter what the client wanted. `client_pid` is separate because it is
     /// not part of the request — the compositor knows which connection the
     /// request arrived on and the client does not get to claim otherwise.
-    CreateWindow { spec: WindowSpec, client_pid: u64 },
+    /// `owner_pid` likewise: the kernel's name for the connection's peer,
+    /// never the client's.
+    CreateWindow {
+        spec: WindowSpec,
+        client_pid: u64,
+        owner_pid: Option<u32>,
+    },
     /// Destroy an existing window.
     DestroyWindow { window_id: WindowId },
     /// Set the window title.
@@ -3674,6 +3687,9 @@ pub enum CompositorResponse {
     /// The modifier keys held. Answer to
     /// [`CompositorRequest::GetHeldModifiers`].
     Modifiers(Modifiers),
+    /// The window a pick landed on, or `None` for a pick given up: the
+    /// answer to [`Compositor::arm_pick`], sent when the pick ends.
+    Picked(Option<PickedWindow>),
 }
 
 /// Notifications sent from the compositor to clients (events).
@@ -5664,9 +5680,14 @@ pub struct Compositor {
     /// The pending `SleepDisplays` requests, as (client, request sequence
     /// number), answered at the wake.
     sleep_waiters: Vec<(u64, u32)>,
-    /// Requests a wake has answered, whose replies the wire layer has not
-    /// yet sent to their clients.
-    wake_replies: Vec<(u64, u32)>,
+    /// Answers given after the request that asked for them -- a sleep's at
+    /// the wake, a pick's at the click -- that the wire layer has not yet
+    /// sent, as (client, request sequence number, answer).
+    deferred_replies: Vec<(u64, u32, CompositorResponse)>,
+    /// The window pick in progress, as (client, request sequence number):
+    /// see [`Self::arm_pick`]. One at a time on the whole desktop, so a click
+    /// answers exactly one asker.
+    pick: Option<(u64, u32)>,
     /// Keys whose press woke the displays and was swallowed. Their repeats
     /// and their release are swallowed with them: a program that never saw
     /// the press must not be told about a release, or about a key typing.
@@ -5968,7 +5989,8 @@ impl Compositor {
             slept_at: None,
             sleep_motion_grace: SLEEP_MOTION_GRACE,
             sleep_waiters: Vec::new(),
-            wake_replies: Vec::new(),
+            deferred_replies: Vec::new(),
+            pick: None,
             swallowed_keys: Vec::new(),
             tray_list_scratch: Vec::new(),
             pending_client_events: Vec::new(),
@@ -6181,7 +6203,11 @@ impl Compositor {
         }
         self.displays_asleep = false;
         self.slept_at = None;
-        self.wake_replies.append(&mut self.sleep_waiters);
+        self.deferred_replies.extend(
+            self.sleep_waiters
+                .drain(..)
+                .map(|(client, seq)| (client, seq, CompositorResponse::Ok)),
+        );
         self.reset_for_recovery();
     }
 
@@ -6191,27 +6217,96 @@ impl Compositor {
         self.displays_asleep
     }
 
-    /// The sequence numbers of `client`'s sleep requests that a wake has
-    /// answered and nobody has yet sent, taken.
-    pub fn take_wake_replies(&mut self, client: u64) -> Vec<u32> {
-        let mut taken = Vec::new();
-        self.wake_replies.retain(|&(owner, seq)| {
-            if owner == client {
-                taken.push(seq);
-                false
-            } else {
-                true
-            }
-        });
-        taken
+    /// The answers owed to `client` that were given after it asked -- a
+    /// sleep's at the wake, a pick's at the click -- as (request sequence
+    /// number, answer), taken.
+    pub fn take_deferred_replies(&mut self, client: u64) -> Vec<(u32, CompositorResponse)> {
+        if self.deferred_replies.is_empty() {
+            return Vec::new();
+        }
+        self.deferred_replies
+            .extract_if(.., |(owner, _, _)| *owner == client)
+            .map(|(_, seq, answer)| (seq, answer))
+            .collect()
     }
 
-    /// Forget a departed client's sleep requests, pending or answered: there
-    /// is nobody left to tell, and a record kept for ever would grow with
-    /// every shell that slept the displays and died.
-    pub fn forget_sleep_requests(&mut self, client: u64) {
+    /// Forget a departed client's deferred requests -- sleeps pending or
+    /// answered, an open pick, answers not yet sent. There is nobody left to
+    /// tell, a record kept for ever would grow with every program that asked
+    /// and died, and a pick nobody will hear about must not keep the pointer
+    /// a crosshair.
+    pub fn forget_client_requests(&mut self, client: u64) {
         self.sleep_waiters.retain(|&(owner, _)| owner != client);
-        self.wake_replies.retain(|&(owner, _)| owner != client);
+        self.deferred_replies
+            .retain(|(owner, _, _)| *owner != client);
+        if self.pick.is_some_and(|(owner, _)| owner == client) {
+            self.pick = None;
+        }
+    }
+
+    /// Start a window pick for `client`'s request `seq`: the pointer is a
+    /// crosshair until the next click, which is taken by the pick rather
+    /// than delivered, and answered with the window it landed on
+    /// ([`CompositorResponse::Picked`], through
+    /// [`Self::take_deferred_replies`]). Escape or another button gives up.
+    ///
+    /// Whether `client` may pick -- it must own the focused window -- is the
+    /// wire layer's to decide, as for the clipboard. Asking again while its
+    /// own pick is open replaces it, the earlier request answered as given
+    /// up.
+    ///
+    /// # Errors
+    ///
+    /// Another client's pick is open: one at a time on the whole desktop.
+    pub fn arm_pick(&mut self, client: u64, seq: u32) -> Result<(), String> {
+        match self.pick {
+            Some((owner, _)) if owner != client => {
+                return Err("another program is waiting for the user to pick a window".to_string());
+            }
+            Some((owner, earlier)) => {
+                self.deferred_replies
+                    .push((owner, earlier, CompositorResponse::Picked(None)));
+            }
+            None => {}
+        }
+        self.pick = Some((client, seq));
+        Ok(())
+    }
+
+    /// Give up `client`'s pick, if it has one open: its request is answered
+    /// as given up. Another client's pick is not its to end.
+    pub fn cancel_pick(&mut self, client: u64) {
+        if self.pick.is_some_and(|(owner, _)| owner == client) {
+            self.finish_pick(None);
+        }
+    }
+
+    /// Whether a window pick is open.
+    #[must_use]
+    pub const fn picking(&self) -> bool {
+        self.pick.is_some()
+    }
+
+    /// End the open pick, answering it with `picked`.
+    fn finish_pick(&mut self, picked: Option<PickedWindow>) {
+        if let Some((owner, seq)) = self.pick.take() {
+            self.deferred_replies
+                .push((owner, seq, CompositorResponse::Picked(picked)));
+        }
+    }
+
+    /// What a pick reports for a click at `(x, y)`: the window there, title
+    /// bar and frame included, as the user sees it -- its id, title, program
+    /// and attested owner, and nothing of its contents.
+    fn picked_at(&self, x: i32, y: i32) -> Option<PickedWindow> {
+        let id = self.window_at_with_decorations(x, y)?;
+        let window = self.window_ref(id)?;
+        Some(PickedWindow {
+            window: id.raw(),
+            title: window.title.clone(),
+            app_id: window.app_id.clone(),
+            pid: window.owner_pid,
+        })
     }
 
     /// How long after the displays go to sleep pointer motion does not wake
@@ -8387,6 +8482,21 @@ impl Compositor {
         self.modifier_episode.spent |= pressed;
         self.track_pointer_window(x, y);
 
+        // An open pick takes the next press, wherever it lands: the primary
+        // button picks the window under it, any other gives up. Not delivered,
+        // so its release goes nowhere -- the rule below for a release whose
+        // press no window saw. Here rather than in `handle_input` so that a
+        // click made with the keypad (mouse keys) picks as a real one does.
+        if pressed && self.pick.is_some() {
+            let picked = if button == MouseButton::Left {
+                self.picked_at(x, y)
+            } else {
+                None
+            };
+            self.finish_pick(picked);
+            return;
+        }
+
         // Release ends any active drag.
         if !pressed && button == MouseButton::Left {
             if let Some(drag) = self.drag.take() {
@@ -8933,6 +9043,14 @@ impl Compositor {
     }
 
     fn dispatch_key(&mut self, scancode: u32, pressed: bool, character: Option<char>) {
+        // Escape gives up an open pick and reaches no window: the program
+        // under the crosshair did not ask for it. Its repeats and release are
+        // swallowed with it (`absorb_while_asleep`).
+        if pressed && self.pick.is_some() && keymap::key_for_scancode(scancode) == Key::Escape {
+            self.swallowed_keys.push(scancode);
+            self.finish_pick(None);
+            return;
+        }
         // Folded *before* the notification is built, so a client told about
         // Shift+A sees `shift: true`. Folding afterwards would report the state
         // as it was before the chord completed, which for the modifier key's
@@ -10659,8 +10777,15 @@ impl Compositor {
     /// Handle a compositor request from a client.
     pub fn handle_request(&mut self, request: CompositorRequest) -> CompositorResponse {
         match request {
-            CompositorRequest::CreateWindow { spec, client_pid } => {
+            CompositorRequest::CreateWindow {
+                spec,
+                client_pid,
+                owner_pid,
+            } => {
                 let id = self.create_window_from_spec(&spec, client_pid);
+                if let Some(window) = self.window_mut(id) {
+                    window.owner_pid = owner_pid;
+                }
                 CompositorResponse::WindowCreated { window_id: id }
             }
             CompositorRequest::DestroyWindow { window_id } => {
@@ -11489,7 +11614,15 @@ impl Compositor {
     /// decorations there do.
     #[must_use]
     pub fn pointer(&self) -> Option<PointerState> {
-        if !self.pointer_on_output || self.cursor_shape == CursorShape::Hidden {
+        // A crosshair while a pick is open, over whatever window: the
+        // compositor's own mark that the next click is not the window's, so
+        // no program can draw it to fake the mode, nor hide it.
+        let shape = if self.pick.is_some() {
+            CursorShape::Crosshair
+        } else {
+            self.cursor_shape
+        };
+        if !self.pointer_on_output || shape == CursorShape::Hidden {
             return None;
         }
         let (x, y) = (self.cursor_x, self.cursor_y);
@@ -11504,7 +11637,7 @@ impl Compositor {
         let size_px = (size.pixels() as f32 * scale).round() as u32;
         let (fill, outline) = Self::pointer_colors(scheme, self.palette.accent);
         Some(PointerState {
-            shape: self.cursor_shape,
+            shape,
             x,
             y,
             style: CursorStyle {
@@ -12595,6 +12728,7 @@ mod tests {
         let resp = comp.handle_request(CompositorRequest::CreateWindow {
             spec: WindowSpec::new("Protocol Test", 320, 240),
             client_pid: 99,
+            owner_pid: None,
         });
         let window_id = match resp {
             CompositorResponse::WindowCreated { window_id } => window_id,
@@ -25225,13 +25359,13 @@ mod tests {
         comp.sleep_displays(7, 41);
         assert!(comp.displays_asleep());
         assert!(
-            comp.take_wake_replies(7).is_empty(),
+            wake_seqs(&mut comp, 7).is_empty(),
             "answered before the wake"
         );
 
         key_down(&mut comp, 0x1E); // A
         assert!(!comp.displays_asleep());
-        assert_eq!(comp.take_wake_replies(7), vec![41]);
+        assert_eq!(wake_seqs(&mut comp, 7), vec![41]);
         key_down(&mut comp, 0x1E); // its repeat
         key_up(&mut comp, 0x1E);
         assert_eq!(key_news(&mut comp), Vec::new(), "the waking key typed");
@@ -25339,15 +25473,279 @@ mod tests {
         assert!(comp.compose_frame(), "the wake drew nothing");
     }
 
+    /// The sequence numbers of `client`'s answered sleep requests, taken;
+    /// every one must be answered `Ok`.
+    fn wake_seqs(comp: &mut Compositor, client: u64) -> Vec<u32> {
+        comp.take_deferred_replies(client)
+            .into_iter()
+            .map(|(seq, answer)| {
+                assert!(matches!(answer, CompositorResponse::Ok), "{answer:?}");
+                seq
+            })
+            .collect()
+    }
+
     /// A client that goes away leaves no sleep request behind to answer.
     #[test]
     fn a_departed_client_s_sleep_requests_are_forgotten() {
         let mut comp = Compositor::new(800, 600, 60).expect("compositor");
         comp.sleep_displays(7, 1);
         comp.sleep_displays(8, 2);
-        comp.forget_sleep_requests(7);
+        comp.forget_client_requests(7);
         comp.wake_displays();
-        assert!(comp.take_wake_replies(7).is_empty());
-        assert_eq!(comp.take_wake_replies(8), vec![2]);
+        assert!(wake_seqs(&mut comp, 7).is_empty());
+        assert_eq!(wake_seqs(&mut comp, 8), vec![2]);
+    }
+
+    // -- picking a window ---------------------------------------------------------------
+
+    /// The picks answered for `client`, taken.
+    fn picks(comp: &mut Compositor, client: u64) -> Vec<(u32, Option<PickedWindow>)> {
+        comp.take_deferred_replies(client)
+            .into_iter()
+            .map(|(seq, answer)| match answer {
+                CompositorResponse::Picked(picked) => (seq, picked),
+                other => panic!("a pick was answered {other:?}"),
+            })
+            .collect()
+    }
+
+    /// A window with its client area at (100, 100), 300 by 200, opened by a
+    /// client the kernel named as process `pid` (or did not name).
+    fn attested_window(comp: &mut Compositor, title: &str, pid: Option<u32>) -> WindowId {
+        let spec = WindowSpec {
+            position: Some((100, 100)),
+            app_id: "org.example.Notes".to_string(),
+            ..WindowSpec::new(title, 300, 200)
+        };
+        match comp.handle_request(CompositorRequest::CreateWindow {
+            spec,
+            client_pid: 3,
+            owner_pid: pid,
+        }) {
+            CompositorResponse::WindowCreated { window_id } => window_id,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn shape(comp: &Compositor) -> Option<CursorShape> {
+        comp.pointer().map(|p| p.shape)
+    }
+
+    /// The next click names the window under it, with the process the
+    /// kernel named for it, and reaches no window.
+    #[test]
+    fn a_pick_takes_the_next_click_and_names_the_window_under_it() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let notes = attested_window(&mut comp, "notes.txt", Some(321));
+        move_to(&mut comp, 150, 150);
+        let _ = pointer_news(&mut comp);
+        assert_ne!(shape(&comp), Some(CursorShape::Crosshair));
+
+        comp.arm_pick(7, 5).unwrap();
+        assert!(comp.picking());
+        assert_eq!(
+            shape(&comp),
+            Some(CursorShape::Crosshair),
+            "the compositor's own mark that the next click is the pick's"
+        );
+        assert!(picks(&mut comp, 7).is_empty(), "answered before the click");
+
+        button_down(&mut comp, MouseButton::Left, 150, 150);
+        button_up(&mut comp, MouseButton::Left, 150, 150);
+        assert_eq!(
+            picks(&mut comp, 7),
+            vec![(
+                5,
+                Some(PickedWindow {
+                    window: notes.raw(),
+                    title: "notes.txt".to_string(),
+                    app_id: "org.example.Notes".to_string(),
+                    pid: Some(321),
+                })
+            )]
+        );
+        let news = pointer_news(&mut comp);
+        assert!(
+            news.iter().all(|(_, kind)| !kind.contains("Button")),
+            "the picking click reached a window: {news:?}"
+        );
+        assert!(!comp.picking());
+        assert_ne!(shape(&comp), Some(CursorShape::Crosshair));
+
+        // The click after it is an ordinary one.
+        button_down(&mut comp, MouseButton::Left, 150, 150);
+        assert!(
+            pointer_news(&mut comp)
+                .iter()
+                .any(|(w, kind)| *w == notes && kind.contains("ButtonPress"))
+        );
+    }
+
+    /// The crosshair shows over a window that hides the pointer: no program
+    /// may hide the mark of a pick.
+    #[test]
+    fn the_crosshair_shows_over_a_window_that_hides_the_pointer() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let video = attested_window(&mut comp, "video", None);
+        comp.handle_request(CompositorRequest::SetCursor {
+            window_id: video,
+            cursor: CursorShape::Hidden,
+        });
+        move_to(&mut comp, 150, 150);
+        assert_eq!(shape(&comp), None, "the window hid the pointer");
+        comp.arm_pick(7, 1).unwrap();
+        assert_eq!(shape(&comp), Some(CursorShape::Crosshair));
+    }
+
+    /// A press on the title bar picks the window it heads, and starts no
+    /// drag: the user sees one window, frame and all.
+    #[test]
+    fn a_click_on_the_frame_picks_the_window_it_frames() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let notes = attested_window(&mut comp, "notes.txt", None);
+        comp.arm_pick(7, 1).unwrap();
+        button_down(&mut comp, MouseButton::Left, 150, 95);
+        let picked = picks(&mut comp, 7);
+        assert_eq!(picked.len(), 1);
+        let window = picked[0].1.clone().expect("the frame's window");
+        assert_eq!(window.window, notes.raw());
+        assert_eq!(
+            window.pid, None,
+            "a window opened over TCP has no attested owner"
+        );
+        move_to(&mut comp, 400, 300);
+        button_up(&mut comp, MouseButton::Left, 400, 300);
+        let rect = comp.window_ref(notes).map(|w| (w.x, w.y));
+        assert_eq!(
+            rect,
+            Some((100, 100)),
+            "the picking press dragged the window"
+        );
+    }
+
+    /// Escape gives up, and neither it nor its repeat nor its release
+    /// reaches the focused window; once the pick is over Escape is a key.
+    #[test]
+    fn escape_gives_up_a_pick_and_types_nothing() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let a = window_at_point(&mut comp, 100, 100, 200, 150);
+        comp.focus_window(a);
+        let _ = key_news(&mut comp);
+        comp.arm_pick(7, 2).unwrap();
+        key_down(&mut comp, 0x01);
+        key_down(&mut comp, 0x01); // its repeat
+        key_up(&mut comp, 0x01);
+        assert_eq!(picks(&mut comp, 7), vec![(2, None)]);
+        assert_eq!(key_news(&mut comp), Vec::new(), "the Escape typed");
+        assert!(!comp.picking());
+
+        key_down(&mut comp, 0x01);
+        assert_eq!(key_news(&mut comp), vec![(Key::Escape, true)]);
+    }
+
+    /// Typing goes on during a pick: only the click is the pick's.
+    #[test]
+    fn typing_during_a_pick_still_types() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let a = window_at_point(&mut comp, 100, 100, 200, 150);
+        comp.focus_window(a);
+        let _ = key_news(&mut comp);
+        comp.arm_pick(7, 1).unwrap();
+        key_down(&mut comp, 0x1E); // A
+        assert_eq!(key_news(&mut comp), vec![(Key::A, true)]);
+        assert!(comp.picking());
+    }
+
+    /// Any other button gives up, and reaches no window either.
+    #[test]
+    fn another_button_gives_up_a_pick_and_reaches_no_window() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let _notes = attested_window(&mut comp, "notes.txt", Some(9));
+        move_to(&mut comp, 150, 150);
+        let _ = pointer_news(&mut comp);
+        comp.arm_pick(7, 3).unwrap();
+        button_down(&mut comp, MouseButton::Right, 150, 150);
+        button_up(&mut comp, MouseButton::Right, 150, 150);
+        assert_eq!(picks(&mut comp, 7), vec![(3, None)]);
+        let news = pointer_news(&mut comp);
+        assert!(
+            news.iter().all(|(_, kind)| !kind.contains("Button")),
+            "{news:?}"
+        );
+    }
+
+    #[test]
+    fn a_click_where_there_is_no_window_picks_nothing() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        comp.arm_pick(7, 4).unwrap();
+        button_down(&mut comp, MouseButton::Left, 700, 500);
+        assert_eq!(picks(&mut comp, 7), vec![(4, None)]);
+    }
+
+    /// One pick on the desktop at a time; a program cannot end another's;
+    /// and asking again replaces one's own, the earlier ask answered as
+    /// given up so nothing waits for ever.
+    #[test]
+    fn one_pick_at_a_time_and_asking_again_replaces_ones_own() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        comp.arm_pick(7, 1).unwrap();
+        assert!(
+            comp.arm_pick(8, 1).is_err(),
+            "another program's pick is open"
+        );
+        comp.cancel_pick(8);
+        assert!(comp.picking(), "a program ended another's pick");
+        comp.arm_pick(7, 2).unwrap();
+        assert_eq!(picks(&mut comp, 7), vec![(1, None)]);
+        comp.cancel_pick(7);
+        assert_eq!(picks(&mut comp, 7), vec![(2, None)]);
+        assert!(!comp.picking());
+        assert!(picks(&mut comp, 8).is_empty());
+    }
+
+    /// A program that goes away mid-pick takes its pick with it: no
+    /// crosshair is left for nobody, and the next click is ordinary.
+    #[test]
+    fn a_departed_picker_leaves_no_crosshair_behind() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let notes = attested_window(&mut comp, "notes.txt", None);
+        move_to(&mut comp, 150, 150);
+        let _ = pointer_news(&mut comp);
+        comp.arm_pick(7, 1).unwrap();
+        comp.forget_client_requests(7);
+        assert!(!comp.picking());
+        assert_ne!(shape(&comp), Some(CursorShape::Crosshair));
+        button_down(&mut comp, MouseButton::Left, 150, 150);
+        assert!(
+            pointer_news(&mut comp)
+                .iter()
+                .any(|(w, kind)| *w == notes && kind.contains("ButtonPress"))
+        );
+        assert!(picks(&mut comp, 7).is_empty());
+    }
+
+    /// The click that wakes sleeping displays is the user finding the screen,
+    /// not choosing a window: the pick waits for the next one.
+    #[test]
+    fn the_click_that_wakes_the_displays_does_not_pick() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let notes = attested_window(&mut comp, "notes.txt", Some(5));
+        comp.arm_pick(7, 1).unwrap();
+        comp.sleep_displays(9, 1);
+        button_down(&mut comp, MouseButton::Left, 150, 150);
+        assert!(!comp.displays_asleep());
+        assert!(comp.picking(), "the waking click picked");
+        assert!(picks(&mut comp, 7).is_empty());
+        button_up(&mut comp, MouseButton::Left, 150, 150);
+        button_down(&mut comp, MouseButton::Left, 150, 150);
+        let picked = picks(&mut comp, 7);
+        assert_eq!(
+            picked
+                .first()
+                .and_then(|(_, p)| p.as_ref())
+                .map(|p| p.window),
+            Some(notes.raw())
+        );
     }
 }

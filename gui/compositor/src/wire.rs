@@ -487,6 +487,8 @@ fn to_compositor_request(
             // From the link, never from the frame: a client that could state
             // its own pid could claim another process's windows in the taskbar.
             client_pid: link.client_pid,
+            // And the process the kernel names for the link, if it named one.
+            owner_pid: link.peer.map(|peer| peer.pid),
         },
         RequestBody::DestroyWindow { window } => CompositorRequest::DestroyWindow {
             window_id: link.resolve(window)?,
@@ -677,6 +679,11 @@ fn to_compositor_request(
         RequestBody::SleepDisplays | RequestBody::WakeDisplays => {
             return Err(ResponseBody::Error {
                 message: "display sleep requests are link-level".to_string(),
+            });
+        }
+        RequestBody::PickWindow | RequestBody::CancelPick => {
+            return Err(ResponseBody::Error {
+                message: "window picks are link-level".to_string(),
             });
         }
         // The one window request that is deliberately *not* resolved against
@@ -883,6 +890,7 @@ fn to_response_body(response: CompositorResponse) -> ResponseBody {
             height,
         },
         CompositorResponse::Modifiers(modifiers) => ResponseBody::Modifiers(modifiers),
+        CompositorResponse::Picked(picked) => ResponseBody::Picked(picked),
         CompositorResponse::StreamStarted { .. } | CompositorResponse::StreamFrame { .. } => {
             ResponseBody::Error {
                 message: "stream responses have no client-facing wire form".to_string(),
@@ -964,36 +972,44 @@ impl Compositor {
         Ok(served)
     }
 
-    /// Send `link` the answers a wake of the displays has made to its sleep
-    /// requests ([`RequestBody::SleepDisplays`]). Answers how many.
+    /// Send `link` the answers given since it asked: a wake's to its
+    /// [`RequestBody::SleepDisplays`], a click's to its
+    /// [`RequestBody::PickWindow`]. Answers how many.
     ///
-    /// Called for every link every tick, readable or not, because the shell
-    /// waiting to hear of the wake has nothing to say until it does.
-    pub fn route_wake_replies(&mut self, link: &mut ClientLink) -> usize {
-        let seqs = self.take_wake_replies(link.client_pid);
-        if seqs.is_empty() {
+    /// Called for every link every tick, readable or not, because a client
+    /// waiting on one of these has nothing to say until it comes.
+    pub fn route_deferred_replies(&mut self, link: &mut ClientLink) -> usize {
+        let answers = self.take_deferred_replies(link.client_pid);
+        if answers.is_empty() {
             return 0;
         }
-        let replies: Vec<Response> = seqs
-            .iter()
-            .map(|&seq| Response::new(seq, ResponseBody::Ok))
+        let replies: Vec<Response> = answers
+            .into_iter()
+            .map(|(seq, answer)| Response::new(seq, to_response_body(answer)))
             .collect();
         encode_responses_into(&mut link.outbox, &replies);
         replies.len()
     }
 
-    /// The refusal to send a client that may not touch the clipboard now, or
-    /// `None` if it may: it must own the window with the keyboard focus.
+    /// The refusal to send a client that may not do `what` now, or `None`
+    /// if it may: it must own the window with the keyboard focus. The rule
+    /// for the clipboard and for starting a window pick -- things a program
+    /// in the background must not be able to do behind the user's back.
     ///
     /// The same answer whether the client has no window focused or no windows
     /// at all, so a refusal tells a program nothing about anyone else's.
-    fn clipboard_refusal(&self, link: &ClientLink) -> Option<ResponseBody> {
+    fn focus_refusal(&self, link: &ClientLink, what: &str) -> Option<ResponseBody> {
         if self.focused_window().is_some_and(|id| link.owns(id)) {
             return None;
         }
         Some(ResponseBody::Error {
-            message: "the clipboard is for the window with the keyboard focus".to_string(),
+            message: format!("{what} is for the window with the keyboard focus"),
         })
+    }
+
+    /// [`Self::focus_refusal`] for the clipboard.
+    fn clipboard_refusal(&self, link: &ClientLink) -> Option<ResponseBody> {
+        self.focus_refusal(link, "the clipboard")
     }
 
     /// Dispatch a batch of control requests and append the replies.
@@ -1094,6 +1110,25 @@ impl Compositor {
                         Err(refusal) => refusal,
                     };
                     replies.push(Response::new(req.seq, body));
+                    continue;
+                }
+                // Answered at the click (`route_deferred_replies`), as a
+                // sleep is at the wake. Only the program the user is working
+                // in may start one: the click it takes is the user's.
+                RequestBody::PickWindow => {
+                    let refusal = self.focus_refusal(link, "picking a window").or_else(|| {
+                        self.arm_pick(link.client_pid, req.seq)
+                            .err()
+                            .map(|message| ResponseBody::Error { message })
+                    });
+                    if let Some(refusal) = refusal {
+                        replies.push(Response::new(req.seq, refusal));
+                    }
+                    continue;
+                }
+                RequestBody::CancelPick => {
+                    self.cancel_pick(link.client_pid);
+                    replies.push(Response::new(req.seq, ResponseBody::Ok));
                     continue;
                 }
                 _ => {}
@@ -1622,14 +1657,14 @@ mod tests {
         comp.serve(&mut link).expect("serves");
         assert!(comp.displays_asleep());
         assert!(!link.has_outgoing(), "answered before the wake");
-        assert_eq!(comp.route_wake_replies(&mut link), 0);
+        assert_eq!(comp.route_deferred_replies(&mut link), 0);
 
         // Somebody touches the space bar.
         comp.handle_input(crate::InputEvent::KeyDown {
             scancode: 0x39,
             character: None,
         });
-        assert_eq!(comp.route_wake_replies(&mut link), 1);
+        assert_eq!(comp.route_deferred_replies(&mut link), 1);
         let (responses, _) = decode_responses(&link.take_outgoing()).expect("decodes");
         assert_eq!(responses, vec![Response::new(9, ResponseBody::Ok)]);
     }
@@ -1647,7 +1682,7 @@ mod tests {
         let responses = exchange(&mut comp, &mut link, vec![RequestBody::WakeDisplays]);
         assert_eq!(responses, vec![Response::new(1, ResponseBody::Ok)]);
         assert!(!comp.displays_asleep());
-        assert_eq!(comp.route_wake_replies(&mut link), 1);
+        assert_eq!(comp.route_deferred_replies(&mut link), 1);
     }
 
     /// Copy in one program, paste in another: the clipboard is the
@@ -2559,6 +2594,169 @@ mod tests {
         );
         assert!(matches!(responses[0].body, ResponseBody::Ok));
         assert!(matches!(responses[1].body, ResponseBody::Display(_)));
+    }
+
+    // ---- Picking a window ----
+
+    /// The answers `link` is owed and has now been sent, decoded.
+    fn deferred(comp: &mut Compositor, link: &mut ClientLink) -> Vec<Response> {
+        comp.route_deferred_replies(link);
+        let bytes = link.take_outgoing();
+        if bytes.is_empty() {
+            return Vec::new();
+        }
+        decode_responses(&bytes).expect("decodes").0
+    }
+
+    /// Send `requests` and return whatever replies came at once -- none, for
+    /// a request answered later.
+    fn send(comp: &mut Compositor, link: &mut ClientLink, requests: &[Request]) -> Vec<Response> {
+        link.receive(&encode_requests(requests));
+        comp.serve(link).expect("serves");
+        let bytes = link.take_outgoing();
+        if bytes.is_empty() {
+            return Vec::new();
+        }
+        decode_responses(&bytes).expect("decodes").0
+    }
+
+    fn pick(seq: u32) -> Request {
+        Request::new(seq, RequestBody::PickWindow)
+    }
+
+    /// Open a 300 by 200 window over `link` with its client area at `at`.
+    fn open_at(comp: &mut Compositor, link: &mut ClientLink, title: &str, at: (i32, i32)) -> u64 {
+        let spec = WindowSpec {
+            position: Some(at),
+            ..WindowSpec::new(title, 300, 200)
+        };
+        match exchange(comp, link, vec![RequestBody::CreateWindow(spec)]).as_slice() {
+            [
+                Response {
+                    body: ResponseBody::WindowCreated { window },
+                    ..
+                },
+            ] => *window,
+            other => panic!("expected one WindowCreated, got {other:?}"),
+        }
+    }
+
+    fn click(comp: &mut Compositor, x: i32, y: i32) {
+        for pressed in [true, false] {
+            comp.handle_input(crate::InputEvent::MouseButton {
+                button: crate::MouseButton::Left,
+                pressed,
+                x,
+                y,
+            });
+        }
+    }
+
+    /// The program the user is working in asks; the click is answered to it
+    /// with the window clicked and the process the kernel named for that
+    /// window's connection.
+    #[test]
+    fn a_pick_is_answered_at_the_click_with_the_attested_owner() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let mut notes = ClientLink::new(10);
+        notes.attest(
+            Some(PeerCred {
+                pid: 777,
+                uid: 1000,
+                gid: 1000,
+            }),
+            Some(false),
+        );
+        let window = open_at(&mut comp, &mut notes, "notes.txt", (100, 100));
+
+        let mut explorer = ClientLink::new(11);
+        let _own = open_at(&mut comp, &mut explorer, "Process Explorer", (480, 360));
+        let now = send(&mut comp, &mut explorer, &[pick(1)]);
+        assert!(now.is_empty(), "answered before the click: {now:?}");
+
+        click(&mut comp, 150, 150);
+        let replies = deferred(&mut comp, &mut explorer);
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].seq, 1);
+        let ResponseBody::Picked(Some(picked)) = &replies[0].body else {
+            panic!("{:?}", replies[0].body);
+        };
+        assert_eq!(picked.window, window);
+        assert_eq!(picked.title, "notes.txt");
+        assert_eq!(picked.pid, Some(777), "the kernel's name for the owner");
+        assert!(deferred(&mut comp, &mut notes).is_empty());
+    }
+
+    /// A window opened over a link nothing attested has no owner to name:
+    /// the pick says so rather than give the connection's number.
+    #[test]
+    fn a_window_opened_over_tcp_is_picked_without_a_process() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let mut app = ClientLink::new(10);
+        let window = open_at(&mut comp, &mut app, "remote", (100, 100));
+        let mut explorer = ClientLink::new(11);
+        let _own = open_at(&mut comp, &mut explorer, "Process Explorer", (480, 360));
+        assert!(send(&mut comp, &mut explorer, &[pick(1)]).is_empty());
+        click(&mut comp, 150, 150);
+        let replies = deferred(&mut comp, &mut explorer);
+        let ResponseBody::Picked(Some(picked)) = &replies[0].body else {
+            panic!("{:?}", replies[0].body);
+        };
+        assert_eq!(picked.window, window);
+        assert_eq!(picked.pid, None);
+    }
+
+    /// A program in the background cannot start a pick: the click it would
+    /// take is the user's, for the program the user is working in.
+    #[test]
+    fn a_program_in_the_background_cannot_start_a_pick() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let mut background = ClientLink::new(10);
+        let _theirs = open(&mut comp, &mut background, "Background");
+        let mut front = ClientLink::new(11);
+        let _mine = open(&mut comp, &mut front, "Front"); // takes the focus
+        let replies = send(&mut comp, &mut background, &[pick(1)]);
+        assert!(
+            matches!(&replies[0].body, ResponseBody::Error { message } if message.contains("focus")),
+            "{replies:?}"
+        );
+        assert!(!comp.picking());
+
+        // Nor can a program with no window at all.
+        let mut windowless = ClientLink::new(12);
+        let replies = send(&mut comp, &mut windowless, &[pick(1)]);
+        assert!(matches!(replies[0].body, ResponseBody::Error { .. }));
+    }
+
+    /// Giving up answers the pick too: nothing is left waiting.
+    #[test]
+    fn a_cancelled_pick_is_answered_as_nothing_picked() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let mut explorer = ClientLink::new(11);
+        let _own = open(&mut comp, &mut explorer, "Process Explorer");
+        assert!(send(&mut comp, &mut explorer, &[pick(1)]).is_empty());
+        let replies = exchange(&mut comp, &mut explorer, vec![RequestBody::CancelPick]);
+        assert!(matches!(replies[0].body, ResponseBody::Ok));
+        let replies = deferred(&mut comp, &mut explorer);
+        assert_eq!(replies.len(), 1);
+        assert!(matches!(replies[0].body, ResponseBody::Picked(None)));
+        assert!(!comp.picking());
+    }
+
+    /// Two programs cannot both wait on one click.
+    #[test]
+    fn a_second_program_is_refused_while_a_pick_is_open() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let mut first = ClientLink::new(11);
+        let _a = open(&mut comp, &mut first, "First");
+        assert!(send(&mut comp, &mut first, &[pick(1)]).is_empty());
+        let mut second = ClientLink::new(12);
+        let _b = open(&mut comp, &mut second, "Second"); // takes the focus
+        let replies = send(&mut comp, &mut second, &[pick(1)]);
+        assert!(
+            matches!(&replies[0].body, ResponseBody::Error { message } if message.contains("another program")),
+            "{replies:?}"
+        );
     }
 
     /// An unchanged tray is not resent.

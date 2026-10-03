@@ -3684,8 +3684,13 @@ lane C's `guitk`.
     next green boot; then the session must grant the compositor `(Service,
     WRITE)` and the shell the display service's key, and pass the flag
     (`requests/f-bd-the-display-service-needs-two-grants-and-a-flag-from-the-session.md`).
-  - `[ ]` The window picker (e-adf part 3), and the attested pid in the
-    window list.
+  - `[x]` The window picker (e-adf part 3, design-decisions §1337):
+    `PickWindow` arms a one-shot pick under a compositor-drawn crosshair, the
+    next click names the window -- title, program, attested pid -- and
+    reaches no window; started only by the focused program; Escape, another
+    button or `CancelPick` gives up. `oswindow::EventLoop::pick_window`.
+  - `[ ]` The attested pid in the window list, for per-program grouping on
+    the taskbar.
 
 - `[F]` Port FreeRDP (line ~5058)
 

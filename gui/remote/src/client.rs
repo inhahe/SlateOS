@@ -875,7 +875,8 @@ impl<T: Transport> Connection<T> {
             | ResponseBody::Display(_)
             | ResponseBody::WorkArea { .. }
             | ResponseBody::Modifiers(_)
-            | ResponseBody::Clipboard(_) => Err(ClientError::Mismatched),
+            | ResponseBody::Clipboard(_)
+            | ResponseBody::Picked(_) => Err(ClientError::Mismatched),
         }
     }
 
@@ -913,7 +914,8 @@ impl<T: Transport> Connection<T> {
             | ResponseBody::WindowCreated { .. }
             | ResponseBody::Display(_)
             | ResponseBody::Modifiers(_)
-            | ResponseBody::Clipboard(_) => Err(ClientError::Mismatched),
+            | ResponseBody::Clipboard(_)
+            | ResponseBody::Picked(_) => Err(ClientError::Mismatched),
         }
     }
 
@@ -935,7 +937,8 @@ impl<T: Transport> Connection<T> {
             | ResponseBody::Display(_)
             | ResponseBody::WorkArea { .. }
             | ResponseBody::Modifiers(_)
-            | ResponseBody::Clipboard(_) => Err(ClientError::Mismatched),
+            | ResponseBody::Clipboard(_)
+            | ResponseBody::Picked(_) => Err(ClientError::Mismatched),
         }
     }
 

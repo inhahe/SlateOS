@@ -507,7 +507,7 @@ impl Server {
                 self.stats.window_lists_sent = self.stats.window_lists_sent.saturating_add(1);
             }
             // The answers a wake owes to the sleep requests this client made.
-            compositor.route_wake_replies(&mut client.link);
+            compositor.route_deferred_replies(&mut client.link);
         }
         // Whatever no live link claimed. Counted rather than left to accumulate:
         // an unbounded queue of events for windows nobody owns would eventually
@@ -668,10 +668,12 @@ impl Server {
             Self::reclaim(compositor, &windows, &mut self.stats);
             // Its tray icons go with it, as its windows do: a crash must not
             // leave an icon in the tray that no process can remove, and that
-            // a click would be sent to nobody for. Its pending requests to
-            // be told the displays woke have nobody left to tell.
+            // a click would be sent to nobody for. Its requests still waiting
+            // on an answer -- to be told the displays woke, a window pick --
+            // have nobody left to tell, and its pick must not leave the
+            // pointer a crosshair.
             compositor.reap_tray_icons(id);
-            compositor.forget_sleep_requests(id);
+            compositor.forget_client_requests(id);
             eprintln!("compositor: client {id} disconnected ({reason})");
         }
     }

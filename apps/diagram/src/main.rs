@@ -2450,6 +2450,37 @@ impl DiagramApp {
             Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
             Picked::Ignored => {}
         }
+        // The shortcut card is modal: while it is up, F1, `?` and Escape put
+        // it away and every other key is its own; a press, with any button,
+        // puts it away rather than reaching the shape or tool drawn under it;
+        // and the wheel moves nothing it covers. It was modal for none of
+        // it -- V, A and H changed the tool under it, G, S and P the canvas,
+        // Delete took the selected shape, and a click drew on it. A move and
+        // a release still go through, so a drag begun before it still ends.
+        if self.show_help {
+            match event {
+                Event::Key(key) if key.pressed => {
+                    let closes = match key.key {
+                        Key::F1 | Key::Escape => true,
+                        Key::Slash => key.modifiers.shift,
+                        _ => false,
+                    };
+                    if closes {
+                        self.show_help = false;
+                    }
+                    return EventResult::Consumed;
+                }
+                Event::Mouse(mouse) => match mouse.kind {
+                    MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                        self.show_help = false;
+                        return EventResult::Consumed;
+                    }
+                    MouseEventKind::Scroll { .. } => return EventResult::Ignored,
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
         match event {
             Event::Key(key_ev) => self.handle_key(key_ev),
             Event::Mouse(mouse_ev) => self.handle_mouse(mouse_ev),
@@ -2744,10 +2775,8 @@ impl DiagramApp {
                 self.show_help = !self.show_help;
                 EventResult::Consumed
             }
-            Key::Escape if self.show_help => {
-                self.show_help = false;
-                EventResult::Consumed
-            }
+            // (While the list is up its own keys never get here:
+            // `handle_event` takes every key the card is up for.)
             // Out of whatever tool is up, and out of a half-drawn edge.
             // Escape backs out of the smallest thing first, and a pending
             // source is smaller than the tool that picked it.
@@ -5526,6 +5555,86 @@ mod tests {
         assert!(
             !drawn_help_text(&app).contains("F1 or ? closes this"),
             "Escape did not close it"
+        );
+    }
+
+    /// **The card is modal for the keys and the pointer**: while it is up,
+    /// F1, `?` and Escape put it away and nothing else does or acts; a press
+    /// puts it away and does nothing else; the wheel zooms nothing under it.
+    /// It was modal for none of it. The controls at the end are the same
+    /// key, press and turn with the card down.
+    #[test]
+    fn the_shortcut_card_takes_every_key_and_press_while_it_is_up() {
+        let mut app = DiagramApp::new(1000.0, 700.0);
+        let card_up = |app: &DiagramApp| drawn_help_text(app).contains("F1 or ? closes this");
+        let (tool, _, _) = app
+            .tool_buttons()
+            .into_iter()
+            .find(|(_, mode, _)| *mode == InteractionMode::AddEdge)
+            .expect("the edge tool's button");
+        let (tx, ty) = tool.centre();
+        let zoom = app.zoom;
+
+        app.handle_event(&press(Key::F1));
+        assert!(card_up(&app));
+        app.handle_event(&press(Key::A));
+        assert_eq!(
+            app.mode,
+            InteractionMode::Select,
+            "A changed the tool under the card"
+        );
+        let grid = app.show_grid;
+        app.handle_event(&press(Key::G));
+        assert_eq!(app.show_grid, grid, "G changed the canvas under the card");
+        app.handle_event(&mouse(
+            MouseEventKind::Scroll { dx: 0.0, dy: 1.0 },
+            0.0,
+            0.0,
+        ));
+        assert!(
+            (app.zoom - zoom).abs() < f32::EPSILON,
+            "the wheel zoomed under the card"
+        );
+        assert!(
+            card_up(&app),
+            "a key or turn that is not the card's put it away"
+        );
+
+        app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Left), tx, ty));
+        assert!(!card_up(&app), "the press did not put the card away");
+        assert_eq!(
+            app.mode,
+            InteractionMode::Select,
+            "the press went through the card to the edge tool"
+        );
+
+        // Any button, and the card's own keys.
+        app.handle_event(&press(Key::F1));
+        app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Right), tx, ty));
+        assert!(!card_up(&app), "a right-button press left the card up");
+        app.handle_event(&press(Key::F1));
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::Slash,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::shift(),
+            text: String::from("?"),
+        }));
+        assert!(!card_up(&app), "? did not put the card away");
+        app.handle_event(&press(Key::F1));
+        app.handle_event(&press(Key::Escape));
+        assert!(!card_up(&app), "Escape did not put the card away");
+
+        app.handle_event(&mouse(
+            MouseEventKind::Scroll { dx: 0.0, dy: 1.0 },
+            0.0,
+            0.0,
+        ));
+        assert!(app.zoom > zoom, "control: the wheel zooms nothing at all");
+        app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Left), tx, ty));
+        assert_eq!(
+            app.mode,
+            InteractionMode::AddEdge,
+            "control: the press does nothing even with the card down"
         );
     }
 

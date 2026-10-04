@@ -339,6 +339,30 @@ MAIN = [
         '',
         ['a_chord_is_neither_a_key_of_the_window_nor_typing'],
     ),
+    # -- the shortcut card's hold on the pointer
+    (
+        'a press goes through the shortcut card',
+        '            MouseEventKind::Press(_) => {\n'
+        '                state.show_help = false;\n'
+        '                return EventResult::Consumed;\n'
+        '            }\n',
+        '',
+        ['the_shortcut_card_takes_a_press_rather_than_passing_it_on'],
+    ),
+    (
+        'only the left button puts the card away',
+        '            MouseEventKind::Press(_) => {\n'
+        '                state.show_help = false;\n',
+        '            MouseEventKind::Press(MouseButton::Left) => {\n'
+        '                state.show_help = false;\n',
+        ['the_shortcut_card_takes_a_press_rather_than_passing_it_on'],
+    ),
+    (
+        'the wheel scrolls what the card covers',
+        '            MouseEventKind::Scroll { .. } => return EventResult::Ignored,\n',
+        '',
+        ['the_shortcut_card_takes_a_press_rather_than_passing_it_on'],
+    ),
 ]
 
 TABLES = {

@@ -16,14 +16,15 @@ press.
 **Found** 2026-10-03, converting colorpicker's value box to the toolkit's
 field. Fixed the same day in colorpicker, contacts and dbviewer; then in
 alarmclock, archivemanager, benchmark, calendar, camera, charmap,
-clipmanager and defrag (2026-10-04) --
-calendar's card was modal for the keys no more than for the pointer.
+clipmanager, defrag, devicemanager and diagram (2026-10-04) -- calendar's
+and diagram's cards were modal for the keys no more than for the pointer,
+so each application's card is checked for both.
 
 **Still to do.** A scan the same day found 66 more applications whose
 production code draws `guitk::shortcut::render_card` and has no function
 handling a mouse event that reads the card's flag:
 
-devicemanager, diagram, diskanalyzer, diskcleanup,
+diskanalyzer, diskcleanup,
 diskimager, ebook, email, explorer, fileassoc, filediff, finance, flashcards,
 fontmanager, habits, hexeditor, imageviewer, ircclient, jsonviewer, kanban,
 logviewer, markdowneditor, metronome, mindmap, musicplayer, notes, paint,

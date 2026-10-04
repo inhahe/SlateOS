@@ -602,6 +602,56 @@ MUTATIONS = [
     ),
 ]
 
+FIND = "the_find_bars_box_is_the_toolkits_field"
+EDIT = "the_value_editor_is_the_toolkits_field_and_its_text_sits_in_its_box"
+
+MUTATIONS += [
+    # The find bar's box and the value editor are the toolkit's fields
+    # (2026-10-04; lane C, c-e-a-theme-can-shape-the-controls).
+    (
+        "the find box never has the keyboard",
+        "            focused: self.search_visible\n                && !self.show_help\n",
+        "            focused: false\n                && !self.show_help\n",
+        [FIND],
+    ),
+    (
+        "the find box keeps its mark under the key list",
+        "            focused: self.search_visible\n                && !self.show_help\n",
+        "            focused: self.search_visible\n",
+        [FIND],
+    ),
+    (
+        "the find box keeps its mark while a value is edited",
+        "                && self.editing_path.is_none()\n                && !self.source_is_open(),\n",
+        "                && !self.source_is_open(),\n",
+        [FIND],
+    ),
+    (
+        "a query that finds nothing is not red",
+        "            invalid: !self.search_query.is_empty() && self.search_results.is_empty(),\n",
+        "            invalid: false,\n",
+        [FIND],
+    ),
+    (
+        "the value editor never has the keyboard",
+        "            focused: !self.show_help,\n",
+        "            focused: false,\n",
+        [EDIT],
+    ),
+    (
+        "the value hangs below its box",
+        "        let (x, y, w) = (r.x + 6.0, r.y + (r.h - line) / 2.0, (r.w - 12.0).max(0.0));\n",
+        "        let (x, y, w) = (r.x + 6.0, r.y + r.h * 0.7, (r.w - 12.0).max(0.0));\n",
+        [EDIT],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [FIND, EDIT],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "jsonviewer", timeout=900, only=only))

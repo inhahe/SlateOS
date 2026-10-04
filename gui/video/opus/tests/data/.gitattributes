@@ -1,0 +1,7 @@
+# The test streams are binary -- opus_demo's packet format and OpusHead
+# blobs, NUL bytes in their first few -- and are named as such rather than
+# left to text=auto's inference (the root .gitattributes says why): one
+# translated byte would make a stream decode to something libopus never
+# heard, and every digest in references.txt would fail at once.
+*.bit  binary
+*.head binary

@@ -3875,11 +3875,22 @@ lane C's `guitk`.
     each, held to its reference as VP8's and VP9's are. Whether to include
     one, and which code to start from, is the operator's:
     `open-questions/F-Q8.md` (H.264), F-Q1 (HEVC).
-  - `[ ]` Sound needs Opus and Vorbis decoders, which nothing has yet (the
-    music player has none either). When it comes, its seek owes Opus a
-    pre-roll: start `matroska::Track::seek_pre_roll` (80 ms) before the
-    time and drop what decodes before it -- the demuxer's seek, like
-    FFmpeg's, leaves that to its caller (`tests/beyond_ffprobe.rs`).
+  - `[-]` Sound: a WebM file's is Opus or Vorbis.
+    - `[x]` The Opus decoder, `gui/video/opus`: libopus 1.5.2's fixed-point
+      decoder ported -- SILK, hybrid and CELT, concealment, in-band FEC,
+      DTX, multistream and ambisonics, the `OpusHead` -- and held to
+      libopus sample for sample: streams of its own decoded a thousand ways
+      (every rate and channel count; lost, damaged, reset; each setting;
+      the errors and the decoder's state as well as the sound), the RFC
+      8251 vectors when present, and its parsers and filters over millions
+      of made-up inputs. design-decisions §1350.
+    - `[ ]` Vorbis.
+    - `[ ]` In `videocodec`, and out to the speakers: a file's sound decoded
+      beside its pictures. Its seek owes Opus a pre-roll: start
+      `matroska::Track::seek_pre_roll` (80 ms) before the time and drop
+      what decodes before it -- the demuxer's seek, like FFmpeg's, leaves
+      that to its caller (`tests/beyond_ffprobe.rs`); and the `OpusHead`'s
+      pre-skip is the caller's to drop too.
 
 - `[-]` `[F]` **A display transport over channel IPC** for local clients,
   beside the TCP one. The point is the peer's identity: the kernel attests a

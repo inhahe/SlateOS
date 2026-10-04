@@ -11,11 +11,13 @@ members = [
     # and vp8 its VP8 decoder, ported the same way; matroska, the Matroska
     # and WebM demuxer their packets come from, and mp4 the MP4 one; yuv,
     # libyuv's and libavif's conversions and scaling their pictures are
-    # drawn with; and codec (videocodec), the one a program calls for a
-    # file's frames.
+    # drawn with; codec (videocodec), the one a program calls for a file's
+    # frames; and opus, libopus's decoder for their sound, ported as vp9 was
+    # (§1350).
     "gui/video/codec",
     "gui/video/matroska",
     "gui/video/mp4",
+    "gui/video/opus",
     "gui/video/rav1d",
     "gui/video/vp8",
     "gui/video/vp9",
@@ -754,6 +756,16 @@ codegen-units = 1
 opt-level = 3
 codegen-units = 1
 
+# opus (the Opus decoder, `gui/video/opus`): filters, transforms and
+# resamplers over every sample, in libopus's fixed-point arithmetic. Counted
+# with callgrind over every stream in its `tests/data` at 48 kHz (151 s of
+# sound; `tests/bench.rs`, one pass): 6.48 G instructions at `-Os` with 16
+# codegen units, 5.48 G at `-O3` with one; libopus 1.5.2's own fixed-point
+# C (`-O2`, no intrinsics; `tools/bench.c`) takes 4.03 G. Lane F, 2026-10-04.
+[profile.release.package.opus]
+opt-level = 3
+codegen-units = 1
+
 # And in debug builds rav1d alone is optimised, keeping its debug assertions
 # (its `DisjointMut` overlap checks among them): unoptimised it takes 11 ms to
 # decode a 37x19 picture, which makes `imagecodec`'s tests that decode
@@ -774,6 +786,13 @@ opt-level = 3
 # And vp8 (`gui/video/vp8`): its own tests decode 446 damaged streams and
 # hundreds more at random, 70 s unoptimised (2026-10-04).
 [profile.dev.package.vp8]
+opt-level = 3
+
+# And opus (`gui/video/opus`): its tests decode every test stream about
+# thirty ways, a thousand decodes, and its damage test thousands of packets
+# more, through every decoder: 453 s unoptimised, 30 s so (2026-10-04).
+# Overflow checks and debug assertions stay on, as everywhere in dev.
+[profile.dev.package.opus]
 opt-level = 3
 
 # The same for `xz`, whose tests hold its encoder to XZ Utils' output byte

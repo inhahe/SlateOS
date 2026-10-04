@@ -1357,6 +1357,89 @@ MUTATIONS = [
     ),
 ]
 
+CARD = "the_shortcut_card_takes_the_keys_and_a_press_rather_than_passing_them_on"
+
+MUTATIONS += [
+    # -- The shortcut list is modal for the keys and the pointer (2026-10-04;
+    # known-issues
+    # E-a-press-goes-through-the-shortcut-card-to-the-control-drawn-under-it).
+    (
+        "a key reaches the board under the list of keys",
+        "        if self.show_help {\n"
+        "            let held = key.modifiers;\n"
+        "            let closes = !held.ctrl\n"
+        "                && !held.alt\n"
+        "                && !held.super_key\n"
+        "                && (matches!(key.key, Key::F1 | Key::Escape)\n"
+        "                    || key.key == Key::Slash && held.shift);\n"
+        "            if closes {\n"
+        "                self.show_help = false;\n"
+        "            }\n"
+        "            return EventResult::Consumed;\n"
+        "        }\n",
+        "",
+        [CARD],
+    ),
+    (
+        "F1 does not put the list of keys away",
+        "                && (matches!(key.key, Key::F1 | Key::Escape)\n",
+        "                && (matches!(key.key, Key::Escape)\n",
+        [CARD],
+    ),
+    (
+        "Escape does not put the list of keys away",
+        "                && (matches!(key.key, Key::F1 | Key::Escape)\n",
+        "                && (matches!(key.key, Key::F1)\n",
+        [CARD],
+    ),
+    (
+        "? does not put the list of keys away",
+        "                    || key.key == Key::Slash && held.shift);\n",
+        ");\n",
+        [CARD],
+    ),
+    (
+        "a chorded Escape puts the list of keys away",
+        "            let closes = !held.ctrl\n"
+        "                && !held.alt\n",
+        "            let closes = !held.ctrl\n",
+        [CARD],
+    ),
+    (
+        "a press goes through the list of keys",
+        "        if self.show_help\n"
+        "            && matches!(\n"
+        "                event.kind,\n"
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_)\n"
+        "            )\n"
+        "        {\n"
+        "            self.show_help = false;\n"
+        "            return EventResult::Consumed;\n"
+        "        }\n",
+        "",
+        [CARD],
+    ),
+    (
+        "only the left button puts the list of keys away",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_)\n",
+        "                MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_)\n",
+        [CARD],
+    ),
+    (
+        "a press under the list of keys leaves it up",
+        "        {\n"
+        "            self.show_help = false;\n"
+        "            return EventResult::Consumed;\n"
+        "        }\n"
+        "        let MouseEventKind::Press(MouseButton::Left) = event.kind else {\n",
+        "        {\n"
+        "            return EventResult::Consumed;\n"
+        "        }\n"
+        "        let MouseEventKind::Press(MouseButton::Left) = event.kind else {\n",
+        [CARD],
+    ),
+]
+
 if __name__ == "__main__":
     # Substrings of the rows' names to run only those, as every other table
     # takes them; none sweeps everything.

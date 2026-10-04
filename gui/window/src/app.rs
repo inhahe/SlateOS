@@ -95,11 +95,11 @@ use std::task::Waker;
 use std::time::Duration;
 
 use appearance::{AppearanceSettings, Palette};
-use guiremote::client::Transport;
+use guiremote::client::{ClientError, Transport};
 
 use crate::{
-    DISPLAY_VAR, Dispatch, Error, Event, EventLoop, EventResponse, Link, PixelFormat, RenderTree,
-    Window, WindowBuilder,
+    DISPLAY_VAR, Dispatch, Error, Event, EventLoop, EventResponse, Link, PickOutcome, PixelFormat,
+    RenderTree, Window, WindowBuilder, WindowPick,
 };
 
 // ---------------------------------------------------------------------------
@@ -247,6 +247,36 @@ pub enum ImageChange {
     /// Dropping an id that was never uploaded succeeds, so an application
     /// cleaning up need not remember whether its last upload worked.
     Drop(u64),
+}
+
+/// What an application asks of a window pick: see [`App::take_pick`].
+///
+/// A pick lets the user click any window on the desktop to name it -- a
+/// process explorer's "which program is this?" crosshair. The pointer
+/// becomes the compositor's crosshair, and the next click is taken by the
+/// pick rather than reaching the window under it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PickRequest {
+    /// Start a pick ([`EventLoop::pick_window`]). Only while one of this
+    /// program's windows has the keyboard focus -- as it does when the user
+    /// has just pressed its pick button -- and only one program's pick at a
+    /// time; otherwise the answer is [`PickRefused`].
+    Start,
+    /// Give up the open pick ([`EventLoop::cancel_pick`]): it is then
+    /// answered as [`PickOutcome::Nothing`].
+    Cancel,
+}
+
+/// The compositor would not start a window pick: what
+/// [`App::window_picked`] hears instead of an outcome.
+///
+/// A refusal, not a failure: no window of this program had the keyboard
+/// focus, or another program's pick was open. The program can say so and
+/// let the user try again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PickRefused {
+    /// The compositor's reason, in words fit for a diagnostic.
+    pub reason: String,
 }
 
 /// The part of an application the toolkit cannot write for it.
@@ -526,6 +556,38 @@ pub trait App {
         Response::Redraw
     }
 
+    /// Whether to start a window pick, or give up the open one, since last
+    /// asked.
+    ///
+    /// Draining, on [`App::take_reloads`]'s terms, and asked at the same
+    /// moments: after every event, wake, tray click and pick answer -- so
+    /// the press of a pick button starts the pick before the loop next
+    /// parks. The answer comes to [`App::window_picked`].
+    ///
+    /// One pick at a time: [`PickRequest::Start`] while one is open is
+    /// ignored, and the open pick's answer is the one reported;
+    /// [`PickRequest::Cancel`] with none open does nothing. The default asks
+    /// for nothing, which is every application without a pick button.
+    fn take_pick(&mut self) -> Option<PickRequest> {
+        None
+    }
+
+    /// What the pick asked for through [`App::take_pick`] came to:
+    /// `Ok(PickOutcome::Window(..))` for the window the user clicked --
+    /// its title, program and process, nothing of its contents --
+    /// `Ok(PickOutcome::Nothing)` if the user gave up (Escape, another
+    /// button, [`PickRequest::Cancel`]) or clicked bare desktop, and
+    /// `Err(PickRefused)` if the compositor would not start it.
+    ///
+    /// Called on the loop's thread when the answer arrives, which is usually
+    /// with no event at all: the click lands on another program's window.
+    /// The response is handled as an event's -- `Redraw` draws, `Exit`
+    /// stops. The default ignores the answer, as it never asks.
+    fn window_picked(&mut self, outcome: Result<PickOutcome, PickRefused>) -> Response {
+        let _ = outcome;
+        Response::Idle
+    }
+
     /// Draw the current state at the current window size.
     ///
     /// The size is the one the compositor last reported, so a frame drawn
@@ -559,27 +621,6 @@ pub fn open<T: Transport, A: App + ?Sized>(
         .build(events)
 }
 
-/// Drive an application on an open window until it exits or the link closes.
-///
-/// Submits the first frame before waiting for anything, because no event is
-/// going to ask for it: nothing has happened yet, and a window that has never
-/// been drawn is blank.
-///
-/// Events for other windows are passed over rather than dispatched, so a
-/// process that owns a second window elsewhere does not feed its events to this
-/// application.
-///
-/// At most one frame is drawn per batch of events, however many of them asked
-/// for a redraw. A mouse drag arrives as a burst of thirty moves, and an
-/// application that drew per event would send twenty-nine frames that were
-/// already stale when they went out. See [`EventLoop::run_batched`].
-///
-/// # Errors
-///
-/// As [`EventLoop::run_batched`], plus any failure to submit a frame. A failed
-/// submit stops the loop rather than being swallowed: an application that ran
-/// on happily while the screen no longer changed would be the frozen-clock
-/// defect again, one layer down.
 /// Send the application's title to the compositor if it has changed.
 ///
 /// Called at every batch boundary, not on every event and not only when a frame
@@ -607,6 +648,31 @@ fn sync_title<T: Transport, A: App + ?Sized>(events: &mut EventLoop<T>, window: 
     let _ = handle.set_title(wanted);
 }
 
+/// Drive an application on an open window until it exits or the link closes.
+///
+/// Submits the first frame before waiting for anything, because no event is
+/// going to ask for it: nothing has happened yet, and a window that has never
+/// been drawn is blank.
+///
+/// Events for other windows are passed over rather than dispatched, so a
+/// process that owns a second window elsewhere does not feed its events to this
+/// application.
+///
+/// At most one frame is drawn per batch of events, however many of them asked
+/// for a redraw. A mouse drag arrives as a burst of thirty moves, and an
+/// application that drew per event would send twenty-nine frames that were
+/// already stale when they went out. See [`EventLoop::run_batched`].
+///
+/// A window pick the application asks for ([`App::take_pick`]) is started and
+/// held here, and its answer handed to [`App::window_picked`] when it comes;
+/// one still open when the loop ends is given up.
+///
+/// # Errors
+///
+/// As [`EventLoop::run_batched`], plus any failure to submit a frame. A failed
+/// submit stops the loop rather than being swallowed: an application that ran
+/// on happily while the screen no longer changed would be the frozen-clock
+/// defect again, one layer down.
 pub fn drive<T: Transport, A: App + ?Sized>(
     events: &mut EventLoop<T>,
     window: u64,
@@ -657,6 +723,9 @@ pub fn drive<T: Transport, A: App + ?Sized>(
     // carried out here and the loop stopped.
     let mut failure = None;
     let mut dirty = false;
+    // The window pick the application asked for and has not yet been told
+    // the answer to: at most one (see `App::take_pick`).
+    let mut pick: Option<WindowPick> = None;
     events.run_batched(|events, dispatch| match dispatch {
         Dispatch::Event {
             window: id,
@@ -668,6 +737,12 @@ pub fn drive<T: Transport, A: App + ?Sized>(
             // icon looks like a dead program rather than a lost event.
             if let guitk::event::Event::TrayIconClicked { id: icon, button } = *event {
                 let response = app.tray_icon_clicked(icon, button);
+                // As after any event: a tray menu may hold the pick button,
+                // or write a setting.
+                if let Err(e) = after_callback(events, app, &mut pick) {
+                    failure = Some(e);
+                    return EventResponse::Exit;
+                }
                 if matches!(response, Response::Redraw | Response::KeepOpen) {
                     dirty = true;
                 }
@@ -704,7 +779,11 @@ pub fn drive<T: Transport, A: App + ?Sized>(
             // boundary would be a setting the user changed with their last
             // click before closing the window, saved to disk, and never
             // announced — visibly not applied until the next login.
-            if let Err(e) = announce_reloads(events, app.take_reloads()) {
+            //
+            // A pick asked for goes out at the same moment, for the first
+            // reason's twin: the press of a pick button changes nothing the
+            // application draws, so it may well answer `Idle`.
+            if let Err(e) = after_callback(events, app, &mut pick) {
                 failure = Some(e);
                 return EventResponse::Exit;
             }
@@ -736,7 +815,40 @@ pub fn drive<T: Transport, A: App + ?Sized>(
             let response = app.on_wake();
             // As after an event, and for the same reason: an application may
             // write a shared file in answer to its own work finishing.
-            if let Err(e) = announce_reloads(events, app.take_reloads()) {
+            if let Err(e) = after_callback(events, app, &mut pick) {
+                failure = Some(e);
+                return EventResponse::Exit;
+            }
+            match response {
+                Response::Idle => EventResponse::Continue,
+                // Nothing was asked to close, so declining is only a redraw.
+                Response::Redraw | Response::KeepOpen => {
+                    dirty = true;
+                    EventResponse::Continue
+                }
+                Response::Exit => EventResponse::Exit,
+            }
+        }
+        // An answer arrived -- for this application, only ever its pick's,
+        // since nothing else it can ask through `App` waits on the user.
+        Dispatch::Answered => {
+            let Some(open) = pick.as_ref() else {
+                return EventResponse::Continue;
+            };
+            let outcome = match events.picked(open) {
+                Ok(None) => return EventResponse::Continue,
+                Ok(Some(outcome)) => Ok(outcome),
+                Err(ClientError::Refused(reason)) => Err(PickRefused { reason }),
+                Err(e) => {
+                    failure = Some(e);
+                    return EventResponse::Exit;
+                }
+            };
+            pick = None;
+            let response = app.window_picked(outcome);
+            // A refused pick may be asked for again at once, and an answer
+            // may be what the application writes a setting about.
+            if let Err(e) = after_callback(events, app, &mut pick) {
                 failure = Some(e);
                 return EventResponse::Exit;
             }
@@ -791,7 +903,39 @@ pub fn drive<T: Transport, A: App + ?Sized>(
         }
     })?;
 
+    // A pick left open by an application that has stopped listening is
+    // given up, so the pointer does not stay a crosshair for a program that
+    // will never hear the click. Over a closed link there is nothing to do:
+    // the compositor ends a departed program's pick itself. A failure here is
+    // deliberately not reported -- the loop is over, the compositor ends the
+    // pick when the link goes, and the outcome the caller needs is the loop's
+    // own, below.
+    if pick.is_some() && events.connection().is_open() {
+        let _ = events.cancel_pick();
+    }
+
     failure.map_or(Ok(()), Err)
+}
+
+/// What the loop does after every call into the application that may have
+/// changed what it wants from the desktop: announce the shared files it
+/// rewrote ([`App::take_reloads`]), and start or give up the window pick it
+/// asked for ([`App::take_pick`]).
+fn after_callback<T: Transport, A: App + ?Sized>(
+    events: &mut EventLoop<T>,
+    app: &mut A,
+    pick: &mut Option<WindowPick>,
+) -> Result<(), Error<T>> {
+    announce_reloads(events, app.take_reloads())?;
+    match app.take_pick() {
+        // One pick at a time: the open one goes on, and its answer is the
+        // one reported.
+        Some(PickRequest::Start) if pick.is_none() => *pick = Some(events.pick_window()?),
+        // Answered as given up, through `Dispatch::Answered`, like any end.
+        Some(PickRequest::Cancel) if pick.is_some() => events.cancel_pick()?,
+        Some(PickRequest::Start | PickRequest::Cancel) | None => {}
+    }
+    Ok(())
 }
 
 /// Tell the compositor about whichever shared files were just rewritten.
@@ -2650,6 +2794,175 @@ mod tests {
             "the loop kept dispatching after the screen stopped updating — an \
              application running on happily over a dead link"
         );
+    }
+
+    // -- Picking a window ---------------------------------------------------
+
+    /// An application with a pick button, as the process explorer has: each
+    /// event it is handed takes the next of `asks` -- a pick to start or give
+    /// up, or nothing -- and every answer it hears is kept.
+    struct Picker {
+        asks: std::collections::VecDeque<Option<PickRequest>>,
+        wanted: Option<PickRequest>,
+        heard: Vec<Result<PickOutcome, PickRefused>>,
+        frames: usize,
+        /// Stop at the event with this number, counting from 1.
+        exit_at: Option<usize>,
+        events_seen: usize,
+    }
+
+    impl Picker {
+        fn new(asks: impl IntoIterator<Item = Option<PickRequest>>) -> Self {
+            Self {
+                asks: asks.into_iter().collect(),
+                wanted: None,
+                heard: Vec::new(),
+                frames: 0,
+                exit_at: None,
+                events_seen: 0,
+            }
+        }
+    }
+
+    impl App for Picker {
+        fn title(&self) -> String {
+            "Process Explorer".to_string()
+        }
+
+        fn on_event(&mut self, _event: &Event) -> Response {
+            self.events_seen += 1;
+            self.wanted = self.asks.pop_front().flatten();
+            // A pick button's press changes nothing drawn: `Idle`, which is
+            // what makes the loop's drain of `take_pick` load-bearing.
+            if self.exit_at == Some(self.events_seen) {
+                Response::Exit
+            } else {
+                Response::Idle
+            }
+        }
+
+        fn take_pick(&mut self) -> Option<PickRequest> {
+            self.wanted.take()
+        }
+
+        fn window_picked(&mut self, outcome: Result<PickOutcome, PickRefused>) -> Response {
+            self.heard.push(outcome);
+            Response::Redraw
+        }
+
+        fn render(&mut self, _width: f32, _height: f32) -> RenderTree {
+            self.frames += 1;
+            RenderTree::new()
+        }
+    }
+
+    /// The explorer, its window open on a test desktop that will deliver one
+    /// batch per turn: a focus change each, standing in for the presses.
+    fn picker_on_desktop(
+        app: &Picker,
+        presses: usize,
+    ) -> (
+        EventLoop<TestConnection>,
+        Rc<RefCell<crate::testing::TestDesktop>>,
+        u64,
+    ) {
+        let (mut events, desk) = desktop();
+        let window = open(&mut events, app).expect("granted");
+        for i in 0..presses {
+            let event = if i % 2 == 0 {
+                Event::FocusIn
+            } else {
+                Event::FocusOut
+            };
+            desk.borrow_mut()
+                .script
+                .push_back(vec![InputEvent::new(window, event)]);
+        }
+        (events, desk, window)
+    }
+
+    /// The pick requests the desktop saw, in order.
+    fn picks_asked(desk: &Rc<RefCell<crate::testing::TestDesktop>>) -> Vec<&'static str> {
+        desk.borrow_mut()
+            .asked()
+            .into_iter()
+            .filter(|name| name.contains("Pick"))
+            .collect()
+    }
+
+    /// The press starts the pick, and the click's answer -- which comes with
+    /// no event, because the click lands on another program's window -- is
+    /// handed over and drawn.
+    #[test]
+    fn a_pick_is_answered_though_no_event_carries_the_answer() {
+        let mut app = Picker::new([Some(PickRequest::Start)]);
+        let (mut events, desk, window) = picker_on_desktop(&app, 1);
+        let clicked = crate::PickedWindow {
+            window: 9,
+            title: "notes.txt".to_string(),
+            app_id: "editor".to_string(),
+            pid: Some(4321),
+        };
+        desk.borrow_mut()
+            .pick_answers
+            .push_back(Some(clicked.clone()));
+        drive(&mut events, window, &mut app).unwrap();
+        assert_eq!(app.heard, vec![Ok(PickOutcome::Window(clicked))]);
+        assert_eq!(
+            app.frames, 2,
+            "the first frame, and the one the answer asked for"
+        );
+        assert_eq!(picks_asked(&desk), vec!["PickWindow"]);
+    }
+
+    /// A pick the compositor will not start is reported as refused, with its
+    /// reason, rather than as one the user gave up.
+    #[test]
+    fn a_refused_pick_is_reported_as_refused() {
+        let mut app = Picker::new([Some(PickRequest::Start)]);
+        let (mut events, desk, window) = picker_on_desktop(&app, 1);
+        let reason = "no window of this program has the focus".to_string();
+        desk.borrow_mut().refuse = Some(reason.clone());
+        drive(&mut events, window, &mut app).unwrap();
+        assert_eq!(app.heard, vec![Err(PickRefused { reason })]);
+    }
+
+    /// Giving up is an answer like any other: the pick is reported as
+    /// nothing picked.
+    #[test]
+    fn a_cancelled_pick_is_answered_as_nothing_picked() {
+        let mut app = Picker::new([Some(PickRequest::Start), Some(PickRequest::Cancel)]);
+        let (mut events, desk, window) = picker_on_desktop(&app, 2);
+        drive(&mut events, window, &mut app).unwrap();
+        assert_eq!(app.heard, vec![Ok(PickOutcome::Nothing)]);
+        assert_eq!(picks_asked(&desk), vec!["PickWindow", "CancelPick"]);
+    }
+
+    /// One pick at a time: a second press while one is open asks the desktop
+    /// nothing, and a cancel with none open sends nothing.
+    #[test]
+    fn a_pick_is_asked_for_once_while_it_is_open() {
+        let mut app = Picker::new([
+            Some(PickRequest::Cancel),
+            Some(PickRequest::Start),
+            Some(PickRequest::Start),
+        ]);
+        let (mut events, desk, window) = picker_on_desktop(&app, 3);
+        drive(&mut events, window, &mut app).unwrap();
+        assert_eq!(app.heard, vec![], "nobody answered the pick");
+        assert_eq!(picks_asked(&desk), vec!["PickWindow"]);
+    }
+
+    /// An application that stops with its pick open gives it up, so the
+    /// pointer does not stay a crosshair for a program no longer listening.
+    #[test]
+    fn a_pick_left_open_when_the_application_stops_is_given_up() {
+        let mut app = Picker::new([Some(PickRequest::Start), None]);
+        app.exit_at = Some(2);
+        let (mut events, desk, window) = picker_on_desktop(&app, 2);
+        drive(&mut events, window, &mut app).unwrap();
+        assert_eq!(picks_asked(&desk), vec!["PickWindow", "CancelPick"]);
+        assert_eq!(desk.borrow().picking, None, "the pick is still open");
     }
 
     // -- Arguments ----------------------------------------------------------

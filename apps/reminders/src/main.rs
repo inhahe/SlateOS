@@ -2784,6 +2784,23 @@ impl RemindersApp {
             Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
             Picked::Ignored => {}
         }
+        // The shortcut card is modal: while it is up, F1, `?` and Escape put
+        // it away and every other key is its own. It was not -- N started a
+        // reminder under it, Delete asked about one, and D, B and C changed
+        // the view it covered. (Nothing here takes a press, so the card has
+        // no pointer to hold.)
+        if self.show_help
+            && let Event::Key(key_ev) = event
+            && key_ev.pressed
+        {
+            let closes = matches!(key_ev.key, Key::F1 | Key::Escape)
+                || key_ev.key == Key::Slash && key_ev.modifiers.shift;
+            if closes {
+                self.show_help = false;
+                return EventResult::Consumed;
+            }
+            return EventResult::Ignored;
+        }
         match event {
             Event::Key(key_ev) if key_ev.pressed && self.form.is_some() => {
                 self.handle_form_key(key_ev)
@@ -5322,6 +5339,41 @@ mod tests {
         form.open_new_task();
 
         vec![plain, elsewhere, moved, notified, steps, form]
+    }
+
+    /// **The card is modal for the keys**: while it is up, F1, `?` and Escape
+    /// put it away and nothing else does or acts. N started a reminder under
+    /// it. The control at the end is the same key with the card down.
+    #[test]
+    fn the_shortcut_card_takes_every_key_while_it_is_up() {
+        let mut app = populated();
+        let detail = app.detail_visible;
+        app.handle_event(&press(Key::F1));
+        assert!(app.show_help);
+        app.handle_event(&press(Key::N));
+        assert!(app.form.is_none(), "N started a reminder under the card");
+        app.handle_event(&press(Key::D));
+        assert_eq!(
+            app.detail_visible, detail,
+            "D changed the view under the card"
+        );
+        assert!(app.show_help, "a key that is not the card's put it away");
+        app.handle_event(&press(Key::Escape));
+        assert!(!app.show_help, "Escape did not put the card away");
+        app.handle_event(&press(Key::F1));
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::Slash,
+            pressed: true,
+            modifiers: Modifiers::shift(),
+            text: String::from("?"),
+        }));
+        assert!(!app.show_help, "? did not put the card away");
+
+        app.handle_event(&press(Key::N));
+        assert!(
+            app.form.is_some(),
+            "control: N does nothing with the card down"
+        );
     }
 
     /// **Completed subtasks can be put out of the way.**

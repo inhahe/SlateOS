@@ -2,7 +2,8 @@
 
 Its keys: Ctrl chords are Ctrl chords, not AltGr; the print range and the
 search type what a key typed; every other key is taken with nothing but Shift
-held.
+held. And the list of keys is modal: while it is up, no key, press or turn of
+the wheel reaches what it covers.
 
 Breaks one piece of production code at a time and checks that the test which
 claims to cover it is the one that fails.  A test that passes against a broken
@@ -21,6 +22,8 @@ from mutation_harness import sweep  # noqa: E402  (path set above)
 
 SRC = Path(__file__).parent / 'src' / 'main.rs'
 
+CARD = 'the_shortcut_card_takes_the_keys_and_a_press_rather_than_passing_them_on'
+
 # (name, old, new, [tests that must fail])
 MUTATIONS = [
     (
@@ -31,9 +34,78 @@ MUTATIONS = [
     ),
     (
         'a chorded Escape puts the list of keys away',
-        '        if event.key == Key::Escape && plain && self.show_help {',
-        '        if event.key == Key::Escape && self.show_help {',
+        '            let closes = plain\n                && (matches!',
+        '            let closes = true\n                && (matches!',
         ['a_chord_is_neither_a_viewer_key_nor_typing'],
+    ),
+    # The list of keys is modal for the keys and the pointer alike (known-issues
+    # E-a-press-goes-through-the-shortcut-card-to-the-control-drawn-under-it).
+    (
+        'a key reaches what the list of keys covers',
+        '        if self.show_help {\n'
+        '            let closes = plain\n'
+        '                && (matches!(event.key, Key::F1 | Key::Escape)\n'
+        '                    || event.key == Key::Slash && event.modifiers.shift);\n'
+        '            if closes {\n'
+        '                self.show_help = false;\n'
+        '            }\n'
+        '            return closes;\n'
+        '        }\n',
+        '',
+        [CARD],
+    ),
+    (
+        'F1 does not put the list of keys away',
+        '                && (matches!(event.key, Key::F1 | Key::Escape)\n',
+        '                && (matches!(event.key, Key::Escape)\n',
+        [CARD],
+    ),
+    (
+        '? does not put the list of keys away',
+        '                    || event.key == Key::Slash && event.modifiers.shift);\n',
+        ');\n',
+        [CARD],
+    ),
+    (
+        'a Ctrl chord acts on what the list of keys covers',
+        '                    _ if self.show_help => {}\n',
+        '',
+        [CARD],
+    ),
+    (
+        'the list of keys swallows the quit',
+        '                    Key::Q => return Response::Exit,\n',
+        '                    _ if self.show_help => {}\n'
+        '                    Key::Q => return Response::Exit,\n',
+        [CARD],
+    ),
+    (
+        'a press goes through the list of keys',
+        '                    MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n'
+        '                        self.show_help = false;\n'
+        '                        return true;\n'
+        '                    }\n',
+        '',
+        [CARD],
+    ),
+    (
+        'only the left button puts the list of keys away',
+        '                    MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n',
+        '                    MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_) => {\n',
+        [CARD],
+    ),
+    (
+        'a press under the list of keys leaves it up',
+        '                        self.show_help = false;\n'
+        '                        return true;\n',
+        '                        return true;\n',
+        [CARD],
+    ),
+    (
+        'the wheel scrolls what the list of keys covers',
+        '                    MouseEventKind::Scroll { .. } => return false,\n',
+        '',
+        [CARD],
     ),
     (
         'a chorded Escape closes the search',

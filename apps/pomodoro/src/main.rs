@@ -544,6 +544,10 @@ pub struct PomodoroApp {
 
     pub log_entries: Vec<LogEntry>,
     pub log_scroll: usize,
+    /// The wheel's unspent fraction of a row of the log. `log_scroll` is a
+    /// whole row, so a touchpad's small turns have to be added up somewhere
+    /// or each rounds to nothing.
+    log_wheel: wheel::Accumulator,
 
     pub daily_stats: Vec<DayStats>,
     /// The day the clock says it is — recomputed on every tick, so a session
@@ -597,6 +601,7 @@ impl PomodoroApp {
             ambient_sound: AmbientSound::None,
             log_entries: Vec::new(),
             log_scroll: 0,
+            log_wheel: wheel::Accumulator::default(),
             daily_stats: Vec::new(),
             today: day_of(now_ms),
             streak_days: 0,
@@ -1194,6 +1199,20 @@ impl PomodoroApp {
     // ── Pointer ────────────────────────────────────────────────────────
 
     fn handle_mouse(&mut self, mouse: &MouseEvent) -> EventResult {
+        // The list of keys is modal for the pointer as it is for the keys, and
+        // drawn over everything: a press with any button puts it away and does
+        // nothing else -- it used to start, reset or skip the interval under
+        // it -- and the wheel scrolls nothing it covers.
+        if self.show_help {
+            match mouse.kind {
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                    self.show_help = false;
+                    return EventResult::Consumed;
+                }
+                MouseEventKind::Scroll { .. } => return EventResult::Ignored,
+                _ => {}
+            }
+        }
         match mouse.kind {
             MouseEventKind::Press(MouseButton::Left) => match self.target_at(mouse.x, mouse.y) {
                 Some(target) => self.activate(target),
@@ -1206,12 +1225,19 @@ impl PomodoroApp {
                 // `wheel` answers in offset space already — one notch down is
                 // a *larger* offset — so the result is added as it comes.
                 // Negating it here is the trap its own docs warn about.
-                let rows = wheel::rows_f(dy);
-                if rows == 0.0 {
-                    return EventResult::Ignored;
+                //
+                // Through an accumulator, not `rows_f(dy) as isize`: that
+                // truncated a touchpad's fifth of a notch -- 0.6 of a row -- to
+                // nothing, every time, so the log could not be scrolled from
+                // a touchpad at all.
+                let rows = self.log_wheel.rows(dy);
+                let before = self.log_scroll;
+                self.scroll_log(rows);
+                if self.log_scroll == before {
+                    EventResult::Ignored
+                } else {
+                    EventResult::Consumed
                 }
-                self.scroll_log(rows as isize);
-                EventResult::Consumed
             }
             _ => EventResult::Ignored,
         }
@@ -3082,6 +3108,58 @@ mod tests {
         assert!(app.task_input_active);
     }
 
+    /// **A press with the list of keys up puts it away and does nothing
+    /// else, and the wheel scrolls nothing under it.** A press reached the
+    /// button drawn under the list and started the interval the reader could
+    /// not see. The controls are the same press and turn with the list down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let mut app = with_log(40);
+        app.screen = Screen::Timer;
+        assert_eq!(app.state, TimerState::Idle);
+
+        press(&mut app, Key::F1);
+        assert!(app.show_help);
+        assert_eq!(
+            probe::click(&mut app, Target::StartPause),
+            EventResult::Consumed
+        );
+        assert!(!app.show_help, "the press did not put the list away");
+        assert_eq!(
+            app.state,
+            TimerState::Idle,
+            "the press started the timer under the list"
+        );
+
+        press(&mut app, Key::F1);
+        probe::click_with(&mut app, Target::StartPause, MouseButton::Right);
+        assert!(!app.show_help, "a right-button press left the list up");
+
+        app.screen = Screen::Log;
+        press(&mut app, Key::F1);
+        handle_event(&mut app, &scroll(-1.0));
+        assert_eq!(
+            app.log_scroll, 0,
+            "the wheel scrolled the log under the list"
+        );
+        assert!(app.show_help, "the wheel put the list away");
+        press(&mut app, Key::Escape);
+
+        // The controls.
+        handle_event(&mut app, &scroll(-1.0));
+        assert!(
+            app.log_scroll > 0,
+            "control: the wheel scrolls nothing at all"
+        );
+        app.screen = Screen::Timer;
+        probe::click(&mut app, Target::StartPause);
+        assert_eq!(
+            app.state,
+            TimerState::Running,
+            "control: the press starts nothing"
+        );
+    }
+
     #[test]
     fn the_notification_dismisses_under_a_click() {
         let mut app = sample();
@@ -3189,6 +3267,28 @@ mod tests {
             handle_event(&mut app, &scroll(1.0));
         }
         assert_eq!(app.log_scroll, 0, "the wheel ran past the top");
+    }
+
+    /// **A touchpad's small turns add up to rows.** Each was truncated to a
+    /// whole row on its own -- a quarter notch is three quarters of a row, and
+    /// `0.75 as isize` is nothing -- so the log could not be scrolled from a
+    /// touchpad at all.
+    #[test]
+    fn a_touchpads_small_turns_add_up_to_rows() {
+        let mut app = with_log(40);
+        assert_eq!(
+            handle_event(&mut app, &scroll(-0.25)),
+            EventResult::Ignored,
+            "three quarters of a row moved a whole one"
+        );
+        assert_eq!(app.log_scroll, 0);
+        for _ in 0..3 {
+            handle_event(&mut app, &scroll(-0.25));
+        }
+        assert_eq!(
+            app.log_scroll, 3,
+            "four quarter notches are one notch, three rows"
+        );
     }
 
     /// The old clamp was `len - 1`, which let a full table be scrolled into a

@@ -4111,24 +4111,32 @@ impl PdfViewerApp {
             return false;
         }
 
-        // The dialog is modal, so it takes every key before anything else --
-        // including the page keys, which would otherwise walk the document
-        // behind a dialog the user is typing a page range into.
-        if self.print_dialog.open {
-            return self.handle_print_key(event);
-        }
-
         // Every key but Ctrl+O and what is typed is taken plain: a chord with
         // Alt or the Windows key is the window's or the desktop's and arrives
         // carrying its key -- Alt+D turned the reading mode on and Alt+Space
         // turned the page.
         let plain = textline::is_plain(event.modifiers);
 
-        // Escape closes the shortcut list before anything else, because it is
-        // drawn over everything else: Escape closes the topmost thing.
-        if event.key == Key::Escape && plain && self.show_help {
-            self.show_help = false;
-            return true;
+        // The shortcut list before anything else, the print dialog included,
+        // because it is drawn over everything else: a plain F1, `?` or Escape
+        // puts it away, and no other key reaches what it covers. The page keys
+        // turned the page under it, `D` the reading mode, and Ctrl+O opened a
+        // file dialog behind it.
+        if self.show_help {
+            let closes = plain
+                && (matches!(event.key, Key::F1 | Key::Escape)
+                    || event.key == Key::Slash && event.modifiers.shift);
+            if closes {
+                self.show_help = false;
+            }
+            return closes;
+        }
+
+        // The dialog is modal, so it takes every key before anything else --
+        // including the page keys, which would otherwise walk the document
+        // behind a dialog the user is typing a page range into.
+        if self.print_dialog.open {
+            return self.handle_print_key(event);
         }
 
         // Escape closes the search bar from anywhere, focused or not, because
@@ -4290,6 +4298,25 @@ impl PdfViewerApp {
 
     /// Route one window event.
     pub fn handle_event(&mut self, event: &Event) -> bool {
+        // The shortcut list is drawn over everything, the open dialog
+        // included, so it has the pointer first: a press with any button puts
+        // it away and does nothing else -- it used to reach the toolbar button
+        // or the tab drawn under it -- and the wheel scrolls nothing it covers.
+        // A move or a release is not a press, and passes. Its keys are in
+        // `handle_key`.
+        if self.show_help {
+            if let Event::Mouse(MouseEvent { kind, .. }) = event {
+                match kind {
+                    MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                        self.show_help = false;
+                        return true;
+                    }
+                    MouseEventKind::Scroll { .. } => return false,
+                    _ => {}
+                }
+            }
+        }
+
         // The picker takes input first while it is up. It does not take `Tick`
         // or `Resize`, so the clock keeps running behind the dialog --
         // `gui/toolkit`'s `a_tick_and_a_resize_still_reach_the_application`
@@ -4427,6 +4454,10 @@ impl App for PdfViewerApp {
             if key.pressed && textline::is_ctrl_chord(key.modifiers) {
                 match key.key {
                     Key::Q => return Response::Exit,
+                    // The rest act on what the shortcut list covers -- Ctrl+W
+                    // closed the tab under it -- so while it is up they go on
+                    // to `handle_key`, which swallows them.
+                    _ if self.show_help => {}
                     // Ctrl+F is the find shortcut everywhere else, and going
                     // through `handle_target` rather than setting the flags
                     // here means the shortcut and the button cannot drift.
@@ -6604,6 +6635,115 @@ mod tests {
     #[allow(clippy::unnecessary_wraps)]
     fn accepts(_doc: &PdfDocument, _pages: &[usize]) -> bool {
         true
+    }
+
+    /// **The list of keys is modal for the keys and the pointer alike.** It is
+    /// drawn over everything, yet a page key turned the page under it, `D`
+    /// turned the reading mode over, Ctrl+O opened a file dialog behind it and
+    /// Ctrl+W closed the tab it covers; a press reached the toolbar button
+    /// under it, and the wheel scrolled the document. The controls are the
+    /// same keys, press and turn with the list down.
+    #[test]
+    fn the_shortcut_card_takes_the_keys_and_a_press_rather_than_passing_them_on() {
+        let mut app = wired();
+        let page = |app: &PdfViewerApp| app.active_tab().map(|t| t.current_page);
+        let offset = |app: &PdfViewerApp| app.active_tab().map(|t| t.scroll_offset_y);
+        let key = |app: &mut PdfViewerApp, event: KeyEvent| app.on_event(&Event::Key(event));
+        let (start, dark, tabs) = (page(&app), app.dark_mode, app.tabs.len());
+
+        // The keys.
+        key(&mut app, probe::press(Key::F1));
+        assert!(app.show_help);
+        for k in [Key::Right, Key::Space, Key::End, Key::D] {
+            key(&mut app, probe::press(k));
+        }
+        for k in [Key::O, Key::W, Key::T, Key::F] {
+            key(&mut app, probe::ctrl(k));
+        }
+        assert!(
+            app.show_help,
+            "a key other than F1, ? or Escape put the list away"
+        );
+        assert_eq!(
+            page(&app),
+            start,
+            "a page key turned the page under the list"
+        );
+        assert_eq!(
+            app.dark_mode, dark,
+            "D turned the reading mode over under the list"
+        );
+        assert!(
+            !app.picker.is_open(),
+            "Ctrl+O opened a file dialog behind the list"
+        );
+        assert_eq!(
+            app.tabs.len(),
+            tabs,
+            "a Ctrl chord changed the tabs under the list"
+        );
+        assert!(
+            !app.search.active,
+            "Ctrl+F opened the search bar under the list"
+        );
+        assert_eq!(
+            key(&mut app, probe::ctrl(Key::Q)),
+            Response::Exit,
+            "the list swallowed the quit"
+        );
+        key(&mut app, probe::shift(Key::Slash));
+        assert!(!app.show_help, "? left the list up");
+        key(&mut app, probe::press(Key::F1));
+        key(&mut app, probe::press(Key::F1));
+        assert!(!app.show_help, "F1 left the list up");
+
+        // A press, with either button, on the next-page button under it.
+        key(&mut app, probe::press(Key::F1));
+        probe::click(&mut app, Target::Nav(Nav::Next));
+        assert!(!app.show_help, "the press did not put the list away");
+        assert_eq!(
+            page(&app),
+            start,
+            "the press went through the list to the button"
+        );
+        key(&mut app, probe::press(Key::F1));
+        probe::click_with(&mut app, Target::Nav(Nav::Next), MouseButton::Right);
+        assert!(!app.show_help, "a right-button press left the list up");
+
+        // The wheel, over a document that scrolls rather than turns pages.
+        probe::click(&mut app, Target::ViewModeToggle);
+        let wheel = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+            x: WINDOW_WIDTH / 2.0,
+            y: WINDOW_HEIGHT / 2.0,
+        });
+        key(&mut app, probe::press(Key::F1));
+        app.handle_event(&wheel);
+        assert_eq!(
+            offset(&app),
+            Some(0.0),
+            "the wheel scrolled the document under the list"
+        );
+        assert!(app.show_help, "the wheel put the list away");
+        key(&mut app, probe::press(Key::Escape));
+        assert!(!app.show_help, "Escape left the list up");
+
+        // The controls.
+        app.handle_event(&wheel);
+        assert!(
+            offset(&app).is_some_and(|y| y > 0.0),
+            "control: the wheel scrolls nothing at all"
+        );
+        probe::click(&mut app, Target::ViewModeToggle);
+        probe::click(&mut app, Target::Nav(Nav::Next));
+        let next = page(&app);
+        assert_ne!(next, start, "control: the next-page button turns no page");
+        key(&mut app, probe::press(Key::Right));
+        assert_ne!(page(&app), next, "control: Right turns no page");
+        key(&mut app, probe::press(Key::D));
+        assert_ne!(app.dark_mode, dark, "control: D does nothing");
+        key(&mut app, probe::ctrl(Key::T));
+        assert_eq!(app.tabs.len(), tabs + 1, "control: Ctrl+T opens no tab");
     }
 
     /// **A chord is neither a viewer key nor typing, and AltGr is not Ctrl**:

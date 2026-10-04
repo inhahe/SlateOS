@@ -131,6 +131,7 @@ FAILURE_SKIPS = "a_paste_told_to_skip_skips_a_file_it_cannot_copy_and_says_so_at
 LINK_DRAG = "an_alt_drag_makes_a_link_or_reports_that_it_could_not"
 EXIF = "a_photographs_exif_is_three_columns"
 LATE = "exif_past_the_head_of_a_webp_is_found"
+CARD_MODAL = "the_shortcut_card_takes_every_key_and_press_while_it_is_up"
 
 MAIN = [
     (
@@ -942,6 +943,58 @@ MAIN = [
         '        let mut dialog = InputDialog::prompt("New folder", "Name:", "")\n            .with_focus_ring_width(self.focus_ring_width);',
         '        let mut dialog = InputDialog::prompt("New folder", "Name:", "");',
         ['the_address_bar_and_the_dialogs_take_the_users_focus_width'],
+    ),
+    # -- the shortcut card is modal, for the keys and the pointer
+    (
+        "the card is modal for nothing",
+        '        if self.show_help {\n            match event {\n',
+        '        if false && self.show_help {\n            match event {\n',
+        [CARD_MODAL],
+    ),
+    (
+        "a key that is not the card's acts behind it",
+        '                    if closes {\n'
+        '                        self.show_help = false;\n'
+        '                    }\n'
+        '                    return closes;\n',
+        '                    if closes {\n'
+        '                        self.show_help = false;\n'
+        '                        return true;\n'
+        '                    }\n',
+        [CARD_MODAL],
+    ),
+    (
+        "? does not put the card away",
+        '                            || k.key == Key::Slash && k.modifiers.shift);\n',
+        '                            || false);\n',
+        [CARD_MODAL],
+    ),
+    (
+        "Escape does not put the card away",
+        '                        && (matches!(k.key, Key::F1 | Key::Escape)\n',
+        '                        && (matches!(k.key, Key::F1)\n',
+        [CARD_MODAL, 'the_shortcut_list_reaches_the_window'],
+    ),
+    (
+        "a press goes through the card",
+        '                    MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n'
+        '                        self.show_help = false;\n'
+        '                        return true;\n'
+        '                    }\n',
+        '',
+        [CARD_MODAL],
+    ),
+    (
+        "only the left button puts the card away",
+        '                    MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n',
+        '                    MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_) => {\n',
+        [CARD_MODAL],
+    ),
+    (
+        "the wheel scrolls what the card covers",
+        '                    MouseEventKind::Scroll { .. } => return false,\n',
+        '',
+        [CARD_MODAL],
     ),
 ]
 

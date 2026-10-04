@@ -2846,6 +2846,21 @@ impl NotesApp {
     /// and most of it had none. This is one panel's worth; the note list and
     /// the sidebar's notebooks and tags answer one too.
     fn handle_mouse(&mut self, event: &MouseEvent) -> EventResult {
+        // The card is modal for the pointer as it is for the keys, and drawn
+        // over everything: a press, with any button, puts it away rather than
+        // reaching the note, button or menu drawn under it, and the wheel
+        // scrolls nothing it covers. A move and a release still go through,
+        // so a selection dragged in a note's text ends.
+        if self.show_help {
+            match event.kind {
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                    self.show_help = false;
+                    return EventResult::Consumed;
+                }
+                MouseEventKind::Scroll { .. } => return EventResult::Ignored,
+                _ => {}
+            }
+        }
         // An open menu takes the press before anything under it, and consumes
         // it either way: a click that dismisses a menu must not also land on
         // whatever was behind it.
@@ -8030,6 +8045,84 @@ mod tests {
             versions.last().map(|v| v.content.as_str()),
             Some("new"),
             "what the note said before is not a version"
+        );
+    }
+
+    /// **A press while the card is up puts it away and does nothing else.**
+    /// It used to go straight through the card to the note drawn under it.
+    /// The control at the end is the same press with the card down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let mut app = NotesApp::new();
+        let nb = app.create_notebook("NB");
+        let first = app.create_note("First", nb);
+        let second = app.create_note("Second", nb);
+        app.selected_note = Some(first);
+        app.render(1280.0, 800.0);
+        let (x, y) = (1..800)
+            .map(|y| (SIDEBAR_WIDTH + 20.0, y as f32))
+            .find(|&(x, y)| app.note_at(x, y) == Some(second))
+            .expect("the second note is in the list");
+
+        app.handle_event(&press(Key::F1));
+        assert!(app.show_help);
+        assert_eq!(app.handle_event(&left_press(x, y)), EventResult::Consumed);
+        assert!(!app.show_help, "the press did not put the card away");
+        assert_eq!(
+            app.selected_note,
+            Some(first),
+            "the press went through the card to another note"
+        );
+
+        // Any button: the right one opens a note's menu, but here it is a
+        // press on the card.
+        app.handle_event(&press(Key::F1));
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Right),
+        }));
+        assert!(!app.show_help, "a right-button press left the card up");
+        assert!(
+            app.note_menu.is_none(),
+            "the right press opened a menu under the card"
+        );
+
+        app.handle_event(&left_press(x, y));
+        assert_eq!(
+            app.selected_note,
+            Some(second),
+            "control: the press does nothing even with the card down"
+        );
+    }
+
+    /// **The wheel scrolls no note under the card**; the control is the same
+    /// turn with the card down.
+    #[test]
+    fn the_wheel_scrolls_no_note_under_the_card() {
+        let long: Vec<String> = (0..200).map(|n| format!("line {n}")).collect();
+        let (mut app, id) = app_with_note(&long.join("\n"));
+        let first_line = body_lines(&mut app).first().cloned();
+        let note = app.find_note(id).expect("the note").clone();
+        let (left, top, _) = app.body_box(&note);
+        let notch = Event::Mouse(MouseEvent {
+            x: left + 10.0,
+            y: top + 10.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -5.0 },
+        });
+        app.handle_event(&press(Key::F1));
+        app.handle_event(&notch);
+        assert_eq!(
+            body_lines(&mut app).first().cloned(),
+            first_line,
+            "the wheel scrolled the note under the card"
+        );
+        app.handle_event(&press(Key::F1));
+        app.handle_event(&notch);
+        assert_ne!(
+            body_lines(&mut app).first().cloned(),
+            first_line,
+            "control: the wheel scrolls nothing at all"
         );
     }
 

@@ -33,6 +33,9 @@ use appearance::Surface;
 #[allow(unused_imports)]
 use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseEvent, MouseEventKind};
+use guitk::field;
+use guitk::frame::Rect;
+use guitk::textedit;
 use pathtext::ShowPath;
 // Only the tests build a modifier set by hand; the handlers read the one on
 // the event they were given. `MouseButton` went with it -- it had no reader at
@@ -1080,6 +1083,10 @@ pub struct FileDiffApp {
     pub sync_scroll: bool,
     /// Whether the shortcut list is up.
     pub show_help: bool,
+    /// How wide the mark is round the find bar's box while it has the
+    /// keyboard: the user's focus width (`App::appearance_changed`), the
+    /// toolkit's until it is known.
+    pub focus_ring_width: f32,
     /// Index of the current change being viewed.
     pub current_change_index: usize,
     /// Indices of change edits in the edit list (for navigation).
@@ -1151,6 +1158,7 @@ impl FileDiffApp {
             scroll_right: 0.0,
             sync_scroll: true,
             show_help: false,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             current_change_index: 0,
             change_indices: Vec::new(),
             ignore_opts: IgnoreOptions::default(),
@@ -2778,77 +2786,94 @@ impl FileDiffApp {
         }
     }
 
+    /// How the box the query is typed into is drawn now: it has the keyboard
+    /// whenever the bar is up -- every key goes to it -- except while the
+    /// shortcut card or the file picker is over it; and it is red while the
+    /// query finds nothing, as a find bar's box is.
+    ///
+    /// Never lit under the pointer: the bar is driven from the keyboard, and
+    /// a box that lit up for a pointer it ignores would promise a click that
+    /// does nothing.
+    fn query_box_state(&self) -> field::State {
+        field::State {
+            hovered: false,
+            focused: self.search.visible && !self.show_help && !self.picker.is_open(),
+            disabled: false,
+            invalid: !self.search.query.is_empty() && self.search.matches.is_empty(),
+        }
+    }
+
     /// Render the search bar overlay.
     fn render_search_bar(&self, tree: &mut RenderTree) {
-        let bar_h: f32 = 36.0;
-        let bar_y = TOOLBAR_HEIGHT;
-        let bar_w = 400.0f32.min(self.width - 20.0);
-        let bar_x = self.width - bar_w - 10.0;
+        let l = FindBar::at(self.width);
+        // The toolkit's panel, in the theme's look: it was a grey slab with a
+        // blue edge, which said "this has the keyboard" in the one colour
+        // the theme no longer chooses -- the box inside it says that now.
+        self.palette.push_surface(
+            tree,
+            l.bar.x,
+            l.bar.y,
+            l.bar.w,
+            l.bar.h,
+            6.0,
+            Surface::Panel,
+        );
 
-        // Background
-        tree.push(RenderCommand::FillRect {
-            x: bar_x,
-            y: bar_y,
-            width: bar_w,
-            height: bar_h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(6.0),
-        });
-
-        // Border
-        tree.push(RenderCommand::StrokeRect {
-            x: bar_x,
-            y: bar_y,
-            width: bar_w,
-            height: bar_h,
-            color: self.palette.blue,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(6.0),
-        });
-
-        // Search label
-        tree.push(RenderCommand::Text {
-            x: bar_x + 8.0,
-            y: bar_y + 10.0,
-            text: "Find:".to_string(),
-            color: self.palette.subtext0,
-            font_size: UI_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Query text
-        if !self.search.query.is_empty() {
+        let words = |tree: &mut RenderTree, r: Rect, text: String| {
             tree.push(RenderCommand::Text {
-                x: bar_x + 48.0,
-                y: bar_y + 10.0,
-                text: self.search.query.clone(),
-                color: self.palette.text,
-                font_size: CONTENT_FONT_SIZE,
+                x: r.x,
+                y: r.y + (r.h - text::line_height(UI_FONT_SIZE, FontWeightHint::Regular)) / 2.0,
+                text,
+                color: self.palette.subtext0,
+                font_size: UI_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some((bar_w - 290.0).max(60.0)),
+                max_width: Some(r.w),
                 overflow: TextOverflow::Ellipsis,
             });
-        }
+        };
+        words(tree, l.label, "Find:".to_string());
+
+        // The query, in the toolkit's field, with the caret after the typing
+        // and scrolled so the end being typed stays in view.
+        let state = self.query_box_state();
+        field::draw(tree, &self.palette, l.query, state, self.focus_ring_width);
+        let line = text::line_height(CONTENT_FONT_SIZE, FontWeightHint::Regular);
+        textedit::draw(
+            tree,
+            &textedit::SingleLine {
+                text: &self.search.query,
+                // Typed and erased at its end, so the end is where the caret
+                // is.
+                cursor: text::TextCursor::from(self.search.query.len()),
+                selection_anchor: None,
+                focused: state.focused,
+                x: l.query.x + FindBar::INSET,
+                y: l.query.y + (l.query.h - line) / 2.0,
+                width: (l.query.w - FindBar::INSET * 2.0).max(0.0),
+                line_height: line,
+                font_size: CONTENT_FONT_SIZE,
+                weight: FontWeightHint::Regular,
+                color: self.palette.text,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
 
         // Whether case matters, and the key that changes it -- a search
         // that silently folds case turns "not found" into a claim about the
         // file rather than about the query.
-        tree.push(RenderCommand::Text {
-            x: bar_x + bar_w - 230.0,
-            y: bar_y + 10.0,
-            text: if self.search.case_sensitive {
-                "Case: on  Ctrl+I".to_string()
-            } else {
-                "Case: off  Ctrl+I".to_string()
-            },
-            color: self.palette.subtext0,
-            font_size: UI_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(110.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        if l.case.w > 0.0 {
+            words(
+                tree,
+                l.case,
+                if self.search.case_sensitive {
+                    "Case: on  Ctrl+I".to_string()
+                } else {
+                    "Case: off  Ctrl+I".to_string()
+                },
+            );
+        }
 
         // Match count
         let match_info = if self.search.matches.is_empty() {
@@ -2860,16 +2885,7 @@ impl FileDiffApp {
                 self.search.matches.len()
             )
         };
-        tree.push(RenderCommand::Text {
-            x: bar_x + bar_w - 80.0,
-            y: bar_y + 10.0,
-            text: match_info,
-            color: self.palette.subtext0,
-            font_size: UI_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        words(tree, l.count, match_info);
     }
 
     /// Render the status bar at the bottom.
@@ -3087,6 +3103,70 @@ fn render_panel_header(
 /// `text_x` is where the line's first character is drawn and `text` is the
 /// exact string drawn there, because a match's offsets are byte offsets into
 /// *that* string and nothing else.
+/// Where the find bar's parts are in a window `width` wide.
+///
+/// Laid out from both ends towards the middle -- the "Find:" label at the
+/// left, the match count and then the case setting at the right -- and the
+/// box the query is typed into takes what is left, never less than
+/// [`QUERY_MIN`](Self::QUERY_MIN) while the case setting can give way
+/// instead. The parts used to sit at fixed offsets, so in a window narrower
+/// than about 650 pixels the case setting was written over the query.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FindBar {
+    /// The bar itself.
+    bar: Rect,
+    /// "Find:".
+    label: Rect,
+    /// The box the query is typed into.
+    query: Rect,
+    /// Whether case matters; no wider than nothing when there is no room.
+    case: Rect,
+    /// The match count.
+    count: Rect,
+}
+
+impl FindBar {
+    const HEIGHT: f32 = 36.0;
+    /// Room between the parts, and at the bar's ends.
+    const GAP: f32 = 8.0;
+    /// The top and bottom margin round the parts.
+    const MARGIN_Y: f32 = 6.0;
+    /// How far the query's text sits inside its box.
+    const INSET: f32 = 4.0;
+    const COUNT_W: f32 = 72.0;
+    const CASE_W: f32 = 110.0;
+    /// The narrowest the query's box gets while the case setting can make
+    /// room for it.
+    const QUERY_MIN: f32 = 60.0;
+
+    fn at(width: f32) -> Self {
+        let w = 400.0f32.min(width - 20.0).max(0.0);
+        let bar = Rect::new(width - w - 10.0, TOOLBAR_HEIGHT, w, Self::HEIGHT);
+        let (y, h) = (bar.y + Self::MARGIN_Y, bar.h - Self::MARGIN_Y * 2.0);
+        let label_w = text::measure("Find:", UI_FONT_SIZE, FontWeightHint::Regular);
+        let label = Rect::new(bar.x + Self::GAP, y, label_w, h);
+        let query_x = label.right() + Self::GAP;
+        let count_w = Self::COUNT_W.min((bar.right() - Self::GAP - query_x).max(0.0));
+        let count = Rect::new(bar.right() - Self::GAP - count_w, y, count_w, h);
+        let room = (count.x - Self::GAP - query_x).max(0.0);
+        let case_w = (room - Self::QUERY_MIN - Self::GAP).clamp(0.0, Self::CASE_W);
+        let case = Rect::new(count.x - Self::GAP - case_w, y, case_w, h);
+        let query_right = if case_w > 0.0 {
+            case.x - Self::GAP
+        } else {
+            count.x - Self::GAP
+        };
+        let query = Rect::new(query_x, y, (query_right - query_x).max(0.0), h);
+        Self {
+            bar,
+            label,
+            query,
+            case,
+            count,
+        }
+    }
+}
+
 fn render_search_highlights(
     palette: &Palette,
     tree: &mut RenderTree,
@@ -3278,6 +3358,10 @@ fn render_dir_entry(tree: &mut RenderTree, pal: &Palette, ey: f32, entry: &DirCo
 impl App for FileDiffApp {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -5197,6 +5281,159 @@ mod tests {
             texts(&mut app).iter().any(|t| t == "Case: on  Ctrl+I"),
             "the bar did not follow the setting"
         );
+    }
+
+    /// **The find bar's box is the toolkit's field** (lane C,
+    /// `c-e-a-theme-can-shape-the-controls`): it has the keyboard while the
+    /// bar is up, marked as the theme marks a field in the user's width; not
+    /// while the shortcut card is over it; and red while the query finds
+    /// nothing. The query was written straight onto the bar, with no box and
+    /// no caret, and the bar's own edge was blue whatever the theme said.
+    #[test]
+    fn the_find_bars_box_is_the_toolkits_field() {
+        let mut app = searching_app(ViewMode::Unified, "alpha");
+        let mut p = app.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut app, &p);
+        App::appearance_changed(
+            &mut app,
+            &appearance::AppearanceSettings {
+                focus_ring_scale: 2.5,
+                ..Default::default()
+            },
+        );
+        let ring = app.focus_ring_width;
+        assert!(
+            ring > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive: {ring}"
+        );
+        let rect = FindBar::at(app.width).query;
+        // Drawn in `s` -- and, unless `s` has the keyboard, not with the
+        // keyboard's mark as well: a box without the mark is the first part
+        // of the same box with it, so finding the one says nothing about the
+        // other.
+        let draws = |app: &FileDiffApp, s: field::State| {
+            let seq = |s: field::State| {
+                let mut want: Vec<RenderCommand> = Vec::new();
+                field::draw(&mut want, &p, rect, s, ring);
+                want
+            };
+            let cmds = app.render_tree().commands;
+            let has = |want: &[RenderCommand]| cmds.windows(want.len()).any(|w| w == want);
+            has(&seq(s)) && (s.focused || !has(&seq(field::State { focused: true, ..s })))
+        };
+        let focused = field::State {
+            focused: true,
+            ..field::State::default()
+        };
+        assert!(
+            draws(&app, focused),
+            "the box of a bar that is up does not have the keyboard"
+        );
+
+        app.search.query = String::from("nowhere");
+        app.refresh_search_matches();
+        assert!(app.search.matches.is_empty());
+        assert!(
+            draws(
+                &app,
+                field::State {
+                    invalid: true,
+                    ..focused
+                }
+            ),
+            "a query that finds nothing does not turn the box red"
+        );
+
+        app.show_help = true;
+        assert!(
+            draws(
+                &app,
+                field::State {
+                    invalid: true,
+                    ..field::State::default()
+                }
+            ),
+            "the box keeps the keyboard's mark under the shortcut card"
+        );
+
+        app.show_help = false;
+        app.search.query.clear();
+        app.refresh_search_matches();
+        assert!(
+            draws(&app, focused),
+            "an empty query is red, though it has found nothing because it asks nothing"
+        );
+    }
+
+    /// **The find bar's parts never overlap, at any window width.** They sat
+    /// at fixed offsets from the bar's ends, so below about 650 pixels the
+    /// case setting was written over the query.
+    #[test]
+    fn the_find_bars_parts_never_overlap_at_any_width() {
+        for width in [
+            1920.0, 1024.0, 800.0, 640.0, 520.0, 480.0, 400.0, 360.0, 320.0,
+        ] {
+            let l = FindBar::at(width);
+            let parts = [l.label, l.query, l.case, l.count];
+            for r in parts {
+                assert!(
+                    r.x >= l.bar.x - 0.01 && r.right() <= l.bar.right() + 0.01,
+                    "at {width}: {r:?} is outside the bar {:?}",
+                    l.bar
+                );
+            }
+            for pair in [(l.label, l.query), (l.query, l.case), (l.case, l.count)] {
+                if pair.1.w > 0.0 {
+                    assert!(
+                        pair.0.right() <= pair.1.x + 0.01,
+                        "at {width}: {:?} runs into {:?}",
+                        pair.0,
+                        pair.1
+                    );
+                }
+            }
+            assert!(
+                l.query.right() <= l.count.x + 0.01,
+                "at {width}: the query's box runs into the count"
+            );
+            if l.case.w > 0.0 {
+                assert!(
+                    l.query.w >= FindBar::QUERY_MIN - 0.01,
+                    "at {width}: the case setting kept its room and the query's box lost its own"
+                );
+            }
+        }
+        // At the bar's full width every part has all its room.
+        let l = FindBar::at(1920.0);
+        assert!(
+            (l.case.w - FindBar::CASE_W).abs() < 0.01
+                && (l.count.w - FindBar::COUNT_W).abs() < 0.01
+        );
+    }
+
+    /// **The caret is after the typing, inside the box.**
+    #[test]
+    fn the_find_bars_caret_follows_the_typing() {
+        let app = searching_app(ViewMode::Unified, "alpha");
+        let l = FindBar::at(app.width);
+        let cmds = app.render_tree().commands;
+        let at = cmds
+            .iter()
+            .position(|c| matches!(c, RenderCommand::RichText { text, .. } if text == "alpha"))
+            .expect("the query is not drawn");
+        let caret = match cmds.get(at.saturating_add(1)) {
+            Some(RenderCommand::Line { x1, x2, .. }) if (x1 - x2).abs() < 0.01 => *x1,
+            other => panic!("no caret after the query: {other:?}"),
+        };
+        let end = l.query.x
+            + FindBar::INSET
+            + text::measure("alpha", CONTENT_FONT_SIZE, FontWeightHint::Regular);
+        assert!(
+            (caret - end).abs() < 0.5,
+            "the caret is at {caret}, not after the query at {end}"
+        );
+        assert!(caret < l.query.right());
     }
 
     /// The feature this whole section is about: matches were computed, counted

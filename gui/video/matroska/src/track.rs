@@ -259,6 +259,11 @@ pub struct Track {
     pub name: Option<Vec<u8>>,
     /// Its language, ISO 639-2 as written: `eng` unless the file says.
     pub language: Vec<u8>,
+    /// Its language as a BCP 47 tag (`LanguageBCP47`: `de-CH`, `zh-Hant`),
+    /// as written, where the file gives one -- which the specification says
+    /// a reader is to prefer to [`Track::language`]. Nothing here acts on
+    /// it; it is kept for what shows a file to a person.
+    pub language_bcp47: Option<Vec<u8>>,
     pub enabled: bool,
     pub default: bool,
     pub forced: bool,
@@ -321,6 +326,7 @@ pub(crate) fn read_track<R: Read + Seek>(
     let mut codec_private = Vec::new();
     let mut name = None;
     let mut language = None;
+    let mut language_bcp47 = None;
     let (mut enabled, mut default, mut forced) = (true, true, false);
     let mut default_duration = 0u64;
     let mut codec_delay = 0;
@@ -341,6 +347,7 @@ pub(crate) fn read_track<R: Read + Seek>(
             ids::TRACK_TIMESTAMP_SCALE => time_scale = r.float(c.size, 1.0)?,
             ids::NAME => name = r.string(c.size)?,
             ids::LANGUAGE => language = r.string(c.size)?,
+            ids::LANGUAGE_BCP47 => language_bcp47 = r.string(c.size)?,
             ids::CODEC_ID => codec_id = r.string(c.size)?,
             ids::CODEC_PRIVATE => codec_private = r.binary(c.size, MAX_BINARY)?,
             ids::CODEC_DELAY => codec_delay = r.uint(c.size, 0)?,
@@ -427,6 +434,7 @@ pub(crate) fn read_track<R: Read + Seek>(
             codec_private,
             name,
             language: language.unwrap_or_else(|| b"eng".to_vec()),
+            language_bcp47,
             enabled,
             default,
             forced,

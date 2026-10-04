@@ -271,6 +271,45 @@ fn the_segment_says_its_tick_and_its_length() {
     assert_eq!(d.doc_type(), Some(&b"webm"[..]));
 }
 
+/// What a file says for a person to read -- its title, and a track's
+/// language as a BCP 47 tag beside its ISO 639-2 code -- is kept as written,
+/// whatever its bytes, less EBML's zero padding; the last of two titles
+/// stands; and who wrote the file is not kept. (ffprobe shows the title, but
+/// FFmpeg's demuxer reads no BCP 47 tag, so neither is a fixture's.)
+#[test]
+fn the_title_and_a_bcp47_language_are_kept_as_written() {
+    let header = el(&[0x1A, 0x45, 0xDF, 0xA3], &el(&[0x42, 0x82], b"webm"));
+    let info = el(
+        &[0x15, 0x49, 0xA9, 0x66],
+        &[
+            uint(&[0x2A, 0xD7, 0xB1], 1_000_000),
+            el(&[0x7B, 0xA9], b"first"),
+            el(&[0x4D, 0x80], b"a muxer"),
+            el(&[0x7B, 0xA9], b"A \xffTitle\0\0"),
+        ]
+        .concat(),
+    );
+    let entry = [
+        uint(&[0xD7], 1),
+        video(),
+        el(&[0x22, 0xB5, 0x9C], b"ger"),
+        el(&[0x22, 0xB5, 0x9D], b"de-CH"),
+    ]
+    .concat();
+    let tracks = el(&[0x16, 0x54, 0xAE, 0x6B], &el(&[0xAE], &entry));
+    let clusters = cluster(0, &[simple(0, true, b"f")]);
+    let bytes = [header, el(SEGMENT, &[info, tracks, clusters].concat())].concat();
+    let d = Demuxer::open(Cursor::new(bytes)).unwrap();
+    assert_eq!(d.info().title.as_deref(), Some(&b"A \xffTitle"[..]));
+    let track = &d.tracks()[0];
+    assert_eq!(track.language, b"ger");
+    assert_eq!(track.language_bcp47.as_deref(), Some(&b"de-CH"[..]));
+    // A file that says neither.
+    let d = open("order.mkv");
+    assert_eq!(d.info().title, None);
+    assert!(d.tracks().iter().all(|t| t.language_bcp47.is_none()));
+}
+
 /// What is not Matroska is refused: no bytes, another format, and an EBML
 /// header with no Segment after it.
 #[test]

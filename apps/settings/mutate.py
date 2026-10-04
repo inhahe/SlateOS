@@ -8,7 +8,9 @@ Covers what lane C asked this app for on 2026-09-27 and 2026-09-28: the
 taskbar's window-titles switch, the automatic mode's hours, the pointer's size
 and colours, the colour and icon themes, and the Date & Time page -- each a
 setting the desktop obeyed that nothing here could change.  The rest of the
-suite predates this table.
+suite predates this table.  The last rows, added 2026-10-04, cover the list of
+keys' hold on the pointer: a press with it up puts it away and flips nothing
+under it, and the wheel scrolls no dropdown it covers.
 
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
@@ -633,6 +635,41 @@ MUTATIONS = [
         '                let search = std::mem::take(&mut self.search_hovered);',
         '                let search = false;',
         ['the_search_box_and_the_text_field_are_the_toolkits'],
+    ),
+]
+
+CARD = "the_shortcut_card_takes_a_press_rather_than_passing_it_on"
+
+MUTATIONS += [
+    # -- The list of keys takes the pointer (2026-10-04; known-issues
+    # E-a-press-goes-through-the-shortcut-card-to-the-control-drawn-under-it).
+    (
+        "a press goes through the list of keys",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n"
+        "                    self.show_help = false;\n"
+        "                    return EventResult::Consumed;\n"
+        "                }\n",
+        "",
+        [CARD],
+    ),
+    (
+        "only the left button puts the list of keys away",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n",
+        "                MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_) => {\n",
+        [CARD],
+    ),
+    (
+        "a press under the list of keys leaves it up",
+        "                    self.show_help = false;\n"
+        "                    return EventResult::Consumed;\n",
+        "                    return EventResult::Consumed;\n",
+        [CARD],
+    ),
+    (
+        "the wheel scrolls a dropdown under the list of keys",
+        "                MouseEventKind::Scroll { .. } => return EventResult::Ignored,\n",
+        "",
+        [CARD],
     ),
 ]
 

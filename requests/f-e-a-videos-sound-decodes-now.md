@@ -78,3 +78,11 @@ samples.
 **What may touch the player:** the sample rate is no longer always 48 000.
 Take it from `Sound::info().sample_rate` -- a player that resamples to the
 device, or that counts samples to keep time, needs the stream's rate.
+
+## Update, 2026-10-04: Opus in MP4
+
+`Sound` reads MP4's sound tracks too, and Opus in them plays, trimmed as
+FFmpeg trims it (the edit list's priming; the decoder's own pre-skip where
+there is none). An MP4 track is named by its track ID
+(`SoundInfo::track`). AAC -- most MP4 files' sound -- is refused by name
+(`Error::SoundCodec(SoundCodec::Aac)`) until there is a decoder for it.

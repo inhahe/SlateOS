@@ -1,6 +1,6 @@
 //! A file's sound, block by block: [`Sound`].
 //!
-//! It reads the file's packets in order -- from a Matroska or WebM file
+//! It reads the file's packets in order -- from a Matroska, WebM or MP4 file
 //! (`container.rs`) -- keeps those of its sound track, decodes them, and
 //! gives back each packet's samples with their time: 16-bit, interleaved, in
 //! the stream's channel order -- for more than two channels, Vorbis's (5.1:
@@ -50,9 +50,16 @@
 //! The stream's first packet is dropped from as on opening, so a seek to its
 //! start plays what opening it plays, to the sample.
 //!
-//! What plays: Opus and Vorbis. A file whose sound is AAC is refused by the
-//! codec's name ([`crate::Error::SoundCodec`]); MP4's sound tracks are not
-//! read yet.
+//! **MP4.** An Opus track's `dOps` is made the `OpusHead` it stands for, as
+//! FFmpeg's `mov_read_dops` makes it, with Opus's 80 ms of pre-roll; the
+//! priming the edit list leaves out comes with the packets, as FFmpeg's
+//! demuxer gives it (a skip on the first packet, packets wholly before the
+//! edit decoded and dropped), replacing the decoder's own pre-skip, which
+//! drops it in a file with no edit list.
+//!
+//! What plays: Opus and Vorbis, in Matroska and WebM; Opus in MP4. A file
+//! whose sound is AAC is refused by the codec's name
+//! ([`crate::Error::SoundCodec`]).
 
 use std::io::{Read, Seek};
 
@@ -68,8 +75,8 @@ const OPUS_MAX_PACKET: usize = 5760;
 /// A file's sound, as [`Sound::info`] describes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SoundInfo {
-    /// The track's number in the file (Matroska's `TrackNumber`): what
-    /// [`Sound::open_track`] takes.
+    /// The track's number in the file (Matroska's `TrackNumber`, MP4's
+    /// track ID): what [`Sound::open_track`] takes.
     pub track: u64,
     pub codec: SoundCodec,
     /// Samples a second: 48 000 for Opus; a Vorbis stream's own.
@@ -441,6 +448,10 @@ impl<R: Read + Seek> Sound<R> {
                 StartSkip::PreSkip(n) => self.skip = n,
             }
         }
+        // MP4's priming, which its demuxer gives the packet as side data.
+        if sample.skip_samples > 0 {
+            side_skip = Some(sample.skip_samples);
+        }
         let padding = sample.discard_padding;
         let mut discard = 0u64;
         if padding > 0 {
@@ -455,6 +466,12 @@ impl<R: Read + Seek> Sound<R> {
         }
         if let Some(s) = side_skip {
             self.skip = s;
+        }
+        // A packet MP4's edit list leaves out: decoded, for those after it,
+        // and its sound dropped -- what is left to skip with it.
+        if sample.discard {
+            self.skip = self.skip.saturating_sub(decoded as u64);
+            return None;
         }
         let mut start = 0u64;
         let mut n = decoded as u64;

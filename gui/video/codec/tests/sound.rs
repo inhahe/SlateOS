@@ -1,5 +1,5 @@
-//! The sound fixtures (`tests/data/opus_*`, `tests/data/vorbis_*`) played
-//! through [`videocodec::Sound`]: every block's time and length held to
+//! The sound fixtures (`tests/data/opus_*`, `tests/data/vorbis_*`, in
+//! Matroska, WebM and MP4) played through [`videocodec::Sound`]: every block's time and length held to
 //! FFmpeg's (`ffprobe -show_frames`), and every sample to libopus's
 //! fixed-point decoder's or Tremor's with FFmpeg's trimming
 //! (`tests/data/generate_sound_fixtures.py`, which says where each answer
@@ -23,7 +23,7 @@ use std::path::PathBuf;
 
 use videocodec::{Error, Sound, SoundCodec};
 
-const FIXTURES: [&str; 7] = [
+const FIXTURES: [&str; 11] = [
     "opus_stereo.webm",
     "opus_mono_voip.webm",
     "opus_short_frames.mka",
@@ -31,6 +31,10 @@ const FIXTURES: [&str; 7] = [
     "vorbis_stereo.webm",
     "vorbis_mono_22k.mka",
     "vorbis_51.webm",
+    "opus_mp4_stereo.mp4",
+    "opus_mp4_no_edit_list.mp4",
+    "opus_mp4_51.mp4",
+    "opus_mp4_long_priming.mp4",
 ];
 
 fn data(name: &str) -> PathBuf {
@@ -192,12 +196,18 @@ fn a_seek_starts_at_the_first_sample_at_or_after_its_time() {
         "vorbis_stereo.webm",
         "vorbis_mono_22k.mka",
         "vorbis_51.webm",
+        "opus_mp4_stereo.mp4",
+        "opus_mp4_no_edit_list.mp4",
+        "opus_mp4_long_priming.mp4",
     ] {
         let e = expected(name);
         let channels = e.channels;
         let whole = blocks(name);
-        let end = whole.last().unwrap().time;
-        for t in [1i64, end * 3 / 10, end / 2 + 1, end * 2 / 3 + 250_000] {
+        // From the first block's time: a file whose decoder drops its own
+        // pre-skip starts later than 0 (an MP4 with no edit list).
+        let start = whole[0].time;
+        let span = whole.last().unwrap().time - start;
+        for t in [1, span * 3 / 10, span / 2 + 1, span * 2 / 3 + 250_000].map(|d| start + d) {
             let i = whole.iter().rposition(|b| b.time <= t).unwrap();
             let b = &whole[i];
             let k = usize::try_from(

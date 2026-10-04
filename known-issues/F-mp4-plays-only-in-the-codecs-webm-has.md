@@ -19,7 +19,7 @@ features are also left out, listed below with what doing each would take.
 | Spherical (360-degree) video: MP4's `sv3d`, Matroska's equirectangular and cubemap projections | shown as its flat, unwrapped picture | a viewer that maps it onto a sphere; nothing here has one. (Matroska files FFmpeg refuses for a broken projection are refused, as there.) |
 | A fragmented MP4's `sidx` (segment index) | not read: every fragment's `moof` is read when the file opens, so a long fragmented file costs a read of each fragment's header before the first frame | read `sidx` as FFmpeg does (`mov_read_sidx`) and the fragments as they are reached; the packets come out the same either way, only the time to open changes (`gui/video/mp4/src/parse.rs`) |
 | Encrypted MP4 tracks (`encv`, `enca`: Common Encryption) | their codec is not recognised, so they are not played | nothing to decrypt with; a DRM question, not a demuxer one |
-| Sound | no track's sound is played yet | Opus, AAC and Vorbis decoders; the roadmap's "Video files" item |
+| Sound in AAC -- what most MP4 files carry | refused by name (`Error::SoundCodec(SoundCodec::Aac)`); Opus in MP4 plays (2026-10-04) | an AAC decoder, beside `gui/video/opus` and `gui/video/vorbis`; the roadmap's "Video files" item |
 
 **Where.** `gui/video/codec` (`container.rs`, `video.rs`, `orientation.rs`),
 `gui/video/mp4`. The crates' module documentation says what they read.

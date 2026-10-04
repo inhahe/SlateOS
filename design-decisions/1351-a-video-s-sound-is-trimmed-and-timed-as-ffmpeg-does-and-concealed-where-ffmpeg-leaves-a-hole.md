@@ -94,10 +94,33 @@ short blocks, mono at 22.05 kHz in plain Matroska, 5.1 -- against ffprobe's
 blocks and Tremor's samples trimmed by FFmpeg's rules (the generator
 applies them to Tremor's output packet by packet).
 
-**What it does not do yet.** AAC (MP4's codec) is refused by name; MP4's
-sound tracks are not read; and nothing plays the samples: the speakers
-need the kernel's PCM interface (`kernel/src/audio_alsa.rs`, lane A's)
-reachable from a program.
+**Opus in MP4, 2026-10-04.** MP4's sound tracks are read now, and Opus in
+them plays, by the rules above as FFmpeg's `mov.c` and `decode.c` apply
+them -- measured on files where they could disagree:
+
+- **The `dOps` box is made the `OpusHead`** it stands for, as
+  `mov_read_dops` makes it (its fields after the version, three of them
+  byte-swapped), with Opus's 80 ms of pre-roll.
+- **The edit list's priming wins.** FFmpeg's MP4 demuxer gives the packet
+  the edit list starts in the samples to skip as side data, which replaces
+  the decoder's own pre-skip: with the `dOps` pre-skip patched to 100 and
+  the edit list leaving out 312, FFmpeg drops 312. Packets wholly before
+  the edit are marked to be decoded and dropped, each taking its length
+  off what is left to skip.
+- **With no edit list, the decoder drops its own pre-skip**, and the first
+  block is that much after its packet's time (6.5 ms for 312 samples).
+- **No end is trimmed:** MP4 has no discard padding, and FFmpeg plays the
+  last packet whole, past the length the edit list gives the track.
+
+Four fixtures (stereo, 5.1, no edit list, an edit list patched to leave
+out 2000 samples -- two whole packets and the start of the third) are held
+to ffprobe's blocks and libopus's samples, with seeks; the generator's
+trimming is one model of FFmpeg's now, for every fixture.
+
+**What it does not do yet.** AAC (MP4's commonest codec) is refused by
+name; and nothing plays the samples: the speakers need the kernel's PCM
+interface (`kernel/src/audio_alsa.rs`, lane A's) reachable from a
+program.
 
 **Where it lives.** `gui/video/codec/src/sound.rs`; the container's sound
 tracks and each packet's discard padding and position in `container.rs`;

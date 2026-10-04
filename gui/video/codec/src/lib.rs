@@ -40,10 +40,11 @@
 //! same file (a second handle to it), it gives back each packet's samples
 //! decoded, with their time on the same clock, for the program to play and
 //! to show the pictures by. Opus and Vorbis, in Matroska and WebM -- WebM's
-//! sound -- through `gui/video/opus`, libopus's decoder, and
-//! `gui/video/vorbis`, Tremor, each ported and held to its reference sample
-//! for sample; the codec delay and each packet's discard padding dropped,
-//! and the blocks timed, as FFmpeg drops and times them (`tests/sound.rs`).
+//! sound -- and Opus in MP4, through `gui/video/opus`, libopus's decoder,
+//! and `gui/video/vorbis`, Tremor, each ported and held to its reference
+//! sample for sample; the codec delay, an MP4 edit list's priming and each
+//! packet's discard padding dropped, and the blocks timed, as FFmpeg drops
+//! and times them (`tests/sound.rs`).
 //!
 //! # Colour
 //!

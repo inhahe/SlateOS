@@ -101,6 +101,11 @@ pub(crate) struct Sample {
     /// positive, its start if negative (Matroska's `DiscardPadding`; 0 in
     /// MP4).
     pub discard_padding: i64,
+    /// Sound to drop from the start of what this packet decodes to, in
+    /// samples (MP4's: the priming its edit list leaves out, given with the
+    /// first packet and with the first after a seek into it; 0 in Matroska,
+    /// whose codec delay is the track's).
+    pub skip_samples: u64,
     /// Where the packet's bytes begin in the file: what tells one packet
     /// from another.
     pub position: u64,
@@ -109,12 +114,13 @@ pub(crate) struct Sample {
 /// A sound track.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SoundTrack {
-    /// Matroska's track number: what a caller names it by.
+    /// Matroska's track number, MP4's track ID: what a caller names it by.
     pub number: u64,
     /// What the container's packets and seeks name it by.
     pub key: u64,
     pub codec: SoundCodec,
-    /// The codec's setup: Opus's `OpusHead`.
+    /// The codec's setup: Opus's `OpusHead` (made from MP4's `dOps` as
+    /// FFmpeg makes it), Vorbis's three headers laced.
     pub config: Vec<u8>,
     pub enabled: bool,
     pub default: bool,
@@ -171,9 +177,7 @@ impl<R: Read + Seek> Container<R> {
         }
     }
 
-    /// The file's sound tracks that can be read, in the file's order:
-    /// Matroska's. (MP4's are not read yet: they are AAC above all, which
-    /// nothing here decodes.)
+    /// The file's sound tracks, in the file's order.
     pub(crate) fn sounds(&self) -> Vec<SoundTrack> {
         match self {
             Self::Matroska(d) => d
@@ -199,7 +203,35 @@ impl<R: Read + Seek> Container<R> {
                     })
                 })
                 .collect(),
-            Self::Mp4(_) => Vec::new(),
+            Self::Mp4(d) => d
+                .tracks()
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| t.kind == mp4::TrackKind::Audio)
+                .filter_map(|(i, t)| {
+                    let (codec, config, seek_pre_roll) = match t.codec {
+                        // FFmpeg's `mov_read_dops`: the OpusHead, and Opus's
+                        // 80 ms of pre-roll.
+                        mp4::Codec::Opus => (SoundCodec::Opus, opus_head(&t.config), 80_000_000),
+                        mp4::Codec::Aac => (SoundCodec::Aac, t.config.clone(), 0),
+                        _ => (SoundCodec::Other, t.config.clone(), 0),
+                    };
+                    Some(SoundTrack {
+                        number: u64::from(t.id),
+                        key: u64::try_from(i).ok()?,
+                        codec,
+                        config,
+                        enabled: true,
+                        default: t.default,
+                        time_base: (1, u64::from(t.timescale)),
+                        // The priming comes with the packets
+                        // (`Sample::skip_samples`), as FFmpeg's demuxer gives
+                        // it; else the decoder's own pre-skip drops it.
+                        codec_delay: 0,
+                        seek_pre_roll,
+                    })
+                })
+                .collect(),
         }
     }
 
@@ -243,6 +275,7 @@ impl<R: Read + Seek> Container<R> {
                     alpha,
                     new_config: None,
                     discard_padding: p.discard_padding,
+                    skip_samples: 0,
                     position: p.position,
                 }
             })),
@@ -260,6 +293,7 @@ impl<R: Read + Seek> Container<R> {
                     alpha: None,
                     new_config: p.new_config,
                     discard_padding: 0,
+                    skip_samples: u64::from(p.skip_samples),
                     position: p.position,
                 }))
             }
@@ -390,6 +424,28 @@ fn matroska_codec(t: &matroska::Track) -> Codec {
 }
 
 /// An MP4 video track, the `index`th of the file's.
+/// MP4's Opus setup (`dOps`) as the `OpusHead` an Ogg or Matroska file
+/// carries, as FFmpeg's `mov_read_dops` makes it: the magic and version 1,
+/// then the box's fields after its version, the pre-skip, the input rate and
+/// the gain turned little-endian (the mapping after them is bytes either
+/// way). Empty where the box is too short to be one.
+fn opus_head(dops: &[u8]) -> Vec<u8> {
+    let Some(rest) = dops.get(1..).filter(|r| r.len() >= 10) else {
+        return Vec::new();
+    };
+    let mut head = Vec::with_capacity(rest.len().saturating_add(9));
+    head.extend_from_slice(b"OpusHead");
+    head.push(1);
+    head.extend_from_slice(rest);
+    // OpusHead's pre-skip, input rate and gain.
+    for field in [10..12, 12..16, 16..18] {
+        if let Some(field) = head.get_mut(field) {
+            field.reverse();
+        }
+    }
+    head
+}
+
 fn mp4_track(index: usize, t: &mp4::Track) -> Option<Track> {
     if t.kind != mp4::TrackKind::Video {
         return None;
@@ -456,8 +512,29 @@ fn segment_duration<R: Read + Seek>(demuxer: &matroska::Demuxer<R>) -> Option<u6
 }
 
 #[cfg(test)]
+#[allow(clippy::indexing_slicing, reason = "a test: a failure should be loud")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_mp4_opus_setup_is_the_opushead_it_stands_for() {
+        // dOps: version 0, 2 channels, pre-skip 312, 48 kHz, gain -3, family 0
+        // -- big-endian.
+        let dops = [0, 2, 0x01, 0x38, 0, 0, 0xbb, 0x80, 0xff, 0xfd, 0];
+        let mut want = b"OpusHead".to_vec();
+        want.extend_from_slice(&[1, 2, 0x38, 0x01, 0x80, 0xbb, 0, 0, 0xfd, 0xff, 0]);
+        assert_eq!(opus_head(&dops), want);
+        assert_eq!(opus::Head::parse(&want).map(|h| h.pre_skip), Some(312));
+        // A mapping table after the family is copied as it is.
+        let mut five_one = dops.to_vec();
+        five_one[1] = 6;
+        five_one[10] = 1;
+        five_one.extend_from_slice(&[4, 2, 0, 4, 1, 2, 3, 5]);
+        // The family at 18, then the stream counts and the mapping.
+        assert_eq!(opus_head(&five_one)[18..], [1, 4, 2, 0, 4, 1, 2, 3, 5]);
+        // Too short to be one: nothing.
+        assert!(opus_head(&dops[..10]).is_empty());
+    }
 
     fn track(aspect: Aspect) -> Track {
         Track {

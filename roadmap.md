@@ -3910,9 +3910,15 @@ lane C's `guitk`.
         lane A's (`requests/e-ad-no-application-can-reach-the-sound-device.md`,
         lane E's request); then the video player plays its sound, which is
         lane E's.
-      - `[ ]` MP4's sound: Opus in MP4 (its `dOps` box, the edit list and the
-        pre-skip together, as FFmpeg's `mov.c` reads them); AAC, which most
-        MP4 files carry, is a decoder of its own.
+      - `[-]` MP4's sound.
+        - `[x]` Opus in MP4: its `dOps` made the `OpusHead` FFmpeg makes of
+          it; the edit list's priming as FFmpeg's demuxer gives it,
+          replacing the decoder's own pre-skip (which drops it where there
+          is no edit list), packets wholly before the edit decoded and
+          dropped. Four fixtures (stereo, 5.1, no edit list, an edit list
+          leaving out two whole packets) held to ffprobe's blocks and
+          libopus's samples, with seeks. design-decisions §1351.
+        - `[ ]` AAC, which most MP4 files carry: a decoder of its own.
 
 - `[-]` `[F]` **A display transport over channel IPC** for local clients,
   beside the TCP one. The point is the peer's identity: the kernel attests a

@@ -58,12 +58,37 @@ match arm again and the test that was written to catch exactly that still
 holds the file green. Verified by deleting `apps/stopwatch`'s arm on the live
 tree -- the first draft said nothing, this one names it.
 
+## The other half: the clock has to be asked for
+
+Routing the tick is half of the wiring. `oswindow` delivers `Event::Tick` only
+to a window whose `App::tick_interval` names an interval, and the trait's
+default is `None` -- so an app that acts on the tick but never says how often
+it wants one receives none, and is exactly as frozen as one with no Tick arm.
+Its tests pass all the same, because a test hands the tick in by hand.
+
+On 2026-10-03 lane E found three this way, all in a sweep prompted by the
+first:
+
+  * `apps/credmanager` -- the vault never auto-locked, however long it was
+    left. A password manager.
+  * `apps/defrag`      -- a started defrag stood at nought per cent for good.
+  * `apps/benchmark`   -- the timer beside a running suite; the suite does not
+    yet run between events, so the next change to it would have frozen it.
+
+So a crate is also reported when it implements `App`, names `Event::Tick` in
+production code, and never writes `fn tick_interval` there. Per crate, not per
+file: the `impl App`, the Tick arm and `tick_interval` can each live in a
+different module. An app that names the tick and genuinely wants none says so
+by writing `tick_interval` out, returning `None`, with the reason beside it --
+which is also the only way a reader can tell "wants no clock" from "forgot".
+
 ## What it cannot see
 
-An app that *does* match `Event::Tick` but routes it somewhere useless, and an
-app whose time-advancing parameter is named something this list does not know.
-It never proves an app is correctly wired; it only names ones that provably are
-not. Exit status is 1 if any are found, so it can be run as a gate.
+An app that *does* match `Event::Tick` but routes it somewhere useless, an app
+whose time-advancing parameter is named something this list does not know, and
+an app whose `tick_interval` asks for a clock at the wrong moments. It never
+proves an app is correctly wired; it only names ones that provably are not.
+Exit status is 1 if any are found, so it can be run as a gate.
 """
 
 from __future__ import annotations
@@ -119,6 +144,25 @@ def timekeeping_functions(text: str) -> list[tuple[int, str]]:
         if TIME_PARAM_RE.search(sig):
             found.append((text.count("\n", 0, m.start()) + 1, m.group(1)))
     return found
+
+
+# The second rule's two patterns -- see "The other half" in the docstring.
+# `impl App for`, optionally generic and optionally path-qualified
+# (`impl oswindow::app::App for`).
+APP_IMPL_RE = re.compile(r"\bimpl(?:\s*<[^>]*>)?\s+(?:[\w:]+::)?App\s+for\b")
+TICK_INTERVAL_RE = re.compile(INDENT + r"fn\s+tick_interval\s*\(", re.M)
+
+
+def asks_for_no_clock(sources: list[str]) -> bool:
+    """Whether the crate made of `sources` acts on the tick but never asks
+    for one: it implements `App` and names `Event::Tick` in production code,
+    and writes no `fn tick_interval` there."""
+    prod = "\n".join(production_only(s) for s in sources)
+    return (
+        bool(APP_IMPL_RE.search(prod))
+        and bool(TICK_RE.search(prod))
+        and not TICK_INTERVAL_RE.search(prod)
+    )
 
 
 def inspect(text: str) -> list[tuple[int, str]] | None:
@@ -303,8 +347,116 @@ SELF_TESTS = [
 ]
 
 
+# The second rule, over whole crates: each case is a crate's sources and
+# whether it asks for no clock.
+ACTS_ON_THE_TICK = """
+impl App for Defrag {
+    fn on_event(&mut self, event: &Event) -> Response {
+        match event {
+            Event::Tick { .. } => self.step(),
+            _ => Response::Idle,
+        }
+    }
+}
+"""
+
+ASKS_FOR_IT = """
+impl App for Defrag {
+    fn tick_interval(&self) -> Option<Duration> {
+        self.running.then_some(TICK)
+    }
+    fn on_event(&mut self, event: &Event) -> Response {
+        match event {
+            Event::Tick { .. } => self.step(),
+            _ => Response::Idle,
+        }
+    }
+}
+"""
+
+# The arm in one module, `impl App` and `tick_interval` in another.
+ARM_IN_ONE_FILE = """
+fn handle_event(state: &mut State, event: &Event) -> EventResult {
+    match event {
+        Event::Tick { elapsed_ms } => state.advance(*elapsed_ms),
+        _ => EventResult::Ignored,
+    }
+}
+"""
+
+APP_IN_ANOTHER = """
+impl oswindow::app::App for State {
+    fn tick_interval(&self) -> Option<Duration> { Some(TICK) }
+}
+"""
+
+APP_IN_ANOTHER_ASKING_NOTHING = """
+impl<'a> oswindow::app::App for State<'a> {
+    fn title(&self) -> String { String::new() }
+}
+"""
+
+# A library type: its owner ticks it, and asks for the owner's clock.
+NO_APP = """
+impl Toast {
+    pub fn handle_event(&mut self, event: &Event) {
+        if let Event::Tick { elapsed_ms } = event { self.age += *elapsed_ms; }
+    }
+}
+"""
+
+TICK_INTERVAL_ONLY_IN_A_COMMENT = """
+impl App for Defrag {
+    // fn tick_interval(&self) -> Option<Duration> -- to do
+    fn on_event(&mut self, event: &Event) -> Response {
+        if let Event::Tick { .. } = event { self.step(); }
+        Response::Idle
+    }
+}
+"""
+
+TICK_ONLY_IN_A_TEST_OF_AN_APP = """
+impl App for Calculator {
+    fn on_event(&mut self, event: &Event) -> Response { Response::Idle }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_tick_changes_nothing() {
+        assert_eq!(app.on_event(&Event::Tick { elapsed_ms: 16 }), Response::Idle);
+    }
+}
+"""
+
+CRATE_SELF_TESTS = [
+    ("an app that acts on the tick and asks for none is reported", [ACTS_ON_THE_TICK], True),
+    ("an app that asks for the tick it acts on is not", [ASKS_FOR_IT], False),
+    ("the arm and the ask may be in different modules", [ARM_IN_ONE_FILE, APP_IN_ANOTHER], False),
+    (
+        "an arm in one module with no ask in the other is reported",
+        [ARM_IN_ONE_FILE, APP_IN_ANOTHER_ASKING_NOTHING],
+        True,
+    ),
+    ("a library type its owner ticks is not reported", [NO_APP], False),
+    (
+        "`tick_interval` in a comment does not count as asking",
+        [TICK_INTERVAL_ONLY_IN_A_COMMENT],
+        True,
+    ),
+    ("a tick in an app's tests is not a production arm", [TICK_ONLY_IN_A_TEST_OF_AN_APP], False),
+]
+
+
 def self_test() -> int:
     failed = 0
+    for name, sources, expected in CRATE_SELF_TESTS:
+        got = asks_for_no_clock(sources)
+        ok = got == expected
+        print(f"{'ok  ' if ok else 'FAIL'} {name}")
+        if not ok:
+            print(f"       expected {expected}, got {got}")
+            failed += 1
     for name, source, expected in SELF_TESTS:
         got = inspect(source)
         if expected is None:
@@ -324,8 +476,32 @@ def self_test() -> int:
         if not ok:
             print(f"       expected {expected}, got {got_desc}")
             failed += 1
-    print(f"\n{len(SELF_TESTS)} self-test case(s), {failed} failed")
+    cases = len(SELF_TESTS) + len(CRATE_SELF_TESTS)
+    print(f"\n{cases} self-test case(s), {failed} failed")
     return 1 if failed else 0
+
+
+def crates_asking_for_no_clock(root: pathlib.Path) -> list[str]:
+    """Every crate under the scanned roots that acts on the tick and never
+    asks for one, as a path relative to `root`."""
+    found = []
+    for name in ROOTS:
+        for d in sorted(root.glob(f"{name}*")):
+            if not d.is_dir():
+                continue
+            for manifest in sorted(d.rglob("Cargo.toml")):
+                crate = manifest.parent
+                if "target" in crate.relative_to(root).parts:
+                    continue
+                sources = []
+                for path in sorted((crate / "src").rglob("*.rs")):
+                    try:
+                        sources.append(path.read_text(encoding="utf-8"))
+                    except (OSError, UnicodeDecodeError):
+                        continue
+                if asks_for_no_clock(sources):
+                    found.append(crate.relative_to(root).as_posix())
+    return found
 
 
 def main(argv: list[str]) -> int:
@@ -366,12 +542,24 @@ def main(argv: list[str]) -> int:
         if verbose and not found:
             print(f"{rel}: handle_event, no Event::Tick, no clock parameter")
 
+    unasked = crates_asking_for_no_clock(root)
+    for crate in unasked:
+        problems.append(
+            f"{crate}: implements `App` and acts on `Event::Tick`, but never "
+            f"asks for one -- `App::tick_interval` is the trait's default, "
+            f"`None`, so no tick is delivered and what the arm advances is "
+            f"frozen. Write `tick_interval` out: the interval while there is "
+            f"something to advance, `None` otherwise -- and `None` with the "
+            f"reason beside it if the app truly wants no clock."
+        )
+
     for p in problems:
         print(p)
     print(
         f"{considered} file(s) with a `handle_event` checked, "
         f"{wired} already route `Event::Tick`, "
-        f"{len(problems)} timekeeping function(s) left unwired"
+        f"{len(problems) - len(unasked)} timekeeping function(s) left unwired; "
+        f"{len(unasked)} crate(s) act on the tick and never ask for one"
     )
     return 1 if problems else 0
 

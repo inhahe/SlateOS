@@ -1,7 +1,7 @@
-### [F] The VP9 encoder makes libvpx's decisions only above 352x288 -- 2026-10-04
+### [F] The VP9 encoder makes libvpx's decisions only above 352x288 -- 2026-10-04 -- **FIXED 2026-10-04**
 
-**Status:** OPEN — answered on lane-f 2026-10-04, and moves to
-`known-issues-resolved/` once that has had a boot test on `main`. The
+**Status:** FIXED 2026-10-04 (lane F); on `main` since the boot-tested
+publication of `cc0cc9137`. The
 learned partitioning is ported (`enc/mlpart.rs`, `enc/nonrd.rs`'s
 `pick_partition`), with glibc's `logf` as the reference machine runs it
 (`enc/glibcmath.rs`). A third reference encode at 350x286,

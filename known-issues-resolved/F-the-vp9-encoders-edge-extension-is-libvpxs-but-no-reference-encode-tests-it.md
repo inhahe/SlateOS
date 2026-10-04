@@ -1,7 +1,7 @@
-### [F] The VP9 encoder's edge extension is libvpx's, but no reference encode tests it -- 2026-10-04
+### [F] The VP9 encoder's edge extension is libvpx's, but no reference encode tests it -- 2026-10-04 -- **FIXED 2026-10-04**
 
-**Status:** OPEN — answered on lane-f 2026-10-04, and moves to
-`known-issues-resolved/` once that has had a boot test on `main`. The
+**Status:** FIXED 2026-10-04 (lane F); on `main` since the boot-tested
+publication of `cc0cc9137`. The
 second reference encode, `tests/data/encoder/rt8cut.ivf`, is 651x357: its
 last superblock row and column hang over the picture, and its last 8x8
 cells are partly outside it. All 150 of its frames come out byte-identical

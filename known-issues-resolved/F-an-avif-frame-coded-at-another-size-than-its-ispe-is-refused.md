@@ -1,7 +1,7 @@
-### [F] An AVIF frame coded at another size than its `ispe` is refused -- 2026-09-27
+### [F] An AVIF frame coded at another size than its `ispe` is refused -- 2026-09-27 -- **FIXED 2026-10-04**
 
-**Status:** OPEN — answered on lane-f 2026-10-04, and moves to
-`known-issues-resolved/` once that has had a boot test on `main`.
+**Status:** FIXED 2026-10-04 (lane F); on `main` since the boot-tested
+publication of `cc0cc9137`.
 
 **The answer:** `gui/video/yuv/src/scale.rs` (first written as
 `gui/imagecodec/src/avif/scale.rs`), called from `decode.rs`'s

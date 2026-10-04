@@ -262,10 +262,17 @@ MAIN = [
         '        if event.modifiers.ctrl {',
         ['a_chord_is_neither_a_readers_key_nor_typing'],
     ),
+    # The search's typing is textline's editor's since 2026-10-04, which types
+    # only what a key typed and no command's letter: the rule is textline's.
+    # What is this program's is handing the editor the key as it came.
     (
         "a command's letter is typed into the search",
-        '&& textline::types_into_field(event)',
-        '&& event.types_text()',
+        '            &mut self.search_editor,\n            event,\n',
+        '            &mut self.search_editor,\n'
+        '            &KeyEvent {\n'
+        '                modifiers: guitk::event::Modifiers::NONE,\n'
+        '                ..event.clone()\n'
+        '            },\n',
         ['a_chord_is_neither_a_readers_key_nor_typing'],
     ),
     (
@@ -290,6 +297,70 @@ MAIN = [
         '            if matches!(event.kind, MouseEventKind::Press(MouseButton::Left)) {\n'
         '                self.show_help = false;\n',
         ['test_mouse_click_library_under_the_card'],
+    ),
+]
+
+# The search box is the toolkit's field, in the reading theme's colours, and
+# edited by textline's editor (2026-10-04; lane C,
+# c-e-a-theme-can-shape-the-controls).
+SEARCH_BOX = "the_search_box_is_the_toolkits_field_in_the_reading_theme"
+
+MAIN += [
+    (
+        "the search box never has the keyboard's mark",
+        "                focused: !self.show_help,\n",
+        "                focused: false,\n",
+        [SEARCH_BOX],
+    ),
+    (
+        "a search that found nothing is not red",
+        "                    && self.searched.as_deref() == Some(self.search_query.as_str()),\n",
+        "                    && false,\n",
+        [SEARCH_BOX],
+    ),
+    (
+        "a query not yet searched for is red",
+        "                    && self.searched.as_deref() == Some(self.search_query.as_str()),\n",
+        "                    && true,\n",
+        [SEARCH_BOX],
+    ),
+    (
+        "a sepia page's box is the desktop's",
+        "        p.crust = tc.background;\n",
+        "",
+        [SEARCH_BOX],
+    ),
+    (
+        "the search's editor is not reloaded",
+        "        if self.search_editor.text() != self.search_query {\n"
+        "            self.search_editor.set_text(&self.search_query);\n"
+        "        }\n"
+        "        let edit = textline::apply_key(\n",
+        "        let edit = textline::apply_key(\n",
+        ["test_search_backspace"],
+    ),
+    (
+        "a cut takes nothing to the clipboard",
+        "            self.search_clipboard = copied;\n",
+        "            let _ = copied;\n",
+        [SEARCH_BOX],
+    ),
+    (
+        "the search box's keys come after the window's chords",
+        "        if self.view == AppView::Reading\n"
+        "            && self.search_active\n"
+        "            && let Some(taken) = self.search_box_key(event)\n",
+        "        if self.view == AppView::Reading\n"
+        "            && self.search_active\n"
+        "            && !textline::is_ctrl_chord(event.modifiers)\n"
+        "            && let Some(taken) = self.search_box_key(event)\n",
+        [SEARCH_BOX],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [SEARCH_BOX],
     ),
 ]
 

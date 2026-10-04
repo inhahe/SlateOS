@@ -30,9 +30,14 @@
 use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::field;
+use guitk::frame::Rect;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::text::{self, TextCursor};
+use guitk::textedit;
 use guitk::textfind;
+use guitk::textinput::TextInput;
 use oswindow::app::{self, App, Response};
 use oswindow::{Event, RenderTree};
 use std::path::{Path, PathBuf};
@@ -287,6 +292,12 @@ impl ThemeColors {
 // ============================================================================
 
 const WINDOW_WIDTH: f32 = 900.0;
+/// The size the search box's text is drawn at.
+const SEARCH_TEXT_SIZE: f32 = 14.0;
+/// How far the search box's text sits in from its left edge.
+const SEARCH_TEXT_INSET: f32 = 8.0;
+/// The most characters the search box holds.
+const SEARCH_CAPACITY: usize = 256;
 const WINDOW_HEIGHT: f32 = 700.0;
 /// A window narrower or shorter than this lays out a page one character
 /// wide and one line tall. The compositor is not asked to forbid the size;
@@ -1337,6 +1348,18 @@ pub struct EbookApp {
     pub search_query: String,
     pub search_active: bool,
     pub search_matches: Vec<SearchMatch>,
+    /// The query `search_matches` were found for: a query that has not been
+    /// searched since it was typed is not yet "found nothing".
+    searched: Option<String>,
+    /// The search box's caret and selection, laid over `search_query`, which
+    /// stays the truth: reloaded whenever the query changes under it.
+    search_editor: TextInput,
+    /// What Ctrl+C or Ctrl+X last took from the search box, for Ctrl+V.
+    search_clipboard: String,
+    /// How wide the mark is round the box that has the keyboard: the user's
+    /// focus width (`App::appearance_changed`), the toolkit's until it is
+    /// known.
+    pub focus_ring_width: f32,
     pub current_match_idx: Option<usize>,
 
     // TOC / bookmark list selection
@@ -1464,6 +1487,10 @@ impl EbookApp {
             search_query: String::new(),
             search_active: false,
             search_matches: Vec::new(),
+            searched: None,
+            search_editor: TextInput::new(),
+            search_clipboard: String::new(),
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             current_match_idx: None,
             list_selection: 0,
             window_width: WINDOW_WIDTH,
@@ -1795,7 +1822,9 @@ impl EbookApp {
         self.search_active = true;
         self.search_query.clear();
         self.search_matches.clear();
+        self.searched = None;
         self.current_match_idx = None;
+        self.search_editor.set_text("");
     }
 
     /// Close the search bar.
@@ -1807,6 +1836,7 @@ impl EbookApp {
     pub fn execute_search(&mut self) {
         if let Some(book) = self.library.get(self.selected_book) {
             self.search_matches = find_all_matches(&book.text, &self.search_query);
+            self.searched = Some(self.search_query.clone());
             if self.search_matches.is_empty() {
                 self.current_match_idx = None;
             } else {
@@ -2144,6 +2174,14 @@ impl EbookApp {
             }
             return true;
         }
+        // The search box, while it is open, takes the keys it answers --
+        // Ctrl+A, C, X and V among them -- before the window's chords.
+        if self.view == AppView::Reading
+            && self.search_active
+            && let Some(taken) = self.search_box_key(event)
+        {
+            return taken;
+        }
         // The two Ctrl chords, as Ctrl chords: AltGr arrives as Ctrl+Alt and
         // types -- AltGr+O is a Polish `ó`, and opened a file.
         if textline::is_ctrl_chord(event.modifiers) {
@@ -2158,13 +2196,6 @@ impl EbookApp {
                 }
                 _ => false,
             };
-        }
-        // The search's text: what a key typed, AltGr's among it, and not a
-        // command's letter, which a chord carries -- Alt+X typed an `x`.
-        if self.view == AppView::Reading && self.search_active && textline::types_into_field(event)
-        {
-            self.search_query.extend(event.typed());
-            return true;
         }
         if !plain {
             return false;
@@ -2274,6 +2305,62 @@ impl EbookApp {
         }
     }
 
+    /// A key while the search box is open: Escape and Enter, plain, close it
+    /// and search; every key a field answers is the box's editor's
+    /// (`textline::apply_key`) -- the caret keys, Backspace and Delete,
+    /// Ctrl+A, C, X and V, and typing, which knows a command from AltGr:
+    /// Alt+X typed an `x`, and AltGr+O is a Polish `ó`. `None` for a key the
+    /// box does not answer, which goes on to the window. The box typed onto
+    /// the end of the query, and Backspace from the end was its only edit.
+    fn search_box_key(&mut self, event: &KeyEvent) -> Option<bool> {
+        if textline::is_plain(event.modifiers) && matches!(event.key, Key::Escape | Key::Enter) {
+            return Some(self.handle_search_key(event));
+        }
+        if self.search_editor.text() != self.search_query {
+            self.search_editor.set_text(&self.search_query);
+        }
+        let edit = textline::apply_key(
+            &mut self.search_editor,
+            event,
+            SEARCH_CAPACITY,
+            &self.search_clipboard,
+            SEARCH_TEXT_SIZE,
+        );
+        if let Some(copied) = edit.copied {
+            self.search_clipboard = copied;
+        }
+        if self.search_editor.text() != self.search_query {
+            self.search_query = self.search_editor.text().to_owned();
+        }
+        edit.handled.then_some(true)
+    }
+
+    /// Where the search box is drawn: along the foot of the page, above the
+    /// status bar, while the search is open.
+    pub fn search_box_rect(&self) -> Option<Rect> {
+        self.search_active.then(|| {
+            Rect::new(
+                CONTENT_PADDING,
+                self.window_height - STATUS_BAR_HEIGHT - 36.0,
+                self.window_width - 2.0 * CONTENT_PADDING,
+                30.0,
+            )
+        })
+    }
+
+    /// The palette the search box is drawn in: the desktop's, with the
+    /// reading theme's colours in the roles a field paints with -- the well,
+    /// the edge, the mark and the red -- so that a sepia page has a sepia
+    /// box, in the shape the theme gives a field.
+    fn field_palette(&self, tc: &ThemeColors) -> Palette {
+        let mut p = self.palette;
+        p.crust = tc.background;
+        p.surface1 = tc.separator;
+        p.accent = tc.accent;
+        p.red = tc.error;
+        p
+    }
+
     fn handle_search_key(&mut self, event: &KeyEvent) -> bool {
         match event.key {
             Key::Escape => {
@@ -2284,11 +2371,7 @@ impl EbookApp {
                 self.execute_search();
                 true
             }
-            Key::Backspace => {
-                self.search_query.pop();
-                true
-            }
-            // What a key typed went in before this was asked.
+            // Every other key is the box's editor's (`search_box_key`).
             _ => false,
         }
     }
@@ -3040,36 +3123,26 @@ impl EbookApp {
         }
 
         // -- Search bar --
-        if self.search_active {
-            let bar_y = self.window_height - STATUS_BAR_HEIGHT - 36.0;
-            cmds.push(RenderCommand::FillRect {
-                x: CONTENT_PADDING,
-                y: bar_y,
-                width: self.window_width - 2.0 * CONTENT_PADDING,
-                height: 30.0,
-                color: tc.surface,
-                corner_radii: CornerRadii::all(SMALL_RADIUS),
-            });
-            cmds.push(RenderCommand::StrokeRect {
-                x: CONTENT_PADDING,
-                y: bar_y,
-                width: self.window_width - 2.0 * CONTENT_PADDING,
-                height: 30.0,
-                color: tc.accent,
-                line_width: 1.0,
-                corner_radii: CornerRadii::all(SMALL_RADIUS),
-            });
-            let search_display = format!("/{}", self.search_query);
-            cmds.push(RenderCommand::Text {
-                x: CONTENT_PADDING + 8.0,
-                y: bar_y + 8.0,
-                text: search_display,
-                color: tc.text,
-                font_size: 14.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(self.window_width - 2.0 * CONTENT_PADDING - 120.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+        if let Some(rect) = self.search_box_rect() {
+            let bar_y = rect.y;
+            // The toolkit's field, in the reading theme's colours; red once
+            // a search of exactly what it holds has found nothing.
+            let state = field::State {
+                hovered: false,
+                focused: !self.show_help,
+                disabled: false,
+                invalid: !self.search_query.is_empty()
+                    && self.search_matches.is_empty()
+                    && self.searched.as_deref() == Some(self.search_query.as_str()),
+            };
+            field::draw(
+                cmds,
+                &self.field_palette(tc),
+                rect,
+                state,
+                self.focus_ring_width,
+            );
+            self.render_search_text(cmds, tc, rect, state.focused);
 
             // Match count
             if !self.search_matches.is_empty() {
@@ -3092,6 +3165,70 @@ impl EbookApp {
 
         // -- Status bar with progress --
         self.render_status_bar(tc, cmds);
+    }
+
+    /// The search box's query -- or what the box is for, faint, while it is
+    /// empty -- with the caret and the selection, in the reading theme's
+    /// colours. Room is left at the right for the count of matches.
+    fn render_search_text(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        tc: &ThemeColors,
+        rect: Rect,
+        focused: bool,
+    ) {
+        let line = text::line_height(SEARCH_TEXT_SIZE, FontWeightHint::Regular);
+        let (x, y, width) = (
+            rect.x + SEARCH_TEXT_INSET,
+            rect.y + (rect.h - line) / 2.0,
+            (rect.w - SEARCH_TEXT_INSET - 120.0).max(0.0),
+        );
+        let mut tree = guitk::render::RenderTree::new();
+        if self.search_query.is_empty() {
+            tree.push(RenderCommand::Text {
+                x,
+                y,
+                text: String::from("Search the book"),
+                color: tc.text_dim,
+                font_size: SEARCH_TEXT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(width),
+                overflow: TextOverflow::Ellipsis,
+            });
+            if focused {
+                textedit::push_caret(&mut tree, x, y, line, tc.text, textedit::CARET_WIDTH);
+            }
+        } else {
+            let synced = self.search_editor.text() == self.search_query;
+            textedit::draw(
+                &mut tree,
+                &textedit::SingleLine {
+                    text: &self.search_query,
+                    cursor: if synced {
+                        self.search_editor.cursor()
+                    } else {
+                        TextCursor::from(self.search_query.len())
+                    },
+                    selection_anchor: if synced {
+                        self.search_editor.selection_anchor()
+                    } else {
+                        None
+                    },
+                    focused,
+                    x,
+                    y,
+                    width,
+                    line_height: line,
+                    font_size: SEARCH_TEXT_SIZE,
+                    weight: FontWeightHint::Regular,
+                    color: tc.text,
+                    selection_bg: tc.accent,
+                    selection_fg: tc.background,
+                    caret_width: textedit::CARET_WIDTH,
+                },
+            );
+        }
+        cmds.extend(tree.commands);
     }
 
     fn render_status_bar(&self, tc: &ThemeColors, cmds: &mut Vec<RenderCommand>) {
@@ -3398,6 +3535,10 @@ impl Default for EbookApp {
 // ============================================================================
 
 impl App for EbookApp {
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
+    }
+
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
     }
@@ -4223,6 +4364,109 @@ mod tests {
         app.handle_key_event(&make_key_with_text(Key::H, 'h'));
         app.handle_key_event(&make_key_with_text(Key::I, 'i'));
         assert_eq!(app.search_query, "hi");
+    }
+
+    /// **The search box is the toolkit's field, in the reading theme's
+    /// colours, and edits like one**: the theme's mark at the user's width;
+    /// a sepia page's box is sepia; the caret keys, Backspace and Delete at
+    /// the caret, Ctrl+A, X and V; red once a search of exactly what it
+    /// holds has found nothing -- not while it is still being typed. It was
+    /// a bar reading `/query`, typed onto the end of.
+    #[test]
+    fn the_search_box_is_the_toolkits_field_in_the_reading_theme() {
+        let mut app = make_app();
+        let mut p = app.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        oswindow::app::App::theme_changed(&mut app, &p);
+        oswindow::app::App::appearance_changed(
+            &mut app,
+            &appearance::AppearanceSettings {
+                focus_ring_scale: 2.5,
+                ..appearance::AppearanceSettings::default()
+            },
+        );
+        assert!(
+            app.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        app.open_book(0);
+        app.handle_key_event(&make_key(Key::Slash));
+        assert!(app.search_active, "control: / opens the search");
+        let rect = app.search_box_rect().expect("the search shows no box");
+        let draws = |app: &EbookApp, state: field::State| {
+            let fp = app.field_palette(&app.theme_colors());
+            let mut want: Vec<RenderCommand> = Vec::new();
+            field::draw(&mut want, &fp, rect, state, app.focus_ring_width);
+            let cmds = app.render_commands();
+            cmds.windows(want.len()).any(|w| w == want.as_slice())
+        };
+        let focused = field::State {
+            focused: true,
+            ..field::State::default()
+        };
+        assert!(
+            draws(&app, focused),
+            "the search box with the keyboard has no mark"
+        );
+
+        for (k, c) in [(Key::O, 'o'), (Key::R, 'r'), (Key::E, 'e'), (Key::M, 'm')] {
+            app.handle_key_event(&make_key_with_text(k, c));
+        }
+        app.handle_key_event(&make_key(Key::Home));
+        app.handle_key_event(&make_key(Key::Delete));
+        assert_eq!(
+            app.search_query, "rem",
+            "Home and Delete did not edit the start"
+        );
+        let ctrl = |k: Key| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::ctrl(),
+            text: String::new(),
+        };
+        app.handle_key_event(&ctrl(Key::A));
+        app.handle_key_event(&ctrl(Key::X));
+        assert_eq!(app.search_query, "", "Ctrl+A and Ctrl+X did not cut");
+        app.handle_key_event(&ctrl(Key::V));
+        app.handle_key_event(&ctrl(Key::V));
+        assert_eq!(
+            app.search_query, "remrem",
+            "Ctrl+V did not paste what was cut"
+        );
+
+        // Not red while it is typed; red once it has been searched for.
+        for c in "zzqq".chars() {
+            app.handle_key_event(&make_key_with_text(Key::Unknown(0), c));
+        }
+        assert!(draws(&app, focused), "a query not yet searched for is red");
+        app.handle_key_event(&make_key(Key::Enter));
+        if app.search_active {
+            let red = field::State {
+                invalid: true,
+                ..focused
+            };
+            assert!(draws(&app, red), "a search that found nothing is not red");
+        } else {
+            assert!(
+                app.search_matches.is_empty(),
+                "control: the search finds nothing"
+            );
+        }
+
+        // A sepia page has a sepia box.
+        app.open_search();
+        app.theme = ThemeKind::Sepia;
+        let well = ThemeColors::sepia().background;
+        assert!(
+            app.render_commands().iter().any(|c| matches!(c,
+                RenderCommand::FillRect { x, y, color, .. }
+                    if (*x - rect.x).abs() < 0.01 && (*y - rect.y).abs() < 0.01 && *color == well)),
+            "the box on a sepia page is not sepia"
+        );
+        assert!(
+            draws(&app, focused),
+            "the sepia box is not the toolkit's field"
+        );
     }
 
     #[test]

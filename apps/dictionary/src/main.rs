@@ -107,6 +107,7 @@ use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, M
 use guitk::frame::Rect;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
+use guitk::scrollbar;
 use guitk::style::CornerRadii;
 use guitk::text;
 use oswindow::app::{self, App, Response};
@@ -896,6 +897,11 @@ pub enum Target {
     NextFeatured,
     /// Open the featured word as a full entry.
     OpenFeatured,
+    /// The scrollbar's column beside a list or an entry, above or below the
+    /// thumb: a page towards the press.
+    ScrollTrack,
+    /// The scrollbar's thumb, which a drag moves.
+    ScrollThumb,
 }
 
 /// The frame type this program records its hit boxes into.
@@ -1415,6 +1421,13 @@ pub struct Dictionary {
     /// fifths of a notch, and a converter that rounded each event on its own
     /// would return zero every time and never scroll at all.
     wheel: guitk::wheel::Accumulator,
+    /// Whether the pointer is over the scrollbar's column: the bar is lit
+    /// under it, and a theme's overlay bar widens from a line.
+    bar_hovered: bool,
+    /// How far below the thumb's top the pointer took hold of it, while it
+    /// is held. The thumb follows that point rather than the pointer, so it
+    /// does not jump under the pointer on the first move.
+    thumb_grab: Option<f32>,
     status: String,
     size: (f32, f32),
     /// The user's colours, replaced whenever the theme changes.
@@ -1486,6 +1499,8 @@ impl Dictionary {
             screen: Screen::Search,
             entry_scroll: 0.0,
             wheel: guitk::wheel::Accumulator::default(),
+            bar_hovered: false,
+            thumb_grab: None,
             status: "Type a word, or part of one".to_string(),
             size: (WINDOW_WIDTH, WINDOW_HEIGHT),
             lookup: online::look_up,
@@ -1504,8 +1519,14 @@ impl Dictionary {
     pub fn replace_lists(&mut self, favorites: Vec<String>, history: Vec<String>) {
         self.favorites = favorites;
         self.history = history;
-        // The list screens have no scroll offset of their own -- only the
-        // entry view does -- so there is nothing else to reset here.
+        // Each list keeps a selection and a scroll position of its own, and
+        // both described the lists just replaced: the fortieth of fifty
+        // favourites is nothing in a list of three, and Enter would open
+        // nothing. A list read from a file starts at its top: its first row
+        // selected, which `set_sel` scrolls into view.
+        for screen in [Screen::History, Screen::Favorites] {
+            self.set_sel(screen, 0);
+        }
     }
 
     /// Remember the size the window is being drawn at, so the next click is
@@ -2076,13 +2097,69 @@ impl Dictionary {
     /// How far the open entry can be scrolled: zero when it already fits.
     #[must_use]
     pub fn entry_max_scroll(&self) -> f32 {
-        let l = self.layout();
-        let pane = l.entry_pane();
         let Some(index) = self.current else {
             return 0.0;
         };
-        let blocks = self.entry_blocks(index, &l, pane.w);
-        (blocks_height(&blocks) - pane.h).max(0.0)
+        self.entry_view(index, &self.layout()).max_scroll()
+    }
+
+    /// The open entry laid out in its pane, as `draw_entry` draws it: wrapped
+    /// to the whole pane when it fits, and to the pane less the scrollbar's
+    /// column when it does not.
+    ///
+    /// Laid out twice when it does not fit, because whether there is a bar
+    /// depends on the height and the height on the width the bar leaves.
+    /// Narrower is never shorter, so an entry too tall for the whole pane is
+    /// too tall for what the bar leaves of it, and the bar stays.
+    fn entry_view(&self, index: usize, l: &Layout) -> EntryView {
+        let pane = l.entry_pane();
+        let blocks = self.entry_blocks(index, l, pane.w);
+        let total = blocks_height(&blocks);
+        if total <= pane.h || pane.w <= 0.0 || pane.h <= 0.0 {
+            return EntryView {
+                blocks,
+                pane,
+                text: pane,
+                total,
+                column: None,
+            };
+        }
+        let text = beside_bar(pane);
+        let blocks = self.entry_blocks(index, l, text.w);
+        let total = blocks_height(&blocks);
+        EntryView {
+            blocks,
+            pane,
+            text,
+            total,
+            column: Some(bar_column(pane)),
+        }
+    }
+
+    /// The first row of `screen`'s list on screen: its scroll position,
+    /// held back so the window never shows empty space past the last row.
+    fn shown_top(&self, screen: Screen, total: usize, visible: usize) -> usize {
+        self.scroll_top(screen)
+            .min(total.saturating_sub(visible.max(1)))
+    }
+
+    /// The scrollbar on screen now, at the size last drawn: the one beside
+    /// the list or the entry, when it does not fit.
+    fn current_bar(&self) -> Option<Bar> {
+        let l = self.layout();
+        match self.screen {
+            Screen::Entry => {
+                let index = self.current?;
+                self.entry_view(index, &l).bar(self.entry_scroll)
+            }
+            screen if screen.is_list() => {
+                let pane = l.list_pane(screen);
+                let total = self.rows(screen).len();
+                let visible = l.rows_in(pane);
+                list_bar(pane, total, visible, self.shown_top(screen, total, visible))
+            }
+            _ => None,
+        }
     }
 
     /// Move the current list's window by `n` rows, clamped so it can never
@@ -2474,23 +2551,95 @@ fn button(
     f.hit(target, r);
 }
 
-/// The thin bar down the right-hand edge of a pane that says how much of it
-/// you are looking at. Not clickable: it reports, it does not drive.
-fn scrollbar(f: &mut Frame, pal: &Palette, pane: Rect, fraction: f32, offset: f32) {
-    if pane.h <= 0.0 || pane.w <= 6.0 || fraction >= 1.0 {
-        return;
+/// A scrollbar at one window size: the column at the right-hand edge of a
+/// list or an entry, which takes every press on the bar whatever the theme
+/// draws of it, and the thumb in that column.
+///
+/// The bar used to be a thin mark that reported and did not drive. It is a
+/// scrollbar now -- a press on its column pages, its thumb drags -- because a
+/// theme's widget style is promised to every scrollbar (lane C,
+/// c-e-a-theme-can-shape-the-controls), and the toolkit keeps that promise
+/// only for a bar with a column to draw in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Bar {
+    /// The column.
+    pub track: Rect,
+    /// The part standing for what is on screen.
+    pub thumb: Rect,
+}
+
+/// The column a scrollbar takes at the right-hand edge of `pane`: the
+/// toolkit's, the same width in every theme -- or a quarter of a pane too
+/// narrow for that, so a tiny window is still mostly words.
+fn bar_column(pane: Rect) -> Rect {
+    let w = scrollbar::WIDTH.min(pane.w / 4.0).max(0.0);
+    Rect::new(pane.right() - w, pane.y, w, pane.h)
+}
+
+/// `pane` less the column its scrollbar takes: where the rows or the entry
+/// are drawn while there is a bar, so that no word runs under it.
+fn beside_bar(pane: Rect) -> Rect {
+    Rect::new(
+        pane.x,
+        pane.y,
+        (pane.w - bar_column(pane).w).max(0.0),
+        pane.h,
+    )
+}
+
+/// The scrollbar beside a list of `total` rows in `pane`, `visible` of them
+/// whole and the first on screen `top` -- or none, when every row fits.
+fn list_bar(pane: Rect, total: usize, visible: usize, top: usize) -> Option<Bar> {
+    if visible == 0 || pane.w <= 0.0 || pane.h <= 0.0 || !scrollbar::needed(total, visible) {
+        return None;
     }
-    let w = (pane.w * 0.012).clamp(2.0, 5.0);
-    let track = Rect::new(pane.right() - w, pane.y, w, pane.h);
-    fill(f, track, pal.crust, w / 2.0);
-    // `guitk::scrollbar`'s arithmetic, shared with the file dialog, the menus
-    // and the desktop shell. Two things stay this pane's own and are passed in
-    // rather than adopted: the floor is three times the bar's own width, so it
-    // scales with a bar that is itself a fraction of the pane; and `fraction`
-    // keeps its 0.05 lower clamp, which stops a very long article's thumb
-    // collapsing before the width-derived floor catches it.
-    let thumb = guitk::scrollbar::thumb_of(track, fraction.clamp(0.05, 1.0), offset, w * 3.0);
-    fill(f, thumb, pal.surface1, w / 2.0);
+    let track = bar_column(pane);
+    Some(Bar {
+        track,
+        thumb: scrollbar::thumb(track, total, visible, top),
+    })
+}
+
+/// The open entry laid out in its pane (`Dictionary::entry_view`).
+struct EntryView {
+    /// Its blocks, wrapped to `text`'s width.
+    blocks: Vec<Block>,
+    /// The pane it scrolls in.
+    pane: Rect,
+    /// Where the blocks are drawn: the pane, less the scrollbar's column
+    /// when there is one.
+    text: Rect,
+    /// How tall the blocks are, all told.
+    total: f32,
+    /// The scrollbar's column, when the entry does not fit.
+    column: Option<Rect>,
+}
+
+impl EntryView {
+    /// How far the entry can be scrolled: zero when it fits.
+    fn max_scroll(&self) -> f32 {
+        (self.total - self.pane.h).max(0.0)
+    }
+
+    /// Its scrollbar, scrolled `offset` pixels down -- when it has one.
+    ///
+    /// The toolkit's arithmetic and the toolkit's floor: the thumb is a
+    /// thing to take hold of now, not only a mark, and the floor that makes
+    /// a thumb big enough to grab is the toolkit's to say.
+    fn bar(&self, offset: f32) -> Option<Bar> {
+        let track = self.column?;
+        let max = self.max_scroll();
+        let position = if max > 0.0 { offset / max } else { 0.0 };
+        Some(Bar {
+            track,
+            thumb: scrollbar::thumb_of(
+                track,
+                self.pane.h / self.total,
+                position,
+                scrollbar::MIN_THUMB,
+            ),
+        })
+    }
 }
 
 impl Dictionary {
@@ -2701,10 +2850,15 @@ impl Dictionary {
             return;
         }
 
-        let top = self
-            .scroll_top(screen)
-            .min(rows.len().saturating_sub(visible.max(1)));
+        let top = self.shown_top(screen, rows.len(), visible);
         let sel = self.selected(screen);
+        // The rows give the bar its column while there is one.
+        let bar = list_bar(pane, rows.len(), visible, top);
+        let strip = if bar.is_some() {
+            beside_bar(pane)
+        } else {
+            pane
+        };
         // One row past the whole ones, when the pane has a strip of height
         // left over for it. A list that stops on an exact row boundary and
         // leaves a blank band below looks finished even when it is not; a row
@@ -2717,12 +2871,12 @@ impl Dictionary {
         // The clip is what makes the peek row honest: it trims the recorded
         // hit box along with the ink, so the half of the row that was never
         // drawn cannot be clicked either.
-        f.clip(pane);
+        f.clip(strip);
         for slot in 0..visible.saturating_add(peek) {
             let Some(row) = rows.get(top.saturating_add(slot)) else {
                 break;
             };
-            let r = l.row(pane, slot);
+            let r = l.row(strip, slot);
             let chosen = top.saturating_add(slot) == sel;
             if chosen {
                 fill(f, r, self.palette.surface0, (r.h * 0.2).min(7.0));
@@ -2734,12 +2888,24 @@ impl Dictionary {
             f.hit(Target::Row(top.saturating_add(slot)), r);
         }
         f.unclip();
-
-        if rows.len() > visible && visible > 0 {
-            let fraction = visible as f32 / rows.len() as f32;
-            let travel = rows.len().saturating_sub(visible).max(1) as f32;
-            scrollbar(f, &self.palette, pane, fraction, top as f32 / travel);
+        if let Some(bar) = bar {
+            self.draw_bar(f, bar);
         }
+    }
+
+    /// A scrollbar, in the theme's widget style (`guitk::scrollbar::draw`):
+    /// lit under the pointer and while its thumb is held, and hit-boxed over
+    /// its whole column and its whole thumb whatever the style draws of
+    /// them -- a thin bar is taken hold of over more than it looks, never
+    /// less.
+    fn draw_bar(&self, f: &mut Frame, bar: Bar) {
+        let state = scrollbar::BarState {
+            hovered: self.bar_hovered,
+            dragging: self.thumb_grab.is_some(),
+        };
+        scrollbar::draw(f, &self.palette, bar.track, bar.thumb, state);
+        f.hit(Target::ScrollTrack, bar.track);
+        f.hit(Target::ScrollThumb, bar.thumb);
     }
 
     fn draw_row(&self, f: &mut Frame, l: &Layout, r: Rect, index: usize, chosen: bool) {
@@ -2921,29 +3087,20 @@ impl Dictionary {
         if pane.w <= 0.0 || pane.h <= 0.0 {
             return;
         }
-        let blocks = self.entry_blocks(index, l, pane.w);
-        let total = blocks_height(&blocks);
-        f.clip(pane);
+        let view = self.entry_view(index, l);
+        f.clip(view.text);
         let mut y = pane.y - self.entry_scroll;
-        for block in &blocks {
+        for block in &view.blocks {
             y += block.space();
             let h = block.height();
             if y + h >= pane.y && y <= pane.bottom() {
-                draw_block(f, &self.palette, l, block, pane, y);
+                draw_block(f, &self.palette, l, block, view.text, y);
             }
             y += h;
         }
         f.unclip();
-
-        if total > pane.h {
-            let travel = (total - pane.h).max(1.0);
-            scrollbar(
-                f,
-                &self.palette,
-                pane,
-                pane.h / total,
-                self.entry_scroll / travel,
-            );
+        if let Some(bar) = view.bar(self.entry_scroll) {
+            self.draw_bar(f, bar);
         }
     }
 
@@ -3293,12 +3450,40 @@ impl Dictionary {
     }
 
     fn handle_mouse(&mut self, ev: &MouseEvent) -> EventResult {
-        if let MouseEventKind::Scroll { dy, .. } = ev.kind {
-            return self.handle_scroll(dy);
+        if self.show_help {
+            // The card is modal for the pointer as it is for the keys: a
+            // press puts it away rather than reaching the control under it,
+            // and nothing under it lights or scrolls while it is up.
+            return if matches!(ev.kind, MouseEventKind::Press(_)) {
+                self.show_help = false;
+                EventResult::Consumed
+            } else {
+                EventResult::Ignored
+            };
         }
-        if !matches!(ev.kind, MouseEventKind::Press(MouseButton::Left)) {
-            return EventResult::Ignored;
+        match ev.kind {
+            MouseEventKind::Scroll { dy, .. } => return self.handle_scroll(dy),
+            MouseEventKind::Move => return self.pointer_moved(ev),
+            MouseEventKind::Release(MouseButton::Left) => {
+                return if self.thumb_grab.take().is_some() {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                };
+            }
+            MouseEventKind::Leave => {
+                return if std::mem::take(&mut self.bar_hovered) {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                };
+            }
+            MouseEventKind::Press(MouseButton::Left) => {}
+            _ => return EventResult::Ignored,
         }
+        // A press lets go of a thumb whose release never came -- the button
+        // let up outside the window -- before it takes hold of anything.
+        self.thumb_grab = None;
         let Some(target) = self.target_at(ev.x, ev.y) else {
             return EventResult::Ignored;
         };
@@ -3344,8 +3529,113 @@ impl Dictionary {
             Target::PrevFeatured => self.apply(Action::StepFeatured(-1)),
             Target::NextFeatured => self.apply(Action::StepFeatured(1)),
             Target::OpenFeatured => self.apply(Action::Open(self.featured)),
+            Target::ScrollThumb => {
+                if let Some(bar) = self.current_bar() {
+                    self.thumb_grab = Some(ev.y - bar.thumb.y);
+                }
+            }
+            Target::ScrollTrack => self.page_towards(ev.y),
         }
         EventResult::Consumed
+    }
+
+    /// The pointer moved: a held thumb follows it, and the bar is lit while
+    /// the pointer is over its column. A redraw only when either changed.
+    fn pointer_moved(&mut self, ev: &MouseEvent) -> EventResult {
+        let mut changed = false;
+        if let Some(grab) = self.thumb_grab {
+            changed |= self.drag_thumb(grab, ev.y);
+        }
+        let over = self
+            .current_bar()
+            .is_some_and(|bar| bar.track.contains(ev.x, ev.y));
+        if over != self.bar_hovered {
+            self.bar_hovered = over;
+            changed = true;
+        }
+        if changed {
+            EventResult::Consumed
+        } else {
+            EventResult::Ignored
+        }
+    }
+
+    /// Move the view with the thumb held `grab` below its top, the pointer
+    /// now at `y`. Whether the view moved.
+    fn drag_thumb(&mut self, grab: f32, y: f32) -> bool {
+        let l = self.layout();
+        match self.screen {
+            Screen::Entry => {
+                let Some(view) = self.current.map(|index| self.entry_view(index, &l)) else {
+                    return false;
+                };
+                let Some(bar) = view.bar(self.entry_scroll) else {
+                    // The window grew enough to fit the entry mid-drag.
+                    self.thumb_grab = None;
+                    return false;
+                };
+                let span = bar.track.h - bar.thumb.h;
+                if span <= 0.0 {
+                    return false;
+                }
+                // `scrollbar::first_from_drag`'s rule, in pixels rather than
+                // rows: the grab point follows the pointer.
+                let fraction = ((y - grab - bar.track.y) / span).clamp(0.0, 1.0);
+                let next = fraction * view.max_scroll();
+                if (next - self.entry_scroll).abs() < 0.01 {
+                    return false;
+                }
+                self.entry_scroll = next;
+                true
+            }
+            screen if screen.is_list() => {
+                let pane = l.list_pane(screen);
+                let total = self.rows(screen).len();
+                let visible = l.rows_in(pane);
+                let top = self.shown_top(screen, total, visible);
+                let Some(bar) = list_bar(pane, total, visible, top) else {
+                    // The list got short enough to lose its bar mid-drag.
+                    self.thumb_grab = None;
+                    return false;
+                };
+                let Some(first) =
+                    scrollbar::first_from_drag(bar.track, bar.thumb.h, grab, y, total, visible)
+                else {
+                    return false;
+                };
+                if first == top {
+                    return false;
+                }
+                if let Some(slot) = self.top.get_mut(screen.index()) {
+                    *slot = first;
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// A press on the scrollbar's column clear of the thumb: a page towards
+    /// it -- a screenful of the entry, or the rows that fit of a list, as
+    /// PageUp and PageDown move.
+    fn page_towards(&mut self, y: f32) {
+        let Some(bar) = self.current_bar() else {
+            return;
+        };
+        let up = y < bar.thumb.y;
+        if self.screen == Screen::Entry {
+            let page = self.layout().entry_pane().h;
+            self.scroll_entry(if up { -page } else { page });
+        } else {
+            let page = isize::try_from(self.visible_rows(self.screen)).unwrap_or(isize::MAX);
+            // `checked_neg` rather than `-page`: paging by nothing is a
+            // better answer than wrapping to the far end of the list.
+            self.scroll_rows(if up {
+                page.checked_neg().unwrap_or(0)
+            } else {
+                page
+            });
+        }
     }
 
     /// The wheel, in the units the wheel actually arrives in.
@@ -4177,7 +4467,7 @@ mod tests {
     /// click instead of letting it fall through.
     fn describe(d: &Dictionary) -> String {
         format!(
-            "{:?}|{}|{:?}|{}|{:.2}|{:?}|{:?}|{:?}|{}|{}|{}",
+            "{:?}|{}|{:?}|{}|{:.2}|{:?}|{:?}|{:?}|{}|{}|{}|{}|{}",
             d.screen(),
             d.query(),
             d.current(),
@@ -4188,7 +4478,11 @@ mod tests {
             d.rows(d.screen()),
             d.selected(d.screen()),
             d.scroll_top(d.screen()),
-            d.status()
+            d.status(),
+            // A held thumb is drawn lit, and the pointer over the bar lights
+            // it: both are on the screen.
+            d.thumb_grab.is_some(),
+            d.bar_hovered
         )
     }
 
@@ -5277,6 +5571,406 @@ mod tests {
         }
     }
 
+    // ── The scrollbars ─────────────────────────────────────────────────────
+
+    /// A pointer event at `(x, y)` in a window of `size`.
+    fn pointer_at(
+        d: &mut Dictionary,
+        x: f32,
+        y: f32,
+        kind: MouseEventKind,
+        size: (f32, f32),
+    ) -> EventResult {
+        d.resize(size.0, size.1);
+        handle_event(d, &Event::Mouse(MouseEvent { x, y, kind }))
+    }
+
+    /// The fill the thumb is drawn with -- at its height, against its
+    /// column's right-hand edge -- as its width and colour.
+    fn thumb_ink(d: &Dictionary, size: (f32, f32), track: Rect, thumb: Rect) -> (f32, Color) {
+        d.frame(size.0, size.1)
+            .commands()
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } if near(*y, thumb.y)
+                    && near(*height, thumb.h)
+                    && near(x + width, track.right()) =>
+                {
+                    Some((*width, *color))
+                }
+                _ => None,
+            })
+            .expect("the thumb is drawn against its column's edge")
+    }
+
+    #[test]
+    fn a_long_lists_thumb_drags_the_rows_and_lets_go_on_release() {
+        let mut d = sized(SHORT);
+        search_for(&mut d, "e");
+        let track =
+            probe::rect_of_sized(&d, Target::ScrollTrack, SHORT).expect("a long list's bar");
+        let thumb = probe::rect_of_sized(&d, Target::ScrollThumb, SHORT).expect("and its thumb");
+        let x = track.x + track.w / 2.0;
+        // Near the thumb's bottom, so a drag that forgot where it took hold
+        // would jump by most of a thumb on the first move.
+        let grab = thumb.y + thumb.h - 2.0;
+        pointer_at(
+            &mut d,
+            x,
+            grab,
+            MouseEventKind::Press(MouseButton::Left),
+            SHORT,
+        );
+        pointer_at(&mut d, x, grab, MouseEventKind::Move, SHORT);
+        assert_eq!(
+            d.scroll_top(Screen::Search),
+            0,
+            "taking hold of the thumb scrolled the list"
+        );
+        pointer_at(&mut d, x, track.bottom(), MouseEventKind::Move, SHORT);
+        let total = d.rows(Screen::Search).len();
+        let visible = d.visible_rows(Screen::Search);
+        assert_eq!(
+            d.scroll_top(Screen::Search),
+            total - visible,
+            "dragged to the bottom, the list is not at its end"
+        );
+        assert_eq!(
+            d.selected(Screen::Search),
+            0,
+            "scrolling chose a row: the selection moved with the thumb"
+        );
+        pointer_at(
+            &mut d,
+            x,
+            track.bottom(),
+            MouseEventKind::Release(MouseButton::Left),
+            SHORT,
+        );
+        pointer_at(&mut d, x, track.y, MouseEventKind::Move, SHORT);
+        assert_eq!(
+            d.scroll_top(Screen::Search),
+            total - visible,
+            "the thumb was still held after the button came up"
+        );
+    }
+
+    #[test]
+    fn a_long_lists_rows_stop_short_of_its_bar() {
+        // A row run under the bar is a word the bar covers -- and a row's
+        // hit box under it would be a click the bar and the row both claim.
+        let mut d = sized(SHORT);
+        search_for(&mut d, "e");
+        let track = probe::rect_of_sized(&d, Target::ScrollTrack, SHORT).expect("a bar");
+        let mut rows = 0;
+        for (target, rect) in d.frame(SHORT.0, SHORT.1).hits() {
+            if matches!(target, Target::Row(_)) {
+                assert!(
+                    rect.right() <= track.x + 0.01,
+                    "{target:?} at {rect:?} runs under the bar at {}",
+                    track.x
+                );
+                rows += 1;
+            }
+        }
+        assert!(rows > 0, "no rows drawn");
+    }
+
+    #[test]
+    fn a_press_lets_go_of_a_thumb_whose_release_never_came() {
+        // The button can come up outside the window, and the release with
+        // it. The next press starts afresh: a pointer moving with no button
+        // held must not go on dragging the list.
+        let mut d = sized(SHORT);
+        search_for(&mut d, "e");
+        let track = probe::rect_of_sized(&d, Target::ScrollTrack, SHORT).expect("a bar");
+        let thumb = probe::rect_of_sized(&d, Target::ScrollThumb, SHORT).expect("a thumb");
+        let x = track.x + track.w / 2.0;
+        pointer_at(
+            &mut d,
+            x,
+            thumb.y + 2.0,
+            MouseEventKind::Press(MouseButton::Left),
+            SHORT,
+        );
+        pointer_at(
+            &mut d,
+            x,
+            track.bottom() - 1.0,
+            MouseEventKind::Press(MouseButton::Left),
+            SHORT,
+        );
+        let paged = d.scroll_top(Screen::Search);
+        assert!(paged > 0, "the press below the thumb did not page");
+        pointer_at(&mut d, x, track.y, MouseEventKind::Move, SHORT);
+        assert_eq!(
+            d.scroll_top(Screen::Search),
+            paged,
+            "a thumb taken hold of before the last press is still being dragged"
+        );
+    }
+
+    #[test]
+    fn a_press_on_a_lists_track_pages_towards_it() {
+        let mut d = sized(SHORT);
+        search_for(&mut d, "e");
+        let visible = d.visible_rows(Screen::Search);
+        let total = d.rows(Screen::Search).len();
+        assert!(total > visible * 2, "too few results to page through");
+        let track = probe::rect_of_sized(&d, Target::ScrollTrack, SHORT).expect("a bar");
+        let x = track.x + track.w / 2.0;
+        pointer_at(
+            &mut d,
+            x,
+            track.bottom() - 1.0,
+            MouseEventKind::Press(MouseButton::Left),
+            SHORT,
+        );
+        assert_eq!(
+            d.scroll_top(Screen::Search),
+            visible,
+            "a press below the thumb is not a page down"
+        );
+        assert!(
+            d.thumb_grab.is_none(),
+            "a press on the track took hold of the thumb"
+        );
+        pointer_at(
+            &mut d,
+            x,
+            track.y + 1.0,
+            MouseEventKind::Press(MouseButton::Left),
+            SHORT,
+        );
+        assert_eq!(
+            d.scroll_top(Screen::Search),
+            0,
+            "a press above the thumb is not a page up"
+        );
+    }
+
+    #[test]
+    fn an_entry_too_tall_for_its_pane_gives_its_bar_a_column_and_drags() {
+        let mut d = sized(CRAMPED);
+        let l = d.layout();
+        let pane = l.entry_pane();
+        let height = |d: &Dictionary, i: usize| blocks_height(&d.entry_blocks(i, &l, pane.w));
+        let longest = (0..d.entries().len())
+            .max_by(|&a, &b| height(&d, a).total_cmp(&height(&d, b)))
+            .expect("an entry");
+        d.apply(Action::Open(longest));
+        let track =
+            probe::rect_of_sized(&d, Target::ScrollTrack, CRAMPED).expect("a tall entry's bar");
+        // No word runs under the column, at the top of the entry or the end:
+        // the lines are wrapped short of it, and so are the chips.
+        let (mut lines, mut chips) = (0, 0);
+        for end in [false, true] {
+            d.scroll_entry(if end { f32::MAX } else { -f32::MAX });
+            let frame = d.frame(CRAMPED.0, CRAMPED.1);
+            let in_strip =
+                |x: f32, y: f32| x >= pane.x && x < track.x && y >= pane.y && y < pane.bottom();
+            let mut fills = Vec::new();
+            for c in frame.commands() {
+                if let RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } = *c
+                    && in_strip(x, y)
+                {
+                    assert!(
+                        x + width <= track.x + 0.01,
+                        "a chip runs to {} under the bar at {}",
+                        x + width,
+                        track.x
+                    );
+                    fills.push(Rect::new(x, y, width, height));
+                    chips += 1;
+                }
+            }
+            for c in frame.commands() {
+                if let RenderCommand::Text {
+                    x,
+                    y,
+                    max_width: Some(w),
+                    ..
+                } = *c
+                    && in_strip(x, y)
+                    && !fills.iter().any(|f| f.contains(x, y))
+                {
+                    assert!(
+                        x + w <= track.x + 0.01,
+                        "a line runs to {} under the bar at {}",
+                        x + w,
+                        track.x
+                    );
+                    lines += 1;
+                }
+            }
+        }
+        assert!(
+            lines > 0 && chips > 0,
+            "{lines} lines and {chips} chips checked"
+        );
+
+        d.scroll_entry(-f32::MAX);
+        let thumb = probe::rect_of_sized(&d, Target::ScrollThumb, CRAMPED).expect("a thumb");
+        let x = track.x + track.w / 2.0;
+        pointer_at(
+            &mut d,
+            x,
+            thumb.y + 1.0,
+            MouseEventKind::Press(MouseButton::Left),
+            CRAMPED,
+        );
+        pointer_at(
+            &mut d,
+            x,
+            track.bottom() + 50.0,
+            MouseEventKind::Move,
+            CRAMPED,
+        );
+        assert!(
+            near(d.entry_scroll(), d.entry_max_scroll()),
+            "dragged to the bottom, the entry is at {} of {}",
+            d.entry_scroll(),
+            d.entry_max_scroll()
+        );
+        pointer_at(
+            &mut d,
+            x,
+            track.bottom() + 50.0,
+            MouseEventKind::Release(MouseButton::Left),
+            CRAMPED,
+        );
+        let before = d.entry_scroll();
+        pointer_at(
+            &mut d,
+            x,
+            track.y + 1.0,
+            MouseEventKind::Press(MouseButton::Left),
+            CRAMPED,
+        );
+        assert!(
+            near(d.entry_scroll(), (before - pane.h).max(0.0)),
+            "a press above the thumb went from {before} to {}, not a screen up",
+            d.entry_scroll()
+        );
+    }
+
+    /// The bar is the toolkit's, in the theme's widget style (lane C,
+    /// c-e-a-theme-can-shape-the-controls): under an overlay style the thumb is
+    /// a line at the column's edge until the pointer comes to the column, it is
+    /// lit while the pointer is there or the thumb is held, and the column
+    /// takes a press either way.
+    #[test]
+    fn the_bar_follows_the_themes_style_and_lights_under_the_pointer() {
+        let mut d = sized(SHORT);
+        search_for(&mut d, "e");
+        let mut palette = d.palette;
+        palette.widget_style.scrollbar.visibility =
+            guitk::widget_style::ScrollbarVisibility::Overlay;
+        App::theme_changed(&mut d, &palette);
+        let track = probe::rect_of_sized(&d, Target::ScrollTrack, SHORT).expect("a bar");
+        let thumb = probe::rect_of_sized(&d, Target::ScrollThumb, SHORT).expect("a thumb");
+        let idle = thumb_ink(&d, SHORT, track, thumb);
+        assert!(
+            near(idle.0, scrollbar::IDLE_WIDTH),
+            "an overlaid bar at rest is a line, not {} wide",
+            idle.0
+        );
+        assert_eq!(idle.1, palette.surface2, "in the theme's colour");
+
+        let over = (track.x + 1.0, track.y + track.h / 2.0);
+        assert_eq!(
+            pointer_at(&mut d, over.0, over.1, MouseEventKind::Move, SHORT),
+            EventResult::Consumed
+        );
+        let lit = thumb_ink(&d, SHORT, track, thumb);
+        assert!(
+            lit.0 > scrollbar::IDLE_WIDTH,
+            "the pointer at the bar did not widen it"
+        );
+        assert_ne!(lit.1, idle.1, "the pointer at the bar did not light it");
+        assert_eq!(
+            pointer_at(&mut d, over.0, over.1 + 1.0, MouseEventKind::Move, SHORT),
+            EventResult::Ignored,
+            "a move along the bar redrew the window"
+        );
+
+        assert_eq!(
+            pointer_at(&mut d, -1.0, -1.0, MouseEventKind::Leave, SHORT),
+            EventResult::Consumed
+        );
+        assert_eq!(
+            thumb_ink(&d, SHORT, track, thumb),
+            idle,
+            "the pointer left and the bar stayed lit"
+        );
+        pointer_at(&mut d, over.0, over.1, MouseEventKind::Move, SHORT);
+        pointer_at(&mut d, track.x - 40.0, over.1, MouseEventKind::Move, SHORT);
+        assert_eq!(
+            thumb_ink(&d, SHORT, track, thumb),
+            idle,
+            "the pointer went to the rows and the bar stayed lit"
+        );
+
+        // Held, the thumb stays lit wherever the pointer goes.
+        pointer_at(
+            &mut d,
+            track.x + 1.0,
+            thumb.y + 2.0,
+            MouseEventKind::Press(MouseButton::Left),
+            SHORT,
+        );
+        pointer_at(
+            &mut d,
+            track.x - 40.0,
+            thumb.y + 2.0,
+            MouseEventKind::Move,
+            SHORT,
+        );
+        assert!(
+            thumb_ink(&d, SHORT, track, thumb).0 > scrollbar::IDLE_WIDTH,
+            "a held thumb went back to a line"
+        );
+    }
+
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        // The card is modal for the keys, and a click used to go straight
+        // through it to whatever was drawn underneath -- opening a word the
+        // reader could not see for the card.
+        let mut d = app();
+        search_for(&mut d, "e");
+        let row = probe::rect_of(&d, Target::Row(0)).expect("a row");
+        probe::key(&mut d, &probe::press(Key::F1));
+        assert!(drawn(&d).contains("F1 closes this"));
+        let (x, y) = row.centre();
+        assert_eq!(
+            d.click_at(x, y, MouseButton::Left, Dictionary::SIZE),
+            EventResult::Consumed
+        );
+        assert!(
+            d.current().is_none(),
+            "the click went through the card and opened a word"
+        );
+        assert_eq!(d.screen(), Screen::Search);
+        assert!(
+            !drawn(&d).contains("F1 closes this"),
+            "the click did not put the card away"
+        );
+    }
+
     // ── Search ─────────────────────────────────────────────────────────────
 
     #[test]
@@ -5554,6 +6248,34 @@ mod tests {
         d.apply(Action::Go(Screen::Search));
         probe::click(&mut d, Target::Tab(Screen::Entry.index()));
         assert_eq!(d.screen(), Screen::Entry);
+    }
+
+    #[test]
+    fn lists_read_from_a_file_start_at_their_top() {
+        // Each list keeps its own selection and scroll position, and both
+        // described the lists a file replaced: the eighteenth of twenty
+        // favourites is nothing in a list of three, and Enter opened nothing.
+        let mut d = sized(SHORT);
+        let words: Vec<String> = d
+            .entries()
+            .iter()
+            .take(20)
+            .map(|e| e.word.clone())
+            .collect();
+        d.replace_lists(words.clone(), Vec::new());
+        d.apply(Action::Go(Screen::Favorites));
+        d.set_sel(Screen::Favorites, 17);
+        assert!(
+            d.scroll_top(Screen::Favorites) > 0,
+            "the list never scrolled, so this tests nothing"
+        );
+        d.replace_lists(words[..3].to_vec(), Vec::new());
+        assert_eq!(d.selected(Screen::Favorites), 0);
+        assert_eq!(d.scroll_top(Screen::Favorites), 0);
+        let first = d.row_word(&d.rows(Screen::Favorites)[0]).to_string();
+        d.key_at(&probe::press(Key::Enter), SHORT);
+        assert_eq!(d.screen(), Screen::Entry, "Enter opened nothing");
+        assert_eq!(d.word(d.current().unwrap()), first);
     }
 
     // ── The word list itself ───────────────────────────────────────────────

@@ -63,7 +63,7 @@ MAIN = [
     ),
     (
         "list pane not clipped",
-        "        f.clip(pane);\n        for slot in 0..visible.saturating_add(peek) {",
+        "        f.clip(strip);\n        for slot in 0..visible.saturating_add(peek) {",
         "        for slot in 0..visible.saturating_add(peek) {",
         ["a_half_scrolled_row_is_not_clickable_where_it_was_never_drawn"],
     ),
@@ -196,6 +196,121 @@ MAIN = [
         "        self.pending\n            .is_some()\n            .then_some(std::time::Duration::from_millis(500))",
         "        None",
         [LACKS],
+    ),
+    # -- the scrollbars, in the theme's style (c-e-a-theme-can-shape-the-controls)
+    (
+        "a long list's rows run under its bar",
+        "        let strip = if bar.is_some() {\n            beside_bar(pane)\n        } else {\n            pane\n        };",
+        "        let strip = pane;",
+        ["a_long_lists_rows_stop_short_of_its_bar"],
+    ),
+    (
+        "a tall entry's lines run under its bar",
+        "        let text = beside_bar(pane);",
+        "        let text = pane;",
+        ["an_entry_too_tall_for_its_pane_gives_its_bar_a_column_and_drags"],
+    ),
+    (
+        "the bar's column takes no press",
+        "        f.hit(Target::ScrollTrack, bar.track);\n",
+        "",
+        [
+            "a_long_lists_thumb_drags_the_rows_and_lets_go_on_release",
+            "a_press_on_a_lists_track_pages_towards_it",
+        ],
+    ),
+    (
+        "the thumb takes no press",
+        "        f.hit(Target::ScrollThumb, bar.thumb);\n",
+        "",
+        ["a_long_lists_thumb_drags_the_rows_and_lets_go_on_release"],
+    ),
+    (
+        "a list's thumb is drawn at its top wherever the list is",
+        "        thumb: scrollbar::thumb(track, total, visible, top),",
+        "        thumb: scrollbar::thumb(track, total, visible, 0),",
+        ["a_press_on_a_lists_track_pages_towards_it"],
+    ),
+    (
+        "an entry's thumb is drawn at its top wherever the entry is",
+        "        let position = if max > 0.0 { offset / max } else { 0.0 };",
+        "        let position = 0.0;",
+        ["an_entry_too_tall_for_its_pane_gives_its_bar_a_column_and_drags"],
+    ),
+    (
+        "a press on the thumb takes no hold of it",
+        "                    self.thumb_grab = Some(ev.y - bar.thumb.y);",
+        "                    let _ = bar;",
+        [
+            "a_long_lists_thumb_drags_the_rows_and_lets_go_on_release",
+            "an_entry_too_tall_for_its_pane_gives_its_bar_a_column_and_drags",
+        ],
+    ),
+    (
+        "a list's drag forgets where the thumb was taken hold of",
+        "scrollbar::first_from_drag(bar.track, bar.thumb.h, grab, y, total, visible)",
+        "scrollbar::first_from_drag(bar.track, bar.thumb.h, 0.0, y, total, visible)",
+        ["a_long_lists_thumb_drags_the_rows_and_lets_go_on_release"],
+    ),
+    (
+        "an entry's drag moves nothing",
+        "                self.entry_scroll = next;\n",
+        "",
+        ["an_entry_too_tall_for_its_pane_gives_its_bar_a_column_and_drags"],
+    ),
+    (
+        "a release does not let go of the thumb",
+        "                return if self.thumb_grab.take().is_some() {",
+        "                return if self.thumb_grab.is_some() {",
+        ["a_long_lists_thumb_drags_the_rows_and_lets_go_on_release"],
+    ),
+    (
+        "a press keeps hold of a thumb whose release never came",
+        "        self.thumb_grab = None;\n        let Some(target) = self.target_at(ev.x, ev.y) else {",
+        "        let Some(target) = self.target_at(ev.x, ev.y) else {",
+        ["a_press_lets_go_of_a_thumb_whose_release_never_came"],
+    ),
+    (
+        "a press on a list's track always pages down",
+        "            self.scroll_rows(if up {\n                page.checked_neg().unwrap_or(0)\n            } else {\n                page\n            });",
+        "            self.scroll_rows(page);",
+        ["a_press_on_a_lists_track_pages_towards_it"],
+    ),
+    (
+        "a press on an entry's track always pages down",
+        "            self.scroll_entry(if up { -page } else { page });",
+        "            self.scroll_entry(page);",
+        ["an_entry_too_tall_for_its_pane_gives_its_bar_a_column_and_drags"],
+    ),
+    (
+        "the bar never lights under the pointer",
+        "            self.bar_hovered = over;\n",
+        "",
+        ["the_bar_follows_the_themes_style_and_lights_under_the_pointer"],
+    ),
+    (
+        "the bar stays lit after the pointer leaves the window",
+        "                return if std::mem::take(&mut self.bar_hovered) {",
+        "                return if self.bar_hovered {",
+        ["the_bar_follows_the_themes_style_and_lights_under_the_pointer"],
+    ),
+    (
+        "a held thumb is drawn as if let go",
+        "            dragging: self.thumb_grab.is_some(),",
+        "            dragging: false,",
+        ["the_bar_follows_the_themes_style_and_lights_under_the_pointer"],
+    ),
+    (
+        "the shortcut card lets a press through to what is under it",
+        "        if self.show_help {\n            // The card is modal for the pointer",
+        "        if false {\n            // The card is modal for the pointer",
+        ["the_shortcut_card_takes_a_press_rather_than_passing_it_on"],
+    ),
+    (
+        "a file's lists keep the selections of the lists they replaced",
+        "            self.set_sel(screen, 0);\n",
+        "",
+        ["lists_read_from_a_file_start_at_their_top"],
     ),
 ]
 

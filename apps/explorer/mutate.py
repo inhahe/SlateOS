@@ -912,6 +912,37 @@ MAIN = [
         '            // Answered by a plain key, as the taken-name prompt is.\n',
         ['a_chord_is_not_the_file_lists_key_and_altgr_is_not_ctrl'],
     ),
+    # -- the theme's widget style (c-e-a-theme-can-shape-the-controls) ------
+    (
+        'the scrollbar is drawn the same wherever the pointer is',
+        '            hovered: self.scrollbar_hovered,',
+        '            hovered: false,',
+        ['the_scrollbar_follows_the_themes_style_and_lights_under_the_pointer'],
+    ),
+    (
+        'the pointer coming to the scrollbar is not noticed',
+        '            MouseEventKind::Move => self.hover_scrollbar(m.x, m.y),',
+        '            MouseEventKind::Move => false,',
+        ['the_scrollbar_follows_the_themes_style_and_lights_under_the_pointer'],
+    ),
+    (
+        'the scrollbar stays lit after the pointer leaves the window',
+        '            MouseEventKind::Leave => std::mem::take(&mut self.scrollbar_hovered),',
+        '            MouseEventKind::Leave => false,',
+        ['the_scrollbar_follows_the_themes_style_and_lights_under_the_pointer'],
+    ),
+    (
+        "the address bar and the dialogs take the toolkit's focus width",
+        '        self.focus_ring_width = settings.focus_ring_width();',
+        '        let _ = settings;',
+        ['the_address_bar_and_the_dialogs_take_the_users_focus_width'],
+    ),
+    (
+        "the New folder dialog takes the toolkit's focus width",
+        '        let mut dialog = InputDialog::prompt("New folder", "Name:", "")\n            .with_focus_ring_width(self.focus_ring_width);',
+        '        let mut dialog = InputDialog::prompt("New folder", "Name:", "");',
+        ['the_address_bar_and_the_dialogs_take_the_users_focus_width'],
+    ),
 ]
 
 COLUMNS = [

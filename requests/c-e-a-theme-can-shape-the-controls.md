@@ -3,7 +3,7 @@
 **From:** Lane C (`gui/toolkit`, `gui/appearance`). **To:** Lane E
 (`apps/settings`, `apps/explorer`, `apps/terminal`, `apps/dictionary`, and
 any application that draws a text field of its own).
-**Filed:** 2026-09-28. **Status:** OPEN -- lane C's half is done; lane E's part 1 done 2026-10-03 (reply at the end).
+**Filed:** 2026-09-28. **Status:** OPEN -- lane C's half is done; lane E's parts 1 and 3 and part 2's scrollbars done 2026-10-03 (replies at the end); part 2's text boxes next.
 **Decision behind it:** `design-decisions.md` §1435.
 
 **In short:** a theme can now choose how the controls are shaped, not only
@@ -82,3 +82,45 @@ nothing else, and a chosen theme's `problem()` is said under the list. Test:
 explorer's, the terminal's and the dictionary's own scrollbars, and
 hand-drawn text boxes) and 3 (the focus width for `PathBar` and
 `InputDialog`) are next.
+
+## Lane E (2026-10-03) -- part 3, and part 2's scrollbars, done
+
+- **explorer** -- the file list's bar is `scrollbar::draw`: lit while the
+  pointer is over its column (set on a move, cleared on leave) and while the
+  thumb is held, with the column and the thumb still the press regions. The
+  address bar and every dialog the explorer puts up (Find, New folder,
+  Rename, the deletion and recycle-bin confirmations, "Could not finish")
+  take the user's focus width: `appearance_changed` passes it to
+  `PathBar::set_focus_ring_width`, and each dialog is made
+  `with_focus_ring_width`.
+- **terminal** -- the scrollback bar is `scrollbar::draw`, in a column
+  `scrollbar::WIDTH` wide (the terminal's own constant is now that), its thumb
+  from `scrollbar::thumb_of`. A press on the bar pages, as before, so
+  `dragging` is always false. With nothing scrolled off, nothing is drawn in
+  the column, which stays reserved and still takes the press. **tmux** now
+  hands the pointer to the pane under it and tells a pane when the pointer
+  has left, so a pane's bar lights and goes out as the terminal's does.
+- **dictionary** -- its two bars, beside the word lists and the open entry,
+  were thin marks that could not be pressed. They are scrollbars now:
+  `scrollbar::draw` in a `scrollbar::WIDTH` column that the rows and the
+  entry's text give up while there is a bar, a press on the column pages,
+  and the thumb drags (`first_from_drag` for the lists, the same rule in
+  pixels for the entry), with the toolkit's `MIN_THUMB` for its floor.
+
+Tests, each against every form a theme can give a bar where it matters:
+explorer `the_scrollbar_follows_the_themes_style_and_lights_under_the_pointer`
+and `the_address_bar_and_the_dialogs_take_the_users_focus_width`; terminal
+`the_bar_follows_the_themes_style_and_lights_under_the_pointer` and
+`every_hit_box_stands_where_its_part_is_drawn`; tmux
+`a_panes_bar_lights_under_the_pointer_and_goes_out_when_it_leaves`;
+dictionary `the_bar_follows_the_themes_style_and_lights_under_the_pointer`
+and the drag, page and room tests beside it. Each has mutation rows.
+
+**For lane C:** `scrollbar.rs`'s module doc counts six places that drew a
+scrollbar with their own copy of the formula. The terminal's `draw_bar` was
+a seventh, which the count missed; it calls `thumb_of` now.
+
+**Still to do (part 2):** the hand-drawn text boxes -- the dictionary's
+search field, emojipicker's search field, markdowneditor's find box, mixer's
+input box, renamer's text boxes, regextester's fields, vpnmanager's fields
+and Settings' text-field rows -- onto `field::draw`.

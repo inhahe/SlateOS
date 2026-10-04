@@ -187,11 +187,16 @@ MUTATIONS = [
         "the thumb is hit-boxed over the whole track rather than over itself",
         "        f.hit(Target::ScrollThumb, thumb);",
         "        f.hit(Target::ScrollThumb, bar);",
-        # Not `every_hit_box_has_ink_painted_at_exactly_that_rectangle`: the
-        # track is a fill at exactly that rectangle, so the ink is there.  What
-        # the mutation destroys is the thumb's *position*, which is the one
-        # thing the thumb is for.
-        ["the_thumb_says_where_in_the_scrollback_the_viewport_is"],
+        # What the mutation destroys first is the thumb's *position*, which
+        # is the one thing the thumb is for.  The hit-box sweep sees it only
+        # in a theme whose bar has no track: where the track is drawn, it is
+        # ink at the whole column's height, which is the box this mutant
+        # gives the thumb -- so the sweep runs every form a theme can give
+        # the bar, not only the default.
+        [
+            "the_thumb_says_where_in_the_scrollback_the_viewport_is",
+            "every_hit_box_stands_where_its_part_is_drawn",
+        ],
     ),
     (
         "the grid reaches under the bar, so the bar's clicks land on text",
@@ -214,15 +219,57 @@ MUTATIONS = [
     ),
     (
         "a long scrollback gets a sliver of a thumb rather than a floor",
-        "        let thumb_h = (bar.h * span).max(4.0).min(bar.h);",
-        "        let thumb_h = bar.h * span;",
+        "        let thumb = scrollbar::thumb_of(bar, ratio(shown, total), progress, THUMB_FLOOR);",
+        "        let thumb = scrollbar::thumb_of(bar, ratio(shown, total), progress, 0.0);",
         ["the_thumb_is_always_thick_enough_to_aim_at"],
     ),
     (
         "the thumb is pinned to the top of its track",
-        "        let thumb = Rect::new(bar.x, bar.y + travel * progress, bar.w, thumb_h);",
-        "        let thumb = Rect::new(bar.x, bar.y, bar.w, thumb_h);",
+        "        let thumb = scrollbar::thumb_of(bar, ratio(shown, total), progress, THUMB_FLOOR);",
+        "        let thumb = scrollbar::thumb_of(bar, ratio(shown, total), 0.0, THUMB_FLOOR);",
         ["the_thumb_says_where_in_the_scrollback_the_viewport_is"],
+    ),
+    (
+        "a bare track is drawn beside a terminal with no history",
+        "            // reads as broken (`guitk::scrollbar::needed`).\n            return;",
+        "            // reads as broken (`guitk::scrollbar::needed`).\n"
+        "            scrollbar::draw(f, &self.palette, bar, bar, scrollbar::BarState::default());\n"
+        "            return;",
+        ["there_is_no_thumb_when_the_whole_buffer_is_on_screen"],
+    ),
+    (
+        # Load-bearing in tmux, which finds what a press lands on from the
+        # pane's hit boxes: without this one a press on a pane's bar is a
+        # press on nothing, and never reaches `press_bar`.
+        "the bar's column is not hit-boxed",
+        "        f.hit(Target::ScrollTrack, bar);\n\n        let total",
+        "\n        let total",
+        ["there_is_no_thumb_when_the_whole_buffer_is_on_screen"],
+    ),
+    # -- the bar in the theme's style ------------------------------------------
+    (
+        "the bar never lights under the pointer",
+        "                self.bar_hovered = l.bar.contains(event.x, event.y);",
+        "                let _ = l.bar.contains(event.x, event.y);",
+        ["the_bar_follows_the_themes_style_and_lights_under_the_pointer"],
+    ),
+    (
+        "the bar stays lit after the pointer leaves the window",
+        "            MouseEventKind::Leave => self.bar_hovered = false,",
+        "            MouseEventKind::Leave => {}",
+        ["the_bar_follows_the_themes_style_and_lights_under_the_pointer"],
+    ),
+    (
+        "the bar is drawn the same wherever the pointer is",
+        "            hovered: self.bar_hovered,",
+        "            hovered: false,",
+        ["the_bar_follows_the_themes_style_and_lights_under_the_pointer"],
+    ),
+    (
+        "the bar keeps the dark default whatever the theme",
+        "        self.palette = *palette;\n",
+        "",
+        ["the_bar_follows_the_themes_style_and_lights_under_the_pointer"],
     ),
     (
         "a press in the bar does nothing",

@@ -64,6 +64,8 @@ use unsaved::{Choice, Question};
 // with their own incompatible versions. See `known-issues.md`
 // C-SIX-APPS-EACH-CARRIED-THEIR-OWN-CIVIL-DATE-ARITHMETIC.
 use guitk::date;
+use guitk::field;
+use guitk::frame::Rect;
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 #[allow(unused_imports)]
@@ -1984,6 +1986,8 @@ fn parse_subtasks_json(json: &str) -> Vec<Subtask> {
 const FORM_TEXT_SIZE: f32 = 13.0;
 /// A form row's height.
 const FORM_ROW_H: f32 = 36.0;
+/// How wide the form's labels are, before each row's box.
+const FORM_LABEL_W: f32 = 100.0;
 /// How many steps the form lists at once.
 const FORM_STEPS_SHOWN: usize = 4;
 
@@ -2324,6 +2328,10 @@ pub struct RemindersApp {
     pub sidebar_visible: bool,
     /// Whether the shortcut list is up.
     pub show_help: bool,
+    /// How wide the mark is round the box that has the keyboard: the user's
+    /// focus width (`App::appearance_changed`), the toolkit's until it is
+    /// known.
+    pub focus_ring_width: f32,
     pub detail_visible: bool,
     pub show_completed_subtasks: bool,
     /// The user's colours, replaced whenever the theme changes.
@@ -2359,6 +2367,7 @@ impl RemindersApp {
     pub fn new(width: f32, height: f32, now: DateTime) -> Self {
         Self {
             show_help: false,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             picker: FilePicker::new(),
             choosing_snooze: false,
@@ -3420,6 +3429,45 @@ impl RemindersApp {
 
     /// The form over the list: a row per field, the steps under their row,
     /// what the last Save found wrong, and the keys that work it.
+    /// Where each of the form's rows has its box, beside the row's label, in
+    /// order -- the steps' as tall as the steps it shows -- and where the
+    /// rows end. One answer for the drawing and anything that asks where a
+    /// row is.
+    fn form_rows(&self, form: &TaskForm) -> (Vec<(TaskField, Rect)>, f32) {
+        let (cx, cy, cw, _) = self.form_card();
+        let control_w = (cw - 40.0 - FORM_LABEL_W).max(0.0);
+        let row_h = FORM_ROW_H * 0.8;
+        let mut y = cy + 48.0;
+        let mut rows = Vec::with_capacity(TaskField::ALL.len());
+        for field in TaskField::ALL {
+            rows.push((
+                field,
+                Rect::new(cx + 20.0 + FORM_LABEL_W, y, control_w, row_h - 4.0),
+            ));
+            y += if field == TaskField::Steps {
+                #[allow(clippy::cast_precision_loss, reason = "a handful of rows")]
+                let shown = form.steps.len().clamp(1, FORM_STEPS_SHOWN) as f32;
+                row_h + (shown - 1.0) * 18.0
+            } else {
+                row_h
+            };
+        }
+        (rows, y)
+    }
+
+    /// Whether row `field` of `form` holds what the form cannot keep: a due
+    /// date that is not one, a due time that is not one for a date that is,
+    /// or -- once a save has been refused for it -- no title.
+    fn row_is_wrong(&self, form: &TaskForm, field: TaskField) -> bool {
+        let dated = !form.due_date.text().trim().is_empty();
+        match field {
+            TaskField::Title => self.form_error.is_some() && form.title.text().trim().is_empty(),
+            TaskField::DueDate => dated && parse_date_text(form.due_date.text()).is_none(),
+            TaskField::DueTime => dated && parse_time_text(form.due_time.text()).is_none(),
+            _ => false,
+        }
+    }
+
     fn render_form(&self, cmds: &mut Vec<RenderCommand>, form: &TaskForm) {
         cmds.push(RenderCommand::FillRect {
             x: 0.0,
@@ -3446,11 +3494,10 @@ impl RemindersApp {
             max_width: Some((cw - 40.0).max(0.0)),
             overflow: TextOverflow::Ellipsis,
         });
-        let label_w = 100.0;
-        let control_w = (cw - 40.0 - label_w).max(0.0);
-        let row_h = FORM_ROW_H * 0.8;
-        let mut y = cy + 48.0;
-        for field in TaskField::ALL {
+        let label_w = FORM_LABEL_W;
+        let (rows, end_y) = self.form_rows(form);
+        for (field, rect) in rows {
+            let y = rect.y;
             let focused = self.form_field == field;
             cmds.push(RenderCommand::Text {
                 x: cx + 20.0,
@@ -3470,27 +3517,25 @@ impl RemindersApp {
                 max_width: Some(label_w - 8.0),
                 overflow: TextOverflow::Ellipsis,
             });
-            let (x, w, h) = (cx + 20.0 + label_w, control_w, row_h - 4.0);
-            self.palette
-                .push_surface(cmds, x, y, w, h, 4.0, Surface::Card);
-            cmds.push(RenderCommand::StrokeRect {
-                x,
-                y,
-                width: w,
-                height: h,
-                color: if focused {
-                    self.palette.blue
-                } else {
-                    self.palette.surface1
+            let (x, w) = (rect.x, rect.w);
+            // The toolkit's field: the theme's box, and the keyboard's mark
+            // at the user's width round the row that has it, and red round a
+            // row that cannot be kept as it is. It was a panel whose edge
+            // turned blue. (The list of keys does not come up over the form.)
+            field::draw(
+                cmds,
+                &self.palette,
+                rect,
+                field::State {
+                    hovered: false,
+                    focused,
+                    disabled: false,
+                    invalid: self.row_is_wrong(form, field),
                 },
-                line_width: if focused { 2.0 } else { 1.0 },
-                corner_radii: CornerRadii::all(4.0),
-            });
+                self.focus_ring_width,
+            );
             if field == TaskField::Steps {
                 self.render_form_steps(cmds, form, focused, (x, y, w));
-                #[allow(clippy::cast_precision_loss, reason = "a handful of rows")]
-                let shown = form.steps.len().clamp(1, FORM_STEPS_SHOWN) as f32;
-                y += row_h + (shown - 1.0) * 18.0;
                 continue;
             }
             if let Some(input) = form.input_ref(field) {
@@ -3549,12 +3594,11 @@ impl RemindersApp {
                     overflow: TextOverflow::Ellipsis,
                 });
             }
-            y += row_h;
         }
         if let Some(error) = &self.form_error {
             cmds.push(RenderCommand::Text {
                 x: cx + 20.0,
-                y: y + 4.0,
+                y: end_y + 4.0,
                 text: error.clone(),
                 font_size: 12.0,
                 color: self.palette.ink(self.palette.red),
@@ -5101,6 +5145,10 @@ fn sample_tasks(store: &mut TaskStore, now: DateTime) {
 impl App for RemindersApp {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -7953,6 +8001,123 @@ mod tests {
 
     fn key(app: &mut RemindersApp, k: Key) -> EventResult {
         app.handle_event(&press(k))
+    }
+
+    /// **The form's rows are the toolkit's field**: the row with the
+    /// keyboard carries the theme's mark at the user's width, and the others
+    /// none; Tab moves it; a due date or time
+    /// that is not one is red, and so is an empty title once a save has been
+    /// refused for it. They were panels whose edge turned blue.
+    #[test]
+    fn the_forms_rows_are_the_toolkits_field() {
+        let mut app = RemindersApp::new(WINDOW_WIDTH, WINDOW_HEIGHT, make_now());
+        let mut p = app.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        oswindow::app::App::theme_changed(&mut app, &p);
+        oswindow::app::App::appearance_changed(
+            &mut app,
+            &appearance::AppearanceSettings {
+                focus_ring_scale: 2.5,
+                ..appearance::AppearanceSettings::default()
+            },
+        );
+        assert!(
+            app.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        app.open_new_task();
+        let rect_of = |app: &RemindersApp, wanted: TaskField| {
+            let form = app.form.as_ref().expect("the form is open");
+            app.form_rows(form)
+                .0
+                .into_iter()
+                .find(|(field, _)| *field == wanted)
+                .map(|(_, rect)| rect)
+                .expect("the form has the row")
+        };
+        let draws = |app: &RemindersApp, rect: Rect, state: field::State| {
+            let seq = |s: field::State| {
+                let mut v: Vec<RenderCommand> = Vec::new();
+                field::draw(&mut v, &p, rect, s, app.focus_ring_width);
+                v
+            };
+            let cmds = app.render_commands();
+            let has = |want: &[RenderCommand]| cmds.windows(want.len()).any(|w| w == want);
+            has(&seq(state))
+                && (state.focused
+                    || !has(&seq(field::State {
+                        focused: true,
+                        ..state
+                    })))
+        };
+        let idle = field::State::default();
+        let focused = field::State {
+            focused: true,
+            ..idle
+        };
+        let wrong = field::State {
+            invalid: true,
+            ..idle
+        };
+        let title = rect_of(&app, TaskField::Title);
+        let date = rect_of(&app, TaskField::DueDate);
+        let time = rect_of(&app, TaskField::DueTime);
+        assert!(
+            draws(&app, title, focused),
+            "the title row, with the keyboard, has no mark"
+        );
+        assert!(
+            draws(&app, date, idle),
+            "the due date row is not the toolkit's field"
+        );
+
+        key(&mut app, Key::Tab);
+        assert!(
+            draws(&app, date, focused) && draws(&app, title, idle),
+            "Tab did not move the keyboard's mark to the due date"
+        );
+        type_in(&mut app, "2026-13-45");
+        assert!(
+            draws(
+                &app,
+                date,
+                field::State {
+                    invalid: true,
+                    ..focused
+                }
+            ),
+            "a due date that is not one is not red"
+        );
+        key(&mut app, Key::Tab);
+        app.handle_event(&with_ctrl(Key::A));
+        type_in(&mut app, "99:99");
+        assert!(
+            draws(
+                &app,
+                time,
+                field::State {
+                    invalid: true,
+                    ..focused
+                }
+            ),
+            "a due time that is not one is not red"
+        );
+        assert!(draws(&app, date, wrong), "the wrong date lost its red");
+
+        // An empty title is red once a save has been refused for it.
+        assert!(
+            draws(&app, title, idle),
+            "an empty title is red before any save"
+        );
+        app.save_form();
+        assert!(
+            app.form_error.is_some(),
+            "control: a reminder with no title is refused"
+        );
+        assert!(
+            draws(&app, title, wrong),
+            "an empty title a save refused is not red"
+        );
     }
 
     fn with_shift(k: Key) -> Event {

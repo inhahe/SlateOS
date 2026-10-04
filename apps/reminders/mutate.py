@@ -336,6 +336,55 @@ MUTATIONS = [
     ),
 ]
 
+# The form's rows are the toolkit's field (2026-10-04; lane C,
+# c-e-a-theme-can-shape-the-controls).
+ROWS = "the_forms_rows_are_the_toolkits_field"
+
+MUTATIONS += [
+    (
+        "the row with the keyboard has no mark",
+        "                    focused,\n                    disabled: false,\n                    invalid: self.row_is_wrong(form, field),\n",
+        "                    focused: false,\n                    disabled: false,\n                    invalid: self.row_is_wrong(form, field),\n",
+        [ROWS],
+    ),
+    (
+        "no row is ever red",
+        "                    invalid: self.row_is_wrong(form, field),\n",
+        "                    invalid: false,\n",
+        [ROWS],
+    ),
+    (
+        "a due date that is not one is not red",
+        "            TaskField::DueDate => dated && parse_date_text(form.due_date.text()).is_none(),\n",
+        "            TaskField::DueDate => false,\n",
+        [ROWS],
+    ),
+    (
+        "a due time that is not one is not red",
+        "            TaskField::DueTime => dated && parse_time_text(form.due_time.text()).is_none(),\n",
+        "            TaskField::DueTime => false,\n",
+        [ROWS],
+    ),
+    (
+        "an empty title is red before any save",
+        "            TaskField::Title => self.form_error.is_some() && form.title.text().trim().is_empty(),\n",
+        "            TaskField::Title => form.title.text().trim().is_empty(),\n",
+        [ROWS],
+    ),
+    (
+        "an empty title a save refused is not red",
+        "            TaskField::Title => self.form_error.is_some() && form.title.text().trim().is_empty(),\n",
+        "            TaskField::Title => false,\n",
+        [ROWS],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [ROWS],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "reminders", timeout=900, only=only))

@@ -25,6 +25,11 @@ pub(crate) fn cost_one(p: u8) -> u32 {
     cost_zero(p.wrapping_neg())
 }
 
+/// The cost of `bit` at probability `p`: libvpx's `vp9_cost_bit`.
+pub(crate) fn cost_bit(p: u8, bit: bool) -> u32 {
+    if bit { cost_one(p) } else { cost_zero(p) }
+}
+
 /// The cost of `ct[0]` zeros and `ct[1]` ones at probability `p`: libvpx's
 /// `cost_branch256`.
 #[allow(

@@ -33,7 +33,9 @@ use crate::common::{ALLOW_16X16, ONLY_4X4, TX_MODE_SELECT};
 use crate::decoder::{Picture, PlaneView};
 use crate::enc::bitstream::{self, CoefUpdates, FrameHeader, KeyFrame, UpdateSearch};
 use crate::enc::cpi::{Cpi, Oxcf, quantizer_to_qindex};
-use crate::enc::encodeframe::{Decide, FixedDecisions, FrameEncoder};
+use crate::enc::encodeframe::{Decide, FrameEncoder};
+use crate::enc::nonrd::RtDecisions;
+use crate::enc::rd::{RdFrame, compute_rd_mult};
 use crate::enc::tokenize;
 use crate::frame::{AnyFrame, Buffers, FrameBuf};
 use crate::header::{self, Quantization};
@@ -237,15 +239,15 @@ impl Encoder {
     /// [`Error::Unsupported`] if a plane is not the configured size, or its
     /// data is too short for its stride.
     pub fn encode(&mut self, planes: [PlaneView<'_, u8>; 3]) -> Result<Vec<u8>, Error> {
-        self.encode_frame(planes, &mut FixedDecisions, FrameOptions::default())
+        self.encode_frame(planes, None, FrameOptions::default())
     }
 
-    /// [`Encoder::encode`] with the block decisions `d` makes, coded as
-    /// `opts` says.
+    /// [`Encoder::encode`] with the block decisions `d` makes, or libvpx's
+    /// realtime ones, coded as `opts` says.
     pub(crate) fn encode_frame(
         &mut self,
         planes: [PlaneView<'_, u8>; 3],
-        d: &mut dyn Decide,
+        d: Option<&mut dyn Decide>,
         opts: FrameOptions,
     ) -> Result<Vec<u8>, Error> {
         let (width, height) = (self.cpi.oxcf.width, self.cpi.oxcf.height);
@@ -349,7 +351,19 @@ impl Encoder {
             tx_mode,
         };
         let mut fc = FrameContext::defaults();
-        let mut fe = FrameEncoder::new(&h, &cpi.common.seg, &cpi.quants, &src, &mut recon);
+        // vp9_initialize_rd_consts and the variance partitioning's
+        // thresholds, for the realtime decisions.
+        let mut rt = RtDecisions::key_frame(
+            compute_rd_mult(q + cpi.common.quant.y_dc_delta_q, RdFrame::Key),
+            i32::from(cpi.quants.get(0, usize::try_from(q).unwrap_or(0)).dequant[1]),
+        );
+        let d: &mut dyn Decide = match d {
+            Some(d) => d,
+            None => &mut rt,
+        };
+        let costing = FrameContext::defaults();
+        let mut fe =
+            FrameEncoder::new(&h, &costing, &cpi.common.seg, &cpi.quants, &src, &mut recon);
         fe.encode_tiles(d);
         let (mi, mut counts, tile_tokens) = fe.finish();
 
@@ -577,7 +591,7 @@ mod tests {
     impl Decide for RandomDecisions {
         fn partition(
             &mut self,
-            _f: &FrameEncoder<'_>,
+            _f: &mut FrameEncoder<'_>,
             _r: usize,
             _c: usize,
             _b: BlockSize,
@@ -587,7 +601,7 @@ mod tests {
 
         fn modes(
             &mut self,
-            _f: &FrameEncoder<'_>,
+            _f: &mut FrameEncoder<'_>,
             _r: usize,
             _c: usize,
             bsize: BlockSize,
@@ -698,7 +712,9 @@ mod tests {
                     });
                     let mut d = RandomDecisions(Lcg(seed * 7919));
                     let opts = FrameOptions { tx_select };
-                    let frame = enc.encode_frame(views(&pic, w, h), &mut d, opts).unwrap();
+                    let frame = enc
+                        .encode_frame(views(&pic, w, h), Some(&mut d), opts)
+                        .unwrap();
                     let mut dec = crate::Decoder::new();
                     let shown = dec
                         .decode(&frame)

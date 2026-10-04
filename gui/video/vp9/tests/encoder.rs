@@ -122,3 +122,51 @@ fn real_pictures_round_trip_at_every_quantiser() {
         }
     }
 }
+
+/// The pictures libvpx's reference encode was made from: the first 30 that
+/// the conformance vector `vp90-2-22-svc_1280x720_1.webm` shows, which
+/// `vpxdec --i420 --limit=30` wrote out for `vpxenc` (and which this
+/// decoder shows bit for bit). `None` until the full vector suite is
+/// fetched.
+fn reference_input() -> Option<Vec<Picture>> {
+    let dir = common::full_suite_dir()?;
+    let v = common::read_vector(&dir.join("vp90-2-22-svc_1280x720_1.webm")).ok()?;
+    let mut d = Decoder::new();
+    let mut out = Vec::new();
+    for p in &v.packets {
+        if let Some(picture) = d.decode(p).ok()? {
+            out.push(picture);
+            if out.len() == 30 {
+                break;
+            }
+        }
+    }
+    Some(out)
+}
+
+/// libvpx's reference encode of [`reference_input`]: `vpxenc --rt
+/// --cpu-used=8` at the settings `EncoderConfig::realtime(1280, 720, 1000)`
+/// gives (`tests/data/encoder/README.md` has the command). The encoder's
+/// frames must be byte-identical to it.
+#[test]
+#[ignore = "needs the full vector suite: python gui/video/vp9/tools/fetch_vectors.py"]
+fn frames_match_vpxenc_realtime() {
+    let input = reference_input()
+        .expect("the full suite is not fetched: python gui/video/vp9/tools/fetch_vectors.py");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/encoder/rt8.ivf");
+    let reference = common::read_ivf(&std::fs::read(path).unwrap()).unwrap();
+    let mut encoder = Encoder::new(EncoderConfig::realtime(1280, 720, 1000)).unwrap();
+    // Only key frames so far: the first frame.
+    for (i, (picture, want)) in input.iter().zip(&reference.packets).enumerate().take(1) {
+        let planes = [0, 1, 2].map(|p| picture.plane8(p).unwrap());
+        let got = encoder.encode(planes).unwrap();
+        if &got != want {
+            let first = got.iter().zip(want.iter()).position(|(a, b)| a != b);
+            panic!(
+                "frame {i}: {} bytes against libvpx's {}, first difference at byte {first:?}",
+                got.len(),
+                want.len()
+            );
+        }
+    }
+}

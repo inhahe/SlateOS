@@ -152,6 +152,9 @@ pub const PARTITION_CONTEXT_LOOKUP: [[u8; 2]; 13] = [
     [0, 0],
 ];
 
+/// The block size a transform covers: libvpx's `txsize_to_bsize`.
+pub const TXSIZE_TO_BSIZE: [u8; 4] = [0, 3, 6, 9];
+
 /// Log2 of a block size's width in 4x4 units: libvpx's `b_width_log2_lookup`.
 pub const B_WIDTH_LOG2: [u8; 13] = [0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4];
 

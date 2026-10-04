@@ -43,6 +43,7 @@ use crate::frame::FrameBuf;
 use crate::header::{self, Segmentation};
 use crate::idct;
 use crate::intra::{self, Edges};
+use crate::probs::FrameContext;
 use crate::tables;
 
 /// A block's intra modes, as a [`Decide`] chooses them.
@@ -72,17 +73,19 @@ pub(crate) trait Decide {
     /// `PARTITION_SPLIT`; any other answer there is taken as a split.
     fn partition(
         &mut self,
-        f: &FrameEncoder<'_>,
+        f: &mut FrameEncoder<'_>,
         mi_row: usize,
         mi_col: usize,
         bsize: BlockSize,
     ) -> Partition;
 
     /// The modes of block `bsize` at (`mi_row`, `mi_col`), the blocks before
-    /// it in coding order already reconstructed.
+    /// it in coding order already reconstructed. A search may predict into
+    /// the reconstruction, as libvpx's does: the block's coding then
+    /// predicts over it.
     fn modes(
         &mut self,
-        f: &FrameEncoder<'_>,
+        f: &mut FrameEncoder<'_>,
         mi_row: usize,
         mi_col: usize,
         bsize: BlockSize,
@@ -93,11 +96,11 @@ pub(crate) trait Decide {
 /// cells and its distances to the frame's edges in eighth pixels (negative
 /// right and bottom distances reach past the frame).
 #[derive(Clone, Copy, Debug)]
-struct Placement {
-    mi_row: usize,
-    mi_col: usize,
-    mb_to_right_edge: i32,
-    mb_to_bottom_edge: i32,
+pub(crate) struct Placement {
+    pub mi_row: usize,
+    pub mi_col: usize,
+    pub mb_to_right_edge: i32,
+    pub mb_to_bottom_edge: i32,
 }
 
 /// A plane's coefficient buffers for one block of up to 64x64: libvpx's
@@ -123,6 +126,9 @@ impl PlaneCoeffs {
 /// state (`MACROBLOCK`, `MACROBLOCKD`, `TileDataEnc`, `FRAME_COUNTS`).
 pub(crate) struct FrameEncoder<'a> {
     pub h: &'a FrameHeader,
+    /// The probabilities the frame codes with, before its header's updates:
+    /// what libvpx's mode search costs decisions with.
+    pub fc: &'a FrameContext,
     pub seg: &'a Segmentation,
     pub quants: &'a Quants,
     /// The picture being encoded, its edges repeated out to whole
@@ -157,6 +163,7 @@ impl<'a> FrameEncoder<'a> {
     /// A frame encoder writing to `recon`, every block yet to be coded.
     pub(crate) fn new(
         h: &'a FrameHeader,
+        fc: &'a FrameContext,
         seg: &'a Segmentation,
         quants: &'a Quants,
         src: &'a FrameBuf<u8>,
@@ -166,6 +173,7 @@ impl<'a> FrameEncoder<'a> {
         let tiles = (1usize << h.log2_tile_cols) * (1usize << h.log2_tile_rows);
         Self {
             h,
+            fc,
             seg,
             quants,
             src,
@@ -294,9 +302,76 @@ impl<'a> FrameEncoder<'a> {
         }
     }
 
+    /// Where block `bsize` at (`mi_row`, `mi_col`) is: libvpx's
+    /// `set_mi_row_col` edge distances.
+    pub(crate) fn placement(&self, mi_row: usize, mi_col: usize, bsize: BlockSize) -> Placement {
+        let n = |t: &[u8; 13]| i32::from(t.get(usize::from(bsize)).copied().unwrap_or(1));
+        let (bw, bh) = (n(&tables::NUM_8X8_WIDE), n(&tables::NUM_8X8_HIGH));
+        let (mi_cols, mi_rows) = (self.mi.mi_cols as i32, self.mi.mi_rows as i32);
+        Placement {
+            mi_row,
+            mi_col,
+            mb_to_right_edge: (mi_cols - bw - mi_col as i32) * 64,
+            mb_to_bottom_edge: (mi_rows - bh - mi_row as i32) * 64,
+        }
+    }
+
+    /// Predict one intra transform block into the reconstruction: libvpx's
+    /// `vp9_predict_intra_block`, with the neighbours it may read. Returns
+    /// the block's top-left pixel in the plane.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn predict_intra(
+        &mut self,
+        place: &Placement,
+        block8: BlockSize,
+        plane: usize,
+        row: usize,
+        col: usize,
+        tx_size: TxSize,
+        mode: PredictionMode,
+    ) -> (usize, usize) {
+        let (sx, sy) = self.subsampling(plane);
+        let plane_bsize = plane_block_size(block8, sx, sy);
+        let bwl = u32::from(
+            tables::B_WIDTH_LOG2
+                .get(usize::from(plane_bsize))
+                .copied()
+                .unwrap_or(0),
+        );
+        let txw = 1usize << tx_size;
+        let x0 = ((place.mi_col * 8) >> sx) + 4 * col;
+        let y0 = ((place.mi_row * 8) >> sy) + 4 * row;
+        let p = &mut self.recon.planes[plane.min(2)];
+        let edges = Edges {
+            have_top: row != 0 || place.mi_row != 0,
+            have_left: col != 0 || place.mi_col > self.tile_mi_col_start,
+            have_right: col + txw < (1usize << bwl),
+            past_right: place.mb_to_right_edge < 0,
+            past_bottom: place.mb_to_bottom_edge < 0,
+            frame_width: p.width,
+            frame_height: p.height,
+        };
+        intra::predict(
+            &mut p.data,
+            p.stride,
+            x0,
+            y0,
+            mode,
+            tx_size,
+            &edges,
+            8,
+            &mut self.intra_out,
+        );
+        (x0, y0)
+    }
+
     /// The blocks above and to the left of a cell, as the contexts see them:
     /// none off the top of the frame or left of the tile.
-    fn neighbours(&self, mi_row: usize, mi_col: usize) -> (Option<usize>, Option<usize>) {
+    pub(crate) fn neighbours(
+        &self,
+        mi_row: usize,
+        mi_col: usize,
+    ) -> (Option<usize>, Option<usize>) {
         let above = if mi_row > 0 {
             self.mi.index_at(mi_row - 1, mi_col)
         } else {
@@ -331,12 +406,7 @@ impl<'a> FrameEncoder<'a> {
         let (mi_cols, mi_rows) = (self.mi.mi_cols, self.mi.mi_rows);
         let x_mis = bw.min(mi_cols - mi_col);
         let y_mis = bh.min(mi_rows - mi_row);
-        let place = Placement {
-            mi_row,
-            mi_col,
-            mb_to_right_edge: (mi_cols as i32 - bw as i32 - mi_col as i32) * 64,
-            mb_to_bottom_edge: (mi_rows as i32 - bh as i32 - mi_row as i32) * 64,
-        };
+        let place = self.placement(mi_row, mi_col, bsize);
 
         let max_tx = tables::MAX_TXSIZE
             .get(usize::from(bsize))
@@ -490,7 +560,7 @@ impl<'a> FrameEncoder<'a> {
     /// (index in 4x4 units, row and column in 4x4 units): libvpx's
     /// `vp9_foreach_transformed_block_in_plane`, which skips those wholly
     /// past the frame's edge.
-    fn transform_blocks(
+    pub(crate) fn transform_blocks(
         &self,
         place: &Placement,
         block8: BlockSize,
@@ -588,50 +658,20 @@ impl<'a> FrameEncoder<'a> {
         plane: usize,
     ) -> bool {
         let h = self.h;
-        let (sx, sy) = self.subsampling(plane);
         let tx_size = if plane == 0 {
             mi.tx_size
         } else {
             uv_tx_size(mi.sb_type, mi.tx_size, h.ss_x, h.ss_y)
         };
-        let plane_bsize = plane_block_size(block8, sx, sy);
-        let bwl = u32::from(
-            tables::B_WIDTH_LOG2
-                .get(usize::from(plane_bsize))
-                .copied()
-                .unwrap_or(0),
-        );
         let qindex = self.seg.qindex(mi.segment_id, h.quant.base_qindex);
         let qs = self.quants.get(plane, usize::try_from(qindex).unwrap_or(0));
         let lossless = h.lossless();
         let n = 4usize << tx_size;
-        let txw = 1usize << tx_size;
         let mut any = false;
         for (block, row, col) in self.transform_blocks(place, block8, plane, tx_size) {
             let (mode, tx_type, scan) = self.transform_of(mi, plane, block, tx_size);
-            let x0 = ((place.mi_col * 8) >> sx) + 4 * col;
-            let y0 = ((place.mi_row * 8) >> sy) + 4 * row;
+            let (x0, y0) = self.predict_intra(place, block8, plane, row, col, tx_size, mode);
             let p = &mut self.recon.planes[plane.min(2)];
-            let edges = Edges {
-                have_top: row != 0 || place.mi_row != 0,
-                have_left: col != 0 || place.mi_col > self.tile_mi_col_start,
-                have_right: col + txw < (1usize << bwl),
-                past_right: place.mb_to_right_edge < 0,
-                past_bottom: place.mb_to_bottom_edge < 0,
-                frame_width: p.width,
-                frame_height: p.height,
-            };
-            intra::predict(
-                &mut p.data,
-                p.stride,
-                x0,
-                y0,
-                mode,
-                tx_size,
-                &edges,
-                8,
-                &mut self.intra_out,
-            );
             // vpx_subtract_block.
             let s = &self.src.planes[plane.min(2)];
             for r in 0..n {
@@ -868,43 +908,5 @@ fn forward_transform(
 fn copy_into(out: &mut [i32], c: &[i32]) {
     if let Some(o) = out.get_mut(..c.len()) {
         o.copy_from_slice(c);
-    }
-}
-
-/// The skeleton's decisions: every superblock cut into 16x16 blocks (8x8
-/// where a 16x16 one would cross the frame's edge), each predicted from its
-/// neighbours' mean (`DC_PRED`). libvpx's realtime choices replace these.
-pub(crate) struct FixedDecisions;
-
-impl Decide for FixedDecisions {
-    fn partition(
-        &mut self,
-        f: &FrameEncoder<'_>,
-        mi_row: usize,
-        mi_col: usize,
-        bsize: BlockSize,
-    ) -> Partition {
-        let n = usize::from(
-            tables::NUM_8X8_WIDE
-                .get(usize::from(bsize))
-                .copied()
-                .unwrap_or(1),
-        );
-        let fits = mi_row + n <= f.mi.mi_rows && mi_col + n <= f.mi.mi_cols;
-        if bsize <= crate::common::BLOCK_16X16 && fits || bsize == BLOCK_8X8 {
-            PARTITION_NONE
-        } else {
-            PARTITION_SPLIT
-        }
-    }
-
-    fn modes(
-        &mut self,
-        _f: &FrameEncoder<'_>,
-        _mi_row: usize,
-        _mi_col: usize,
-        _bsize: BlockSize,
-    ) -> BlockModes {
-        BlockModes::default()
     }
 }

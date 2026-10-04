@@ -3681,10 +3681,11 @@ lane C's `guitk`.
     reconstruction (`vp9::Encoder`). Key frames with fixed decisions decode
     to exactly the encoder's reconstruction, at random partitions, modes and
     transform sizes too, and the encoder counts what the decoder counts.
-    `[x]` libvpx's one-pass CBR rate control and the frame loop around it:
-    the reference encode's first frame gets libvpx's quantiser (161) and
-    loop filter level (24). `[ ]` libvpx's partition and mode decisions,
-    inter frames with motion search, cyclic refresh's band, threads.
+    `[x]` libvpx's one-pass CBR rate control and the frame loop around it.
+    `[x]` libvpx's key-frame decisions (variance partitioning, the realtime
+    intra mode search): the reference encode's first frame
+    (`tests/data/encoder/rt8.ivf`) is byte-identical to `vpxenc`'s.
+    `[ ]` Inter frames with motion search, cyclic refresh's band, threads.
 
 - `[-]` `[F]` **AVIF pictures**, decided 2026-09-27 (§1333): a HEIF container reader
   and a port of rav1d (dav1d in Rust, BSD) in `gui/imagecodec`, so AVIF opens

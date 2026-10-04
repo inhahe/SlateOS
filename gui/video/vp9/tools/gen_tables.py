@@ -56,6 +56,8 @@ TABLES = [
      "a chroma plane's transform size, by block size, luma transform size and [x][y] subsampling"),
     ("vp9/common/vp9_common_data.c", "partition_context_lookup", "PARTITION_CONTEXT_LOOKUP",
      "u8", [13, 2], "the partition context a block size leaves: [above, left]"),
+    ("vp9/common/vp9_common_data.c", "txsize_to_bsize", "TXSIZE_TO_BSIZE", "u8", [4],
+     "the block size a transform covers"),
     ("vp9/common/vp9_common_data.c", "b_width_log2_lookup", "B_WIDTH_LOG2", "u8", [13],
      "log2 of a block size's width in 4x4 units"),
     ("vp9/common/vp9_common_data.c", "partition_lookup", "PARTITION_LOOKUP", "u8", [5, 13],

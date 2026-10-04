@@ -176,13 +176,6 @@ fn put(qcoeff: &mut [i32], dqcoeff: &mut [i32], rc: usize, q: i32, dq: i32) {
 /// libvpx's `vp9_quantize_fp_c` (and, with `is32`, `vp9_quantize_fp_32x32_c`)
 /// over the first `n` scan positions. Returns the end of block: one past the
 /// last nonzero level, in scan order.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "libvpx's realtime speeds quantise inter blocks with this (use_quant_fp off key frames); it is used when the encoder's inter frames are, and checked against libvpx now"
-    )
-)]
 pub(crate) fn quantize_fp(
     coeff: &[i32],
     n: usize,

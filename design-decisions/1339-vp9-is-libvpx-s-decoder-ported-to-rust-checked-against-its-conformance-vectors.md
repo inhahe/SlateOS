@@ -117,15 +117,17 @@ outside the tree for that comparison). How it is built:
   with rate control, cyclic refresh and the frame loop as `impl Cpi` blocks
   in modules of their own, so a function ports line for line.
 
-So far every frame is a key frame, with fixed decisions (16x16 blocks, DC
-prediction), at the quantiser libvpx's one-pass CBR rate control picks: the
-reference encode's first frame gets libvpx's quantiser (161) and loop filter
-level (24), from the same model and the same floating point. Every frame
-decodes to what the encoder says it reconstructed -- at random decisions,
-at seven sizes from 1x1 up, at five quantisers, with transform sizes fixed
-and chosen per block -- and what the encoder counts equals what the decoder
-counts on the same frame. Quantiser 0 reproduces the source exactly.
-libvpx's decisions and inter frames come next.
+**Status, 2026-10-03: the first frame is libvpx's.** The reference encode
+(`tests/data/encoder/rt8.ivf`, how it was made beside it) opens with a key
+frame, and the port's first frame is byte-identical to it: libvpx's one-pass
+CBR rate control picks the same quantiser from the same model in the same
+floating point, its variance partitioning cuts the same blocks, its realtime
+intra search picks the same modes, and the coefficients, tokens, probability
+updates and headers come out bit for bit. Every frame also decodes to what
+the encoder says it reconstructed -- at random decisions, at seven sizes from
+1x1 up, at five quantisers -- and what the encoder counts equals what the
+decoder counts. Every frame is a key frame so far; inter frames come next,
+and the reference's 29 others are their test.
 
 **Alternatives.**
 

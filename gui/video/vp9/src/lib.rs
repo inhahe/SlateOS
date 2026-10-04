@@ -49,12 +49,14 @@
 //!
 //! [`Encoder`] is libvpx's realtime encoder being ported the same way, its
 //! output to be byte-identical to `vpxenc`'s (`design-decisions.md` §1339).
-//! It codes key frames so far, at the bitrate libvpx's one-pass CBR rate
-//! control holds; every frame it writes decodes to exactly
-//! [`Encoder::reconstruction`]. Its parts are under `enc`: the bool and bit
-//! writers, forward transforms, quantisers, tokenizer, probability updates,
-//! the bitstream writer, block coding, rate control, cyclic refresh, and the
-//! frame loop.
+//! It codes key frames so far, with libvpx's realtime decisions at the
+//! bitrate libvpx's one-pass CBR rate control holds: the first frame of
+//! libvpx's own reference encode comes out byte for byte. Every frame it
+//! writes decodes to exactly [`Encoder::reconstruction`]. Its parts are
+//! under `enc`: the bool and bit writers, forward transforms, quantisers,
+//! tokenizer, probability updates, the bitstream writer, block coding, rate
+//! control, cyclic refresh, the realtime partitioning and mode search, and
+//! the frame loop.
 //!
 //! # Speed
 //!

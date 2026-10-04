@@ -198,6 +198,35 @@ MAIN = [
         "",
         ["a_chord_is_neither_typed_into_the_line_nor_one_of_its_keys"],
     ),
+    # -- the message line is the toolkit's field (2026-10-04; lane C,
+    #    c-e-a-theme-can-shape-the-controls)
+    (
+        "the message line never has the keyboard",
+        "            focused: !self.show_help,\n",
+        "            focused: false,\n",
+        [
+            "the_message_line_is_the_toolkits_field",
+            "the_caret_follows_the_typing_and_a_long_line_scrolls",
+        ],
+    ),
+    (
+        "the message line keeps its mark under the key list",
+        "            focused: !self.show_help,\n",
+        "            focused: true,\n",
+        ["the_message_line_is_the_toolkits_field"],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        ["the_message_line_is_the_toolkits_field"],
+    ),
+    (
+        "the caret is at the start of the line",
+        "                cursor: guitk::text::TextCursor::from(self.input_text.len()),\n",
+        "                cursor: guitk::text::TextCursor::from(0),\n",
+        ["the_caret_follows_the_typing_and_a_long_line_scrolls"],
+    ),
     (
         "a press goes through the card",
         "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n"

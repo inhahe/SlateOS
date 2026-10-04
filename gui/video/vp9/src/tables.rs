@@ -36,7 +36,7 @@ pub const MAX_TXSIZE: [u8; 13] = [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 3];
 /// The largest transform a frame's transform mode allows: libvpx's `tx_mode_to_biggest_tx_size`.
 pub const TX_MODE_TO_BIGGEST_TX_SIZE: [u8; 5] = [0, 1, 2, 3, 3];
 
-/// A block size subsampled by [x][y] (13 = invalid): libvpx's `ss_size_lookup`.
+/// A block size subsampled by `[x][y]` (13 = invalid): libvpx's `ss_size_lookup`.
 pub const SS_SIZE: [[[u8; 2]; 2]; 13] = [
     [[0, 13], [13, 13]],
     [[1, 0], [13, 13]],
@@ -53,7 +53,7 @@ pub const SS_SIZE: [[[u8; 2]; 2]; 13] = [
     [[12, 11], [10, 9]],
 ];
 
-/// A chroma plane's transform size, by block size, luma transform size and [x][y] subsampling: libvpx's `uv_txsize_lookup`.
+/// A chroma plane's transform size, by block size, luma transform size and `[x][y]` subsampling: libvpx's `uv_txsize_lookup`.
 pub const UV_TXSIZE: [[[[u8; 2]; 2]; 4]; 13] = [
     [
         [[0, 0], [0, 0]],

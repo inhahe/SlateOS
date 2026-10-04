@@ -317,14 +317,14 @@ impl FrameEncoder<'_> {
             for (_, row, col) in self.transform_blocks(&place, bsize, 0, intra_tx_size) {
                 let (x0, y0) = self.predict_intra(&place, bsize, 0, row, col, intra_tx_size, mode);
                 let s = &self.src.planes[0];
-                let p = &self.recon.planes[0];
+                let (pred, pred_stride) = self.recon_at(0, x0, y0);
                 // libvpx's block_yrd resets the skip flag each call, so the
                 // block is skippable if its last transform block is.
                 let (r, d, sk) = block_yrd(
                     s.data.get(y0 * s.stride + x0..).unwrap_or(&[]),
                     s.stride,
-                    p.data.get(y0 * p.stride + x0..).unwrap_or(&[]),
-                    p.stride,
+                    pred,
+                    pred_stride,
                     bsize_tx,
                     intra_tx_size.min(TX_16X16),
                     &place,

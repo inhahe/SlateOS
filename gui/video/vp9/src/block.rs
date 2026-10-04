@@ -225,6 +225,12 @@ impl MiGrid {
         Self::window(mi_cols, mi_rows, cols)
     }
 
+    /// A grid of only the `width` columns of cells from `col0`, for a tile
+    /// column coded alone: put together with [`MiGrid::absorb`].
+    pub(crate) fn for_columns(mi_cols: usize, mi_rows: usize, col0: usize, width: usize) -> Self {
+        Self::window(mi_cols, mi_rows, Columns { col0, width })
+    }
+
     /// A grid of only `cols`, for a tile column decoding alone.
     fn window(mi_cols: usize, mi_rows: usize, cols: Columns) -> Self {
         Self {
@@ -270,7 +276,7 @@ impl MiGrid {
 
     /// Take in a tile column's grid: its blocks, after this grid's, and its
     /// columns' cells, pointing at them.
-    fn absorb(&mut self, part: MiGrid) -> Result<(), Error> {
+    pub(crate) fn absorb(&mut self, part: MiGrid) -> Result<(), Error> {
         let offset =
             u32::try_from(self.blocks.len()).map_err(|_| Error::Corrupt("too many blocks"))?;
         let Columns { col0, width } = part.cols;

@@ -18,10 +18,14 @@
 //! (`mlpart`), every candidate's modes picked, the cheaper kept -- and only
 //! then is the superblock coded, from what the search kept.
 //!
-//! What carries from frame to frame -- the adaptive mode thresholds, the
-//! partitions to copy, the skin map, how long each superblock has been
-//! still, and the contents of libvpx's mode-information buffers, which its
-//! decisions read stale -- is [`RtState`].
+//! What carries from frame to frame -- the adaptive mode thresholds (each
+//! tile's own), the partitions to copy, the skin map, how long each
+//! superblock has been still, and the contents of libvpx's mode-information
+//! buffers, which its decisions read stale -- is [`RtState`]. Everything in
+//! it but the thresholds and one register is kept per cell or superblock,
+//! and a block reads and writes only its own tile column's, so tile columns
+//! coded on threads of their own each take a copy and
+//! [`RtState::absorb_columns`] puts their columns back.
 //!
 //! Translated into Rust from libvpx v1.17.0's `vp9/encoder/vp9_encodeframe.c`
 //! (copyright the WebM project authors), used under libvpx's BSD licence and
@@ -75,9 +79,10 @@ pub(crate) struct RtState {
     mi_rows: usize,
     mi_cols: usize,
     sb_cols: usize,
-    /// The tile's adaptive mode thresholds, by block size: libvpx's
-    /// `tile_data->thresh_freq_fact` (one tile).
-    pub thresh_freq_fact: Box<[[i32; MAX_MODES]; BLOCK_SIZES]>,
+    /// Each tile's adaptive mode thresholds, by block size: libvpx's
+    /// `tile_data->thresh_freq_fact`, which every tile keeps for itself from
+    /// frame to frame. See [`RtState::thresholds`].
+    thresh_freq_fact: Vec<[[i32; MAX_MODES]; BLOCK_SIZES]>,
     /// The last partition each cell had, for copying (`prev_partition`),
     /// and per superblock its segment, its low-variance flags and how many
     /// frames in a row it was copied (`prev_segment_id`,
@@ -112,7 +117,7 @@ impl RtState {
             mi_rows,
             mi_cols,
             sb_cols,
-            thresh_freq_fact: Box::new([[RD_THRESH_INIT_FACT; MAX_MODES]; BLOCK_SIZES]),
+            thresh_freq_fact: Vec::new(),
             prev_partition: vec![BLOCK_4X4; cells],
             prev_segment_id: vec![0; sbs],
             prev_variance_low: vec![[false; 25]; sbs],
@@ -130,6 +135,89 @@ impl RtState {
 
     fn sb_index(&self, mi_row: usize, mi_col: usize) -> usize {
         (mi_row >> 3) * self.sb_cols + (mi_col >> 3)
+    }
+
+    /// Take in what a tile column coded apart -- on a thread of its own, from
+    /// a clone of this state -- left: its cells' and superblocks' entries
+    /// (the column is the cells `col0..col1`, whole superblocks but at the
+    /// frame's edge), the thresholds of its `tiles`, and, if it is the
+    /// frame's last column, `x->last_sb_high_content` as its last
+    /// superblock left it -- where a single thread, coding the columns in
+    /// order, would leave it. A column reads and writes no other column's
+    /// entries, so nothing else of `part` differs from this state.
+    pub(crate) fn absorb_columns(
+        &mut self,
+        part: &RtState,
+        col0: usize,
+        col1: usize,
+        tiles: &[usize],
+        last: bool,
+    ) {
+        let cols = self.mi_cols.max(1);
+        copy_columns(
+            &mut self.prev_partition,
+            &part.prev_partition,
+            cols,
+            col0,
+            col1,
+        );
+        copy_columns(&mut self.skin_map, &part.skin_map, cols, col0, col1);
+        for (d, s) in self.stale_mi.iter_mut().zip(&part.stale_mi) {
+            copy_columns(d, s, cols, col0, col1);
+        }
+        let (sbs, s0, s1) = (self.sb_cols.max(1), col0 / 8, col1.div_ceil(8));
+        copy_columns(
+            &mut self.prev_segment_id,
+            &part.prev_segment_id,
+            sbs,
+            s0,
+            s1,
+        );
+        copy_columns(
+            &mut self.prev_variance_low,
+            &part.prev_variance_low,
+            sbs,
+            s0,
+            s1,
+        );
+        copy_columns(
+            &mut self.copied_frame_cnt,
+            &part.copied_frame_cnt,
+            sbs,
+            s0,
+            s1,
+        );
+        copy_columns(
+            &mut self.content_state_sb_fd,
+            &part.content_state_sb_fd,
+            sbs,
+            s0,
+            s1,
+        );
+        for &t in tiles {
+            if let Some(th) = part.thresh_freq_fact.get(t) {
+                *self.tile_thresholds(t) = *th;
+            }
+        }
+        if last {
+            self.last_sb_high_content = part.last_sb_high_content;
+        }
+    }
+
+    /// Tile `tile`'s adaptive mode thresholds, by block size. A tile's start
+    /// at libvpx's initial factor the first time it is coded, as
+    /// `vp9_init_tile_data` sets them when it allocates the tiles' data.
+    fn tile_thresholds(&mut self, tile: usize) -> &mut [[i32; MAX_MODES]; BLOCK_SIZES] {
+        while self.thresh_freq_fact.len() <= tile {
+            self.thresh_freq_fact
+                .push([[RD_THRESH_INIT_FACT; MAX_MODES]; BLOCK_SIZES]);
+        }
+        &mut self.thresh_freq_fact[tile]
+    }
+
+    /// Tile `tile`'s adaptive mode thresholds for blocks of `bsize`.
+    fn thresholds(&mut self, tile: usize, bsize: BlockSize) -> &mut [i32; MAX_MODES] {
+        &mut self.tile_thresholds(tile)[usize::from(bsize)]
     }
 
     /// After a shown frame: libvpx's `vp9_swap_mi_and_prev_mi`.
@@ -162,6 +250,19 @@ impl RtState {
             }
         }
         last
+    }
+}
+
+/// Copy columns `c0..c1` of every row of `src`, a row-major array `width`
+/// to a row, into `dst`, laid out alike.
+pub(crate) fn copy_columns<T: Copy>(dst: &mut [T], src: &[T], width: usize, c0: usize, c1: usize) {
+    for (d, s) in dst
+        .chunks_exact_mut(width.max(1))
+        .zip(src.chunks_exact(width.max(1)))
+    {
+        if let (Some(d), Some(s)) = (d.get_mut(c0..c1.min(width)), s.get(c0..c1.min(width))) {
+            d.copy_from_slice(s);
+        }
     }
 }
 
@@ -292,6 +393,7 @@ impl<'a> RtDecisions<'a> {
 }
 
 /// An inter frame's settings for its decisions, fixed for the frame.
+#[derive(Clone, Copy)]
 pub(crate) struct InterSettings {
     pub base_qindex: i32,
     /// The partitioning's whole-superblock and copy thresholds:
@@ -657,13 +759,11 @@ impl InterDecisions<'_> {
             ..ModeInfo::default()
         };
         let (x0, y0) = (mi_col * 8, mi_row * 8);
-        let stride = f.recon.planes[0].stride;
         let mut saved = vec![0u8; 64 * 64];
         for (row, out) in saved.chunks_exact_mut(64).enumerate() {
-            if let Some(line) = f.recon.planes[0].data.get((y0 + row) * stride + x0..) {
-                let n = line.len().min(64);
-                out[..n].copy_from_slice(&line[..n]);
-            }
+            let (line, _) = f.recon_at(0, x0, y0 + row);
+            let n = line.len().min(64);
+            out[..n].copy_from_slice(&line[..n]);
         }
         f.predict_inter(mi_row, mi_col, BLOCK_64X64, &mi, 0..3);
         for (row, (est, old)) in self
@@ -673,11 +773,10 @@ impl InterDecisions<'_> {
             .zip(saved.chunks_exact(64))
             .enumerate()
         {
-            if let Some(line) = f.recon.planes[0].data.get_mut((y0 + row) * stride + x0..) {
-                let n = line.len().min(64);
-                est[..n].copy_from_slice(&line[..n]);
-                line[..n].copy_from_slice(&old[..n]);
-            }
+            let (line, _) = f.recon_at_mut(0, x0, y0 + row);
+            let n = line.len().min(64);
+            est[..n].copy_from_slice(&line[..n]);
+            line[..n].copy_from_slice(&old[..n]);
         }
     }
 
@@ -848,11 +947,12 @@ impl InterDecisions<'_> {
         } else {
             0
         };
+        let tile = f.tile_index();
         let picked = pickinter::pick_inter_mode(
             f,
             &self.search,
             &mut self.sb,
-            &mut self.state.thresh_freq_fact[usize::from(bsize)],
+            self.state.thresholds(tile, bsize),
             mi_row,
             mi_col,
             bsize,
@@ -1043,13 +1143,13 @@ impl InterDecisions<'_> {
         let h = 4usize << tables::B_HEIGHT_LOG2[usize::from(uv_bsize)];
         for i in 1..=2usize {
             let s = &f.src.planes[i];
-            let p = &f.recon.planes[i];
             let (x, y) = (mi_col * 4, mi_row * 4);
+            let (pred, pred_stride) = f.recon_at(i, x, y);
             let uv_sad = crate::enc::variance::sad(
                 s.data.get(y * s.stride + x..).unwrap_or(&[]),
                 s.stride,
-                p.data.get(y * p.stride + x..).unwrap_or(&[]),
-                p.stride,
+                pred,
+                pred_stride,
                 w,
                 h,
             );
@@ -1213,9 +1313,11 @@ impl InterDecisions<'_> {
             self.trace_sb(mi_row, mi_col, segment_id, y_sad, 'P');
             return;
         }
+        let (pred, pred_x0) = f.recon_plane(0);
         let ip = partition::choose_inter_partitioning(&InterSb {
             src: &f.src.planes[0],
-            pred: &f.recon.planes[0],
+            pred,
+            pred_x0,
             mi_rows,
             mi_cols,
             mi_row,
@@ -1305,11 +1407,12 @@ impl InterDecisions<'_> {
         } else {
             0
         };
+        let tile = f.tile_index();
         let picked = pickinter::pick_inter_mode(
             f,
             &self.search,
             &mut self.sb,
-            &mut self.state.thresh_freq_fact[usize::from(bsize)],
+            self.state.thresholds(tile, bsize),
             mi_row,
             mi_col,
             bsize,

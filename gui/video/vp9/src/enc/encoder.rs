@@ -14,14 +14,15 @@
 //! what it cost.
 //!
 //! Every frame takes libvpx's own decisions, as `vpxenc --rt --cpu-used=8`
-//! makes them: a key frame first, inter frames after it. Above 352x288 the
-//! frames are `vpxenc`'s byte for byte; at and below it libvpx cuts inter
-//! frames' blocks with a learned partitioning that is not ported yet
-//! (`known-issues/F-the-vp9-encoder-is-libvpxs-only-above-352x288.md`), so
-//! the frames there are valid but not `vpxenc`'s. Tests may hand the frame
-//! loop decisions of their own instead. What a decoder makes of each frame
-//! is exactly [`Encoder::reconstruction`]: the tests decode every frame
-//! written and compare.
+//! makes them: a key frame first, inter frames after it, `vpxenc`'s byte for
+//! byte at every size -- above 352x288 partitioned by variance, at and below
+//! it by libvpx's learned search. A picture cut into tile columns
+//! ([`EncoderConfig::tile_columns`]) is coded a column to a thread
+//! (`encode_columns_threaded`, design-decisions §1342), and the frames are
+//! the same on any number of threads. Tests may hand the frame loop
+//! decisions of their own instead, which run on one thread. What a decoder
+//! makes of each frame is exactly [`Encoder::reconstruction`]: the tests
+//! decode every frame written and compare.
 //!
 //! Translated in part into Rust from libvpx v1.17.0's `vp9/vp9_cx_iface.c`,
 //! `vp9/encoder/vp9_encoder.c`, `vp9_picklpf.c`, `vp9_extend.c`,
@@ -35,7 +36,7 @@
     reason = "timestamps are frame counts times the timebase's ticks, far inside i64; the raw-rate cap is computed in f64 and the plane checks bound every size by the frame (at most 65536 a side)"
 )]
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::Error;
 use crate::block::MiGrid;
@@ -45,14 +46,19 @@ use crate::common::{
 };
 use crate::common::{BLOCK_SIZES, LAST_FRAME};
 use crate::decoder::{Picture, PlaneView};
+use crate::enc::aq_cyclicrefresh::CyclicRefresh;
 use crate::enc::bitstream::{self, CoefUpdates, Frame, FrameHeader, UpdateSearch};
 use crate::enc::content;
 use crate::enc::cpi::{Cpi, Oxcf, quantizer_to_qindex};
-use crate::enc::encodeframe::{Decide, FrameEncoder, InterFrame};
+use crate::enc::encodeframe::{
+    ColumnEncoded, Decide, Encoded, FrameEncoder, InterFrame, column_strip, merge_columns,
+    tile_span,
+};
 use crate::enc::mcomp::LumaRef;
-use crate::enc::nonrd::{InterDecisions, InterSettings, RtDecisions};
+use crate::enc::nonrd::{InterDecisions, InterSettings, RtDecisions, RtState};
 use crate::enc::partition::NoiseLevel;
 use crate::enc::pickinter::{ALT_FLAG, GOLD_FLAG, LAST_FLAG, SearchFrame};
+use crate::enc::quantize::Quants;
 use crate::enc::rd::{MAX_MODES, RdFrame, compute_rd_mult};
 use crate::enc::tokenize;
 use crate::frame::{AnyFrame, Buffers, FrameBuf, Pixel};
@@ -96,14 +102,28 @@ pub struct EncoderConfig {
     pub buffer_optimal_ms: u32,
     /// The most frames between key frames.
     pub keyframe_max_distance: u32,
+    /// How many tile columns each picture is cut into, as a power of two:
+    /// `vpxenc`'s `--tile-columns` (0 for one column, 1 for two, 2 for
+    /// four), held to what the width allows -- a tile column is 256 to 4096
+    /// pixels wide, so 1280 pixels make at most four. Tile columns are coded
+    /// independently of each other, so the encoder codes them on threads of
+    /// their own ([`Encoder::set_threads`]), and the stream is the same on
+    /// any number of threads; each costs a little compression, mostly where
+    /// a column's first blocks cannot see their left neighbours (0.3% for
+    /// four at 1280x720). The encoder's only parallelism: a picture of one
+    /// column encodes on one thread.
+    pub tile_columns: u8,
 }
 
 impl EncoderConfig {
-    /// libvpx's realtime settings, as the reference encode the port is
-    /// checked against gives them to `vpxenc` (`--rt --cpu-used=8
+    /// libvpx's realtime settings, as `vpxenc` takes them for the reference
+    /// encodes the port is checked against (`--rt --cpu-used=8
     /// --end-usage=cbr --min-q=2 --max-q=52 --undershoot-pct=50
     /// --overshoot-pct=50 --buf-sz=1000 --buf-initial-sz=500
-    /// --buf-optimal-sz=600 --kf-max-dist=9999`), at 30 frames a second.
+    /// --buf-optimal-sz=600 --kf-max-dist=9999`), at 30 frames a second, in
+    /// as many tile columns as the width allows -- `vpxenc`'s default
+    /// (`--tile-columns=6`), so that a picture 512 pixels wide or wider
+    /// encodes on several threads.
     #[must_use]
     pub fn realtime(width: u32, height: u32, bitrate_kbps: u32) -> Self {
         Self {
@@ -120,6 +140,7 @@ impl EncoderConfig {
             buffer_initial_ms: 500,
             buffer_optimal_ms: 600,
             keyframe_max_distance: 9999,
+            tile_columns: 6,
         }
     }
 
@@ -169,7 +190,7 @@ impl EncoderConfig {
             drop_frames_water_mark: 0,
             frame_parallel_decoding_mode: true,
             error_resilient_mode: false,
-            tile_columns: 0,
+            tile_columns: u32::from(self.tile_columns),
             tile_rows: 0,
         }
     }
@@ -308,6 +329,23 @@ impl Encoder {
             #[cfg(test)]
             last_mi: None,
         }
+    }
+
+    /// Encode on at most `threads` threads (at least one) from the next
+    /// picture on. A new encoder uses as many as the machine has cores.
+    ///
+    /// A frame's tile columns are what encode in parallel
+    /// ([`EncoderConfig::tile_columns`]), so a picture of one tile column
+    /// encodes on one thread whatever this says. The frames are the same
+    /// however many threads make them.
+    pub fn set_threads(&mut self, threads: usize) {
+        self.threads = threads.max(1);
+    }
+
+    /// How many threads the encoder may use.
+    #[must_use]
+    pub fn threads(&self) -> usize {
+        self.threads
     }
 
     /// What a decoder shows for the last frame encoded, if any.
@@ -706,78 +744,95 @@ impl Encoder {
             noise,
             ..
         } = &mut *cpi;
-        let mut rt_own;
-        let decide: &mut dyn Decide = if let Some(d) = d {
-            d
-        } else if intra_only {
-            rt_own = RtDecisions::key_frame(rdmult, y_ac_q, rt, last_src);
-            &mut rt_own
-        } else {
-            let (_, vbp_threshold_sad, vbp_threshold_copy) = frame_vbp;
-            rt_own = RtDecisions::inter(InterDecisions {
-                search: SearchFrame {
-                    mv_costs,
-                    mode_costs,
-                    threshes: &threshes,
-                    luma: [0, 1, 2].map(|i| ref_luma.get(i).and_then(Option::as_deref)),
-                    ref_frame_flags,
-                    frames_since_golden: rc.frames_since_golden,
-                    avg_frame_low_motion: rc.avg_frame_low_motion,
-                    scene_change: rc.high_source_sad,
-                    high_num_blocks_with_motion: rc.high_num_blocks_with_motion,
-                    noise_enabled: noise.enabled,
-                    noise_level: noise.level,
-                    rdmult,
-                    cr_rdmult: cr.rdmult,
-                    // The configured mode, not whether this frame codes
-                    // segments: a scene cut codes none, and libvpx still
-                    // sizes its transforms as under cyclic refresh. A caller's
-                    // fixed segments are not the refresh's.
-                    cyclic_refresh: cyclic_refresh_mode,
-                    current_video_frame: common.current_video_frame,
-                    skip_encode_frame,
-                    short_circuit_low_temp_var,
-                    rd_frame,
-                    adaptive_rd_thresh: crate::enc::pickinter::speed8_adaptive_rd_thresh(
-                        width, height,
-                    ),
-                    max_partition_size: if learned_partition {
-                        crate::common::BLOCK_64X64
-                    } else {
-                        crate::common::BLOCK_32X32
-                    },
-                    base_qindex: q,
-                    frame_width: width,
-                    frame_height: height,
+        let (_, vbp_threshold_sad, vbp_threshold_copy) = frame_vbp;
+        let decisions = FrameDecisions {
+            intra_only,
+            rdmult,
+            y_ac_q,
+            dc_q: i32::from(header::dc_quant(q, 0, 8)),
+            search: SearchFrame {
+                mv_costs,
+                mode_costs,
+                threshes: &threshes,
+                luma: [0, 1, 2].map(|i| ref_luma.get(i).and_then(Option::as_deref)),
+                ref_frame_flags,
+                frames_since_golden: rc.frames_since_golden,
+                avg_frame_low_motion: rc.avg_frame_low_motion,
+                scene_change: rc.high_source_sad,
+                high_num_blocks_with_motion: rc.high_num_blocks_with_motion,
+                noise_enabled: noise.enabled,
+                noise_level: noise.level,
+                rdmult,
+                cr_rdmult: cr.rdmult,
+                // The configured mode, not whether this frame codes
+                // segments: a scene cut codes none, and libvpx still sizes
+                // its transforms as under cyclic refresh. A caller's fixed
+                // segments are not the refresh's.
+                cyclic_refresh: cyclic_refresh_mode,
+                current_video_frame: common.current_video_frame,
+                skip_encode_frame,
+                short_circuit_low_temp_var,
+                rd_frame,
+                adaptive_rd_thresh: crate::enc::pickinter::speed8_adaptive_rd_thresh(width, height),
+                max_partition_size: if learned_partition {
+                    crate::common::BLOCK_64X64
+                } else {
+                    crate::common::BLOCK_32X32
                 },
-                settings: InterSettings {
-                    base_qindex: q,
-                    vbp_threshold_sad,
-                    vbp_threshold_copy,
-                    vbp_threshold_8x8,
-                    noise_extracted: noise.enabled.then(|| noise.extract_level()),
-                    avg_inter_qindex: rc.avg_frame_qindex[crate::enc::ratectrl::INTER_FRAME],
-                    copy_partition: true,
-                    max_copied_frame: 4,
-                    frames_since_key: rc.frames_since_key,
-                    use_skin_detection: true,
-                    use_source_sad: last_src.is_some(),
-                    cyclic_refresh: cyclic_refresh_mode,
-                    learned_partition,
-                },
-                state: rt,
-                cr,
-                consec_zero_mv,
-                last_src: last_src.unwrap_or(&src),
-                sb: crate::enc::pickinter::SbState::default(),
-                part: None,
-                learned: crate::enc::nonrd::Learned::new(i32::from(header::dc_quant(q, 0, 8))),
-            });
-            &mut rt_own
+                base_qindex: q,
+                frame_width: width,
+                frame_height: height,
+            },
+            settings: InterSettings {
+                base_qindex: q,
+                vbp_threshold_sad,
+                vbp_threshold_copy,
+                vbp_threshold_8x8,
+                noise_extracted: noise.enabled.then(|| noise.extract_level()),
+                avg_inter_qindex: rc.avg_frame_qindex[crate::enc::ratectrl::INTER_FRAME],
+                copy_partition: true,
+                max_copied_frame: 4,
+                frames_since_key: rc.frames_since_key,
+                use_skin_detection: true,
+                use_source_sad: last_src.is_some(),
+                cyclic_refresh: cyclic_refresh_mode,
+                learned_partition,
+            },
+            consec_zero_mv,
+            last_src,
+            src: &src,
         };
-        let mut fe = FrameEncoder::new(&h, &costing, &common.seg, quants, &src, &mut recon, inter);
-        fe.encode_tiles(decide);
-        let mut encoded = fe.finish();
+        // The blocks: the caller's decisions, on one thread; libvpx's, each
+        // tile column on a thread of its own where there are several of
+        // both (a frame of one tile row: the encoder makes no others).
+        let workers = self.threads.min(1usize << h.log2_tile_cols);
+        let mut encoded = match d {
+            Some(d) => {
+                let mut fe =
+                    FrameEncoder::new(&h, &costing, &common.seg, quants, &src, &mut recon, inter);
+                fe.encode_tiles(d);
+                fe.finish()
+            }
+            None if workers > 1 && h.log2_tile_rows == 0 => {
+                let frame = FrameShared {
+                    h: &h,
+                    fc: &costing,
+                    seg: &common.seg,
+                    quants,
+                    src: &src,
+                    inter,
+                    decisions,
+                };
+                encode_columns_threaded(&frame, &mut recon, rt, cr, workers)?
+            }
+            None => {
+                let mut own = decisions.on(rt, cr);
+                let mut fe =
+                    FrameEncoder::new(&h, &costing, &common.seg, quants, &src, &mut recon, inter);
+                fe.encode_tiles(&mut own);
+                fe.finish()
+            }
+        };
         // fix_interp_filter: a frame of one filter codes it once.
         h.interp_filter = bitstream::fix_interp_filter(SWITCHABLE, &encoded.counts.counts);
         // sf.skip_encode_frame for the next frame: this one predicted
@@ -1084,6 +1139,178 @@ fn trace_frame(cpi: &Cpi, rdmult: i32, scl: i32, tx_mode: TxMode, vbp: &([i64; 4
             u8::from(cm.allow_high_precision_mv)
         )
     });
+}
+
+/// libvpx's decisions for one frame, but for the state they keep from block
+/// to block and frame to frame, which they are given: the encoder's own, or
+/// a tile column's clone of it.
+#[derive(Clone, Copy)]
+struct FrameDecisions<'a> {
+    intra_only: bool,
+    rdmult: i32,
+    y_ac_q: i32,
+    /// The frame's luma DC step, which the learned partitioning reads.
+    dc_q: i32,
+    search: SearchFrame<'a>,
+    settings: InterSettings,
+    consec_zero_mv: &'a [u8],
+    last_src: Option<&'a FrameBuf<u8>>,
+    src: &'a FrameBuf<u8>,
+}
+
+impl<'a> FrameDecisions<'a> {
+    /// The decisions, keeping `state` and the cyclic refresh `cr`.
+    fn on<'b>(&self, state: &'b mut RtState, cr: &'b mut CyclicRefresh) -> RtDecisions<'b>
+    where
+        'a: 'b,
+    {
+        if self.intra_only {
+            RtDecisions::key_frame(self.rdmult, self.y_ac_q, state, self.last_src)
+        } else {
+            RtDecisions::inter(InterDecisions {
+                search: self.search,
+                settings: self.settings,
+                state,
+                cr,
+                consec_zero_mv: self.consec_zero_mv,
+                last_src: self.last_src.unwrap_or(self.src),
+                sb: crate::enc::pickinter::SbState::default(),
+                part: None,
+                learned: crate::enc::nonrd::Learned::new(self.dc_q),
+            })
+        }
+    }
+}
+
+/// What every tile column of a frame reads while the columns are coded on
+/// threads of their own.
+struct FrameShared<'a> {
+    h: &'a FrameHeader,
+    fc: &'a FrameContext,
+    seg: &'a Segmentation,
+    quants: &'a Quants,
+    src: &'a FrameBuf<u8>,
+    inter: Option<InterFrame<'a>>,
+    decisions: FrameDecisions<'a>,
+}
+
+/// One tile column coded on a thread of its own: its strip of the
+/// reconstruction and the luma pixel it starts at, its clones of the state
+/// the decisions keep, and, once coded, what its encoder left.
+struct ColumnJob {
+    tile_col: usize,
+    x0: usize,
+    strip: FrameBuf<u8>,
+    rt: RtState,
+    cr: CyclicRefresh,
+    encoded: Option<Encoded>,
+}
+
+/// The frame's blocks, each tile column on a thread of its own, `workers`
+/// at once -- libvpx's `vp9_encode_tiles_mt` -- each from its own clone of
+/// the state libvpx's decisions keep (no column reads another's), then put
+/// together in column order and the state taken back: the frame one thread
+/// codes, bit for bit.
+///
+/// A column's thread that panics -- a bug, which would panic on one thread
+/// too -- panics this thread with the same payload.
+///
+/// # Errors
+///
+/// [`Error::Unsupported`] if a strip cannot be allocated.
+fn encode_columns_threaded(
+    frame: &FrameShared<'_>,
+    recon: &mut FrameBuf<u8>,
+    rt: &mut RtState,
+    cr: &mut CyclicRefresh,
+    workers: usize,
+) -> Result<Encoded, Error> {
+    let h = frame.h;
+    let tile_cols = 1usize << h.log2_tile_cols;
+    let plane_w: [usize; 3] = recon.planes.each_ref().map(|p| p.width);
+    // Columns dealt out in turn: hand i takes columns i, i + workers, ...
+    // Each hand is one thread's; its mutex only carries it across the
+    // thread boundary, and is never contended.
+    let mut dealt: Vec<Vec<ColumnJob>> = (0..workers.max(1)).map(|_| Vec::new()).collect();
+    for tile_col in 0..tile_cols {
+        let (x0, strip) = column_strip(recon, h, tile_col)?;
+        if let Some(hand) = dealt.get_mut(tile_col % workers.max(1)) {
+            hand.push(ColumnJob {
+                tile_col,
+                x0,
+                strip,
+                rt: rt.clone(),
+                cr: cr.clone(),
+                encoded: None,
+            });
+        }
+    }
+    let hands: Vec<Mutex<Vec<ColumnJob>>> = dealt.into_iter().map(Mutex::new).collect();
+    let code_hand = |hand: &Mutex<Vec<ColumnJob>>| {
+        // Poisoned only by a panic on this very hand, which is re-raised
+        // below before the hand is read again.
+        let mut hand = hand.lock().unwrap_or_else(PoisonError::into_inner);
+        for job in hand.iter_mut() {
+            let mut d = frame.decisions.on(&mut job.rt, &mut job.cr);
+            let mut fe = FrameEncoder::for_tile_column(
+                h,
+                frame.fc,
+                frame.seg,
+                frame.quants,
+                frame.src,
+                &mut job.strip,
+                frame.inter,
+                job.tile_col,
+                plane_w,
+            );
+            fe.encode_tile_column(&mut d, job.tile_col);
+            job.encoded = Some(fe.finish());
+        }
+    };
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        let mut here = vec![0];
+        for (i, hand) in hands.iter().enumerate().skip(1) {
+            match std::thread::Builder::new().spawn_scoped(scope, move || code_hand(hand)) {
+                Ok(handle) => handles.push(handle),
+                // A thread that cannot be made leaves its hand to this one.
+                Err(_) => here.push(i),
+            }
+        }
+        // This thread takes the first hand, and any left over.
+        for i in here {
+            if let Some(hand) = hands.get(i) {
+                code_hand(hand);
+            }
+        }
+        for handle in handles {
+            if let Err(payload) = handle.join() {
+                std::panic::resume_unwind(payload);
+            }
+        }
+    });
+    let mut columns = Vec::with_capacity(tile_cols);
+    for hand in hands {
+        for job in hand.into_inner().unwrap_or_else(PoisonError::into_inner) {
+            let (col0, col1) = tile_span(job.tile_col, h.mi_cols(), h.log2_tile_cols);
+            let tiles: Vec<usize> = (0..1usize << h.log2_tile_rows)
+                .map(|r| r * tile_cols + job.tile_col)
+                .collect();
+            rt.absorb_columns(&job.rt, col0, col1, &tiles, job.tile_col + 1 == tile_cols);
+            cr.absorb_columns(&job.cr, h.mi_cols(), col0, col1);
+            // Every hand was coded, or its panic re-raised above.
+            let encoded = job
+                .encoded
+                .ok_or(Error::Unsupported("a tile column was not coded"))?;
+            columns.push(ColumnEncoded {
+                tile_col: job.tile_col,
+                x0: job.x0,
+                strip: job.strip,
+                encoded,
+            });
+        }
+    }
+    merge_columns(recon, h, columns)
 }
 
 impl Cpi {

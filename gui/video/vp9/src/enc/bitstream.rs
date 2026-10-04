@@ -43,7 +43,7 @@ use crate::enc::tokenize::{
 };
 use crate::enc::writer::{BitWriter, BoolWriter, Token, tree_branch_counts};
 use crate::header::{self, LoopFilterParams, Quantization, Segmentation};
-use crate::probs::{CoefProbs, Counts, EobBranchCounts, FrameContext, TxCounts};
+use crate::probs::{Accumulate, CoefProbs, Counts, EobBranchCounts, FrameContext, TxCounts};
 use crate::tables;
 
 /// libvpx's `VP9_FRAME_MARKER`.
@@ -213,6 +213,15 @@ pub(crate) struct EncCounts {
     pub counts: Counts,
     pub tx_totals: [u32; TX_SIZES],
     pub coef: Box<[CoefTokenCounts; TX_SIZES]>,
+}
+
+/// Tile columns coded apart count apart; the frame's counts are their sums.
+impl Accumulate for EncCounts {
+    fn accumulate(&mut self, other: &Self) {
+        self.counts.accumulate(&other.counts);
+        self.tx_totals.accumulate(&other.tx_totals);
+        (*self.coef).accumulate(&other.coef);
+    }
 }
 
 /// libvpx's `fix_interp_filter`: a frame whose blocks all chose one filter

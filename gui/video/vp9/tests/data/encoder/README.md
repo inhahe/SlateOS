@@ -21,6 +21,9 @@ reference C, which its SIMD builds are tested against) -- then:
       --buf-optimal-sz=600 --min-q=2 --max-q=52 --noise-sensitivity=0 --resize-allowed=0 \
       --i420 -w 1280 -h 720 --fps=30/1 --ivf -o rt8.ivf in720.yuv
 
+One tile column (`--tile-columns=0`), as for every reference below but the
+last section's: the port's `EncoderConfig::realtime` with `tile_columns: 0`.
+
 `vpxdec --md5 rt8.ivf` gives `51e08b78a895f10ae405e121dad85472`; the file is
 134977 bytes, 30 frames.
 
@@ -95,3 +98,37 @@ design-decisions §1341):
 file is 77061 bytes, 90 frames. Its trace has 2,670 superblock estimates,
 12,803 network predictions and 16,041 partition decisions; the scene cuts
 come at pictures 50 and 75.
+
+# The references in tile columns
+
+`rt8tiles.ivf` and `rt8cuttiles.ivf` are the first two references' inputs
+encoded again with each picture cut into tile columns, which the encoder
+codes on threads of their own (`tests/encoder.rs`,
+`frames_match_vpxenc_in_tile_columns` and
+`frames_match_vpxenc_through_cuts_in_tile_columns`, which run the port on one
+to four threads and two).
+
+**Encoder.** The same `vpxenc` and settings, but four tile columns for the
+first -- the most 1280 pixels allow -- and two for the second, the most 651
+allow:
+
+    vpxenc --codec=vp9 --rt --cpu-used=8 --end-usage=cbr --target-bitrate=1000 \
+      --lag-in-frames=0 --threads=1 --tile-columns=2 --aq-mode=3 --kf-max-dist=9999 \
+      --undershoot-pct=50 --overshoot-pct=50 --buf-sz=1000 --buf-initial-sz=500 \
+      --buf-optimal-sz=600 --min-q=2 --max-q=52 --noise-sensitivity=0 --resize-allowed=0 \
+      --i420 -w 1280 -h 720 --fps=30/1 --ivf -o rt8tiles.ivf in720.yuv
+
+    vpxenc --codec=vp9 --rt --cpu-used=8 --end-usage=cbr --target-bitrate=600 \
+      --lag-in-frames=0 --threads=1 --tile-columns=1 --aq-mode=3 --kf-max-dist=9999 \
+      --undershoot-pct=50 --overshoot-pct=50 --buf-sz=1000 --buf-initial-sz=500 \
+      --buf-optimal-sz=600 --min-q=2 --max-q=52 --noise-sensitivity=0 --resize-allowed=0 \
+      --i420 -w 651 -h 357 --fps=30/1 --ivf -o rt8cuttiles.ivf cut651.yuv
+
+`vpxdec --md5` gives `4cc2acfd8845c46c1e3c089a073790ee` for `rt8tiles.ivf`
+(135422 bytes, 30 frames) and `da522bf48565319c58767018e15244b9` for
+`rt8cuttiles.ivf` (378550 bytes, 150 frames). `vpxenc --threads=4` (and
+`--threads=2`) makes the same files, byte for byte; `--row-mt=1` on more than
+one thread does not, which is why the port's threads are its tile columns
+(`design-decisions/1342`). Without `--tile-columns`, `vpxenc` makes
+`rt8tiles.ivf`: its default, 6, is as many columns as the width allows, and
+so is `EncoderConfig::realtime`'s.

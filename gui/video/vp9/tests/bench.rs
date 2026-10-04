@@ -29,9 +29,10 @@
 //! on another before comparing.
 //!
 //! `bench_vp9_encode` does the same for the encoder: each reference encode's
-//! input (`tests/data/encoder/README.md`) encoded at its settings on one
-//! thread, only the encoding timed, against libvpx's `vpxenc` in
-//! `LIBVPX_ENCODE`.
+//! input (`tests/data/encoder/README.md`) encoded at its settings, only the
+//! encoding timed, against libvpx's `vpxenc` -- on one thread
+//! (`LIBVPX_ENCODE`), and for the references in tile columns on every core
+//! too (`LIBVPX_ENCODE_TILES`).
 
 #![allow(
     clippy::indexing_slicing,
@@ -129,6 +130,15 @@ const LIBVPX_ENCODE: [(&str, f64, f64); 3] = [
     ("rt8small (350x286)", 154.8, 638.1),
 ];
 
+/// The same, for the references in tile columns (`rt8tiles`, four columns;
+/// `rt8cuttiles`, two): (reference, plain C on one thread, SIMD on one, SIMD
+/// on one thread per column -- `vpxenc --threads`), measured as
+/// `LIBVPX_ENCODE` was, a boot test sharing the machine.
+const LIBVPX_ENCODE_TILES: [(&str, f64, f64, f64); 2] = [
+    ("rt8tiles (4 columns)", 24.4, 78.5, 117.2),
+    ("rt8cuttiles (2 columns)", 60.1, 233.3, 281.4),
+];
+
 /// The first `count` pictures the full suite's vector `name` shows, as I420.
 fn shown(name: &str, count: usize) -> Option<Vec<common::I420>> {
     let dir = common::full_suite_dir()?;
@@ -158,9 +168,11 @@ fn shown(name: &str, count: usize) -> Option<Vec<common::I420>> {
     None
 }
 
-/// Encode every picture once, on a fresh encoder made with `config`.
-fn encode_pass(input: &[common::I420], config: EncoderConfig) {
+/// Encode every picture once, on a fresh encoder made with `config`, on at
+/// most `threads` threads.
+fn encode_pass(input: &[common::I420], config: EncoderConfig, threads: usize) {
     let mut e = Encoder::new(config).unwrap();
+    e.set_threads(threads);
     for p in input {
         let views = [0, 1, 2].map(|i| {
             let (width, height) = p.plane_size(i);
@@ -175,11 +187,11 @@ fn encode_pass(input: &[common::I420], config: EncoderConfig) {
     }
 }
 
-/// Frames per second encoding `input`: passes repeated until they take half
-/// a second, the fastest of three such runs.
-fn encode_fps(input: &[common::I420], config: EncoderConfig) -> f64 {
+/// Frames per second encoding `input` on `threads` threads: passes repeated
+/// until they take half a second, the fastest of three such runs.
+fn encode_fps(input: &[common::I420], config: EncoderConfig, threads: usize) -> f64 {
     let start = Instant::now();
-    encode_pass(input, config);
+    encode_pass(input, config, threads);
     let once = start.elapsed().max(Duration::from_micros(1));
     let passes = (Duration::from_millis(500).as_secs_f64() / once.as_secs_f64()).ceil() as usize;
     let passes = passes.max(1);
@@ -187,7 +199,7 @@ fn encode_fps(input: &[common::I420], config: EncoderConfig) -> f64 {
         .map(|_| {
             let start = Instant::now();
             for _ in 0..passes {
-                encode_pass(input, config);
+                encode_pass(input, config, threads);
             }
             (input.len() * passes) as f64 / start.elapsed().as_secs_f64()
         })
@@ -195,8 +207,9 @@ fn encode_fps(input: &[common::I420], config: EncoderConfig) -> f64 {
 }
 
 /// How fast the encoder is: each reference input encoded with the
-/// encoder's own decisions, at the reference's settings, on one thread --
-/// against `LIBVPX_ENCODE`.
+/// encoder's own decisions, at the reference's settings, on one thread and
+/// on every core -- against `LIBVPX_ENCODE` and `LIBVPX_ENCODE_TILES`. Only
+/// a picture of several tile columns encodes on more than one thread.
 #[test]
 #[ignore = "measurement benchmark; run explicitly with --release --ignored --nocapture"]
 fn bench_vp9_encode() {
@@ -207,13 +220,19 @@ fn bench_vp9_encode() {
     let size = |w: usize, h: usize| (w as u32, h as u32);
     let (cw, ch) = size(common::CUT_WIDTH, common::CUT_HEIGHT);
     let (sw, sh) = size(common::SMALL_WIDTH, common::SMALL_HEIGHT);
+    let cores = std::thread::available_parallelism().map_or(1, usize::from);
+    // The references' settings: one tile column, as vpxenc made them.
+    let one_column = |w: u32, h: u32, kbps: u32| EncoderConfig {
+        tile_columns: 0,
+        ..EncoderConfig::realtime(w, h, kbps)
+    };
     let runs = [
-        (&first, EncoderConfig::realtime(1280, 720, 1000)),
-        (&cut, EncoderConfig::realtime(cw, ch, 600)),
-        (&small, EncoderConfig::realtime(sw, sh, 200)),
+        (&first, one_column(1280, 720, 1000)),
+        (&cut, one_column(cw, ch, 600)),
+        (&small, one_column(sw, sh, 200)),
     ];
     std::println!(
-        "frames per second, one thread; libvpx's as measured on the machine `LIBVPX` names\n\
+        "frames per second; libvpx's as measured on the machine `LIBVPX` names\n\
          {:<24} {:>8} {:>9} {:>9}",
         "reference",
         "port",
@@ -221,7 +240,39 @@ fn bench_vp9_encode() {
         "SIMD"
     );
     for ((input, config), (name, c, simd)) in runs.into_iter().zip(LIBVPX_ENCODE) {
-        let port = encode_fps(input, config);
+        let port = encode_fps(input, config, 1);
         std::println!("{name:<24} {port:>8.1} {c:>9.1} {simd:>9.1}");
+    }
+    let tiled = [
+        (
+            &first,
+            EncoderConfig {
+                tile_columns: 2,
+                ..EncoderConfig::realtime(1280, 720, 1000)
+            },
+        ),
+        (
+            &cut,
+            EncoderConfig {
+                tile_columns: 1,
+                ..EncoderConfig::realtime(cw, ch, 600)
+            },
+        ),
+    ];
+    std::println!(
+        "\nin tile columns, on one thread and on {cores} (the port), on one and on \
+         one per column (libvpx)\n\
+         {:<24} {:>8} {:>8} {:>9} {:>9} {:>9}",
+        "reference",
+        "port 1",
+        "port all",
+        "libvpx C",
+        "SIMD 1",
+        "SIMD all"
+    );
+    for ((input, config), (name, c, simd, simd_all)) in tiled.into_iter().zip(LIBVPX_ENCODE_TILES) {
+        let one = encode_fps(input, config, 1);
+        let all = encode_fps(input, config, cores);
+        std::println!("{name:<24} {one:>8.1} {all:>8.1} {c:>9.1} {simd:>9.1} {simd_all:>9.1}");
     }
 }

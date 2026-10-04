@@ -47,16 +47,17 @@
 //!
 //! # The encoder
 //!
-//! [`Encoder`] is libvpx's realtime encoder being ported the same way, its
-//! output to be byte-identical to `vpxenc`'s (`design-decisions.md` §1339).
-//! It codes key frames so far, with libvpx's realtime decisions at the
-//! bitrate libvpx's one-pass CBR rate control holds: the first frame of
-//! libvpx's own reference encode comes out byte for byte. Every frame it
-//! writes decodes to exactly [`Encoder::reconstruction`]. Its parts are
-//! under `enc`: the bool and bit writers, forward transforms, quantisers,
-//! tokenizer, probability updates, the bitstream writer, block coding, rate
-//! control, cyclic refresh, the realtime partitioning and mode search, and
-//! the frame loop.
+//! [`Encoder`] is libvpx's realtime encoder (`vpxenc --rt --cpu-used=8`:
+//! one-pass CBR, cyclic refresh) ported the same way, its output
+//! byte-identical to `vpxenc`'s (`design-decisions.md` §1339): every frame of
+//! five reference encodes -- 1280x720; 651x357 through scene cuts, noise and
+//! blocks over the edges; 350x286, partitioned by libvpx's learned search;
+//! and the first two again in tile columns -- comes out byte for byte, and
+//! every frame it writes decodes to exactly [`Encoder::reconstruction`]. Its
+//! parts are under `enc`: the bool and bit writers, forward transforms,
+//! quantisers, tokenizer, probability updates, the bitstream writer, block
+//! coding, rate control, cyclic refresh, the realtime partitionings and mode
+//! search, and the frame loop.
 //!
 //! # Speed
 //!
@@ -64,15 +65,20 @@
 //! `decode_tiles_mt` does them: each into its own strip of the frame, put
 //! back together in column order, so the pictures are the same on any
 //! number of threads ([`Decoder::set_threads`]; a new decoder uses every
-//! core). The hot loops -- motion compensation and the loop filter -- are
-//! written for the compiler to vectorise for baseline x86-64 (SSE2), in
-//! 16-bit lanes where every value provably fits. There is no hand-written
-//! SIMD and no `unsafe`; `tests/bench.rs` measures it against libvpx.
+//! core). The encoder does the same with its tile columns
+//! ([`Encoder::set_threads`], design-decisions §1342), and by default cuts a
+//! picture into as many as its width allows, as `vpxenc` does. The hot loops
+//! -- motion compensation, the loop filter, and the encoder's searches,
+//! transforms and quantisers -- are written for the compiler to vectorise
+//! for baseline x86-64 (SSE2), exactly, in 16-bit lanes where every value
+//! provably fits. There is no hand-written SIMD and no `unsafe`;
+//! `tests/bench.rs` measures both directions against libvpx.
 //!
 //! The loop filter's superblock rows run on threads too, as libvpx's
 //! wavefront, and frames and the threads' buffers are reused from frame to
-//! frame. Not yet here: libvpx's row-based multithreading within one tile
-//! column.
+//! frame. Not here: libvpx's row-based multithreading within one tile
+//! column, whose encoder makes other frames on several threads than on one
+//! (§1342).
 //!
 //! # What a hostile stream can do
 //!

@@ -536,6 +536,9 @@ pub(crate) struct InterSb<'a> {
     /// frame (libvpx's `xd->plane[0].dst`, where it was built).
     pub src: &'a Plane<u8>,
     pub pred: &'a Plane<u8>,
+    /// The frame's column `pred`'s column 0 is: 0, or a tile column's
+    /// strip's left edge.
+    pub pred_x0: usize,
     pub mi_rows: usize,
     pub mi_cols: usize,
     pub mi_row: usize,
@@ -621,7 +624,7 @@ pub(crate) fn choose_inter_partitioning(s: &InterSb<'_>) -> InterPartition {
                 let y8 = y16 + ((k >> 1) << 3);
                 let (sum, sse) = if (x8 as i64) < pixels_wide && (y8 as i64) < pixels_high {
                     let s_avg = avg_8x8(s.src, sx + x8, sy + y8);
-                    let d_avg = avg_8x8(s.pred, sx + x8, sy + y8);
+                    let d_avg = avg_8x8(s.pred, (sx + x8).saturating_sub(s.pred_x0), sy + y8);
                     let sum = s_avg - d_avg;
                     (sum, (sum * sum) as u32)
                 } else {

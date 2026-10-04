@@ -144,10 +144,19 @@ fn reference_input() -> Option<Vec<Picture>> {
     Some(out)
 }
 
+/// The references' settings: `EncoderConfig::realtime`'s, in one tile
+/// column (`vpxenc --tile-columns=0`).
+fn one_column(width: usize, height: usize, kbps: u32) -> EncoderConfig {
+    EncoderConfig {
+        tile_columns: 0,
+        ..EncoderConfig::realtime(width as u32, height as u32, kbps)
+    }
+}
+
 /// libvpx's reference encode of [`reference_input`]: `vpxenc --rt
-/// --cpu-used=8` at the settings `EncoderConfig::realtime(1280, 720, 1000)`
-/// gives (`tests/data/encoder/README.md` has the command). The encoder's
-/// frames must be byte-identical to it.
+/// --cpu-used=8` at the settings `one_column(1280, 720, 1000)` gives
+/// (`tests/data/encoder/README.md` has the command). The encoder's frames
+/// must be byte-identical to it.
 #[test]
 #[ignore = "needs the full vector suite: python gui/video/vp9/tools/fetch_vectors.py"]
 fn frames_match_vpxenc_realtime() {
@@ -155,7 +164,7 @@ fn frames_match_vpxenc_realtime() {
         .expect("the full suite is not fetched: python gui/video/vp9/tools/fetch_vectors.py");
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/encoder/rt8.ivf");
     let reference = common::read_ivf(&std::fs::read(path).unwrap()).unwrap();
-    let mut encoder = Encoder::new(EncoderConfig::realtime(1280, 720, 1000)).unwrap();
+    let mut encoder = Encoder::new(one_column(1280, 720, 1000)).unwrap();
     assert_eq!((input.len(), reference.packets.len()), (30, 30));
     // Every frame: the key frame, then 29 inter frames of libvpx's own
     // decisions, made by the encoder.
@@ -169,6 +178,41 @@ fn frames_match_vpxenc_realtime() {
             got.len(),
             want.len()
         );
+    }
+}
+
+/// The first reference's pictures cut into four tile columns
+/// (`tests/data/encoder/rt8tiles.ivf`: `vpxenc --tile-columns=2`, the most
+/// 1280 pixels allow, which gives the same bytes on one thread or four). The
+/// encoder's frames must be byte-identical to it on any number of threads:
+/// one (the columns in turn), two and four (each thread an equal share), and
+/// three (one thread taking two columns, as the columns are dealt out).
+#[test]
+#[ignore = "needs the full vector suite: python gui/video/vp9/tools/fetch_vectors.py"]
+fn frames_match_vpxenc_in_tile_columns() {
+    let input = reference_input()
+        .expect("the full suite is not fetched: python gui/video/vp9/tools/fetch_vectors.py");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/encoder/rt8tiles.ivf");
+    let reference = common::read_ivf(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!((input.len(), reference.packets.len()), (30, 30));
+    let config = EncoderConfig {
+        tile_columns: 2,
+        ..EncoderConfig::realtime(1280, 720, 1000)
+    };
+    for threads in [1, 2, 3, 4] {
+        let mut encoder = Encoder::new(config).unwrap();
+        encoder.set_threads(threads);
+        for (i, (picture, want)) in input.iter().zip(&reference.packets).enumerate() {
+            let planes = [0, 1, 2].map(|p| picture.plane8(p).unwrap());
+            let got = encoder.encode(planes).unwrap();
+            let first = got.iter().zip(want.iter()).position(|(a, b)| a != b);
+            assert!(
+                &got == want,
+                "{threads} threads, frame {i}: {} bytes against libvpx's {}, first difference at byte {first:?}",
+                got.len(),
+                want.len()
+            );
+        }
     }
 }
 
@@ -240,8 +284,7 @@ fn frames_match_vpxenc_through_cuts_noise_and_edges() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/encoder/rt8cut.ivf");
     let reference = common::read_ivf(&std::fs::read(path).unwrap()).unwrap();
     assert_eq!((input.len(), reference.packets.len()), (150, 150));
-    let (w, h) = (common::CUT_WIDTH, common::CUT_HEIGHT);
-    let mut encoder = Encoder::new(EncoderConfig::realtime(w as u32, h as u32, 600)).unwrap();
+    let mut encoder = Encoder::new(one_column(common::CUT_WIDTH, common::CUT_HEIGHT, 600)).unwrap();
     for (i, (picture, want)) in input.iter().zip(&reference.packets).enumerate() {
         let got = encoder.encode(views(picture)).unwrap();
         let first = got.iter().zip(want.iter()).position(|(a, b)| a != b);
@@ -251,6 +294,40 @@ fn frames_match_vpxenc_through_cuts_noise_and_edges() {
             got.len(),
             want.len()
         );
+    }
+}
+
+/// The second reference's pictures cut into two tile columns
+/// (`tests/data/encoder/rt8cuttiles.ivf`: `vpxenc --tile-columns=1`, the most
+/// 651 pixels allow): the cuts, the noise and the blocks over the edges, now
+/// with a tile boundary through every superblock row. The encoder's frames
+/// must be byte-identical to it, on one thread and on two.
+#[test]
+#[ignore = "needs the full vector suite: python gui/video/vp9/tools/fetch_vectors.py"]
+fn frames_match_vpxenc_through_cuts_in_tile_columns() {
+    let input = common::cut_reference_input(shown)
+        .expect("the full suite is not fetched: python gui/video/vp9/tools/fetch_vectors.py");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/encoder/rt8cuttiles.ivf");
+    let reference = common::read_ivf(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!((input.len(), reference.packets.len()), (150, 150));
+    let (w, h) = (common::CUT_WIDTH, common::CUT_HEIGHT);
+    let config = EncoderConfig {
+        tile_columns: 1,
+        ..EncoderConfig::realtime(w as u32, h as u32, 600)
+    };
+    for threads in [1, 2] {
+        let mut encoder = Encoder::new(config).unwrap();
+        encoder.set_threads(threads);
+        for (i, (picture, want)) in input.iter().zip(&reference.packets).enumerate() {
+            let got = encoder.encode(views(picture)).unwrap();
+            let first = got.iter().zip(want.iter()).position(|(a, b)| a != b);
+            assert!(
+                &got == want,
+                "{threads} threads, frame {i}: {} bytes against libvpx's {}, first difference at byte {first:?}",
+                got.len(),
+                want.len()
+            );
+        }
     }
 }
 
@@ -277,8 +354,8 @@ fn frames_match_vpxenc_when_partitioned_by_search() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/encoder/rt8small.ivf");
     let reference = common::read_ivf(&std::fs::read(path).unwrap()).unwrap();
     assert_eq!((input.len(), reference.packets.len()), (90, 90));
-    let (w, h) = (common::SMALL_WIDTH, common::SMALL_HEIGHT);
-    let mut encoder = Encoder::new(EncoderConfig::realtime(w as u32, h as u32, 200)).unwrap();
+    let mut encoder =
+        Encoder::new(one_column(common::SMALL_WIDTH, common::SMALL_HEIGHT, 200)).unwrap();
     for (i, (picture, want)) in input.iter().zip(&reference.packets).enumerate() {
         let got = encoder.encode(views(picture)).unwrap();
         let first = got.iter().zip(want.iter()).position(|(a, b)| a != b);

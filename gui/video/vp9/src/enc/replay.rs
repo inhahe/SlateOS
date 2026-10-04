@@ -156,12 +156,25 @@ impl Reference {
         }
     }
 
+    /// The references' settings: `EncoderConfig::realtime`'s, in one tile
+    /// column (`vpxenc --tile-columns=0`).
+    fn one_column(width: usize, height: usize, kbps: u32) -> EncoderConfig {
+        EncoderConfig {
+            tile_columns: 0,
+            ..EncoderConfig::realtime(
+                u32::try_from(width).unwrap(),
+                u32::try_from(height).unwrap(),
+                kbps,
+            )
+        }
+    }
+
     /// The first, `rt8.ivf`: the first 30 pictures the conformance vector
     /// `vp90-2-22-svc_1280x720_1.webm` shows.
     fn first() -> Self {
         let input = shown("vp90-2-22-svc_1280x720_1.webm", 30)
             .expect("the full suite is not fetched: python gui/video/vp9/tools/fetch_vectors.py");
-        Self::load(input, "rt8.ivf", EncoderConfig::realtime(1280, 720, 1000))
+        Self::load(input, "rt8.ivf", Self::one_column(1280, 720, 1000))
     }
 
     /// The second, `rt8cut.ivf`: 651x357 through two scene cuts, a rising
@@ -169,9 +182,7 @@ impl Reference {
     fn second() -> Self {
         let input = common::cut_reference_input(shown)
             .expect("the full suite is not fetched: python gui/video/vp9/tools/fetch_vectors.py");
-        let (w, h) = (common::CUT_WIDTH, common::CUT_HEIGHT);
-        let config =
-            EncoderConfig::realtime(u32::try_from(w).unwrap(), u32::try_from(h).unwrap(), 600);
+        let config = Self::one_column(common::CUT_WIDTH, common::CUT_HEIGHT, 600);
         Self::load(input, "rt8cut.ivf", config)
     }
 
@@ -180,9 +191,7 @@ impl Reference {
     fn third() -> Self {
         let input = common::small_reference_input(shown)
             .expect("the full suite is not fetched: python gui/video/vp9/tools/fetch_vectors.py");
-        let (w, h) = (common::SMALL_WIDTH, common::SMALL_HEIGHT);
-        let config =
-            EncoderConfig::realtime(u32::try_from(w).unwrap(), u32::try_from(h).unwrap(), 200);
+        let config = Self::one_column(common::SMALL_WIDTH, common::SMALL_HEIGHT, 200);
         Self::load(input, "rt8small.ivf", config)
     }
 

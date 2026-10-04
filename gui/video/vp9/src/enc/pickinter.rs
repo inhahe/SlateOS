@@ -213,7 +213,9 @@ pub(crate) struct SbState {
 }
 
 /// The frame-level settings and state the search reads: libvpx's
-/// `VP9_COMP` fields and speed features for the frame.
+/// `VP9_COMP` fields and speed features for the frame. Shared, as it is, by
+/// every tile column coded on a thread of its own.
+#[derive(Clone, Copy)]
 pub(crate) struct SearchFrame<'a> {
     pub mv_costs: &'a MvCosts,
     pub mode_costs: &'a ModeCosts,
@@ -362,12 +364,12 @@ impl FrameEncoder<'_> {
     /// strides.
     fn planes_at(&self, plane: usize, x: usize, y: usize) -> (&[u8], usize, &[u8], usize) {
         let s = &self.src.planes[plane.min(2)];
-        let r = &self.recon.planes[plane.min(2)];
+        let (r, r_stride) = self.recon_at(plane, x, y);
         (
             s.data.get(y * s.stride + x..).unwrap_or(&[]),
             s.stride,
-            r.data.get(y * r.stride + x..).unwrap_or(&[]),
-            r.stride,
+            r,
+            r_stride,
         )
     }
 }

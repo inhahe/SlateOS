@@ -133,6 +133,21 @@ impl CyclicRefresh {
         }
     }
 
+    /// Take in what a tile column coded apart -- on a thread of its own,
+    /// from a clone of this refresh -- left in its cells (`col0..col1` of a
+    /// frame `mi_cols` wide) of the refresh map and the segment map: all
+    /// that coding a block changes here ([`Self::update_segment`]).
+    pub(crate) fn absorb_columns(
+        &mut self,
+        part: &CyclicRefresh,
+        mi_cols: usize,
+        col0: usize,
+        col1: usize,
+    ) {
+        crate::enc::nonrd::copy_columns(&mut self.map, &part.map, mi_cols, col0, col1);
+        crate::enc::nonrd::copy_columns(&mut self.seg_map, &part.seg_map, mi_cols, col0, col1);
+    }
+
     /// The segment of a block decided at (`mi_row`, `mi_col`): libvpx's
     /// `vp9_cyclic_refresh_update_segment`. `segment_id` is the block's
     /// segment as the band set it; `inter`, `mv`, `rate` and `dist` describe

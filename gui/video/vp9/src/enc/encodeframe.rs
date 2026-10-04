@@ -12,6 +12,14 @@
 //! decoder's own inter prediction, then their residual quantised with the
 //! fast quantiser libvpx's realtime path uses.
 //!
+//! Tile columns are independent -- no block reads anything of another column
+//! -- so a [`FrameEncoder::for_tile_column`] can code one on a thread of its
+//! own, into a strip of the reconstruction with its own block grid, vectors,
+//! counts and tokens, which [`merge_columns`] puts together in column order:
+//! what one thread coding the tiles in turn leaves, bit for bit (libvpx's
+//! `vp9_encode_tiles_mt`). The reconstruction is read and written through
+//! [`FrameEncoder::recon_at`] in the frame's coordinates, whichever it is.
+//!
 //! Translated into Rust from libvpx v1.17.0's `vp9/encoder/vp9_encodeframe.c`
 //! (`encode_superblock`, `update_state_rt`, `update_stats`, `encode_b_rt`,
 //! `encode_sb_rt`, `nonrd_use_partition`, `encode_tiles`), `vp9_encodemb.c`
@@ -33,6 +41,7 @@
     reason = "the only indices are planes, clamped with min(2) into three-element arrays, sub-blocks below 4 into four-element ones, and contexts computed in range by the context functions; everything taken from a buffer goes through get"
 )]
 
+use crate::Error;
 use crate::block::{
     BlockPos, Bmi, MiGrid, ModeInfo, MvPredictor, MvRef, inc_mv, lower_mv_precision, mv_ref_blocks,
     uv_tx_size,
@@ -56,7 +65,7 @@ use crate::header::{self, Segmentation};
 use crate::idct;
 use crate::inter::{self, McScratch, ScaleFactors};
 use crate::intra::{self, Edges};
-use crate::probs::FrameContext;
+use crate::probs::{Accumulate, FrameContext};
 use crate::tables;
 
 /// A block's inter prediction, as a [`Decide`] chooses it.
@@ -301,6 +310,94 @@ pub(crate) struct Encoded {
     pub mvs: Vec<MvRef>,
 }
 
+/// Tile `i`'s cells, from and to, of `mis` cells cut into `1 << log2` tiles
+/// that way: libvpx's `vp9_tile_set_col` and `vp9_tile_set_row`.
+pub(crate) fn tile_span(i: usize, mis: usize, log2: u32) -> (usize, usize) {
+    let offset = |i: usize| {
+        header::tile_offset(
+            u32::try_from(i).unwrap_or(u32::MAX),
+            u32::try_from(mis).unwrap_or(u32::MAX),
+            log2,
+        ) as usize
+    };
+    (offset(i), offset(i + 1))
+}
+
+/// Tile column `tile_col`'s strip of `frame` ([`FrameBuf::strip`]), and the
+/// luma pixel it starts at: from the column's left edge to its last
+/// superblock's right edge, where a block over the frame's edge is
+/// reconstructed whole. The columns' strips cover the frame's rows exactly.
+pub(crate) fn column_strip(
+    frame: &FrameBuf<u8>,
+    h: &FrameHeader,
+    tile_col: usize,
+) -> Result<(usize, FrameBuf<u8>), Error> {
+    let (col_start, col_end) = tile_span(tile_col, h.mi_cols(), h.log2_tile_cols);
+    let x0 = col_start * 8;
+    let x1 = col_end.div_ceil(8) * 64;
+    Ok((x0, frame.strip(x1.saturating_sub(x0))?))
+}
+
+/// One tile column coded apart from the others
+/// ([`FrameEncoder::for_tile_column`]): its strip of the reconstruction, the
+/// luma pixel the strip starts at, and what its encoder left.
+pub(crate) struct ColumnEncoded {
+    pub tile_col: usize,
+    pub x0: usize,
+    pub strip: FrameBuf<u8>,
+    pub encoded: Encoded,
+}
+
+/// Put tile columns coded apart together, in column order: each strip into
+/// `recon`, the blocks into one grid in the order one thread codes them, the
+/// cells' vectors, the counts summed, each tile's tokens. For a frame of one
+/// tile row, what [`FrameEncoder::encode_tiles`] leaves, bit for bit.
+///
+/// # Errors
+///
+/// [`Error::Corrupt`] if the blocks overflow the grid's indices.
+pub(crate) fn merge_columns(
+    recon: &mut FrameBuf<u8>,
+    h: &FrameHeader,
+    mut columns: Vec<ColumnEncoded>,
+) -> Result<Encoded, Error> {
+    columns.sort_by_key(|c| c.tile_col);
+    let (mi_cols, mi_rows) = (h.mi_cols(), h.mi_rows());
+    let tile_cols = 1usize << h.log2_tile_cols;
+    let tiles = tile_cols * (1usize << h.log2_tile_rows);
+    let mut out = Encoded {
+        mi: MiGrid::new(mi_cols, mi_rows),
+        ext: Vec::new(),
+        counts: EncCounts::default(),
+        tile_tokens: vec![Vec::new(); tiles],
+        mvs: vec![MvRef::default(); mi_cols * mi_rows],
+    };
+    for c in columns {
+        recon.paste(&c.strip, c.x0);
+        let (col_start, col_end) = tile_span(c.tile_col, mi_cols, h.log2_tile_cols);
+        let n = col_end.saturating_sub(col_start);
+        for row in 0..mi_rows {
+            let at = row * mi_cols + col_start;
+            if let (Some(d), Some(s)) = (out.mvs.get_mut(at..at + n), c.encoded.mvs.get(at..at + n))
+            {
+                d.copy_from_slice(s);
+            }
+        }
+        out.counts.accumulate(&c.encoded.counts);
+        // The column's tiles: one in each tile row.
+        for (t, tokens) in c.encoded.tile_tokens.into_iter().enumerate() {
+            if t % tile_cols == c.tile_col
+                && let Some(slot) = out.tile_tokens.get_mut(t)
+            {
+                *slot = tokens;
+            }
+        }
+        out.mi.absorb(c.encoded.mi)?;
+        out.ext.extend(c.encoded.ext);
+    }
+    Ok(out)
+}
+
 /// Encodes one frame's blocks: libvpx's per-frame and per-tile encoder
 /// state (`MACROBLOCK`, `MACROBLOCKD`, `TileDataEnc`, `FRAME_COUNTS`).
 pub(crate) struct FrameEncoder<'a> {
@@ -313,8 +410,17 @@ pub(crate) struct FrameEncoder<'a> {
     /// The picture being encoded, its edges repeated out to whole
     /// superblocks.
     pub src: &'a FrameBuf<u8>,
-    /// What the decoder will reconstruct, block by block.
-    pub recon: &'a mut FrameBuf<u8>,
+    /// What the decoder will reconstruct, block by block: the frame, or a
+    /// tile column's strip of it ([`FrameEncoder::for_tile_column`]). Read
+    /// and write it through [`FrameEncoder::recon_at`] and
+    /// [`FrameEncoder::recon_at_mut`], which take the frame's coordinates.
+    recon: &'a mut FrameBuf<u8>,
+    /// Per plane, the frame's column that `recon`'s column 0 is: 0, or a
+    /// strip's left edge.
+    px_x0: [usize; 3],
+    /// Per plane, the frame's width: the edge intra prediction stops at (a
+    /// strip's planes are the strip's width).
+    plane_w: [usize; 3],
     /// An inter frame's references and settings; `None` on an intra-only
     /// frame.
     pub inter: Option<InterFrame<'a>>,
@@ -362,6 +468,7 @@ impl<'a> FrameEncoder<'a> {
     ) -> Self {
         let aligned_cols = (h.mi_cols() + 7) & !7;
         let tiles = (1usize << h.log2_tile_cols) * (1usize << h.log2_tile_rows);
+        let plane_w = core::array::from_fn(|i| recon.planes[i].width);
         let pred_refs = inter.map_or([None; 3], |f| {
             f.refs.map(|r| {
                 r.map(|r| {
@@ -377,6 +484,8 @@ impl<'a> FrameEncoder<'a> {
             quants,
             src,
             recon,
+            px_x0: [0; 3],
+            plane_w,
             inter,
             mi: MiGrid::new(h.mi_cols(), h.mi_rows()),
             ext: Vec::new(),
@@ -399,6 +508,68 @@ impl<'a> FrameEncoder<'a> {
         }
     }
 
+    /// A frame encoder for tile column `tile_col` alone: writing to `strip`
+    /// ([`column_strip`]) and to a block grid of the column's cells, for
+    /// tile columns coded on threads of their own and put together by
+    /// [`merge_columns`]. `plane_w` is the frame's planes' widths.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn for_tile_column(
+        h: &'a FrameHeader,
+        fc: &'a FrameContext,
+        seg: &'a Segmentation,
+        quants: &'a Quants,
+        src: &'a FrameBuf<u8>,
+        strip: &'a mut FrameBuf<u8>,
+        inter: Option<InterFrame<'a>>,
+        tile_col: usize,
+        plane_w: [usize; 3],
+    ) -> Self {
+        let mut fe = Self::new(h, fc, seg, quants, src, strip, inter);
+        let (col_start, col_end) = tile_span(tile_col, h.mi_cols(), h.log2_tile_cols);
+        fe.mi = MiGrid::for_columns(
+            h.mi_cols(),
+            h.mi_rows(),
+            col_start,
+            col_end.saturating_sub(col_start),
+        );
+        let x0 = col_start * 8;
+        fe.px_x0 = [x0, x0 >> h.ss_x, x0 >> h.ss_x];
+        fe.plane_w = plane_w;
+        fe
+    }
+
+    /// The tile being encoded, tile rows first: libvpx's index into
+    /// `cpi->tile_data`.
+    pub(crate) fn tile_index(&self) -> usize {
+        self.tile_index
+    }
+
+    /// `plane`'s reconstruction from the frame's pixel (`x`, `y`) on, and
+    /// its stride: the rows below follow, a stride apart. Empty left of a
+    /// strip, which nothing in a tile column reads.
+    pub(crate) fn recon_at(&self, plane: usize, x: usize, y: usize) -> (&[u8], usize) {
+        let p = &self.recon.planes[plane.min(2)];
+        let at = x
+            .checked_sub(self.px_x0[plane.min(2)])
+            .and_then(|x| p.data.get(y * p.stride + x..));
+        (at.unwrap_or(&[]), p.stride)
+    }
+
+    /// `plane`'s reconstruction whole, and the frame's column its column 0
+    /// is: for a reader that indexes it itself.
+    pub(crate) fn recon_plane(&self, plane: usize) -> (&crate::frame::Plane<u8>, usize) {
+        (&self.recon.planes[plane.min(2)], self.px_x0[plane.min(2)])
+    }
+
+    /// [`Self::recon_at`], to write.
+    pub(crate) fn recon_at_mut(&mut self, plane: usize, x: usize, y: usize) -> (&mut [u8], usize) {
+        let p = &mut self.recon.planes[plane.min(2)];
+        let at = x
+            .checked_sub(self.px_x0[plane.min(2)])
+            .and_then(|x| p.data.get_mut(y * p.stride + x..));
+        (at.unwrap_or(&mut []), p.stride)
+    }
+
     /// What encoding left.
     pub(crate) fn finish(self) -> Encoded {
         Encoded {
@@ -415,35 +586,40 @@ impl<'a> FrameEncoder<'a> {
     /// start clear once, for the frame; the left ones at each superblock
     /// row.
     pub(crate) fn encode_tiles(&mut self, d: &mut dyn Decide) {
-        let (mi_cols, mi_rows) = (self.h.mi_cols(), self.h.mi_rows());
         let (log2_cols, log2_rows) = (self.h.log2_tile_cols, self.h.log2_tile_rows);
-        let offset = |i: usize, mis: usize, log2: u32| {
-            header::tile_offset(
-                u32::try_from(i).unwrap_or(u32::MAX),
-                u32::try_from(mis).unwrap_or(u32::MAX),
-                log2,
-            ) as usize
-        };
         for tile_row in 0..1usize << log2_rows {
             for tile_col in 0..1usize << log2_cols {
-                self.tile_index = (tile_row << log2_cols) + tile_col;
-                let col_start = offset(tile_col, mi_cols, log2_cols);
-                let col_end = offset(tile_col + 1, mi_cols, log2_cols);
-                self.tile_mi_col_start = col_start;
-                self.tile_mi_col_end = col_end;
-                let mut mi_row = offset(tile_row, mi_rows, log2_rows);
-                let row_end = offset(tile_row + 1, mi_rows, log2_rows);
-                while mi_row < row_end {
-                    self.left_ctx = [[0; 16]; 3];
-                    self.partition_ctx.new_row();
-                    let mut mi_col = col_start;
-                    while mi_col < col_end {
-                        self.encode_partition(d, mi_row, mi_col, BLOCK_64X64);
-                        mi_col += 8;
-                    }
-                    mi_row += 8;
-                }
+                self.encode_tile(d, tile_row, tile_col);
             }
+        }
+    }
+
+    /// Encode tile column `tile_col`'s tiles, top to bottom: what a
+    /// [`FrameEncoder::for_tile_column`] does.
+    pub(crate) fn encode_tile_column(&mut self, d: &mut dyn Decide, tile_col: usize) {
+        for tile_row in 0..1usize << self.h.log2_tile_rows {
+            self.encode_tile(d, tile_row, tile_col);
+        }
+    }
+
+    /// Encode one tile: libvpx's `vp9_encode_tile`.
+    fn encode_tile(&mut self, d: &mut dyn Decide, tile_row: usize, tile_col: usize) {
+        let (mi_cols, mi_rows) = (self.h.mi_cols(), self.h.mi_rows());
+        let (log2_cols, log2_rows) = (self.h.log2_tile_cols, self.h.log2_tile_rows);
+        self.tile_index = (tile_row << log2_cols) + tile_col;
+        let (col_start, col_end) = tile_span(tile_col, mi_cols, log2_cols);
+        self.tile_mi_col_start = col_start;
+        self.tile_mi_col_end = col_end;
+        let (mut mi_row, row_end) = tile_span(tile_row, mi_rows, log2_rows);
+        while mi_row < row_end {
+            self.left_ctx = [[0; 16]; 3];
+            self.partition_ctx.new_row();
+            let mut mi_col = col_start;
+            while mi_col < col_end {
+                self.encode_partition(d, mi_row, mi_col, BLOCK_64X64);
+                mi_col += 8;
+            }
+            mi_row += 8;
         }
     }
 
@@ -646,6 +822,10 @@ impl<'a> FrameEncoder<'a> {
         let txw = 1usize << tx_size;
         let x0 = ((place.mi_col * 8) >> sx) + 4 * col;
         let y0 = ((place.mi_row * 8) >> sy) + 4 * row;
+        // In the reconstruction, which may be a strip starting `px_x0` into
+        // the frame; the frame's own right edge, there too.
+        let px_x0 = self.px_x0[plane.min(2)];
+        let frame_width = self.plane_w[plane.min(2)].saturating_sub(px_x0);
         let p = &mut self.recon.planes[plane.min(2)];
         let edges = Edges {
             have_top: row != 0 || place.mi_row != 0,
@@ -653,13 +833,13 @@ impl<'a> FrameEncoder<'a> {
             have_right: col + txw < (1usize << bwl),
             past_right: place.mb_to_right_edge < 0,
             past_bottom: place.mb_to_bottom_edge < 0,
-            frame_width: p.width,
+            frame_width,
             frame_height: p.height,
         };
         intra::predict(
             &mut p.data,
             p.stride,
-            x0,
+            x0.saturating_sub(px_x0),
             y0,
             mode,
             tx_size,
@@ -699,6 +879,10 @@ impl<'a> FrameEncoder<'a> {
         let txw = 1usize << tx_size;
         let x0 = place.mi_col * 8 + 4 * col;
         let y0 = place.mi_row * 8 + 4 * row;
+        // Both pictures at the reconstruction's coordinates, a strip's
+        // starting `px_x0` into the frame: the source read from there on.
+        let px_x0 = self.px_x0[0];
+        let frame_width = self.plane_w[0].saturating_sub(px_x0);
         let p = &mut self.recon.planes[0];
         let s = &self.src.planes[0];
         let edges = Edges {
@@ -707,15 +891,15 @@ impl<'a> FrameEncoder<'a> {
             have_right: col + txw < (1usize << bwl),
             past_right: place.mb_to_right_edge < 0,
             past_bottom: place.mb_to_bottom_edge < 0,
-            frame_width: p.width,
+            frame_width,
             frame_height: p.height,
         };
         intra::predict_from(
-            &s.data,
+            s.data.get(px_x0..).unwrap_or(&[]),
             s.stride,
             &mut p.data,
             p.stride,
-            x0,
+            x0.saturating_sub(px_x0),
             y0,
             mode,
             tx_size,
@@ -747,7 +931,7 @@ impl<'a> FrameEncoder<'a> {
         m.bh = pos.bh;
         let predicted = inter::build_inter_predictors(
             self.recon,
-            0,
+            self.px_x0[0],
             &self.pred_refs,
             &m,
             &pos,
@@ -975,7 +1159,7 @@ impl<'a> FrameEncoder<'a> {
             let pos = self.block_pos(mi_row, mi_col, bsize);
             let predicted = inter::build_inter_predictors_sb(
                 self.recon,
-                0,
+                self.px_x0[0],
                 &self.pred_refs,
                 &mi,
                 &pos,
@@ -1389,10 +1573,13 @@ impl<'a> FrameEncoder<'a> {
     fn subtract(&mut self, plane: usize, x0: usize, y0: usize, n: usize) {
         let s = &self.src.planes[plane.min(2)];
         let p = &self.recon.planes[plane.min(2)];
+        // The reconstruction's column: a strip starts `px_x0` in.
+        let px = x0.checked_sub(self.px_x0[plane.min(2)]);
         for r in 0..n {
             let (srow, prow) = (
                 s.data.get((y0 + r) * s.stride + x0..).unwrap_or(&[]),
-                p.data.get((y0 + r) * p.stride + x0..).unwrap_or(&[]),
+                px.and_then(|x| p.data.get((y0 + r) * p.stride + x..))
+                    .unwrap_or(&[]),
             );
             let drow = self.diff.get_mut(r * n..(r + 1) * n).unwrap_or(&mut []);
             for ((d, &a), &b) in drow.iter_mut().zip(srow).zip(prow) {
@@ -1455,8 +1642,9 @@ impl<'a> FrameEncoder<'a> {
             }
             if eob > 0 {
                 any = true;
+                let px = x0.checked_sub(self.px_x0[plane.min(2)]);
                 let p = &mut self.recon.planes[plane.min(2)];
-                if let Some(dst) = p.data.get_mut(y0 * p.stride + x0..) {
+                if let Some(dst) = px.and_then(|x| p.data.get_mut(y0 * p.stride + x..)) {
                     idct::inverse_transform_add(
                         tx_size, tx_type, lossless, eob, dqcoeff, dst, p.stride, 8,
                     );
@@ -1525,8 +1713,9 @@ impl<'a> FrameEncoder<'a> {
                 }
                 if eob > 0 {
                     any = true;
+                    let px = x0.checked_sub(self.px_x0[plane.min(2)]);
                     let p = &mut self.recon.planes[plane.min(2)];
-                    if let Some(dst) = p.data.get_mut(y0 * p.stride + x0..) {
+                    if let Some(dst) = px.and_then(|x| p.data.get_mut(y0 * p.stride + x..)) {
                         idct::inverse_transform_add(
                             tx_size, DCT_DCT, lossless, eob, dqcoeff, dst, p.stride, 8,
                         );

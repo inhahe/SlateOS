@@ -3732,7 +3732,17 @@ lane C's `guitk`.
     reference encode at 350x286 (`tests/data/encoder/rt8small.ivf`) is
     byte-identical for all 90 frames, the traces agreeing on all 152,823
     lines. Every frame size now makes `vpxenc`'s frames.
-    `[ ]` Threads.
+    `[x]` Threads (§1342): each tile column on a thread of its own, into a
+    strip with its own copy of the decisions' state, put together in column
+    order -- the same bytes on any number of threads, and `vpxenc`'s with
+    the same `--tile-columns` (two more reference encodes, four columns at
+    1280x720 and two at 651x357, match on one to four threads). By default a
+    picture has as many columns as its width allows, as `vpxenc`'s does.
+    `[-]` Speed: the hot paths rewritten to vectorise for SSE2, exactly --
+    the sub-pixel variance, the quantisers (raster order and inverse scans),
+    the 8x8 DCT (eight columns at once in 32 bits), the block measures; 2.3x
+    fewer instructions for the first reference (callgrind). Encoding speed in
+    `tests/bench.rs` (`bench_vp9_encode`).
 
 - `[-]` `[F]` **AVIF pictures**, decided 2026-09-27 (§1333): a HEIF container reader
   and a port of rav1d (dav1d in Rust, BSD) in `gui/imagecodec`, so AVIF opens

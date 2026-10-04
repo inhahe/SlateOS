@@ -19,7 +19,7 @@ and Backspace `pop`s it.
 (`known-issues-resolved/E-thirty-applications-answer-f1-with-nothing.md`).
 
 **The twenty-nine:** credmanager (the entry form, the master password,
-search), lockscreen (the password), passwordgen (its input).
+search), passwordgen (its input).
 
 Not among them: `terminal`, whose typing goes to the shell's own line
 editor; `typingtutor`, where a line typed straight through is the exercise;
@@ -99,4 +99,5 @@ the two sorts on them take Shift (design-decisions 1233)); dbviewer
 (2026-10-04: the SQL editor and the filter's value edit at a caret -- not
 cell editing, as listed -- and the editor draws the query as it was typed);
 dictionary (2026-10-04: the query edits at a caret; AltGr types into it;
-Ctrl+Home and Ctrl+End take the list to its ends).
+Ctrl+Home and Ctrl+End take the list to its ends); lockscreen (2026-10-04:
+the password edits at a caret between its dots, a masked field's).

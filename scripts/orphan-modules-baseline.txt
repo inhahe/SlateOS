@@ -4,7 +4,7 @@
 # public items which no other file in the repository names.  57 of them, 113k
 # lines, were found the day this file was created; the list is a debt ledger,
 # not an allow-list, and the only edit it should ever receive is a deletion.
-# 33 remain.  Paid off so far: apps/explorer's columns.rs, thumbs.rs and
+# 32 remain.  Paid off so far: apps/explorer's columns.rs, thumbs.rs and
 # dropzone.rs — 5,611 lines between them — wired into the app that declared
 # them; then the desktop shell's focus_assist.rs, hotkeys.rs, osd.rs,
 # run_dialog.rs and window_rules.rs together with gui/toolkit's modal.rs; and
@@ -232,7 +232,9 @@
 # converter's, the radio groups in undelete, netmanager and podcast), lane
 # E's since the split, asked for in
 # requests/c-e-the-toolkit-has-switches-checkboxes-radio-buttons-and-drop-downs.md.
-# Delete each line when an application draws one.
+# Delete each line when an application draws one.  radio.rs's went on
+# 2026-10-03, when apps/undelete drew its scan modes as the toolkit's radio
+# buttons; dropdown.rs's stays until an application draws a drop-down.
 
 # Another line was ADDED on 2026-09-28, by lane F:
 # gui/imagecodec/src/avif/animation.rs, the player for animated AVIF pictures
@@ -252,6 +254,16 @@
 # their own copy of an editor and are lane E's -- asked for in
 # requests/c-e-the-toolkit-has-a-code-editor.md.  Delete the line when an
 # application draws a CodeView.
+#
+# Another line was ADDED on 2026-10-03, by lane E:
+# apps/mediaprobe/src/mkv/demux.rs, the Matroska and WebM demuxer
+# (`mediaprobe::mkv::Demuxer`), which gives a file's frames back in order with
+# their times, and seeks.  It is held to libvpx's own pictures by mediaprobe's
+# VP9 vector test -- a test, so this scan rightly does not count it.  Its caller
+# is the video player's playback, lane E's own, which waits on lane F exposing
+# the YUV-to-RGB conversion its AVIF decoder already has
+# (requests/f-e-vp9-video-decodes-now.md) rather than carrying a second copy.
+# Delete the line when the player demuxes a file.
 #
 # THIS HEADER LIVES IN scripts/scan-orphan-modules.py, NOT HERE.  `--pin`
 # rewrites this file from that constant, so anything added directly to the
@@ -281,7 +293,7 @@
 # reader, including the lane that wrote it, that a decided question was still
 # open.  A stale blocker is indistinguishable from a real one from the
 # outside, and this one had sat for a week.
-apps/installer/src/grub.rs
+apps/mediaprobe/src/mkv/demux.rs
 apps/settings/src/remote.rs
 gui/desktop/src/about.rs
 gui/desktop/src/bluetooth.rs
@@ -312,5 +324,4 @@ gui/toolkit/src/codeview.rs
 gui/toolkit/src/context_ext.rs
 gui/toolkit/src/dirtree.rs
 gui/toolkit/src/dropdown.rs
-gui/toolkit/src/radio.rs
 netproto/src/dhcp.rs

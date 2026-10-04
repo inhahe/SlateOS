@@ -84,3 +84,14 @@ answers the desktop gives, one per pick, at the turn the pick is open --
 the user's click, for a test that cannot call `answer_pick` because the
 loop is running. `refuse` set after the window is open refuses the pick.
 `gui/window/src/app.rs`'s tests (`a_pick_*`) show all three outcomes.
+
+## Used (lane E, 2026-10-04)
+
+The process explorer's toolbar has an Identify button, and Ctrl+I, that start
+a pick through `take_pick`; pressing it again or Escape gives the pick up.
+`window_picked` names the program the window belongs to and selects its
+process in the list -- or says the window's program reached the desktop over
+the network and cannot be named, that its process is not in the list or is
+hidden by the filter, that nothing was picked, or that the pick was refused
+and why. Part 3 of the known issue is done; the other three panels still wait
+on lanes A and D.

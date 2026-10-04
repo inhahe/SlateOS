@@ -327,6 +327,75 @@ MUTATIONS = [
     ),
 ]
 
+ASK = "the_identify_button_and_ctrl_i_ask_for_a_window_pick"
+NAMED = "a_picked_window_names_and_selects_its_program"
+BUTTONS = "every_toolbar_button_is_pressed_where_it_is_drawn"
+
+MUTATIONS += [
+    # The window pick, through lane F's `App::take_pick` (2026-10-04), and
+    # the toolbar pressed where it is drawn.
+    (
+        "the Identify button asks for nothing",
+        "                ToolbarAction::IdentifyWindow => self.toggle_window_pick(),\n",
+        "                ToolbarAction::IdentifyWindow => {}\n",
+        [ASK],
+    ),
+    (
+        "pressing Identify again does not give the pick up",
+        "        if self.window_picker.active {\n            self.cancel_window_pick();\n        } else {\n",
+        "        if false {\n            self.cancel_window_pick();\n        } else {\n",
+        [ASK],
+    ),
+    (
+        "one press asks for a pick at every turn",
+        "        self.pick_request.take()\n",
+        "        self.pick_request\n",
+        [ASK],
+    ),
+    (
+        "Escape does not give the pick up",
+        "        if key.key == Key::Escape && self.window_picker.active {\n            self.cancel_window_pick();\n            return EventResult::Consumed;\n        }\n",
+        "",
+        [ASK],
+    ),
+    (
+        "AltGr+I picks",
+        "        if key.key == Key::I && key.modifiers.ctrl && !key.modifiers.alt && !key.modifiers.super_key\n",
+        "        if key.key == Key::I && key.modifiers.ctrl && !key.modifiers.super_key\n",
+        [ASK],
+    ),
+    (
+        "nothing says the next click is a pick",
+        "        if self.window_picker.active {\n            tree.commands.extend(self.window_picker.render(\n",
+        "        if false {\n            tree.commands.extend(self.window_picker.render(\n",
+        [ASK],
+    ),
+    (
+        "the picked window's process is not selected",
+        "                        self.select_row(row);\n",
+        "",
+        [NAMED],
+    ),
+    (
+        "the list the process is selected in is not shown",
+        "                            self.set_tab(Tab::Processes);\n",
+        "",
+        [NAMED],
+    ),
+    (
+        "a pick that came to nothing leaves the banner up",
+        "        // Whatever the answer, the pick is over.\n        self.window_picker.cancel();\n",
+        "",
+        [NAMED],
+    ),
+    (
+        "a press beside a button presses it",
+        "        .find(|(r, _)| r.contains(x, y))\n",
+        "        .find(|(r, _)| x < r.right() + 6.0 && y >= r.y && y < r.bottom())\n",
+        [BUTTONS],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "procexplorer", timeout=600, only=only))

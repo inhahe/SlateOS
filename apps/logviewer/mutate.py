@@ -467,6 +467,35 @@ MUTATIONS = [
     ),
 ]
 
+MODAL = "the_shortcut_list_takes_every_key_while_it_is_up"
+
+MUTATIONS += [
+    # The shortcut list is modal for the keys (2026-10-04; known-issues
+    # E-a-press-goes-through-the-shortcut-card-to-the-control-drawn-under-it).
+    (
+        "a key reaches the log under the list of keys",
+        "        if self.show_help {\n"
+        "            if key.key == Key::Escape {\n"
+        "                self.show_help = false;\n"
+        "            }\n"
+        "            return EventResult::Consumed;\n"
+        "        }\n",
+        "        if key.key == Key::Escape && self.show_help {\n"
+        "            self.show_help = false;\n"
+        "            return EventResult::Consumed;\n"
+        "        }\n",
+        [MODAL],
+    ),
+    (
+        "Escape does not put the list of keys away",
+        "            if key.key == Key::Escape {\n"
+        "                self.show_help = false;\n"
+        "            }\n",
+        "",
+        [MODAL],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "logviewer", timeout=900, only=only))

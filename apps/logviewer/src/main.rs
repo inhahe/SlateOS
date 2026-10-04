@@ -1520,13 +1520,19 @@ impl App {
         if !key.pressed {
             return EventResult::Ignored;
         }
-        // The shortcut list, whatever has the keyboard.
+        // The shortcut list, whatever has the keyboard -- and modal while it
+        // is up: F1 or Escape puts it away, and no other key reaches the log
+        // it covers. It took only those two, so a letter moved the severity
+        // floor under it, an arrow the selection, and a letter typed into a
+        // search box the list was covering.
         if key.key == Key::F1 {
             self.show_help = !self.show_help;
             return EventResult::Consumed;
         }
-        if key.key == Key::Escape && self.show_help {
-            self.show_help = false;
+        if self.show_help {
+            if key.key == Key::Escape {
+                self.show_help = false;
+            }
             return EventResult::Consumed;
         }
         // Chords first, and apart. This match reads `key.key` and nothing
@@ -6390,6 +6396,73 @@ mod tests {
         assert!(
             app.show_help,
             "F1 reaches the list whatever has the keyboard"
+        );
+    }
+
+    /// **The shortcut list is modal for the keys.** It took only F1 and
+    /// Escape: with it up, `W` moved the severity floor under it, `L` turned
+    /// wrapping over, Ctrl+L the line numbers, and a letter was typed into a
+    /// search box it covered. The controls are the same keys with it down.
+    #[test]
+    fn the_shortcut_list_takes_every_key_while_it_is_up() {
+        let mut app = App::with_sample();
+        let (floor, wrap, numbers) = (app.filter.min_level, app.wrap_lines, app.show_line_numbers);
+        assert_ne!(
+            floor,
+            LogLevel::Warn,
+            "the fixture starts at the Warn floor"
+        );
+
+        app.handle_event(&press(Key::F1));
+        assert!(app.show_help);
+        app.handle_event(&press(Key::W));
+        app.handle_event(&press(Key::L));
+        app.handle_event(&ctrl(Key::L));
+        assert!(
+            app.show_help,
+            "a key other than F1 or Escape put the list away"
+        );
+        assert_eq!(
+            app.filter.min_level, floor,
+            "W moved the floor under the list"
+        );
+        assert_eq!(
+            app.wrap_lines, wrap,
+            "L turned wrapping over under the list"
+        );
+        assert_eq!(
+            app.show_line_numbers, numbers,
+            "Ctrl+L reached the log under it"
+        );
+        app.handle_event(&press(Key::Escape));
+        assert!(!app.show_help, "Escape left the list up");
+
+        // With the search box holding the keyboard under it.
+        app.handle_event(&press(Key::Slash));
+        assert!(app.search_focused);
+        let query = app.filter.search_query.clone();
+        app.handle_event(&press(Key::F1));
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::X,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::from("x"),
+        }));
+        assert_eq!(
+            app.filter.search_query, query,
+            "a letter was typed under the list"
+        );
+        app.handle_event(&press(Key::F1));
+        assert!(!app.show_help, "F1 left the list up");
+        app.handle_event(&press(Key::Escape));
+
+        // The controls.
+        app.search_focused = false;
+        app.handle_event(&press(Key::W));
+        assert_eq!(
+            app.filter.min_level,
+            LogLevel::Warn,
+            "control: W moves nothing"
         );
     }
 

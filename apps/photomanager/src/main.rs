@@ -114,6 +114,7 @@ use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::scroll_window;
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use oswindow::{Event, RenderTree};
 use std::process::ExitCode;
@@ -1285,6 +1286,9 @@ pub struct PhotoApp {
     /// pixel offset could only express positions the renderer then rounds
     /// away.
     pub grid_scroll: usize,
+    /// The wheel's unspent fraction of a row of the grid, so that a touchpad's
+    /// small turns add up to a row rather than each rounding to nothing.
+    grid_wheel: wheel::Accumulator,
     /// Whether the shortcut card is up.
     pub show_help: bool,
     pub show_info_panel: bool,
@@ -1449,6 +1453,7 @@ impl PhotoApp {
             active_panel: ActivePanel::PhotoGrid,
             thumb_size_idx: 1,
             grid_scroll: 0,
+            grid_wheel: wheel::Accumulator::default(),
             show_help: false,
             show_info_panel: true,
             slideshow: None,
@@ -2647,6 +2652,41 @@ impl PhotoApp {
         }
     }
 
+    /// Turn the wheel at a point: over the grid, one row of thumbnails a
+    /// notch. Returns whether the grid moved.
+    ///
+    /// The grid had no wheel at all -- a library of four hundred pictures was
+    /// scrolled by the arrow keys or not at all. A row a notch rather than the
+    /// three a list of text moves, because a row here is a whole thumbnail
+    /// tall, up to two hundred points, and three of them is most of a screen
+    /// gone by between one notch and the next.
+    fn scroll_grid(&mut self, x: f32, y: f32, dy: f32) -> bool {
+        // Not under an open menu: the picture it is about would scroll out
+        // from under it.
+        if self.view_mode != ViewMode::Grid
+            || self.photo_menu.is_some()
+            || !self.content_rect().contains(x, y)
+        {
+            return false;
+        }
+        let rows = self.grid_wheel.rows_at(dy, 1.0);
+        let before = self.grid_window().start;
+        self.grid_scroll = scroll_window::shift(before, rows);
+        // Pulled back to the last full screen: a wheel turned on past the end
+        // would otherwise bank rows that the first turn back has to spend
+        // before anything moves.
+        self.grid_scroll = self.grid_window().start;
+        self.grid_scroll != before
+    }
+
+    /// Back to the top of the grid, because what it shows or how it is laid
+    /// out has changed -- and with it any fraction of a notch the wheel had
+    /// banked, which belongs to the grid as it was.
+    fn scroll_grid_to_top(&mut self) {
+        self.grid_scroll = 0;
+        self.grid_wheel.reset();
+    }
+
     // ------------------------------------------------------------------
     // Input
     // ------------------------------------------------------------------
@@ -2655,18 +2695,22 @@ impl PhotoApp {
     pub fn handle_event(&mut self, event: &Event) -> bool {
         // The list of keys is drawn over everything, the picker and an open
         // menu included, so it has the pointer first: a press with any button
-        // puts it away and does nothing else. It used to reach the photograph
-        // drawn under the list -- the left button selected it, and the right
-        // raised its menu behind the list. A move or a release is not a press,
-        // and passes; the list's keys are in `handle_key`.
+        // puts it away and does nothing else, and the wheel scrolls nothing it
+        // covers. A press used to reach the photograph drawn under the list --
+        // the left button selected it, and the right raised its menu behind
+        // the list. A move or a release is not a press, and passes; the list's
+        // keys are in `handle_key`.
         if self.show_help
-            && let Event::Mouse(MouseEvent {
-                kind: MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_),
-                ..
-            }) = event
+            && let Event::Mouse(MouseEvent { kind, .. }) = event
         {
-            self.show_help = false;
-            return true;
+            match kind {
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                    self.show_help = false;
+                    return true;
+                }
+                MouseEventKind::Scroll { .. } => return false,
+                _ => {}
+            }
         }
 
         // The picker takes input first while it is up, or a click meant for a
@@ -2788,6 +2832,9 @@ impl PhotoApp {
                 return true;
             }
         }
+        if let MouseEventKind::Scroll { dy, .. } = event.kind {
+            return self.scroll_grid(event.x, event.y, dy);
+        }
         if matches!(event.kind, MouseEventKind::Press(MouseButton::Right))
             && self.view_mode == ViewMode::Grid
             && let Some(pid) = self.photo_at(event.x, event.y)
@@ -2849,11 +2896,11 @@ impl PhotoApp {
             }
             ToolbarControl::Sort => {
                 self.cycle_sort();
-                self.grid_scroll = 0;
+                self.scroll_grid_to_top();
             }
             ToolbarControl::ThumbSize => {
                 self.cycle_thumb_size();
-                self.grid_scroll = 0;
+                self.scroll_grid_to_top();
             }
             ToolbarControl::Slideshow => {
                 if self.slideshow.is_some() {
@@ -2875,7 +2922,7 @@ impl PhotoApp {
         self.sidebar_selection = target;
         // A grid scrolled forty rows into one album shows nothing at all of a
         // shorter one, and a selection from the old album is not in the new.
-        self.grid_scroll = 0;
+        self.scroll_grid_to_top();
         self.selected_photo = None;
         self.selected_photos.clear();
     }
@@ -3122,7 +3169,7 @@ impl PhotoApp {
         // user looking at the same screen, with the only evidence of success
         // one more row in a list.
         self.sidebar_selection = SidebarItem::Album(id);
-        self.grid_scroll = 0;
+        self.scroll_grid_to_top();
     }
 
     fn handle_key(&mut self, event: &KeyEvent) -> bool {
@@ -3207,7 +3254,7 @@ impl PhotoApp {
                 self.show_info_panel = !self.show_info_panel;
                 // The content area just changed width, so a column count and
                 // therefore a row count changed with it.
-                self.grid_scroll = 0;
+                self.scroll_grid_to_top();
                 true
             }
             's' | 'S' => {
@@ -6692,12 +6739,13 @@ mod tests {
     }
 
     /// **A press with the list of keys up puts it away and does nothing
-    /// else.** It reached the photograph drawn under the list: the left button
-    /// selected it, and the right raised its menu behind the list. The
-    /// controls are the same presses with the list down.
+    /// else, and the wheel scrolls nothing under it.** A press reached the
+    /// photograph drawn under the list: the left button selected it, and the
+    /// right raised its menu behind the list. The controls are the same
+    /// presses and turn with the list down.
     #[test]
     fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
-        let mut app = library(20);
+        let mut app = library(400);
         let visible = app.visible_photos();
         let rect = app.thumb_rect(5).expect("a sixth thumbnail");
         let (x, y) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
@@ -6729,7 +6777,22 @@ mod tests {
             "the right button went through the list"
         );
 
+        app.handle_event(&key(Key::F1));
+        app.handle_event(&wheel_over_grid(&app, -1.0));
+        assert_eq!(
+            app.grid_scroll, 0,
+            "the wheel scrolled the grid under the list"
+        );
+        assert!(app.show_help, "the wheel put the list away");
+        app.handle_event(&key(Key::Escape));
+
         // The controls.
+        app.handle_event(&wheel_over_grid(&app, -1.0));
+        assert_eq!(
+            app.grid_scroll, 1,
+            "control: the wheel scrolls nothing at all"
+        );
+        app.handle_event(&wheel_over_grid(&app, 1.0));
         app.handle_event(&click(x, y));
         assert_eq!(
             app.selected_photo,
@@ -6741,6 +6804,130 @@ mod tests {
             app.photo_menu.is_some(),
             "control: the right button raises no menu"
         );
+    }
+
+    /// A turn of the wheel over the middle of the grid.
+    fn wheel_over_grid(app: &PhotoApp, dy: f32) -> Event {
+        let content = app.content_rect();
+        Event::Mouse(MouseEvent {
+            x: content.x + content.w / 2.0,
+            y: content.y + content.h / 2.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy },
+        })
+    }
+
+    /// **The wheel scrolls the grid, a row of thumbnails a notch.** The grid
+    /// had no wheel at all: a library of four hundred pictures moved by the
+    /// arrow keys or not at all.
+    #[test]
+    fn the_wheel_scrolls_the_grid_a_row_a_notch() {
+        let mut app = library(400);
+        assert!(
+            app.handle_event(&wheel_over_grid(&app, -1.0)),
+            "a notch towards the reader moved nothing"
+        );
+        assert_eq!(app.grid_scroll, 1);
+        app.handle_event(&wheel_over_grid(&app, -2.0));
+        assert_eq!(app.grid_scroll, 3, "two notches at once are two rows");
+        app.handle_event(&wheel_over_grid(&app, 1.0));
+        assert_eq!(
+            app.grid_scroll, 2,
+            "a notch away from the reader is a row back"
+        );
+        // A touchpad's small turns add up rather than each rounding to nothing.
+        app.handle_event(&wheel_over_grid(&app, -0.5));
+        assert_eq!(app.grid_scroll, 2);
+        app.handle_event(&wheel_over_grid(&app, -0.5));
+        assert_eq!(app.grid_scroll, 3, "two half notches are a row");
+    }
+
+    /// **The wheel scrolls the grid and nothing else.** Not over the sidebar,
+    /// not under an open menu -- the picture it is about would scroll out from
+    /// under it -- and not while a single picture is shown; and at the top it
+    /// stays at the top.
+    #[test]
+    fn the_wheel_scrolls_the_grid_and_nothing_else() {
+        let mut app = library(400);
+        assert!(
+            !app.handle_event(&wheel_over_grid(&app, 1.0)),
+            "moved above the top"
+        );
+        assert_eq!(app.grid_scroll, 0);
+
+        let over_sidebar = Event::Mouse(MouseEvent {
+            x: SIDEBAR_WIDTH / 2.0,
+            y: app.content_rect().y + 40.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -1.0 },
+        });
+        assert!(!app.handle_event(&over_sidebar));
+        assert_eq!(
+            app.grid_scroll, 0,
+            "the wheel over the sidebar scrolled the grid"
+        );
+
+        let (x, y) = first_card_point(&app);
+        app.handle_event(&right_click(x, y));
+        assert!(app.photo_menu.is_some(), "the fixture raised no menu");
+        app.handle_event(&wheel_over_grid(&app, -1.0));
+        assert_eq!(app.grid_scroll, 0, "the grid scrolled under an open menu");
+        app.photo_menu = None;
+
+        app.view_mode = ViewMode::Single;
+        app.handle_event(&wheel_over_grid(&app, -1.0));
+        assert_eq!(
+            app.grid_scroll, 0,
+            "the wheel scrolled a grid that is not shown"
+        );
+
+        app.view_mode = ViewMode::Grid;
+        app.handle_event(&wheel_over_grid(&app, -1.0));
+        assert_eq!(
+            app.grid_scroll, 1,
+            "control: the wheel scrolls nothing at all"
+        );
+    }
+
+    /// **A wheel turned on past the end banks nothing**: the first notch back
+    /// moves the grid, rather than spending the rows turned past the end.
+    #[test]
+    fn turning_the_wheel_on_past_the_end_banks_nothing() {
+        let mut app = library(400);
+        app.handle_event(&wheel_over_grid(&app, -1000.0));
+        let last = app.grid_scroll;
+        assert!(last > 1, "the fixture does not scroll");
+        assert_eq!(
+            last,
+            app.grid_window().start,
+            "scrolled past the last screen"
+        );
+        assert!(
+            !app.handle_event(&wheel_over_grid(&app, -1.0)),
+            "moved past the end"
+        );
+        assert!(app.handle_event(&wheel_over_grid(&app, 1.0)));
+        assert_eq!(
+            app.grid_scroll,
+            last - 1,
+            "the first notch back moved nothing"
+        );
+    }
+
+    /// **A fraction of a notch belongs to the grid it was turned over.** Half
+    /// a notch, another album, half a notch: the second half is not the
+    /// first's other half, because the first was turned over a grid that is
+    /// gone.
+    #[test]
+    fn a_fraction_of_a_notch_does_not_outlive_the_grid() {
+        let mut app = library(400);
+        app.handle_event(&wheel_over_grid(&app, -0.5));
+        app.select_sidebar(SidebarItem::AllPhotos);
+        app.handle_event(&wheel_over_grid(&app, -0.5));
+        assert_eq!(
+            app.grid_scroll, 0,
+            "half a notch over the old grid moved the new"
+        );
+        app.handle_event(&wheel_over_grid(&app, -0.5));
+        assert_eq!(app.grid_scroll, 1, "control: half notches do not add up");
     }
 
     #[test]

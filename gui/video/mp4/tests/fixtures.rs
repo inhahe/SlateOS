@@ -34,29 +34,55 @@ fn data(name: &str) -> String {
     format!("{}/tests/data/{name}", env!("CARGO_MANIFEST_DIR"))
 }
 
-/// One stream as `ffprobe` printed it: its codec tag, time base, and its
-/// picture's size (`WxH`) or its sound's rate and channels (`RHz/C`).
-type Stream = (String, u64, u64, String);
+/// One stream as `ffprobe` printed it.
+#[derive(Debug)]
+struct Stream {
+    tag: String,
+    time_base: (u64, u64),
+    /// Its picture's size (`WxH`) or its sound's rate and channels
+    /// (`RHz/C`).
+    shape: String,
+    /// `duration_ts`: how long it lasts, in its ticks.
+    duration: String,
+    /// A picture's `r_frame_rate` (`-` for sound).
+    rate: String,
+}
 
-/// A fixture's answers: each stream, and the packets.
-fn answers(name: &str) -> (Vec<Stream>, Vec<Line>) {
+/// A fixture's answers: each stream, each `look` line's words after the
+/// stream's index, the packets, and whether FFmpeg refuses the file.
+struct Answers {
+    streams: Vec<Stream>,
+    looks: Vec<String>,
+    packets: Vec<Line>,
+    refused: bool,
+}
+
+fn answers(name: &str) -> Answers {
     let base = name.rsplit_once('.').unwrap().0;
     let path = data(&format!("{base}.txt"));
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
-    let (mut streams, mut packets) = (Vec::new(), Vec::new());
+    let mut a = Answers {
+        streams: Vec::new(),
+        looks: Vec::new(),
+        packets: Vec::new(),
+        refused: false,
+    };
     for line in text.lines().filter(|l| !l.starts_with('#')) {
         let w: Vec<&str> = line.split(' ').collect();
         match w[0] {
             "stream" => {
                 let (num, den) = w[3].split_once('/').unwrap();
-                streams.push((
-                    w[2].to_owned(),
-                    num.parse().unwrap(),
-                    den.parse().unwrap(),
-                    w[4].to_owned(),
-                ));
+                a.streams.push(Stream {
+                    tag: w[2].to_owned(),
+                    time_base: (num.parse().unwrap(), den.parse().unwrap()),
+                    shape: w[4].to_owned(),
+                    duration: w[5].to_owned(),
+                    rate: w[6].to_owned(),
+                });
             }
-            "packet" => packets.push(Line {
+            "look" => a.looks.push(w[2..].join(" ")),
+            "refused" => a.refused = true,
+            "packet" => a.packets.push(Line {
                 stream: w[1].parse().unwrap(),
                 pts: w[2].parse().unwrap(),
                 dts: w[3].parse().unwrap(),
@@ -70,7 +96,123 @@ fn answers(name: &str) -> (Vec<Stream>, Vec<Line>) {
             other => panic!("{path}: a line this test does not know: {other}"),
         }
     }
-    (streams, packets)
+    a
+}
+
+/// `num/den` in lowest terms, as ffprobe prints a rate.
+fn reduced(num: u64, den: u64) -> String {
+    let (mut a, mut b) = (num, den);
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    match a {
+        0 => format!("{num}/{den}"),
+        g => format!("{}/{}", num / g, den / g),
+    }
+}
+
+/// FFmpeg's names for ITU-T H.273's colour primaries (`libavutil/pixdesc.c`),
+/// as ffprobe prints them.
+fn primaries_name(v: u16) -> &'static str {
+    match v {
+        0 | 3 => "reserved",
+        1 => "bt709",
+        4 => "bt470m",
+        5 => "bt470bg",
+        6 => "smpte170m",
+        7 => "smpte240m",
+        8 => "film",
+        9 => "bt2020",
+        10 => "smpte428",
+        11 => "smpte431",
+        12 => "smpte432",
+        22 => "ebu3213",
+        256 => "vgamut",
+        _ => "unknown",
+    }
+}
+
+/// FFmpeg's names for the transfer characteristics.
+fn transfer_name(v: u16) -> &'static str {
+    match v {
+        0 | 3 => "reserved",
+        1 => "bt709",
+        4 => "bt470m",
+        5 => "bt470bg",
+        6 => "smpte170m",
+        7 => "smpte240m",
+        8 => "linear",
+        9 => "log100",
+        10 => "log316",
+        11 => "iec61966-2-4",
+        12 => "bt1361e",
+        13 => "iec61966-2-1",
+        14 => "bt2020-10",
+        15 => "bt2020-12",
+        16 => "smpte2084",
+        17 => "smpte428",
+        18 => "arib-std-b67",
+        256 => "vlog",
+        _ => "unknown",
+    }
+}
+
+/// FFmpeg's names for the matrix coefficients (its "colour spaces").
+fn space_name(v: u16) -> &'static str {
+    match v {
+        0 => "gbr",
+        1 => "bt709",
+        3 => "reserved",
+        4 => "fcc",
+        5 => "bt470bg",
+        6 => "smpte170m",
+        7 => "smpte240m",
+        8 => "ycgco",
+        9 => "bt2020nc",
+        10 => "bt2020c",
+        11 => "smpte2085",
+        12 => "chroma-derived-nc",
+        13 => "chroma-derived-c",
+        14 => "ictcp",
+        15 => "ipt-c2",
+        16 => "ycgco-re",
+        17 => "ycgco-ro",
+        _ => "unknown",
+    }
+}
+
+/// A track's `look` line, after its index, as the generator writes
+/// ffprobe's: the pixel's shape (ffprobe shows only a positive one), the
+/// colour, the display matrix and the crop.
+fn look(t: &mp4::Track) -> String {
+    let v = t.video;
+    let sar = match v.and_then(|v| v.pixel_aspect) {
+        Some((n, d)) if n > 0 && d > 0 => format!("{n}:{d}"),
+        _ => "N/A".to_owned(),
+    };
+    let colour = match v.and_then(|v| v.colour) {
+        Some(c) => format!(
+            "{}/{}/{}/{}",
+            primaries_name(c.primaries),
+            transfer_name(c.transfer),
+            space_name(c.matrix),
+            match c.full_range {
+                Some(true) => "pc",
+                Some(false) => "tv",
+                None => "unknown",
+            }
+        ),
+        None => "unknown/unknown/unknown/unknown".to_owned(),
+    };
+    let matrix = match v.and_then(|v| v.matrix) {
+        Some(m) => m.map(|n| n.to_string()).join(","),
+        None => "none".to_owned(),
+    };
+    let crop = v
+        .map_or([0; 4], |v| v.crop)
+        .map(|n| n.to_string())
+        .join(",");
+    format!("sar={sar} colour={colour} matrix={matrix} crop={crop}")
 }
 
 /// ffprobe's flags: K a key frame, D discarded, C cut short.
@@ -83,32 +225,62 @@ fn flags(p: &mp4::Packet) -> String {
     )
 }
 
-/// The fixture's streams and every packet -- the stream, times, duration,
-/// size, position, flags, bytes and samples to skip -- as FFmpeg's demuxer
-/// gives them.
+/// The fixture's streams -- codec tag, time base, picture or sound,
+/// duration, frame rate, and what a `look` line says of the picture -- and
+/// every packet -- the stream, times, duration, size, position, flags, bytes
+/// and samples to skip -- as FFmpeg's demuxer gives them; or, for a file
+/// FFmpeg refuses, a refusal.
 fn demuxes_as_ffmpeg_does(name: &str) {
-    let mut d =
-        Demuxer::open(File::open(data(name)).unwrap()).unwrap_or_else(|e| panic!("{name}: {e}"));
-    let (streams, expected) = answers(name);
+    let a = answers(name);
+    let opened = Demuxer::open(File::open(data(name)).unwrap());
+    if a.refused {
+        assert!(opened.is_err(), "{name}: FFmpeg refuses it, and it opened");
+        return;
+    }
+    let mut d = opened.unwrap_or_else(|e| panic!("{name}: {e}"));
+    let (streams, expected) = (&a.streams, &a.packets);
     assert_eq!(d.tracks().len(), streams.len(), "{name}: the streams");
-    for (t, (tag, num, den, shape)) in d.tracks().iter().zip(&streams) {
+    for (t, s) in d.tracks().iter().zip(streams) {
         let ours = String::from_utf8_lossy(&t.codec_tag).into_owned();
-        assert_eq!(&ours, tag, "{name}: track {}'s codec tag", t.id);
+        assert_eq!(ours, s.tag, "{name}: track {}'s codec tag", t.id);
         let our_shape = match (t.video, t.audio) {
             (Some(v), _) => format!("{}x{}", v.width, v.height),
             (_, Some(a)) => format!("{}Hz/{}", a.sample_rate, a.channels),
             _ => "-".to_owned(),
         };
         assert_eq!(
-            &our_shape, shape,
+            our_shape, s.shape,
             "{name}: track {}'s picture or sound",
             t.id
         );
         assert_eq!(
             (1, u64::from(t.timescale)),
-            (*num, *den),
+            s.time_base,
             "{name}: track {}'s time base",
             t.id
+        );
+        assert_eq!(
+            t.duration.to_string(),
+            s.duration,
+            "{name}: track {}'s duration",
+            t.id
+        );
+        // Where the crate finds one frame rate, FFmpeg's demuxer found it
+        // too; where it does not, ffprobe's figure is its own estimate.
+        if let Some(d) = t.video.and_then(|v| v.frame_duration) {
+            assert_eq!(
+                reduced(u64::from(t.timescale), u64::from(d)),
+                s.rate,
+                "{name}: track {}'s frame rate",
+                t.id
+            );
+        }
+    }
+    if !a.looks.is_empty() {
+        let ours: Vec<String> = d.tracks().iter().map(look).collect();
+        assert_eq!(
+            ours, a.looks,
+            "{name}: what the tracks say of their pictures"
         );
     }
     let mut got = Vec::new();
@@ -125,7 +297,7 @@ fn demuxes_as_ffmpeg_does(name: &str) {
             skip: p.skip_samples,
         });
     }
-    for (i, (g, e)) in got.iter().zip(&expected).enumerate() {
+    for (i, (g, e)) in got.iter().zip(expected).enumerate() {
         assert_eq!(g, e, "{name}: packet {i}");
     }
     assert_eq!(got.len(), expected.len(), "{name}: the packets");
@@ -279,6 +451,146 @@ fn packets_of_hoov() {
 #[test]
 fn packets_of_truncated() {
     demuxes_as_ffmpeg_does("truncated.mp4");
+}
+
+#[test]
+fn packets_of_both_rotations() {
+    demuxes_as_ffmpeg_does("both_rotations.mp4");
+}
+
+#[test]
+fn packets_of_clap() {
+    demuxes_as_ffmpeg_does("clap.mp4");
+}
+
+#[test]
+fn packets_of_clap_fraction() {
+    demuxes_as_ffmpeg_does("clap_fraction.mp4");
+}
+
+#[test]
+fn packets_of_clap_infinite() {
+    demuxes_as_ffmpeg_does("clap_infinite.mp4");
+}
+
+#[test]
+fn packets_of_clap_offset() {
+    demuxes_as_ffmpeg_does("clap_offset.mp4");
+}
+
+#[test]
+fn packets_of_clap_outside() {
+    demuxes_as_ffmpeg_does("clap_outside.mp4");
+}
+
+#[test]
+fn packets_of_clap_too_wide() {
+    demuxes_as_ffmpeg_does("clap_too_wide.mp4");
+}
+
+#[test]
+fn packets_of_clap_twice() {
+    demuxes_as_ffmpeg_does("clap_twice.mp4");
+}
+
+#[test]
+fn packets_of_colr_nclc_after_vpcc() {
+    demuxes_as_ffmpeg_does("colr_nclc_after_vpcc.mp4");
+}
+
+#[test]
+fn packets_of_colr_nclx() {
+    demuxes_as_ffmpeg_does("colr_nclx.mp4");
+}
+
+#[test]
+fn packets_of_colr_prof() {
+    demuxes_as_ffmpeg_does("colr_prof.mp4");
+}
+
+#[test]
+fn packets_of_colr_rare_codes() {
+    demuxes_as_ffmpeg_does("colr_rare_codes.mp4");
+}
+
+#[test]
+fn packets_of_colr_unknown_codes() {
+    demuxes_as_ffmpeg_does("colr_unknown_codes.mp4");
+}
+
+#[test]
+fn packets_of_matrix_stretch() {
+    demuxes_as_ffmpeg_does("matrix_stretch.mp4");
+}
+
+#[test]
+fn packets_of_mirror() {
+    demuxes_as_ffmpeg_does("mirror.mp4");
+}
+
+#[test]
+fn packets_of_movie_rotation() {
+    demuxes_as_ffmpeg_does("movie_rotation.mp4");
+}
+
+#[test]
+fn packets_of_pasp() {
+    demuxes_as_ffmpeg_does("pasp.mp4");
+}
+
+#[test]
+fn packets_of_pasp_no_horizontal() {
+    demuxes_as_ffmpeg_does("pasp_no_horizontal.mp4");
+}
+
+#[test]
+fn packets_of_pasp_no_vertical() {
+    demuxes_as_ffmpeg_does("pasp_no_vertical.mp4");
+}
+
+#[test]
+fn packets_of_pasp_reduced() {
+    demuxes_as_ffmpeg_does("pasp_reduced.mp4");
+}
+
+#[test]
+fn packets_of_rotate_180() {
+    demuxes_as_ffmpeg_does("rotate_180.mp4");
+}
+
+#[test]
+fn packets_of_rotate_270() {
+    demuxes_as_ffmpeg_does("rotate_270.mp4");
+}
+
+#[test]
+fn packets_of_rotate_90() {
+    demuxes_as_ffmpeg_does("rotate_90.mp4");
+}
+
+#[test]
+fn packets_of_tkhd_size() {
+    demuxes_as_ffmpeg_does("tkhd_size.mp4");
+}
+
+#[test]
+fn packets_of_vpcc() {
+    demuxes_as_ffmpeg_does("vpcc.mp4");
+}
+
+#[test]
+fn packets_of_vpcc_init_data() {
+    demuxes_as_ffmpeg_does("vpcc_init_data.mp4");
+}
+
+#[test]
+fn packets_of_vpcc_short() {
+    demuxes_as_ffmpeg_does("vpcc_short.mp4");
+}
+
+#[test]
+fn packets_of_vpcc_version_0() {
+    demuxes_as_ffmpeg_does("vpcc_version_0.mp4");
 }
 
 /// One seek's answer: where to, in milliseconds, and each packet after it

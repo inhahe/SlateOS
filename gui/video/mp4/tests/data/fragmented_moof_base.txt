@@ -1,6 +1,6 @@
 # fragmented_moof_base.mp4: what ffprobe makes of it (generate_fixtures.py).
-stream 0 av01 1/10240 64x48
-stream 1 Opus 1/48000 48000Hz/1
+stream 0 av01 1/10240 64x48 12355 10/1
+stream 1 Opus 1/48000 48000Hz/1 57912 -
 packet 0 0 0 1091 763 1478 K__ 155b6f2906b0975e8a5e83e18aed50e4 0
 packet 0 1091 1091 1024 207 2241 ___ 8651ddf30ecdf7fc9a28fc942b5a7b4f 0
 packet 0 2115 2115 1024 20 2448 ___ 1773109b925f04df07fe16f09ddca26d 0

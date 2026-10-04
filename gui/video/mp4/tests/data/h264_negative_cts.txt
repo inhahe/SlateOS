@@ -1,5 +1,5 @@
 # h264_negative_cts.mp4: what ffprobe makes of it (generate_fixtures.py).
-stream 0 avc1 1/10240 64x48
+stream 0 avc1 1/10240 64x48 12288 10/1
 packet 0 0 -1024 1024 1307 52 K__ 674bfd64bc70a4406d8573965239f87d 0
 packet 0 3072 0 1024 130 1359 ___ 49f175f3a7415819adcdbcdd10d93db8 0
 packet 0 1024 1024 1024 12 1489 ___ 168fcdccf04c66ec3273834f0532ba97 0

@@ -91,20 +91,44 @@ pub struct Video {
     /// The size `tkhd` asks it shown at, whole pixels.
     pub track_width: u32,
     pub track_height: u32,
-    /// `pasp`: the pixel's width to its height, if the file says.
-    pub pixel_aspect: Option<(u32, u32)>,
-    /// `colr` of type `nclx` or `nclc`.
+    /// The pixel's width to its height, as FFmpeg settles it
+    /// (`sample_aspect_ratio`): `pasp`'s, else the display matrix's stretch,
+    /// else the shape that shows the picture at `tkhd`'s size. In lowest
+    /// terms, the denominator positive; `None` where nothing says. A
+    /// damaged file can make it negative.
+    pub pixel_aspect: Option<(i32, i32)>,
+    /// What `colr` (`nclx` or `nclc`) and `vpcC` say of the colour, a later
+    /// box over an earlier; `None` where neither is there.
     pub colour: Option<Colour>,
+    /// The display matrix -- the track's (`tkhd`) after the movie's
+    /// (`mvhd`) -- where it is not the identity: rotation, mirroring and
+    /// stretching for the picture to be shown with, as FFmpeg gives it
+    /// (`AV_PKT_DATA_DISPLAYMATRIX`). Row by row: `a b u / c d v / x y w`,
+    /// with `u`, `v` and `w` in 2.30 fixed point and the rest 16.16.
+    pub matrix: Option<[i32; 9]>,
+    /// `clap`'s crop: left, top, right, bottom, in pixels of the coded
+    /// picture, as FFmpeg works it out (`AV_PKT_DATA_FRAME_CROPPING`); all
+    /// 0 where there is none.
+    pub crop: [u32; 4],
+    /// How long each frame lasts, in the track's ticks, where FFmpeg takes
+    /// the track to have one frame rate (its `r_frame_rate`): every sample
+    /// in `stts` but the last lasts as long as the first. `None` where the
+    /// `moov` lists no samples (a fragmented file).
+    pub frame_duration: Option<u32>,
 }
 
-/// A picture's colour, numbered as ITU-T H.273 numbers it (`colr`).
+/// A picture's colour, numbered as ITU-T H.273 numbers it, as `colr` and
+/// `vpcC` say it and FFmpeg keeps it: a code point FFmpeg has no name for
+/// is 2, "unspecified", as is one never said.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Colour {
     pub primaries: u16,
     pub transfer: u16,
     pub matrix: u16,
-    /// `nclx`'s full-range flag; `nclc` has none (studio range).
-    pub full_range: bool,
+    /// Whether samples span every code (`true`) or the studio range:
+    /// `nclx`'s flag, or `vpcC`'s; `None` where only `nclc` spoke, which has
+    /// none.
+    pub full_range: Option<bool>,
 }
 
 /// An audio track's sound.
@@ -131,6 +155,10 @@ pub struct Track {
     pub config: Vec<u8>,
     /// Ticks a second: every time of the track's is in these.
     pub timescale: u32,
+    /// How long the track lasts, in its ticks, as FFmpeg reckons it
+    /// (`st->duration`): `mdhd`'s, cut by the edit list, or as far as the
+    /// fragments reach.
+    pub duration: i64,
     /// ISO 639-2/T, from `mdhd`; `und` when the file does not say.
     pub language: [u8; 3],
     /// `tkhd`'s "enabled" flag, which FFmpeg reads as the default track.

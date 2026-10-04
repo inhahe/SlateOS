@@ -1,6 +1,6 @@
 # aac.mp4: what ffprobe makes of it (generate_fixtures.py).
-stream 0 av01 1/10240 64x48
-stream 1 mp4a 1/48000 48000Hz/1
+stream 0 av01 1/10240 64x48 12288 10/1
+stream 1 mp4a 1/48000 48000Hz/1 57600 -
 packet 1 -1024 -1024 1024 183 48 KD_ 8fec10f80cc020f73a68c8c933feaa19 1024
 packet 0 0 0 1024 763 231 K__ 155b6f2906b0975e8a5e83e18aed50e4 0
 packet 1 0 0 1024 198 994 K__ 8417e0b2517a423e5bd240284d98b5ba 0

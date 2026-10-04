@@ -410,6 +410,7 @@ fn track(s: &Stream, d: &Description) -> Track {
         codec_tag: d.codec_tag,
         config: s.extradata.first().cloned().unwrap_or_default(),
         timescale: u32::try_from(s.time_scale).unwrap_or(1),
+        duration: s.duration,
         language: d.language,
         default: d.default,
         video: (s.kind == Kind::Video).then(|| d.video()),

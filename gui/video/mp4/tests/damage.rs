@@ -48,6 +48,11 @@ fn a_damaged_file_is_read_or_refused_but_never_panics() {
         "aac.mp4",
         "fragmented.mp4",
         "delayed_audio.mp4",
+        // What a track says of its picture: colr over vpcC, a clean
+        // aperture, and two display matrices.
+        "colr_nclc_after_vpcc.mp4",
+        "clap_offset.mp4",
+        "both_rotations.mp4",
     ] {
         let path = format!("{}/tests/data/{name}", env!("CARGO_MANIFEST_DIR"));
         let bytes = std::fs::read(&path).unwrap();

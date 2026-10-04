@@ -4,7 +4,10 @@
 
 # The demuxer is FFmpeg's MP4 demuxer translated: src/parse.rs from
 # libavformat/mov.c's box readers (mov_read_default, mov_read_trak,
-# mov_read_stsd and the sample-table and fragment readers), src/index.rs
+# mov_read_stsd, the sample-table and fragment readers, and those of a
+# picture's description: colr, vpcC, pasp, clap, the display matrices),
+# src/rational.rs from libavutil/rational.c, src/lib.rs's probe from
+# mov_probe, src/index.rs
 # from mov_build_index, mov_merge_tts_data, mov_fix_index and
 # find_prev_closest_index, with libavformat/seek.c's
 # ff_index_search_timestamp, and src/demux.rs from mov_find_next_sample,

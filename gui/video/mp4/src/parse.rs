@@ -8,6 +8,7 @@ use std::io::{Read, Seek};
 
 use crate::Error;
 use crate::index::{DISCARD, Edit, Entry, KEYFRAME, Stream, Stsc, Tts};
+use crate::rational::{self, Q};
 use crate::reader::Reader;
 use crate::track::{Audio, Codec, Colour, Kind, Video, audio_codec, read_esds, video_codec};
 
@@ -64,12 +65,25 @@ pub(crate) struct Description {
     pub config: Vec<u8>,
     pub language: [u8; 3],
     pub default: bool,
-    pub tkhd_width: u32,
-    pub tkhd_height: u32,
+    /// `tkhd`'s size, whole pixels (FFmpeg's `sc->width`, an int).
+    pub tkhd_width: i32,
+    pub tkhd_height: i32,
     pub width: u32,
     pub height: u32,
-    pub pixel_aspect: Option<(u32, u32)>,
+    /// `pasp`'s spacings (`sc->h_spacing`, `sc->v_spacing`), kept when the
+    /// vertical one is not 0.
+    pub pasp: Option<(i32, i32)>,
+    /// The pixel's shape as FFmpeg settles it (`st->sample_aspect_ratio`).
+    pub sample_aspect: Option<Q>,
     pub colour: Option<Colour>,
+    /// `tkhd`'s display matrix after the movie's, unless it is the identity
+    /// (`sc->display_matrix`).
+    pub matrix: Option<[i32; 9]>,
+    /// `clap`'s crop: top, bottom, left, right, as FFmpeg's side data
+    /// orders it.
+    pub crop: Option<[u32; 4]>,
+    /// FFmpeg's `r_frame_rate` rule's frame duration, in the track's ticks.
+    pub frame_duration: Option<u32>,
     pub channels: u32,
     pub sample_rate: u32,
     pub stsd_version: u8,
@@ -79,13 +93,20 @@ pub(crate) struct Description {
 
 impl Description {
     pub(crate) fn video(&self) -> Video {
+        let [top, bottom, left, right] = self.crop.unwrap_or([0; 4]);
         Video {
             width: self.width,
             height: self.height,
-            track_width: self.tkhd_width,
-            track_height: self.tkhd_height,
-            pixel_aspect: self.pixel_aspect,
+            track_width: self.tkhd_width.cast_unsigned(),
+            track_height: self.tkhd_height.cast_unsigned(),
+            pixel_aspect: self
+                .sample_aspect
+                .filter(|q| q.num != 0)
+                .map(|q| (q.num, q.den)),
             colour: self.colour,
+            matrix: self.matrix,
+            crop: [left, top, right, bottom],
+            frame_duration: self.frame_duration,
         }
     }
 
@@ -102,6 +123,9 @@ pub(crate) struct Parser<'a, R> {
     pub r: &'a mut Reader<R>,
     /// The movie's timescale (`mvhd`).
     pub time_scale: i32,
+    /// The movie's display matrix (`mvhd`), applied after each track's: all
+    /// zeros until an `mvhd` is read, as FFmpeg's context starts it.
+    movie_matrix: [[i32; 3]; 3],
     pub isom: bool,
     pub found_moov: bool,
     pub found_mdat: bool,
@@ -127,6 +151,7 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         Self {
             r,
             time_scale: 0,
+            movie_matrix: [[0; 3]; 3],
             isom: false,
             found_moov: false,
             found_mdat: false,
@@ -301,12 +326,13 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
             b"stps" => self.stps()?,
             b"sdtp" => self.sdtp(a)?,
             b"sbgp" => self.sbgp()?,
-            b"av1C" | b"avcC" | b"hvcC" | b"vpcC" | b"dOps" | b"dfLa" | b"glbl" => {
-                self.config(a)?;
-            }
+            b"av1C" | b"avcC" | b"hvcC" | b"glbl" => self.glbl(a)?,
+            b"dOps" | b"dfLa" => self.config(a)?,
+            b"vpcC" => self.vpcc(a)?,
             b"esds" => self.esds(a)?,
             b"colr" => self.colr(a)?,
             b"pasp" => self.pasp()?,
+            b"clap" => self.clap()?,
             b"trex" => self.trex()?,
             b"moof" => self.moof(a)?,
             b"tfhd" => self.tfhd()?,
@@ -356,7 +382,24 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         self.r.skip(if version == 1 { 16 } else { 8 })?;
         let scale = self.r.u32()?.cast_signed();
         self.time_scale = if scale <= 0 { 1 } else { scale };
+        // The duration, which FFmpeg keeps and does not use; the preferred
+        // rate and volume, and ten reserved bytes.
+        self.r.skip(if version == 1 { 8 } else { 4 })?;
+        self.r.skip(4 + 2 + 10)?;
+        self.movie_matrix = self.matrix()?;
         Ok(())
+    }
+
+    /// A display matrix as `mvhd` and `tkhd` hold it: three rows of two
+    /// 16.16 numbers and a 2.30 one.
+    fn matrix(&mut self) -> Result<[[i32; 3]; 3], Error> {
+        let mut m = [[0; 3]; 3];
+        for row in &mut m {
+            for v in row.iter_mut() {
+                *v = self.r.u32()?.cast_signed();
+            }
+        }
+        Ok(m)
     }
 
     fn trak(&mut self, a: Atom) -> Result<(), Error> {
@@ -403,6 +446,12 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         if let Some(sc) = self.streams.get_mut(index) {
             sc.build_index(advanced, movie_scale, codec);
         }
+        if let (Some(sc), Some(d)) = (self.streams.get(index), self.descriptions.get_mut(index))
+            && sc.kind == Kind::Video
+        {
+            picture_shape(d);
+            d.frame_duration = frame_duration(sc);
+        }
         Ok(())
     }
 
@@ -422,15 +471,27 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         let id = self.r.u32()?.cast_signed();
         self.r.skip(4)?;
         self.r.skip(if version == 1 { 8 } else { 4 })?;
-        // reserved (8), layer, alternate group, volume, reserved (8), the
-        // display matrix (36).
-        self.r.skip(8 + 8 + 36)?;
+        // Two reserved words, then the layer, alternate group, volume and
+        // another two reserved bytes.
+        self.r.skip(8 + 8)?;
+        let own = self.matrix()?;
         let width = self.r.u32()?.cast_signed();
         let height = self.r.u32()?.cast_signed();
+        let matrix = display_matrix(own, self.movie_matrix);
         if let Some((sc, d)) = self.last() {
             sc.id = i64::from(id);
-            d.tkhd_width = (width >> 16).cast_unsigned();
-            d.tkhd_height = (height >> 16).cast_unsigned();
+            d.tkhd_width = width >> 16;
+            d.tkhd_height = height >> 16;
+            d.matrix = matrix;
+            // A matrix that stretches one axis more than the other makes the
+            // pixel that shape.
+            if width != 0
+                && height != 0
+                && let Some(m) = matrix
+                && let Some(shape) = stretch(&m)
+            {
+                d.sample_aspect = Some(shape);
+            }
         }
         Ok(())
     }
@@ -1051,13 +1112,112 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
     }
 
     /// A codec configuration box: kept whole, as the track's setup.
-    fn config(&mut self, a: Atom) -> Result<(), Error> {
-        if self.streams.is_empty() || a.size > 1 << 30 {
+    /// A configuration FFmpeg keeps whole as the track's setup
+    /// (`mov_read_glbl`): `av1C`, `avcC`, `hvcC`, `glbl`.
+    fn glbl(&mut self, a: Atom) -> Result<(), Error> {
+        if self.streams.is_empty() {
             return Ok(());
         }
-        let body = self.r.bytes(u64::try_from(a.size.max(0)).unwrap_or(0))?;
+        let size = u64::try_from(a.size)
+            .ok()
+            .filter(|&s| s <= 1 << 30)
+            .ok_or(Error::Invalid("a codec configuration box over a gibibyte"))?;
+        if size >= 10 {
+            // Old libavformat wrapped a whole `fiel` box in a `glbl`: read as
+            // the boxes it is.
+            let start = self.r.pos();
+            let inner = u64::from(self.r.u32()?);
+            let kind = self.r.fourcc()?;
+            self.r.seek_to(start)?;
+            if kind == *b"fiel" && inner == size {
+                return self.walk(a);
+            }
+        }
+        if self.last().is_some_and(|(_, d)| d.config.len() > 1) {
+            // "ignoring multiple glbl": the first stands.
+            return Ok(());
+        }
+        let body = self.r.bytes(size)?;
+        if let Some((_, d)) = self.last() {
+            d.config = body;
+        }
+        Ok(())
+    }
+
+    /// Opus's `dOps` and FLAC's `dfLa`, refused where FFmpeg refuses them
+    /// (`mov_read_dops`, `mov_read_dfla`): a size out of bounds, a version
+    /// it does not know, and for FLAC a first block that is not the stream's
+    /// description. The body is the track's setup, a later box's over an
+    /// earlier one's, as there.
+    fn config(&mut self, a: Atom) -> Result<(), Error> {
+        if self.streams.is_empty() {
+            return Ok(());
+        }
+        let flac = a.kind == *b"dfLa";
+        let least = if flac { 42 } else { 11 };
+        let size = u64::try_from(a.size)
+            .ok()
+            .filter(|&s| (least..=1 << 30).contains(&s))
+            .ok_or(Error::Invalid("a sound configuration box's size"))?;
+        let body = self.r.bytes(size)?;
+        match body.as_slice() {
+            [0, ..] if !flac => {}
+            // Version 0, its flags, and a STREAMINFO block (type 0) of 34
+            // bytes first.
+            [0, _, _, _, block, a, b, c, ..]
+                if block & 0x7f == 0 && u32::from_be_bytes([0, *a, *b, *c]) == 34 => {}
+            _ => {
+                return Err(Error::Invalid(
+                    "a sound configuration box FFmpeg does not read",
+                ));
+            }
+        }
+        if let Some((_, d)) = self.last() {
+            d.config = body;
+        }
+        Ok(())
+    }
+
+    /// `vpcC`, VP8's and VP9's configuration (`mov_read_vpcc`): its colour,
+    /// in version 1, and the box whole as the track's setup. FFmpeg refuses
+    /// the file for a box too short to hold its version and flags, and for
+    /// codec initialization data, which VP9 never has.
+    fn vpcc(&mut self, a: Atom) -> Result<(), Error> {
+        if self.streams.is_empty() {
+            return Ok(());
+        }
+        if a.size < 5 {
+            return Err(Error::Invalid("an empty VP codec configuration box"));
+        }
+        let start = self.r.pos();
+        if self.r.u8()? == 1 {
+            // Flags, profile and level.
+            self.r.skip(3 + 2)?;
+            // Bit depth, chroma subsampling, and the full-range flag.
+            let packed = self.r.u8()?;
+            let primaries = u16::from(self.r.u8()?);
+            let transfer = u16::from(self.r.u8()?);
+            let matrix = u16::from(self.r.u8()?);
+            if self.r.u16()? != 0 {
+                return Err(Error::Invalid(
+                    "a VP codec configuration box with initialization data",
+                ));
+            }
+            let (primaries, transfer, matrix) = known_colour(primaries, transfer, matrix);
+            if let Some((_, d)) = self.last() {
+                d.colour = Some(Colour {
+                    primaries,
+                    transfer,
+                    matrix,
+                    full_range: Some(packed & 1 != 0),
+                });
+            }
+        }
+        // Another version is passed over, as FFmpeg passes it.
+        self.r.seek_to(start)?;
+        let body = self.r.bytes(u64::try_from(a.size).unwrap_or(0))?;
         if let Some((_, d)) = self.last()
-            && d.config.is_empty()
+            && d.config.len() <= 1
         {
             d.config = body;
         }
@@ -1079,36 +1239,85 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         Ok(())
     }
 
+    /// `colr` (`mov_read_colr`): `nclx` and QuickTime's `nclc` give the
+    /// colour's three code points, and `nclx` the range too; an ICC profile
+    /// (`prof`) is read past, as nothing here manages colour; any other kind
+    /// is ignored. A later box's word stands over an earlier one's, a field
+    /// at a time.
     fn colr(&mut self, a: Atom) -> Result<(), Error> {
-        if self.streams.is_empty() || a.size < 4 {
+        if self.streams.is_empty() {
             return Ok(());
         }
         let kind = self.r.fourcc()?;
-        if (kind == *b"nclx" || kind == *b"nclc") && a.size >= 10 {
-            let primaries = self.r.u16()?;
-            let transfer = self.r.u16()?;
-            let matrix = self.r.u16()?;
-            let full_range = kind == *b"nclx" && a.size >= 11 && self.r.u8()? & 0x80 != 0;
-            if let Some((_, d)) = self.last() {
-                d.colour = Some(Colour {
-                    primaries,
-                    transfer,
-                    matrix,
-                    full_range,
-                });
+        match &kind {
+            b"nclx" | b"nclc" => {
+                let primaries = self.r.u16()?;
+                let transfer = self.r.u16()?;
+                let matrix = self.r.u16()?;
+                let range = if kind == *b"nclx" {
+                    Some(self.r.u8()? >> 7 != 0)
+                } else {
+                    None
+                };
+                let (primaries, transfer, matrix) = known_colour(primaries, transfer, matrix);
+                if let Some((_, d)) = self.last() {
+                    let before = d.colour.and_then(|c| c.full_range);
+                    d.colour = Some(Colour {
+                        primaries,
+                        transfer,
+                        matrix,
+                        full_range: range.or(before),
+                    });
+                }
             }
+            // FFmpeg allocates the profile's size, and fails for a box too
+            // short to have one.
+            b"prof" if a.size < 4 => {
+                return Err(Error::Invalid("an ICC profile box too short"));
+            }
+            _ => {}
         }
         Ok(())
     }
 
+    /// `pasp` (`mov_read_pasp`): the pixel's spacings, kept unless the
+    /// vertical one is 0.
     fn pasp(&mut self) -> Result<(), Error> {
-        let h = self.r.u32()?;
-        let v = self.r.u32()?;
+        let h = self.r.u32()?.cast_signed();
+        let v = self.r.u32()?.cast_signed();
         if let Some((_, d)) = self.last()
-            && h != 0
             && v != 0
         {
-            d.pixel_aspect = Some((h, v));
+            d.pasp = Some((h, v));
+        }
+        Ok(())
+    }
+
+    /// `clap`, the clean aperture (`mov_read_clap`): the picture's middle
+    /// part to show, as a crop of each side. One FFmpeg finds invalid --
+    /// larger than the picture, or reaching outside it -- is passed over, as
+    /// is one that crops nothing; a later valid one replaces an earlier.
+    fn clap(&mut self) -> Result<(), Error> {
+        let Some((width, height)) = self.last().map(|(_, d)| (d.width, d.height)) else {
+            return Ok(());
+        };
+        let (Ok(width), Ok(height)) = (i32::try_from(width), i32::try_from(height)) else {
+            return Ok(());
+        };
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+        let mut q = || -> Result<Q, Error> {
+            let num = self.r.u32()?.cast_signed();
+            let den = self.r.u32()?.cast_signed();
+            Ok(Q { num, den })
+        };
+        let (aperture_w, aperture_h, offset_x, offset_y) = (q()?, q()?, q()?, q()?);
+        if let Some(crop) =
+            clean_aperture(width, height, aperture_w, aperture_h, offset_x, offset_y)
+            && let Some((_, d)) = self.last()
+        {
+            d.crop = Some(crop);
         }
         Ok(())
     }
@@ -1529,6 +1738,160 @@ fn language(code: u16) -> [u8; 3] {
     [letter(10), letter(5), letter(0)]
 }
 
+/// A track's display matrix: its own (`tkhd`) then the movie's (`mvhd`),
+/// multiplied in their fixed point as FFmpeg multiplies them, each step held
+/// to an int as C holds it; `None` for the identity.
+fn display_matrix(own: [[i32; 3]; 3], movie: [[i32; 3]; 3]) -> Option<[i32; 9]> {
+    // The shift that brings each term back to its column's fixed point:
+    // 16.16 for the first two rows of the movie's, 2.30 for its third.
+    const SHIFTS: [u32; 3] = [16, 16, 30];
+    let mut out = [0i32; 9];
+    for (row, cells) in own.iter().zip(out.chunks_exact_mut(3)) {
+        for (j, cell) in cells.iter_mut().enumerate() {
+            for ((&a, movie_row), shift) in row.iter().zip(&movie).zip(SHIFTS) {
+                let b = movie_row.get(j).copied().unwrap_or(0);
+                // |a * b| < 2^62: the product is exact; the shift is C's
+                // arithmetic one, and the sum wraps to an int as C's does.
+                let term = i64::from(a).wrapping_mul(i64::from(b)).wrapping_shr(shift);
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    reason = "C's conversion of the sum back to an int"
+                )]
+                let term = term as i32;
+                *cell = cell.wrapping_add(term);
+            }
+        }
+    }
+    let identity = [1 << 16, 0, 0, 0, 1 << 16, 0, 0, 0, 1 << 30];
+    (out != identity).then_some(out)
+}
+
+/// A video track's pixel shape, settled once its boxes are read
+/// (`mov_read_trak`): `pasp`'s, where both its spacings are given, over the
+/// display matrix's; and where neither said, the shape that shows the
+/// picture at `tkhd`'s size.
+fn picture_shape(d: &mut Description) {
+    if let Some((h, v)) = d.pasp
+        && h != 0
+        && v != 0
+    {
+        d.sample_aspect = Some(rational::reduce(i64::from(h), i64::from(v), rational::MAX).0);
+    }
+    let unsaid = d.sample_aspect.is_none_or(|q| q.num == 0);
+    let (w, h) = (i64::from(d.width), i64::from(d.height));
+    let (tw, th) = (i64::from(d.tkhd_width), i64::from(d.tkhd_height));
+    if unsaid && w != 0 && h != 0 && tw != 0 && th != 0 && (w != tw || h != th) {
+        // Within 2^47 each: the products are exact.
+        d.sample_aspect =
+            Some(rational::reduce(h.wrapping_mul(tw), w.wrapping_mul(th), rational::MAX).0);
+    }
+}
+
+/// How long each frame of a video track lasts, in its ticks, where FFmpeg
+/// takes it to have one frame rate (its `r_frame_rate`): the track has an
+/// `stts`, and every sample but the first and last lasts as long as the
+/// first. A fragmented file's `moov` has none, and says nothing.
+fn frame_duration(sc: &Stream) -> Option<u32> {
+    let first = sc.tts.first()?;
+    let middle = sc.tts.get(1..sc.tts.len().saturating_sub(1)).unwrap_or(&[]);
+    (sc.has_stts && middle.iter().all(|t| t.duration == first.duration)).then_some(first.duration)
+}
+
+/// The pixel shape a display matrix gives (`mov_read_tkhd`): the ratio of
+/// how far it stretches the x axis to how far the y, where both are within
+/// reason and differ by more than 1%.
+fn stretch(m: &[i32; 9]) -> Option<Q> {
+    let [m0, m1, _, m3, m4, ..] = *m;
+    let x = f64::from(m0).hypot(f64::from(m3));
+    let y = f64::from(m1).hypot(f64::from(m4));
+    let limit = f64::from(1 << 24);
+    (x > 1.0 && y > 1.0 && x < limit && y < limit && (x / y - 1.0).abs() > 0.01)
+        .then(|| rational::d2q(x / y, i32::MAX))
+}
+
+/// `clap`'s crop of a `width` x `height` picture, as FFmpeg works it out
+/// (`mov_read_clap`) in its rationals and its C conversions: the aperture's
+/// size and its centre's offset from the picture's give the edges, and each
+/// side's crop is the distance from the picture's edge. Top, bottom, left,
+/// right; `None` for an aperture FFmpeg finds invalid, or one that crops
+/// nothing.
+fn clean_aperture(
+    width: i32,
+    height: i32,
+    aperture_w: Q,
+    aperture_h: Q,
+    offset_x: Q,
+    offset_y: Q,
+) -> Option<[u32; 4]> {
+    use rational::{add, cmp, mul, q2d, sub, to_u64_as_c};
+    if aperture_w.num < 0
+        || aperture_w.den < 0
+        || aperture_h.num < 0
+        || aperture_h.den < 0
+        || offset_x.den < 0
+        || offset_y.den < 0
+    {
+        return None;
+    }
+    let whole = |n: i32| Q { num: n, den: 1 };
+    if cmp(whole(width), aperture_w) < 0 || cmp(whole(height), aperture_h) < 0 {
+        return None;
+    }
+    let half = Q { num: 1, den: 2 };
+    let centre_x = add(mul(whole(width.wrapping_sub(1)), half), offset_x);
+    let centre_y = add(mul(whole(height.wrapping_sub(1)), half), offset_y);
+    let half_w = mul(sub(aperture_w, whole(1)), half);
+    let half_h = mul(sub(aperture_h, whole(1)), half);
+    let left = to_u64_as_c(q2d(sub(centre_x, half_w)));
+    let right = to_u64_as_c(q2d(add(centre_x, half_w)));
+    let top = to_u64_as_c(q2d(sub(centre_y, half_h)));
+    let bottom = to_u64_as_c(q2d(add(centre_y, half_h)));
+    // Both at least 1, so these are what C's int-to-unsigned conversions
+    // give.
+    let last_x = u64::from(width.wrapping_sub(1).cast_unsigned());
+    let last_y = u64::from(height.wrapping_sub(1).cast_unsigned());
+    if bottom > last_y || right > last_x {
+        return None;
+    }
+    let (bottom, right) = (last_y.wrapping_sub(bottom), last_x.wrapping_sub(right));
+    if left | right | top | bottom == 0 {
+        return None;
+    }
+    let (w, h) = (
+        u64::from(width.cast_unsigned()),
+        u64::from(height.cast_unsigned()),
+    );
+    if left.wrapping_add(right) >= w || top.wrapping_add(bottom) >= h {
+        return None;
+    }
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "FFmpeg's side data stores each as 32 bits; all are under the picture's size"
+    )]
+    Some([top as u32, bottom as u32, left as u32, right as u32])
+}
+
+/// A colour's three code points as FFmpeg keeps them: each one it has a name
+/// for (`av_color_primaries_name` and its kin), and "unspecified" (2) for
+/// any other.
+fn known_colour(primaries: u16, transfer: u16, matrix: u16) -> (u16, u16, u16) {
+    const UNSPECIFIED: u16 = 2;
+    // ITU-T H.273's code points through 12, EBU 3213, and V-Gamut, the one
+    // FFmpeg numbers past H.273's.
+    let primaries = match primaries {
+        0..=12 | 22 | 256 => primaries,
+        _ => UNSPECIFIED,
+    };
+    // H.273's through 18 (HLG), and V-Log.
+    let transfer = match transfer {
+        0..=18 | 256 => transfer,
+        _ => UNSPECIFIED,
+    };
+    // H.273's through 17 (YCgCo-R with an odd bit).
+    let matrix = if matrix <= 17 { matrix } else { UNSPECIFIED };
+    (primaries, transfer, matrix)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -1588,5 +1951,81 @@ mod tests {
         assert_eq!(language(0x55C4), *b"und");
         assert_eq!(language(0), *b"und", "a QuickTime code");
         assert_eq!(language(0x7fff), *b"und");
+    }
+
+    const ONE: i32 = 1 << 16;
+    const IDENTITY: [[i32; 3]; 3] = [[ONE, 0, 0], [0, ONE, 0], [0, 0, 1 << 30]];
+
+    #[test]
+    fn display_matrices_multiply_in_their_fixed_point() {
+        assert_eq!(display_matrix(IDENTITY, IDENTITY), None);
+        let quarter = [[0, ONE, 0], [-ONE, 0, 0], [0, 0, 1 << 30]];
+        assert_eq!(
+            display_matrix(quarter, IDENTITY),
+            Some([0, ONE, 0, -ONE, 0, 0, 0, 0, 1 << 30])
+        );
+        // A quarter turn twice is a half turn, whichever matrix holds each.
+        assert_eq!(
+            display_matrix(quarter, quarter),
+            Some([-ONE, 0, 0, 0, -ONE, 0, 0, 0, 1 << 30])
+        );
+        // No mvhd: FFmpeg's movie matrix is all zeros, and so is the result.
+        assert_eq!(display_matrix(IDENTITY, [[0; 3]; 3]), Some([0; 9]));
+    }
+
+    #[test]
+    fn a_stretching_matrix_shapes_the_pixel() {
+        let q = |num, den| Q { num, den };
+        assert_eq!(
+            stretch(&[2 * ONE, 0, 0, 0, ONE, 0, 0, 0, 1 << 30]),
+            Some(q(2, 1))
+        );
+        // A rotation stretches nothing; under 1% is none; 0 is none.
+        assert_eq!(stretch(&[0, ONE, 0, -ONE, 0, 0, 0, 0, 1 << 30]), None);
+        assert_eq!(stretch(&[ONE + 600, 0, 0, 0, ONE, 0, 0, 0, 1 << 30]), None);
+        assert_eq!(stretch(&[0; 9]), None);
+    }
+
+    #[test]
+    fn code_points_without_a_name_in_ffmpeg_are_unspecified() {
+        assert_eq!(known_colour(1, 1, 1), (1, 1, 1));
+        assert_eq!(known_colour(13, 19, 18), (2, 2, 2));
+        assert_eq!(known_colour(22, 256, 17), (22, 256, 17));
+        assert_eq!(known_colour(21, 255, 255), (2, 2, 2));
+        assert_eq!(known_colour(0, 0, 0), (0, 0, 0), "reserved, but named");
+    }
+
+    #[test]
+    fn a_clean_aperture_crops_as_ffmpeg_works_it_out() {
+        let q = |num, den| Q { num, den };
+        // Centred: 48x40 of 64x48 leaves 8 and 4 on each side (top, bottom,
+        // left, right).
+        assert_eq!(
+            clean_aperture(64, 48, q(48, 1), q(40, 1), q(0, 1), q(0, 1)),
+            Some([4, 4, 8, 8])
+        );
+        // The whole picture crops nothing; wider than it, or a negative
+        // denominator, is invalid.
+        assert_eq!(
+            clean_aperture(64, 48, q(64, 1), q(48, 1), q(0, 1), q(0, 1)),
+            None
+        );
+        assert_eq!(
+            clean_aperture(64, 48, q(80, 1), q(40, 1), q(0, 1), q(0, 1)),
+            None
+        );
+        assert_eq!(
+            clean_aperture(64, 48, q(48, -1), q(40, 1), q(0, 1), q(0, 1)),
+            None
+        );
+        // Reaching outside it to the left makes the left edge negative,
+        // which C's conversion wraps to nearly 2^64 -- and the sum of the
+        // two sides then wraps past the check meant to catch it, so FFmpeg
+        // keeps a crop no frame can take (`clap_outside.mp4` holds the crate
+        // to ffprobe's word on it).
+        assert_eq!(
+            clean_aperture(64, 48, q(48, 1), q(40, 1), q(-40, 1), q(0, 1)),
+            Some([4, 4, 4_294_967_264, 48])
+        );
     }
 }

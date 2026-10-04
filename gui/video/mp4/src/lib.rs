@@ -28,14 +28,28 @@
 //! and how damage is read. Every fixture's packets and seeks are held to
 //! `ffprobe`'s.
 //!
+//! So is what a track says of its picture ([`Video`]): its colour (`colr`,
+//! `vpcC`, a code point FFmpeg has no name for read as unspecified), its
+//! pixel's shape (`pasp`, else the display matrix's stretch, else `tkhd`'s
+//! size against the picture's), its display matrix (rotation and mirroring,
+//! the track's after the movie's), its clean aperture (`clap`, worked out
+//! in FFmpeg's rationals and its C conversions, wraps and all), and its
+//! frame rate where FFmpeg's demuxer finds one. Each is held to ffprobe over
+//! files written to exercise it, in a code no decoder reads so that what
+//! ffprobe prints is the demuxer's word alone.
+//!
+//! [`probe`] tells an MP4 file from others by its first boxes, as FFmpeg's
+//! probe does.
+//!
 //! # Whose code
 //!
-//! FFmpeg's, translated: the index building, the edit lists, the fragments
-//! and the reading order follow `mov.c`'s functions closely, each named
-//! where it is ported. FFmpeg is LGPL version 2.1 or later, and so is this
-//! crate, its licence in `licenses/`. Whether SlateOS keeps an LGPL demuxer
-//! or has one written again from the specification and these tests is
-//! `open-questions/F-Q7.md`.
+//! FFmpeg's, translated: the index building, the edit lists, the fragments,
+//! the reading order and the picture's description follow `mov.c`'s
+//! functions closely, each named where it is ported, with `libavutil`'s
+//! rationals beneath them. FFmpeg is LGPL version 2.1 or later, and so is
+//! this crate, its licence in `licenses/`. Whether SlateOS keeps an LGPL
+//! demuxer or has one written again from the specification and these tests
+//! is `open-questions/F-Q7.md`.
 //!
 //! # A hostile file
 //!
@@ -45,11 +59,87 @@
 mod demux;
 mod index;
 mod parse;
+mod rational;
 mod reader;
 mod track;
 
 pub use demux::{Demuxer, Packet};
 pub use track::{Audio, Codec, Colour, Track, TrackKind, Video};
+
+/// Whether a file whose first bytes are `head` is one FFmpeg would take for
+/// MP4 (or QuickTime, its parent): its probe (`mov_probe`) walks the boxes
+/// at the top of the file and gives the file a score for any box type an
+/// MP4 file begins with. Give it as much of the file as a caller can spare
+/// to read; FFmpeg reads up to a mebibyte to decide.
+///
+/// FFmpeg weighs that score against every other format's, so the few files
+/// it scores low -- JPEG 2000 and JPEG XL in their ISO boxes, MPEG program
+/// streams packed in QuickTime -- go to another demuxer there and are taken
+/// here: [`Demuxer::open`] then finds no film in them.
+pub fn probe(head: &[u8]) -> bool {
+    let len = u64::try_from(head.len()).unwrap_or(u64::MAX);
+    let word = |at: u64, n: usize| -> Option<&[u8]> {
+        let at = usize::try_from(at).ok()?;
+        head.get(at..at.checked_add(n)?)
+    };
+    let mut offset: u64 = 0;
+    loop {
+        if offset.saturating_add(8) > len {
+            return false;
+        }
+        let Some(header) = word(offset, 8) else {
+            return false;
+        };
+        let size32 = header
+            .get(..4)
+            .map_or(0, |b| u32::from_be_bytes(b.try_into().unwrap_or([0; 4])));
+        let mut size = i64::from(size32);
+        let mut least = 8;
+        if size == 1 && offset.saturating_add(16) <= len {
+            let big = word(offset.saturating_add(8), 8)
+                .and_then(|b| b.try_into().ok())
+                .map_or(0, u64::from_be_bytes);
+            size = big.cast_signed();
+            least = 16;
+        } else if size == 0 {
+            size = i64::try_from(len.saturating_sub(offset)).unwrap_or(i64::MAX);
+        }
+        if size < least {
+            // Not a box: FFmpeg looks again four bytes on.
+            offset = offset.saturating_add(4);
+            continue;
+        }
+        if matches!(
+            header.get(4..8),
+            Some(
+                b"moov"
+                    | b"mdat"
+                    | b"pnot"
+                    | b"udta"
+                    | b"ftyp"
+                    | b"ediw"
+                    | b"wide"
+                    | b"free"
+                    | b"junk"
+                    | b"pict"
+                    | [0x82, 0x82, 0x7f, 0x7d]
+                    | b"skip"
+                    | b"uuid"
+                    | b"prfl"
+            )
+        ) {
+            return true;
+        }
+        match u64::try_from(size)
+            .ok()
+            .and_then(|s| offset.checked_add(s))
+            .filter(|&o| o <= i64::MAX.cast_unsigned())
+        {
+            Some(next) => offset = next,
+            None => return false,
+        }
+    }
+}
 
 /// Why a file could not be read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,3 +175,54 @@ impl core::fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+#[cfg(test)]
+mod tests {
+    use super::probe;
+
+    fn header(size: u32, kind: &[u8; 4]) -> Vec<u8> {
+        let mut b = size.to_be_bytes().to_vec();
+        b.extend_from_slice(kind);
+        b
+    }
+
+    #[test]
+    fn mp4s_first_boxes_are_known_by_their_types() {
+        for kind in [
+            b"ftyp", b"moov", b"mdat", b"free", b"wide", b"skip", b"uuid",
+        ] {
+            assert!(probe(&header(8, kind)), "{kind:?}");
+        }
+        // A box of a type FFmpeg does not know, then one it does.
+        let mut two = header(16, b"abcd");
+        two.extend_from_slice(&[0; 8]);
+        two.extend_from_slice(&header(8, b"moov"));
+        assert!(probe(&two));
+        // A 64-bit size, and a size of 0 (to the end).
+        let mut big = header(1, b"ftyp");
+        big.extend_from_slice(&16u64.to_be_bytes());
+        assert!(probe(&big));
+        assert!(probe(&header(0, b"mdat")));
+    }
+
+    #[test]
+    fn other_files_are_not_mp4() {
+        assert!(!probe(b""));
+        assert!(!probe(b"not a video at all"));
+        assert!(!probe(&[0x1A, 0x45, 0xDF, 0xA3, 0x9F, 0x42, 0x86, 0x81]));
+        // A known type past what is given is not seen.
+        let mut far = header(64, b"abcd");
+        far.extend_from_slice(&header(8, b"moov"));
+        assert!(!probe(&far));
+        // A size too small to be a box's is stepped over, four bytes at a
+        // time: here onto a box header.
+        let mut small = 4u32.to_be_bytes().to_vec();
+        small.extend_from_slice(&header(8, b"ftyp"));
+        assert!(probe(&small));
+        // From a box of a type it does not know, the walk jumps by its size,
+        // past a header inside it.
+        let mut inside = header(4, b"xxxx");
+        inside.extend_from_slice(&header(8, b"ftyp"));
+        assert!(!probe(&inside));
+    }
+}

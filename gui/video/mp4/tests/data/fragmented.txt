@@ -1,6 +1,6 @@
 # fragmented.mp4: what ffprobe makes of it (generate_fixtures.py).
-stream 0 vp09 1/10240 64x48
-stream 1 Opus 1/48000 48000Hz/1
+stream 0 vp09 1/10240 64x48 12355 10/1
+stream 1 Opus 1/48000 48000Hz/1 57912 -
 packet 0 0 0 1091 849 1534 K__ 1cc9ce95e1d238a70b2a748235433833 0
 packet 0 1091 1091 1024 108 2383 ___ ff05a65235f0c3b925ae3787c3d2b556 0
 packet 0 2115 2115 1024 126 2491 ___ d7c4a43fd905023a3886cce6cb01bd34 0

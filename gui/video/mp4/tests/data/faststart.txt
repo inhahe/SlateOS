@@ -1,5 +1,5 @@
 # faststart.mp4: what ffprobe makes of it (generate_fixtures.py).
-stream 0 av01 1/10240 64x48
+stream 0 av01 1/10240 64x48 12288 10/1
 packet 0 0 0 1024 763 858 K__ 155b6f2906b0975e8a5e83e18aed50e4 0
 packet 0 1024 1024 1024 207 1621 ___ 8651ddf30ecdf7fc9a28fc942b5a7b4f 0
 packet 0 2048 2048 1024 20 1828 ___ 1773109b925f04df07fe16f09ddca26d 0

@@ -1,5 +1,5 @@
 # sound_edit_mid_frame.mp4: what ffprobe makes of it (generate_fixtures.py).
-stream 0 afx0 1/48000 48000Hz/1
+stream 0 afx0 1/48000 48000Hz/1 14400 -
 packet 0 -1500 -1500 960 8 768 KD_ c64f733b23ec61247553ec6b352ec982 1500
 packet 0 -540 -540 960 8 776 K__ aefa7aa9b7373f10bce3f1344490544b 0
 packet 0 420 420 960 8 784 K__ e38a909bd455be9e7ec038396ed0b2ee 0

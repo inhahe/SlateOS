@@ -1,6 +1,6 @@
 # delayed_audio.mp4: what ffprobe makes of it (generate_fixtures.py).
-stream 0 av01 1/10240 64x48
-stream 1 Opus 1/48000 48000Hz/1
+stream 0 av01 1/10240 64x48 12288 10/1
+stream 1 Opus 1/48000 48000Hz/1 57912 -
 packet 0 0 0 1024 763 48 K__ 155b6f2906b0975e8a5e83e18aed50e4 0
 packet 0 1024 1024 1024 207 811 ___ 8651ddf30ecdf7fc9a28fc942b5a7b4f 0
 packet 1 9264 9264 960 95 1018 K__ 269ec55c9daf7efd9ed128b3c6cdcaa2 0

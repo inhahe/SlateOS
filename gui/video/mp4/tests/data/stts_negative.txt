@@ -1,5 +1,5 @@
 # stts_negative.mp4: what ffprobe makes of it (generate_fixtures.py).
-stream 0 vfx0 1/10240 64x48
+stream 0 vfx0 1/10240 64x48 3076 20/1
 packet 0 0 0 1024 10 666 K__ a84c4aea02a8fa3604c18b07e7d1ed0b 0
 packet 0 1024 1024 1024 10 676 ___ 0b4648fd02d8bc30c4b9dca2f3542646 0
 packet 0 2048 2048 1024 10 686 ___ b2299ea67f6cc710408072e9631d16eb 0

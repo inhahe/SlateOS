@@ -1,6 +1,6 @@
 # pcm.mov: what ffprobe makes of it (generate_fixtures.py).
-stream 0 mp4v 1/10240 64x48
-stream 1 sowt 1/48000 48000Hz/1
+stream 0 mp4v 1/10240 64x48 12288 10/1
+stream 1 sowt 1/48000 48000Hz/1 57600 -
 packet 0 0 0 1024 1119 36 K__ 1c16fd8df2e3b7d2141fbdb06b1d0e16 0
 packet 1 0 0 1024 2048 1155 K__ 4f79d3b30ae2fa3e85102f0c4598c62b 0
 packet 1 1024 1024 1024 2048 3203 K__ a6a0869229073ba42b648925b7920496 0

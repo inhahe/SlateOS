@@ -1,5 +1,5 @@
 # mpeg4_bframes.mp4: what ffprobe makes of it (generate_fixtures.py).
-stream 0 mp4v 1/10240 64x48
+stream 0 mp4v 1/10240 64x48 12288 10/1
 packet 0 0 -1024 1024 1119 44 K__ 1c16fd8df2e3b7d2141fbdb06b1d0e16 0
 packet 0 3072 0 1024 183 1163 ___ 3d9ea8247edb26c9f116ea17c7b2df74 0
 packet 0 1024 1024 1024 34 1346 ___ 72c9316415853692e13fe1fd7dafaec9 0

@@ -1,0 +1,2 @@
+# vpcc_short.mp4: ffprobe refuses it (vpcc_short.mp4: Invalid data found when processing input) (generate_fixtures.py).
+refused

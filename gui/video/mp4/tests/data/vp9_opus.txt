@@ -1,6 +1,6 @@
 # vp9_opus.mp4: what ffprobe makes of it (generate_fixtures.py).
-stream 0 vp09 1/10240 64x48
-stream 1 Opus 1/48000 48000Hz/1
+stream 0 vp09 1/10240 64x48 12288 10/1
+stream 1 Opus 1/48000 48000Hz/1 57600 -
 packet 1 -312 -312 960 95 44 K__ 269ec55c9daf7efd9ed128b3c6cdcaa2 312
 packet 0 0 0 1024 849 139 K__ 1cc9ce95e1d238a70b2a748235433833 0
 packet 1 648 648 960 66 988 K__ 3417027a6da5ce0c3131cbb0c55442d4 0

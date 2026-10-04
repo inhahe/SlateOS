@@ -2,18 +2,22 @@
 """Generate the mp4 crate's fixtures and their answers.
 
 Each fixture `NAME.mp4` gets `NAME.txt`: what FFmpeg's demuxer makes of it,
-as `ffprobe` prints it -- a line per stream (index, codec tag, time base)
-and a line per packet (stream, pts, dts, duration, size, position, flags,
-the data's MD5, and the samples to skip from its start). `tests/fixtures.rs`
-holds the crate's packets to those lines. Fixtures it seeks in get
-`NAME.seek.txt` too: the first packets after each seek.
+as `ffprobe` prints it -- a line per stream (index, codec tag, time base,
+picture size or sound, duration in ticks, and a picture's frame rate) and a
+line per packet (stream, pts, dts, duration, size, position, flags, the
+data's MD5, and the samples to skip from its start). `tests/fixtures.rs`
+holds the crate's tracks and packets to those lines. Fixtures it seeks in
+get `NAME.seek.txt` too: the first packets after each seek. A fixture that
+describes its picture gets a `look` line per stream as well (the pixel's
+shape, the colour, the display matrix, the crop), and one FFmpeg refuses to
+open is answered `refused`.
 
 The packets are the demuxer's own: `-fflags +noparse+nofillin` keeps
 FFmpeg's codec parsers and its generic layer's filling-in out of them. (The
 skip-samples side data is the generic layer's -- it hands on the demuxer's
 count with the first packet of the stream read -- and stays.)
 
-Two kinds of fixture:
+Three kinds of fixture:
 
 - **Written by ffmpeg**, as a player meets MP4: AV1 with its index after the
   media and before it (faststart); VP9 with Opus, whose priming the edit list
@@ -23,6 +27,10 @@ Two kinds of fixture:
   picture (an empty edit); and fragmented files, as a live stream or DASH
   writes them.
 - **Written here**, byte by byte, for what muxers seldom write.
+- **Described here**, byte by byte, for what a track says of its picture
+  (`colr`, `vpcC`, `pasp`, `clap`, the display matrices) -- each in a code
+  no decoder reads, so that what ffprobe prints is the demuxer's word, not a
+  decoder's -- and two FFmpeg refuses.
 
 The answers were made with the ffmpeg and ffprobe of gyan.dev's full build
 of 2026-03-09 (git 9b7439c31b). Run from this directory:
@@ -31,6 +39,7 @@ of 2026-03-09 (git 9b7439c31b). Run from this directory:
 """
 
 import hashlib
+import json
 import os
 import struct
 import subprocess
@@ -120,17 +129,22 @@ def full(kind, version, flags, *parts):
     return box(kind, u8(version), flags.to_bytes(3, "big"), *parts)
 
 
-MATRIX = b"".join(u32(v) for v in (0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000))
+def matrix(*values):
+    """A display matrix: nine words, row by row (16.16, 16.16, 2.30)."""
+    return b"".join(u32(v) for v in values)
 
 
-def mvhd(timescale, duration):
+MATRIX = matrix(0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000)
+
+
+def mvhd(timescale, duration, display=MATRIX):
     return full(b"mvhd", 0, 0, u32(0), u32(0), u32(timescale), u32(duration), u32(0x10000), u16(0x100),
-                bytes(10), MATRIX, bytes(24), u32(9))
+                bytes(10), display, bytes(24), u32(9))
 
 
-def tkhd(track_id, duration, width=0, height=0):
+def tkhd(track_id, duration, width=0, height=0, display=MATRIX):
     return full(b"tkhd", 0, 3, u32(0), u32(0), u32(track_id), u32(0), u32(duration), bytes(8), u16(0), u16(0),
-                u16(0 if width else 0x100), u16(0), MATRIX, u32(width << 16), u32(height << 16))
+                u16(0 if width else 0x100), u16(0), display, u32(width << 16), u32(height << 16))
 
 
 def mdhd(timescale, duration):
@@ -202,13 +216,38 @@ def sbgp_rap(runs):
     return full(b"sbgp", 0, 0, b"rap ", u32(len(runs)), *[u32(c) + u32(i) for c, i in runs])
 
 
+def colr(kind, primaries, transfer, space, full_range=None):
+    """`nclx` with its range flag, or QuickTime's `nclc` without one."""
+    flag = b"" if full_range is None else u8(0x80 if full_range else 0)
+    return box(b"colr", kind, u16(primaries), u16(transfer), u16(space), flag)
+
+
+def vpcc(version=1, packed=0x80, primaries=2, transfer=2, space=2, init=0, body=None):
+    """VP9's configuration: `packed` is the bit depth (high four bits),
+    chroma subsampling and the full-range flag (bit 0)."""
+    if body is None:
+        body = (u8(version) + bytes(3) + u8(0) + u8(10) + u8(packed) + u8(primaries) + u8(transfer)
+                + u8(space) + u16(init) + bytes(init))
+    return box(b"vpcC", body)
+
+
+def pasp(h, v):
+    return box(b"pasp", u32(h), u32(v))
+
+
+def clap(width, height, offset_x, offset_y):
+    """The clean aperture: four fractions, each (numerator, denominator)."""
+    return box(b"clap", *[u32(v) for q in (width, height, offset_x, offset_y) for v in q])
+
+
 class Trak:
     """A track to lay out: its samples (bytes, duration, key, composition
     offset), how many go in each chunk, and what its tables say."""
 
     def __init__(self, handler, entry, timescale, samples, chunks, *, edits=None, stss_keys="auto",
                  ctts_version=None, extra_stbl=b"", stsc_override=None, stsd_entries=None,
-                 sizes="stsz", offsets="stco", stts_override=None, ctts_override=None, width=64, height=48):
+                 sizes="stsz", offsets="stco", stts_override=None, ctts_override=None, width=64, height=48,
+                 display=MATRIX):
         self.handler, self.entry, self.timescale = handler, entry, timescale
         self.samples, self.chunks = samples, chunks
         self.edits, self.stss_keys, self.ctts_version = edits, stss_keys, ctts_version
@@ -217,6 +256,7 @@ class Trak:
         self.sizes, self.offsets = sizes, offsets
         self.stts_override, self.ctts_override = stts_override, ctts_override
         self.width, self.height = width, height
+        self.display = display
 
     def chunk_data(self):
         out, at = [], 0
@@ -264,10 +304,11 @@ class Trak:
         mdia = box(b"mdia", mdhd(self.timescale, media), hdlr(self.handler), minf)
         edts = box(b"edts", elst(self.edits)) if self.edits else b""
         w, h = (self.width, self.height) if self.handler == b"vide" else (0, 0)
-        return box(b"trak", tkhd(track_id, movie_duration, w, h), edts, mdia)
+        return box(b"trak", tkhd(track_id, movie_duration, w, h, self.display), edts, mdia)
 
 
-def mp4(traks, movie_scale=1000, brand=b"isom", moov_kind=b"moov", mdat_header=None, cut=None):
+def mp4(traks, movie_scale=1000, brand=b"isom", moov_kind=b"moov", mdat_header=None, cut=None,
+        movie_display=MATRIX):
     """A file: ftyp, moov, then mdat with each track's chunks interleaved
     chunk by chunk. `mdat_header` writes the mdat's header itself (a 64-bit
     size, or 0 for one running to the end)."""
@@ -281,7 +322,7 @@ def mp4(traks, movie_scale=1000, brand=b"isom", moov_kind=b"moov", mdat_header=N
 
     def moov_with(offsets):
         duration = max(sum(s[1] for s in t.samples) * movie_scale // t.timescale for t in traks)
-        body = mvhd(movie_scale, duration) + b"".join(
+        body = mvhd(movie_scale, duration, movie_display) + b"".join(
             t.trak(i + 1, offsets[i], movie_scale) for i, t in enumerate(traks))
         return box(moov_kind, body)
 
@@ -373,6 +414,82 @@ def synthetic():
     return out
 
 
+def described():
+    """Hand-written fixtures for what a track says of its picture -- its
+    colour, its pixel's shape, its display matrix, its clean aperture -- each
+    a picture track of a code no decoder has, so that what ffprobe prints of
+    it is the demuxer's word alone: name -> bytes."""
+    out = {}
+    v8 = video_samples(8, keys=(0, 4))
+
+    def one(name, *children, movie_display=MATRIX, **trak):
+        entry = visual_entry(b"vfx0", 64, 48, *children)
+        out[name] = mp4([Trak(b"vide", entry, 10240, v8, [8], **trak)], movie_display=movie_display)
+
+    # Colour: nclx's three code points and its range; nclc's, which has no
+    # range, over vpcC's; code points FFmpeg has no name for, which it reads
+    # as unspecified; the rarest it has names for; vpcC alone, and in a
+    # version FFmpeg passes over; an ICC profile, which says nothing here.
+    one("colr_nclx.mp4", colr(b"nclx", 1, 1, 1, True))
+    one("colr_nclc_after_vpcc.mp4", vpcc(packed=0x83, primaries=9, transfer=16, space=9),
+        colr(b"nclc", 5, 6, 6))
+    one("colr_unknown_codes.mp4", colr(b"nclx", 13, 19, 18, False))
+    one("colr_rare_codes.mp4", colr(b"nclx", 22, 256, 17, True))
+    one("vpcc.mp4", vpcc(packed=0x80, primaries=1, transfer=1, space=1))
+    one("vpcc_version_0.mp4", vpcc(version=0, packed=0x81, primaries=9, transfer=16, space=9))
+    one("colr_prof.mp4", box(b"colr", b"prof", bytes(16)))
+    # The pixel's shape: pasp's, in lowest terms; a pasp with no vertical
+    # spacing, passed over; one with no horizontal spacing, kept but not
+    # used, so the track's size against the picture's decides; that alone;
+    # and a display matrix that stretches one axis.
+    one("pasp.mp4", pasp(4, 3))
+    one("pasp_reduced.mp4", pasp(64, 48))
+    one("pasp_no_vertical.mp4", pasp(5, 0))
+    one("pasp_no_horizontal.mp4", pasp(0, 5), width=128)
+    one("tkhd_size.mp4", width=96, height=48)
+    one("matrix_stretch.mp4", display=matrix(0x20000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000))
+    # Rotation and mirroring: the track's matrix, the movie's, and both (the
+    # track's, then the movie's).
+    quarter = matrix(0, 0x10000, 0, -0x10000, 0, 0, 0, 0, 0x40000000)
+    one("rotate_90.mp4", display=quarter)
+    one("rotate_180.mp4", display=matrix(-0x10000, 0, 0, 0, -0x10000, 0, 0, 0, 0x40000000))
+    one("rotate_270.mp4", display=matrix(0, -0x10000, 0, 0x10000, 0, 0, 0, 0, 0x40000000))
+    one("mirror.mp4", display=matrix(-0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000))
+    one("movie_rotation.mp4", movie_display=quarter)
+    one("both_rotations.mp4", display=quarter, movie_display=quarter)
+    # The clean aperture: centred; moved off centre; a fractional width; one
+    # wider than the picture, passed over; one reaching outside it, whose
+    # negative left edge FFmpeg's C wraps past its own check, keeping a crop
+    # no frame can take; and a valid one followed by an invalid one, the
+    # first standing.
+    one("clap.mp4", clap((48, 1), (40, 1), (0, 1), (0, 1)))
+    one("clap_offset.mp4", clap((48, 1), (40, 1), (-4, 1), (2, 1)))
+    one("clap_fraction.mp4", clap((95, 2), (40, 1), (0, 1), (0, 1)))
+    one("clap_too_wide.mp4", clap((80, 1), (40, 1), (0, 1), (0, 1)))
+    one("clap_outside.mp4", clap((48, 1), (40, 1), (-40, 1), (0, 1)))
+    one("clap_twice.mp4", clap((48, 1), (40, 1), (0, 1), (0, 1)),
+        clap((80, 1), (40, 1), (0, 1), (0, 1)))
+    # An offset of x/0, which FFmpeg's rationals make an infinite centre and
+    # its C conversions make edges of: the crop comes out of how GCC turns
+    # infinity into an unsigned 64-bit number.
+    one("clap_infinite.mp4", clap((48, 1), (40, 1), (1, 0), (0, 1)))
+    return out
+
+
+def refused():
+    """Hand-written files FFmpeg refuses to open: name -> bytes."""
+    v8 = video_samples(8, keys=(0, 4))
+    children = {
+        # VP9 has no codec initialization data, and FFmpeg refuses a vpcC
+        # that says it has some.
+        "vpcc_init_data.mp4": vpcc(init=2),
+        # A vpcC too short to hold its version and flags.
+        "vpcc_short.mp4": vpcc(body=bytes(4)),
+    }
+    return {name: mp4([Trak(b"vide", visual_entry(b"vfx0", 64, 48, child), 10240, v8, [8])])
+            for name, child in children.items()}
+
+
 # --- the answers ---------------------------------------------------------------
 
 
@@ -387,10 +504,32 @@ def fields(line):
     return dict(kv.split("=", 1) for kv in line.split("|") if "=" in kv)
 
 
-def answer(name):
+def look(name):
+    """A `look` line per stream: what the track says of its picture, as
+    ffprobe prints it -- the pixel's shape, the colour (primaries, transfer,
+    matrix, range, by FFmpeg's names), the display matrix and the crop."""
+    out = subprocess.run([FFPROBE, "-v", "error", "-show_streams", "-of", "json", name],
+                         check=True, capture_output=True, text=True, encoding="utf-8").stdout
+    lines = []
+    for st in json.loads(out)["streams"]:
+        display, crop = "none", "0,0,0,0"
+        for sd in st.get("side_data_list", []):
+            if sd["side_data_type"] == "Display Matrix":
+                rows = sd["displaymatrix"].strip().splitlines()
+                display = ",".join(w for row in rows for w in row.split(":", 1)[1].split())
+            elif sd["side_data_type"] == "Frame Cropping":
+                crop = f"{sd['crop_left']},{sd['crop_top']},{sd['crop_right']},{sd['crop_bottom']}"
+        colour = "/".join(st.get(k, "unknown") for k in
+                          ("color_primaries", "color_transfer", "color_space", "color_range"))
+        lines.append(f"look {st['index']} sar={st.get('sample_aspect_ratio', 'N/A')} colour={colour} "
+                     f"matrix={display} crop={crop}")
+    return lines
+
+
+def answer(name, described=False):
     lines = [f"# {name}: what ffprobe makes of it (generate_fixtures.py)."]
-    for s in probe("-show_entries", "stream=index,codec_type,codec_tag_string,time_base,width,height,sample_rate,channels",
-                   "-of", "compact=p=0", name):
+    for s in probe("-show_entries", "stream=index,codec_type,codec_tag_string,time_base,width,height,"
+                   "sample_rate,channels,duration_ts,r_frame_rate", "-of", "compact=p=0", name):
         f = fields(s)
         if f.get("codec_type") == "video":
             shape = f"{f.get('width', '0')}x{f.get('height', '0')}"
@@ -398,7 +537,15 @@ def answer(name):
             shape = f"{f.get('sample_rate', '0')}Hz/{f.get('channels', '0')}"
         else:
             shape = "-"
-        lines.append(f"stream {f['index']} {f['codec_tag_string']} {f['time_base']} {shape}")
+        # The frame rate is the demuxer's where its rule finds one (every
+        # sample but the last as long as the first) and ffprobe's own
+        # estimate where not: tests/fixtures.rs holds the crate to it only
+        # where the crate's rule finds one too.
+        rate = f.get("r_frame_rate", "0/0") if f.get("codec_type") == "video" else "-"
+        lines.append(f"stream {f['index']} {f['codec_tag_string']} {f['time_base']} {shape} "
+                     f"{f.get('duration_ts', 'N/A')} {rate}")
+    if described:
+        lines += look(name)
     for p in probe("-fflags", "+noparse+nofillin", "-show_entries",
                    "packet=stream_index,pts,dts,duration,size,pos,flags,data_hash:packet_side_data",
                    "-show_data_hash", "MD5", "-of", "compact=p=0", name):
@@ -451,12 +598,24 @@ def seek_answer(name):
     return "\n".join(lines) + "\n"
 
 
+def refusal(name):
+    """A file FFmpeg refuses: ffprobe must fail on it."""
+    r = subprocess.run([FFPROBE, "-v", "error", "-show_streams", name], capture_output=True, text=True,
+                       encoding="utf-8")
+    if r.returncode == 0:
+        raise SystemExit(f"{name}: ffprobe opened it, and it was meant to be refused")
+    why = r.stderr.strip().splitlines()[-1] if r.stderr.strip() else "no message"
+    return f"# {name}: ffprobe refuses it ({why}) (generate_fixtures.py).\nrefused\n"
+
+
 def main():
     files = {**made_by_ffmpeg(), **synthetic()}
-    for name, data in sorted(files.items()):
+    looks = described()
+    refusals = refused()
+    for name, data in sorted({**files, **looks, **refusals}.items()):
         with open(name, "wb") as f:
             f.write(data)
-        text = answer(name)
+        text = refusal(name) if name in refusals else answer(name, described=name in looks)
         base = name.rsplit(".", 1)[0]
         with open(f"{base}.txt", "w", encoding="utf-8", newline="\n") as f:
             f.write(text)

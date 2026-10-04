@@ -1935,6 +1935,12 @@ impl HexEditor {
             self.show_help = false;
             return EventResult::Consumed;
         }
+        if self.show_help {
+            // Modal: every other key is the card's while it is up. It was
+            // not -- a hex digit or a character typed with the card up was
+            // written into the file it covers, and Alt+Z undid an edit there.
+            return EventResult::Consumed;
+        }
 
         // Alt+Z and Alt+Shift+Z: every version the file has been in, in the
         // order each was made. Alt without Ctrl: Ctrl+Alt is AltGr.
@@ -2979,6 +2985,17 @@ impl HexEditor {
 
     /// Apply a mouse event.
     fn handle_mouse(&mut self, ev: &MouseEvent) -> EventResult {
+        if self.show_help {
+            // The card is modal for the pointer as it is for the keys: a
+            // press, with any button, puts it away rather than reaching the
+            // button or byte drawn under it, and the wheel scrolls nothing it
+            // covers.
+            if matches!(ev.kind, MouseEventKind::Press(_)) {
+                self.show_help = false;
+                return EventResult::Consumed;
+            }
+            return EventResult::Ignored;
+        }
         if matches!(ev.kind, MouseEventKind::Press(MouseButton::Left)) {
             let (bw, bh, by) = TOOLBAR_BUTTON;
             if let Some(&(_, action, _)) = TOOLBAR_BUTTONS
@@ -4545,6 +4562,75 @@ mod tests {
         assert_eq!(
             click(editor, x + bw / 2.0, by + bh / 2.0),
             EventResult::Consumed
+        );
+    }
+
+    /// **The card is modal for the keys and the pointer**: while it is up,
+    /// nothing typed reaches the file, the wheel scrolls nothing, and a press
+    /// puts it away and does nothing else. A hex digit typed with the card up
+    /// was written into the file it covered. The controls at the end are the
+    /// same key, turn and press with the card down.
+    #[test]
+    fn the_shortcut_card_takes_every_key_and_press_while_it_is_up() {
+        let mut editor = make_test_editor(vec![0; 4096]);
+        let (bw, bh, by) = TOOLBAR_BUTTON;
+        let &(_, _, sx) = TOOLBAR_BUTTONS
+            .iter()
+            .find(|b| b.1 == ToolbarAction::Save)
+            .expect("a Save button");
+        let save = |button| {
+            Event::Mouse(MouseEvent {
+                x: sx + bw / 2.0,
+                y: by + bh / 2.0,
+                kind: MouseEventKind::Press(button),
+            })
+        };
+
+        editor.handle_event(&key(Key::F1));
+        assert!(editor.show_help);
+        editor.handle_event(&key(Key::F));
+        assert_eq!(
+            editor.active_doc().data[0],
+            0,
+            "a hex digit was written into the file under the card"
+        );
+        editor.handle_event(&wheel(-3.0));
+        assert_eq!(
+            editor.active_doc().view.scroll_offset,
+            0,
+            "the wheel scrolled the file under the card"
+        );
+        assert!(
+            editor.show_help,
+            "a key or turn that is not the card's put it away"
+        );
+
+        assert_eq!(
+            editor.handle_event(&save(MouseButton::Left)),
+            EventResult::Consumed
+        );
+        assert!(!editor.show_help, "the press did not put the card away");
+        assert!(
+            !editor.picker.is_open(),
+            "the press went through the card to Save"
+        );
+
+        // Any button: the right one does nothing to a button, but it is
+        // still a press on the card.
+        editor.handle_event(&key(Key::F1));
+        editor.handle_event(&save(MouseButton::Right));
+        assert!(!editor.show_help, "a right-button press left the card up");
+
+        editor.handle_event(&wheel(-3.0));
+        assert!(
+            editor.active_doc().view.scroll_offset > 0,
+            "control: the wheel scrolls nothing at all"
+        );
+        editor.handle_event(&key(Key::F));
+        assert_ne!(
+            editor.active_doc().data[0],
+            0,
+            "control: a hex digit writes nothing with the card down"
         );
     }
 

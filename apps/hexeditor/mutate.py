@@ -153,6 +153,31 @@ MUTATIONS = [
         "                Key::F4 => {\n                    let _ = self.active_tab;",
         ["ctrl_f4_closes_the_tab_even_in_the_search_bar"],
     ),
+    # -- the shortcut card is modal, for the keys and the pointer
+    (
+        "a key that is not the card's writes into the file behind it",
+        "        if self.show_help {\n"
+        "            // Modal: every other key is the card's while it is up. It was\n",
+        "        if false {\n"
+        "            // Modal: every other key is the card's while it is up. It was\n",
+        ["the_shortcut_card_takes_every_key_and_press_while_it_is_up"],
+    ),
+    (
+        "a press goes through the card and the wheel scrolls under it",
+        "        if self.show_help {\n"
+        "            // The card is modal for the pointer as it is for the keys: a\n",
+        "        if false {\n"
+        "            // The card is modal for the pointer as it is for the keys: a\n",
+        ["the_shortcut_card_takes_every_key_and_press_while_it_is_up"],
+    ),
+    (
+        "only the left button puts the card away",
+        "            if matches!(ev.kind, MouseEventKind::Press(_)) {\n"
+        "                self.show_help = false;\n",
+        "            if matches!(ev.kind, MouseEventKind::Press(MouseButton::Left)) {\n"
+        "                self.show_help = false;\n",
+        ["the_shortcut_card_takes_every_key_and_press_while_it_is_up"],
+    ),
 ]
 
 if __name__ == "__main__":

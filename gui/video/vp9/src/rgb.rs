@@ -3,22 +3,22 @@
 //! weights at limited range ("studio swing": luma 16 to 235), in 8-bit fixed
 //! point.
 //!
-//! To YUV is libyuv's `ARGBToI420` as its x86 code computes it: luma from
-//! each pixel, chroma from each 2x2 block averaged as two rounded averages of
-//! pairs (`pavgb`), down the columns and then across, a last odd column or
-//! row averaged with itself. Back to RGB is the textbook inverse, each chroma
-//! sample serving its 2x2 block. A picture through both comes back within a
-//! few levels, except where colour changes inside a 2x2 block -- which no
-//! 4:2:0 coding keeps.
+//! To YUV is libyuv's `ARGBToI420` (version 1924, revision `644251f2`, the
+//! one libavif 1.4.2 pins): luma from each pixel, chroma from the rounded mean
+//! of each 2x2 block, a last odd column or row taken twice. (Earlier libyuv
+//! averaged a block on x86 as two rounded averages of pairs, `pavgb`, which
+//! rounds up more often; 1924 does the exact mean everywhere.) Back to RGB is
+//! the textbook inverse, each chroma sample serving its 2x2 block. A picture
+//! through both comes back within a few levels, except where colour changes
+//! inside a 2x2 block -- which no 4:2:0 coding keeps.
 //!
 //! Pixels are `0xAARRGGBB` words, as SlateOS's compositor holds them. Alpha
 //! is not coded: it is ignored on the way in, and opaque on the way out.
 //!
 //! The forward conversion is translated into Rust from libyuv's
-//! `source/row_common.cc` (`RGBToY`, `RGBToU`, `RGBToV`, `ARGBToUVRow_C`'s
-//! `LIBYUV_ARGBTOUV_PAVGB` form) and `source/convert.cc` (`ARGBToI420`),
-//! copyright the LibYuv Project Authors, used under libyuv's BSD licence
-//! (`licenses/libyuv-LICENSE`).
+//! `source/row_common.cc` (`RGBToY`, `RGBToU`, `RGBToV`, `ARGBToUVRow_C`)
+//! and `source/convert.cc` (`ARGBToI420`), copyright the LibYuv Project
+//! Authors, used under libyuv's BSD licence (`licenses/libyuv-LICENSE`).
 
 #![allow(
     clippy::arithmetic_side_effects,
@@ -92,10 +92,12 @@ fn rgb_to_v(r: i32, g: i32, b: i32) -> u8 {
     ((112 * r - 94 * g - 18 * b + 0x8000) >> 8) as u8
 }
 
-/// libyuv's `AVGB`: `pavgb`'s rounded average.
+/// The rounded mean of a 2x2 block's samples, as `ARGBToUVRow_C` takes it:
+/// for a last odd column or row, whose block holds each sample twice, the
+/// rounded mean of two.
 #[inline]
-fn avg(a: i32, b: i32) -> i32 {
-    (a + b + 1) >> 1
+fn mean4(a: i32, b: i32, c: i32, d: i32) -> i32 {
+    (a + b + c + d + 2) >> 2
 }
 
 /// A pixel's red, green and blue.
@@ -156,20 +158,19 @@ pub fn argb_to_yuv420(
         .zip(out.v.chunks_exact_mut(cw))
         .enumerate()
     {
-        // A last odd row is averaged with itself (libyuv passes it a stride
-        // of 0).
+        // A last odd row is its own pair (libyuv passes it a stride of 0):
+        // the mean of four, each sample twice, is the rounded mean of two,
+        // which is what libyuv computes for it.
         let (top, bottom) = (row(2 * cr), row((2 * cr + 1).min(height - 1)));
         for (cc, (u, v)) in us.iter_mut().zip(vs.iter_mut()).enumerate() {
             let x = 2 * cc;
             // A last odd column, likewise.
             let x1 = (x + 1).min(width - 1);
             let px = |s: &[u32], x: usize| channels(s.get(x).copied().unwrap_or(0));
-            let (a, b, c, d) = (px(top, x), px(bottom, x), px(top, x1), px(bottom, x1));
-            // Down the columns, then across: libyuv's order.
-            let mean = |p: i32, q: i32, r: i32, s: i32| avg(avg(p, q), avg(r, s));
-            let red = mean(a[0], b[0], c[0], d[0]);
-            let green = mean(a[1], b[1], c[1], d[1]);
-            let blue = mean(a[2], b[2], c[2], d[2]);
+            let (a, b, c, d) = (px(top, x), px(top, x1), px(bottom, x), px(bottom, x1));
+            let red = mean4(a[0], b[0], c[0], d[0]);
+            let green = mean4(a[1], b[1], c[1], d[1]);
+            let blue = mean4(a[2], b[2], c[2], d[2]);
             *u = rgb_to_u(red, green, blue);
             *v = rgb_to_v(red, green, blue);
         }
@@ -250,26 +251,27 @@ mod tests {
         assert_eq!(one(0xff80_8080), (126, 128, 128));
     }
 
-    /// Chroma is the 2x2 block's pairs averaged down, then across, each
-    /// average rounded up at the half -- not the four's exact mean.
+    /// Chroma is the rounded mean of the 2x2 block -- not, as libyuv's x86
+    /// code computed it before version 1924, the pairs' rounded averages
+    /// averaged.
     #[test]
-    fn chroma_averages_pairs_down_then_across() {
-        // Blue only, so U is 112 * b / 256 + 128 and every rounding shows:
-        // columns (1, 2) and (2, 2) average to 2 and 2, then 2 -- where the
-        // exact mean of 1, 2, 2, 2 is 1.75.
+    fn chroma_is_the_rounded_mean_of_its_block() {
+        // Blue only, so U is (112 * b + 0x8000) >> 8 and roundings show: the
+        // block 1 2 / 2 4 has the mean 2.25, so 2; pairs down the columns
+        // (2, 3) and then across would give 3, and U 129 for 128.
         let p = |b: u32| 0xff00_0000 | b;
-        let yuv = argb_to_yuv420(&[p(1), p(2), p(2), p(2)], 2, 2, 2).unwrap();
+        let yuv = argb_to_yuv420(&[p(1), p(2), p(2), p(4)], 2, 2, 2).unwrap();
         assert_eq!(yuv.u[0], rgb_to_u(0, 0, 2));
-        // An odd size: the last column and row average with themselves.
+        assert_ne!(yuv.u[0], rgb_to_u(0, 0, 3), "the pairs' way");
+        // An odd size: the last column and row are their own pairs.
         let pic: Vec<u32> = (0..9).map(|i| 0xff00_0000 | (i * 30)).collect();
         let yuv = argb_to_yuv420(&pic, 3, 3, 3).unwrap();
         assert_eq!(yuv.chroma_size(), (2, 2));
         assert_eq!(yuv.u[3], rgb_to_u(0, 0, 240), "the corner is its own block");
-        assert_eq!(
-            yuv.u[1],
-            rgb_to_u(0, 0, avg(60, 150)),
-            "the last column's pairs"
-        );
+        // The last column's two rows, 60 and 150: their rounded mean, 105.
+        assert_eq!(yuv.u[1], rgb_to_u(0, 0, 105), "the last column");
+        // The last row's two columns, 180 and 210: 195.
+        assert_eq!(yuv.u[2], rgb_to_u(0, 0, 195), "the last row");
     }
 
     /// Through both, a picture whose colour is constant on each 2x2 block

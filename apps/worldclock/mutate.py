@@ -40,22 +40,79 @@ MUTATIONS = [
         ['a_chord_is_neither_a_clock_key_nor_typing'],
     ),
     (
+        # What the search did before the editor: Backspace with any chord.
         'Alt+Backspace deletes from the city search',
-        '        Key::Backspace if !textline::is_alt_or_windows_chord(key.modifiers) => {',
-        '        Key::Backspace => {',
+        '        if self.picker_editor.text() != self.picker_search {\n'
+        '            self.picker_editor.set_text(&self.picker_search);\n'
+        '        }\n',
+        '        if key.key == Key::Backspace {\n'
+        '            self.picker_search.pop();\n'
+        '            return EventResult::Consumed;\n'
+        '        }\n'
+        '        if self.picker_editor.text() != self.picker_search {\n'
+        '            self.picker_editor.set_text(&self.picker_search);\n'
+        '        }\n',
         ['a_chord_is_neither_a_clock_key_nor_typing'],
     ),
     (
         "a chord works the picker's keys",
-        '        _ if !plain && !textline::types_into_field(key) => return EventResult::Ignored,\n',
-        '',
+        '        Key::Escape if plain => state.show_picker = false,\n',
+        '        Key::Escape => state.show_picker = false,\n',
         ['a_chord_is_neither_a_clock_key_nor_typing'],
     ),
     (
+        # What the search did before the editor: type whatever text a key
+        # carried, a command's letter among it.
         "the city search types a command's letter",
-        '            if !textline::types_into_field(key) {\n                return EventResult::Ignored;\n            }\n',
-        '',
+        '        if self.picker_editor.text() != self.picker_search {\n'
+        '            self.picker_editor.set_text(&self.picker_search);\n'
+        '        }\n',
+        '        if key.types_text() && !textline::types_into_field(key) {\n'
+        '            self.picker_search.push_str(&key.text);\n'
+        '            return EventResult::Consumed;\n'
+        '        }\n'
+        '        if self.picker_editor.text() != self.picker_search {\n'
+        '            self.picker_editor.set_text(&self.picker_search);\n'
+        '        }\n',
         ['a_chord_is_neither_a_clock_key_nor_typing'],
+    ),
+    # The city search is the toolkit's field, edited by textline's editor
+    # (2026-10-04; lane C, c-e-a-theme-can-shape-the-controls).
+    (
+        "the city search never has the keyboard",
+        '            focused: self.show_picker && !self.show_help,\n',
+        '            focused: false,\n',
+        ['the_city_search_is_the_toolkits_field'],
+    ),
+    (
+        "the city search keeps its mark under the list of keys",
+        '            focused: self.show_picker && !self.show_help,\n',
+        '            focused: self.show_picker,\n',
+        ['the_city_search_is_the_toolkits_field'],
+    ),
+    (
+        "a search that finds nothing is not red",
+        '            invalid: !self.picker_search.is_empty() && self.filtered_timezones().is_empty(),\n',
+        '            invalid: false,\n',
+        ['the_city_search_is_the_toolkits_field'],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        '        self.focus_ring_width = settings.focus_ring_width();\n',
+        '        let _ = settings;\n',
+        ['the_city_search_is_the_toolkits_field'],
+    ),
+    (
+        "the caret is drawn at the start of the search",
+        '                        self.picker_editor.cursor()\n',
+        '                        text::TextCursor::default()\n',
+        ['the_city_search_is_the_toolkits_field'],
+    ),
+    (
+        "a search is folded as ASCII",
+        '        let query = self.picker_search.to_lowercase();\n',
+        '        let query = self.picker_search.to_ascii_lowercase();\n',
+        ['a_search_in_capitals_finds_a_city_with_an_accent'],
     ),
 ]
 

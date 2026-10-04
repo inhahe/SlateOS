@@ -970,6 +970,7 @@ dependencies = [
  "oswindow",
  "pathtext",
  "scratchdir",
+ "textline",
 ]
 
 [[package]]

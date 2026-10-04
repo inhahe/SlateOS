@@ -2949,16 +2949,18 @@ word; text inside them that says "lane C" is history.
     `tests/vp9_vectors.rs` holds `matroska::Demuxer` to libvpx's pictures
     now;
   - `[ ]` `apps/mediaprobe` reads its track list from `matroska::Demuxer`
-    -- blocked by lane F: the probe shows a file's title and a track's BCP
-    47 language, which `matroska` reads and drops
-    (`requests/e-f-matroska-keep-the-title-and-the-bcp47-language.md`).
+    -- unblocked 2026-10-04: lane F keeps a file's title and a track's BCP
+    47 language now (59194ec67,
+    `requests/e-f-matroska-keep-the-title-and-the-bcp47-language.md`).
 
 - `[-]` `[E]` **Text boxes with a caret** --
   `known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box.md`:
-  twenty-nine programs' boxes take typing only at their end, with no caret,
+  twenty-nine programs' boxes took typing only at their end, with no caret,
   selection or clipboard. One program at a time onto `textline::apply_key`
-  over a `TextInput`, as netscan's and sysmonitor's; emojipicker,
-  vpnmanager, taskscheduler and musicplayer done 2026-10-04.
+  over a `TextInput`, as netscan's and sysmonitor's: twenty-six done
+  2026-10-04, listed in the known issue. Left: the masked boxes --
+  passwordgen's analyser, lockscreen's password, credmanager's master
+  password with its entry form and search.
 
 - `[x]` `[E]` **`apps/terminal` runs the user's shell on a kernel
   pseudo-terminal** — 2026-09-24, the "interactive terminal" joint task

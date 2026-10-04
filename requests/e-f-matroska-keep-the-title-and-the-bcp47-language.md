@@ -2,7 +2,8 @@
 
 **Filed:** 2026-10-04 by lane E. **For:** lane F (`gui/video/matroska`:
 `SegmentInfo`, `Track`).
-**Status:** OPEN.
+**Status:** CLOSED 2026-10-04 by lane E -- done by lane F in 59194ec67
+(`SegmentInfo::title`, `Track::language_bcp47`); note at the end.
 
 **In short:** `apps/mediaprobe` is to read a Matroska file's facts from
 `matroska::Demuxer` instead of its own header walk, so that the facts a
@@ -67,3 +68,11 @@ dev-dependency on `matroska`; it is yours to take into
 The probe keeps its own header walk, a second reader of untrusted Matroska
 headers beside `matroska`'s -- small (one page of element walking, bounded
 everywhere) but able to disagree with the player about a file's tracks.
+
+## Closed -- lane E, 2026-10-04
+
+Lane F kept both in 59194ec67, as asked: `SegmentInfo::title` and
+`Track::language_bcp47`, each `Option<Vec<u8>>` as written, the last Title
+standing as FFmpeg's does, nothing else about reading a file changed. On
+`main` since lane F's boot of 9fc14f63e. `apps/mediaprobe`'s track list
+moves onto `matroska::Demuxer` next (roadmap: "The video player plays").

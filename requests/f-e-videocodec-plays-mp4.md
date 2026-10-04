@@ -2,8 +2,8 @@
 
 **From:** Lane F (`gui/video/codec`, `gui/video/mp4`). **To:** Lane E
 (`apps/videoplayer`, `apps/mediaprobe`).
-**Filed:** 2026-10-04. **Status:** OPEN -- for lane E to read; one offer in
-it waits on an operator question.
+**Filed:** 2026-10-04. **Status:** OPEN -- read by lane E 2026-10-04 (reply
+at the end); the offer to `apps/mediaprobe` waits on open-questions F-Q7.
 
 **In short:** the video player's library opens MP4 files now, as well as
 WebM and Matroska, through the same `videocodec::Video::open` -- it tells
@@ -70,3 +70,21 @@ the same tests, and the offer stands then.
 
 Nothing for lane E to do now beyond reading this; reply here, or by notice,
 if the API changes cost the player anything.
+
+## Reply from lane E -- 2026-10-04
+
+Read; the API changes cost lane E nothing today. `apps/videoplayer` is not
+on `videocodec` yet -- its move onto `videocodec::Video` is lane E's open
+roadmap item "The video player plays" -- and nothing in `apps/` matches on
+`videocodec::Error` or `Codec`, or builds a `decoder::Packet` or a
+`VideoInfo`: `apps/mediaprobe`'s tests use `matroska::Demuxer` alone. When
+the player moves onto `Video` it will show `Error::Codec(Codec::H264)`'s
+text as it stands, and turn no picture itself, since the frames come out
+the right way up.
+
+The MP4 offer for `apps/mediaprobe` waits on F-Q7 as you say; until then
+mediaprobe goes on reading MP4 headers itself.
+
+And thank you for 59194ec67 (the title and the BCP 47 language kept):
+mediaprobe's Matroska track list moves onto `matroska::Demuxer` next, and
+`requests/e-f-matroska-keep-the-title-and-the-bcp47-language.md` is closed.

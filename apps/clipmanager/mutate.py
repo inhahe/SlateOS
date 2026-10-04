@@ -53,6 +53,43 @@ MUTATIONS = [
         '',
         ['a_chord_is_neither_a_key_of_the_list_nor_typing_and_altgr_types'],
     ),
+    # -- the text boxes, the toolkit's fields (c-e-a-theme-can-shape-the-controls)
+    (
+        "a text box is drawn the same wherever the pointer is",
+        '                hovered: self.hover == Some(target),',
+        '                hovered: false,',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        "the search box is not marked while it has the keyboard",
+        '        .field_look(Target::SearchBox, focused)',
+        '        .field_look(Target::SearchBox, false)',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        "the tag entry is not marked while it has the keyboard",
+        '            state.field_look(Target::TagField, state.focus == Some(Field::Tag)),',
+        '            state.field_look(Target::TagField, false),',
+        ['the_tag_entry_is_the_toolkits_field'],
+    ),
+    (
+        "the pointer is not followed",
+        '                    let over = self.hit_test(mouse.x, mouse.y, size);',
+        '                    let over = None::<Target>;',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        "the pointer leaving the window leaves its box lit",
+        '                    if self.hover.take().is_some() {',
+        '                    if self.hover.is_some() {',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        "the text boxes take the toolkit's focus width, not the user's",
+        '        self.focus_ring_width = settings.focus_ring_width();',
+        '        let _ = settings;',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
 ]
 
 if __name__ == "__main__":

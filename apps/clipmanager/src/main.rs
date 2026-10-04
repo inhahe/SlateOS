@@ -821,15 +821,35 @@ struct AppState {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// What the pointer is over, which is drawn lit.
+    hover: Option<Target>,
+    /// The user's focus width, which the text boxes draw their focus mark
+    /// at (`appearance_changed`).
+    focus_ring_width: f32,
 }
 
 impl AppState {
+    /// How the text box that `target` names is drawn now.
+    fn field_look(&self, target: Target, focused: bool) -> FieldLook {
+        FieldLook {
+            state: guitk::field::State {
+                hovered: self.hover == Some(target),
+                focused,
+                disabled: false,
+                invalid: false,
+            },
+            focus_width: self.focus_ring_width,
+        }
+    }
+
     fn new() -> Self {
         Self {
             picker: FilePicker::default(),
             picker_saves: false,
             store: ClipboardStore::new(),
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            hover: None,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             search_query: String::new(),
             type_filter: None,
             filtered_ids: Vec::new(),
@@ -1274,27 +1294,27 @@ fn build_frame(state: &AppState, width: f32, height: f32) -> Frame {
 }
 
 /// The colour a text box's border takes when it holds the caret.
-fn field_border(focused: bool, pal: &Palette) -> Color {
-    if focused { pal.blue } else { pal.surface1 }
+/// How a text box is drawn: the toolkit's field (lane C,
+/// c-e-a-theme-can-shape-the-controls) in this state, at the user's focus
+/// width.
+#[derive(Clone, Copy)]
+struct FieldLook {
+    state: guitk::field::State,
+    focus_width: f32,
+}
+
+impl FieldLook {
+    fn draw(self, frame: &mut Frame, pal: &Palette, rect: Rect) {
+        guitk::field::draw(frame, pal, rect, self.state, self.focus_width);
+    }
 }
 
 fn render_search_bar(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32, h: f32) {
     let focused = state.focus == Some(Field::Search);
     let box_rect = Rect::new(x, y, w, h);
     state
-        .palette
-        .push_surface(frame, x, y, w, h, 6.0, Surface::Card);
-    if focused {
-        frame.push(RenderCommand::StrokeRect {
-            x,
-            y,
-            width: w,
-            height: h,
-            color: field_border(true, &state.palette),
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(6.0),
-        });
-    }
+        .field_look(Target::SearchBox, focused)
+        .draw(frame, &state.palette, box_rect);
 
     frame.push(RenderCommand::Text {
         x: x + 10.0,
@@ -1613,7 +1633,7 @@ fn render_history_panel(frame: &mut Frame, state: &AppState, rect: Rect, visible
             entry,
             Rect::new(detail_x, y, detail_w, h),
             state.now,
-            state.focus == Some(Field::Tag),
+            state.field_look(Target::TagField, state.focus == Some(Field::Tag)),
             &state.tag_input,
         ),
         None => frame.push(RenderCommand::Text {
@@ -1776,9 +1796,10 @@ fn render_detail_panel(
     entry: &ClipEntry,
     rect: Rect,
     now: u64,
-    tag_focused: bool,
+    tag: FieldLook,
     tag_input: &str,
 ) {
+    let tag_focused = tag.state.focused;
     let Rect { x, y, w, h } = rect;
     frame.push(RenderCommand::PushClip {
         x,
@@ -1860,24 +1881,7 @@ fn render_detail_panel(
     // Tag entry: a box that takes the keyboard and a button that commits it.
     let add_w = 44.0_f32;
     let field = Rect::new(x + pad, cy, (w - pad * 2.0 - add_w - 6.0).max(0.0), 20.0);
-    pal.push_surface(
-        frame,
-        field.x,
-        field.y,
-        field.w,
-        field.h,
-        3.0,
-        Surface::Card,
-    );
-    frame.push(RenderCommand::StrokeRect {
-        x: field.x,
-        y: field.y,
-        width: field.w,
-        height: field.h,
-        color: field_border(tag_focused, pal),
-        line_width: 1.0,
-        corner_radii: CornerRadii::all(3.0),
-    });
+    tag.draw(frame, pal, field);
     let tag_display = if tag_input.is_empty() && !tag_focused {
         "add a tag...".to_string()
     } else if tag_focused {
@@ -2146,7 +2150,10 @@ fn render_templates_panel(frame: &mut Frame, state: &AppState, x: f32, y: f32, w
             label: "Name:",
             placeholder: "e.g. Email Reply",
             value: &state.template_name_input,
-            focused: state.focus == Some(Field::TemplateName),
+            look: state.field_look(
+                Target::TemplateName,
+                state.focus == Some(Field::TemplateName),
+            ),
             target: Target::TemplateName,
             height: 20.0,
         },
@@ -2162,7 +2169,10 @@ fn render_templates_panel(frame: &mut Frame, state: &AppState, x: f32, y: f32, w
             label: "Body:",
             placeholder: "Dear {name}, ...",
             value: &state.template_body_input,
-            focused: state.focus == Some(Field::TemplateBody),
+            look: state.field_look(
+                Target::TemplateBody,
+                state.focus == Some(Field::TemplateBody),
+            ),
             target: Target::TemplateBody,
             height: 40.0,
         },
@@ -2199,7 +2209,7 @@ struct TemplateField<'a> {
     label: &'a str,
     placeholder: &'a str,
     value: &'a str,
-    focused: bool,
+    look: FieldLook,
     target: Target,
     height: f32,
 }
@@ -2225,21 +2235,12 @@ fn render_template_field(
     });
 
     let rect = Rect::new(x + 60.0, y - 2.0, (w - 60.0).max(0.0), field.height);
-    let mut paint = pal.surface_paint(Surface::Card);
-    paint.border = Some(field_border(field.focused, pal));
-    pal.push_paint_radii(
-        frame,
-        rect.x,
-        rect.y,
-        rect.w,
-        rect.h,
-        CornerRadii::all(3.0),
-        paint,
-    );
+    field.look.draw(frame, pal, rect);
+    let focused = field.look.state.focused;
 
-    let display = if field.value.is_empty() && !field.focused {
+    let display = if field.value.is_empty() && !focused {
         field.placeholder.to_string()
-    } else if field.focused {
+    } else if focused {
         format!("{}_", field.value)
     } else {
         field.value.to_string()
@@ -2248,7 +2249,7 @@ fn render_template_field(
         x: rect.x + 6.0,
         y,
         text: display,
-        color: if field.value.is_empty() && !field.focused {
+        color: if field.value.is_empty() && !focused {
             pal.subtext0
         } else {
             pal.text
@@ -2898,6 +2899,24 @@ impl AppState {
         match event {
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::Press(button) => self.handle_click(mouse.x, mouse.y, button, size),
+                // What is under the pointer is drawn lit; only a change in it
+                // is worth a redraw.
+                MouseEventKind::Move => {
+                    let over = self.hit_test(mouse.x, mouse.y, size);
+                    if over == self.hover {
+                        Action::None
+                    } else {
+                        self.hover = over;
+                        Action::Redraw
+                    }
+                }
+                MouseEventKind::Leave => {
+                    if self.hover.take().is_some() {
+                        Action::Redraw
+                    } else {
+                        Action::None
+                    }
+                }
                 MouseEventKind::Scroll { dy, .. } => {
                     // The accumulator keeps the fractions a trackpad sends, so a
                     // slow drag moves instead of rounding to zero every frame.
@@ -2952,6 +2971,10 @@ fn next_type_filter(current: Option<ClipType>) -> Option<ClipType> {
 impl App for AppState {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -3009,6 +3032,151 @@ impl App for AppState {
 /// Lets the tests drive this window by naming its controls rather than
 /// measuring them. Three lines of forwarding; the helpers are in
 /// [`guitk::probe`].
+#[cfg(test)]
+mod field_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+    use guitk::event::MouseEvent;
+    use guitk::probe::{click, rect_of};
+
+    /// The search box, the tag entry and the template fields are the
+    /// toolkit's (lane C, c-e-a-theme-can-shape-the-controls): lit under the
+    /// pointer, out when it leaves, and marked at the user's focus width while
+    /// they have the keyboard.
+    #[test]
+    fn the_text_boxes_are_the_toolkits_fields() {
+        let mut state = AppState::new();
+        state.refresh_filter();
+        let mut palette = state.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut state, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        App::appearance_changed(&mut state, &settings);
+        let size = AppState::SIZE;
+        let draws = |state: &AppState, rect: Rect, s: guitk::field::State| {
+            let seq = |f: guitk::field::State| {
+                let mut want: Vec<RenderCommand> = Vec::new();
+                guitk::field::draw(&mut want, &palette, rect, f, width);
+                want
+            };
+            let frame = build_frame(state, size.0, size.1);
+            let cmds = frame.commands();
+            let has = |want: &[RenderCommand]| {
+                !want.is_empty() && cmds.windows(want.len()).any(|w| w == want)
+            };
+            // Not focused means no focus mark either: an unfocused box's
+            // commands begin a focused one's.
+            has(&seq(s)) && (s.focused || !has(&seq(guitk::field::State { focused: true, ..s })))
+        };
+        let idle = guitk::field::State::default();
+        let lit = guitk::field::State {
+            hovered: true,
+            ..idle
+        };
+        let keyed = guitk::field::State {
+            focused: true,
+            ..idle
+        };
+        let pointer = |state: &mut AppState, x: f32, y: f32, kind: MouseEventKind| {
+            state.handle_event(&Event::Mouse(MouseEvent { x, y, kind }), size)
+        };
+
+        let search = rect_of(&state, Target::SearchBox).expect("the search box");
+        assert!(
+            draws(&state, search, idle),
+            "the search box is not the toolkit's"
+        );
+        let (x, y) = search.centre();
+        assert_eq!(
+            pointer(&mut state, x, y, MouseEventKind::Move),
+            Action::Redraw
+        );
+        assert_eq!(
+            pointer(&mut state, x + 1.0, y, MouseEventKind::Move),
+            Action::None,
+            "a move that changed nothing redrew the window"
+        );
+        assert!(
+            draws(&state, search, lit),
+            "the box under the pointer is not lit"
+        );
+        assert_eq!(
+            pointer(&mut state, -1.0, -1.0, MouseEventKind::Leave),
+            Action::Redraw
+        );
+        assert!(
+            draws(&state, search, idle),
+            "the box stayed lit after the pointer left"
+        );
+        click(&mut state, Target::SearchBox);
+        assert!(
+            draws(&state, search, keyed),
+            "the search box with the keyboard is not marked at the user's width"
+        );
+
+        click(&mut state, Target::Tab(ActiveTab::Templates));
+        click(&mut state, Target::TemplateName);
+        let name = rect_of(&state, Target::TemplateName).expect("the template name");
+        let body = rect_of(&state, Target::TemplateBody).expect("the template body");
+        assert!(
+            draws(&state, name, keyed),
+            "the name with the keyboard is not marked"
+        );
+        let (bx, by) = body.centre();
+        pointer(&mut state, bx, by, MouseEventKind::Move);
+        assert!(
+            draws(&state, body, lit),
+            "the body under the pointer is not lit"
+        );
+    }
+
+    /// The tag entry, in the detail panel of a chosen entry, is the toolkit's
+    /// field too.
+    #[test]
+    fn the_tag_entry_is_the_toolkits_field() {
+        let mut state = AppState::new();
+        for i in 0..3 {
+            state.store.add(
+                format!("clip number {i}"),
+                ClipType::PlainText,
+                i,
+                format!("app{i}"),
+            );
+        }
+        state.refresh_filter();
+        state.selected_id = state.filtered_ids.first().copied();
+        let width = state.focus_ring_width;
+        let palette = state.palette;
+        click(&mut state, Target::TagField);
+        let tag = rect_of(&state, Target::TagField).expect("the tag entry");
+        let mut want: Vec<RenderCommand> = Vec::new();
+        guitk::field::draw(
+            &mut want,
+            &palette,
+            tag,
+            guitk::field::State {
+                focused: true,
+                ..guitk::field::State::default()
+            },
+            width,
+        );
+        let frame = build_frame(&state, AppState::SIZE.0, AppState::SIZE.1);
+        assert!(
+            frame
+                .commands()
+                .windows(want.len())
+                .any(|w| w == want.as_slice()),
+            "the tag entry with the keyboard is not the toolkit's field"
+        );
+    }
+}
+
 impl Probe for AppState {
     type Target = Target;
     type Outcome = Action;

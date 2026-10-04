@@ -3706,8 +3706,20 @@ lane C's `guitk`.
     `[x]` Inter frames coded from given decisions: references, inter headers,
     vector prediction and coding, sub-8x8 inter, segment-map prediction --
     random decisions decode to the encoder's reconstruction, counts agree.
-    `[ ]` libvpx's inter decisions (motion search, the inter mode search,
-    cyclic refresh's band, scene and noise estimates), then threads.
+    `[x]` libvpx's inter decisions: the speed-8 variance partitioning with
+    its copy-partition shortcut, the realtime inter mode search
+    (`vp9_pick_inter_mode`: the fast diamond, sub-pixel and
+    integral-projection searches, the filter search, the encode breakout),
+    cyclic refresh's band and segment updates, source SAD, scene, noise and
+    skin detection. All 30 frames of the reference encode are byte-identical
+    to `vpxenc`'s from the encoder's own decisions, and a trace of every
+    decision matches libvpx's line for line. `[ ]` A second reference encode
+    for the paths that clip never reaches -- scene cuts, a rising noise
+    level, the golden refresh, blocks over the picture's edge
+    (`known-issues/F-the-vp9-encoders-edge-extension-is-libvpxs-but-no-reference-encode-tests-it.md`).
+    `[ ]` The learned partitioning libvpx uses at 352x288 and below
+    (`known-issues/F-the-vp9-encoder-is-libvpxs-only-above-352x288.md`).
+    `[ ]` Threads.
 
 - `[-]` `[F]` **AVIF pictures**, decided 2026-09-27 (§1333): a HEIF container reader
   and a port of rav1d (dav1d in Rust, BSD) in `gui/imagecodec`, so AVIF opens

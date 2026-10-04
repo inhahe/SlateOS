@@ -145,6 +145,41 @@ the encoder's reconstruction while the encoder counts what the decoder
 counts, over a thousand streams in a soak. Until libvpx's inter decisions
 are ported, `Encoder::encode` keeps coding every frame as a key frame.
 
+**2026-10-04: every frame is libvpx's.** The inter decisions are in: the
+speed-8 variance partitioning and its shortcut of copying the last frame's
+partition, the realtime inter mode search (`vp9_pick_inter_mode`, with the
+fast diamond, sub-pixel and integral-projection searches, the filter search
+and the encode breakout), cyclic refresh's band of refreshed blocks and
+their segments, and what libvpx learns from the source -- each superblock's
+change since the last picture, scene cuts, the noise level, skin. All 30
+frames of the reference encode are now byte-identical to `vpxenc`'s from the
+encoder's own decisions. Two things it took:
+
+- **A decision trace on both sides.** A differing frame says little about
+  why: one block that picked another mode changes every byte after it. So a
+  copy of libvpx is instrumented to log each superblock's partition and each
+  candidate its mode search scored, the port logs the same lines in tests,
+  and a comparer finds the first line that differs. The tools and the
+  procedure are in the tree (`gui/video/vp9/tools/trace/`); on the
+  reference encode the two logs agree on all 365,835 lines.
+- **libvpx's stale state, reproduced.** libvpx reads state it never
+  refreshed, and its decisions depend on it: the mode-info buffer it swaps
+  with every frame and never clears (a check of low motion reads the vector
+  left by whatever block last covered the cell, two frames ago), cost tables
+  rebuilt only every eighth frame (a table never built is zeros), a mode's
+  threshold carried from frame to frame. The port models each as libvpx
+  holds it, with a comment at the read. Reading them as bugs and "fixing"
+  them would make different frames from `vpxenc`'s, which is the one test
+  the encoder has.
+
+Paths the reference clip never reaches -- a scene cut, a rising noise
+level, the golden refresh at frame 40, a block over the picture's edge --
+are ported but not yet proved; a second reference encode is next. At
+352x288 and below libvpx partitions inter frames by a learned search the
+port does not have yet
+(`known-issues/F-the-vp9-encoder-is-libvpxs-only-above-352x288.md`). How
+the encoder keeps time is §1340.
+
 **Alternatives.**
 
 | | For | Against |

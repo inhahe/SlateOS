@@ -157,6 +157,7 @@ typedef struct {
   int sweep_to;          /* if not 0, the rate ramps 6 kb/s to this and back every 8 s */
   int frame_switch;      /* the frame size cycles through every one */
   double level;
+  int force_stereo;      /* coded in stereo however few the bits */
 } Stream;
 
 static void encode_stream(const char *dir, const Stream *s) {
@@ -179,6 +180,7 @@ static void encode_stream(const char *dir, const Stream *s) {
   opus_encoder_ctl(enc, OPUS_SET_VBR_CONSTRAINT(s->cvbr));
   if (s->bandwidth != OPUS_AUTO) opus_encoder_ctl(enc, OPUS_SET_BANDWIDTH(s->bandwidth));
   if (s->force_mode != OPUS_AUTO) opus_encoder_ctl(enc, OPUS_SET_FORCE_MODE(s->force_mode));
+  if (s->force_stereo) opus_encoder_ctl(enc, OPUS_SET_FORCE_CHANNELS(2));
   FILE *bit = open_out(dir, s->name, "bit");
   /* Every frame size opus_encode takes; 80 ms and over are several frames
    * repacketized into one packet. */
@@ -348,5 +350,13 @@ int main(int argc, char **argv) {
     {"discrete",          255,  4, V,  40000, 1, 10, 4},
   };
   for (size_t i = 0; i < sizeof multis / sizeof multis[0]; i++) encode_multi(dir, &multis[i]);
+  /* Streams added since go last: the noise generator is shared, so a stream
+   * put among the others would change every one after it. */
+  const Stream later[] = {
+    /* Stereo CELT starved of bits: bands too poor for more than one step
+     * of their split, where a stream may still ask for the side inverted. */
+    {"celt_stereo_low",   2, A, CELT, FB,    12000, 200, 0,  0, 0, 1, 0, 1,  3,     0, 0, 1.0, 1},
+  };
+  for (size_t i = 0; i < sizeof later / sizeof later[0]; i++) encode_stream(dir, &later[i]);
   return 0;
 }

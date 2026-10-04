@@ -295,6 +295,8 @@ mod tests {
         assert_eq!(lshift_sat32(-(1 << 30), 2), i32::MIN);
         assert_eq!(limit(5, 10, 0), 5);
         assert_eq!(limit(-5, 10, 0), 0);
+        assert_eq!(limit(15, 10, 0), 10);
+        assert_eq!(limit(15, 0, 10), 10);
         assert_eq!(clz32(0), 32);
     }
 

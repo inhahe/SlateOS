@@ -687,3 +687,41 @@ impl Decoder {
         celt_ret.map(|_| audiosize)
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "a test: a failure should be loud")]
+mod tests {
+    use super::*;
+
+    /// What `opus_decoder_create`, `OPUS_SET_GAIN`, `opus_decode` and
+    /// `opus_decode_float` refuse, refused here too, with libopus's codes.
+    #[test]
+    fn arguments_libopus_refuses_are_refused() {
+        for (rate, channels) in [(44100, 1), (48000, 0), (48000, 3), (0, 2)] {
+            assert_eq!(
+                Decoder::new(rate, channels).err(),
+                Some(Error::BadArgument),
+                "{rate} {channels}"
+            );
+        }
+        let mut d = Decoder::new(24000, 2).unwrap();
+        assert_eq!((d.sample_rate(), d.channels(), d.gain()), (24000, 2, 0));
+        assert_eq!(d.set_gain(32768), Err(Error::BadArgument));
+        assert_eq!(d.set_gain(-32769), Err(Error::BadArgument));
+        d.set_gain(-300).unwrap();
+        assert_eq!(d.gain(), -300);
+        // Room for no samples.
+        assert_eq!(d.decode(None, &mut [], false), Err(Error::BadArgument));
+        assert_eq!(
+            d.decode_float(None, &mut [], false),
+            Err(Error::BadArgument)
+        );
+        // Code 3 with no frames: `opus_decode_float` asks the packet's
+        // length first, and a packet of no samples is not one.
+        let mut f = vec![0f32; 5760 * 2];
+        assert_eq!(
+            d.decode_float(Some(&[0x03, 0x00]), &mut f, false),
+            Err(Error::InvalidPacket)
+        );
+    }
+}

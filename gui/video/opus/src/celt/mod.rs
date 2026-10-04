@@ -204,7 +204,7 @@ mod reference {
                 d.add(o);
             }
         }
-        d.check("celt_lpc", 740_000, 0x9ff0_19f1_d677_f643).unwrap();
+        d.check("celt_lpc", 740_000, 0xcee6_b06f_4e49_6698).unwrap();
     }
 
     /// The concealment's pitch search: `pitch_downsample` of one or two
@@ -231,7 +231,7 @@ mod reference {
             }
             d.add(pitch_search(&lp[360..], &lp, 2048 - 720, 720 - 100));
         }
-        d.check("celt_pitch", 1_537_500, 0xb601_2a54_dc99_3e1c)
+        d.check("celt_pitch", 1_537_500, 0x943f_644a_7dc9_39ef)
             .unwrap();
     }
 }

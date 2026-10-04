@@ -82,9 +82,10 @@ pub(crate) fn tone(out: &mut [i32], c: i32, amp: i32) {
     }
 }
 
-/// `signal`: noise, a tone, two tones and noise, or silence.
+/// `signal`: noise, a tone, two tones and noise, silence, resonant noise,
+/// impulses, a square wave, or the Nyquist tone.
 pub(crate) fn signal(rng: &mut Xorshift, out: &mut [i32]) {
-    match rng.below(4) {
+    match rng.below(8) {
         0 => {
             let shift = rng.below(16);
             for v in out.iter_mut() {
@@ -109,6 +110,45 @@ pub(crate) fn signal(rng: &mut Xorshift, out: &mut [i32]) {
                 *v = (*v / 2 + o / 2 + noise).clamp(-32768, 32767);
             }
         }
-        _ => out.fill(0),
+        3 => out.fill(0),
+        4 => {
+            // Quiet noise through three resonators at one frequency, poles
+            // just inside the unit circle.
+            let cosw = i64::from(rng.below(16384));
+            let r = 16383 - i64::from(rng.below(64));
+            let (a1, a2) = ((2 * r * cosw) >> 14, (r * r) >> 14);
+            let mut y = [[0i64; 2]; 3];
+            for o in out.iter_mut() {
+                let mut v = i64::from(rng.sample(8));
+                for st in &mut y {
+                    let w = (v + ((a1 * st[0]) >> 14) - ((a2 * st[1]) >> 14))
+                        .clamp(-(1 << 24), 1 << 24);
+                    st[1] = st[0];
+                    st[0] = w;
+                    v = w;
+                }
+                *o = (v >> 8).clamp(-32768, 32767) as i32;
+            }
+        }
+        5 => {
+            let period = 20 + rng.below(300) as usize;
+            let amp = rng.below(32768) as i32;
+            for (i, o) in out.iter_mut().enumerate() {
+                *o = if i % period == 0 { amp } else { 0 };
+            }
+        }
+        6 => {
+            let half = 1 + rng.below(100) as usize;
+            let amp = rng.below(32768) as i32;
+            for (i, o) in out.iter_mut().enumerate() {
+                *o = if (i / half) & 1 != 0 { amp } else { -amp };
+            }
+        }
+        _ => {
+            let amp = rng.below(32768) as i32;
+            for (i, o) in out.iter_mut().enumerate() {
+                *o = if i & 1 != 0 { amp } else { -amp };
+            }
+        }
     }
 }

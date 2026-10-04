@@ -42,3 +42,22 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// libopus's numbers, and `opus_strerror`'s words.
+    #[test]
+    fn errors_say_what_libopus_says() {
+        for (e, code, text) in [
+            (Error::BadArgument, -1, "invalid argument"),
+            (Error::BufferTooSmall, -2, "buffer too small"),
+            (Error::Internal, -3, "internal error"),
+            (Error::InvalidPacket, -4, "corrupted stream"),
+        ] {
+            assert_eq!(e.code(), code);
+            assert_eq!(e.to_string(), text);
+        }
+    }
+}

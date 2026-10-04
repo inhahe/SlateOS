@@ -57,7 +57,8 @@ def single_variants(single_streams):
          for g in [-32768, -1536, 1536, 6000, 32767]]
         + [(s, r, c, "plain+noinv")
            for s in ["celt_fb_stereo", "celt_voice_stereo", "celt_nb_5ms", "celt_loud",
-                     "switching_music", "switching_speech", "hybrid_swb", "celt_tone_stereo"]
+                     "switching_music", "switching_speech", "hybrid_swb", "celt_tone_stereo",
+                     "celt_stereo_low"]
            for (r, c) in [(48000, 2), (24000, 2), (48000, 1)]]
         + [(s, r, c, v)
            for s in ["switching_speech", "frame_sizes_cbr", "silk_mb_stereo", "celt_2_5ms"]

@@ -62,13 +62,15 @@ sounds, so they are this project's to keep in the repository.
   function by function over millions of made-up inputs
   (`tools/functions.c`, `tools/mathops.c`).
 
-**Status, 2026-10-04: done.** 998 decodes of 27 streams and a stream of
+**Status, 2026-10-04: done.** 1036 decodes of 28 streams and a stream of
 made-up packets, and all 360 of the RFC vectors', match libopus to the
 bit; so do its packet parser over 200 000 made-up packets and its math,
 LPC, pitch and LSF functions over millions of inputs. Measured with
-llvm-cov, the streams alone run 95.6% of the decoder's lines; what they
-miss is either reached by the function tests or is a check C makes that
-the Opus layer above it never lets fail. Along the way the streams found
+llvm-cov, the tests run 98.9% of the decoder's lines. What they miss is a
+check C makes that the Opus layer above it never lets fail -- but for one
+path: CELT's LPC fit shrinks its coefficients when they outgrow 16 bits,
+and no input found reaches that, the recursion's own stop at 30 dB of
+prediction gain coming first even for resonant noise. Along the way the streams found
 what the RFC vectors could not: in a multistream packet, a stream that
 cannot use FEC (CELT) reported where it ended as 0, so the next stream
 re-read its packet -- fixed, and tested by the surround streams with loss.

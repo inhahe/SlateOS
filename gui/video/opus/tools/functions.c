@@ -21,6 +21,7 @@
 #include <string.h>
 #include "opus.h"
 #include "opus_custom.h"
+#include "opus_multistream.h"
 #include "opus_private.h"
 #include "celt/celt_lpc.h"
 #include "celt/modes.h"
@@ -66,10 +67,10 @@ static void tone(int *out, int n, int c, int amp) {
   }
 }
 
-/* A signal of one of four kinds: noise, a tone, two tones and noise, or
- * silence. */
+/* A signal of one of eight kinds: noise, a tone, two tones and noise,
+ * silence, resonant noise, impulses, a square wave, or the Nyquist tone. */
 static void signal(int *out, int n) {
-  unsigned kind = rnd() % 4;
+  unsigned kind = rnd() % 8;
   if (kind == 0) {
     unsigned shift = rnd() % 16;
     for (int i = 0; i < n; i++) out[i] = (short)(rnd() & 0xffff) >> shift;
@@ -89,8 +90,40 @@ static void signal(int *out, int n) {
       int v = out[i] / 2 + other[i] / 2 + noise;
       out[i] = v > 32767 ? 32767 : v < -32768 ? -32768 : v;
     }
-  } else {
+  } else if (kind == 3) {
     for (int i = 0; i < n; i++) out[i] = 0;
+  } else if (kind == 4) {
+    /* Quiet noise through three resonators at one frequency, poles just
+     * inside the unit circle: a spectrum so peaky that an LPC fit's
+     * coefficients pass what 16 bits hold. */
+    long long cosw = rnd() % 16384;
+    long long r = 16383 - (long long)(rnd() % 64);
+    long long a1 = (2 * r * cosw) >> 14, a2 = (r * r) >> 14;
+    long long y[3][2] = {{0}};
+    for (int i = 0; i < n; i++) {
+      long long v = (short)(rnd() & 0xffff) >> 8;
+      for (int st = 0; st < 3; st++) {
+        long long w = v + ((a1 * y[st][0]) >> 14) - ((a2 * y[st][1]) >> 14);
+        if (w > (1 << 24)) w = 1 << 24;
+        if (w < -(1 << 24)) w = -(1 << 24);
+        y[st][1] = y[st][0];
+        y[st][0] = w;
+        v = w;
+      }
+      long long o = v >> 8;
+      out[i] = o > 32767 ? 32767 : o < -32768 ? -32768 : (int)o;
+    }
+  } else if (kind == 5) {
+    int period = 20 + (int)(rnd() % 300);
+    int amp = (int)(rnd() % 32768);
+    for (int i = 0; i < n; i++) out[i] = i % period == 0 ? amp : 0;
+  } else if (kind == 6) {
+    int half = 1 + (int)(rnd() % 100);
+    int amp = (int)(rnd() % 32768);
+    for (int i = 0; i < n; i++) out[i] = (i / half) & 1 ? amp : -amp;
+  } else {
+    int amp = (int)(rnd() % 32768);
+    for (int i = 0; i < n; i++) out[i] = i & 1 ? amp : -amp;
   }
 }
 
@@ -285,11 +318,42 @@ static void silk_math_check(void) {
   end("silk_math");
 }
 
+/* Made-up packets through a multistream decoder (three channels: a coupled
+ * stream and a mono one): its validation of the streams' framing, and what
+ * it decodes. */
+static void multistream_check(void) {
+  static unsigned char data[1700];
+  static short pcm[5760 * 3];
+  const unsigned char mapping[3] = {0, 1, 2};
+  int err;
+  OpusMSDecoder *ms = opus_multistream_decoder_create(48000, 3, 2, 1, mapping, &err);
+  s = 0xA0761D6478BD642Full;
+  start();
+  for (int i = 0; i < 20000; i++) {
+    unsigned r = rnd() % 4;
+    int len;
+    if (r == 0) len = (int)(rnd() % 4);
+    else if (r == 1) len = (int)(rnd() % 16);
+    else if (r == 2) len = (int)(rnd() % 300);
+    else len = (int)(rnd() % 1700);
+    for (int j = 0; j < len; j++) {
+      unsigned b = rnd();
+      data[j] = (b & 3) == 0 ? 0xff : (unsigned char)(b >> 2);
+    }
+    int ret = opus_multistream_decode(ms, data, len, pcm, 5760, 0);
+    add(ret);
+    for (int k = 0; k < ret * 3; k += 7) add(pcm[k]);
+  }
+  opus_multistream_decoder_destroy(ms);
+  end("multistream");
+}
+
 int main(void) {
   packets();
   celt_lpc_check();
   celt_pitch_check();
   silk_nlsf_check();
   silk_math_check();
+  multistream_check();
   return 0;
 }

@@ -395,6 +395,8 @@ mod tests {
         }
         d.check("packets", 1_601_782, 0x1373_c4a2_5bfd_1239)
             .unwrap();
+        // libopus reads an empty packet's TOC anyway; here it is an error.
+        assert_eq!(packet_has_lbrr(&[]), Err(Error::InvalidPacket));
     }
 
     #[test]

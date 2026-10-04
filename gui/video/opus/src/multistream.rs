@@ -741,4 +741,77 @@ mod tests {
         assert!(MultistreamDecoder::new(48000, 2, 1, 0, &[0, 1]).is_err());
         assert!(MultistreamDecoder::new(48000, 2, 1, 0, &[0, 255]).is_ok());
     }
+
+    /// What `opus_multistream_decoder_create` and
+    /// `opus_projection_decoder_create` refuse; heads that are not; and a
+    /// head whose mapping its streams cannot fill, whose decoder libopus
+    /// would refuse.
+    #[test]
+    fn arguments_libopus_refuses_are_refused() {
+        let bad: [(usize, usize, usize, &[u8]); 4] = [
+            (0, 1, 0, &[]),
+            (2, 0, 0, &[0, 1]),
+            (2, 1, 2, &[0, 1]),
+            (2, 1, 0, &[0]),
+        ];
+        for (channels, streams, coupled, mapping) in bad {
+            assert_eq!(
+                MultistreamDecoder::new(48000, channels, streams, coupled, mapping).err(),
+                Some(Error::BadArgument)
+            );
+        }
+        let mut ms = MultistreamDecoder::new(48000, 3, 2, 1, &[0, 1, 2]).unwrap();
+        assert_eq!(ms.decode(None, &mut [], false), Err(Error::BadArgument));
+        assert!(ProjectionDecoder::new(48000, 4, 2, 2, &[0; 31]).is_err());
+        assert!(ProjectionDecoder::new(48000, 4, 2, 2, &[0; 32]).is_ok());
+        assert!(Head::parse(b"OpusHea").is_none());
+        assert!(Head::parse(&head(0, 0, &[])).is_none(), "no channels");
+        assert!(
+            Head::parse(&head(0, 3, &[])).is_none(),
+            "family 0 holds two"
+        );
+        assert!(
+            Head::parse(&head(1, 2, &[0, 0, 0, 1])).is_none(),
+            "no streams"
+        );
+        let h = Head::parse(&head(1, 2, &[1, 0, 0, 1])).unwrap();
+        assert_eq!(h.decoder(48000).err(), Some(Error::BadArgument));
+    }
+
+    /// Made-up packets -- a quarter of their bytes 255, so that the
+    /// streams' self-delimited lengths and padding come up -- through a
+    /// three-channel decoder: every result and error, and what it decodes,
+    /// as `tools/functions.c` digested libopus's.
+    #[test]
+    fn random_packets_agree_with_libopus() {
+        use crate::testutil::{Digest, Xorshift};
+        let mut rng = Xorshift(0xA076_1D64_78BD_642F);
+        let mut d = Digest::new();
+        let mut ms = MultistreamDecoder::new(48000, 3, 2, 1, &[0, 1, 2]).unwrap();
+        let mut data = vec![0u8; 1700];
+        let mut pcm = vec![0i16; 5760 * 3];
+        for _ in 0..20000 {
+            let len = match rng.below(4) {
+                0 => rng.below(4),
+                1 => rng.below(16),
+                2 => rng.below(300),
+                _ => rng.below(1700),
+            } as usize;
+            for b in &mut data[..len] {
+                let r = rng.next();
+                *b = if r & 3 == 0 { 0xff } else { (r >> 2) as u8 };
+            }
+            match ms.decode(Some(&data[..len]), &mut pcm, false) {
+                Ok(n) => {
+                    d.add(n as i32);
+                    for &s in pcm[..n * 3].iter().step_by(7) {
+                        d.add(i32::from(s));
+                    }
+                }
+                Err(e) => d.add(e.code()),
+            }
+        }
+        d.check("multistream", 3_973_810, 0xfc6c_bff6_fd08_57d8)
+            .unwrap();
+    }
 }

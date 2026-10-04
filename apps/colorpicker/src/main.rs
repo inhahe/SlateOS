@@ -1225,6 +1225,15 @@ impl ColorPickerApp {
         button: MouseButton,
         size: (f32, f32),
     ) -> Action {
+        // The card is modal for the pointer as it is for the keys: a press,
+        // with any button, puts it away rather than reaching the control
+        // drawn under it -- or, with the eyedropper armed, rather than
+        // sampling a colour the card is covering.  Only the press: a drag
+        // begun before the card came up still ends at its release.
+        if self.show_help {
+            self.show_help = false;
+            return Action::Redraw;
+        }
         if button != MouseButton::Left {
             return Action::None;
         }
@@ -2504,6 +2513,61 @@ mod tests {
         );
     }
 
+    /// **A press while the card is up puts it away, and does nothing else.**
+    ///
+    /// It used to go straight through the card to the control drawn under
+    /// it. The control at the end is the same press with the card down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let card_up = |app: &ColorPickerApp| {
+            app.frame(ColorPickerApp::SIZE.0, ColorPickerApp::SIZE.1)
+                .commands()
+                .iter()
+                .any(|c| match c {
+                    RenderCommand::Text { text, .. } => text.contains("F1 closes this"),
+                    _ => false,
+                })
+        };
+        let mut app = ColorPickerApp::create();
+
+        key(&mut app, &press(Key::F1));
+        assert!(card_up(&app));
+        assert_eq!(click(&mut app, Target::Eyedropper), Action::Redraw);
+        assert!(!card_up(&app), "the press did not put the card away");
+        assert!(
+            !app.eyedropper.active,
+            "the press went through the card and armed the eyedropper"
+        );
+
+        // Any button: the right one does nothing to a control, but it is
+        // still a press on the card.
+        key(&mut app, &press(Key::F1));
+        assert_eq!(
+            click_with(&mut app, Target::Eyedropper, MouseButton::Right),
+            Action::Redraw
+        );
+        assert!(!card_up(&app), "a right-button press left the card up");
+
+        // An armed eyedropper samples nothing the card is covering.
+        click(&mut app, Target::Eyedropper);
+        assert!(app.eyedropper.active);
+        let before = app.current;
+        key(&mut app, &press(Key::F1));
+        click(&mut app, Target::Swatch(0));
+        assert_eq!(
+            app.current, before,
+            "the eyedropper sampled a colour through the card"
+        );
+        assert!(!card_up(&app));
+
+        // Control: with the card down, the same press samples the swatch.
+        click(&mut app, Target::Swatch(0));
+        assert_ne!(
+            app.current, before,
+            "control: the press samples nothing at all"
+        );
+    }
+
     // -- Hex conversion tests ----------------------------------------------
 
     #[test]
@@ -3285,8 +3349,8 @@ mod tests {
 
     use guitk::event::{Modifiers, MouseEvent};
     use guitk::probe::{
-        click, click_background, control_names, ctrl, is_visible, key, press, rect_of, shift,
-        type_str, typing,
+        click, click_background, click_with, control_names, ctrl, is_visible, key, press, rect_of,
+        shift, type_str, typing,
     };
 
     /// A pointer move, which the probe helpers do not cover because most

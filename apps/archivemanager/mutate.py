@@ -10,7 +10,8 @@ dialogs -- whose Open filter said `*.zip` alone after TAR and TAR.GZ could be
 opened -- and the 7z refusal, by name and by the bytes when the name says TAR.
 Since then: the compressed TARs, TAR.BZ2 and TAR.XZ (2026-10-03, read and
 written, TAR.XZ as `xz -6` writes it), and the cap each is decompressed
-under.
+under; and 7z, read through `sevenz` (2026-10-03) -- listed, extracted and
+tested, never written -- which retired the rows about refusing it.
 
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
@@ -36,6 +37,16 @@ REFUSED = "opening_something_that_is_not_an_archive_says_which_thing_it_is_not"
 GZIPPED = "a_gzipped_tar_is_inflated_and_listed_whatever_it_is_called"
 TXZ_READ = "a_tar_xz_that_xz_wrote_is_listed_and_extracted"
 BUDGET = "a_compressed_tar_past_the_budget_is_too_big_not_damaged"
+SEVEN = "a_7z_that_7zip_wrote_is_listed_extracted_and_tested"
+SEVEN_DAMAGED = "a_damaged_7z_gives_up_what_7zip_would"
+SEVEN_LOCKED = "an_encrypted_7z_is_listed_and_its_files_wait_for_a_password"
+SEVEN_SAVE = "a_7z_is_not_rewritten"
+SEVEN_NAMES = "a_7z_name_that_is_not_text_is_kept_as_bytes"
+SEVEN_TIME = "a_7z_time_is_read_from_windows_ticks"
+SEVEN_FOUND = "a_7z_whose_start_header_was_never_written_is_found_from_its_end"
+SEVEN_AFTER = "a_7z_with_data_after_a_block_is_whole_in_its_files_only"
+SEVEN_ANTI = "a_7z_deletion_record_is_not_extracted_as_a_file"
+SEVEN_RO = "a_7z_opens_read_only"
 
 
 def cap_arm(variant, error, verb):
@@ -68,28 +79,34 @@ MAIN = [
         [CASE, OWN],
     ),
     (
-        "7z is taken for readable",
-        "            Self::Zip | Self::Tar | Self::TarGz | Self::TarBz2 | Self::TarXz\n",
-        "            Self::Zip | Self::Tar | Self::TarGz | Self::TarBz2 | Self::TarXz | Self::SevenZip\n",
-        [REFUSED],
-    ),
-    (
-        "TAR.XZ is not readable",
-        "            Self::Zip | Self::Tar | Self::TarGz | Self::TarBz2 | Self::TarXz\n",
-        "            Self::Zip | Self::Tar | Self::TarGz | Self::TarBz2\n",
-        [TXZ_READ],
+        "7z is taken for writable",
+        "        self != Self::SevenZip\n    }\n\n    /// Whether this is a TAR inside",
+        "        true\n    }\n\n    /// Whether this is a TAR inside",
+        [DIALOGS, SEVEN_RO],
     ),
     (
         "TAR.XZ is not writable",
-        "        self.readable()\n    }\n\n    /// Whether this is a TAR inside",
-        "        self.readable() && self != Self::TarXz\n    }\n\n    /// Whether this is a TAR inside",
+        "        self != Self::SevenZip\n    }\n\n    /// Whether this is a TAR inside",
+        "        self != Self::SevenZip && self != Self::TarXz\n    }\n\n    /// Whether this is a TAR inside",
         [DIALOGS],
     ),
     (
         "TAR.BZ2 is not writable",
-        "        self.readable()\n    }\n\n    /// Whether this is a TAR inside",
-        "        self.readable() && self != Self::TarBz2\n    }\n\n    /// Whether this is a TAR inside",
+        "        self != Self::SevenZip\n    }\n\n    /// Whether this is a TAR inside",
+        "        self != Self::SevenZip && self != Self::TarBz2\n    }\n\n    /// Whether this is a TAR inside",
         [DIALOGS],
+    ),
+    (
+        "Add and Delete are offered on a 7z",
+        "        .is_some_and(|a| a.source.is_some() && a.format.writable());",
+        "        .is_some_and(|a| a.source.is_some());",
+        [SEVEN_RO],
+    ),
+    (
+        "a dead Add on a 7z blames the source",
+        "                    Some(f) if !f.writable() => {",
+        "                    Some(f) if !f.writable() && false => {",
+        [SEVEN_RO],
     ),
     (
         "the filter keeps every format",
@@ -181,26 +198,129 @@ MAIN = [
         '',
         ['a_folders_arrow_opens_it_without_showing_it', 'a_click_on_a_folder_shows_it'],
     ),
-    (
-        'TAR.BZ2 is not readable',
-        "            Self::Zip | Self::Tar | Self::TarGz | Self::TarBz2 | Self::TarXz\n",
-        "            Self::Zip | Self::Tar | Self::TarGz | Self::TarXz\n",
-        ['a_bzipped_tar_is_decompressed_and_listed_whatever_it_is_called', 'a_tar_and_a_compressed_tar_are_rewritten_in_their_own_format'],
-    ),
 ]
 
 BACKEND = [
     (
-        "a refused name is read anyway",
-        "    if !format.readable() {\n        return Err(ArchiveError::NotYetReadable { format });\n    }",
-        "",
+        "a .7z is opened as a TAR",
+        "    if format == ArchiveFormat::SevenZip {\n        let whole",
+        "    if false {\n        let whole",
         [REFUSED],
     ),
-    # No row for `open`'s early refusal of a 7z under a TAR's name: since
-    # TAR.XZ became readable, `decompress_tar` refuses 7z in the same words,
-    # so removing the early check changes nothing a test can see -- it only
-    # stops the file being read before it is refused (an equivalent mutant;
-    # backend.rs says why the check stays).
+    (
+        "a 7z under a TAR's name is decompressed as a TAR's wrapper",
+        "        Some(ArchiveFormat::SevenZip) => {",
+        "        Some(ArchiveFormat::SevenZip) if false => {",
+        [SEVEN, REFUSED],
+    ),
+    (
+        "a block's packed size is on every file",
+        "                    *shown = true;\n",
+        "",
+        [SEVEN],
+    ),
+    (
+        "a block's packed size is on no file",
+        "                    archive.folder_packed_size(f)\n",
+        "                    0\n",
+        [SEVEN],
+    ),
+    (
+        "a 7z's method is not named",
+        "                method: folder.map_or_else(String::new, |f| archive.folder_method(f)),",
+        "                method: String::new(),",
+        [SEVEN],
+    ),
+    (
+        "a 7z's times are not read",
+        "                modified: entry.mtime().map_or(0, unix_from_filetime),",
+        "                modified: 0,",
+        [SEVEN],
+    ),
+    (
+        "a 7z's encryption is not shown",
+        "                encrypted: folder.is_some_and(|f| archive.is_folder_encrypted(f)),",
+        "                encrypted: false,",
+        [SEVEN_LOCKED],
+    ),
+    (
+        "a 7z found from its end is not noted",
+        "        if archive.was_recovered() {",
+        "        if false {",
+        [SEVEN_FOUND],
+    ),
+    (
+        "a 7z's directories are written as files",
+        "        if member.is_dir() {",
+        "        if member.is_dir() && false {",
+        [SEVEN],
+    ),
+    (
+        "a 7z deletion record is extracted",
+        "        if member.is_anti() {",
+        "        if false {",
+        [SEVEN_ANTI],
+    ),
+    (
+        "an empty 7z file is not written",
+        "            None => write_out(&mut report, entry, &target, &[]),",
+        "            None => {}",
+        [SEVEN],
+    ),
+    (
+        "a 7z's decoded files are not written",
+        "                        Some(Ok(data)) => write_out(&mut report, entry, &target, &data),",
+        "                        Some(Ok(_)) => {}",
+        [SEVEN, SEVEN_DAMAGED],
+    ),
+    (
+        "a 7z file refused by its block is not reported",
+        "                        Some(Err(e)) => report\n                            .skipped\n                            .push((entry.path.clone(), SkipReason::SevenZ(e))),",
+        "                        Some(Err(_)) => {}",
+        [SEVEN_DAMAGED],
+    ),
+    (
+        "a block that cannot be decoded skips its files silently",
+        "            Err(e) => {\n                for (entry, ..) in wanted {\n                    report\n                        .skipped\n                        .push((entry.path.clone(), SkipReason::SevenZ(e)));\n                }\n            }",
+        "            Err(_) => {}",
+        [SEVEN_LOCKED],
+    ),
+    (
+        "a 7z file needing a password is called corrupt",
+        "        sevenz::Error::PasswordRequired => TestResult::DecryptionFailed,\n",
+        "",
+        [SEVEN_LOCKED],
+    ),
+    (
+        "damage after a block's last file is not reported",
+        "                if result.error_after_files.is_some() {",
+        "                if false {",
+        [SEVEN_DAMAGED],
+    ),
+    (
+        "data after a block's end is not reported",
+        "                } else if result.data_after_end {",
+        "                } else if false {",
+        [SEVEN_AFTER],
+    ),
+    (
+        "a 7z is rewritten",
+        "    if let Members::SevenZ(_) = &source.members {\n        return Err(SaveError::Unwritable {",
+        "    if false {\n        return Err(SaveError::Unwritable {",
+        [SEVEN_SAVE],
+    ),
+    (
+        "a lone surrogate loses its middle bits",
+        "                    0x80 | ((hi & 0x0F) << 2) | (lo >> 6),",
+        "                    0x80 | (lo >> 6),",
+        [SEVEN_NAMES],
+    ),
+    (
+        "a time before 1970 wraps around",
+        "    (ticks / 10_000_000).saturating_sub(EPOCH_GAP)",
+        "    (ticks / 10_000_000).wrapping_sub(EPOCH_GAP)",
+        [SEVEN_TIME],
+    ),
     (
         "gzip is not recognised by its bytes",
         "        [0x1F, 0x8B, ..] => Some(ArchiveFormat::TarGz),",

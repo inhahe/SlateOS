@@ -20,11 +20,11 @@ clipmanager, defrag, devicemanager, diagram, diskanalyzer, diskcleanup,
 diskimager, ebook, explorer, fileassoc, filediff, fontmanager, hexeditor,
 imageviewer, ircclient, jsonviewer, reminders, mindmap, musicplayer, notes,
 paint, partmanager, pdfviewer, photomanager, podcast, pomodoro,
-procexplorer, radio, remotedesktop, screenrecorder, screenshot and
-settings (2026-10-04).
+procexplorer, radio, remotedesktop, screenrecorder, screenshot, settings
+and spreadsheet (2026-10-04).
 Calendar's, diagram's, diskimager's, explorer's, filediff's, hexeditor's,
 imageviewer's, ircclient's, jsonviewer's, reminders', mindmap's,
-pdfviewer's and remotedesktop's cards were modal for
+pdfviewer's, remotedesktop's and spreadsheet's cards were modal for
 the keys no more than for the pointer -- hexeditor's let a hex digit typed
 with the card up be written into the file under it, imageviewer's let
 Delete send the picture under it to the bin, ircclient's let Enter send the
@@ -36,7 +36,7 @@ each application's card is checked for both. (Reminders takes no press at all; i
 production code draws `guitk::shortcut::render_card` and has no function
 handling a mouse event that reads the card's flag. Those not yet fixed:
 
-spreadsheet, startupmanager, stopwatch, sudoku,
+startupmanager, stopwatch, sudoku,
 sysinfo, sysmonitor, systemrestore, undelete, whiteboard, wordle,
 worldclock.
 

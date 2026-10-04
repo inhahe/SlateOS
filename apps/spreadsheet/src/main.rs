@@ -4427,6 +4427,23 @@ impl SpreadsheetApp {
         if !event.pressed {
             return EventResult::Ignored;
         }
+        // The shortcut list before anything else, because it is drawn over
+        // everything else, and modal: F1 or Escape puts it away and no other
+        // key reaches what it covers. It took only those two, so Delete
+        // cleared the selection under it, a letter began editing the cell
+        // there, and Ctrl+O opened a file dialog behind it. Held with Ctrl,
+        // Alt or the Windows key, F1 and Escape are a chord, not the list's.
+        if self.show_help {
+            let held = event.modifiers;
+            if matches!(event.key, Key::F1 | Key::Escape)
+                && !held.ctrl
+                && !held.alt
+                && !held.super_key
+            {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
         // Any keystroke dismisses a notice. Cleared before dispatch, so an
         // operation below is free to set a new one.
         self.notice = None;
@@ -4629,14 +4646,9 @@ impl SpreadsheetApp {
             }
             // The shortcut list. `F1` rather than `?`, which this program has
             // to be able to type into a cell.
+            // Only ever raises it: with the list up, the keys never get here.
             Key::F1 => {
-                self.show_help = !self.show_help;
-                EventResult::Consumed
-            }
-            // Before the unguarded `Key::Escape` below, which would otherwise
-            // take this and cancel an edit while the list stayed up.
-            Key::Escape if self.show_help => {
-                self.show_help = false;
+                self.show_help = true;
                 EventResult::Consumed
             }
             Key::Delete => {
@@ -4750,6 +4762,22 @@ impl SpreadsheetApp {
 
     /// Handle mouse events.
     pub fn handle_mouse_event(&mut self, event: &MouseEvent) -> EventResult {
+        // The list of keys is modal for the pointer as it is for the keys: a
+        // press with any button puts it away and does nothing else -- it used
+        // to pick the cell under it, or with a double click begin editing
+        // there -- and the wheel scrolls nothing it covers. A move or a
+        // release is not a press, and passes, so a drag begun before the list
+        // came up still ends.
+        if self.show_help {
+            match event.kind {
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                    self.show_help = false;
+                    return EventResult::Consumed;
+                }
+                MouseEventKind::Scroll { .. } => return EventResult::Ignored,
+                _ => {}
+            }
+        }
         match &event.kind {
             MouseEventKind::Press(MouseButton::Left) => {
                 self.handle_left_click(event.x, event.y, false)
@@ -10438,6 +10466,123 @@ mod tests {
         assert!(
             !drawn_text(&app).contains("F1 closes this"),
             "Escape did not close it"
+        );
+    }
+
+    /// **The shortcut list is modal for the keys and the pointer alike.** It
+    /// took only F1 and Escape: with it up, Delete cleared the cell under it, a
+    /// letter began editing there, Ctrl+O opened a file dialog behind it and
+    /// an arrow moved the selection; a press picked the cell under it, a
+    /// double click began editing it, and the wheel scrolled the sheet. The
+    /// controls are the same key, presses and turn with the list down.
+    #[test]
+    fn the_shortcut_card_takes_the_keys_and_a_press_rather_than_passing_them_on() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        let home = CellAddr::new(0, 0);
+        app.set_cell_input(home, "42");
+        let f1 = Event::Key(key(Key::F1, None));
+        let escape = Event::Key(key(Key::Escape, None));
+        let top = app.grid_top();
+        let (x, y) = (0..400)
+            .flat_map(|i| (0..200).map(move |j| (i, j)))
+            .map(|(i, j)| (ROW_HEADER_WIDTH + i as f32 * 2.0, top + j as f32 * 2.0))
+            .find(|&(x, y)| app.cell_at_position(x, y) == Some((2, 3)))
+            .expect("cell C4 on screen");
+        let mouse = |kind| Event::Mouse(MouseEvent { x, y, kind });
+
+        // The keys.
+        app.handle_event(&f1);
+        assert!(app.show_help);
+        app.handle_event(&Event::Key(key(Key::Delete, None)));
+        app.handle_event(&Event::Key(key(Key::Right, None)));
+        app.handle_event(&Event::Key(key(Key::X, Some('x'))));
+        app.handle_event(&ctrl(Key::O));
+        assert!(
+            app.show_help,
+            "a key other than F1 or Escape put the list away"
+        );
+        assert_eq!(
+            app.active_sheet().get_cell(home).raw_input,
+            "42",
+            "Delete cleared the cell under the list"
+        );
+        assert_eq!(
+            app.selection().active,
+            home,
+            "an arrow moved the selection under it"
+        );
+        assert!(
+            !matches!(app.mode, InteractionMode::Editing { .. }),
+            "a letter began editing under the list"
+        );
+        assert!(
+            !app.picker.is_open(),
+            "Ctrl+O opened a file dialog behind it"
+        );
+        app.handle_event(&Event::Key(KeyEvent {
+            modifiers: Modifiers::alt(),
+            ..key(Key::Escape, None)
+        }));
+        assert!(
+            app.show_help,
+            "Alt+Escape, the desktop's chord, put the list away"
+        );
+        app.handle_event(&escape);
+        assert!(!app.show_help, "Escape left the list up");
+        app.handle_event(&f1);
+        app.handle_event(&f1);
+        assert!(!app.show_help, "F1 left the list up");
+
+        // The pointer.
+        app.handle_event(&f1);
+        assert_eq!(
+            app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Left))),
+            EventResult::Consumed
+        );
+        assert!(!app.show_help, "the press did not put the list away");
+        assert_eq!(
+            app.selection().active,
+            home,
+            "the press picked a cell under the list"
+        );
+        app.handle_event(&f1);
+        app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Right)));
+        assert!(!app.show_help, "a right-button press left the list up");
+        app.handle_event(&f1);
+        app.handle_event(&mouse(MouseEventKind::DoubleClick(MouseButton::Left)));
+        assert!(!app.show_help, "a double click left the list up");
+        assert!(
+            !matches!(app.mode, InteractionMode::Editing { .. }),
+            "a double click began editing under the list"
+        );
+        app.handle_event(&f1);
+        app.handle_event(&mouse(MouseEventKind::Scroll { dx: 0.0, dy: -1.0 }));
+        assert_eq!(
+            app.scroll().y,
+            0.0,
+            "the wheel scrolled the sheet under the list"
+        );
+        assert!(app.show_help, "the wheel put the list away");
+        app.handle_event(&escape);
+
+        // The controls.
+        app.handle_event(&mouse(MouseEventKind::Scroll { dx: 0.0, dy: -1.0 }));
+        assert!(
+            app.scroll().y > 0.0,
+            "control: the wheel scrolls nothing at all"
+        );
+        app.handle_event(&mouse(MouseEventKind::Scroll { dx: 0.0, dy: 1.0 }));
+        app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Left)));
+        assert_eq!(
+            app.selection().active,
+            CellAddr::new(2, 3),
+            "control: the press picks nothing even with the list down"
+        );
+        app.handle_event(&Event::Key(key(Key::Left, None)));
+        assert_eq!(
+            app.selection().active,
+            CellAddr::new(1, 3),
+            "control: an arrow moves nothing"
         );
     }
 

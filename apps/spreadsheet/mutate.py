@@ -8,7 +8,9 @@ program is not testing the program.
 Ctrl+S wrote the sheet in front as CSV -- values only, no formula, no format,
 no other sheet -- and nothing recorded unsaved changes, so the window closed
 over them.  The table covers the workbook file and the question; the rest of
-the suite predates them.
+the suite predates them.  The last rows, added 2026-10-04, cover the shortcut
+list: modal for the keys and the pointer, where it had taken only F1 and
+Escape.
 
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
@@ -220,6 +222,82 @@ MUTATIONS = [
         "            new_cell: Cell::empty(),\n"
         "        }))?;",
         ["test_undo_manager_limit"],
+    ),
+]
+
+CARD = "the_shortcut_card_takes_the_keys_and_a_press_rather_than_passing_them_on"
+
+MUTATIONS += [
+    # -- The shortcut list is modal for the keys and the pointer (2026-10-04;
+    # known-issues
+    # E-a-press-goes-through-the-shortcut-card-to-the-control-drawn-under-it).
+    (
+        "a key reaches what the list of keys covers",
+        "        if self.show_help {\n"
+        "            let held = event.modifiers;\n"
+        "            if matches!(event.key, Key::F1 | Key::Escape)\n"
+        "                && !held.ctrl\n"
+        "                && !held.alt\n"
+        "                && !held.super_key\n"
+        "            {\n"
+        "                self.show_help = false;\n"
+        "            }\n"
+        "            return EventResult::Consumed;\n"
+        "        }\n",
+        "",
+        [CARD],
+    ),
+    (
+        "F1 does not put the list of keys away",
+        "            if matches!(event.key, Key::F1 | Key::Escape)\n",
+        "            if matches!(event.key, Key::Escape)\n",
+        [CARD],
+    ),
+    (
+        "Escape does not put the list of keys away",
+        "            if matches!(event.key, Key::F1 | Key::Escape)\n",
+        "            if matches!(event.key, Key::F1)\n",
+        [CARD],
+    ),
+    (
+        "a chorded Escape puts the list of keys away",
+        "                && !held.alt\n",
+        "",
+        [CARD],
+    ),
+    (
+        "a press goes through the list of keys",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n"
+        "                    self.show_help = false;\n"
+        "                    return EventResult::Consumed;\n"
+        "                }\n",
+        "",
+        [CARD],
+    ),
+    (
+        "only a single press puts the list of keys away",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n",
+        "                MouseEventKind::Press(_) => {\n",
+        [CARD],
+    ),
+    (
+        "only the left button puts the list of keys away",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n",
+        "                MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_) => {\n",
+        [CARD],
+    ),
+    (
+        "a press under the list of keys leaves it up",
+        "                    self.show_help = false;\n"
+        "                    return EventResult::Consumed;\n",
+        "                    return EventResult::Consumed;\n",
+        [CARD],
+    ),
+    (
+        "the wheel scrolls what the list of keys covers",
+        "                MouseEventKind::Scroll { .. } => return EventResult::Ignored,\n",
+        "",
+        [CARD],
     ),
 ]
 

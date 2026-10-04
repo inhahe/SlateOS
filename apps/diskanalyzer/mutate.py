@@ -23,6 +23,7 @@ from mutation_harness import sweep  # noqa: E402  (path set above)
 SRC = Path(__file__).parent / "src" / "main.rs"
 
 ROOT = "the_folder_named_on_the_command_line_is_the_root"
+CARD = "the_shortcut_card_takes_a_press_rather_than_passing_it_on"
 
 # (name, old, new, [tests that must fail])
 MUTATIONS = [
@@ -37,6 +38,41 @@ MUTATIONS = [
         "    if let Some(extra) = words.next() {",
         "    if let Some(extra) = None::<&std::ffi::OsString> {",
         [ROOT],
+    ),
+    # -- the shortcut card's hold on the pointer
+    (
+        "a press goes through the shortcut card",
+        "                MouseEventKind::Press(_) if self.show_help => {\n"
+        "                    self.show_help = false;\n"
+        "                    Action::Redraw\n"
+        "                }\n",
+        "",
+        [CARD],
+    ),
+    (
+        "only the left button puts the card away",
+        "                MouseEventKind::Press(_) if self.show_help => {\n",
+        "                MouseEventKind::Press(MouseButton::Left) if self.show_help => {\n",
+        [CARD],
+    ),
+    (
+        "the wheel scrolls what the card covers",
+        "                MouseEventKind::Scroll { .. } if self.show_help => Action::None,\n",
+        "",
+        [CARD],
+    ),
+    (
+        "the probe goes round the window's own way in",
+        "        self.handle_event(\n"
+        "            &Event::Mouse(MouseEvent {\n"
+        "                x,\n"
+        "                y,\n"
+        "                kind: MouseEventKind::Press(button),\n"
+        "            }),\n"
+        "            size,\n"
+        "        )\n",
+        "        self.handle_click(x, y, button, size)\n",
+        [CARD],
     ),
 ]
 

@@ -33,7 +33,7 @@ use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
-use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEventKind};
+use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::filetypes::FileCategory;
 use guitk::frame::Rect;
 use guitk::probe::Probe;
@@ -2633,6 +2633,15 @@ impl DiskAnalyzerUI {
     pub fn handle_event(&mut self, event: &Event, size: (f32, f32)) -> Action {
         match event {
             Event::Mouse(mouse) => match mouse.kind {
+                // The card is modal for the pointer as it is for the keys: a
+                // press, with any button, puts it away rather than reaching
+                // the control drawn under it, and the wheel scrolls nothing
+                // it covers.
+                MouseEventKind::Press(_) if self.show_help => {
+                    self.show_help = false;
+                    Action::Redraw
+                }
+                MouseEventKind::Scroll { .. } if self.show_help => Action::None,
                 MouseEventKind::Press(button) => self.handle_click(mouse.x, mouse.y, button, size),
                 MouseEventKind::Move => {
                     let before = (self.hovered_rect, self.tooltip_text.clone());
@@ -2800,12 +2809,22 @@ impl Probe for DiskAnalyzerUI {
         self.frame(size.0, size.1)
     }
 
+    // Through `handle_event`, the window's own way in: a probe that called
+    // `handle_click` went round the shortcut card's hold on the pointer,
+    // and a test of what a press does passed against a path no window takes.
     fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Self::Outcome {
-        self.handle_click(x, y, button, size)
+        self.handle_event(
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }),
+            size,
+        )
     }
 
     fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Self::Outcome {
-        self.handle_key(key, size)
+        self.handle_event(&Event::Key(key.clone()), size)
     }
 }
 
@@ -4347,6 +4366,62 @@ mod tests {
         assert_eq!(
             probe::click(&mut ui, Target::View(ViewMode::List)),
             Action::None
+        );
+    }
+
+    /// **A press while the card is up puts it away and does nothing else,
+    /// and the wheel scrolls nothing under it.** A press used to go straight
+    /// through the card to the control drawn under it. The controls at the
+    /// end are the same press and turn with the card down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let size = DiskAnalyzerUI::SIZE;
+        let mut ui = loaded();
+        ui.set_view_mode(ViewMode::List);
+        let row = probe::rect_of(&ui, Target::Row(0)).expect("a row").centre();
+        let wheel = |ui: &mut DiskAnalyzerUI| {
+            ui.handle_event(
+                &Event::Mouse(guitk::event::MouseEvent {
+                    x: row.0,
+                    y: row.1,
+                    kind: MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+                }),
+                size,
+            )
+        };
+        let view = Target::View(ViewMode::Extensions);
+
+        probe::key(&mut ui, &probe::press(Key::F1));
+        assert!(ui.show_help);
+        wheel(&mut ui);
+        assert_eq!(
+            ui.scroll_offset, 0,
+            "the wheel scrolled the list under the card"
+        );
+        assert_eq!(probe::click(&mut ui, view), Action::Redraw);
+        assert!(!ui.show_help, "the press did not put the card away");
+        assert_eq!(
+            ui.view_mode,
+            ViewMode::List,
+            "the press went through the card to a view button"
+        );
+
+        // Any button: the right one does nothing to a control, but it is
+        // still a press on the card.
+        probe::key(&mut ui, &probe::press(Key::F1));
+        probe::click_with(&mut ui, view, MouseButton::Right);
+        assert!(!ui.show_help, "a right-button press left the card up");
+
+        wheel(&mut ui);
+        assert_ne!(
+            ui.scroll_offset, 0,
+            "control: the wheel scrolls nothing at all"
+        );
+        probe::click(&mut ui, view);
+        assert_eq!(
+            ui.view_mode,
+            ViewMode::Extensions,
+            "control: the press does nothing even with the card down"
         );
     }
 

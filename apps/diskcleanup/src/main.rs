@@ -1645,6 +1645,16 @@ impl CleanupUI {
             }
             _ => {}
         }
+        // The card is modal for the pointer as it is for the keys: a press,
+        // with any button, puts it away rather than reaching the control
+        // drawn under it -- the Clean button among them.
+        if self.show_help {
+            if matches!(mouse.kind, MouseEventKind::Press(_)) {
+                self.show_help = false;
+                return EventResult::Consumed;
+            }
+            return EventResult::Ignored;
+        }
         // Press, not release: this app has no drag, and matching on press is
         // what makes a click feel immediate.
         if !matches!(mouse.kind, MouseEventKind::Press(MouseButton::Left)) {
@@ -3923,6 +3933,43 @@ mod tests {
             ui.selected_categories().len(),
             ticked,
             "control: A does nothing even with the card down"
+        );
+    }
+
+    /// **A press while the card is up puts it away and does nothing else.**
+    /// It used to go straight through the card to the control drawn under
+    /// it. The control at the end is the same press with the card down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let (mut ui, index) = scanned(CleanupCategory::TempFiles, 4096);
+        let category = CleanupCategory::ALL[index];
+        let lay = ui.layout();
+        let (x, y) = centre(lay.category_checkbox(index).expect("row is on screen"));
+        let ticked = ui.selected[&category];
+
+        ui.handle_key(Key::F1);
+        assert!(ui.show_help);
+        assert_eq!(ui.handle_event(&click(x, y)), EventResult::Consumed);
+        assert!(!ui.show_help, "the press did not put the card away");
+        assert_eq!(
+            ui.selected[&category], ticked,
+            "the press went through the card to the category's box"
+        );
+
+        // Any button: the right one does nothing to a control, but it is
+        // still a press on the card.
+        ui.handle_key(Key::F1);
+        ui.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Right),
+        }));
+        assert!(!ui.show_help, "a right-button press left the card up");
+
+        ui.handle_event(&click(x, y));
+        assert_ne!(
+            ui.selected[&category], ticked,
+            "control: the press does nothing even with the card down"
         );
     }
 

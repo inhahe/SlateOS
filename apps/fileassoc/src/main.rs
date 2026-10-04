@@ -16,6 +16,7 @@ use std::process::ExitCode;
 use guitk::color::Color;
 use guitk::dialog::{FileDialog, FilePicker, Picked};
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::field;
 use guitk::frame::Rect;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -1369,10 +1370,17 @@ pub struct FileAssocUI {
     pub selected_category: Option<FileCategory>,
     /// Current search query string.
     pub search_query: String,
-    /// Whether typed text goes to the search box.
     /// Whether the shortcut card is up.
     pub show_help: bool,
+    /// Whether typed text goes to the search box.
     pub search_focused: bool,
+    /// The text box the pointer is over, which lights its edge: the search
+    /// box or one of the add dialog's, and nothing else.
+    pub hover: Option<Target>,
+    /// How wide the mark is round a text box while it has the keyboard: the
+    /// user's focus width (`App::appearance_changed`), the toolkit's until it
+    /// is known.
+    pub focus_ring_width: f32,
     /// Index of the selected file type in the current filtered list.
     pub selected_index: Option<usize>,
     /// Scroll offset for the file type list, in pixels.
@@ -1540,6 +1548,8 @@ impl FileAssocUI {
             search_query: String::new(),
             show_help: false,
             search_focused: false,
+            hover: None,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             selected_index: None,
             scroll_offset: 0.0,
             active_dialog: ActiveDialog::None,
@@ -1917,6 +1927,52 @@ impl FileAssocUI {
             .hit_test(x, y)
     }
 
+    /// Note which text box the pointer is over, if any -- `None` when it has
+    /// left the window. A change is a repaint: the box's edge lights.
+    fn point_at(&mut self, at: Option<(f32, f32)>) -> EventResult {
+        let over = at
+            .and_then(|(x, y)| self.target_at(x, y))
+            .filter(|t| matches!(t, Target::Search | Target::DialogField(_)));
+        if over == self.hover {
+            return EventResult::Ignored;
+        }
+        self.hover = over;
+        EventResult::Consumed
+    }
+
+    /// Whether the extension typed into the add dialog is one already
+    /// registered -- which adding would refuse -- so its box can say so while
+    /// it is being typed rather than only after Add.
+    fn extension_taken(&self) -> bool {
+        let ext = self.new_ext.trim().trim_start_matches('.');
+        !ext.is_empty() && self.registry.get_file_type(ext).is_some()
+    }
+
+    /// How the text box `target` is drawn now: lit under the pointer and
+    /// marked while it has the keyboard -- neither while something covers
+    /// it (the add dialog over the search box, the file picker or the
+    /// shortcut card over either) -- and red while what is in it is wrong.
+    fn box_state(&self, target: Target) -> field::State {
+        let (shown, keyboard) = match target {
+            Target::Search => (
+                self.active_dialog == ActiveDialog::None,
+                self.search_focused,
+            ),
+            Target::DialogField(f) => (
+                self.active_dialog == ActiveDialog::AddFileType,
+                self.new_field == f,
+            ),
+            _ => return field::State::default(),
+        };
+        let open = shown && !self.show_help && !self.picker.is_open();
+        field::State {
+            hovered: open && self.hover == Some(target),
+            focused: open && keyboard,
+            disabled: false,
+            invalid: target == Target::DialogField(NewField::Extension) && self.extension_taken(),
+        }
+    }
+
     /// Handle a UI event (keyboard or mouse).
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
         // The picker is modal and answers everything but a resize, which
@@ -1968,6 +2024,8 @@ impl FileAssocUI {
                     // `dy` is a notch count, not a distance (see `guitk::wheel`),
                     // and three rows a notch is the toolkit's convention.
                     MouseEventKind::Scroll { dy, .. } => self.handle_scroll(x, y, dy),
+                    MouseEventKind::Move => self.point_at(Some((x, y))),
+                    MouseEventKind::Leave => self.point_at(None),
                     _ => EventResult::Ignored,
                 }
             }
@@ -2496,20 +2554,20 @@ impl FileAssocUI {
             overflow: TextOverflow::Ellipsis,
         });
 
-        // Search box. The caret is a border rather than a blinking bar: this
-        // window has no clock, and a caret that cannot blink is better drawn as
-        // something that does not look like it should.
+        // Search box: the toolkit's field, so the theme decides how a box
+        // that has the keyboard is marked. There is no caret: this window
+        // has no clock, and a caret that cannot blink is better left to the
+        // field's mark than drawn as something that does not look like it
+        // should.
         if !l.search.is_empty() {
             let r = l.search;
-            // Focus recolours the field's outline; it does not add a second
-            // one inside the first, which is what a separate stroke was under
-            // the bordered theme.
-            let mut paint = self.palette.surface_paint(Surface::Card);
-            if self.search_focused {
-                paint.border = Some(self.palette.blue);
-            }
-            self.palette
-                .push_paint_radii(frame, r.x, r.y, r.w, r.h, CornerRadii::all(4.0), paint);
+            field::draw(
+                frame,
+                &self.palette,
+                r,
+                self.box_state(Target::Search),
+                self.focus_ring_width,
+            );
             let empty = self.search_query.is_empty();
             let shown = if empty {
                 String::from("Search by extension or description...")
@@ -3326,13 +3384,13 @@ impl FileAssocUI {
                 max_width: Some(r.w),
                 overflow: TextOverflow::Ellipsis,
             });
-            let focused = self.new_field == *field;
-            let mut paint = self.palette.surface_paint(Surface::Card);
-            if focused {
-                paint.border = Some(self.palette.blue);
-            }
-            self.palette
-                .push_paint_radii(frame, r.x, r.y, r.w, r.h, CornerRadii::all(4.0), paint);
+            field::draw(
+                frame,
+                &self.palette,
+                r,
+                self.box_state(Target::DialogField(*field)),
+                self.focus_ring_width,
+            );
             let value = self.new_field_text(*field);
             let empty = value.is_empty();
             frame.push(RenderCommand::Text {
@@ -3394,6 +3452,10 @@ impl FileAssocUI {
 impl App for FileAssocUI {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -4820,6 +4882,192 @@ mod tests {
             EventResult::Ignored
         );
         assert_eq!(ui.search_query, "");
+    }
+
+    // -- The text boxes are the toolkit's fields (lane C,
+    //    c-e-a-theme-can-shape-the-controls)
+
+    /// A window whose theme marks a field with the keyboard by a ring, with
+    /// the user's focus width two and a half times the toolkit's.
+    fn ringed() -> (FileAssocUI, Palette) {
+        let mut ui = FileAssocUI::new();
+        let mut p = ui.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut ui, &p);
+        App::appearance_changed(
+            &mut ui,
+            &appearance::AppearanceSettings {
+                focus_ring_scale: 2.5,
+                ..Default::default()
+            },
+        );
+        assert!(
+            ui.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        (ui, p)
+    }
+
+    /// Whether `ui`'s frame draws exactly the toolkit's field for `rect` in
+    /// `state` -- and, unless `state` has the keyboard, not the focused one
+    /// as well, which would hide what is being checked.
+    fn draws_field(ui: &FileAssocUI, p: &Palette, rect: Rect, state: field::State) -> bool {
+        let seq = |s: field::State| {
+            let mut v: Vec<RenderCommand> = Vec::new();
+            field::draw(&mut v, p, rect, s, ui.focus_ring_width);
+            v
+        };
+        let (w, h) = <FileAssocUI as Probe>::SIZE;
+        let f = ui.frame(w, h);
+        let has = |want: &[RenderCommand]| f.commands().windows(want.len()).any(|w| w == want);
+        has(&seq(state))
+            && (state.focused
+                || !has(&seq(field::State {
+                    focused: true,
+                    ..state
+                })))
+    }
+
+    fn pointer(ui: &mut FileAssocUI, kind: MouseEventKind, (x, y): (f32, f32)) -> EventResult {
+        ui.handle_event(&Event::Mouse(MouseEvent { x, y, kind }))
+    }
+
+    /// **The search box is the toolkit's field**: lit under the pointer and
+    /// dark again when it leaves, marked as the theme marks a field with the
+    /// keyboard, in the user's width, and neither while the add dialog or
+    /// the shortcut card is over it. It was a card whose edge turned blue,
+    /// whatever the theme said a field looks like.
+    #[test]
+    fn the_search_box_is_the_toolkits_field() {
+        let (mut ui, p) = ringed();
+        let rect = probe::rect_of(&ui, Target::Search).expect("the search box is drawn");
+        let rest = field::State::default();
+        let lit = field::State {
+            hovered: true,
+            ..rest
+        };
+        let focused = field::State {
+            focused: true,
+            ..rest
+        };
+        assert!(draws_field(&ui, &p, rect, rest), "at rest");
+
+        let centre = rect.centre();
+        assert_eq!(
+            pointer(&mut ui, MouseEventKind::Move, centre),
+            EventResult::Consumed
+        );
+        assert!(
+            draws_field(&ui, &p, rect, lit),
+            "the pointer does not light it"
+        );
+        assert_eq!(
+            pointer(&mut ui, MouseEventKind::Move, centre),
+            EventResult::Ignored,
+            "moving within the same box changed something"
+        );
+        assert_eq!(
+            pointer(&mut ui, MouseEventKind::Leave, centre),
+            EventResult::Consumed
+        );
+        assert!(
+            draws_field(&ui, &p, rect, rest),
+            "the light stays after the pointer leaves"
+        );
+
+        probe::click(&mut ui, Target::Search);
+        assert!(
+            draws_field(&ui, &p, rect, focused),
+            "the box with the keyboard is not marked as the theme marks it"
+        );
+
+        pointer(&mut ui, MouseEventKind::Move, centre);
+        ui.show_help = true;
+        assert!(
+            draws_field(&ui, &p, rect, rest),
+            "the box is lit or marked through the shortcut card"
+        );
+        ui.show_help = false;
+        ui.active_dialog = ActiveDialog::AddFileType;
+        assert!(
+            draws_field(&ui, &p, rect, rest),
+            "the box is lit or marked through the add dialog"
+        );
+    }
+
+    /// **The add dialog's boxes are the toolkit's fields**: the one with the
+    /// keyboard is marked and moves with Tab, the one under the pointer is
+    /// lit, and an extension that is already registered -- which Add would
+    /// refuse -- turns its box red as it is typed, rather than the dialog
+    /// saying so only after Add is pressed.
+    #[test]
+    fn the_add_dialogs_boxes_are_the_toolkits_fields() {
+        let (mut ui, p) = ringed();
+        probe::click(&mut ui, Target::AddButton);
+        assert_eq!(ui.active_dialog, ActiveDialog::AddFileType);
+        let rect = |ui: &FileAssocUI, f: NewField| {
+            probe::rect_of(ui, Target::DialogField(f)).expect("the box is drawn")
+        };
+        let rest = field::State::default();
+        let focused = field::State {
+            focused: true,
+            ..rest
+        };
+        let ext = rect(&ui, NewField::Extension);
+        let mime = rect(&ui, NewField::MimeType);
+        let desc = rect(&ui, NewField::Description);
+        assert!(
+            draws_field(&ui, &p, ext, focused),
+            "the extension box opens with the keyboard"
+        );
+        assert!(draws_field(&ui, &p, mime, rest));
+        assert!(draws_field(&ui, &p, desc, rest));
+
+        probe::key(&mut ui, &probe::press(Key::Tab));
+        assert!(draws_field(&ui, &p, ext, rest), "Tab left the mark behind");
+        assert!(
+            draws_field(&ui, &p, mime, focused),
+            "Tab did not move the mark"
+        );
+
+        pointer(&mut ui, MouseEventKind::Move, desc.centre());
+        assert!(
+            draws_field(
+                &ui,
+                &p,
+                desc,
+                field::State {
+                    hovered: true,
+                    ..rest
+                }
+            ),
+            "the box under the pointer is not lit"
+        );
+        pointer(&mut ui, MouseEventKind::Leave, desc.centre());
+
+        // Back to the extension, and type one that is already registered.
+        probe::key(&mut ui, &probe::press(Key::Tab));
+        probe::key(&mut ui, &probe::press(Key::Tab));
+        assert_eq!(ui.new_field, NewField::Extension);
+        probe::type_str(&mut ui, "mp3");
+        assert!(
+            draws_field(
+                &ui,
+                &p,
+                ext,
+                field::State {
+                    focused: true,
+                    invalid: true,
+                    ..rest
+                }
+            ),
+            "a registered extension does not turn its box red"
+        );
+        probe::key(&mut ui, &probe::press(Key::Backspace));
+        assert!(
+            draws_field(&ui, &p, ext, focused),
+            "an extension that is free is still red"
+        );
     }
 
     #[test]

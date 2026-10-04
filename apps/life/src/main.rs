@@ -88,30 +88,74 @@
 //!     unused palette entries and a hand-written `impl Clone for Grid`
 //!     reproducing the derive field for field.
 
+use gamechrome::{Chrome, Ink};
+use guitk::button::{Kind, State};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
+use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
 use guitk::style::CornerRadii;
+use guitk::surface::Surface;
 use guitk::text;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::Duration;
 
-// ── Catppuccin Mocha palette ───────────────────────────────────────────────
-const CRUST: Color = Color::from_hex(0x11_111B);
-const MANTLE: Color = Color::from_hex(0x18_1825);
-const SURFACE0: Color = Color::from_hex(0x31_3244);
-const SURFACE1: Color = Color::from_hex(0x45_475A);
-const TEXT_COLOR: Color = Color::from_hex(0xCD_D6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6_ADC8);
-const BLUE: Color = Color::from_hex(0x89_B4FA);
-const GREEN: Color = Color::from_hex(0xA6_E3A1);
-const YELLOW: Color = Color::from_hex(0xF9_E2AF);
-const LAVENDER: Color = Color::from_hex(0xB4_BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C_7086);
+/// The colours the window is drawn in, worked out from the user's palette
+/// each time the theme changes (`App::theme_changed`).
+///
+/// Eleven Catppuccin Mocha constants used to sit here, so a light desktop got
+/// a dark Game of Life: of the forty-odd games, this was the one that never
+/// moved onto the shared chrome (the operator's C-Q16, design-decisions
+/// §1422). Its buttons were its own flat slabs, and its cursor a fill of a
+/// colour that a light theme's board all but hid.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Colours {
+    /// The roles every game's chrome is drawn in.
+    chrome: Chrome,
+    /// A live cell: the palette's green, moved only as far as it must be to
+    /// stand off the board at 3:1 (WCAG 1.4.11). Both stock greens already
+    /// do; a light theme carrying a dark one's pastels does not. Whether a
+    /// cell is alive is the one thing on the board a player reads.
+    live: Color,
+    /// The keyboard cursor's ring on a live cell, and on a dead one:
+    /// whichever of the text and the page stands off the cell. No one colour
+    /// can -- a hue that reads on a light theme's well is lost on its green.
+    cursor_on_live: Color,
+    cursor_on_dead: Color,
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        let chrome = Chrome::of(p);
+        let live = Ink::on(p.green, &[chrome.well]).large;
+        Self {
+            chrome,
+            live,
+            cursor_on_live: gamechrome::legible_on((p.text, p.base), live),
+            cursor_on_dead: gamechrome::legible_on((p.text, p.base), chrome.well),
+        }
+    }
+
+    /// The colour a sheet's buttons are drawn on: the toolkit's panel's fill
+    /// in `p`'s look, over the veil over the page.
+    ///
+    /// Only the buttons need it. The words on a sheet are in the palette's
+    /// own inks, because the panel and the chosen row's mark are the
+    /// toolkit's surfaces and the palette already holds its inks to the floor
+    /// on every ground those are drawn in (`Palette::text_grounds`). The band
+    /// is not one of them under a theme with separator strips, which is why
+    /// the header moves its inks and the sheets do not.
+    fn panel_ground(&self, p: &Palette) -> Color {
+        let under = self.chrome.veil.over(self.chrome.page);
+        p.surface_paint(Surface::Panel)
+            .fill
+            .map_or(under, |panel| panel.over(under))
+    }
+}
 
 const WINDOW_WIDTH: f32 = 900.0;
 const WINDOW_HEIGHT: f32 = 760.0;
@@ -729,6 +773,11 @@ pub struct LifeApp {
     /// The size the window last drew at, so the next click is read against the
     /// pixels the player is looking at.
     size_drawn: (f32, f32),
+    /// The user's palette, replaced whenever the theme changes, and the
+    /// colours worked out from it. Seeded from the dark defaults; the
+    /// framework calls `App::theme_changed` before the first frame.
+    palette: Palette,
+    colours: Colours,
 }
 
 impl LifeApp {
@@ -759,6 +808,8 @@ impl LifeApp {
             show_grid: true,
             show_help: false,
             size_drawn: (WINDOW_WIDTH, WINDOW_HEIGHT),
+            palette: Palette::for_mode(false),
+            colours: Colours::of(&Palette::for_mode(false)),
         };
         // A gun in the corner, so an empty window is not what the program opens
         // with. Placed away from the cursor so the opening board does not sit
@@ -1133,7 +1184,7 @@ impl LifeApp {
     pub fn frame(&self, width: f32, height: f32) -> Frame {
         let l = Layout::new(width, height, self.grid.cols(), self.grid.rows());
         let mut f = Frame::new(width, height);
-        fill(&mut f, l.window, CRUST, 0.0);
+        fill(&mut f, l.window, self.colours.chrome.page, 0.0);
         self.draw_board(&mut f, &l);
         self.draw_header(&mut f, &l);
         self.draw_controls(&mut f, &l);
@@ -1150,7 +1201,13 @@ impl LifeApp {
         if !l.shows(l.header) {
             return;
         }
-        fill(f, l.header, MANTLE, 0.0);
+        let band = self.colours.chrome.band;
+        fill(f, l.header, band, 0.0);
+        // The chrome's inks are made for the page and the palette's own
+        // grounds. The band is a step off the page -- darker, in a light
+        // theme -- and under a theme whose strips are separators rather than
+        // bands, not a ground the palette writes on at all.
+        let c = self.colours.chrome.on(band);
         let size = l.big.min(l.header.h * 0.7);
         let y = l.header.y + (l.header.h - text::line_height(size, FontWeightHint::Bold)) / 2.0;
         let title_w = (l.header.w * 0.22)
@@ -1161,7 +1218,7 @@ impl LifeApp {
             y,
             "Game of Life",
             size,
-            TEXT_COLOR,
+            c.title,
             FontWeightHint::Bold,
             Some((title_w - l.pad).max(0.0)),
         );
@@ -1169,18 +1226,17 @@ impl LifeApp {
         // The remaining width, shared equally. Every string is bounded by its
         // own slot and ellipsised inside it, which is what stops the last one
         // running off the edge of a narrow window as the fixed offsets did.
+        // The board's size is secondary, as the counts are -- not the disabled
+        // grey it was drawn in, which is faint on purpose and was 3.6:1 here.
         let fields: [(String, Color); 5] = [
             (
                 if self.running { "Running" } else { "Paused" }.to_string(),
-                if self.running { GREEN } else { YELLOW },
+                if self.running { c.good } else { c.even },
             ),
-            (format!("Gen {}", self.generation), SUBTEXT0),
-            (format!("Pop {}", self.grid.population()), SUBTEXT0),
-            (format!("Speed {}", self.speed), SUBTEXT0),
-            (
-                format!("{}x{}", self.grid.cols(), self.grid.rows()),
-                OVERLAY0,
-            ),
+            (format!("Gen {}", self.generation), c.dim),
+            (format!("Pop {}", self.grid.population()), c.dim),
+            (format!("Speed {}", self.speed), c.dim),
+            (format!("{}x{}", self.grid.cols(), self.grid.rows()), c.dim),
         ];
         let rest = (l.header.w - title_w - l.pad).max(0.0);
         let slot = rest / fields.len() as f32;
@@ -1205,33 +1261,20 @@ impl LifeApp {
         if l.cell <= 0.0 {
             return;
         }
-        fill(f, l.board, MANTLE, 0.0);
+        let c = &self.colours;
+        fill(f, l.board, c.chrome.well, 0.0);
         // Big enough to see the gap between cells, and to be worth stroking a
         // grid line at all. Below this the lines are more ink than the cells.
         let gap = if l.cell >= 4.0 { 0.5 } else { 0.0 };
+        let face = |r: Rect| Rect::new(r.x, r.y, (r.w - gap).max(0.0), (r.h - gap).max(0.0));
         for row in 0..self.grid.rows() {
             for col in 0..self.grid.cols() {
                 let r = l.cell_rect(row, col);
-                let alive = self.grid.get(row, col);
-                let is_cursor = row == self.cursor_row && col == self.cursor_col;
-                if alive {
-                    let color = if is_cursor { LAVENDER } else { GREEN };
-                    fill(
-                        f,
-                        Rect::new(r.x, r.y, (r.w - gap).max(0.0), (r.h - gap).max(0.0)),
-                        color,
-                        0.0,
-                    );
-                } else if is_cursor {
-                    fill(
-                        f,
-                        Rect::new(r.x, r.y, (r.w - gap).max(0.0), (r.h - gap).max(0.0)),
-                        SURFACE1,
-                        0.0,
-                    );
+                if self.grid.get(row, col) {
+                    fill(f, face(r), c.live, 0.0);
                 }
                 if self.show_grid && l.cell >= 4.0 {
-                    stroke(f, r, SURFACE0, 0.5, 0.0);
+                    stroke(f, r, c.chrome.raised, 0.5, 0.0);
                 }
                 // Recorded whatever the cell looks like: a dead cell is exactly
                 // the one you most want to click.
@@ -1240,57 +1283,97 @@ impl LifeApp {
                 }
             }
         }
+        // The cursor is a ring inside its cell, so the cell's own state still
+        // shows through it. It used to be a fill that replaced the cell: a
+        // lavender over a live one, 1.0:1 against the green around it in the
+        // light theme, and a grey over a dead one, 1.5:1 on the light theme's
+        // board and 1.9:1 on the dark one's. Drawn last, so no neighbour's
+        // grid line crosses it.
+        let (row, col) = (self.cursor_row, self.cursor_col);
+        let ring = if self.grid.get(row, col) {
+            c.cursor_on_live
+        } else {
+            c.cursor_on_dead
+        };
+        draw_ring(f, face(l.cell_rect(row, col)), ring);
     }
 
     fn draw_controls(&self, f: &mut Frame, l: &Layout) {
         if !l.shows(l.controls) {
             return;
         }
-        let buttons: [(Target, String, Color); 9] = [
+        // The toolkit's buttons, whose labels are inked for the face they are
+        // on: the flat slabs these replaced wrote grey and accent labels on a
+        // grey that a light theme left at 3.6:1 to 4.1:1. The grid lines'
+        // switch is marked while it is on as the games mark a chosen size --
+        // a primary button -- where it used to be a blue label, or a grey one
+        // too faint to read.
+        let buttons: [(Target, &str, Kind); 9] = [
             (
                 Target::PlayPause,
-                if self.running { "Pause" } else { "Play" }.to_string(),
-                if self.running { YELLOW } else { GREEN },
+                if self.running { "Pause" } else { "Play" },
+                Kind::Plain,
             ),
-            (Target::StepOnce, "Step".to_string(), BLUE),
-            (Target::Clear, "Clear".to_string(), SUBTEXT0),
-            (Target::Randomize, "Random".to_string(), SUBTEXT0),
-            (Target::Patterns, "Patterns".to_string(), BLUE),
+            (Target::StepOnce, "Step", Kind::Plain),
+            (Target::Clear, "Clear", Kind::Plain),
+            (Target::Randomize, "Random", Kind::Plain),
+            (Target::Patterns, "Patterns", Kind::Plain),
             (
                 Target::GridLines,
-                "Grid".to_string(),
-                if self.show_grid { BLUE } else { OVERLAY0 },
+                "Grid",
+                if self.show_grid {
+                    Kind::Primary
+                } else {
+                    Kind::Plain
+                },
             ),
-            (Target::Slower, "-".to_string(), SUBTEXT0),
-            (Target::Faster, "+".to_string(), SUBTEXT0),
-            (Target::Help, "Help".to_string(), SUBTEXT0),
+            (Target::Slower, "-", Kind::Plain),
+            (Target::Faster, "+", Kind::Plain),
+            (Target::Help, "Help", Kind::Plain),
         ];
         let n = buttons.len() as f32;
         let gap = (l.pad * 0.6).min(6.0);
         let each = ((l.controls.w - l.pad * 2.0 - gap * (n - 1.0)) / n).max(0.0);
         let h = (l.controls.h - l.pad).max(0.0);
-        for (i, (target, text_str, color)) in buttons.iter().enumerate() {
+        for (i, (target, text_str, kind)) in buttons.iter().enumerate() {
             let r = Rect::new(
                 l.controls.x + l.pad + (each + gap) * i as f32,
                 l.controls.y + (l.controls.h - h) / 2.0,
                 each,
                 h,
             );
-            button(f, l, r, text_str, SURFACE0, *color);
+            button(
+                f,
+                &self.palette,
+                l,
+                r,
+                text_str,
+                *kind,
+                self.colours.chrome.page,
+            );
             f.hit(*target, r);
         }
     }
 
+    /// The veil over the window, and the toolkit's panel for a sheet.
+    fn draw_panel(&self, f: &mut Frame, l: &Layout, sheet: Rect) {
+        fill(f, l.window, self.colours.chrome.veil, 0.0);
+        if sheet.w >= 1.0 && sheet.h >= 1.0 {
+            self.palette
+                .push_surface(f, sheet.x, sheet.y, sheet.w, sheet.h, 12.0, Surface::Panel);
+        }
+    }
+
     fn draw_sheet(&self, f: &mut Frame, l: &Layout) {
-        fill(f, l.window, Color::rgba(0, 0, 0, 180), 0.0);
+        let sheet = l.sheet;
+        self.draw_panel(f, l, sheet);
+        let ground = self.colours.panel_ground(&self.palette);
         // First, so that every box recorded below it wins. `hit_test` takes the
         // last box at a point, which is what makes a modal backdrop and the
         // things on top of it both work with no special case in the handler.
         f.hit(Target::ClosePatterns, l.window);
 
-        let sheet = l.sheet;
-        fill(f, sheet, MANTLE, 12.0);
-        stroke(f, sheet, SURFACE1, 1.0, 12.0);
+        let c = self.colours.chrome;
         let pad = l.pad * 1.5;
         let title = Rect::new(sheet.x, sheet.y + pad, sheet.w, l.big * 1.4);
         centred_in(
@@ -1298,7 +1381,7 @@ impl LifeApp {
             title,
             "Place a pattern",
             l.big.min(title.h * 0.8),
-            YELLOW,
+            c.even,
             FontWeightHint::Bold,
         );
 
@@ -1317,9 +1400,18 @@ impl LifeApp {
                 break;
             }
             let selected = i == self.selected_pattern;
-            if selected {
-                fill(f, r, SURFACE0, 4.0);
-            }
+            // The theme's mark for the chosen row: a shade under the cards
+            // look, an outline in the accent under the bordered one. Not in a
+            // row with no room, where the outline would be a box of nothing.
+            let ink = if selected {
+                if r.w >= 1.0 && r.h >= 1.0 {
+                    self.palette
+                        .push_surface(f, r.x, r.y, r.w, r.h, 4.0, Surface::Selected);
+                }
+                c.text
+            } else {
+                c.dim
+            };
             let size = (row_h * 0.55).clamp(6.0, l.font);
             label(
                 f,
@@ -1327,7 +1419,7 @@ impl LifeApp {
                 r.y + (r.h - text::line_height(size, FontWeightHint::Regular)) / 2.0,
                 pattern.name(),
                 size,
-                if selected { BLUE } else { SUBTEXT0 },
+                ink,
                 if selected {
                     FontWeightHint::Bold
                 } else {
@@ -1347,20 +1439,20 @@ impl LifeApp {
         let half = ((foot.w - l.pad) / 2.0).max(0.0);
         let place = Rect::new(foot.x, foot.y, half, foot.h);
         let cancel = Rect::new(foot.x + half + l.pad, foot.y, half, foot.h);
-        button(f, l, place, "Place", SURFACE1, GREEN);
+        // Placing is what the sheet is for, so it is the primary button.
+        button(f, &self.palette, l, place, "Place", Kind::Primary, ground);
         f.hit(Target::PlacePattern, place);
-        button(f, l, cancel, "Cancel", SURFACE1, SUBTEXT0);
+        button(f, &self.palette, l, cancel, "Cancel", Kind::Plain, ground);
         f.hit(Target::ClosePatterns, cancel);
     }
 
     fn draw_help(&self, f: &mut Frame, l: &Layout) {
-        fill(f, l.window, Color::rgba(0, 0, 0, 190), 0.0);
+        let sheet = l.help;
+        self.draw_panel(f, l, sheet);
         // The whole window closes it: there is nothing on the sheet to press.
         f.hit(Target::CloseHelp, l.window);
 
-        let sheet = l.help;
-        fill(f, sheet, MANTLE, 12.0);
-        stroke(f, sheet, SURFACE1, 1.0, 12.0);
+        let c = self.colours.chrome;
         let pad = l.pad * 1.5;
         let slots = HELP_ROWS.len().saturating_add(3) as f32;
         let size = l.font.min((sheet.h / slots) * 0.8);
@@ -1371,7 +1463,7 @@ impl LifeApp {
             sheet.y + pad,
             "Controls",
             l.big.min(sheet.h * 0.12),
-            YELLOW,
+            c.even,
             FontWeightHint::Bold,
             Some((sheet.w - pad * 2.0).max(0.0)),
         );
@@ -1387,7 +1479,7 @@ impl LifeApp {
                 y,
                 key,
                 size,
-                BLUE,
+                c.key,
                 FontWeightHint::Bold,
                 Some(key_w),
             );
@@ -1397,7 +1489,7 @@ impl LifeApp {
                 y,
                 what,
                 size,
-                TEXT_COLOR,
+                c.text,
                 FontWeightHint::Regular,
                 Some((sheet.w - pad * 2.0 - key_w).max(0.0)),
             );
@@ -1490,14 +1582,60 @@ fn centred_in(f: &mut Frame, r: Rect, s: &str, size: f32, color: Color, weight: 
     );
 }
 
-/// A filled, labelled control.
-fn button(f: &mut Frame, l: &Layout, r: Rect, text_str: &str, back: Color, fore: Color) {
+/// One of the toolkit's push buttons, through `gamechrome::button`: the
+/// toolkit's colours for `kind` on `ground`, with the label at a size that
+/// follows the button as the window scales.
+fn button(
+    f: &mut Frame,
+    p: &Palette,
+    l: &Layout,
+    r: Rect,
+    text_str: &str,
+    kind: Kind,
+    ground: Color,
+) {
     if r.w <= 0.0 || r.h <= 0.0 {
         return;
     }
-    fill(f, r, back, (r.h * 0.25).min(8.0));
     let size = (r.h * 0.45).clamp(6.0, l.font);
-    centred_in(f, r, text_str, size, fore, FontWeightHint::Bold);
+    gamechrome::button(
+        f,
+        p,
+        (r.x, r.y, r.w, r.h),
+        text_str,
+        size,
+        kind,
+        State::default(),
+        ground,
+    );
+}
+
+/// A ring just inside `face`, in `colour`: the keyboard cursor.
+///
+/// Four bars rather than a stroke, because a stroke is centred on the edge
+/// and would bleed into the neighbouring cells. A face too small to hold a
+/// ring with a hole in it is filled whole: in a window that small a cursor
+/// that hides the one cell's state is better than a cursor that is not there.
+fn draw_ring(f: &mut Frame, face: Rect, colour: Color) {
+    let t = (face.w.min(face.h) * 0.2).clamp(1.0, 3.0);
+    if face.w <= t * 2.0 || face.h <= t * 2.0 {
+        fill(f, face, colour, 0.0);
+        return;
+    }
+    fill(f, Rect::new(face.x, face.y, face.w, t), colour, 0.0);
+    fill(
+        f,
+        Rect::new(face.x, face.bottom() - t, face.w, t),
+        colour,
+        0.0,
+    );
+    fill(f, Rect::new(face.x, face.y, t, face.h), colour, 0.0);
+    fill(
+        f,
+        Rect::new(face.right() - t, face.y, t, face.h),
+        colour,
+        0.0,
+    );
 }
 
 // ── Window ─────────────────────────────────────────────────────────────────
@@ -1518,6 +1656,14 @@ pub fn handle_event(app: &mut LifeApp, event: &Event) -> EventResult {
 }
 
 impl App for LifeApp {
+    /// The board, its cells, the buttons and both sheets are drawn from this,
+    /// so a light desktop gets a light board -- which it did not while the
+    /// colours were eleven constants of the dark scheme.
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+        self.colours = Colours::of(palette);
+    }
+
     fn title(&self) -> String {
         "Game of Life".to_string()
     }
@@ -3006,38 +3152,100 @@ mod tests {
             "turning one cell on should add exactly one filled rectangle"
         );
         let want = l.cell_rect(11, 17);
+        let green = a.colours.live;
         assert!(
             after
                 .iter()
-                .any(|&(r, c)| about(r.x, want.x, 0.01) && about(r.y, want.y, 0.01) && c == GREEN),
+                .any(|&(r, c)| about(r.x, want.x, 0.01) && about(r.y, want.y, 0.01) && c == green),
             "the live cell was not drawn green at {want:?}"
         );
     }
 
+    /// The fills drawn wholly inside the cell at `(row, col)`, in order.
+    fn fills_in_cell(a: &LifeApp, row: usize, col: usize) -> Vec<(Rect, Color)> {
+        let cell = a.layout().cell_rect(row, col);
+        fills(&frame_of(a))
+            .into_iter()
+            .filter(|&(r, _)| {
+                r.x >= cell.x - 0.01
+                    && r.y >= cell.y - 0.01
+                    && r.right() <= cell.right() + 0.01
+                    && r.bottom() <= cell.bottom() + 0.01
+            })
+            .collect()
+    }
+
+    /// The cursor is a ring inside its cell, on a dead cell and on a live one,
+    /// and the cell's own state still shows through it: a live cell under the
+    /// cursor is still drawn live. It was a fill that replaced the cell -- a
+    /// player could not see whether the cell they were on was alive without
+    /// knowing that lavender meant yes.
     #[test]
-    fn the_cursor_is_drawn_whether_its_cell_is_alive_or_not() {
+    fn the_cursor_is_a_ring_and_the_cell_under_it_still_shows_its_state() {
         let mut a = empty();
-        let l = a.layout();
         let (r, c) = a.cursor();
-        let want = l.cell_rect(r, c);
-        let at_cursor = |a: &LifeApp| -> Option<Color> {
-            fills(&frame_of(a))
+        let cell = a.layout().cell_rect(r, c);
+        let ring_of = |a: &LifeApp, colour: Color| -> usize {
+            fills_in_cell(a, r, c)
                 .into_iter()
-                .filter(|&(rect, _)| about(rect.x, want.x, 0.01) && about(rect.y, want.y, 0.01))
-                .map(|(_, colour)| colour)
-                .next_back()
+                .filter(|&(rect, col)| {
+                    col == colour && (rect.w < cell.w * 0.5 || rect.h < cell.h * 0.5)
+                })
+                .count()
         };
         assert_eq!(
-            at_cursor(&a),
-            Some(SURFACE1),
-            "a dead cell under the cursor should still be marked"
+            ring_of(&a, a.colours.cursor_on_dead),
+            4,
+            "a dead cell under the cursor should be ringed: {:?}",
+            fills_in_cell(&a, r, c)
         );
+        assert!(
+            !fills_in_cell(&a, r, c)
+                .iter()
+                .any(|&(_, col)| col == a.colours.live),
+            "a dead cell under the cursor was drawn live"
+        );
+
         a.apply(Action::ToggleCell(a.grid().index(r, c).unwrap()));
         assert_eq!(
-            at_cursor(&a),
-            Some(LAVENDER),
-            "a live cell under the cursor should be drawn in the cursor's colour"
+            ring_of(&a, a.colours.cursor_on_live),
+            4,
+            "a live cell under the cursor should be ringed: {:?}",
+            fills_in_cell(&a, r, c)
         );
+        let inside = fills_in_cell(&a, r, c);
+        let live = inside
+            .iter()
+            .position(|&(rect, col)| col == a.colours.live && rect.w > cell.w * 0.9)
+            .expect("a live cell under the cursor is no longer drawn live");
+        let ring = inside
+            .iter()
+            .position(|&(_, col)| col == a.colours.cursor_on_live)
+            .expect("no ring");
+        assert!(live < ring, "the cell was painted over its own ring");
+    }
+
+    /// In a window too small for a ring with a hole, the cursor still shows:
+    /// its cell is filled whole.
+    #[test]
+    fn in_a_tiny_window_the_cursor_fills_its_cell_rather_than_vanishing() {
+        let a = app();
+        let (w, h) = (160.0, 120.0);
+        let l = layout_at(w, h);
+        let (r, c) = a.cursor();
+        let cell = l.cell_rect(r, c);
+        assert!(
+            cell.w > 0.0 && cell.w <= 2.0,
+            "this test needs a window whose cells are too small for a ring: {cell:?}"
+        );
+        let marked = fills(&a.frame(w, h)).into_iter().any(|(rect, colour)| {
+            colour == a.colours.cursor_on_dead
+                && about(rect.x, cell.x, 0.01)
+                && about(rect.y, cell.y, 0.01)
+                && about(rect.w, cell.w, 0.01)
+                && about(rect.h, cell.h, 0.01)
+        });
+        assert!(marked, "the cursor vanished in a small window");
     }
 
     #[test]
@@ -3068,7 +3276,7 @@ mod tests {
         assert_eq!(
             strokes(&a.frame(200.0, 160.0))
                 .into_iter()
-                .filter(|&(_, c)| c == SURFACE0)
+                .filter(|&(_, c)| c == a.colours.chrome.raised)
                 .count(),
             0,
             "grid lines were drawn at a cell size where they cannot be seen"
@@ -3125,9 +3333,10 @@ mod tests {
         // actually emitted and clicks its middle.
         let mut a = empty();
         a.grid.set(41, 7, true);
+        let live = a.colours.live;
         let green: Vec<Rect> = fills(&frame_of(&a))
             .into_iter()
-            .filter(|&(_, c)| c == GREEN)
+            .filter(|&(_, c)| c == live)
             .map(|(r, _)| r)
             .collect();
         assert_eq!(
@@ -3757,5 +3966,265 @@ mod tests {
             a.tick_accum, 0,
             "a new soup kept part of a generation's time"
         );
+    }
+
+    // ── The user's colours ─────────────────────────────────────────────────
+
+    /// The palettes every game is read under (`gamechrome::legibility`),
+    /// and a light theme of the user's own whose band is a mid grey and whose
+    /// strips are separators, in either surface look.
+    ///
+    /// The palette holds its inks to the floor on the grounds it writes on
+    /// (`Palette::text_grounds`), and the band is one of them only while
+    /// strips are bands -- so only under separator strips does the header,
+    /// which draws its band whatever the strips are, have to move its inks
+    /// for it. On this one the page's secondary grey is about 2:1.
+    fn looks() -> Vec<(String, Palette)> {
+        let mut out = gamechrome::legibility::looks();
+        for cards in [false, true] {
+            let mut theme = guitk::palette::ThemeColors::default();
+            theme
+                .light
+                .insert("mantle".to_string(), Color::from_hex(0xA8_AD_BD));
+            let mut p = Palette::for_theme(true, &theme);
+            p.set_strip_style(guitk::palette::StripStyle::Separator);
+            p.set_surface_style(if cards {
+                guitk::palette::SurfaceStyle::Cards
+            } else {
+                guitk::palette::SurfaceStyle::Borders
+            });
+            let look = if cards { "cards" } else { "borders" };
+            out.push((format!("grey band, separator strips, light, {look}"), p));
+        }
+        out
+    }
+
+    /// Every look the window has, each handed `p` the way the framework hands
+    /// it over -- through `App::theme_changed`, so a hook that dropped the
+    /// palette on the floor would leave every one of these dark.
+    ///
+    /// Between them they draw every colour the program has: the header's
+    /// Running and Paused, live and dead cells, the cursor on each, the grid
+    /// lines, every button with the grid's switch both on and off, both
+    /// sheets, and a window small enough that the grid lines are left out.
+    fn every_look(p: &Palette) -> Vec<(&'static str, LifeApp, (f32, f32))> {
+        let themed = |mut a: LifeApp| {
+            a.theme_changed(p);
+            a
+        };
+        let size = LifeApp::SIZE;
+        let mut looks = vec![("paused, the cursor on a dead cell", themed(app()), size)];
+
+        let mut a = themed(app());
+        let (r, c) = a.cursor();
+        a.apply(Action::ToggleCell(a.grid().index(r, c).unwrap()));
+        a.apply(Action::TogglePlay);
+        looks.push(("running, the cursor on a live cell", a, size));
+
+        let mut a = themed(app());
+        stroke(&mut a, Key::G);
+        looks.push(("grid lines off", a, size));
+
+        let mut a = themed(app());
+        a.apply(Action::OpenPatterns);
+        looks.push(("the pattern sheet", a, size));
+
+        let mut a = themed(app());
+        a.apply(Action::ToggleHelp);
+        looks.push(("the help sheet", a, size));
+
+        looks.push((
+            "a window too small for grid lines",
+            themed(app()),
+            (200.0, 160.0),
+        ));
+        looks
+    }
+
+    /// The colours the window works out rather than reads, for `p`: the
+    /// toolkit's buttons on the page and on a sheet, the chrome's inks moved
+    /// for the band, and the live cells' green.
+    ///
+    /// Worked out here from `p` directly, not read back from a window: a
+    /// window whose `theme_changed` kept the old colours would hand back the
+    /// old colours' list, and every one of its stale colours would pass.
+    fn derived(p: &Palette) -> Vec<Color> {
+        let c = Colours::of(p);
+        let mut out = Vec::new();
+        for ground in [c.chrome.page, c.panel_ground(p)] {
+            for kind in [Kind::Plain, Kind::Primary] {
+                out.extend(gamechrome::button_colours(p, kind, ground));
+            }
+        }
+        out.extend(c.chrome.on(c.chrome.band).inks());
+        out.push(c.live);
+        out
+    }
+
+    /// **The window is drawn in the user's colours**, light or dark, in
+    /// either surface look and under the themes that leave no room -- every
+    /// colour the palette's, the toolkit's buttons', or an ink moved to read
+    /// where it is written (the operator's C-Q16). It drew in eleven
+    /// constants of Catppuccin Mocha, so a light desktop got a dark Game of
+    /// Life.
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        for (look, p) in looks() {
+            let derived = derived(&p);
+            for (what, a, (w, h)) in every_look(&p) {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    a.frame(w, h).commands(),
+                    &derived,
+                    &format!("life, {what}, {look}"),
+                );
+            }
+        }
+    }
+
+    /// The first frame can be drawn before any theme arrives, so the window
+    /// opens in the dark defaults' colours rather than in none at all.
+    #[test]
+    fn until_a_theme_arrives_the_window_is_drawn_in_the_dark_defaults() {
+        let p = Palette::for_mode(false);
+        let a = app();
+        assert_eq!(a.palette, p);
+        assert_eq!(a.colours, Colours::of(&p));
+        appearance::palette_check::assert_drawn_from(
+            &p,
+            frame_of(&a).commands(),
+            &derived(&p),
+            "life before any theme",
+        );
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look, under the themes that leave no room, and on a
+    /// grey band under separator strips (`looks`). The flat buttons this
+    /// window drew wrote grey and accent labels on a grey that a light theme
+    /// left at 3.6:1 to 4.1:1, and the board's size was in the disabled grey,
+    /// 3.6:1 even in the dark theme.
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_every_theme() {
+        let mut bad = Vec::new();
+        for (look, p) in looks() {
+            for (what, a, (w, h)) in every_look(&p) {
+                let f = a.frame(w, h);
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, |_| false) {
+                    bad.push(format!(
+                        "{what}, {look}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "life: {bad:#?}");
+    }
+
+    /// The colour of the face of the button `target` names, as drawn: the
+    /// first fill laid exactly over its hit box.
+    fn face_of(a: &LifeApp, target: Target) -> Color {
+        let f = frame_of(a);
+        let r = f
+            .hits()
+            .iter()
+            .rev()
+            .find(|(t, _)| *t == target)
+            .map(|(_, r)| *r)
+            .expect("no such button");
+        fills(&f)
+            .into_iter()
+            .find(|&(fr, _)| {
+                about(fr.x, r.x, 0.01)
+                    && about(fr.y, r.y, 0.01)
+                    && about(fr.w, r.w, 0.01)
+                    && about(fr.h, r.h, 0.01)
+            })
+            .map(|(_, c)| c)
+            .expect("the button has no face")
+    }
+
+    /// **A button is marked by what it is**, as the games mark theirs: the
+    /// grid lines' switch is a primary button while the lines are on and a
+    /// plain one while they are off, the way a game marks the size in play;
+    /// Place is the pattern sheet's primary button, the one the sheet is for;
+    /// the rest are plain. The switch was a blue label when on and a grey one
+    /// too faint to read when off.
+    #[test]
+    fn the_grid_switch_and_place_are_marked_as_the_games_mark_them() {
+        let paint = |a: &LifeApp, kind, ground| {
+            guitk::button::paint(&a.palette, kind, State::default(), ground).lower
+        };
+        let a = app();
+        let page = a.colours.chrome.page;
+        assert!(a.show_grid(), "the program opens with grid lines on");
+        assert_eq!(
+            face_of(&a, Target::GridLines),
+            paint(&a, Kind::Primary, page),
+            "the grid lines are on and their switch is not marked"
+        );
+        assert_ne!(paint(&a, Kind::Primary, page), paint(&a, Kind::Plain, page));
+        for plain in [Target::PlayPause, Target::StepOnce, Target::Help] {
+            assert_eq!(
+                face_of(&a, plain),
+                paint(&a, Kind::Plain, page),
+                "{plain:?}"
+            );
+        }
+
+        let mut a = app();
+        stroke(&mut a, Key::G);
+        assert_eq!(
+            face_of(&a, Target::GridLines),
+            paint(&a, Kind::Plain, page),
+            "the grid lines are off and their switch is still marked"
+        );
+
+        let mut a = app();
+        a.apply(Action::OpenPatterns);
+        let ground = a.colours.panel_ground(&a.palette);
+        assert_eq!(
+            face_of(&a, Target::PlacePattern),
+            paint(&a, Kind::Primary, ground),
+            "Place is not the sheet's primary button"
+        );
+        // The backdrop is recorded first and Cancel last, so the last box
+        // for closing the sheet is Cancel's.
+        assert_eq!(
+            face_of(&a, Target::ClosePatterns),
+            paint(&a, Kind::Plain, ground),
+            "Cancel is not a plain button"
+        );
+    }
+
+    /// **A live cell is told from a dead one, and the cursor is seen on
+    /// either, in every theme** (WCAG 1.4.11's 3:1 for what a player has to
+    /// see). The grey the cursor was drawn in fell short of it in both stock
+    /// themes, and the palette's own green does under a light theme carrying
+    /// a dark one's pastels.
+    #[test]
+    fn the_cells_and_the_cursor_are_seen_in_every_theme() {
+        use guitk::theme::contrast_ratio;
+        for (look, p) in looks() {
+            let c = Colours::of(&p);
+            let well = c.chrome.well;
+            let ratio = contrast_ratio(c.live, well);
+            assert!(
+                ratio >= 3.0,
+                "{look}: a live cell is {ratio:.2}:1 on the board"
+            );
+            for (cell, ring, what) in [
+                (c.live, c.cursor_on_live, "live"),
+                (well, c.cursor_on_dead, "dead"),
+            ] {
+                let ratio = contrast_ratio(ring, cell);
+                assert!(
+                    ratio >= 3.0,
+                    "{look}: the cursor is {ratio:.2}:1 on a {what} cell"
+                );
+            }
+        }
     }
 }

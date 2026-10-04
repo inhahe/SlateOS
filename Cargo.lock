@@ -4513,6 +4513,7 @@ dependencies = [
  "mp4",
  "opus",
  "rav1d",
+ "vorbis",
  "vp8",
  "vp9",
  "yuv",

@@ -1,8 +1,9 @@
-//! The sound fixtures (`tests/data/opus_*`) played through
-//! [`videocodec::Sound`]: every block's time and length held to FFmpeg's
-//! (`ffprobe -show_frames`), and every sample to libopus's fixed-point
-//! decoder's with FFmpeg's trimming (`tests/data/generate_sound_fixtures.py`,
-//! which says where each answer comes from).
+//! The sound fixtures (`tests/data/opus_*`, `tests/data/vorbis_*`) played
+//! through [`videocodec::Sound`]: every block's time and length held to
+//! FFmpeg's (`ffprobe -show_frames`), and every sample to libopus's
+//! fixed-point decoder's or Tremor's with FFmpeg's trimming
+//! (`tests/data/generate_sound_fixtures.py`, which says where each answer
+//! comes from).
 
 #![allow(
     clippy::unwrap_used,
@@ -17,15 +18,19 @@
 )]
 
 use std::fs::File;
+use std::io::Cursor;
 use std::path::PathBuf;
 
 use videocodec::{Error, Sound, SoundCodec};
 
-const FIXTURES: [&str; 4] = [
+const FIXTURES: [&str; 7] = [
     "opus_stereo.webm",
     "opus_mono_voip.webm",
     "opus_short_frames.mka",
     "opus_51.webm",
+    "vorbis_stereo.webm",
+    "vorbis_mono_22k.mka",
+    "vorbis_51.webm",
 ];
 
 fn data(name: &str) -> PathBuf {
@@ -39,6 +44,7 @@ fn data(name: &str) -> PathBuf {
 struct Expected {
     track: u64,
     channels: usize,
+    rate: u32,
     /// Each block's time (ns) and samples a channel.
     blocks: Vec<(i64, usize)>,
     bytes: usize,
@@ -51,6 +57,7 @@ fn expected(name: &str) -> Expected {
     let mut e = Expected {
         track: 0,
         channels: 0,
+        rate: 0,
         blocks: Vec::new(),
         bytes: 0,
         digest: 0,
@@ -61,6 +68,7 @@ fn expected(name: &str) -> Expected {
             "track" => {
                 e.track = f[1].parse().unwrap();
                 e.channels = f[3].parse().unwrap();
+                e.rate = f[5].parse().unwrap();
             }
             "block" => e
                 .blocks
@@ -73,6 +81,15 @@ fn expected(name: &str) -> Expected {
         }
     }
     e
+}
+
+/// The codec a fixture's name says it is.
+fn codec(name: &str) -> SoundCodec {
+    if name.starts_with("opus") {
+        SoundCodec::Opus
+    } else {
+        SoundCodec::Vorbis
+    }
 }
 
 fn fnv1a64(data: &[u8]) -> u64 {
@@ -93,14 +110,14 @@ fn blocks(name: &str) -> Vec<videocodec::Block> {
 }
 
 #[test]
-fn every_fixture_plays_as_ffmpeg_and_libopus_play_it() {
+fn every_fixture_plays_as_ffmpeg_and_its_reference_decoder_play_it() {
     for name in FIXTURES {
         let e = expected(name);
         let sound = Sound::open(File::open(data(name)).unwrap()).unwrap();
         let info = sound.info();
         assert_eq!(
             (info.track, info.channels, info.sample_rate, info.codec),
-            (e.track, e.channels, 48000, SoundCodec::Opus),
+            (e.track, e.channels, e.rate, codec(name)),
             "{name}: the track"
         );
         let got = blocks(name);
@@ -116,7 +133,7 @@ fn every_fixture_plays_as_ffmpeg_and_libopus_play_it() {
         assert_eq!(
             (pcm.len(), fnv1a64(&pcm)),
             (e.bytes, e.digest),
-            "{name}: the samples, as libopus decodes them"
+            "{name}: the samples, as libopus or Tremor decodes them"
         );
     }
 }
@@ -151,11 +168,11 @@ fn snr(ours: &[i16], theirs: &[i16]) -> f64 {
 fn a_seek_starts_at_the_first_sample_at_or_after_its_time() {
     // "At or after" by the times the whole file's blocks carry: the block
     // whose time is the last at or before `t`, from its sample
-    // ceil((t - time) * 48000 / 10^9) on -- or, past its end, the next block
+    // ceil((t - time) * rate / 10^9) on -- or, past its end, the next block
     // whole -- and every block after it the whole file's, time and length.
     //
-    // The samples: after a seek the decoder has had its pre-roll (80 ms),
-    // not the whole file, and starts off by what it never heard, then
+    // The samples: after a seek an Opus decoder has had its pre-roll (80
+    // ms), not the whole file, and starts off by what it never heard, then
     // converges on the whole decode. CELT predicts each frame's band
     // energies from the last's: measured, some 20 dB of signal to error at
     // the first block after the pre-roll, 5 to 6 dB more each 20 ms, past
@@ -163,17 +180,28 @@ fn a_seek_starts_at_the_first_sample_at_or_after_its_time() {
     // it decoded before: on this voiced signal, 6 dB at first, 40 to 50 dB
     // two packets on, then the same sound a few tens of dB from the whole
     // decode's waveform for as long as the voicing lasts. Held to: within
-    // 30 dB inside ten blocks -- a block out of place is near 0. (A seek
-    // that reaches back to the stream's start decodes what opening it
-    // decodes, to the bit.)
-    for name in ["opus_stereo.webm", "opus_mono_voip.webm", "opus_51.webm"] {
-        let channels = expected(name).channels;
+    // 30 dB inside ten blocks -- a block out of place is near 0. A Vorbis
+    // decoder remembers nothing but the last block, which the pre-roll
+    // decodes: its blocks are the whole decode's, to the bit, from the
+    // first. (A seek that reaches back to the stream's start decodes what
+    // opening it decodes, to the bit.)
+    for name in [
+        "opus_stereo.webm",
+        "opus_mono_voip.webm",
+        "opus_51.webm",
+        "vorbis_stereo.webm",
+        "vorbis_mono_22k.mka",
+        "vorbis_51.webm",
+    ] {
+        let e = expected(name);
+        let channels = e.channels;
         let whole = blocks(name);
-        for t in [1i64, 480_000_000, 1_000_000_001, 1_100_250_000] {
+        let end = whole.last().unwrap().time;
+        for t in [1i64, end * 3 / 10, end / 2 + 1, end * 2 / 3 + 250_000] {
             let i = whole.iter().rposition(|b| b.time <= t).unwrap();
             let b = &whole[i];
             let k = usize::try_from(
-                (u128::try_from(t - b.time).unwrap() * 48000).div_ceil(1_000_000_000),
+                (u128::try_from(t - b.time).unwrap() * u128::from(e.rate)).div_ceil(1_000_000_000),
             )
             .unwrap();
             let (theirs, mut next) = if k * channels < b.samples.len() {
@@ -194,6 +222,12 @@ fn a_seek_starts_at_the_first_sample_at_or_after_its_time() {
                 theirs.len(),
                 "{name} at {t}: the block's length"
             );
+            if codec(name) == SoundCodec::Vorbis {
+                assert_eq!(
+                    first.samples, theirs,
+                    "{name} at {t}: the first block's samples"
+                );
+            }
             let mut settled = snr(&first.samples, &theirs) >= 30.0;
             for _ in 0..10 {
                 let (Some(ours), Some(w)) = (sound.next_block().unwrap(), whole.get(next)) else {
@@ -204,12 +238,63 @@ fn a_seek_starts_at_the_first_sample_at_or_after_its_time() {
                     (w.time, w.samples.len()),
                     "{name} at {t}: block {next}"
                 );
+                if codec(name) == SoundCodec::Vorbis {
+                    assert_eq!(
+                        ours.samples, w.samples,
+                        "{name} at {t}: block {next}'s samples"
+                    );
+                }
                 settled |= snr(&ours.samples, &w.samples) >= 30.0;
                 next += 1;
             }
             assert!(settled, "{name} at {t}: not within 30 dB inside ten blocks");
         }
     }
+}
+
+#[test]
+fn a_damaged_vorbis_packet_is_concealed_with_silence() {
+    // The 21st packet's first bit set, which makes it no audio packet: its
+    // block is silence as long as the last block, at its time; the next
+    // overlaps the block before the damaged one (so differs), and every
+    // block after that is the whole decode's again.
+    let name = "vorbis_51.webm";
+    let mut file = std::fs::read(data(name)).unwrap();
+    let mut demuxer = matroska::Demuxer::open(Cursor::new(&file)).unwrap();
+    let mut packets = Vec::new();
+    while let Some(p) = demuxer.next_packet().unwrap() {
+        packets.push(p);
+    }
+    let p = &packets[20];
+    let head = &p.data[..p.data.len().min(16)];
+    let at = (usize::try_from(p.position).unwrap()..file.len())
+        .find(|&i| file[i..].starts_with(head))
+        .unwrap();
+    file[at] |= 1;
+    let whole = blocks(name);
+    let mut sound = Sound::open(Cursor::new(file)).unwrap();
+    let mut got = Vec::new();
+    while let Some(b) = sound.next_block().unwrap() {
+        got.push(b);
+    }
+    assert_eq!(sound.damaged(), 1);
+    assert_eq!(
+        sound.last_damage(),
+        Some(&Error::Vorbis(vorbis::Error::NotAudio))
+    );
+    // The first packet makes no block: packet 20's is block 19.
+    let i = 19;
+    assert_eq!(got.len(), whole.len());
+    assert_eq!(got[..i], whole[..i], "the blocks before");
+    assert_eq!(got[i].time, whole[i].time);
+    assert_eq!(
+        got[i].samples.len(),
+        whole[i - 1].samples.len(),
+        "as long as the last block"
+    );
+    assert!(got[i].samples.iter().all(|&s| s == 0), "silence");
+    assert_eq!(got[i + 1].time, whole[i + 1].time);
+    assert_eq!(got[i + 2..], whole[i + 2..], "the blocks after the next");
 }
 
 #[test]

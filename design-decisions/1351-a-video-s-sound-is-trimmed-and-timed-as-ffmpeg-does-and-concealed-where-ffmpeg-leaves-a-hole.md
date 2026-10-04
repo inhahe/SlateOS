@@ -65,10 +65,39 @@ first block.
 - *Float output.* Opus's fixed-point decoder produces 16-bit samples; a
   float conversion adds nothing but a step the caller can take.
 
-**What it does not do yet.** Vorbis (WebM's other sound codec) and AAC
-(MP4's) are refused by name; MP4's sound tracks are not read; and nothing
-plays the samples: the speakers need the kernel's PCM interface
-(`kernel/src/audio_alsa.rs`, lane A's) reachable from a program.
+**Vorbis, 2026-10-04.** WebM's other sound codec now plays too
+(`gui/video/vorbis`, §1352), by the same rules, which settle what is
+particular to it:
+
+- **At the stream's own rate.** Unlike Opus, a Vorbis stream has no native
+  rate but its own (44.1 kHz, 22.05 kHz, ...); `SoundInfo::sample_rate`
+  says which, and resampling stays the mixer's business.
+- **A packet that decodes to nothing gives no block, and its side data is
+  never read.** A Vorbis stream's first packet only primes the decoder's
+  overlap. FFmpeg reads a packet's skip and padding from the frame it
+  makes, so the first packet's -- which carries the codec delay a newer
+  muxer writes for a Vorbis track (128 samples, from libvorbis's
+  `initial_padding`) -- is lost, and FFmpeg plays those samples. `Sound`
+  does the same: measured, FFmpeg's total for such a file is exactly the
+  stream's samples less the last packet's `DiscardPadding`.
+- **A damaged packet is concealed with silence** as long as the last block:
+  Vorbis has no concealment, and the decoder overlaps the next packet with
+  the last one it decoded.
+- **A seek pre-rolls by a long block at least**, whatever `SeekPreRoll`
+  says (Matroska's is 0 for Vorbis): a packet decodes only after the one
+  before it, so without it a seek landing on the packet that holds the time
+  would start a packet late. After the pre-roll the blocks are the
+  uninterrupted decode's to the bit.
+
+Checked on three more fixtures -- stereo at 44.1 kHz with clicks that force
+short blocks, mono at 22.05 kHz in plain Matroska, 5.1 -- against ffprobe's
+blocks and Tremor's samples trimmed by FFmpeg's rules (the generator
+applies them to Tremor's output packet by packet).
+
+**What it does not do yet.** AAC (MP4's codec) is refused by name; MP4's
+sound tracks are not read; and nothing plays the samples: the speakers
+need the kernel's PCM interface (`kernel/src/audio_alsa.rs`, lane A's)
+reachable from a program.
 
 **Where it lives.** `gui/video/codec/src/sound.rs`; the container's sound
 tracks and each packet's discard padding and position in `container.rs`;

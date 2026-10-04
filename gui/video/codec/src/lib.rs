@@ -39,11 +39,11 @@
 //! [`Sound`] is a file's sound, as [`Video`] is its pictures: opened on the
 //! same file (a second handle to it), it gives back each packet's samples
 //! decoded, with their time on the same clock, for the program to play and
-//! to show the pictures by. Opus, in Matroska and WebM -- WebM's sound,
-//! besides Vorbis -- through `gui/video/opus`, libopus's decoder ported and
-//! held to it sample for sample; the codec delay and each packet's discard
-//! padding dropped, and the blocks timed, as FFmpeg drops and times them
-//! (`tests/sound.rs`).
+//! to show the pictures by. Opus and Vorbis, in Matroska and WebM -- WebM's
+//! sound -- through `gui/video/opus`, libopus's decoder, and
+//! `gui/video/vorbis`, Tremor, each ported and held to its reference sample
+//! for sample; the codec delay and each packet's discard padding dropped,
+//! and the blocks timed, as FFmpeg drops and times them (`tests/sound.rs`).
 //!
 //! # Colour
 //!
@@ -213,7 +213,6 @@ impl From<mp4::Error> for ContainerError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SoundCodec {
     Opus,
-    /// Not decoded here yet.
     Vorbis,
     /// Not decoded here yet.
     Aac,
@@ -264,6 +263,9 @@ pub enum Error {
     /// An Opus track's setup (its `OpusHead`) is not one, or a packet did not
     /// decode.
     Opus(opus::Error),
+    /// A Vorbis track's headers (its codec private data) are not Vorbis's,
+    /// or a packet did not decode.
+    Vorbis(vorbis::Error),
 }
 
 impl fmt::Display for Error {
@@ -289,6 +291,7 @@ impl fmt::Display for Error {
             }
             Self::SoundCodec(c) => write!(f, "the sound is {c}, which is not decoded here yet"),
             Self::Opus(e) => write!(f, "the sound could not be decoded: {e}"),
+            Self::Vorbis(e) => write!(f, "the sound could not be decoded: {e}"),
         }
     }
 }

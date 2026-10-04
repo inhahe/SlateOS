@@ -15,8 +15,9 @@ vp9 = { path = "../vp9" }
 rav1d = { path = "../rav1d" }
 # YUV to pixels, exactly as an AVIF still of the same picture is converted.
 yuv = { path = "../yuv" }
-# The sound: Opus, libopus's decoder ported.
+# The sound: Opus, libopus's decoder ported; Vorbis, Tremor ported.
 opus = { path = "../opus" }
+vorbis = { path = "../vorbis" }
 
 [dev-dependencies]
 # The fixtures' answers are MD5s of each frame's pixels.

@@ -3899,8 +3899,12 @@ lane C's `guitk`.
         fixtures held to ffprobe's blocks and libopus's samples; a damaged
         packet concealed; a seek pre-rolled by `SeekPreRoll`.
         design-decisions §1351.
-      - `[ ]` A Vorbis track in `videocodec::Sound`: its three headers from
-        the track's Xiph-laced private data, timed as FFmpeg times it.
+      - `[x]` A Vorbis track in `videocodec::Sound`: its three headers from
+        the track's Xiph-laced private data, at the stream's own rate, timed
+        and trimmed as FFmpeg does (the first packet only primes; the codec
+        delay played, as FFmpeg plays it); three fixtures held to ffprobe's
+        blocks and Tremor's samples; damage concealed with silence; a seek
+        pre-rolled a long block. design-decisions §1351.
       - `[ ]` Out to the speakers: the kernel's PCM interface
         (`kernel/src/audio_alsa.rs`) reachable from a program, which is
         lane A's (`requests/e-ad-no-application-can-reach-the-sound-device.md`,

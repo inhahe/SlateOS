@@ -5,6 +5,7 @@
  *   reference damage <file.ogg> <seed> [-v]
  *   reference headers <file.ogg>
  *   reference setupdamage <file.ogg> <seed>
+ *   reference pcm <file.ogg> <out.pcm>
  *
  * decode: every packet in order (granule positions withheld, so Tremor
  * trims nothing), printing a summary line -- the packets, the errors, the
@@ -21,6 +22,11 @@
  * setupdamage: the setup header damaged (bits flipped, or cut short) as
  * damage_setup() says, then the first 24 audio packets decoded as by
  * decode -- or which header Tremor refused, or that it would not start.
+ *
+ * pcm: every packet's samples as ov_read gives them -- 16-bit, clipped,
+ * interleaved, little-endian -- into out.pcm, nothing trimmed (the first
+ * packet gives none); on stdout, each audio packet's samples a channel, a
+ * line each, in order. What gui/video/codec's sound fixtures are held to.
  *
  * Built by tools/build_reference.sh against Tremor and libogg.
  */
@@ -277,6 +283,58 @@ static int run(int damaged, uint32_t seed, int verbose, long limit) {
     return 0;
 }
 
+static int write_pcm(const char *path) {
+    vorbis_info vi;
+    vorbis_comment vc;
+    vorbis_dsp_state vd;
+    vorbis_block vb;
+    int r = headers(&vi, &vc);
+    if (r) {
+        printf("headers refused %d\n", r);
+        return 1;
+    }
+    if (vorbis_synthesis_init(&vd, &vi)) {
+        printf("init refused\n");
+        return 1;
+    }
+    vorbis_block_init(&vd, &vb);
+    FILE *out = fopen(path, "wb");
+    if (!out) {
+        perror(path);
+        return 1;
+    }
+    for (long k = 3; k < npackets; k++) {
+        ogg_packet op = {0};
+        op.packet = packets[k].data;
+        op.bytes = packets[k].len;
+        op.packetno = k;
+        op.granulepos = -1;
+        if (vorbis_synthesis(&vb, &op)) {
+            printf("0\n");
+            continue;
+        }
+        vorbis_synthesis_blockin(&vd, &vb);
+        ogg_int32_t **pcm;
+        int n = vorbis_synthesis_pcmout(&vd, &pcm);
+        for (int s = 0; s < n; s++) {
+            for (int c = 0; c < vi.channels; c++) {
+                int32_t x = pcm[c][s] >> 9;
+                int16_t w = x > 32767 ? 32767 : x < -32768 ? -32768 : x;
+                unsigned char b[2] = {(unsigned char)w, (unsigned char)((uint16_t)w >> 8)};
+                fwrite(b, 1, 2, out);
+            }
+        }
+        vorbis_synthesis_read(&vd, n);
+        printf("%d\n", n);
+    }
+    fclose(out);
+    vorbis_block_clear(&vb);
+    vorbis_dsp_clear(&vd);
+    vorbis_comment_clear(&vc);
+    vorbis_info_clear(&vi);
+    return 0;
+}
+
 static int show_headers(void) {
     vorbis_info vi;
     vorbis_comment vc;
@@ -297,7 +355,7 @@ static int show_headers(void) {
 
 int main(int argc, char **argv) {
     if (argc < 3) {
-        fprintf(stderr, "usage: reference decode|damage|headers|setupdamage <file.ogg> [seed] [-v]\n");
+        fprintf(stderr, "usage: reference decode|damage|headers|setupdamage|pcm <file.ogg> [seed] [-v]\n");
         return 2;
     }
     if (read_packets(argv[2])) return 2;
@@ -310,6 +368,7 @@ int main(int argc, char **argv) {
         return run(0, 0, verbose, 24);
     }
     if (!strcmp(argv[1], "headers")) return show_headers();
+    if (!strcmp(argv[1], "pcm") && argc > 3) return write_pcm(argv[3]);
     fprintf(stderr, "unknown mode %s\n", argv[1]);
     return 2;
 }

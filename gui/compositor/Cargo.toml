@@ -30,6 +30,11 @@ guitk = { path = "../toolkit" }
 guiremote = { path = "../remote" }
 osfont = { path = "../font" }
 
+# The video-encoded capture fallback (design-decisions 1343): a window that
+# presents its own pixels -- a game's, a video player's -- has no draw
+# commands for a remote viewer to replay, so its stream codes them as VP9.
+vp9 = { path = "../video/vp9" }
+
 # `settingsfile::testing` -- reached here as `appearance::config::testing` -- for the tests that
 # run against a scratch configuration directory instead of the developer's
 # own. Cargo unifies this with the ordinary dependency when building tests,

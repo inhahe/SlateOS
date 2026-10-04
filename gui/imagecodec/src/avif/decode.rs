@@ -18,9 +18,11 @@
 //! frame to the next in a [`Codecs`], which the animation (`animation.rs`)
 //! holds for as long as it plays.
 //!
-//! After decoding, Chrome's checks apply: a frame whose size, depth or chroma
-//! layout is not the container's is refused, as Chrome refuses it (libavif
-//! would take the frame's word).
+//! A tile decoded at another size than its `ispe` (or its track's) is
+//! brought to that size as libavif brings it ([`scale_tile`], over libyuv's
+//! scaling in `scale.rs`). After decoding, Chrome's checks apply: a frame
+//! whose size, depth or chroma layout is not the container's is refused, as
+//! Chrome refuses it (libavif would take the frame's word).
 //!
 //! Portions of this file are copyright 2019 Joe Drago, from libavif, and
 //! used under its BSD-2-Clause licence: `licenses/libavif-LICENSE.txt`.
@@ -30,6 +32,7 @@ use alloc::vec::Vec;
 
 use rav1d::safe::{self, Data, Decoder, Layout, Settings};
 
+use super::scale::{Scaled, scale_plane};
 use super::setup::{Grid, Layer, Picture, Tile, TileInput, YuvFormat};
 use super::{Error, IMAGE_SIZE_LIMIT};
 
@@ -86,7 +89,8 @@ impl<T> Plane<T> {
 }
 
 impl<T: Copy + Default> Plane<T> {
-    fn new(width: usize, height: usize) -> Result<Self, Error> {
+    /// A `width` x `height` plane of zeros.
+    pub(crate) fn new(width: usize, height: usize) -> Result<Self, Error> {
         let len = width
             .checked_mul(height)
             .ok_or(Error::Parse("AVIF plane size"))?;
@@ -440,7 +444,7 @@ fn one_decoder(picture: &Picture<'_>, layers: &[(&Layer, bool)]) -> bool {
     })
 }
 
-fn decode_as<T: Sample>(
+fn decode_as<T: Scaled>(
     picture: &Picture<'_>,
     layers: &[(&Layer, bool)],
     samples: &[alloc::borrow::Cow<'_, [u8]>],
@@ -503,13 +507,7 @@ fn decode_as<T: Sample>(
                     }
                 }
             }
-            if (tile_image.width, tile_image.height) != (tile.width, tile.height) {
-                // avifImageScaleWithLimit: libyuv's box filter, which is not
-                // ported yet.
-                return Err(Error::Unsupported(
-                    "AVIF frame of another size than its ispe",
-                ));
-            }
+            scale_tile(&mut tile_image, tile.width, tile.height, alpha)?;
             match layer.grid {
                 Some(grid) => {
                     if tile_index == 0 {
@@ -588,6 +586,52 @@ fn tile_image<T: Sample>(picture: &safe::Picture, alpha: bool) -> Result<Decoded
         colour,
         planes,
     })
+}
+
+/// `avifImageScaleWithLimit`, as `avifDecoderDecodeTiles` calls it for a
+/// tile decoded at another size than its `ispe` (or its track's): every
+/// plane brought to `width` x `height` -- chroma to that size's chroma size
+/// -- by libyuv's scaling (`scale.rs`).
+///
+/// Refused as libavif refuses it, which turns its refusal into a failure to
+/// decode the tile: a size of 0, a size past libavif's limits, or a decoded
+/// frame over 16384 on a side, which libyuv's fixed point could overflow.
+fn scale_tile<T: Scaled>(
+    tile: &mut DecodedTile<T>,
+    width: u32,
+    height: u32,
+    alpha: bool,
+) -> Result<(), Error> {
+    if (tile.width, tile.height) == (width, height) {
+        return Ok(());
+    }
+    let failed = decode_failed(alpha);
+    if width == 0 || height == 0 || super::too_large(width, height) {
+        return Err(failed);
+    }
+    if tile.width > 16384 || tile.height > 16384 {
+        return Err(failed);
+    }
+    let (sx, sy) = match tile.format {
+        YuvFormat::Yuv420 => (1, 1),
+        YuvFormat::Yuv422 => (1, 0),
+        YuvFormat::Yuv444 | YuvFormat::Yuv400 => (0, 0),
+    };
+    let at = |v: u32| usize::try_from(v).map_err(|_| failed);
+    // Luma or alpha at the new size; chroma at its own.
+    let sizes = [
+        (width, height),
+        (chroma_size(width, sx), chroma_size(height, sy)),
+        (chroma_size(width, sx), chroma_size(height, sy)),
+    ];
+    for (plane, (w, h)) in tile.planes.iter_mut().zip(sizes) {
+        if let Some(p) = plane {
+            *p = scale_plane(p, at(w)?, at(h)?).map_err(|_| failed)?;
+        }
+    }
+    tile.width = width;
+    tile.height = height;
+    Ok(())
 }
 
 /// The single-tile case of `avifDecoderDecodeTiles`: the image takes the

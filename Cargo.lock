@@ -609,6 +609,7 @@ dependencies = [
  "keylayout",
  "osfont",
  "settingsfile",
+ "vp9",
 ]
 
 [[package]]

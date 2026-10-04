@@ -76,6 +76,9 @@ use osfont::system::{Family, FontCache, Weight};
 pub mod blur;
 mod buffer;
 pub use buffer::{BufferFormat, ImageAsset, SharedBuffer};
+// The video-encoded capture fallback: a remote stream's VP9 of each window
+// that presents its own pixels. See the module docs.
+mod video;
 // Sticky, filter and mouse keys. The state machines live here rather than
 // beside the settings because the compositor is the only place every
 // keystroke passes through; `inputsettings` owns what the user chose.
@@ -144,7 +147,7 @@ use guiremote::control::{BlurKind, PickedWindow, StackTier, WindowPolicy, Window
 // the compositor cannot disagree about what a reservation means.
 pub use guiremote::reserve::PanelEdge;
 use guiremote::reserve::ReservedEdges;
-use guiremote::scene::{ImageSnapshot, SceneFrame, SceneSession, WindowSnapshot};
+use guiremote::scene::{ImageSnapshot, SceneFrame, SceneSession, VideoUpdate, WindowSnapshot};
 // Same reason: `window_list` returns these, and a shell reading one should not
 // have to reach past the compositor to name what it got.
 pub use guiremote::window_list::{WindowInfo, WindowList};
@@ -5494,6 +5497,25 @@ pub enum Scanout {
     Direct(WindowId),
 }
 
+/// One remote viewer's stream: what its viewer holds of the scene, the video
+/// stream of each window presenting a buffer (`video`), and when it started
+/// -- the clock the video is stamped by.
+struct StreamSession {
+    scene: SceneSession,
+    videos: BTreeMap<u64, video::VideoStream>,
+    started: std::time::Instant,
+}
+
+impl StreamSession {
+    fn new() -> Self {
+        Self {
+            scene: SceneSession::new(),
+            videos: BTreeMap::new(),
+            started: std::time::Instant::now(),
+        }
+    }
+}
+
 /// The main compositor state machine.
 pub struct Compositor {
     /// All managed windows (ordered by creation, z_order field determines draw order).
@@ -5772,9 +5794,12 @@ pub struct Compositor {
     /// How the last presented frame was produced (composited vs direct scanout).
     scanout: Scanout,
     /// Active remote draw-command stream sessions, keyed by stream id. Each
-    /// tracks its own per-window delta state so multiple remote viewers can be
+    /// tracks its own per-window delta state, and its own video stream of
+    /// each window presenting a buffer, so multiple remote viewers can be
     /// served independently.
-    stream_sessions: BTreeMap<u64, SceneSession>,
+    stream_sessions: BTreeMap<u64, StreamSession>,
+    /// The serial the next attached buffer gets ([`SharedBuffer::serial`]).
+    next_buffer_serial: u64,
     /// Monotonic allocator for stream session ids.
     next_stream_id: u64,
     /// The last revision stamped on an image (`ImageAsset::revision`), from
@@ -6007,6 +6032,7 @@ impl Compositor {
             scanout: Scanout::Composited,
             idle_watches: HashMap::new(),
             stream_sessions: BTreeMap::new(),
+            next_buffer_serial: 1,
             next_stream_id: 1,
             last_image_revision: 0,
             current_workspace: 0,
@@ -7881,12 +7907,15 @@ impl Compositor {
         bytes: &[u8],
     ) -> CompositorResult<()> {
         // Validate before touching window state so a bad buffer is a no-op.
-        let buffer = SharedBuffer::import(handle, width, height, stride, format, bytes)?;
+        let mut buffer = SharedBuffer::import(handle, width, height, stride, format, bytes)?;
+        let serial = self.next_buffer_serial;
         let window = self
             .window_mut(window_id)
             .ok_or(CompositorError::WindowNotFound(window_id))?;
+        buffer.set_serial(serial);
         window.buffer = Some(buffer);
         window.dirty = true;
+        self.next_buffer_serial = serial.wrapping_add(1);
         self.damage_window(window_id);
         Ok(())
     }
@@ -11989,47 +12018,56 @@ impl Compositor {
         }
     }
 
+    /// The windows a stream frame shows, bottom to top: every visible,
+    /// non-minimised one on the current workspace.
+    fn streamed_windows(&self) -> impl Iterator<Item = &Window> {
+        self.z_stack
+            .iter()
+            .filter_map(|&id| self.window_ref(id))
+            .filter(|win| win.is_showing(self.current_workspace))
+    }
+
     /// Capture the current scene as a draw-command stream frame for a remote
     /// viewer (native compositor-level streaming).
     ///
     /// Walks the z-stack bottom-to-top, includes every visible, non-minimized
     /// window, and hands the per-window render-command lists to `session`,
     /// which forwards only the commands that changed since the last frame
-    /// (geometry-only deltas otherwise). The buffer (DMA-BUF) path has no
-    /// vector commands to forward, so such windows stream as empty command
-    /// lists — pixel forwarding for those is the video-encoded fallback's job,
-    /// not this path's.
-    pub fn capture_stream_frame(&self, session: &mut SceneSession) -> SceneFrame {
-        let mut snaps: Vec<WindowSnapshot<'_>> = Vec::with_capacity(self.z_stack.len());
-        for &id in &self.z_stack {
-            if let Some(win) = self.window_ref(id) {
-                if !win.is_showing(self.current_workspace) {
-                    continue;
-                }
-                snaps.push(WindowSnapshot {
-                    id: win.id.raw(),
-                    x: win.x,
-                    y: win.y,
-                    width: win.width,
-                    height: win.height,
-                    opacity: win.opacity,
-                    commands: &win.render_tree,
-                    images: win
-                        .images
-                        .iter()
-                        .map(|(&id, image)| ImageSnapshot {
-                            id,
-                            revision: image.revision(),
-                            width: image.width(),
-                            height: image.height(),
-                            pixels: image.pixels(),
-                            patch_base: image.patch_base(),
-                            patches: image.patch_log(),
-                        })
-                        .collect(),
-                });
-            }
-        }
+    /// (geometry-only deltas otherwise). A window presenting a buffer has no
+    /// commands to forward; its pixels go as video, whose updates for this
+    /// frame are `video`'s (`video::capture`, which
+    /// [`capture_stream`](Self::capture_stream) runs first).
+    pub fn capture_stream_frame(
+        &self,
+        session: &mut SceneSession,
+        video: &BTreeMap<u64, VideoUpdate>,
+    ) -> SceneFrame {
+        let snaps: Vec<WindowSnapshot<'_>> = self
+            .streamed_windows()
+            .map(|win| WindowSnapshot {
+                id: win.id.raw(),
+                x: win.x,
+                y: win.y,
+                width: win.width,
+                height: win.height,
+                opacity: win.opacity,
+                commands: &win.render_tree,
+                images: win
+                    .images
+                    .iter()
+                    .map(|(&id, image)| ImageSnapshot {
+                        id,
+                        revision: image.revision(),
+                        width: image.width(),
+                        height: image.height(),
+                        pixels: image.pixels(),
+                        patch_base: image.patch_base(),
+                        patches: image.patch_log(),
+                    })
+                    .collect(),
+                video: video.get(&win.id.raw()),
+            })
+            .collect();
         let (fb_w, fb_h) = self.backend.size();
         session.build_frame(fb_w, fb_h, &snaps)
     }
@@ -12040,21 +12078,41 @@ impl Compositor {
     pub fn start_stream(&mut self) -> u64 {
         let id = self.next_stream_id;
         self.next_stream_id = self.next_stream_id.wrapping_add(1);
-        self.stream_sessions.insert(id, SceneSession::new());
+        self.stream_sessions.insert(id, StreamSession::new());
         id
     }
 
     /// Capture the current scene for stream `stream_id` and return the encoded
-    /// wire frame (geometry-only deltas for unchanged windows). Errors if the
-    /// id is unknown (e.g. the session was already stopped).
+    /// wire frame (geometry-only deltas for unchanged windows), its windows'
+    /// video stamped with the time since the stream started. Errors if the id
+    /// is unknown (e.g. the session was already stopped).
     pub fn capture_stream(&mut self, stream_id: u64) -> CompositorResult<Vec<u8>> {
-        // Take ownership of the session so capture_stream_frame can borrow
-        // &self immutably while mutating the (now-local) session; reinsert after.
+        let now_ms = self
+            .stream_sessions
+            .get(&stream_id)
+            .ok_or(CompositorError::StreamNotFound(stream_id))?
+            .started
+            .elapsed()
+            .as_millis();
+        self.capture_stream_at(stream_id, u64::try_from(now_ms).unwrap_or(u64::MAX))
+    }
+
+    /// [`capture_stream`](Self::capture_stream) at `now_ms` milliseconds into
+    /// the stream: the time its windows' video frames are stamped with,
+    /// which must not go backwards from one capture to the next.
+    pub fn capture_stream_at(&mut self, stream_id: u64, now_ms: u64) -> CompositorResult<Vec<u8>> {
+        // Take ownership of the session so the windows can be borrowed while
+        // the (now-local) session changes; reinsert after.
         let mut session = self
             .stream_sessions
             .remove(&stream_id)
             .ok_or(CompositorError::StreamNotFound(stream_id))?;
-        let frame = self.capture_stream_frame(&mut session);
+        let shown: Vec<(u64, Option<&SharedBuffer>)> = self
+            .streamed_windows()
+            .map(|win| (win.id.raw(), win.buffer.as_ref()))
+            .collect();
+        let updates = video::capture(&mut session.videos, &shown, now_ms);
+        let frame = self.capture_stream_frame(&mut session.scene, &updates);
         let bytes = guiremote::scene::encode_scene_frame(&frame);
         self.stream_sessions.insert(stream_id, session);
         Ok(bytes)
@@ -17995,6 +18053,147 @@ mod tests {
         );
         viewer.apply(&dropped).unwrap();
         assert!(held(&viewer).is_empty());
+    }
+
+    /// A window presenting a buffer streams as video: a frame whenever a new
+    /// buffer is attached, which a viewer decodes back to the buffer's pixels
+    /// (within what the coding loses); nothing while the buffer is the same;
+    /// a stop when the window goes back to commands. A window drawing
+    /// commands sends no video.
+    #[test]
+    fn test_stream_codes_a_buffers_pixels_as_video() {
+        use guiremote::scene::{SceneFrame, SceneViewer};
+
+        fn capture(comp: &mut Compositor, stream: u64, ms: u64) -> SceneFrame {
+            let data = comp
+                .capture_stream_at(stream, ms)
+                .expect("the stream exists");
+            let (frame, used) = guiremote::scene::decode_scene_frame(&data).expect("decodes");
+            assert_eq!(used, data.len());
+            frame
+        }
+        fn video_of(frame: &SceneFrame, id: WindowId) -> Option<VideoUpdate> {
+            frame
+                .windows
+                .iter()
+                .find(|w| w.id == id.raw())
+                .and_then(|w| w.video.clone())
+        }
+        /// Peak signal to noise over the colour channels, in decibels.
+        fn psnr(a: &[u32], b: &[u32]) -> f64 {
+            assert_eq!(a.len(), b.len());
+            let mut sse = 0f64;
+            for (&p, &q) in a.iter().zip(b) {
+                for shift in [0, 8, 16] {
+                    let d = f64::from((p >> shift) & 0xff) - f64::from((q >> shift) & 0xff);
+                    sse += d * d;
+                }
+            }
+            let mse = sse / (a.len() as f64 * 3.0);
+            10.0 * (255.0 * 255.0 / mse.max(1e-9)).log10()
+        }
+
+        let mut comp = Compositor::new(320, 240, 60).unwrap();
+        let game = comp.create_window("Game".to_string(), 160, 96, 1);
+        let ui = comp.create_window("UI".to_string(), 80, 60, 1);
+        // Smooth, as video's pictures are.
+        let picture = |shift: u32| -> Vec<u8> {
+            (0..96u32)
+                .flat_map(|y| {
+                    (0..160u32).flat_map(move |x| {
+                        let r = (x + shift) & 0xff;
+                        let g = (y * 2) & 0xff;
+                        let b = x.midpoint(y) & 0xff;
+                        (0xFF00_0000 | (r << 16) | (g << 8) | b).to_le_bytes()
+                    })
+                })
+                .collect()
+        };
+        let attach = |comp: &mut Compositor, shift: u32| {
+            comp.attach_buffer(
+                game,
+                11,
+                160,
+                96,
+                160 * 4,
+                BufferFormat::Xrgb8888,
+                &picture(shift),
+            )
+            .unwrap();
+        };
+        let pixels = |comp: &Compositor| {
+            comp.window_ref(game)
+                .unwrap()
+                .buffer
+                .as_ref()
+                .unwrap()
+                .pixels()
+                .to_vec()
+        };
+        attach(&mut comp, 0);
+        let stream = comp.start_stream();
+        let mut viewer = SceneViewer::new();
+        let mut decoder = vp9::Decoder::new();
+        // Every frame the viewer holds for the game, decoded in order; the
+        // last one's picture. A stop is not expected until the end.
+        let mut take = |viewer: &mut SceneViewer| -> Option<Vec<u32>> {
+            let held = viewer.windows.get_mut(&game.raw())?;
+            let mut last = None;
+            for update in held.take_video() {
+                let VideoUpdate::Frame(video) = update else {
+                    panic!("a stop while the game still presents its buffer");
+                };
+                assert_eq!((video.width, video.height), (160, 96));
+                let picture = decoder.decode(&video.frame).unwrap()?;
+                let planes = [0, 1, 2].map(|p| picture.plane8(p).unwrap());
+                last = Some(vp9::rgb::yuv420_to_argb(planes).unwrap());
+            }
+            last
+        };
+
+        let first = capture(&mut comp, stream, 0);
+        assert!(matches!(
+            video_of(&first, game),
+            Some(VideoUpdate::Frame(_))
+        ));
+        assert_eq!(video_of(&first, ui), None, "commands send no video");
+        viewer.apply(&first).unwrap();
+        let got = take(&mut viewer).expect("the first picture");
+        assert!(
+            psnr(&got, &pixels(&comp)) > 35.0,
+            "{} dB",
+            psnr(&got, &pixels(&comp))
+        );
+
+        // The same buffer: nothing new.
+        let same = capture(&mut comp, stream, 33);
+        assert_eq!(video_of(&same, game), None);
+        viewer.apply(&same).unwrap();
+        assert!(take(&mut viewer).is_none());
+
+        // New pictures: frames coded against the last.
+        for (n, shift) in [(1u64, 4u32), (2, 8), (3, 12)] {
+            attach(&mut comp, shift);
+            let next = capture(&mut comp, stream, 33 + 33 * n);
+            assert!(matches!(video_of(&next, game), Some(VideoUpdate::Frame(_))));
+            viewer.apply(&next).unwrap();
+            let got = take(&mut viewer).expect("the next picture");
+            assert!(
+                psnr(&got, &pixels(&comp)) > 33.0,
+                "frame {n}: {} dB",
+                psnr(&got, &pixels(&comp))
+            );
+        }
+
+        // Back to commands: the video stops.
+        assert_eq!(comp.detach_buffer(game), Some(11));
+        let stopped = capture(&mut comp, stream, 200);
+        assert_eq!(video_of(&stopped, game), Some(VideoUpdate::Stop));
+        viewer.apply(&stopped).unwrap();
+        assert_eq!(
+            viewer.windows.get_mut(&game.raw()).unwrap().take_video(),
+            [VideoUpdate::Stop]
+        );
     }
 
     #[test]

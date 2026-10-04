@@ -274,6 +274,7 @@ fn replay(reference: &Reference) {
                     filter_level,
                     seg,
                 }),
+                stamp: None,
             };
             enc.encode_frame(views(picture), Some(&mut d), opts)
                 .unwrap()

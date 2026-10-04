@@ -481,6 +481,12 @@ pub enum DecodeError {
     /// A [`BufferFormat`](control::BufferFormat) byte is not in this decoder's
     /// table.
     BadBufferFormat(u8),
+    /// A scene frame's compressed video frame is longer than
+    /// [`scene::MAX_VIDEO_FRAME_BYTES`].
+    VideoTooLarge(u32),
+    /// A scene frame's video names a codec this decoder does not know
+    /// ([`scene::VIDEO_VP9`] is the only one).
+    BadVideoCodec(u8),
 }
 
 impl core::fmt::Display for DecodeError {
@@ -569,6 +575,12 @@ impl core::fmt::Display for DecodeError {
                 write!(f, "image byte length {n} exceeds limit {MAX_IMAGE_BYTES}")
             }
             Self::BadBufferFormat(b) => write!(f, "unknown buffer format {b:#04x}"),
+            Self::VideoTooLarge(n) => write!(
+                f,
+                "video frame length {n} exceeds limit {}",
+                scene::MAX_VIDEO_FRAME_BYTES
+            ),
+            Self::BadVideoCodec(b) => write!(f, "unknown video codec {b:#04x}"),
         }
     }
 }

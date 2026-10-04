@@ -1,6 +1,7 @@
 //! libyuv's conversions from YUV to ARGB -- the ones libavif 1.3.0 calls
 //! (`src/reformat_libyuv.c`) to turn a decoded AVIF into pixels, at the
-//! libyuv revision libavif pins (`4db2af62dab48895226be6b52737247e898ebe36`).
+//! libyuv revision libavif pins (`4db2af62dab48895226be6b52737247e898ebe36`,
+//! version 1909; unchanged in 1924, `644251f2`, which libavif 1.4.2 pins).
 //!
 //! Ported: the row conversions (`source/row_common.cc`: `YuvPixel`,
 //! `YuvPixel10`, `YuvPixel12`, `YPixel` and the `I444`, `I410`, `I212` and

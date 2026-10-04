@@ -1,4 +1,8 @@
-## TD-COMPOSITOR-POLLS-INSTEAD-OF-WAITING (lane C, 2026-08-17) - **fixed 2026-09-25 (lane F)**
+## TD-COMPOSITOR-POLLS-INSTEAD-OF-WAITING (lane C, 2026-08-17) - **FIXED 2026-09-25 (lane F)**
+
+**Status:** FIXED 2026-09-25 (lane F); the SlateOS gap below closed by lane A's
+`851d9165b` (on `main`), after which `gui/remote/src/wait.rs` stopped asking
+the listener every tick. Moved to `known-issues-resolved/` 2026-10-04.
 
 > **Fixed 2026-09-25 (lane F).** The server loop now *waits*: between ticks it
 > blocks on its listener, every client, the display's input devices and a

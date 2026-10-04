@@ -44,6 +44,8 @@
 //! - `frame`: the planes frames are decoded into.
 //! - `context`: which probabilities each decision is coded with, from the
 //!   blocks around it -- read by the decoder and written by the encoder.
+//! - [`rgb`]: pictures of `0xAARRGGBB` pixels to the 4:2:0 YUV VP9 codes, and
+//!   back -- for a caller whose pixels are a screen's or a window's.
 //!
 //! # The encoder
 //!
@@ -110,6 +112,7 @@ mod inter;
 mod intra;
 mod loopfilter;
 mod probs;
+pub mod rgb;
 // Generated from libvpx by `tools/gen_tables.py`, which formats what it
 // writes, so regenerating and diffing compares like with like.
 mod tables;

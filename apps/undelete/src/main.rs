@@ -83,6 +83,7 @@ use guitk::table::{Column, Fit, Table};
 use guitk::text;
 use guitk::text::TextCursor;
 use guitk::textedit;
+use guitk::textinput::TextInput;
 use guitk::widget::CheckState;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
@@ -149,6 +150,9 @@ const SEARCH_WIDTH: f32 = 260.0;
 const SEARCH_HEIGHT: f32 = 28.0;
 /// How far the search box's text sits in from its left and right edges.
 const SEARCH_TEXT_INSET: f32 = 8.0;
+/// The most the search holds, in characters: a file name or a piece of
+/// one, and a paste of a page is neither.
+const SEARCH_CAPACITY: usize = 512;
 const FONT_SIZE_SMALL: f32 = 11.0;
 const FONT_SIZE_HEADING: f32 = 16.0;
 const FONT_SIZE_TITLE: f32 = 20.0;
@@ -2226,6 +2230,7 @@ impl SortDirection {
 const SHORTCUTS: &[(&str, &str)] = &[
     ("F1", "This list"),
     ("Up / Down", "Move through the files"),
+    ("Ctrl+Home / Ctrl+End", "The first / last file"),
     ("Tab", "Next field or panel"),
     ("Enter", "Use the selected control"),
     ("Ctrl+A", "Tick every file found"),
@@ -2267,6 +2272,12 @@ pub struct UndeleteApp {
     /// The user's focus width (`App::appearance_changed`), for the
     /// toolkit's controls' keyboard rings.
     focus_ring_width: f32,
+    /// The search's editor -- its caret and selection over
+    /// `filter.filename_search` -- reloaded when the search changed under
+    /// it: cleared with the filters, or by a new scan.
+    search_editor: TextInput,
+    /// What the search's Ctrl+C and Ctrl+X took, for its Ctrl+V.
+    clipboard: String,
 }
 
 impl UndeleteApp {
@@ -2295,6 +2306,8 @@ impl UndeleteApp {
             recovery_results: Vec::new(),
             show_filter_panel: false,
             active_category_filter: None,
+            search_editor: TextInput::new(),
+            clipboard: String::new(),
         }
     }
 
@@ -2402,6 +2415,20 @@ impl UndeleteApp {
                     self.engine.deselect_all();
                     EventResult::Consumed
                 }
+                // The list's ends: Home and End are the search's.
+                Key::Home if self.screen == UiScreen::Results => {
+                    self.select_file(0);
+                    EventResult::Consumed
+                }
+                Key::End if self.screen == UiScreen::Results => {
+                    let last = self.visible_files().len().saturating_sub(1);
+                    self.select_file(last);
+                    EventResult::Consumed
+                }
+                // Ctrl+C, X and V are the search's. Ctrl+A is the files'.
+                Key::C | Key::X | Key::V if self.screen == UiScreen::Results => {
+                    self.search_key(key)
+                }
                 _ => EventResult::Ignored,
             };
         }
@@ -2457,102 +2484,158 @@ impl UndeleteApp {
         }
     }
 
-    /// Keys on the results screen: the list's keys plain, and typing into
-    /// the search -- what was typed, AltGr's letters among it, not the letter
-    /// a command carries (Alt+X searched for `x`). Backspace edits the search,
-    /// so it is refused only to Alt and the Windows key.
+    /// Keys on the results screen: the list's keys, taken plain, and every
+    /// other key the search's (`search_key`).
     fn handle_results_key(&mut self, key: &KeyEvent) -> EventResult {
-        let plain = textline::is_plain(key.modifiers);
-        match key.key {
-            Key::Backspace if !textline::is_alt_or_windows_chord(key.modifiers) => {
-                let mut search = self.filter.filename_search.clone();
-                if search.pop().is_none() {
-                    return EventResult::Ignored;
+        // Plain, nothing held but Shift: Alt's chords are the window's, the
+        // Windows key's the desktop's, and AltGr types.
+        if textline::is_plain(key.modifiers) {
+            match key.key {
+                Key::Up => {
+                    self.select_prev();
+                    return EventResult::Consumed;
                 }
-                self.set_search(&search);
-                EventResult::Consumed
-            }
-            _ if !plain => self.type_into_search(key),
-            Key::Up => {
-                self.select_prev();
-                EventResult::Consumed
-            }
-            Key::Down => {
-                self.select_next();
-                EventResult::Consumed
-            }
-            Key::Home => {
-                self.select_file(0);
-                EventResult::Consumed
-            }
-            Key::End => {
-                let last = self.visible_files().len().saturating_sub(1);
-                self.select_file(last);
-                EventResult::Consumed
-            }
-            Key::Space => {
-                self.toggle_current_selection();
-                EventResult::Consumed
-            }
-            Key::Enter => {
-                if self.engine.selected_count() > 0 {
-                    self.start_recovery();
+                Key::Down => {
+                    self.select_next();
+                    return EventResult::Consumed;
                 }
-                EventResult::Consumed
-            }
-            Key::Tab => {
-                // Through the sort columns, and a second visit to the same
-                // column reverses it -- which is what `toggle_sort` is for and
-                // what nothing called.
-                let fields: Vec<SortField> = FILE_COLUMNS.iter().map(|(field, _)| *field).collect();
-                let current = fields.iter().position(|f| *f == self.sort_field);
-                let step: isize = if key.modifiers.shift { -1 } else { 1 };
-                let next = match current {
-                    Some(i) => {
-                        let count = fields.len() as isize;
-                        let at = (i as isize).saturating_add(step).rem_euclid(count);
-                        fields
-                            .get(at.unsigned_abs())
-                            .copied()
-                            .unwrap_or(self.sort_field)
+                Key::Space => {
+                    self.toggle_current_selection();
+                    return EventResult::Consumed;
+                }
+                Key::Enter => {
+                    if self.engine.selected_count() > 0 {
+                        self.start_recovery();
                     }
-                    // Sorting by a column that is not one of the headings:
-                    // reverse the current sort rather than jumping somewhere
-                    // the user cannot see.
-                    None => self.sort_field,
-                };
-                self.toggle_sort(next);
-                EventResult::Consumed
-            }
-            Key::Escape => {
-                if self.filter.is_active() {
-                    // One key that clears every filter, because a search that
-                    // hides everything otherwise looks like a scan that found
-                    // nothing.
-                    self.clear_filters();
-                    EventResult::Consumed
-                } else {
-                    self.screen = UiScreen::ScanSetup;
-                    EventResult::Consumed
+                    return EventResult::Consumed;
                 }
+                Key::Tab => {
+                    self.sort_by_next_column(key.modifiers.shift);
+                    return EventResult::Consumed;
+                }
+                Key::Escape => {
+                    if self.filter.is_active() {
+                        // One key that clears every filter, because a search
+                        // that hides everything otherwise looks like a scan
+                        // that found nothing.
+                        self.clear_filters();
+                    } else {
+                        self.screen = UiScreen::ScanSetup;
+                    }
+                    return EventResult::Consumed;
+                }
+                _ => {}
             }
-            _ => self.type_into_search(key),
+        }
+        self.search_key(key)
+    }
+
+    /// Tab's sort: through the sort columns, and a second visit to the same
+    /// column reverses it -- which is what `toggle_sort` is for and what
+    /// nothing called. Shift goes the other way.
+    fn sort_by_next_column(&mut self, back: bool) {
+        let fields: Vec<SortField> = FILE_COLUMNS.iter().map(|(field, _)| *field).collect();
+        let current = fields.iter().position(|f| *f == self.sort_field);
+        let step: isize = if back { -1 } else { 1 };
+        let next = match current {
+            Some(i) => {
+                let count = fields.len() as isize;
+                let at = (i as isize).saturating_add(step).rem_euclid(count);
+                fields
+                    .get(at.unsigned_abs())
+                    .copied()
+                    .unwrap_or(self.sort_field)
+            }
+            // Sorting by a column that is not one of the headings: reverse
+            // the current sort rather than jumping somewhere the user cannot
+            // see.
+            None => self.sort_field,
+        };
+        self.toggle_sort(next);
+    }
+
+    /// The search's editor loaded with the search, unless it holds it
+    /// already: the caret after it.
+    fn load_search(&mut self) {
+        if self.search_editor.text() != self.filter.filename_search {
+            self.search_editor.set_text(&self.filter.filename_search);
         }
     }
 
-    /// What `key` typed, onto the end of the search.
-    fn type_into_search(&mut self, key: &KeyEvent) -> EventResult {
-        if !textline::types_into_field(key) {
+    /// A key for the search: the caret keys, Backspace and Delete at the
+    /// caret, Ctrl+C, X and V, and typing -- what AltGr types among it (a
+    /// Polish `ą` is AltGr+A), and no command's letter, which a chord
+    /// carries as text (Alt+X searched for `x`). `Consumed` where the key
+    /// changed the search, its caret or its selection; a search changed
+    /// filters the files again. The search took typing at its end and
+    /// Backspace from it, and nothing else.
+    fn search_key(&mut self, key: &KeyEvent) -> EventResult {
+        self.load_search();
+        let editor = &self.search_editor;
+        let before = (
+            editor.text().to_owned(),
+            editor.cursor(),
+            editor.selection_anchor(),
+        );
+        let edit = textline::apply_key(
+            &mut self.search_editor,
+            key,
+            SEARCH_CAPACITY,
+            &self.clipboard,
+            FONT_SIZE,
+        );
+        if let Some(copied) = edit.copied {
+            self.clipboard = copied;
+        }
+        if !edit.handled {
             return EventResult::Ignored;
         }
-        let typed: String = key.typed().collect();
-        if typed.is_empty() {
-            return EventResult::Ignored;
+        if self.search_editor.text() != self.filter.filename_search {
+            let typed = self.search_editor.text().to_owned();
+            self.set_search(&typed);
         }
-        let mut search = self.filter.filename_search.clone();
-        search.push_str(&typed);
-        self.set_search(&search);
-        EventResult::Consumed
+        let editor = &self.search_editor;
+        let after = (
+            editor.text().to_owned(),
+            editor.cursor(),
+            editor.selection_anchor(),
+        );
+        if after == before {
+            EventResult::Ignored
+        } else {
+            EventResult::Consumed
+        }
+    }
+
+    /// Where the search's caret and selection anchor are: the editor's
+    /// while it holds the search, after it and none otherwise. One answer
+    /// for the drawing and for a press.
+    fn search_caret(&self) -> (TextCursor, Option<usize>) {
+        if self.search_editor.text() == self.filter.filename_search {
+            (
+                self.search_editor.cursor(),
+                self.search_editor.selection_anchor(),
+            )
+        } else {
+            (TextCursor::from(self.filter.filename_search.len()), None)
+        }
+    }
+
+    /// A press at `x` in the search box drawn at `rect`: the caret under the
+    /// pointer, measured against the search as it was drawn.
+    fn press_search(&mut self, rect: Rect, x: f32) {
+        let (drawn, _) = self.search_caret();
+        self.load_search();
+        let cursor = textedit::cursor_at_click(
+            &self.filter.filename_search,
+            drawn,
+            (rect.w - 2.0 * SEARCH_TEXT_INSET).max(0.0),
+            FONT_SIZE,
+            FontWeightHint::Regular,
+            x - rect.x - SEARCH_TEXT_INSET,
+        );
+        self.search_editor.set_selection_anchor(None);
+        self.search_editor.set_cursor(cursor);
     }
 
     /// Handle a mouse event.
@@ -2617,6 +2700,14 @@ impl UndeleteApp {
 
     /// Handle a left click.
     fn handle_click(&mut self, x: f32, y: f32) -> EventResult {
+        // The search box: the caret under the pointer. A press on it did
+        // nothing, the keys being its already.
+        if let Some(rect) = self.search_box_rect()
+            && rect.contains(x, y)
+        {
+            self.press_search(rect, x);
+            return EventResult::Consumed;
+        }
         if let Some(control) = self.control_at(x, y) {
             self.apply_control(control);
             return EventResult::Consumed;
@@ -2829,7 +2920,8 @@ impl UndeleteApp {
     /// How the search box is drawn: with the keyboard whenever the results
     /// show -- what is typed goes to it -- unless the list of keys is over
     /// it, and red while what is in it matches no file. Never lit under the
-    /// pointer: a press on it does nothing, the keys being its already.
+    /// pointer: a press on it only places its caret, the keys being its
+    /// already.
     fn search_box_state(&self) -> field::State {
         field::State {
             hovered: false,
@@ -2839,10 +2931,12 @@ impl UndeleteApp {
         }
     }
 
-    /// Draw the search box: the toolkit's field, holding the search -- or
-    /// what it is for, faint, while it is empty -- with the caret after it,
-    /// where what is typed goes. The search was typed blind: no box showed
-    /// it anywhere, and the list only got shorter.
+    /// Draw the search box: the toolkit's field, holding the search with
+    /// its caret and selection where they are, scrolled so the caret stays
+    /// in view -- or what it is for, faint, while it is empty. The search was
+    /// typed blind: no box showed it anywhere, and the list only got
+    /// shorter; then a caret fixed at its end, the only place the keys could
+    /// type.
     fn render_search_box(&self, cmds: &mut Vec<RenderCommand>) {
         let Some(rect) = self.search_box_rect() else {
             return;
@@ -2879,12 +2973,13 @@ impl UndeleteApp {
                 );
             }
         } else {
+            let (cursor, selection_anchor) = self.search_caret();
             textedit::draw(
                 &mut tree,
                 &textedit::SingleLine {
                     text: query,
-                    cursor: TextCursor::from(query.len()),
-                    selection_anchor: None,
+                    cursor,
+                    selection_anchor,
                     focused: state.focused,
                     x,
                     y,
@@ -7343,6 +7438,145 @@ mod tests {
             dark,
             fills(&mut app),
             "high contrast reached every other surface but not this window"
+        );
+    }
+
+    // -- The search edits at a caret -------------------------------------------------
+
+    fn type_text(app: &mut UndeleteApp, text: &str) {
+        for c in text.chars() {
+            app.handle_event(&types(c));
+        }
+    }
+
+    fn held(k: Key, modifiers: guitk::event::Modifiers) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
+    }
+
+    /// The x of every caret drawn inside `area`.
+    fn search_carets(app: &UndeleteApp, area: Rect) -> Vec<f32> {
+        app.render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Line {
+                    x1, x2, y1, width, ..
+                } if (x1 - x2).abs() < f32::EPSILON
+                    && (width - textedit::CARET_WIDTH).abs() < f32::EPSILON
+                    && area.contains(*x1, *y1 + 1.0) =>
+                {
+                    Some(*x1)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **The search edits at a caret**: the arrows, Home and End move it,
+    /// typing goes where it is, Delete deletes at it, Ctrl+C, X and V copy,
+    /// cut and paste, a press puts it where it lands -- and it and the
+    /// selection are drawn where they are. The search took typing at its end
+    /// and Backspace from it, and nothing else.
+    #[test]
+    fn the_search_edits_at_a_caret() {
+        let mut app = scanned();
+        type_text(&mut app, "rport");
+        app.handle_event(&press(Key::Home));
+        app.handle_event(&press(Key::Right));
+        type_text(&mut app, "e");
+        assert_eq!(
+            app.filter.filename_search, "report",
+            "the caret did not move"
+        );
+        let rect = app.search_box_rect().expect("the search box");
+        let at = rect.x
+            + SEARCH_TEXT_INSET
+            + text::caret_x(
+                "report",
+                TextCursor::from(2),
+                FONT_SIZE,
+                FontWeightHint::Regular,
+            );
+        let carets = search_carets(&app, rect);
+        assert_eq!(carets.len(), 1, "one caret in the search box");
+        assert!(
+            carets.iter().all(|x| (x - at).abs() < 0.5),
+            "the caret is drawn at {carets:?}, not after the `re` it follows at {at}"
+        );
+
+        app.handle_event(&press(Key::Home));
+        app.handle_event(&press(Key::Delete));
+        assert_eq!(app.filter.filename_search, "eport", "Delete at the caret");
+        type_text(&mut app, "r");
+        app.handle_event(&held(Key::End, guitk::event::Modifiers::shift()));
+        assert!(
+            app.render_commands().iter().any(|c| matches!(
+                c,
+                RenderCommand::RichText { text, spans, .. } if text == "report" && !spans.is_empty()
+            )),
+            "the selection is not drawn"
+        );
+        app.handle_event(&ctrl_key(Key::C));
+        app.handle_event(&ctrl_key(Key::X));
+        assert_eq!(app.filter.filename_search, "r", "Shift+End, or Ctrl+X");
+        app.handle_event(&ctrl_key(Key::V));
+        assert_eq!(app.filter.filename_search, "report", "Ctrl+C or Ctrl+V");
+
+        // A press at the start of the search puts the caret there, and one
+        // past its end at its end.
+        let mid = rect.y + rect.h / 2.0;
+        app.handle_event(&click(rect.x + SEARCH_TEXT_INSET + 0.5, mid));
+        type_text(&mut app, "<");
+        app.handle_event(&click(rect.right() - 2.0, mid));
+        type_text(&mut app, ">");
+        assert_eq!(
+            app.filter.filename_search, "<report>",
+            "a press did not put the caret where it landed"
+        );
+    }
+
+    /// **The files keep their keys beside the search**: Home and End are the
+    /// search's, and Ctrl+Home and Ctrl+End take the list to its ends; a key
+    /// that changes nothing in the search is no redraw.
+    #[test]
+    fn the_files_keep_their_keys_beside_the_search() {
+        let mut app = scanned();
+        let last = app.visible_files().len().saturating_sub(1);
+        assert!(last > 0, "a scan of one file has its ends in one place");
+        app.handle_event(&press(Key::Down));
+        let at = app.selected_file_idx;
+        assert_eq!(
+            app.handle_event(&press(Key::End)),
+            EventResult::Ignored,
+            "End in an empty search is a redraw"
+        );
+        assert_eq!(app.selected_file_idx, at, "End moved through the files");
+        app.handle_event(&held(Key::End, guitk::event::Modifiers::ctrl()));
+        assert_eq!(app.selected_file_idx, Some(last), "Ctrl+End");
+        app.handle_event(&held(Key::Home, guitk::event::Modifiers::ctrl()));
+        assert_eq!(app.selected_file_idx, Some(0), "Ctrl+Home");
+        assert!(app.filter.filename_search.is_empty());
+    }
+
+    /// **The search edits what it shows**, however it came to be what it
+    /// is: cleared by Escape with its caret at the start, it is typed into
+    /// from its new end.
+    #[test]
+    fn the_search_edits_what_it_shows() {
+        let mut app = scanned();
+        type_text(&mut app, "ab");
+        app.handle_event(&press(Key::Home));
+        app.handle_event(&press(Key::Escape));
+        assert!(app.filter.filename_search.is_empty());
+        app.set_search("cd");
+        type_text(&mut app, "!");
+        assert_eq!(
+            app.filter.filename_search, "cd!",
+            "the key edited another search"
         );
     }
 }

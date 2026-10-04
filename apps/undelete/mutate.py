@@ -69,22 +69,16 @@ MUTATIONS = [
         '            UiScreen::ScanSetup',
         ['a_chord_is_neither_an_undelete_key_nor_typing'],
     ),
-    (
-        'Alt+Backspace deletes from the search',
-        '            Key::Backspace if !textline::is_alt_or_windows_chord(key.modifiers) => {',
-        '            Key::Backspace => {',
-        ['a_chord_is_neither_an_undelete_key_nor_typing'],
-    ),
+    # No rows for "Alt+Backspace deletes from the search" or "the search
+    # types a command's letter": since 2026-10-04 the search's keys are
+    # textline::apply_key's, which refuses Alt's and the Windows key's chords
+    # and tells a command from AltGr itself, in its own crate and with its
+    # own tests; a_chord_is_neither_an_undelete_key_nor_typing still holds the
+    # search to both.
     (
         "a chord works the results' keys",
-        '            _ if !plain => self.type_into_search(key),\n',
-        '',
-        ['a_chord_is_neither_an_undelete_key_nor_typing'],
-    ),
-    (
-        "the search types a command's letter",
-        '        if !textline::types_into_field(key) {\n            return EventResult::Ignored;\n        }\n        let typed: String = key.typed().collect();',
-        '        let typed: String = key.typed().collect();',
+        '        if textline::is_plain(key.modifiers) {\n            match key.key {\n                Key::Up => {',
+        '        if true {\n            match key.key {\n                Key::Up => {',
         ['a_chord_is_neither_an_undelete_key_nor_typing'],
     ),
     # -- the toolkit's radio buttons and check boxes (c-e-the-toolkit-has-switches-...)
@@ -222,9 +216,9 @@ MUTATIONS += [
     ),
     (
         "the search's caret is at its start",
-        "                    cursor: TextCursor::from(query.len()),\n",
-        "                    cursor: TextCursor::default(),\n",
-        [SEARCH],
+        "            let (cursor, selection_anchor) = self.search_caret();\n",
+        "            let (cursor, selection_anchor) = (TextCursor::default(), None);\n",
+        [SEARCH, "the_search_edits_at_a_caret"],
     ),
     (
         "an empty search box with the keyboard has no caret",
@@ -250,6 +244,81 @@ MUTATIONS += [
         "                .contains(&self.filename_search.to_lowercase())\n",
         "                .contains(&self.filename_search)\n",
         [SEARCH],
+    ),
+]
+
+# The search edits at a caret (2026-10-04,
+# known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box): it
+# took typing at its end and Backspace from it, and nothing else.
+EDITS = "the_search_edits_at_a_caret"
+ENDS = "the_files_keep_their_keys_beside_the_search"
+SHOWN = "the_search_edits_what_it_shows"
+
+MUTATIONS += [
+    (
+        "a cut or a copy takes nothing to the clipboard",
+        "            self.clipboard = copied;\n",
+        "            let _ = copied;\n",
+        [EDITS],
+    ),
+    (
+        "a key finds the editor holding another search",
+        "        if self.search_editor.text() != self.filter.filename_search {\n"
+        "            self.search_editor.set_text(&self.filter.filename_search);",
+        "        if false {\n"
+        "            self.search_editor.set_text(&self.filter.filename_search);",
+        [SHOWN],
+    ),
+    (
+        "an edit of the search does not filter",
+        "            let typed = self.search_editor.text().to_owned();\n"
+        "            self.set_search(&typed);\n",
+        "",
+        [EDITS],
+    ),
+    (
+        "every key the search answers is a redraw",
+        "        if after == before {\n            EventResult::Ignored\n",
+        "        if false {\n            EventResult::Ignored\n",
+        [ENDS],
+    ),
+    (
+        "Ctrl+C, X and V are nobody's",
+        "                Key::C | Key::X | Key::V if self.screen == UiScreen::Results => {\n"
+        "                    self.search_key(key)\n"
+        "                }\n",
+        "",
+        [EDITS],
+    ),
+    (
+        "Ctrl+End is not the last file",
+        "                Key::End if self.screen == UiScreen::Results => {\n",
+        "                Key::End if false => {\n",
+        [ENDS],
+    ),
+    (
+        "Ctrl+Home is not the first file",
+        "                Key::Home if self.screen == UiScreen::Results => {\n",
+        "                Key::Home if false => {\n",
+        [ENDS],
+    ),
+    (
+        "the search's selection is not drawn",
+        "                    selection_anchor,\n",
+        "                    selection_anchor: None,\n",
+        [EDITS],
+    ),
+    (
+        "a press puts the caret at the start",
+        "            x - rect.x - SEARCH_TEXT_INSET,\n",
+        "            0.0,\n",
+        [EDITS],
+    ),
+    (
+        "a press in the search does not place the caret",
+        "            self.press_search(rect, x);\n",
+        "            let _ = (rect, x);\n",
+        [EDITS],
     ),
 ]
 

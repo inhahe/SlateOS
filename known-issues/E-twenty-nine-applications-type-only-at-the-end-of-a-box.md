@@ -21,7 +21,7 @@ and Backspace `pop`s it.
 **The twenty-nine:** charmap (search), clipmanager (its form), credmanager
 (the entry form, the master password, search), dbviewer (cell editing),
 dictionary (the query), filesearch (the query), lockscreen (the password),
-passwordgen (its input), undelete (search).
+passwordgen (its input).
 
 Not among them: `terminal`, whose typing goes to the shell's own line
 editor; `typingtutor`, where a line typed straight through is the exercise;
@@ -91,4 +91,5 @@ the form's lines edit at a caret; Delete in a box no longer deletes the
 contact); diagram (2026-10-04: a shape's or a line's label edits at a caret,
 pressed where it is drawn); mindmap (2026-10-04: a node's text and the find
 bar's query edit at a caret; the search reads the outline's order and
-follows changes).
+follows changes); undelete (2026-10-04: the results' search edits at a
+caret; Ctrl+Home and Ctrl+End take the files to their ends).

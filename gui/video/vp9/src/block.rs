@@ -145,6 +145,11 @@ pub(crate) struct ModeInfo {
     pub mi_col: usize,
     pub bw: usize,
     pub bh: usize,
+    /// Whether an inter block coded any luma coefficient: what a test that
+    /// replays a stream's decisions through the encoder needs to know,
+    /// since an encoder may skip a block's luma transform outright.
+    #[cfg(test)]
+    pub y_coded: bool,
 }
 
 impl ModeInfo {
@@ -1049,11 +1054,19 @@ impl<'a, P: Pixel> Dec<'a, P> {
             if mi.skip {
                 false
             } else {
-                let eobtotal = self.reconstruct(r, &mi, &pos, false);
+                let (eobtotal, luma) = self.reconstruct(r, &mi, &pos, false);
+                #[cfg(test)]
+                if let Some(b) = self.mi.blocks.get_mut(idx as usize) {
+                    b.y_coded = luma > 0;
+                }
+                // Only tests keep it.
+                #[cfg(not(test))]
+                let _ = luma;
                 bsize >= BLOCK_8X8 && eobtotal == 0
             }
         } else {
-            self.reconstruct(r, &mi, &pos, true);
+            // An intra block is never marked skipped for the loop filter.
+            let _ = self.reconstruct(r, &mi, &pos, true);
             false
         };
         if skip_lf && let Some(b) = self.mi.blocks.get_mut(idx as usize) {
@@ -1090,16 +1103,18 @@ impl<'a, P: Pixel> Dec<'a, P> {
 
     /// Predict (intra) and add the residual of every transform block in the
     /// frame: libvpx's loops over `predict_and_reconstruct_intra_block` and
-    /// `reconstruct_inter_block`. Returns the total end-of-block count.
+    /// `reconstruct_inter_block`. Returns the total end-of-block count, and
+    /// the luma plane's.
     fn reconstruct(
         &mut self,
         r: &mut BoolReader<'_>,
         mi: &ModeInfo,
         pos: &BlockPos,
         intra: bool,
-    ) -> usize {
+    ) -> (usize, usize) {
         let info = self.info;
         let mut eobtotal = 0usize;
+        let mut luma = 0usize;
         for plane in 0..3usize {
             let (sx, sy) = if plane == 0 {
                 (0, 0)
@@ -1142,7 +1157,7 @@ impl<'a, P: Pixel> Dec<'a, P> {
             while row < max_blocks_high {
                 let mut col = 0;
                 while col < max_blocks_wide {
-                    eobtotal += self.transform_block(
+                    let eob = self.transform_block(
                         r,
                         mi,
                         pos,
@@ -1153,12 +1168,16 @@ impl<'a, P: Pixel> Dec<'a, P> {
                         intra,
                         ctx_limits,
                     );
+                    eobtotal += eob;
+                    if plane == 0 {
+                        luma += eob;
+                    }
                     col += step;
                 }
                 row += step;
             }
         }
-        eobtotal
+        (eobtotal, luma)
     }
 
     /// One transform block: intra prediction if `intra`, then its tokens and
@@ -1982,6 +2001,9 @@ impl<'a, P: Pixel> Dec<'a, P> {
                         return Err(Error::Corrupt("an invalid motion vector"));
                     }
                     mi.bmi[j].mv = mvs;
+                    // The mode too, though nothing in decoding reads an inter
+                    // sub-block's: its neighbours' contexts read intra modes.
+                    mi.bmi[j].mode = b_mode;
                     if num_4x4_h == 2 {
                         mi.bmi[j + 2] = mi.bmi[j];
                     }

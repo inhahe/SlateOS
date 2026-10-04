@@ -263,6 +263,13 @@ impl Decoder {
         self.last_mi.as_ref()
     }
 
+    /// The last frame's quantiser index, loop filter level and
+    /// segmentation, as its header set them.
+    #[cfg(test)]
+    pub(crate) fn last_frame_settings(&self) -> (i32, u8, Segmentation) {
+        (self.quant.base_qindex, self.lf.filter_level, self.seg)
+    }
+
     /// A decoder at the start of a stream.
     #[must_use]
     pub fn new() -> Self {

@@ -33,6 +33,8 @@ pub(crate) mod pickmode;
 pub(crate) mod quantize;
 pub(crate) mod ratectrl;
 pub(crate) mod rd;
+#[cfg(test)]
+mod replay;
 pub(crate) mod subexp;
 pub(crate) mod tokenize;
 pub(crate) mod writer;

@@ -80,6 +80,7 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 use guitk::text;
+use guitk::widget::CheckState;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -144,7 +145,15 @@ const FONT_SIZE_HEADING: f32 = 16.0;
 const FONT_SIZE_TITLE: f32 = 20.0;
 const BUTTON_WIDTH: f32 = 120.0;
 const BUTTON_HEIGHT: f32 = 32.0;
-const CHECKBOX_SIZE: f32 = 16.0;
+/// Where a file row's check box is drawn: the toolkit's size, at the row's
+/// left, centred down it.
+fn row_check_box(x: f32, y: f32) -> Rect {
+    let side = guitk::checkbox::SIZE;
+    Rect::new(x + 8.0, y + (ITEM_HEIGHT - side) / 2.0, side, side)
+}
+
+/// How tall a scan mode's row is, drawn and pressed alike.
+const MODE_ROW_HEIGHT: f32 = 24.0;
 const PROGRESS_HEIGHT: f32 = 8.0;
 const STATUS_BAR_HEIGHT: f32 = 28.0;
 
@@ -2234,12 +2243,19 @@ pub struct UndeleteApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// The control under the pointer, which is drawn lit.
+    hover: Option<Control>,
+    /// The user's focus width (`App::appearance_changed`), for the
+    /// toolkit's controls' keyboard rings.
+    focus_ring_width: f32,
 }
 
 impl UndeleteApp {
     pub fn new(width: f32, height: f32) -> Self {
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            hover: None,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             width,
             height,
             show_help: false,
@@ -2523,6 +2539,24 @@ impl UndeleteApp {
     fn handle_mouse(&mut self, mouse: &MouseEvent) -> EventResult {
         match mouse.kind {
             MouseEventKind::Press(MouseButton::Left) => self.handle_click(mouse.x, mouse.y),
+            // What is under the pointer is drawn lit; only a change in it is
+            // worth a redraw.
+            MouseEventKind::Move => {
+                let over = self.control_at(mouse.x, mouse.y);
+                if over == self.hover {
+                    EventResult::Ignored
+                } else {
+                    self.hover = over;
+                    EventResult::Consumed
+                }
+            }
+            MouseEventKind::Leave => {
+                if self.hover.take().is_some() {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
             MouseEventKind::Scroll { dy, .. } => {
                 if self.screen != UiScreen::Results {
                     return EventResult::Ignored;
@@ -2539,16 +2573,19 @@ impl UndeleteApp {
 
     /// Handle a left click.
     fn handle_click(&mut self, x: f32, y: f32) -> EventResult {
-        if let Some(control) = self
-            .controls()
-            .into_iter()
-            .find(|(rect, _)| rect.contains(x, y))
-            .map(|(_, control)| control)
-        {
+        if let Some(control) = self.control_at(x, y) {
             self.apply_control(control);
             return EventResult::Consumed;
         }
         EventResult::Ignored
+    }
+
+    /// The control at `(x, y)` on the current screen, if any.
+    fn control_at(&self, x: f32, y: f32) -> Option<Control> {
+        self.controls()
+            .into_iter()
+            .find(|(rect, _)| rect.contains(x, y))
+            .map(|(_, control)| control)
     }
 
     /// Do what a control says.
@@ -2623,11 +2660,11 @@ impl UndeleteApp {
         let mode_y = list_y + self.partitions.len() as f32 * PARTITION_CARD_HEIGHT + PADDING;
         let quick_y = mode_y + 28.0;
         out.push((
-            Rect::new(PADDING, quick_y, card_w, 24.0),
+            Rect::new(PADDING, quick_y, card_w, MODE_ROW_HEIGHT),
             Control::Mode(ScanMode::Quick),
         ));
         out.push((
-            Rect::new(PADDING, quick_y + 32.0, card_w, 24.0),
+            Rect::new(PADDING, quick_y + 32.0, card_w, MODE_ROW_HEIGHT),
             Control::Mode(ScanMode::Deep),
         ));
 
@@ -2995,7 +3032,7 @@ impl UndeleteApp {
             PADDING,
             quick_y,
             "Quick Scan - Recycle bin + inode tables (faster)",
-            self.scan_mode == ScanMode::Quick,
+            ScanMode::Quick,
         );
 
         // Deep scan option
@@ -3005,7 +3042,7 @@ impl UndeleteApp {
             PADDING,
             deep_y,
             "Deep Scan - Sector-by-sector signature detection (thorough)",
-            self.scan_mode == ScanMode::Deep,
+            ScanMode::Deep,
         );
 
         // Start button
@@ -3119,59 +3156,31 @@ impl UndeleteApp {
         }
     }
 
+    /// One scan mode: the toolkit's radio button (lane C,
+    /// c-e-the-toolkit-has-switches-checkboxes-radio-buttons-and-drop-downs),
+    /// on a row as tall as the row a press chooses it in, lit while the
+    /// pointer is on that row.
     fn render_radio_option(
         &self,
         cmds: &mut Vec<RenderCommand>,
         x: f32,
         y: f32,
         label: &str,
-        selected: bool,
+        mode: ScanMode,
     ) {
-        let radio_size: f32 = 16.0;
-        let cx = x + radio_size / 2.0;
-        let cy = y + radio_size / 2.0;
-
-        // Outer circle (approximated with small rounded rect)
-        cmds.push(RenderCommand::StrokeRect {
-            x,
-            y,
-            width: radio_size,
-            height: radio_size,
-            color: if selected {
-                self.palette.blue
-            } else {
-                self.palette.overlay0
+        guitk::radio::draw(
+            cmds,
+            &self.palette,
+            (x, y, MODE_ROW_HEIGHT),
+            label,
+            self.scan_mode == mode,
+            guitk::radio::State {
+                hovered: self.hover == Some(Control::Mode(mode)),
+                focused: false,
+                disabled: false,
             },
-            line_width: 1.5,
-            corner_radii: CornerRadii::all(radio_size / 2.0),
-        });
-
-        if selected {
-            // Inner filled circle
-            cmds.push(RenderCommand::FillRect {
-                x: cx - 4.0,
-                y: cy - 4.0,
-                width: 8.0,
-                height: 8.0,
-                color: self.palette.blue,
-                corner_radii: CornerRadii::all(4.0),
-            });
-        }
-
-        cmds.push(RenderCommand::Text {
-            x: x + radio_size + 8.0,
-            y: y + 1.0,
-            text: label.to_string(),
-            color: if selected {
-                self.palette.text
-            } else {
-                self.palette.subtext0
-            },
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(self.width - x - radio_size - PADDING - 8.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+            self.focus_ring_width,
+        );
     }
 
     // -- Scanning progress screen -------------------------------------------
@@ -3531,16 +3540,18 @@ impl UndeleteApp {
             let row_y = list_y + (i as f32) * ITEM_HEIGHT;
             let global_idx = i.saturating_add(self.scroll_offset);
             let is_selected = self.selected_file_idx == Some(global_idx);
-            self.render_file_row(cmds, file, x, row_y, width, is_selected);
+            self.render_file_row(cmds, file, global_idx, x, row_y, width, is_selected);
         }
 
         cmds.push(RenderCommand::PopClip);
     }
 
+    #[allow(clippy::too_many_arguments)] // one row's whole description
     fn render_file_row(
         &self,
         cmds: &mut Vec<RenderCommand>,
         file: &RecoverableFile,
+        index: usize,
         x: f32,
         y: f32,
         width: f32,
@@ -3561,28 +3572,27 @@ impl UndeleteApp {
             corner_radii: CornerRadii::ZERO,
         });
 
-        // Checkbox
-        let cb_x = x + 8.0;
-        let cb_y = y + (ITEM_HEIGHT - CHECKBOX_SIZE) / 2.0;
-        cmds.push(RenderCommand::StrokeRect {
-            x: cb_x,
-            y: cb_y,
-            width: CHECKBOX_SIZE,
-            height: CHECKBOX_SIZE,
-            color: self.palette.overlay0,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(3.0),
-        });
-        if file.selected {
-            cmds.push(RenderCommand::FillRect {
-                x: cb_x + 3.0,
-                y: cb_y + 3.0,
-                width: CHECKBOX_SIZE - 6.0,
-                height: CHECKBOX_SIZE - 6.0,
-                color: self.palette.blue,
-                corner_radii: CornerRadii::all(2.0),
-            });
-        }
+        // Whether it is to be recovered: the toolkit's check box (lane C,
+        // c-e-the-toolkit-has-switches-checkboxes-radio-buttons-and-drop-downs),
+        // lit while the pointer is on its row, which is what a press ticks.
+        let state = guitk::checkbox::State {
+            hovered: self.hover == Some(Control::File(index)),
+            focused: false,
+            disabled: false,
+        };
+        guitk::checkbox::draw_box(
+            cmds,
+            &self.palette,
+            row_check_box(x, y),
+            if file.selected {
+                CheckState::Checked
+            } else {
+                CheckState::Unchecked
+            },
+            state,
+            self.focus_ring_width,
+            guitk::checkbox::paint(&self.palette, state).mark,
+        );
 
         let columns = file_list_columns(width);
         let table = file_list_table(&columns, x);
@@ -4516,6 +4526,10 @@ impl App for UndeleteApp {
         self.palette = *palette;
     }
 
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
+    }
+
     fn title(&self) -> String {
         // What the window is doing, because these four screens are four
         // different jobs and a taskbar entry saying only "Undelete" cannot tell
@@ -5222,6 +5236,123 @@ mod tests {
         assert_eq!(app.sort_field, SortField::Filename);
         let reversed = app.visible_files().first().map(|f| f.filename.clone());
         assert_ne!(first, reversed, "a second click should reverse the order");
+    }
+
+    /// Whether `cmds` hold `want`, command for command.
+    fn holds(cmds: &[RenderCommand], want: &[RenderCommand]) -> bool {
+        !want.is_empty() && cmds.windows(want.len()).any(|w| w == want)
+    }
+
+    /// The scan modes are the toolkit's radio buttons (lane C,
+    /// c-e-the-toolkit-has-switches-checkboxes-radio-buttons-and-drop-downs):
+    /// the chosen one dotted, the one under the pointer lit.
+    #[test]
+    fn the_scan_modes_are_the_toolkits_radio_buttons() {
+        let mut app = UndeleteApp::new(1000.0, 700.0);
+        let deep = app
+            .controls()
+            .into_iter()
+            .find(|(_, c)| *c == Control::Mode(ScanMode::Deep))
+            .expect("the deep scan row")
+            .0;
+        let radio = |app: &UndeleteApp, chosen: bool, hovered: bool| {
+            let mut want: Vec<RenderCommand> = Vec::new();
+            guitk::radio::draw(
+                &mut want,
+                &app.palette,
+                (deep.x, deep.y, deep.h),
+                "Deep Scan - Sector-by-sector signature detection (thorough)",
+                chosen,
+                guitk::radio::State {
+                    hovered,
+                    focused: false,
+                    disabled: false,
+                },
+                app.focus_ring_width,
+            );
+            want
+        };
+        assert!(holds(&app.render_commands(), &radio(&app, false, false)));
+        let (x, y) = (deep.x + 4.0, deep.y + deep.h / 2.0);
+        assert_eq!(
+            app.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Move,
+            })),
+            EventResult::Consumed
+        );
+        assert!(
+            holds(&app.render_commands(), &radio(&app, false, true)),
+            "the mode under the pointer is not lit"
+        );
+        app.handle_event(&click(x, y));
+        assert_eq!(app.scan_mode, ScanMode::Deep);
+        assert!(
+            holds(&app.render_commands(), &radio(&app, true, true)),
+            "the chosen mode is not dotted"
+        );
+    }
+
+    /// A row's box is the toolkit's check box: ticked when the file is to be
+    /// recovered, lit while the pointer is on the row.
+    #[test]
+    fn a_rows_box_is_the_toolkits_check_box() {
+        let mut app = scanned();
+        let row = app
+            .controls()
+            .into_iter()
+            .find(|(_, c)| *c == Control::File(1))
+            .expect("row 1")
+            .0;
+        let check = |app: &UndeleteApp, ticked: bool, hovered: bool| {
+            let state = guitk::checkbox::State {
+                hovered,
+                focused: false,
+                disabled: false,
+            };
+            let mut want: Vec<RenderCommand> = Vec::new();
+            guitk::checkbox::draw_box(
+                &mut want,
+                &app.palette,
+                row_check_box(row.x, row.y),
+                if ticked {
+                    CheckState::Checked
+                } else {
+                    CheckState::Unchecked
+                },
+                state,
+                app.focus_ring_width,
+                guitk::checkbox::paint(&app.palette, state).mark,
+            );
+            want
+        };
+        assert!(holds(&app.render_commands(), &check(&app, false, false)));
+        let (x, y) = (row.x + row.w / 2.0, row.y + row.h / 2.0);
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Move,
+        }));
+        assert!(
+            holds(&app.render_commands(), &check(&app, false, true)),
+            "the row under the pointer does not light its box"
+        );
+        app.handle_event(&click(x, y));
+        app.handle_event(&click(x, y));
+        assert!(
+            holds(&app.render_commands(), &check(&app, true, true)),
+            "a ticked row's box is not ticked"
+        );
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x: -1.0,
+            y: -1.0,
+            kind: MouseEventKind::Leave,
+        }));
+        assert!(
+            holds(&app.render_commands(), &check(&app, true, false)),
+            "the box stayed lit after the pointer left"
+        );
     }
 
     #[test]

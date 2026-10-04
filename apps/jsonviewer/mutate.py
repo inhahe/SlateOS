@@ -547,6 +547,59 @@ MUTATIONS = [
         '',
         ['the_find_bar_takes_its_own_clicks'],
     ),
+    # -- the shortcut card is modal, for the keys and the pointer
+    (
+        "the card is modal for nothing",
+        '        if self.show_help {\n            match event {\n',
+        '        if false && self.show_help {\n            match event {\n',
+        ['the_shortcut_card_takes_every_key_and_press_while_it_is_up'],
+    ),
+    (
+        "a key that is not the card's acts behind it",
+        '                        return EventResult::Consumed;\n'
+        '                    }\n'
+        '                    return EventResult::Ignored;\n'
+        '                }\n'
+        '                Event::Mouse(mouse_ev) => match mouse_ev.kind {\n',
+        '                        return EventResult::Consumed;\n'
+        '                    }\n'
+        '                }\n'
+        '                Event::Mouse(mouse_ev) => match mouse_ev.kind {\n',
+        ['the_shortcut_card_takes_every_key_and_press_while_it_is_up'],
+    ),
+    (
+        "? does not put the card away",
+        '                            || key_ev.key == Key::Slash && key_ev.modifiers.shift);\n',
+        '                            || false);\n',
+        ['the_shortcut_card_takes_every_key_and_press_while_it_is_up'],
+    ),
+    (
+        "Escape does not put the card away",
+        '                        && (matches!(key_ev.key, Key::F1 | Key::Escape)\n',
+        '                        && (matches!(key_ev.key, Key::F1)\n',
+        ['the_shortcut_card_takes_every_key_and_press_while_it_is_up'],
+    ),
+    (
+        "a press goes through the card",
+        '                    MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n'
+        '                        self.show_help = false;\n'
+        '                        return EventResult::Consumed;\n'
+        '                    }\n',
+        '',
+        ['the_shortcut_card_takes_every_key_and_press_while_it_is_up'],
+    ),
+    (
+        "only the left button puts the card away",
+        '                    MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n',
+        '                    MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_) => {\n',
+        ['the_shortcut_card_takes_every_key_and_press_while_it_is_up'],
+    ),
+    (
+        "the wheel scrolls the tree the card covers",
+        '                    MouseEventKind::Scroll { .. } => return EventResult::Ignored,\n',
+        '',
+        ['the_wheel_scrolls_no_tree_under_the_card'],
+    ),
 ]
 
 if __name__ == "__main__":

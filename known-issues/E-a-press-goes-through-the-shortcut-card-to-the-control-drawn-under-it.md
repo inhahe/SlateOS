@@ -18,9 +18,10 @@ field. Fixed the same day in colorpicker, contacts and dbviewer; then in
 alarmclock, archivemanager, benchmark, calendar, camera, charmap,
 clipmanager, defrag, devicemanager, diagram, diskanalyzer, diskcleanup,
 diskimager, ebook, explorer, fileassoc, filediff, fontmanager, hexeditor,
-imageviewer and ircclient (2026-10-04). Calendar's, diagram's, diskimager's,
-explorer's, filediff's, hexeditor's, imageviewer's and ircclient's cards
-were modal for the keys no more than for the pointer -- hexeditor's let a
+imageviewer, ircclient and jsonviewer (2026-10-04). Calendar's, diagram's,
+diskimager's, explorer's, filediff's, hexeditor's, imageviewer's, ircclient's
+and jsonviewer's cards were modal for the keys no more than for the
+pointer -- hexeditor's let a
 hex digit typed with the card up be written into the file under it,
 imageviewer's let Delete send the picture under it to the bin, ircclient's
 let Enter send the line under it to the channel -- so each application's
@@ -30,7 +31,7 @@ card is checked for both.
 production code draws `guitk::shortcut::render_card` and has no function
 handling a mouse event that reads the card's flag. Those not yet fixed:
 
-jsonviewer, kanban, mindmap,
+kanban, mindmap,
 musicplayer, notes, paint, partmanager, passwordgen, pdfviewer,
 photomanager, podcast, pomodoro, procexplorer, radio, reminders,
 remotedesktop, screenrecorder, screenshot, settings, spreadsheet,

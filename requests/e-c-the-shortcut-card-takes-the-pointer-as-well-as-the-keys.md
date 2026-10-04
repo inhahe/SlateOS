@@ -38,3 +38,10 @@ is taken, and its own `show_help` and key arm would go.
 Lane E fixes each application's handling where it is (a press puts the card
 away and does nothing else), each with a test, and moves them onto the
 card's own handling when it lands.
+
+**2026-10-04: done in every application.** Each now guards its card by hand
+-- sixty-six applications' worth of the same few lines, and nineteen of
+their cards turned out not to be modal for the keys either -- which is the
+case for the card owning the rule, not an argument against it: the request
+stands, and is no more urgent than it was, since nothing is broken while it
+waits. The known issue lists the applications and the shape of each guard.

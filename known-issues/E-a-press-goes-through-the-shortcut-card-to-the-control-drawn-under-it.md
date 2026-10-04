@@ -19,21 +19,21 @@ alarmclock, archivemanager, benchmark, calendar, camera, charmap,
 clipmanager, defrag, devicemanager, diagram, diskanalyzer, diskcleanup,
 diskimager, ebook, explorer, fileassoc, filediff, fontmanager, hexeditor,
 imageviewer, ircclient, jsonviewer, reminders, mindmap, musicplayer, notes,
-paint and partmanager (2026-10-04).
+paint, partmanager and pdfviewer (2026-10-04).
 Calendar's, diagram's, diskimager's, explorer's, filediff's, hexeditor's,
-imageviewer's, ircclient's, jsonviewer's, reminders' and mindmap's cards were
-modal for
+imageviewer's, ircclient's, jsonviewer's, reminders', mindmap's and
+pdfviewer's cards were modal for
 the keys no more than for the pointer -- hexeditor's let a hex digit typed
 with the card up be written into the file under it, imageviewer's let
 Delete send the picture under it to the bin, ircclient's let Enter send the
-line under it to the channel -- so each application's card is checked for
-both. (Reminders takes no press at all; its card was modal for no key.)
+line under it to the channel, pdfviewer's let Ctrl+W close the tab under
+it -- so each application's card is checked for both. (Reminders takes no press at all; its card was modal for no key.)
 
 **Still to do.** A scan the same day found 66 more applications whose
 production code draws `guitk::shortcut::render_card` and has no function
 handling a mouse event that reads the card's flag. Those not yet fixed:
 
-pdfviewer, photomanager, podcast, pomodoro, procexplorer, radio, remotedesktop, screenrecorder,
+photomanager, podcast, pomodoro, procexplorer, radio, remotedesktop, screenrecorder,
 screenshot, settings, spreadsheet, startupmanager, stopwatch, sudoku,
 sysinfo, sysmonitor, systemrestore, undelete, whiteboard, wordle,
 worldclock.

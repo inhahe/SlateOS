@@ -59,6 +59,19 @@ MUTATIONS = [
         '            && key.modifiers.ctrl',
         ['a_chord_is_neither_a_key_of_the_window_nor_typing'],
     ),
+    # -- the clock, 2026-10-03: none was asked for, so a defrag never moved
+    (
+        'a running defrag asks for no clock',
+        '        (self.defrag_state() == DefragState::Running).then_some(TICK)\n',
+        '        None\n',
+        ['a_running_defrag_asks_for_the_clock_and_nothing_else_does'],
+    ),
+    (
+        'an idle window asks for the clock',
+        '        (self.defrag_state() == DefragState::Running).then_some(TICK)\n',
+        '        Some(TICK)\n',
+        ['a_running_defrag_asks_for_the_clock_and_nothing_else_does'],
+    ),
 ]
 
 if __name__ == "__main__":

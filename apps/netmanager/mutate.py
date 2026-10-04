@@ -277,6 +277,183 @@ MAIN = [
     ),
 ]
 
+# The boxes are the toolkit's field, edited by the toolkit's editor; the keys
+# are plain keys; the shortcut card takes the pointer (2026-10-04; lane C,
+# c-e-a-theme-can-shape-the-controls).
+DNS_FIELD = "the_dns_box_is_the_toolkits_field"
+CHORDS = "a_chord_is_not_typed_into_a_box_and_the_caret_keys_edit_it"
+WINDOW_KEYS = "a_chord_is_none_of_the_windows_keys"
+PRESS = "a_press_in_a_box_puts_the_caret_under_the_pointer"
+DNS_TAB = "tab_in_the_dns_box_keeps_the_keyboard_on_its_tab"
+DHCP = "under_dhcp_the_address_boxes_are_disabled_and_take_no_keyboard"
+RED = "an_address_box_is_red_while_it_is_not_an_address"
+CARD = "the_shortcut_card_takes_a_press_rather_than_passing_it_on"
+WALK = "tab_walks_the_ip_fields_and_typing_lands_in_the_focused_one"
+CARET = "a_focused_field_shows_a_caret_so_the_keyboard_has_somewhere_visible_to_go"
+ADD = "the_dns_box_takes_typing_and_add_moves_it_into_the_list"
+
+MAIN += [
+    (
+        "a chord raises the card",
+        "        if key.key == Key::F1 && plain {\n",
+        "        if key.key == Key::F1 {\n",
+        [WINDOW_KEYS],
+    ),
+    (
+        "a chord works the window's keys",
+        "        if !plain {\n            return Action::None;\n        }\n\n        match key.key {\n",
+        "        match key.key {\n",
+        [WINDOW_KEYS],
+    ),
+    (
+        # What the box did before the editor: type whatever text a key
+        # carried, a chord's letter among it.
+        "a box types a chord's letter",
+        "            _ => self.edit_field(key, field),\n",
+        "            _ => {\n"
+        "                let typed: String = key.typed().collect();\n"
+        "                if typed.is_empty() {\n"
+        "                    return self.edit_field(key, field);\n"
+        "                }\n"
+        "                self.field_mut(field).push_str(&typed);\n"
+        "                Action::Redraw\n"
+        "            }\n",
+        [CHORDS],
+    ),
+    (
+        "Shift+Tab walks forwards",
+        "                let next = Self::next_field(field, key.modifiers.shift);\n",
+        "                let next = Self::next_field(field, false);\n",
+        [WALK],
+    ),
+    (
+        "Tab leaves the DNS box for a box on another tab",
+        "            (Field::DnsInput, _) => Field::DnsInput,\n",
+        "            (Field::DnsInput, _) => Field::Ip,\n",
+        [DNS_TAB],
+    ),
+    (
+        "a press leaves the caret at the end",
+        "        self.editor.set_selection_anchor(None);\n        self.editor.set_cursor(cursor);\n",
+        "        self.editor.set_selection_anchor(None);\n",
+        [PRESS],
+    ),
+    (
+        "the editor keeps text the box no longer holds",
+        "        if self.editor.text() != self.field_text(field) {\n            self.load_editor(field);\n",
+        "        if false {\n            self.load_editor(field);\n",
+        [ADD],
+    ),
+    (
+        "a box is never lit",
+        "            hovered: enabled && self.hover == Some(field),\n",
+        "            hovered: false,\n",
+        [DNS_FIELD],
+    ),
+    (
+        "the pointer leaving leaves the box lit",
+        "                MouseEventKind::Leave => self.set_hover(None),\n",
+        "",
+        [DNS_FIELD],
+    ),
+    (
+        "a box never has the keyboard's mark",
+        "            focused: enabled && self.focus == Some(field) && !self.show_help,\n",
+        "            focused: false,\n",
+        [DNS_FIELD],
+    ),
+    (
+        "a box keeps its mark under the card",
+        "            focused: enabled && self.focus == Some(field) && !self.show_help,\n",
+        "            focused: enabled && self.focus == Some(field),\n",
+        [DNS_FIELD],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [DNS_FIELD],
+    ),
+    (
+        "nothing in a box is red",
+        "            invalid: enabled && !text.is_empty() && refused,\n",
+        "            invalid: false,\n",
+        [DNS_FIELD, RED],
+    ),
+    (
+        "an empty box is red",
+        "            invalid: enabled && !text.is_empty() && refused,\n",
+        "            invalid: enabled && refused,\n",
+        [RED],
+    ),
+    (
+        "a server already listed is not red",
+        "        let refused = !is_valid_ipv4(text)\n"
+        "            || (field == Field::DnsInput\n"
+        "                && self.edit_ip_config.dns_servers.iter().any(|s| s == text));\n",
+        "        let refused = !is_valid_ipv4(text);\n",
+        [DNS_FIELD],
+    ),
+    (
+        "the box is drawn with no caret",
+        "            focused: state.focused,\n            x: tx,\n",
+        "            focused: false,\n            x: tx,\n",
+        [CARET],
+    ),
+    (
+        "an address box under DHCP takes the keyboard",
+        "        field == Field::DnsInput || (self.editing_ip && !self.edit_ip_config.dhcp_enabled)\n",
+        "        field == Field::DnsInput || self.editing_ip\n",
+        [DHCP],
+    ),
+    (
+        "an address box under DHCP is not drawn disabled",
+        "            disabled: !enabled,\n",
+        "            disabled: false,\n",
+        [DHCP],
+    ),
+    (
+        "a disabled box is a target",
+        "        if app.field_enabled(field) {\n            frame.hit(Target::Focus(field), rect);\n        }\n",
+        "        frame.hit(Target::Focus(field), rect);\n",
+        [DHCP],
+    ),
+    (
+        "Edit gives the keyboard to a box DHCP fills in",
+        "                self.focus = None;\n                self.focus_field(Field::Ip);\n",
+        "                self.focus = Some(Field::Ip);\n",
+        [DHCP],
+    ),
+    (
+        "switching DHCP on leaves the keyboard in a disabled box",
+        "                if self.focus.is_some_and(|field| !self.field_enabled(field)) {\n"
+        "                    self.focus = None;\n"
+        "                }\n",
+        "",
+        [DHCP],
+    ),
+    (
+        "a press goes through the shortcut card",
+        "            Event::Mouse(mouse) if self.show_help => match mouse.kind {\n",
+        "            Event::Mouse(mouse) if false => match mouse.kind {\n",
+        [CARD],
+    ),
+    (
+        "only the left button puts the card away",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n"
+        "                    self.show_help = false;\n",
+        "                MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_) => {\n"
+        "                    self.show_help = false;\n",
+        [CARD],
+    ),
+    (
+        "the wheel scrolls what the card covers",
+        "            Event::Mouse(mouse) if self.show_help => match mouse.kind {\n",
+        "            Event::Mouse(mouse) if self.show_help && !matches!(mouse.kind, MouseEventKind::Scroll { .. }) => match mouse.kind {\n",
+        [CARD],
+    ),
+]
+
 TABLES = {
     "main.rs": MAIN,
 }

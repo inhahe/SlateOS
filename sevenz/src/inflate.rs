@@ -355,15 +355,20 @@ impl Inflater<'_> {
     fn run(&mut self, out_size: usize) -> Step<()> {
         loop {
             let rem = out_size.saturating_sub(self.out.len());
-            let (want, finish) = if rem <= CHUNK { (rem, true) } else { (CHUNK, false) };
+            let (want, finish) = if rem <= CHUNK {
+                (rem, true)
+            } else {
+                (CHUNK, false)
+            };
             self.request(want, finish)?;
             if self.finished {
                 break;
             }
         }
-        if self.bits.over_read() {
-            return Err(Fail);
-        }
+        // 7-Zip asks once more here whether a bit past the end was used
+        // (`InputEofError`). The final block is found finished only at the
+        // top of a request's loop, just after that loop asked the same with
+        // no bit used since, so the answer cannot have changed.
         Ok(())
     }
 
@@ -688,7 +693,9 @@ mod tests {
         // dynamic blocks and matches.
         let mut data = Vec::new();
         for i in 0..3000u32 {
-            data.extend_from_slice(alloc::format!("line {} of the test {}\n", i % 97, i % 13).as_bytes());
+            data.extend_from_slice(
+                alloc::format!("line {} of the test {}\n", i % 97, i % 13).as_bytes(),
+            );
         }
         let packed = deflate::deflate_level(&data, 9);
         let r = decode(&packed, data.len(), false);
@@ -1043,12 +1050,73 @@ mod tests {
         assert!(r.out.is_empty());
     }
 
+    /// Block type 3 is refused as it is read -- here on the body of a sound
+    /// dynamic block, which would decode were it taken for type 2.
     #[test]
     fn a_block_type_of_3_is_refused() {
+        let (mut s, _, n) = dynamic_block(30);
+        assert!(decode(&s, n, false).ok);
+        // BFINAL is bit 0, BTYPE bits 1 and 2: 2 becomes 3.
+        s[0] |= 0b010;
+        assert!(!decode(&s, n, false).ok);
+    }
+
+    /// A code-length repeat (16) with no length before it to repeat.
+    #[test]
+    fn a_repeat_with_nothing_before_it_is_refused() {
         let mut w = Writer::default();
         w.put(1, 1);
-        w.put(3, 2);
+        w.put(2, 2);
+        w.put(0, 5);
+        w.put(0, 5);
+        w.put(15, 4);
+        // The code-length code: 16 in one bit ("0"), 0 and 1 in two.
+        let mut lens = [0u32; 19];
+        lens[16] = 1;
+        lens[0] = 2;
+        lens[1] = 2;
+        for &k in &LEVEL_ORDER {
+            w.put(lens[k], 3);
+        }
+        // A 16 first, repeating 3 times.
+        w.code(0, 1);
+        w.put(0, 2);
         assert!(!decode(&w.finish(), 1, false).ok);
+    }
+
+    /// The end of each megabyte of output is a check for a bit used past the
+    /// end. A match the input's last bits begin -- its distance's extra bit
+    /// past the end -- that crosses the first megabyte fails there, with the
+    /// rest of the match not written; without that check, the next request
+    /// would write it before its own check failed.
+    #[test]
+    fn a_megabyte_boundary_checks_for_a_bit_used_past_the_end() {
+        // Stored blocks, not final, of 16 x 65 535 bytes: 2^20 - 16.
+        let mut s = Vec::new();
+        let chunk: Vec<u8> = (0..65_535u32).map(|i| (i % 251) as u8).collect();
+        for _ in 0..16 {
+            s.push(0);
+            s.extend_from_slice(&65_535u16.to_le_bytes());
+            s.extend_from_slice(&0u16.to_le_bytes());
+            s.extend_from_slice(&chunk);
+        }
+        // A final fixed block: 14 literals of 8 bits and one of 9 -- 2^20 - 1
+        // bytes in all -- then a match of 3 at distance code 4, whose extra
+        // bit is the first past the end: 3 + 112 + 9 + 7 + 5 = 136 bits.
+        let mut w = Writer::default();
+        w.put(1, 1);
+        w.put(1, 2);
+        for _ in 0..14 {
+            w.fixed(u32::from(b'q'));
+        }
+        w.fixed(200);
+        w.fixed(257);
+        w.code(4, 5);
+        assert_eq!(w.bits, 136);
+        s.extend_from_slice(&w.finish());
+        let r = decode(&s, (1 << 20) + 10, false);
+        assert!(!r.ok);
+        assert_eq!(r.out.len(), 1 << 20);
     }
 
     #[test]

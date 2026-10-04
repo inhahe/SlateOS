@@ -164,6 +164,7 @@ fn methods_are_named_as_7zip_names_them() {
         ("arm64.7z", "ARM64 LZMA2:17"),
         ("riscv.7z", "RISCV LZMA2:17"),
         ("deflate.7z", "Deflate"),
+        ("deflate64.7z", "Deflate64"),
         ("bzip2.7z", "BZip2"),
         ("copy.7z", "Copy"),
         ("lzma2-files.7z", "LZMA2:16"),
@@ -203,20 +204,35 @@ fn our_verdict(data: &[u8], threads: Threads) -> String {
         errors.push("Headers_Error");
     }
     let mut items = Vec::new();
+    let name_of = |index: usize| archive.entry(index).unwrap().name().unwrap();
     for folder in 0..archive.num_folders() {
         match archive.read_folder(folder, 1 << 24) {
             Ok(result) => {
                 for (index, r) in result.files {
                     if let Err(e) = r {
-                        let name = archive.entry(index).unwrap().name().unwrap();
-                        items.push(format!("{name}:{}", kind(e)));
+                        items.push(format!("{}:{}", name_of(index), kind(e)));
                     }
                 }
+                // What 7-Zip reports of a folder rather than a file, it
+                // labels with the folder's index.
                 if let Some(e) = result.error_after_files {
-                    items.push(format!("#0:{}", kind(e)));
+                    items.push(format!("#{folder}:{}", kind(e)));
+                }
+                if result.data_after_end {
+                    items.push(format!(
+                        "#{folder}:There_are_some_data_after_the_end_of_the_payload_data"
+                    ));
                 }
             }
-            Err(e) => items.push(format!("#folder:{}", kind(e))),
+            // A folder that cannot be decoded at all: 7-Zip fails each of
+            // its files.
+            Err(e) => {
+                for index in 0..archive.len() {
+                    if archive.folder_of(index) == Some(folder) {
+                        items.push(format!("{}:{}", name_of(index), kind(e)));
+                    }
+                }
+            }
         }
     }
     if errors.is_empty() && items.is_empty() {
@@ -245,6 +261,27 @@ fn kind(e: Error) -> &'static str {
         Error::UnexpectedEnd => "Unexpected_end_of_data",
         _ => "?",
     }
+}
+
+/// What no one-byte mutant reaches (`crafted.txt`): bytes after a coder's
+/// stream -- data after the end for BZip2, Deflate and Copy, the coder's
+/// own error for LZMA and PPMd -- two BZip2 streams in one coder, of which
+/// 7-Zip reads one, Deflate streams zlib refuses and 7-Zip does not, and
+/// Deflate and BZip2 coders given a property they do not take.
+#[test]
+fn crafted_archives_fail_where_7zip_says() {
+    let list = std::fs::read_to_string(data_dir().join("crafted.txt")).unwrap();
+    let mut checked = 0;
+    for line in list.lines().filter(|l| !l.starts_with('#')) {
+        let (name, rest) = line.split_once(' ').unwrap();
+        let want = rest.split(" -- ").next().unwrap();
+        let data = read(&format!("made/{name}"));
+        for threads in [Threads::Many, Threads::One] {
+            assert_eq!(our_verdict(&data, threads), want, "{name}");
+        }
+        checked += 1;
+    }
+    assert!(checked >= 12, "only {checked}");
 }
 
 /// Every byte of three small archives XORed with 01, 80 and FF -- LZMA2

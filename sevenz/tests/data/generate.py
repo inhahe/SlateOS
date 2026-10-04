@@ -7,6 +7,8 @@ the release the port's LZMA SDK 26.00 sources are from. Run from Windows:
 
     python sevenz/tests/data/generate.py
 
+(`generate.py crafted` remakes only the crafted archives, below.)
+
 What it writes, beside itself:
 
 - `input.txt`: the tree every archive is made of -- text, random bytes,
@@ -23,6 +25,10 @@ What it writes, beside itself:
 - `mutations-mmt-off.txt`: the same, tested by 7-Zip with one thread
   (`-mmt=off`). Its LZMA2 decoder works differently with several threads,
   and on some damaged streams the two give back different amounts of data.
+- `made/crafted-*.7z` and `crafted.txt`: what no one-byte mutant makes,
+  from the small archives by rewriting a packed stream and the header with
+  it -- bytes after a coder's stream, two BZip2 streams in one coder, and
+  Deflate streams zlib would refuse -- with `7z t`'s verdict on each.
 
 7-Zip 26.00 sometimes crashes -- an access violation -- testing a damaged
 LZMA2 archive of several dictionary-reset blocks with several threads; on the
@@ -34,11 +40,13 @@ died.)
 
 from __future__ import annotations
 
+import bz2
 import os
 import pathlib
 import shutil
 import subprocess
 import sys
+import zlib
 
 HERE = pathlib.Path(__file__).resolve().parent
 SEVENZIP = pathlib.Path("C:/Program Files/7-Zip/7z.exe")
@@ -109,6 +117,7 @@ MADE = [
     ("lzma-fast", ["-m0=LZMA", "-mx=1"]),
     ("bzip2", ["-m0=BZip2"]),
     ("deflate", ["-m0=Deflate"]),
+    ("deflate64", ["-m0=Deflate64"]),
     ("copy", ["-m0=Copy"]),
     ("ppmd", ["-m0=PPMd"]),
     # 64 KiB of model for about 105 KB of input: the model fills and starts
@@ -135,6 +144,7 @@ MUTATED = [
     "small-ppmd",
     "small-bzip2",
     "small-deflate",
+    "small-deflate64",
     "small-bcj-lzma2",
     "small-bcj2",
     "small-arm64",
@@ -146,6 +156,7 @@ SMALL = {
     "small-ppmd": ["-m0=PPMd", "-mhc=off"],
     "small-bzip2": ["-m0=BZip2", "-mhc=off"],
     "small-deflate": ["-m0=Deflate", "-mhc=off"],
+    "small-deflate64": ["-m0=Deflate64", "-mhc=off"],
     # A filter before a coder: two coders, one bond.
     "small-bcj-lzma2": ["-mf=BCJ", "-m0=LZMA2", "-mhc=off"],
     # Four packed streams, three of them through LZMA.
@@ -216,6 +227,241 @@ def targeted(data: bytes) -> list[tuple[int, int]]:
             for pos in sorted({first, first + 1, first + size // 2, first + size - 2, first + size - 1}):
                 out.extend((pos, x) for x in XORS)
     return out
+
+
+def read_number(data: bytes, i: int) -> tuple[int, int]:
+    """A 7z NUMBER at `i`: the first byte's leading 1-bits count the bytes
+    after it, which are the value's low bytes; its other bits, the high
+    part. Returns the value and where it ends."""
+    first = data[i]
+    i += 1
+    value = 0
+    mask = 0x80
+    for k in range(8):
+        if first & mask == 0:
+            return value | (first & (mask - 1)) << (8 * k), i
+        value |= data[i] << (8 * k)
+        i += 1
+        mask >>= 1
+    return value, i
+
+
+def write_number(v: int) -> bytes:
+    """`v` as the shortest 7z NUMBER."""
+    for k in range(9):
+        if k == 8 or v < 1 << (8 * k + 7 - k):
+            high = v >> (8 * k) if k < 8 else 0
+            first = (0xFF00 >> k) & 0xFF | high
+            return bytes([first]) + (v & ((1 << (8 * k)) - 1)).to_bytes(k, "little")
+    raise AssertionError
+
+
+def with_pack_stream(data: bytes, j: int, new: bytes) -> bytes:
+    """The plain-header archive `data` with its packed stream `j` replaced by
+    `new`: the header's size for it rewritten, the streams after it moved,
+    and the start header's offsets and CRCs made good."""
+    next_offset = int.from_bytes(data[12:20], "little")
+    next_size = int.from_bytes(data[20:28], "little")
+    header = data[32 + next_offset:32 + next_offset + next_size]
+    # kHeader, kMainStreamsInfo, kPackInfo: the pack position and count,
+    # then kSize and a size a stream.
+    assert header[:3] == b"\x01\x04\x06", "a plain header"
+    pack_pos, i = read_number(header, 3)
+    count, i = read_number(header, i)
+    assert header[i] == 0x09
+    i += 1
+    spans, sizes = [], []
+    for _ in range(count):
+        start = i
+        size, i = read_number(header, i)
+        spans.append((start, i))
+        sizes.append(size)
+    begin = 32 + pack_pos + sum(sizes[:j])
+    end = begin + sizes[j]
+    s, e = spans[j]
+    header = header[:s] + write_number(len(new)) + header[e:]
+    packed = data[32:begin] + new + data[end:32 + next_offset]
+    start = (
+        len(packed).to_bytes(8, "little")
+        + len(header).to_bytes(8, "little")
+        + zlib.crc32(header).to_bytes(4, "little")
+    )
+    return data[:8] + zlib.crc32(start).to_bytes(4, "little") + start + packed + header
+
+
+def with_header_bytes(data: bytes, old: bytes, new: bytes) -> bytes:
+    """The plain-header archive `data` with `old`, found once in its header,
+    made `new`, and the start header's size and CRCs made good."""
+    next_offset = int.from_bytes(data[12:20], "little")
+    next_size = int.from_bytes(data[20:28], "little")
+    header = data[32 + next_offset:32 + next_offset + next_size]
+    assert header.count(old) == 1, f"{old.hex()} is not once in the header"
+    header = header.replace(old, new)
+    start = (
+        next_offset.to_bytes(8, "little")
+        + len(header).to_bytes(8, "little")
+        + zlib.crc32(header).to_bytes(4, "little")
+    )
+    return data[:8] + zlib.crc32(start).to_bytes(4, "little") + start + data[32:32 + next_offset] + header
+
+
+def pack_stream(data: bytes, j: int = 0) -> bytes:
+    """Packed stream `j` of the plain-header archive `data`."""
+    next_offset = int.from_bytes(data[12:20], "little")
+    header = data[32 + next_offset:]
+    pack_pos, i = read_number(header, 3)
+    count, i = read_number(header, i)
+    i += 1
+    sizes = []
+    for _ in range(count):
+        size, i = read_number(header, i)
+        sizes.append(size)
+    begin = 32 + pack_pos + sum(sizes[:j])
+    return data[begin:begin + sizes[j]]
+
+
+class Bits:
+    """Bits least significant first, as Deflate packs them."""
+
+    def __init__(self) -> None:
+        self.out = bytearray()
+        self.n = 0
+
+    def put(self, v: int, n: int) -> None:
+        for k in range(n):
+            if self.n % 8 == 0:
+                self.out.append(0)
+            self.out[-1] |= ((v >> k) & 1) << (self.n % 8)
+            self.n += 1
+
+    def code(self, c: int, n: int) -> None:
+        """A Huffman code, its first bit the most significant."""
+        for k in reversed(range(n)):
+            self.put((c >> k) & 1, 1)
+
+
+LEVEL_ORDER = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
+
+
+def incomplete_deflate(data: bytes) -> bytes:
+    """`data` as one final dynamic block whose literal/length code gives every
+    byte and the end of block 9 bits and nothing else a code: 257 codes of 9
+    bits fill 257/512 of the code space. RFC 1951 does not say such a code
+    is wrong; zlib refuses it, 7-Zip need not."""
+    w = Bits()
+    w.put(1, 1)
+    w.put(2, 2)
+    w.put(0, 5)  # 257 literal/length lengths
+    w.put(0, 5)  # 1 distance length
+    w.put(15, 4)  # all 19 code-length lengths
+    # The code-length code: 9 in 1 bit ("0"), 0 in 2 ("10"), 16 and 18 in
+    # 3 ("110", "111").
+    cl = [0] * 19
+    cl[9], cl[0], cl[16], cl[18] = 1, 2, 3, 3
+    for k in LEVEL_ORDER:
+        w.put(cl[k], 3)
+    w.code(0, 1)  # a 9
+    left = 256
+    while left:
+        run = min(left, 6)
+        w.code(6, 3)  # 16: the last length again, 3 to 6 times
+        w.put(run - 3, 2)
+        left -= run
+    w.code(2, 2)  # the one distance length: 0
+    for b in data:
+        w.code(b, 9)
+    w.code(256, 9)
+    return bytes(w.out)
+
+
+# RFC 1951's fixed literal/length code and its distance symbols.
+def fixed_code(w: Bits, sym: int) -> None:
+    if sym < 144:
+        w.code(0x30 + sym, 8)
+    elif sym < 256:
+        w.code(0x190 + sym - 144, 9)
+    elif sym < 280:
+        w.code(sym - 256, 7)
+    else:
+        w.code(0xC0 + sym - 280, 8)
+
+
+DIST_BASE = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769,
+             1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577]
+DIST_EXTRA = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8,
+              9, 9, 10, 10, 11, 11, 12, 12, 13, 13]
+
+
+def deflate_with_code(data: bytes, sym: int) -> bytes:
+    """`data` as one final fixed block of literals but one match of length
+    3, coded with literal/length code `sym` -- 286 or 287, which RFC 1951
+    leaves without a meaning."""
+    for i in range(3, len(data) - 2):
+        j = data.rfind(data[i:i + 3], 0, i)
+        if j >= 0 and j + 3 <= i:
+            break
+    else:
+        raise AssertionError("no three bytes repeat")
+    d = i - j
+    w = Bits()
+    w.put(1, 1)
+    w.put(1, 2)
+    for b in data[:i]:
+        fixed_code(w, b)
+    fixed_code(w, sym)
+    k = max(k for k in range(30) if DIST_BASE[k] <= d)
+    w.code(k, 5)
+    w.put(d - DIST_BASE[k], DIST_EXTRA[k])
+    for b in data[i + 3:]:
+        fixed_code(w, b)
+    fixed_code(w, 256)
+    return bytes(w.out)
+
+
+def crafted(made: pathlib.Path) -> list[tuple[str, bytes, str]]:
+    """Archives no one-byte mutant makes, from the small plain-header ones:
+    (name, archive, what was done to it)."""
+    small = {name: (made / f"{name}.7z").read_bytes() for name in MUTATED}
+    out = []
+    # Two bytes after the stream: data after the end, if the coder says how
+    # much it read (BZip2, Deflate, Copy) -- or its own error (LZMA, PPMd).
+    for name, label in (("small-deflate", "deflate"), ("small-deflate64", "deflate64"),
+                        ("small-bzip2", "bzip2"), ("small-copy", "copy"),
+                        ("small-headers-plain", "lzma"), ("small-ppmd", "ppmd")):
+        data = small[name]
+        tail = with_pack_stream(data, 0, pack_stream(data) + b"\x00\x7f")
+        out.append((f"after-end-{label}", tail, f"{name} with 2 bytes after its first packed stream"))
+    folder = bz2.decompress(pack_stream(small["small-bzip2"]))
+    half = len(folder) // 2
+    two = bz2.compress(folder[:half]) + bz2.compress(folder[half:])
+    out.append(("two-streams-bzip2", with_pack_stream(small["small-bzip2"], 0, two),
+                "small-bzip2 packed as two bzip2 streams, as pbzip2 does"))
+    folder = zlib.decompressobj(-15).decompress(pack_stream(small["small-deflate"]))
+    out.append(("incomplete-code-deflate",
+                with_pack_stream(small["small-deflate"], 0, incomplete_deflate(folder)),
+                "small-deflate with a literal/length code of 257 9-bit codes"))
+    for sym in (286, 287):
+        out.append((f"code-{sym}-deflate",
+                    with_pack_stream(small["small-deflate"], 0, deflate_with_code(folder, sym)),
+                    f"small-deflate with a match of 3 coded as {sym}"))
+    # A coder given a property byte it does not take -- its record's flags
+    # gain "has properties" (20) and one byte, 00, follows the method id.
+    for name, method in (("small-deflate", "040108"), ("small-bzip2", "040202")):
+        mid = bytes.fromhex(method)
+        given = with_header_bytes(small[name], b"\x03" + mid, b"\x23" + mid + b"\x01\x00")
+        out.append((f"props-{name[6:]}", given, f"{name} with a property byte on its coder"))
+    return out
+
+
+def write_crafted(made: pathlib.Path) -> None:
+    """The crafted archives, from the small ones in `made`, and their
+    verdicts in `crafted.txt`."""
+    lines = ["# archive verdict -- what was done to it; verdicts with several threads"]
+    for name, data, how in crafted(made):
+        archive = made / f"crafted-{name}.7z"
+        archive.write_bytes(data)
+        lines.append(f"{archive.name} {verdict(archive)} -- {how}")
+    (HERE / "crafted.txt").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
 
 
 def sevenzip(*args: str, cwd: pathlib.Path | None = None) -> subprocess.CompletedProcess:
@@ -369,6 +615,7 @@ def main() -> None:
     shutil.rmtree(chunky_src)
     shutil.rmtree(src)
     (HERE / "made.txt").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    write_crafted(made)
 
     header = "# == archive, then: position xor verdict -- 7z t's"
     out = {False: [header], True: [header + " -mmt=off"]}
@@ -403,4 +650,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # `generate.py crafted`: the crafted archives alone, from the small
+    # archives already in made/ -- seconds, where everything is an hour.
+    if sys.argv[1:] == ["crafted"]:
+        write_crafted(HERE / "made")
+    else:
+        main()

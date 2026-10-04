@@ -5,6 +5,7 @@ lzma.7z OK -- -m0=LZMA -mx=5
 lzma-fast.7z OK -- -m0=LZMA -mx=1
 bzip2.7z OK -- -m0=BZip2
 deflate.7z OK -- -m0=Deflate
+deflate64.7z OK -- -m0=Deflate64
 copy.7z OK -- -m0=Copy
 ppmd.7z OK -- -m0=PPMd
 ppmd-small-mem.7z OK -- -m0=PPMd:mem=64k:o=32
@@ -24,6 +25,7 @@ small-copy.7z OK -- -m0=Copy -mhc=off
 small-ppmd.7z OK -- -m0=PPMd -mhc=off
 small-bzip2.7z OK -- -m0=BZip2 -mhc=off
 small-deflate.7z OK -- -m0=Deflate -mhc=off
+small-deflate64.7z OK -- -m0=Deflate64 -mhc=off
 small-bcj-lzma2.7z OK -- -mf=BCJ -m0=LZMA2 -mhc=off
 small-bcj2.7z OK -- -mf=BCJ2 -m0=LZMA -mhc=off
 small-arm64.7z OK -- -mf=ARM64 -m0=Copy -mhc=off

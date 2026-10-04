@@ -457,10 +457,14 @@ impl<'a> Archive<'a> {
             index = index.saturating_add(1);
         }
         let error_after_files = if all_out { decoded.error } else { None };
+        // 7-Zip says so only of a folder whose coders all succeeded and whose
+        // files all came out (`7zExtract.cpp`); short of that, the files left
+        // over carry the error.
+        let data_after_end = all_out && decoded.error.is_none() && decoded.after_end;
         Ok(FolderResult {
             files,
             error_after_files,
-            data_after_end: decoded.after_end,
+            data_after_end,
         })
     }
 
@@ -496,8 +500,9 @@ pub struct FolderResult {
     /// The folder's decoder failed after every file's data had come out --
     /// 7-Zip's error on no file ("#0").
     pub error_after_files: Option<Error>,
-    /// A coder finished before its input did (7-Zip: "There are some data
-    /// after the end of the payload data").
+    /// Every file came out and every coder succeeded, but one of them
+    /// finished before its input did: 7-Zip's "There are some data after
+    /// the end of the payload data", also on no file. The files are sound.
     pub data_after_end: bool,
 }
 

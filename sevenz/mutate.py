@@ -1,13 +1,16 @@
 """Mutation test for sevenz.
 
-The port of 7-Zip's LZMA and LZMA2 decoding (`LzmaDec.c`, `Lzma2Dec.c` and
-the `Lzma2Decoder` / `Lzma2DecMt` / `MtDec` drivers): each row puts back one
-way of not being 7-Zip -- a check it makes skipped, a rule it keeps broken --
-and names the tests that have to notice. Most are caught by the tests that
-hold the reader to 7-Zip 26.00's own verdicts on every one-byte corruption
-of three small archives and on the chunk headers and edges of two LZMA2
-archives of several chunks, tested by 7-Zip with several threads and with
-one (`tests/data/mutations*.txt`).
+The port of 7-Zip's decoding -- LZMA and LZMA2 (`LzmaDec.c`, `Lzma2Dec.c`
+and the `Lzma2Decoder` / `Lzma2DecMt` / `MtDec` drivers), PPMd, BCJ2, the
+ARM64 and RISC-V converters, 7z AES -- the method names 7-Zip lists, and the
+Deflate decoder written to 7-Zip's rules: each row puts back one way of not
+being 7-Zip -- a check it makes skipped, a rule it keeps broken -- and names
+the tests that have to notice. Many are caught by the tests that hold the
+reader to 7-Zip 26.00's own verdicts: on every one-byte corruption of ten
+small archives and on the chunk headers and edges of two LZMA2 archives of
+several chunks, tested by 7-Zip with several threads and with one
+(`tests/data/mutations*.txt`), and on the crafted archives no mutant makes
+(`tests/data/crafted.txt`).
 
 Breaks one piece of production code at a time and checks that the tests
 which claim to cover it are the ones that fail.  A test that passes against
@@ -30,6 +33,8 @@ CORPUS = "a_corrupted_archive_fails_where_7zip_says"
 CORPUS_ONE = "a_corrupted_archive_fails_where_7zip_with_one_thread_says"
 MADE = "archives_7zip_made_are_read"
 CHUNKY = "lzma2_of_many_chunks_and_blocks_is_read"
+CRAFTED = "crafted_archives_fail_where_7zip_says"
+METHODS = "methods_are_named_as_7zip_names_them"
 
 # (name, old, new, [tests that must fail])
 LZMA_DEC = [
@@ -271,6 +276,307 @@ BCJ2 = [
     ),
 ]
 
+INF_PAST = "input_past_the_end_reads_as_ones_until_a_check"
+INF_MEGABYTE = "a_megabyte_boundary_checks_for_a_bit_used_past_the_end"
+INF_FULL = "a_full_output_must_end_its_block"
+INF_CUT = "a_match_running_past_the_output_is_cut"
+INF_CODES = "an_incomplete_code_is_kept_and_an_over_full_one_refused"
+INF_286 = "codes_286_and_287_are_matches_of_three"
+INF_DIST = "distances_reach_back_no_further_than_the_output_or_the_window"
+INF_285 = "deflate64_reads_sixteen_bits_after_length_285"
+INF_HDIST = "a_dynamic_block_may_declare_32_distance_codes_only_in_deflate64"
+INF_USED = "the_input_used_ends_with_the_final_block"
+INF_TYPE3 = "a_block_type_of_3_is_refused"
+INF_REPEAT = "a_repeat_with_nothing_before_it_is_refused"
+INF_ZLIB = "a_stream_zlib_wrote_is_read"
+INF_STORED = "a_stored_block_is_read"
+# Not rows, and why:
+# - the check at the top of a request's loop for a bit used past the end,
+#   and those inside a block header: past the end every bit is 1, so the
+#   next block header read is type 3 and fails whatever is checked, and the
+#   check at the end of a request catches the rest -- only a stream ending
+#   inside a header whose code-length code decodes 1-bits could tell, and
+#   neither the corpus nor a test makes one;
+# - the input step that ends a request early at a block boundary: it moves
+#   the megabyte checks only for a stream that takes 2 MiB of input in one
+#   request, more than twice its output;
+# - a stored block after a full output that still holds data: with the
+#   check gone the request loops forever on it, as 7-Zip would -- the check
+#   is what stops it;
+# - a code-length repeat running past the lengths: no test makes one.
+INFLATE = [
+    (
+        "input past the end reads as zeros",
+        "            .unwrap_or(0xFF)",
+        "            .unwrap_or(0)",
+        [INF_PAST],
+    ),
+    (
+        "the lookahead is drawn five bytes ahead",
+        "let want = (self.taken / 8).saturating_add(4);",
+        "let want = (self.taken / 8).saturating_add(5);",
+        [INF_PAST],
+    ),
+    (
+        "nothing is checked before a symbol",
+        "                if self.bits.over_drawn() {",
+        "                if false {",
+        [INF_PAST],
+    ),
+    (
+        "the check before a symbol is the full one",
+        "                if self.bits.over_drawn() {",
+        "                if self.bits.over_read() {",
+        [INF_PAST],
+    ),
+    (
+        "over-drawing is counted from three bytes past the end",
+        "        self.drawn > self.len().saturating_add(4)",
+        "        self.drawn > self.len().saturating_add(3)",
+        [INF_PAST],
+    ),
+    (
+        "a megabyte's end is not checked",
+        "        if self.bits.over_read() {\n            return Err(Fail);\n        }\n        Ok(())\n    }\n\n    /// The length and distance",
+        "        Ok(())\n    }\n\n    /// The length and distance",
+        [INF_MEGABYTE],
+    ),
+    (
+        "a full output need not end its block",
+        "                if self.lit.decode(&mut self.bits) != Some(END_OF_BLOCK) {",
+        "                if self.lit.decode(&mut self.bits).is_none() {",
+        [INF_FULL],
+    ),
+    (
+        "a match running past the output is written whole",
+        "                let now = len.min(want);",
+        "                let now = len;",
+        [INF_CUT],
+    ),
+    (
+        "the final block is not looked for",
+        "                if self.final_block {\n                    self.finished = true;",
+        "                if false {\n                    self.finished = true;",
+        [INF_ZLIB, INF_STORED],
+    ),
+    (
+        "codes 286 and 287 are refused",
+        "        let (base, extra) = if self.deflate64 && i == 28 {",
+        "        if i > 28 {\n            return Err(Fail);\n        }\n        let (base, extra) = if self.deflate64 && i == 28 {",
+        [INF_286, CRAFTED],
+    ),
+    (
+        "Deflate64's length 285 takes no extra bits",
+        "        let (base, extra) = if self.deflate64 && i == 28 {",
+        "        let (base, extra) = if false && i == 28 {",
+        [INF_285],
+    ),
+    (
+        "Deflate allows 32 distance codes",
+        "        if !self.deflate64 && n_dist > DIST_SYMBOLS_DEFLATE {",
+        "        if !self.deflate64 && n_dist > DIST_SYMBOLS {",
+        [INF_HDIST],
+    ),
+    (
+        "Deflate's window is 64 KiB",
+        "        window: if deflate64 { 1 << 16 } else { 1 << 15 },",
+        "        window: 1 << 16,",
+        [INF_DIST],
+    ),
+    (
+        "a distance may reach the byte before the first",
+        "        if distance >= reach {",
+        "        if distance > reach {",
+        [INF_DIST],
+    ),
+    (
+        "an over-full code is kept",
+        "        if sum > 1 << max_bits {",
+        "        if false {",
+        [INF_CODES],
+    ),
+    (
+        "an incomplete code is refused",
+        "        if sum > 1 << max_bits {",
+        "        if sum != 1 << max_bits && sum != 0 {",
+        [INF_CODES, CRAFTED],
+    ),
+    (
+        "the code-length lengths come in another order",
+        "    16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,",
+        "    15, 1, 14, 2, 13, 3, 12, 4, 11, 5, 10, 6, 9, 7, 8, 0, 18, 17, 16,",
+        [INF_ZLIB],
+    ),
+    (
+        "a repeat with nothing before it repeats a zero",
+        "let last = i.checked_sub(1).and_then(|j| lengths.get(j)).ok_or(Fail)?;",
+        "let last = lengths.get(i.saturating_sub(1)).ok_or(Fail)?;",
+        [INF_REPEAT],
+    ),
+    (
+        "a stored block's length need not match its complement",
+        "            if len != !nlen {",
+        "            if false {",
+        [INF_STORED],
+    ),
+    (
+        "the input used counts the lookahead",
+        "        self.taken.div_ceil(8)\n",
+        "        self.drawn\n",
+        [INF_USED],
+    ),
+    (
+        "block type 3 is read as dynamic",
+        "        if kind > 2 || self.bits.over_read() {",
+        "        if self.bits.over_read() {",
+        [INF_TYPE3],
+    ),
+]
+
+BRANCH = [
+    (
+        "ARM64 BL is left as encoded",
+        "        if v.wrapping_sub(0x9400_0000) & 0xFC00_0000 == 0 {",
+        "        if false {",
+        [MADE],
+    ),
+    (
+        "ARM64 ADRP is left as encoded",
+        "            if v & 0x9F00_0000 == 0 {",
+        "            if false {",
+        [MADE],
+    ),
+    (
+        "RISC-V JAL is taken for AUIPC",
+        "        if a & 8 == 0 {\n            // JAL",
+        "        if false {\n            // JAL",
+        [MADE],
+    ),
+    (
+        "RISC-V AUIPC with x0 or x2 is left as encoded",
+        "            if riscv_check_2(v, r) {",
+        "            if false {",
+        [MADE],
+    ),
+    (
+        "RISC-V AUIPC pairs are left as encoded",
+        "            if riscv_check_1(v, b) {",
+        "            if false {",
+        [MADE],
+    ),
+]
+
+AES = [
+    (
+        "the key is one round short",
+        "    for round in 0..rounds {",
+        "    for round in 1..rounds {",
+        ["the_hashed_key_is_sha256_over_its_rounds", MADE],
+    ),
+    (
+        "the round counter is not hashed",
+        "        sha.update(&round.to_le_bytes());\n",
+        "",
+        ["the_hashed_key_is_sha256_over_its_rounds", MADE],
+    ),
+    (
+        "blocks are not chained",
+        "            *b ^= p;",
+        "            let _ = p;",
+        [MADE],
+    ),
+    (
+        "a short last block is no damage",
+        "    let ok = whole == input.len();",
+        "    let ok = true;",
+        ["a_short_last_block_is_damage"],
+    ),
+    (
+        "a rounds power past 24 is taken",
+        "    if props.cycles_power > CYCLES_POWER_MAX && props.cycles_power != CYCLES_POWER_RAW {",
+        "    if false {",
+        ["properties_are_read_as_7zip_reads_them"],
+    ),
+    (
+        "the password is UTF-8",
+        "    password.encode_utf16().flat_map(u16::to_le_bytes).collect()",
+        "    password.as_bytes().to_vec()",
+        [MADE],
+    ),
+    (
+        "the raw key leaves out the salt",
+        ".zip(props.salt.iter().chain(password))",
+        ".zip(password)",
+        ["the_raw_key_is_salt_and_password"],
+    ),
+]
+
+NAMES = [
+    (
+        "coders are named first to last",
+        "    parts.reverse();\n",
+        "",
+        [METHODS],
+    ),
+    (
+        "LZMA's lc is always named",
+        "                    if lc != 3 {",
+        "                    if true {",
+        [METHODS],
+    ),
+    (
+        "the AES rounds keep their flag bits",
+        '                .map_or_else(String::new, |&b| alloc::format!("{}", b & 0x3F)),',
+        '                .map_or_else(String::new, |&b| alloc::format!("{b}")),',
+        [METHODS],
+    ),
+    (
+        "an odd LZMA2 dictionary is named as a power",
+        "    } else if d & 1 == 0 {",
+        "    } else if true {",
+        ["sizes_are_written_as_7zip_writes_them"],
+    ),
+    (
+        "sizes in megabytes are named in kilobytes",
+        "    if val & ((1 << 20) - 1) == 0 {",
+        "    if false {",
+        ["sizes_are_written_as_7zip_writes_them"],
+    ),
+]
+
+DECODE = [
+    (
+        "BZip2 data after the end is not flagged",
+        "                    d.after_end = used < data.len();",
+        "                    d.after_end = false;",
+        [CRAFTED],
+    ),
+    (
+        "Deflate data after the end is not flagged",
+        "            d.after_end = r.ok && r.used < data.len();",
+        "            d.after_end = false;",
+        [CRAFTED],
+    ),
+    (
+        "BZip2 takes properties",
+        "            // 23.00 a coder given some it cannot take is refused.\n            if !props.is_empty() {",
+        "            // 23.00 a coder given some it cannot take is refused.\n            if false {",
+        [CRAFTED],
+    ),
+    (
+        "Deflate takes properties",
+        "        method::DEFLATE | method::DEFLATE64 => {\n            if !props.is_empty() {",
+        "        method::DEFLATE | method::DEFLATE64 => {\n            if false {",
+        [CRAFTED],
+    ),
+    (
+        "Deflate64 is read as Deflate",
+        "        let r = inflate::decode(&data, size, method == method::DEFLATE64);",
+        "        let r = inflate::decode(&data, size, false);",
+        [MADE],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:]
     tables = [
@@ -279,6 +585,11 @@ if __name__ == "__main__":
         (SRC / "lzma_coder.rs", LZMA_CODER),
         (SRC / "ppmd7.rs", PPMD7),
         (SRC / "bcj2.rs", BCJ2),
+        (SRC / "inflate.rs", INFLATE),
+        (SRC / "branch.rs", BRANCH),
+        (SRC / "aes7z.rs", AES),
+        (SRC / "names.rs", NAMES),
+        (SRC / "decode.rs", DECODE),
     ]
     names = [name for _, rows in tables for name, *_ in rows]
     unmatched = [o for o in only if not any(o in n for n in names)]

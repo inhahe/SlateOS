@@ -2,14 +2,19 @@
 name = "mediaprobe"
 version = "0.1.0"
 edition = "2024"
-description = "SlateOS video file facts for applications: container, length and each track's codec, picture, rate and language, read from headers without decoding -- and Matroska's and WebM's frames, demuxed, for a player."
+description = "SlateOS video file facts for applications: container, length and each track's codec, picture, rate and language, read from headers without decoding."
 
 [dependencies]
 
 [dev-dependencies]
-# The demuxer is held to libvpx's own pictures: libvpx's VP9 test vectors
-# (tests/data, libvpx's licence beside them) demuxed here, decoded by lane
-# F's port of libvpx, and each picture hashed as libvpx's md5_helper does.
+# The tree's Matroska demuxer and VP9 decoder, held together to libvpx's own
+# pictures: libvpx's VP9 test vectors (tests/data, libvpx's licence beside
+# them) demuxed by lane F's `matroska`, decoded by lane F's port of libvpx,
+# and each picture hashed as libvpx's md5_helper does. The vectors came with
+# this crate's own demuxer, retired 2026-10-04 for `matroska`
+# (requests/f-e-two-matroska-demuxers-which-stays.md); the test stayed, on
+# the demuxer that replaced it.
+matroska = { path = "../../gui/video/matroska" }
 vp9 = { path = "../../gui/video/vp9" }
 md5 = { path = "../../md5" }
 

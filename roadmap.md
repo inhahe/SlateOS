@@ -2944,16 +2944,21 @@ word; text inside them that says "lane C" is history.
   - `[ ]` `apps/videoplayer` plays through `videocodec::Video` -- open,
     `next_frame`, `seek`, late pictures dropped through `next_picture`
     without their conversion -- keeping timing and display its own;
-  - `[ ]` `apps/mediaprobe` reads its track list from `matroska::Demuxer`,
-    and `mkv/demux.rs` is retired with its mutation rows -- once lane F's
-    port of its test cases and its mutation sweep is on `main`.
+  - `[x]` `mkv/demux.rs` is retired with its tests and its mutation sweep,
+    lane F's port of both being on `main` -- 2026-10-04;
+    `tests/vp9_vectors.rs` holds `matroska::Demuxer` to libvpx's pictures
+    now;
+  - `[ ]` `apps/mediaprobe` reads its track list from `matroska::Demuxer`
+    -- blocked by lane F: the probe shows a file's title and a track's BCP
+    47 language, which `matroska` reads and drops
+    (`requests/e-f-matroska-keep-the-title-and-the-bcp47-language.md`).
 
 - `[-]` `[E]` **Text boxes with a caret** --
   `known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box.md`:
   twenty-nine programs' boxes take typing only at their end, with no caret,
   selection or clipboard. One program at a time onto `textline::apply_key`
-  over a `TextInput`, as netscan's and sysmonitor's; emojipicker done
-  2026-10-04.
+  over a `TextInput`, as netscan's and sysmonitor's; emojipicker,
+  vpnmanager, taskscheduler and musicplayer done 2026-10-04.
 
 - `[x]` `[E]` **`apps/terminal` runs the user's shell on a kernel
   pseudo-terminal** — 2026-09-24, the "interactive terminal" joint task

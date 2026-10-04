@@ -8,13 +8,12 @@
 //! so the walk ends there, and the `SeekHead` says where `Info` and `Tracks`
 //! are past it.
 //!
-//! The frames themselves, for a player, are [`Demuxer`]'s (`demux.rs`), on
-//! the same element walk.
+//! The frames themselves, for a player, are `gui/video/matroska`'s, the
+//! tree's one Matroska demuxer, held to FFmpeg packet for packet. This crate
+//! carried a demuxer of its own until 2026-10-04; its tests moved into that
+//! crate's suite (`requests/f-e-matroska-has-mediaprobes-tests.md`).
 
 use std::io::{self, Read, Seek};
-
-mod demux;
-pub use demux::{Demuxer, Packet, Stream};
 
 use crate::{Codec, Container, Kind, MAX_CHILDREN, Probe, Track, language, read_at, text};
 

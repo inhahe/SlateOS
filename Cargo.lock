@@ -2386,6 +2386,7 @@ dependencies = [
 name = "mediaprobe"
 version = "0.1.0"
 dependencies = [
+ "matroska",
  "md5",
  "vp9",
 ]

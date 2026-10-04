@@ -24,7 +24,7 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 
 mod avi;
-pub mod mkv;
+mod mkv;
 mod mp4;
 pub mod testing;
 

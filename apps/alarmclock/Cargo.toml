@@ -15,6 +15,9 @@ oswindow = { path = "../../gui/window" }
 # The zone the clock face is rendered through. UTC today, explicitly and
 # greppably — see `refresh_clock`.
 tzrules = { path = "../../tzrules" }
+# The label box's keys, and what is a chord: a caret, a selection, and typing
+# that is not a command's letter.
+textline = { path = "../textline" }
 
 [lints]
 workspace = true

@@ -555,6 +555,96 @@ MAIN += [
     ),
 ]
 
+# An edit Apply has not sent is not lost without a question: choosing
+# another interface, Escape and the window's X ask first (2026-10-04).
+ASKS = "choosing_another_interface_asks_about_an_unapplied_edit"
+ONLY = "only_an_unapplied_edit_is_asked_about_and_only_when_it_would_go"
+APPLY_GOES = "apply_from_the_question_sends_the_edit_and_then_goes"
+REFUSED_STAYS = "a_refused_apply_from_the_question_stays_with_the_edit"
+CLOSING = "closing_with_an_unapplied_edit_asks_and_keeps_the_window_open"
+
+MAIN += [
+    (
+        "an unapplied edit is left without a question",
+        "        if !self.unapplied() {\n            return self.go(to);\n        }\n",
+        "        if true {\n            return self.go(to);\n        }\n",
+        [ASKS, CLOSING],
+    ),
+    (
+        "an untouched editor is asked about",
+        "        self.editing_ip\n"
+        "            && self\n"
+        "                .selected_iface()\n"
+        "                .is_some_and(|iface| iface.ip_config != self.edit_ip_config)\n",
+        "        self.editing_ip\n",
+        [ONLY],
+    ),
+    (
+        "choosing the interface already chosen reloads it",
+        "                if i == self.selected_interface {\n"
+        "                    self.focus = None;\n"
+        "                    return Action::Redraw;\n"
+        "                }\n",
+        "",
+        [ONLY],
+    ),
+    (
+        "Cancel goes anyway",
+        "            Choice::Cancel => Action::Redraw,\n",
+        "            Choice::Cancel => self.go(to),\n",
+        [ASKS],
+    ),
+    (
+        "a refused Apply goes anyway",
+        "                if let Err(why) = self.apply_ip_config() {\n"
+        "                    self.status_message = why;\n"
+        "                    return Action::Redraw;\n"
+        "                }\n",
+        "                if let Err(why) = self.apply_ip_config() {\n"
+        "                    self.status_message = why;\n"
+        "                }\n",
+        [REFUSED_STAYS],
+    ),
+    (
+        "the interface being chosen is found by its old index",
+        "                        if let Some(index) = target.and_then(|name| {\n"
+        "                            self.interfaces.iter().position(|iface| iface.name == name)\n"
+        "                        }) {\n",
+        "                        if let (Some(_), Leaving::Interface(index)) = (target, to) {\n",
+        [APPLY_GOES],
+    ),
+    (
+        "\"Applied\" is lost from the status line",
+        "                        self.status_message = applied;\n",
+        "                        let _ = applied;\n",
+        [APPLY_GOES],
+    ),
+    (
+        "the question is not drawn",
+        "            question.render(&palette, width, height, &mut tree);\n",
+        "            let _ = (question, palette);\n",
+        [ASKS, CLOSING],
+    ),
+    (
+        "a close over an unapplied edit closes",
+        "            _ if matches!(event, Event::CloseRequested) => Response::KeepOpen,\n",
+        "",
+        [CLOSING],
+    ),
+    (
+        "a key goes under the question",
+        "        if self.question.is_some() {\n            return self.ask(&Event::Key(key.clone()));\n        }\n",
+        "",
+        [ASKS, CLOSING],
+    ),
+    (
+        "a press goes under the question",
+        "        if self.question.is_some() && matches!(event, Event::Mouse(_)) {\n",
+        "        if false {\n",
+        [ASKS],
+    ),
+]
+
 TABLES = {
     "main.rs": MAIN,
 }

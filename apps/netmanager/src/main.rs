@@ -55,6 +55,7 @@ use guitk::textedit;
 use guitk::textinput::TextInput;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
+use unsaved::{Choice, Question};
 
 use std::collections::VecDeque;
 use std::process::ExitCode;
@@ -604,6 +605,9 @@ pub struct NetManagerApp {
     /// focus width (`App::appearance_changed`), the toolkit's until it is
     /// known.
     pub focus_ring_width: f32,
+    /// The question asked before an edit Apply has not sent is lost, and
+    /// what it is holding up.
+    question: Option<Question<Leaving>>,
     /// Carries the fraction of a row a wheel event is worth.
     ///
     /// Rounding each event on its own would discard it, and a precision
@@ -1027,6 +1031,7 @@ impl NetManagerApp {
             clipboard: String::new(),
             hover: None,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
+            question: None,
             wheel: wheel::Accumulator::default(),
             window_size: (WINDOW_WIDTH, WINDOW_HEIGHT),
             listing: Listing::NotRead,
@@ -1363,6 +1368,109 @@ impl NetManagerApp {
     fn begin_edit(&mut self) {
         if !self.editing_ip {
             self.start_editing_ip();
+        }
+    }
+
+    /// Whether the open edit has changes Apply has not sent: an editor
+    /// opened and left as it was is not one.
+    pub fn unapplied(&self) -> bool {
+        self.editing_ip
+            && self
+                .selected_iface()
+                .is_some_and(|iface| iface.ip_config != self.edit_ip_config)
+    }
+
+    /// Leave the open edit -- for another interface, or to close the
+    /// window -- asking first if it has changes Apply has not sent: Apply
+    /// them, drop them, or stay. Choosing another interface reloaded the
+    /// editor from it, and Escape and the window's X closed the window,
+    /// each throwing the changes away without a word.
+    fn leave(&mut self, to: Leaving) -> Action {
+        if !self.unapplied() {
+            return self.go(to);
+        }
+        let message = self.selected_iface().map_or_else(
+            || String::from("The configuration has changes that are not applied."),
+            |iface| format!("{} has changes that are not applied.", iface.name),
+        );
+        let prompt = match to {
+            Leaving::Close => "Apply them before closing?",
+            Leaving::Interface(_) => "Apply them before choosing another interface?",
+        };
+        // The list of keys would be drawn over the question it cannot answer.
+        self.show_help = false;
+        self.question = Some(Question::to_apply(&message, prompt, to));
+        Action::Redraw
+    }
+
+    /// Do what the open edit was left for, the edit settled.
+    fn go(&mut self, to: Leaving) -> Action {
+        match to {
+            Leaving::Close => Action::Quit,
+            Leaving::Interface(index) => {
+                self.select_interface(index);
+                self.focus = None;
+                Action::Redraw
+            }
+        }
+    }
+
+    /// Offer `event` to the question about an unapplied edit, which has
+    /// every key and press while it is up: what reached the window under it
+    /// would be a change made while being asked about the changes.
+    fn ask(&mut self, event: &Event) -> Action {
+        let Some(question) = self.question.as_mut() else {
+            return Action::None;
+        };
+        match question.handle(event) {
+            Some(choice) => {
+                let to = question.pending();
+                self.question = None;
+                self.answer(choice, to)
+            }
+            None => Action::Redraw,
+        }
+    }
+
+    /// Act on the answer to the question about an unapplied edit.
+    ///
+    /// Apply goes on only if the kernel takes the change: a refusal stays,
+    /// with the edit open and the reason on the status line. Its re-read can
+    /// reorder the list, so the interface being chosen is found again by
+    /// name, and "Applied to ..." stays on the status line over the newly
+    /// chosen interface's summary.
+    fn answer(&mut self, choice: Choice, to: Leaving) -> Action {
+        match choice {
+            Choice::Save => {
+                let target = match to {
+                    Leaving::Interface(index) => {
+                        self.interfaces.get(index).map(|iface| iface.name.clone())
+                    }
+                    Leaving::Close => None,
+                };
+                if let Err(why) = self.apply_ip_config() {
+                    self.status_message = why;
+                    return Action::Redraw;
+                }
+                self.focus = None;
+                match to {
+                    Leaving::Close => Action::Quit,
+                    Leaving::Interface(_) => {
+                        let applied = std::mem::take(&mut self.status_message);
+                        if let Some(index) = target.and_then(|name| {
+                            self.interfaces.iter().position(|iface| iface.name == name)
+                        }) {
+                            self.select_interface(index);
+                        }
+                        self.status_message = applied;
+                        Action::Redraw
+                    }
+                }
+            }
+            // Going drops the edit: choosing an interface loads it into a
+            // closed editor, and closing is closing.
+            Choice::Discard => self.go(to),
+            Choice::Cancel => Action::Redraw,
         }
     }
 
@@ -1759,6 +1867,15 @@ pub enum Field {
     Mask,
     Gateway,
     DnsInput,
+}
+
+/// What the question about an unapplied edit is holding up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Leaving {
+    /// The window closing: Escape, or its X.
+    Close,
+    /// The interface at this index in the sidebar being chosen.
+    Interface(usize),
 }
 
 /// What a click at a point means.
@@ -3811,9 +3928,13 @@ impl NetManagerApp {
                 Action::Redraw
             }
             Target::Interface(i) => {
-                self.select_interface(i);
-                self.focus = None;
-                Action::Redraw
+                // The interface already chosen is not a choice: choosing it
+                // again reloaded it, and threw an open edit away.
+                if i == self.selected_interface {
+                    self.focus = None;
+                    return Action::Redraw;
+                }
+                self.leave(Leaving::Interface(i))
             }
             Target::Tab(tab) => {
                 self.set_tab(tab);
@@ -4000,6 +4121,11 @@ impl NetManagerApp {
 
     /// Route a keystroke.
     pub fn handle_key(&mut self, key: &KeyEvent) -> Action {
+        // Here rather than only in `handle_event`, so that no way in can go
+        // round it.
+        if self.question.is_some() {
+            return self.ask(&Event::Key(key.clone()));
+        }
         if !key.pressed {
             return Action::None;
         }
@@ -4029,7 +4155,7 @@ impl NetManagerApp {
         }
 
         match key.key {
-            Key::Escape => Action::Quit,
+            Key::Escape => self.leave(Leaving::Close),
             Key::Down => self.move_selection(1),
             Key::Up => self.move_selection(-1),
             Key::Right => self.move_tab(1),
@@ -4173,8 +4299,7 @@ impl NetManagerApp {
         if next == self.selected_interface {
             return Action::None;
         }
-        self.select_interface(next);
-        Action::Redraw
+        self.leave(Leaving::Interface(next))
     }
 
     /// Move to the next or previous detail tab, wrapping.
@@ -4202,6 +4327,11 @@ impl NetManagerApp {
 
     /// Route a whole event.
     pub fn handle_event(&mut self, event: &Event, size: (f32, f32)) -> Action {
+        // The question about an unapplied edit has every press while it is
+        // up (and every key: `handle_key` asks first).
+        if self.question.is_some() && matches!(event, Event::Mouse(_)) {
+            return self.ask(event);
+        }
         match event {
             // The shortcut card is drawn over everything, so it takes the
             // pointer as well as the keys: a press with any button puts it
@@ -4240,7 +4370,7 @@ impl NetManagerApp {
                 _ => Action::None,
             },
             Event::Key(key) => self.handle_key(key),
-            Event::CloseRequested => Action::Quit,
+            Event::CloseRequested => self.leave(Leaving::Close),
             _ => Action::None,
         }
     }
@@ -4546,9 +4676,12 @@ impl App for NetManagerApp {
             return Response::Redraw;
         }
         match self.handle_event(event, self.window_size) {
+            Action::Quit => Response::Exit,
+            // A close that is being asked about first: the window stays, with
+            // the question drawn, until an answer brings the `Exit`.
+            _ if matches!(event, Event::CloseRequested) => Response::KeepOpen,
             Action::None => Response::Idle,
             Action::Redraw => Response::Redraw,
-            Action::Quit => Response::Exit,
         }
     }
 
@@ -4557,7 +4690,15 @@ impl App for NetManagerApp {
         // `Resize` arrives, so this is the only place the real size is known
         // on frame one.
         self.window_size = (width, height);
-        render_frame(self, width, height).into_tree()
+        let mut tree = render_frame(self, width, height).into_tree();
+        // Over everything, and drawn here rather than in `render_frame`:
+        // drawing is what places the question's buttons, which needs it
+        // mutable.
+        let palette = self.palette;
+        if let Some(question) = self.question.as_mut() {
+            question.render(&palette, width, height, &mut tree);
+        }
+        tree
     }
 }
 
@@ -6836,6 +6977,189 @@ mod tests {
         assert!(!app.editing_ip);
         assert_eq!(app.edit_ip_config.ip_address, original);
         assert_eq!(app.focus, None);
+    }
+
+    // -- An edit Apply has not sent is not lost without a question
+
+    /// Every string the window draws, the question over it included.
+    fn shown(app: &mut NetManagerApp) -> String {
+        App::render(app, SIZE.0, SIZE.1)
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// The sample window on the IP tab, with Ethernet 1's address changed in
+    /// the editor and not applied, and nothing holding the keyboard.
+    fn with_an_unapplied_edit() -> NetManagerApp {
+        let mut app = configured_by_hand();
+        app.set_tab(DetailTab::IpConfig);
+        click(&mut app, Target::EditIp);
+        app.edit_ip_config.ip_address = String::from("10.9.9.9");
+        app.focus = None;
+        assert!(app.unapplied());
+        app
+    }
+
+    /// **Choosing another interface asks about an unapplied edit** -- by a
+    /// press or by the keys -- where it reloaded the editor from the new
+    /// interface and threw the change away. Cancel stays as it was; Don't
+    /// apply drops the change and chooses.
+    #[test]
+    fn choosing_another_interface_asks_about_an_unapplied_edit() {
+        let mut app = with_an_unapplied_edit();
+        click(&mut app, Target::Interface(1));
+        assert!(
+            app.question.is_some(),
+            "the edit was left without a question"
+        );
+        assert_eq!(app.selected_interface, 0, "chosen before the answer");
+        let text = shown(&mut app);
+        assert!(
+            text.contains("Ethernet 1 has changes that are not applied."),
+            "{text}"
+        );
+        assert!(
+            text.contains("Apply them before choosing another interface?"),
+            "{text}"
+        );
+
+        // A press under the question reaches nothing.
+        click(&mut app, Target::Tab(DetailTab::Dns));
+        assert_eq!(
+            app.active_tab,
+            DetailTab::IpConfig,
+            "a press went under the question"
+        );
+        assert!(app.question.is_some());
+
+        app.handle_key(&press(Key::Escape));
+        assert!(app.question.is_none(), "Cancel left the question up");
+        assert_eq!(app.selected_interface, 0);
+        assert!(app.editing_ip);
+        assert_eq!(
+            app.edit_ip_config.ip_address, "10.9.9.9",
+            "Cancel lost the edit"
+        );
+
+        app.handle_key(&press(Key::Down));
+        assert!(
+            app.question.is_some(),
+            "Down left the edit without a question"
+        );
+        app.handle_key(&press(Key::D));
+        assert!(app.question.is_none());
+        assert_eq!(app.selected_interface, 1, "Don't apply did not choose");
+        assert!(!app.editing_ip, "the dropped edit is still open");
+    }
+
+    /// An editor opened and left as it was is no edit to ask about, and
+    /// choosing the interface already chosen is no choice: it reloaded the
+    /// interface and threw an open edit away.
+    #[test]
+    fn only_an_unapplied_edit_is_asked_about_and_only_when_it_would_go() {
+        let mut app = configured_by_hand();
+        app.set_tab(DetailTab::IpConfig);
+        click(&mut app, Target::EditIp);
+        assert!(!app.unapplied());
+        click(&mut app, Target::Interface(1));
+        assert!(
+            app.question.is_none(),
+            "an untouched editor was asked about"
+        );
+        assert_eq!(app.selected_interface, 1);
+
+        let mut app = with_an_unapplied_edit();
+        click(&mut app, Target::Interface(0));
+        assert!(app.question.is_none(), "the interface already chosen asked");
+        assert!(app.editing_ip);
+        assert_eq!(
+            app.edit_ip_config.ip_address, "10.9.9.9",
+            "choosing it again threw the edit away"
+        );
+    }
+
+    /// **Apply, from the question, sends the edit and then goes on** -- to
+    /// the interface being chosen, found again by name after the re-read
+    /// the change brings, with "Applied" left on the status line.
+    #[test]
+    fn apply_from_the_question_sends_the_edit_and_then_goes() {
+        let wlan0 = "Interface: wlan0  (UP)\n  MAC:     52:54:00:00:00:01\n  IPv4:    10.0.3.15\n  Netmask: 255.255.255.0\n  Gateway: 10.0.3.2\n  DNS:     10.0.3.3\n";
+        let (dir, mut app) = app_on(&format!("{ETH0_UP}{wlan0}"));
+        app.configure = obliging;
+        app.set_tab(DetailTab::IpConfig);
+        app.start_editing_ip();
+        app.edit_ip_config.dhcp_enabled = false;
+        app.edit_ip_config.ip_address = String::from("10.0.2.99");
+
+        click(&mut app, Target::Interface(1));
+        assert!(app.question.is_some());
+        // The kernel lists wlan0 first after the change: the interface being
+        // chosen is wlan0, wherever it now sits.
+        the_kernel_now_says(&dir, &format!("{wlan0}{ETH0_UP}"));
+        app.handle_key(&press(Key::A));
+        assert_eq!(asked().len(), 1, "Apply sent nothing");
+        assert_eq!(asked()[0].ip, Some([10, 0, 2, 99]));
+        assert_eq!(app.selected_iface().map(|i| i.name.as_str()), Some("wlan0"));
+        assert!(!app.editing_ip);
+        assert!(
+            app.status_message.starts_with("Applied to eth0"),
+            "{}",
+            app.status_message
+        );
+    }
+
+    /// A refusal, from the question, stays: the edit open on the same
+    /// interface, the reason on the status line.
+    #[test]
+    fn a_refused_apply_from_the_question_stays_with_the_edit() {
+        let wlan0 = "Interface: wlan0  (UP)\n  MAC:     52:54:00:00:00:01\n";
+        let (_dir, mut app) = app_on(&format!("{ETH0_UP}{wlan0}"));
+        app.configure = refusing;
+        app.set_tab(DetailTab::IpConfig);
+        app.start_editing_ip();
+        app.edit_ip_config.dhcp_enabled = false;
+        app.edit_ip_config.ip_address = String::from("10.0.2.99");
+
+        click(&mut app, Target::Interface(1));
+        app.handle_key(&press(Key::A));
+        assert!(app.question.is_none());
+        assert_eq!(app.selected_iface().map(|i| i.name.as_str()), Some("eth0"));
+        assert!(app.editing_ip, "a refused Apply closed the editor");
+        assert_eq!(app.edit_ip_config.ip_address, "10.0.2.99");
+        assert!(
+            app.status_message.contains("administrator"),
+            "{}",
+            app.status_message
+        );
+    }
+
+    /// **Closing over an unapplied edit asks first**, the window's X and
+    /// Escape alike, and the window stays open until the answer. With no
+    /// edit -- the control -- it closes.
+    #[test]
+    fn closing_with_an_unapplied_edit_asks_and_keeps_the_window_open() {
+        let mut app = with_an_unapplied_edit();
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::KeepOpen);
+        assert!(app.question.is_some());
+        assert!(shown(&mut app).contains("Apply them before closing?"));
+        assert_eq!(app.on_event(&Event::Key(press(Key::D))), Response::Exit);
+
+        let mut app = with_an_unapplied_edit();
+        assert_eq!(app.handle_key(&press(Key::Escape)), Action::Redraw);
+        assert!(app.question.is_some(), "Escape closed over the edit");
+        app.handle_key(&press(Key::Escape));
+        assert!(app.question.is_none(), "Cancel left the question up");
+        assert!(app.editing_ip);
+
+        let mut app = configured_by_hand();
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::Exit);
+        assert_eq!(app.handle_key(&press(Key::Escape)), Action::Quit);
     }
 
     /// The sample window with its first interface -- Ethernet 1, and its

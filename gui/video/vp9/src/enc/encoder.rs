@@ -242,6 +242,11 @@ pub struct Encoder {
     /// The key frame's 8x8 partitioning threshold, which libvpx's inter
     /// frames leave in place (`vbp_thresholds[3]`).
     vbp_threshold_8x8: i64,
+    /// The variance partitioning's thresholds as the last frame that set
+    /// them left them (`vbp_thresholds`, `vbp_threshold_sad`,
+    /// `vbp_threshold_copy`): a frame partitioned by search sets none, and
+    /// libvpx's state keeps the old ones.
+    frame_vbp: ([i64; 4], i64, i64),
     /// The loop filter's buffers, kept from frame to frame.
     scratch: Buffers<u8>,
     threads: usize,
@@ -295,6 +300,7 @@ impl Encoder {
             ref_luma: Default::default(),
             last_src: None,
             vbp_threshold_8x8: 0,
+            frame_vbp: ([0; 4], 0, 0),
             scratch: Buffers::default(),
             threads: std::thread::available_parallelism().map_or(1, usize::from),
             #[cfg(test)]
@@ -633,7 +639,14 @@ impl Encoder {
                 crate::enc::rd::block_thresholds(qi.clamp(0, 255), &thresh_mult)
             }));
         let y_ac_q = i32::from(cpi.quants.get(0, usize::try_from(q).unwrap_or(0)).dequant[1]);
-        let frame_vbp = if intra_only {
+        // sf->nonrd_use_ml_partition: speed 8 partitions inter frames of
+        // 352x288 pixels or fewer by search, and sets no variance
+        // thresholds for them (vp9_set_variance_partition_thresholds
+        // returns early).
+        let learned_partition = !intra_only && u64::from(width) * u64::from(height) <= 352 * 288;
+        let frame_vbp = if learned_partition {
+            self.frame_vbp
+        } else if intra_only {
             (
                 crate::enc::partition::key_frame_thresholds(y_ac_q),
                 0i64,
@@ -672,6 +685,7 @@ impl Encoder {
             };
             (thresholds, sad, copy)
         };
+        self.frame_vbp = frame_vbp;
         #[cfg(test)]
         trace_frame(cpi, rdmult, short_circuit_low_temp_var, tx_mode, &frame_vbp);
         let ref_frame_flags = cpi.ref_frame_flags;
@@ -727,6 +741,11 @@ impl Encoder {
                     adaptive_rd_thresh: crate::enc::pickinter::speed8_adaptive_rd_thresh(
                         width, height,
                     ),
+                    max_partition_size: if learned_partition {
+                        crate::common::BLOCK_64X64
+                    } else {
+                        crate::common::BLOCK_32X32
+                    },
                     base_qindex: q,
                     frame_width: width,
                     frame_height: height,
@@ -744,6 +763,7 @@ impl Encoder {
                     use_skin_detection: true,
                     use_source_sad: last_src.is_some(),
                     cyclic_refresh: cyclic_refresh_mode,
+                    learned_partition,
                 },
                 state: rt,
                 cr,
@@ -751,6 +771,7 @@ impl Encoder {
                 last_src: last_src.unwrap_or(&src),
                 sb: crate::enc::pickinter::SbState::default(),
                 part: None,
+                learned: crate::enc::nonrd::Learned::new(i32::from(header::dc_quant(q, 0, 8))),
             });
             &mut rt_own
         };

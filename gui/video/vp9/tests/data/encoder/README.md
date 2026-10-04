@@ -63,3 +63,35 @@ picture 96 and falling after the noise stops; every content state, the
 change of light (`LowVarHighSumdiff`) on 692 superblocks; and every way a
 superblock is partitioned -- copied, the 64x64 early exit, copied after the
 source check, and by variance.
+
+# The third reference encode
+
+`rt8small.ivf` is small enough -- 350x286, 352x288 pixels or fewer -- that
+libvpx's speed 8 partitions its inter frames by search, trimmed by a small
+network, rather than by variance (`tests/encoder.rs`,
+`frames_match_vpxenc_when_partitioned_by_search`; `src/enc/replay.rs`
+replays its decisions too).
+
+**Input.** 90 pictures of 350x286, I420, from `common::small_reference_input`
+(`tests/common/mod.rs`): a window on `vp90-2-22-svc_1280x720_1.webm` (its
+first 50 pictures), a cut to a window on `vp90-2-02-size-lf-1920x1080.webm`
+(25 pictures), then the first vector again fading to black (15). Its MD5 is
+`e75fb192ba8ab28ad9fde1224898daed`; to write it out:
+
+    VP9_WRITE_INPUT=small350.yuv VP9_WRITE_WHICH=small cargo test --release \
+      --target x86_64-pc-windows-gnu -p vp9 --test encoder write_cut_reference_input -- --ignored
+
+**Encoder.** The same `vpxenc`, at 200 kbit/s, on an x86-64 processor with
+FMA (the learned partitioning's logarithms are glibc's FMA build's:
+design-decisions §1341):
+
+    vpxenc --codec=vp9 --rt --cpu-used=8 --end-usage=cbr --target-bitrate=200 \
+      --lag-in-frames=0 --threads=1 --tile-columns=0 --aq-mode=3 --kf-max-dist=9999 \
+      --undershoot-pct=50 --overshoot-pct=50 --buf-sz=1000 --buf-initial-sz=500 \
+      --buf-optimal-sz=600 --min-q=2 --max-q=52 --noise-sensitivity=0 --resize-allowed=0 \
+      --i420 -w 350 -h 286 --fps=30/1 --ivf -o rt8small.ivf small350.yuv
+
+`vpxdec --md5 rt8small.ivf` gives `d4b1ceac5f843cdd0fac4f2d38dda5b3`; the
+file is 77061 bytes, 90 frames. Its trace has 2,670 superblock estimates,
+12,803 network predictions and 16,041 partition decisions; the scene cuts
+come at pictures 50 and 75.

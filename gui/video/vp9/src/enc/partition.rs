@@ -848,13 +848,33 @@ impl Chooser<'_> {
 /// The 64x64 early exit's and the copy's partitions are set the same way:
 /// one 64x64 block (libvpx's `set_block_size` of the whole superblock).
 pub(crate) fn whole_superblock(mi_row: usize, mi_col: usize) -> SbPartition {
-    let mut part = SbPartition {
+    let mut part = empty_superblock(mi_row, mi_col);
+    part.sizes[0][0] = BLOCK_64X64;
+    part
+}
+
+/// A superblock at (`mi_row`, `mi_col`) with no block sizes set yet, for
+/// [`SbPartition::set_size`] to fill.
+pub(crate) const fn empty_superblock(mi_row: usize, mi_col: usize) -> SbPartition {
+    SbPartition {
         mi_row,
         mi_col,
         sizes: [[BLOCK_4X4; 8]; 8],
-    };
-    part.sizes[0][0] = BLOCK_64X64;
-    part
+    }
+}
+
+impl SbPartition {
+    /// Record a block of `bsize` starting at cell (`mi_row`, `mi_col`) of
+    /// this superblock.
+    pub(crate) fn set_size(&mut self, mi_row: usize, mi_col: usize, bsize: BlockSize) {
+        if let Some(cell) = mi_row
+            .checked_sub(self.mi_row)
+            .zip(mi_col.checked_sub(self.mi_col))
+            .and_then(|(r, c)| self.sizes.get_mut(r).and_then(|row| row.get_mut(c)))
+        {
+            *cell = bsize;
+        }
+    }
 }
 
 /// The partition libvpx copies from the last frame's: its

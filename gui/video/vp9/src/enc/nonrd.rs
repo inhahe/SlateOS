@@ -12,10 +12,16 @@
 //! `vp9_pick_inter_mode`, the cyclic refresh then settling its segment
 //! (`update_state_rt`).
 //!
+//! An inter frame of 352x288 pixels or fewer is partitioned by search
+//! instead (`nonrd_pick_partition`, [`Learned`]): each square block of the
+//! superblock tried whole and cut in four as a small network allows
+//! (`mlpart`), every candidate's modes picked, the cheaper kept -- and only
+//! then is the superblock coded, from what the search kept.
+//!
 //! What carries from frame to frame -- the adaptive mode thresholds, the
 //! partitions to copy, the skin map, how long each superblock has been
-//! still, and the contents of libvpx's mode-information buffers, which one
-//! of its decisions reads stale -- is [`RtState`].
+//! still, and the contents of libvpx's mode-information buffers, which its
+//! decisions read stale -- is [`RtState`].
 //!
 //! Translated into Rust from libvpx v1.17.0's `vp9/encoder/vp9_encodeframe.c`
 //! (copyright the WebM project authors), used under libvpx's BSD licence and
@@ -35,25 +41,32 @@
 use crate::block::ModeInfo;
 use crate::common::{
     BILINEAR, BLOCK_4X4, BLOCK_8X8, BLOCK_32X32, BLOCK_64X64, BLOCK_SIZES, BlockSize, INTRA_MODES,
-    LAST_FRAME, Mv, PARTITION_NONE, Partition,
+    LAST_FRAME, Mv, PARTITION_CONTEXTS, PARTITION_NONE, PARTITION_SPLIT, PARTITION_TREE,
+    PARTITION_TYPES, Partition,
 };
 use crate::enc::aq_cyclicrefresh::{CR_SEGMENT_ID_BASE, CyclicRefresh, segment_boosted};
 use crate::enc::content;
 use crate::enc::encodeframe::{BlockModes, Decide, FrameEncoder};
 use crate::enc::mcomp::{self, MvLimits, Search};
+use crate::enc::mlpart;
 use crate::enc::partition::{self, ContentState, InterSb, NoiseLevel, SbPartition};
 use crate::enc::pickinter::{self, SbState, SearchFrame};
-use crate::enc::rd::{MAX_MODES, RD_THRESH_INIT_FACT, kf_y_mode_costs};
+use crate::enc::rd::{
+    MAX_MODES, RD_THRESH_INIT_FACT, RDDIV_BITS, cost_tokens, kf_y_mode_costs, rdcost,
+};
 use crate::frame::FrameBuf;
 use crate::tables;
 
 /// What one 8x8 cell of libvpx's mode-information buffer last held, as far
-/// as any decision reads it: the block size `set_block_size` wrote there
-/// and the vector a block left.
+/// as any decision reads it: the block size `set_block_size` wrote there,
+/// the vector a block left, and whether the block coded at the cell coded
+/// nothing -- which the mode search never writes, so a partition search's
+/// unfinished blocks keep the cell's old one (see `Learned`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct StaleMi {
     pub sb_type: BlockSize,
     pub mv: Mv,
+    pub skip: bool,
 }
 
 /// What libvpx's realtime decisions keep from frame to frame.
@@ -179,6 +192,38 @@ fn get_segment_id(
     id.min(7)
 }
 
+/// The blocks a partition search kept under `node` (block `bsize` at
+/// (`mi_row`, `mi_col`)), in coding order: libvpx's `encode_sb_rt` walk.
+fn collect_leaves(
+    node: &SearchNode,
+    mi_row: usize,
+    mi_col: usize,
+    bsize: BlockSize,
+    mi_rows: usize,
+    mi_cols: usize,
+    out: &mut Vec<(usize, usize, BlockSize, Candidate)>,
+) {
+    if mi_row >= mi_rows || mi_col >= mi_cols {
+        return;
+    }
+    match node.chosen {
+        Some(PARTITION_NONE) => {
+            if let Some(c) = node.whole {
+                out.push((mi_row, mi_col, bsize, c));
+            }
+        }
+        Some(PARTITION_SPLIT) => {
+            let ms = usize::from(tables::NUM_8X8_WIDE[usize::from(bsize)]) / 2;
+            let subsize = tables::SUBSIZE[usize::from(PARTITION_SPLIT)][usize::from(bsize)];
+            for (i, quarter) in node.quarters.iter().enumerate() {
+                let (r, c) = (mi_row + (i >> 1) * ms, mi_col + (i & 1) * ms);
+                collect_leaves(quarter, r, c, subsize, mi_rows, mi_cols, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// The partition `nonrd_use_partition` walks at block `bsize` of a
 /// superblock: the size chosen where the block starts.
 fn walk_partition(
@@ -270,6 +315,81 @@ pub(crate) struct InterSettings {
     /// CYCLIC_REFRESH_AQ`), whether or not this frame codes segments: see
     /// [`SearchFrame::cyclic_refresh`](crate::enc::pickinter::SearchFrame).
     pub cyclic_refresh: bool,
+    /// Partition by search, trimmed by a network, rather than by variance:
+    /// libvpx's speed 8 for inter frames of 352x288 pixels or fewer
+    /// (`ML_BASED_PARTITION`).
+    pub learned_partition: bool,
+}
+
+/// A block the learned partitioning tried whole: libvpx's
+/// `PICK_MODE_CONTEXT` after `nonrd_pick_sb_modes`, kept for the coding.
+#[derive(Clone, Copy, Debug)]
+struct Candidate {
+    picked: pickinter::Picked,
+}
+
+/// One block of a superblock's partition search: libvpx's `PC_TREE` node.
+#[derive(Debug, Default)]
+struct SearchNode {
+    /// `PARTITION_NONE` or `PARTITION_SPLIT`, whichever the search kept;
+    /// `None` if neither came in under its budget.
+    chosen: Option<Partition>,
+    /// What trying the block whole found.
+    whole: Option<Candidate>,
+    /// Its quarters, if it was cut.
+    quarters: Vec<SearchNode>,
+}
+
+/// libvpx's `RD_COST` as the partition search adds it up.
+#[derive(Clone, Copy, Debug)]
+struct SearchCost {
+    rate: i32,
+    dist: i64,
+    rdcost: i64,
+}
+
+/// The learned partitioning's state (`InterSettings::learned_partition`):
+/// libvpx's `nonrd_pick_partition`, which searches all of a superblock
+/// before coding any of it. What the search reads that the variance path
+/// never did is libvpx's state between blocks, which here carries from one
+/// block's search to another's and to the coding -- so it is kept as libvpx
+/// keeps it.
+pub(crate) struct Learned {
+    /// The superblock's luma predicted from the last frame at its estimated
+    /// vector, 64x64, rows 64 apart: libvpx's `x->est_pred`
+    /// (`get_estimated_pred`), which the network's features measure.
+    est_pred: Vec<u8>,
+    /// The blocks the search kept, in coding order, for the coding.
+    leaves: Vec<(usize, usize, BlockSize, Candidate)>,
+    /// libvpx's `x->skip` between blocks. Each mode search leaves its
+    /// verdict there and each block's coding the block's own, and the
+    /// cyclic refresh reads it before the coding sets it -- so a
+    /// superblock's first block is judged by the search's last candidate,
+    /// and every other by the block coded before it.
+    x_skip: bool,
+    /// libvpx's `x->rdmult` between blocks: the last mode search's (a
+    /// boosted segment's own), with which the search prices a split before
+    /// searching it.
+    rdmult: i32,
+    /// libvpx's `cpi->partition_cost`, by context and partition: from the
+    /// frame's probabilities, every frame that searches partitions.
+    partition_cost: [[i32; PARTITION_TYPES]; PARTITION_CONTEXTS],
+    /// The frame's luma DC quantiser step: the network's first feature.
+    dc_q: i32,
+}
+
+impl Learned {
+    /// The state for a frame whose luma DC step is `dc_q`.
+    pub(crate) fn new(dc_q: i32) -> Self {
+        Self {
+            est_pred: vec![0; 64 * 64],
+            leaves: Vec::new(),
+            x_skip: false,
+            rdmult: 0,
+            partition_cost: [[0; PARTITION_TYPES]; PARTITION_CONTEXTS],
+            dc_q,
+        }
+    }
 }
 
 /// An inter frame's.
@@ -284,6 +404,8 @@ pub(crate) struct InterDecisions<'a> {
     /// The superblock's state, and its partition.
     pub sb: SbState,
     pub part: Option<SbPartition>,
+    /// The learned partitioning's, where it runs.
+    pub learned: Learned,
 }
 
 impl<'a> RtDecisions<'a> {
@@ -356,14 +478,28 @@ impl Decide for RtDecisions<'_> {
             Self::Key(k) => {
                 let modes = f.pick_intra_mode(mi_row, mi_col, bsize, k.rdmult, &k.y_mode_costs);
                 if let Some(m) = k.state.mi_at(mi_row, mi_col) {
-                    *m = StaleMi {
-                        sb_type: bsize,
-                        mv: Mv::INVALID,
-                    };
+                    m.sb_type = bsize;
+                    m.mv = Mv::INVALID;
                 }
                 modes
             }
+            Self::Inter(d) if d.settings.learned_partition => {
+                d.searched_block(f, mi_row, mi_col, bsize)
+            }
             Self::Inter(d) => d.block(f, mi_row, mi_col, bsize),
+        }
+    }
+
+    /// The block's coding leaves its verdict on coding nothing in the
+    /// buffer cell where it starts, as libvpx's `encode_superblock` writes
+    /// `mi->skip`.
+    fn encoded(&mut self, mi_row: usize, mi_col: usize, _bsize: BlockSize, skip: bool) {
+        let state = match self {
+            Self::Key(k) => &mut *k.state,
+            Self::Inter(d) => &mut *d.state,
+        };
+        if let Some(m) = state.mi_at(mi_row, mi_col) {
+            m.skip = skip;
         }
     }
 }
@@ -406,7 +542,440 @@ impl InterDecisions<'_> {
                 0
             };
         }
-        self.choose_partitioning(f, mi_row, mi_col);
+        if self.settings.learned_partition {
+            self.learned_superblock(f, mi_row, mi_col);
+        } else {
+            self.choose_partitioning(f, mi_row, mi_col);
+        }
+    }
+
+    /// A superblock of the learned partitioning: libvpx's
+    /// `get_estimated_pred`, then `nonrd_pick_partition` over the whole
+    /// superblock, its choices shown to the blocks searched after them and
+    /// kept for the coding.
+    fn learned_superblock(&mut self, f: &mut FrameEncoder<'_>, mi_row: usize, mi_col: usize) {
+        if self.learned.partition_cost == [[0; PARTITION_TYPES]; PARTITION_CONTEXTS] {
+            // The frame's first superblock: vp9_initialize_rd_consts.
+            for (costs, probs) in self
+                .learned
+                .partition_cost
+                .iter_mut()
+                .zip(&f.fc.partition_prob)
+            {
+                cost_tokens(costs, probs, &PARTITION_TREE);
+            }
+        }
+        self.estimated_pred(f, mi_row, mi_col);
+        let mark = f.shown_mark();
+        let mut root = SearchNode::default();
+        self.pick_partition(f, mi_row, mi_col, BLOCK_64X64, i64::MAX, &mut root);
+        f.forget_shown(mark, mi_row, mi_col);
+        // The blocks kept, in coding order, and the partition they make.
+        let mut leaves = Vec::new();
+        collect_leaves(
+            &root,
+            mi_row,
+            mi_col,
+            BLOCK_64X64,
+            f.mi.mi_rows,
+            f.mi.mi_cols,
+            &mut leaves,
+        );
+        let mut part = partition::empty_superblock(mi_row, mi_col);
+        for &(r, c, bs, _) in &leaves {
+            part.set_size(r, c, bs);
+        }
+        self.part = Some(part);
+        self.learned.leaves = leaves;
+    }
+
+    /// libvpx's `get_estimated_pred` for an inter frame at speed 8: the
+    /// superblock's motion estimated by integral projections, and its luma
+    /// predicted from the last frame there with the bilinear filter.
+    fn estimated_pred(&mut self, f: &mut FrameEncoder<'_>, mi_row: usize, mi_col: usize) {
+        let (mi_rows, mi_cols) = (f.mi.mi_rows, f.mi.mi_cols);
+        // set_offsets: the frame's multiplier.
+        self.learned.rdmult = self.search.rdmult;
+        let bsize = BLOCK_32X32
+            + if mi_col + 4 < mi_cols { 2 } else { 0 }
+            + if mi_row + 4 < mi_rows { 1 } else { 0 };
+        let (bw, bh) = (
+            4usize << tables::B_WIDTH_LOG2[usize::from(bsize)],
+            4usize << tables::B_HEIGHT_LOG2[usize::from(bsize)],
+        );
+        let (y_sad, mv) = match self.search.luma[0] {
+            Some(last) => {
+                let src = &f.src.planes[0];
+                let search = Search {
+                    src: src
+                        .data
+                        .get(mi_row * 8 * src.stride + mi_col * 8..)
+                        .unwrap_or(&[]),
+                    src_stride: src.stride,
+                    pre: last,
+                    x: (mi_col * 8) as i32,
+                    y: (mi_row * 8) as i32,
+                    w: bw,
+                    h: bh,
+                };
+                let limits = MvLimits::for_block(mi_row, mi_col, 8, 8, mi_rows, mi_cols);
+                mcomp::int_pro_motion_estimation(
+                    &search,
+                    u32::from(tables::B_WIDTH_LOG2[usize::from(bsize)]),
+                    u32::from(tables::B_HEIGHT_LOG2[usize::from(bsize)]),
+                    &limits,
+                    Mv::ZERO,
+                )
+            }
+            None => (u32::MAX, Mv::ZERO),
+        };
+        self.sb.sb_use_mv_part = true;
+        self.sb.sb_mvcol_part = i32::from(mv.col);
+        self.sb.sb_mvrow_part = i32::from(mv.row);
+        self.sb.pred_mv[LAST_FRAME as usize] = Some(mv);
+        if let Some(m) = self.state.mi_at(mi_row, mi_col) {
+            m.sb_type = BLOCK_64X64;
+            m.mv = mv;
+        }
+        #[cfg(test)]
+        crate::enc::trace::line(|| {
+            format!(
+                "G {mi_row} {mi_col} cs={} ysad={y_sad} mv={},{}",
+                self.sb.content_state as i32, mv.row, mv.col
+            )
+        });
+        #[cfg(not(test))]
+        let _ = y_sad;
+        // The superblock predicted from the last frame: its luma into
+        // est_pred, its chroma into the reconstruction as libvpx's leaves
+        // it, the reconstruction's luma as it was.
+        let mi = ModeInfo {
+            sb_type: BLOCK_64X64,
+            ref_frame: [LAST_FRAME, crate::common::NO_REF_FRAME],
+            mv: [mv, Mv::ZERO],
+            interp_filter: BILINEAR,
+            ..ModeInfo::default()
+        };
+        let (x0, y0) = (mi_col * 8, mi_row * 8);
+        let stride = f.recon.planes[0].stride;
+        let mut saved = vec![0u8; 64 * 64];
+        for (row, out) in saved.chunks_exact_mut(64).enumerate() {
+            if let Some(line) = f.recon.planes[0].data.get((y0 + row) * stride + x0..) {
+                let n = line.len().min(64);
+                out[..n].copy_from_slice(&line[..n]);
+            }
+        }
+        f.predict_inter(mi_row, mi_col, BLOCK_64X64, &mi, 0..3);
+        for (row, (est, old)) in self
+            .learned
+            .est_pred
+            .chunks_exact_mut(64)
+            .zip(saved.chunks_exact(64))
+            .enumerate()
+        {
+            if let Some(line) = f.recon.planes[0].data.get_mut((y0 + row) * stride + x0..) {
+                let n = line.len().min(64);
+                est[..n].copy_from_slice(&line[..n]);
+                line[..n].copy_from_slice(&old[..n]);
+            }
+        }
+    }
+
+    /// libvpx's `nonrd_pick_partition` at speed 8 for the square block
+    /// `bsize` at (`mi_row`, `mi_col`): tried whole and cut in four, as the
+    /// edges and the network allow, the cheaper kept and shown to the
+    /// blocks searched after it -- or `None` where neither comes in under
+    /// `best_rd`.
+    ///
+    /// At speed 8 the search is square only (`use_square_partition_only`),
+    /// from 64x64 down to 8x8 (`x->max_partition_size`,
+    /// `min_partition_size`), so a block is never tried in halves: where it
+    /// crosses the picture's edge, only cut.
+    fn pick_partition(
+        &mut self,
+        f: &mut FrameEncoder<'_>,
+        mi_row: usize,
+        mi_col: usize,
+        bsize: BlockSize,
+        best_rd: i64,
+        node: &mut SearchNode,
+    ) -> Option<SearchCost> {
+        let (mi_rows, mi_cols) = (f.mi.mi_rows, f.mi.mi_cols);
+        let ms = usize::from(tables::NUM_8X8_WIDE[usize::from(bsize)]) / 2;
+        let mut whole_allowed = mi_row + ms < mi_rows && mi_col + ms < mi_cols;
+        let mut do_split = bsize > BLOCK_8X8;
+        if whole_allowed
+            && do_split
+            && let Some((verdict, score)) = mlpart::predict(
+                &f.src.planes[0],
+                &self.learned.est_pred,
+                mi_row,
+                mi_col,
+                bsize,
+                self.learned.dc_q,
+            )
+        {
+            #[cfg(test)]
+            crate::enc::trace::line(|| format!("Q {mi_row} {mi_col} bs={bsize} score={score}"));
+            #[cfg(not(test))]
+            let _ = score;
+            match verdict {
+                mlpart::Verdict::Whole => do_split = false,
+                mlpart::Verdict::Split => whole_allowed = false,
+                mlpart::Verdict::Both => {}
+            }
+        }
+        let rd = |rdmult: i32, rate: i32, dist: i64| rdcost(rdmult, RDDIV_BITS, rate, dist);
+        let mut best = SearchCost {
+            rate: i32::MAX,
+            dist: i64::MAX,
+            rdcost: best_rd,
+        };
+        node.chosen = None;
+        if whole_allowed {
+            // ctx->pred_pixel_ready: a block that will not be searched in
+            // quarters keeps its winner's prediction (see search_candidate).
+            let candidate = self.search_candidate(f, mi_row, mi_col, bsize, !do_split);
+            node.whole = Some(candidate);
+            let p = candidate.picked;
+            if p.rate != i32::MAX {
+                let pl = f.partition_context(mi_row, mi_col, bsize);
+                let rate = p.rate + self.learned.partition_cost[pl][usize::from(PARTITION_NONE)];
+                let this = SearchCost {
+                    rate,
+                    dist: p.dist,
+                    rdcost: rd(self.learned.rdmult, rate, p.dist),
+                };
+                if this.rdcost < best.rdcost {
+                    best = this;
+                    node.chosen = Some(PARTITION_NONE);
+                }
+            }
+        }
+        // store_pred_mv: what the quarters each start from.
+        let pred_mv = self.sb.pred_mv;
+        if do_split {
+            let pl = f.partition_context(mi_row, mi_col, bsize);
+            let rate = self.learned.partition_cost[pl][usize::from(PARTITION_SPLIT)];
+            let mut sum = SearchCost {
+                rate,
+                dist: 0,
+                rdcost: rd(self.learned.rdmult, rate, 0),
+            };
+            let subsize = tables::SUBSIZE[usize::from(PARTITION_SPLIT)][usize::from(bsize)];
+            node.quarters = (0..4).map(|_| SearchNode::default()).collect();
+            for (i, quarter) in node.quarters.iter_mut().enumerate() {
+                if sum.rdcost >= best.rdcost {
+                    break;
+                }
+                let (r, c) = (mi_row + (i >> 1) * ms, mi_col + (i & 1) * ms);
+                if r >= mi_rows || c >= mi_cols {
+                    continue;
+                }
+                // load_pred_mv.
+                self.sb.pred_mv = pred_mv;
+                match self.pick_partition(f, r, c, subsize, best.rdcost - sum.rdcost, quarter) {
+                    None => {
+                        sum = SearchCost {
+                            rate: i32::MAX,
+                            dist: i64::MAX,
+                            rdcost: i64::MAX,
+                        };
+                    }
+                    Some(this) => {
+                        sum.rate += this.rate;
+                        sum.dist += this.dist;
+                        sum.rdcost += this.rdcost;
+                    }
+                }
+            }
+            if sum.rdcost < best.rdcost {
+                best = sum;
+                node.chosen = Some(PARTITION_SPLIT);
+            }
+        }
+        if best.rate == i32::MAX {
+            #[cfg(test)]
+            crate::enc::trace::line(|| format!("X {mi_row} {mi_col} bs={bsize} none"));
+            return None;
+        }
+        #[cfg(test)]
+        crate::enc::trace::line(|| {
+            format!(
+                "X {mi_row} {mi_col} bs={bsize} part={} rate={} dist={} rd={}",
+                node.chosen.unwrap_or(PARTITION_NONE),
+                best.rate,
+                best.dist,
+                best.rdcost
+            )
+        });
+        // fill_mode_info_sb: kept whole, the block shows its modes, and the
+        // verdict on coding nothing its buffer cell held before -- the mode
+        // search never writes one. Cut, its quarters showed themselves.
+        if node.chosen == Some(PARTITION_NONE)
+            && let Some(whole) = node.whole
+        {
+            let skip = self.state.mi_at(mi_row, mi_col).is_some_and(|m| m.skip);
+            f.show(&whole.picked.modes, mi_row, mi_col, bsize, skip);
+        }
+        Some(best)
+    }
+
+    /// One block tried whole by the partition search: libvpx's
+    /// `nonrd_pick_sb_modes` -- the block's segment as the map has it, its
+    /// modes searched, and libvpx's registers left as the search leaves
+    /// them.
+    ///
+    /// What the search leaves in the reconstruction matters here as it
+    /// never does when each block is coded straight after its search: the
+    /// blocks searched next predict intra from it. libvpx's mode search
+    /// predicts into the reconstruction as this one does, and so leaves the
+    /// last prediction it made -- except where it keeps its predictions
+    /// aside to reuse them (`reuse_inter_pred`, on when `pred_pixel_ready`:
+    /// the block will not be searched in quarters), and then copies its
+    /// winner back if an inter mode won.
+    fn search_candidate(
+        &mut self,
+        f: &mut FrameEncoder<'_>,
+        mi_row: usize,
+        mi_col: usize,
+        bsize: BlockSize,
+        pred_pixel_ready: bool,
+    ) -> Candidate {
+        let (mi_rows, mi_cols) = (f.mi.mi_rows, f.mi.mi_cols);
+        let segment_id = if f.seg.enabled {
+            get_segment_id(&self.cr.seg_map, bsize, mi_row, mi_col, mi_rows, mi_cols)
+        } else {
+            0
+        };
+        let picked = pickinter::pick_inter_mode(
+            f,
+            &self.search,
+            &mut self.sb,
+            &mut self.state.thresh_freq_fact[usize::from(bsize)],
+            mi_row,
+            mi_col,
+            bsize,
+            segment_id,
+        );
+        let modes = picked.modes;
+        let mv = modes.inter.map_or(Mv::INVALID, |i| i.mv);
+        #[cfg(test)]
+        crate::enc::trace::line(|| {
+            let (r, filt) = modes
+                .inter
+                .map_or((0, 3), |i| (i.ref_frame, i.interp_filter));
+            format!(
+                "B {mi_row} {mi_col} bs={bsize} seg={segment_id} m={} r={r} mv={},{} f={filt} tx={} sk={} skt={} rate={} dist={}",
+                modes.mode,
+                mv.row,
+                mv.col,
+                modes.tx_size,
+                u8::from(modes.skip),
+                picked.skip_txfm,
+                picked.rate,
+                picked.dist
+            )
+        });
+        if pred_pixel_ready && let Some(inter) = modes.inter {
+            let mi = ModeInfo {
+                sb_type: bsize,
+                ref_frame: [inter.ref_frame, crate::common::NO_REF_FRAME],
+                mv: [inter.mv, Mv::ZERO],
+                interp_filter: inter.interp_filter,
+                ..ModeInfo::default()
+            };
+            f.predict_inter(mi_row, mi_col, bsize, &mi, 0..1);
+        }
+        if let Some(m) = self.state.mi_at(mi_row, mi_col) {
+            m.sb_type = bsize;
+            m.mv = mv;
+        }
+        self.learned.x_skip = modes.skip;
+        self.learned.rdmult = if self.settings.cyclic_refresh && segment_boosted(segment_id) {
+            self.search.cr_rdmult
+        } else {
+            self.search.rdmult
+        };
+        Candidate { picked }
+    }
+
+    /// A block of the learned partitioning, coded: what the search kept
+    /// for it, its segment settled by the cyclic refresh as libvpx's
+    /// `update_state_rt` settles it -- with `x->skip` as the block before it
+    /// left it.
+    fn searched_block(
+        &mut self,
+        f: &mut FrameEncoder<'_>,
+        mi_row: usize,
+        mi_col: usize,
+        bsize: BlockSize,
+    ) -> BlockModes {
+        let (mi_rows, mi_cols) = (f.mi.mi_rows, f.mi.mi_cols);
+        let Some(candidate) = self
+            .learned
+            .leaves
+            .iter()
+            .find(|l| l.0 == mi_row && l.1 == mi_col && l.2 == bsize)
+            .map(|l| l.3)
+        else {
+            debug_assert!(
+                false,
+                "the coding asked for a block the search did not keep"
+            );
+            return self.block(f, mi_row, mi_col, bsize);
+        };
+        let picked = candidate.picked;
+        let mut modes = picked.modes;
+        let mv = modes.inter.map_or(Mv::INVALID, |i| i.mv);
+        if f.seg.enabled && self.settings.cyclic_refresh {
+            let use_skin = self.settings.use_skin_detection;
+            let src = f.src;
+            let mut is_skin = || {
+                use_skin && {
+                    let (y, u, v) = (&src.planes[0], &src.planes[1], &src.planes[2]);
+                    let (x0, y0) = (mi_col * 8, mi_row * 8);
+                    let bw = 4usize << tables::B_WIDTH_LOG2[usize::from(bsize)];
+                    let bh = 4usize << tables::B_HEIGHT_LOG2[usize::from(bsize)];
+                    content::skin_block(
+                        y.data.get(y0 * y.stride + x0..).unwrap_or(&[]),
+                        y.stride,
+                        u.data
+                            .get((y0 >> 1) * u.stride + (x0 >> 1)..)
+                            .unwrap_or(&[]),
+                        v.data
+                            .get((y0 >> 1) * v.stride + (x0 >> 1)..)
+                            .unwrap_or(&[]),
+                        u.stride,
+                        bw,
+                        bh,
+                        0,
+                    )
+                }
+            };
+            modes.segment_id = self.cr.update_segment(
+                modes.segment_id,
+                modes.inter.is_some(),
+                mv,
+                i64::from(picked.rate),
+                picked.dist,
+                self.learned.x_skip,
+                bsize,
+                mi_row,
+                mi_col,
+                mi_rows,
+                mi_cols,
+                &mut is_skin,
+            );
+            #[cfg(test)]
+            crate::enc::trace::line(|| format!("U {mi_row} {mi_col} seg={}", modes.segment_id));
+        }
+        self.learned.x_skip = picked.modes.skip;
+        if let Some(m) = self.state.mi_at(mi_row, mi_col) {
+            m.sb_type = bsize;
+            m.mv = mv;
+        }
+        modes
     }
 
     /// The copy of the last frame's partition, if libvpx copies here:
@@ -595,10 +1164,8 @@ impl InterDecisions<'_> {
         let y_sad_last = y_sad;
         self.sb.pred_mv[1] = Some(sb_mv);
         if let Some(m) = self.state.mi_at(mi_row, mi_col) {
-            *m = StaleMi {
-                sb_type: BLOCK_64X64,
-                mv: sb_mv,
-            };
+            m.sb_type = BLOCK_64X64;
+            m.mv = sb_mv;
         }
         // The superblock predicted from the last frame, every plane.
         let mi = ModeInfo {
@@ -810,7 +1377,8 @@ impl InterDecisions<'_> {
             crate::enc::trace::line(|| format!("U {mi_row} {mi_col} seg={}", modes.segment_id));
         }
         if let Some(m) = self.state.mi_at(mi_row, mi_col) {
-            *m = StaleMi { sb_type: bsize, mv };
+            m.sb_type = bsize;
+            m.mv = mv;
         }
         modes
     }

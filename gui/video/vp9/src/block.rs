@@ -252,6 +252,11 @@ impl MiGrid {
             .map(|i| i as usize)
     }
 
+    /// Mark `n` cells of `row` from `col` as covered by no block.
+    pub(crate) fn uncover(&mut self, row: usize, col: usize, n: usize) {
+        self.cover(row, col, n, NO_BLOCK);
+    }
+
     /// Record `block` as covering `n` cells of `row` from `col`.
     pub(crate) fn cover(&mut self, row: usize, col: usize, n: usize, block: u32) {
         if let Some(cells) = self

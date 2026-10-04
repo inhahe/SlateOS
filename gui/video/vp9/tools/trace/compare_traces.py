@@ -6,11 +6,13 @@ Usage: python compare_traces.py libvpx.trace rust.trace [--context N] [--all N]
 
 Walks both traces line by line and reports the first line that differs,
 with the frame and superblock it falls in and the lines before it. Values
-written as floats (`lca=`) are compared as numbers, since C's %.17g and
-Rust's shortest round-trip form spell the same double differently.
+written as floats are compared as numbers -- `lca=` as doubles, `score=` as
+single-precision floats -- since C's printf and Rust's shortest round-trip
+form spell the same value differently.
 With --all N, lists the first N differing lines (after the first, later
 differences are usually consequences).
 """
+import struct
 import sys
 
 
@@ -20,6 +22,13 @@ def norm(line):
         if tok.startswith("lca="):
             try:
                 tok = "lca=" + repr(float(tok[4:]))
+            except ValueError:
+                pass
+        elif tok.startswith("score="):
+            # A single-precision score: C's %.9g and Rust's shortest form
+            # spell the same float differently.
+            try:
+                tok = "score=" + struct.pack("<f", float(tok[6:])).hex()
             except ValueError:
                 pass
         out.append(tok)
@@ -56,7 +65,7 @@ def main():
     for n, (a, b) in enumerate(zip(ref, got)):
         if a.startswith("F "):
             frame = a
-        if a.startswith("S "):
+        if a.startswith("S ") or a.startswith("G "):
             sb = a
         if norm(a) != norm(b):
             print(f"first difference at line {n + 1}")

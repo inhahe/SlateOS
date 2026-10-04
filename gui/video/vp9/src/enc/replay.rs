@@ -175,12 +175,25 @@ impl Reference {
         Self::load(input, "rt8cut.ivf", config)
     }
 
-    /// The one `VP9_TRACE_INPUT` names: `rt8` (the default) or `rt8cut`.
+    /// The third, `rt8small.ivf`: 350x286, small enough for libvpx's
+    /// learned partitioning (`common::small_reference_input`).
+    fn third() -> Self {
+        let input = common::small_reference_input(shown)
+            .expect("the full suite is not fetched: python gui/video/vp9/tools/fetch_vectors.py");
+        let (w, h) = (common::SMALL_WIDTH, common::SMALL_HEIGHT);
+        let config =
+            EncoderConfig::realtime(u32::try_from(w).unwrap(), u32::try_from(h).unwrap(), 200);
+        Self::load(input, "rt8small.ivf", config)
+    }
+
+    /// The one `VP9_TRACE_INPUT` names: `rt8` (the default), `rt8cut` or
+    /// `rt8small`.
     fn from_env() -> Self {
         match std::env::var("VP9_TRACE_INPUT").as_deref() {
             Ok("rt8cut") => Self::second(),
+            Ok("rt8small") => Self::third(),
             Ok("rt8") | Err(_) => Self::first(),
-            Ok(other) => panic!("VP9_TRACE_INPUT={other}: rt8 or rt8cut"),
+            Ok(other) => panic!("VP9_TRACE_INPUT={other}: rt8, rt8cut or rt8small"),
         }
     }
 }
@@ -281,4 +294,11 @@ fn libvpxs_decisions_give_libvpxs_frames() {
 #[ignore = "needs the full vector suite: python gui/video/vp9/tools/fetch_vectors.py"]
 fn libvpxs_decisions_give_libvpxs_frames_through_cuts_noise_and_edges() {
     replay(&Reference::second());
+}
+
+/// The same for the third, partitioned by libvpx's learned search.
+#[test]
+#[ignore = "needs the full vector suite: python gui/video/vp9/tools/fetch_vectors.py"]
+fn libvpxs_decisions_give_libvpxs_frames_when_partitioned_by_search() {
+    replay(&Reference::third());
 }

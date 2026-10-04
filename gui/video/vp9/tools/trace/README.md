@@ -26,6 +26,9 @@ reports the first line that differs, with the frame and superblock it is in.
 | `B` | once a block, after its search | what was picked |
 | `U` | once a block, under cyclic refresh | the segment it ended in |
 | `E` | once a frame, after it is coded | its size, the refreshed segments' counts, golden refresh, low motion, buffer level |
+| `G` | once a superblock (frames partitioned by search) | the content state, and the vector the superblock's prediction is estimated at |
+| `Q` | per network prediction (the same) | the block and the network's score |
+| `X` | per block the partition search finished (the same) | what it kept -- whole (`part=0`) or cut (`part=3`) -- and at what cost, or `none` |
 
 libvpx also logs its key frames' superblocks; the port does not, since a key
 frame's decisions are proved by its bytes. The comparer drops them.
@@ -46,8 +49,8 @@ Encode the reference input with the command in
 byte for byte (`cmp`): the trace statements only print.
 
 Then the port's trace, from `gui/video/vp9`. `VP9_TRACE_INPUT` picks the
-reference -- `rt8` (the default) or `rt8cut` -- and `VP9_TRACE_FRAMES=N`
-stops after N frames:
+reference -- `rt8` (the default), `rt8cut` or `rt8small` -- and
+`VP9_TRACE_FRAMES=N` stops after N frames:
 
     VP9_TRACE=rust.trace cargo test --release --target x86_64-pc-windows-gnu \
       -p vp9 --lib own_decisions_traced -- --ignored
@@ -56,5 +59,5 @@ and compare:
 
     python tools/trace/compare_traces.py libvpx.trace rust.trace --context 20
 
-The two traces are identical on both references: 365,835 lines on
-`rt8.ivf`, 867,893 on `rt8cut.ivf`.
+The two traces are identical on all three references: 365,835 lines on
+`rt8.ivf`, 867,893 on `rt8cut.ivf`, 152,823 on `rt8small.ivf`.

@@ -22,6 +22,8 @@
 //! - `pickmode`: the realtime mode search's measures, and a key frame's.
 //! - `pickinter`: the realtime mode search of an inter frame's block.
 //! - `nonrd`: libvpx's realtime decisions, as a `Decide`.
+//! - `glibcmath`: the C library's `logf` as the reference encodes computed it.
+//! - `mlpart`: the network that trims small pictures' partition search.
 
 pub(crate) mod aq_cyclicrefresh;
 pub(crate) mod bitstream;
@@ -32,7 +34,9 @@ pub(crate) mod encodeframe;
 pub(crate) mod encodemv;
 pub(crate) mod encoder;
 pub(crate) mod fdct;
+pub(crate) mod glibcmath;
 pub(crate) mod mcomp;
+pub(crate) mod mlpart;
 pub(crate) mod nonrd;
 pub(crate) mod partition;
 pub(crate) mod pickinter;

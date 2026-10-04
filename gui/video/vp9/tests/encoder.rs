@@ -254,18 +254,60 @@ fn frames_match_vpxenc_through_cuts_noise_and_edges() {
     }
 }
 
-/// Write the second reference's input, raw I420, to the file `VP9_WRITE_INPUT`
-/// names: what `vpxenc` is given to make `rt8cut.ivf`. A tool rather than a
-/// test, so it does nothing unless asked: a run of every ignored test passes
-/// through it.
+/// The MD5 of the third reference's input, as `vpxenc` was given it.
+const SMALL_INPUT_MD5: &str = "e75fb192ba8ab28ad9fde1224898daed";
+
+/// libvpx's third reference encode (`tests/data/encoder/README.md`): 90
+/// pictures of 350x286, small enough that libvpx partitions its inter frames
+/// by its learned search. The encoder's frames must be byte-identical to it.
 #[test]
-#[ignore = "a tool for remaking the reference: VP9_WRITE_INPUT=path"]
+#[ignore = "needs the full vector suite: python gui/video/vp9/tools/fetch_vectors.py"]
+fn frames_match_vpxenc_when_partitioned_by_search() {
+    let input = common::small_reference_input(shown)
+        .expect("the full suite is not fetched: python gui/video/vp9/tools/fetch_vectors.py");
+    let mut md5 = md5::Md5::new();
+    for p in &input {
+        md5.update(&p.raw());
+    }
+    assert_eq!(
+        md5::hex(&md5.finalize()).to_string(),
+        SMALL_INPUT_MD5,
+        "the input is not what vpxenc was given"
+    );
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/encoder/rt8small.ivf");
+    let reference = common::read_ivf(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!((input.len(), reference.packets.len()), (90, 90));
+    let (w, h) = (common::SMALL_WIDTH, common::SMALL_HEIGHT);
+    let mut encoder = Encoder::new(EncoderConfig::realtime(w as u32, h as u32, 200)).unwrap();
+    for (i, (picture, want)) in input.iter().zip(&reference.packets).enumerate() {
+        let got = encoder.encode(views(picture)).unwrap();
+        let first = got.iter().zip(want.iter()).position(|(a, b)| a != b);
+        assert!(
+            &got == want,
+            "frame {i}: {} bytes against libvpx's {}, first difference at byte {first:?}",
+            got.len(),
+            want.len()
+        );
+    }
+}
+
+/// Write a reference's input, raw I420, to the file `VP9_WRITE_INPUT` names:
+/// what `vpxenc` is given to make `rt8cut.ivf`, or with `VP9_WRITE_WHICH=small`
+/// `rt8small.ivf`. A tool rather than a test, so it does nothing unless
+/// asked: a run of every ignored test passes through it.
+#[test]
+#[ignore = "a tool for remaking the references: VP9_WRITE_INPUT=path"]
 fn write_cut_reference_input() {
     let Ok(out) = std::env::var("VP9_WRITE_INPUT") else {
         eprintln!("VP9_WRITE_INPUT is not set: nothing written");
         return;
     };
-    let input = common::cut_reference_input(shown).expect("the full suite is not fetched");
+    let input = if std::env::var("VP9_WRITE_WHICH").as_deref() == Ok("small") {
+        common::small_reference_input(shown)
+    } else {
+        common::cut_reference_input(shown)
+    }
+    .expect("the full suite is not fetched");
     let raw: Vec<u8> = input.iter().flat_map(common::I420::raw).collect();
     std::fs::write(out, raw).unwrap();
 }

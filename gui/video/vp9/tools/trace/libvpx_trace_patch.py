@@ -171,6 +171,53 @@ patch(ENC_FRAME, [
      "  if (cpi->oxcf.aq_mode == PERCEPTUAL_AQ) build_kmeans_segmentation(cpi);\n"),
 ])
 
+# The learned partitioning (speed 8 at 352x288 and below): the estimated
+# prediction each superblock is judged against, every network prediction,
+# and each level's decision.
+patch(ENC_FRAME, [
+    ("      y_sad = vp9_int_pro_motion_estimation(cpi, x, bsize, mi_row, mi_col,\n"
+     "                                            &dummy_mv);\n"
+     "      x->sb_use_mv_part = 1;\n"
+     "      x->sb_mvcol_part = mi->mv[0].as_mv.col;\n"
+     "      x->sb_mvrow_part = mi->mv[0].as_mv.row;\n"
+     "    }\n",
+     "      y_sad = vp9_int_pro_motion_estimation(cpi, x, bsize, mi_row, mi_col,\n"
+     "                                            &dummy_mv);\n"
+     "      x->sb_use_mv_part = 1;\n"
+     "      x->sb_mvcol_part = mi->mv[0].as_mv.col;\n"
+     "      x->sb_mvrow_part = mi->mv[0].as_mv.row;\n"
+     "      VP9T(\"G %d %d cs=%d ysad=%u mv=%d,%d\\n\", mi_row, mi_col,\n"
+     "           (int)x->content_state_sb, y_sad, mi->mv[0].as_mv.row,\n"
+     "           mi->mv[0].as_mv.col);\n"
+     "    }\n"),
+    ("    nn_predict(features, nn_config, score);\n"
+     "    if (score[0] > thresh) return PARTITION_SPLIT;\n",
+     "    nn_predict(features, nn_config, score);\n"
+     "    VP9T(\"Q %d %d bs=%d score=%.9g\\n\", mi_row, mi_col, bsize,\n"
+     "         (double)score[0]);\n"
+     "    if (score[0] > thresh) return PARTITION_SPLIT;\n"),
+    ("  *rd_cost = best_rdc;\n"
+     "\n"
+     "  if (best_rdc.rate == INT_MAX) {\n"
+     "    vp9_rd_cost_reset(rd_cost);\n"
+     "    return;\n"
+     "  }\n"
+     "\n"
+     "  // update mode info array\n",
+     "  *rd_cost = best_rdc;\n"
+     "\n"
+     "  if (best_rdc.rate == INT_MAX) {\n"
+     "    VP9T(\"X %d %d bs=%d none\\n\", mi_row, mi_col, bsize);\n"
+     "    vp9_rd_cost_reset(rd_cost);\n"
+     "    return;\n"
+     "  }\n"
+     "  VP9T(\"X %d %d bs=%d part=%d rate=%d dist=%lld rd=%lld\\n\", mi_row, mi_col,\n"
+     "       bsize, pc_tree->partitioning, best_rdc.rate, (long long)best_rdc.dist,\n"
+     "       (long long)best_rdc.rdcost);\n"
+     "\n"
+     "  // update mode info array\n"),
+])
+
 PICKMODE = "vp9/encoder/vp9_pickmode.c"
 patch(PICKMODE, [
     ("#include \"vp9/encoder/vp9_rd.h\"\n",

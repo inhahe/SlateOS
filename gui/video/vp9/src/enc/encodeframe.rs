@@ -137,6 +137,13 @@ pub(crate) trait Decide {
         mi_col: usize,
         bsize: BlockSize,
     ) -> BlockModes;
+
+    /// Block `bsize` at (`mi_row`, `mi_col`) has been coded, `skip` if it
+    /// codes no coefficients: for a decider that keeps what libvpx's
+    /// mode-information buffers hold, which its later decisions read.
+    fn encoded(&mut self, mi_row: usize, mi_col: usize, bsize: BlockSize, skip: bool) {
+        let _ = (mi_row, mi_col, bsize, skip);
+    }
 }
 
 /// Where a block is, as libvpx's `MACROBLOCKD` describes it: its size in
@@ -1067,6 +1074,67 @@ impl<'a> FrameEncoder<'a> {
 
         if let Some(tokens) = self.tile_tokens.get_mut(self.tile_index) {
             tokens.push(TokenExtra::END_OF_BLOCK_TOKENS);
+        }
+        d.encoded(mi_row, mi_col, bsize, mi.skip);
+    }
+
+    /// The partition context of the square block `bsize` at (`mi_row`,
+    /// `mi_col`) as the blocks coded so far leave it: libvpx's
+    /// `partition_plane_context`, which a partition search reads while its
+    /// own superblock is still uncoded.
+    pub(crate) fn partition_context(
+        &self,
+        mi_row: usize,
+        mi_col: usize,
+        bsize: BlockSize,
+    ) -> usize {
+        self.partition_ctx.context(mi_row, mi_col, bsize)
+    }
+
+    /// Where the coded blocks end, for [`Self::forget_shown`].
+    pub(crate) fn shown_mark(&self) -> usize {
+        self.mi.blocks.len()
+    }
+
+    /// Show `modes` as block `bsize` at (`mi_row`, `mi_col`), with `skip`,
+    /// to every block looked at after it -- a search's choice for an area
+    /// it has finished, which the blocks it goes on to search take as their
+    /// neighbours, as libvpx's mode-information grid shows them
+    /// (`fill_mode_info_sb`). Nothing is coded or counted, and
+    /// [`Self::forget_shown`] takes it back.
+    pub(crate) fn show(
+        &mut self,
+        modes: &BlockModes,
+        mi_row: usize,
+        mi_col: usize,
+        bsize: BlockSize,
+        skip: bool,
+    ) {
+        let (mut mi, ext) = self.mode_info(modes, mi_row, mi_col, bsize);
+        mi.skip = skip;
+        let (mi_cols, mi_rows) = (self.mi.mi_cols, self.mi.mi_rows);
+        let x_mis = mi.bw.min(mi_cols.saturating_sub(mi_col));
+        let y_mis = mi.bh.min(mi_rows.saturating_sub(mi_row));
+        let Ok(idx) = u32::try_from(self.mi.blocks.len()) else {
+            return;
+        };
+        self.mi.blocks.push(mi);
+        self.ext.push(ext);
+        for y in 0..y_mis {
+            self.mi.cover(mi_row + y, mi_col, x_mis, idx);
+        }
+    }
+
+    /// Forget every block shown since `mark`, and every cell of the
+    /// superblock at (`mi_row`, `mi_col`): what a search showed is not what
+    /// is coded, which follows.
+    pub(crate) fn forget_shown(&mut self, mark: usize, mi_row: usize, mi_col: usize) {
+        self.mi.blocks.truncate(mark);
+        self.ext.truncate(mark);
+        let (mi_cols, mi_rows) = (self.mi.mi_cols, self.mi.mi_rows);
+        let n = mi_cols.saturating_sub(mi_col).min(8);
+        for row in mi_row..(mi_row + 8).min(mi_rows) {
+            self.mi.uncover(row, mi_col, n);
         }
     }
 

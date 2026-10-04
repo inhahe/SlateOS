@@ -251,6 +251,11 @@ pub(crate) struct SearchFrame<'a> {
     /// How far a mode's threshold may rise while it keeps losing (libvpx's
     /// `sf->adaptive_rd_thresh`): [`speed8_adaptive_rd_thresh`].
     pub adaptive_rd_thresh: i32,
+    /// libvpx's `x->max_partition_size`: a block smaller than it also
+    /// tries the vector its last search found as a start (`vp9_mv_pred`).
+    /// The variance partitioning leaves the speed's default, 32x32; the
+    /// learned partitioning sets 64x64 before each superblock.
+    pub max_partition_size: BlockSize,
     pub base_qindex: i32,
     pub frame_width: u32,
     pub frame_height: u32,
@@ -878,7 +883,7 @@ pub(crate) fn pick_inter_mode(
                 w: b.bw,
                 h: b.bh,
             };
-            let consider_pred_mv = bsize < BLOCK_32X32;
+            let consider_pred_mv = bsize < s.max_partition_size;
             let (idx, _max_mv, sad) =
                 mcomp::mv_pred(&search, ref_mvs[ri], b.sb.pred_mv[ri], consider_pred_mv);
             mv_best_ref_index[ri] = idx;

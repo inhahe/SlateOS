@@ -471,3 +471,39 @@ pub fn cut_reference_input(shown: impl Fn(&str, usize) -> Option<Vec<I420>>) -> 
     assert_eq!(out.len(), 150);
     Some(out)
 }
+
+/// The third reference encode's picture size (`tests/data/encoder/README.md`):
+/// 352x288 or fewer pixels, where libvpx's speed 8 partitions inter frames
+/// by its learned search, and not a whole number of 8x8 cells either way.
+pub const SMALL_WIDTH: usize = 350;
+pub const SMALL_HEIGHT: usize = 286;
+
+/// The third reference encode's input (`tests/data/encoder/README.md`): 90
+/// pictures of [`SMALL_WIDTH`] x [`SMALL_HEIGHT`] --
+///
+/// - 0-49: a window on `vp90-2-22-svc_1280x720_1.webm` (its pictures 0 to
+///   49): two people talking, across the golden refresh at picture 40;
+/// - 50-74: a window on `vp90-2-02-size-lf-1920x1080.webm` (pictures 0 to
+///   24), leaves against a sky: a scene cut;
+/// - 75-89: the first vector again (pictures 50 to 64), fading to black.
+///
+/// `shown` as for [`cut_reference_input`].
+pub fn small_reference_input(
+    shown: impl Fn(&str, usize) -> Option<Vec<I420>>,
+) -> Option<Vec<I420>> {
+    let talk = shown("vp90-2-22-svc_1280x720_1.webm", 65)?;
+    let trees = shown("vp90-2-02-size-lf-1920x1080.webm", 25)?;
+    let (w, h) = (SMALL_WIDTH, SMALL_HEIGHT);
+    let mut out: Vec<I420> = talk[..50]
+        .iter()
+        .map(|p| p.window(464, 216, w, h))
+        .collect();
+    out.extend(trees.iter().map(|p| p.window(784, 396, w, h)));
+    for (k, p) in (0i32..).zip(&talk[50..65]) {
+        let mut p = p.window(464, 216, w, h);
+        fade(&mut p, 15 - k, 15);
+        out.push(p);
+    }
+    assert_eq!(out.len(), 90);
+    Some(out)
+}

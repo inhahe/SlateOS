@@ -285,6 +285,63 @@ MUTATIONS = [
     ),
 ]
 
+FIELD = 'the_query_box_is_the_toolkits_field'
+ALTGR = 'altgr_types_into_the_query_and_a_command_does_not'
+CARET = 'the_caret_follows_the_query_in_its_box'
+
+MUTATIONS += [
+    # The query's box is the toolkit's field, with a caret, and takes what
+    # AltGr types (2026-10-04; lane C, c-e-a-theme-can-shape-the-controls).
+    (
+        'the box never lights',
+        '            hovered: open && self.hover == Some(Target::SearchBox),\n',
+        '            hovered: false,\n',
+        [FIELD],
+    ),
+    (
+        'the box never has the keyboard',
+        '            focused: open,\n',
+        '            focused: false,\n',
+        [FIELD],
+    ),
+    (
+        'the box shows through the card',
+        '        let open = !self.show_help && !self.picker.is_open();\n        field::State {\n',
+        '        let open = !self.picker.is_open();\n        field::State {\n',
+        [FIELD],
+    ),
+    (
+        'a query that finds nothing is not red',
+        '                && self.results.is_empty()\n                && self.content.is_none(),\n',
+        '                && false,\n',
+        [FIELD],
+    ),
+    (
+        'the focus mark is the toolkit\'s width, not the user\'s',
+        '        self.focus_ring_width = settings.focus_ring_width();\n',
+        '        let _ = settings;\n',
+        [FIELD],
+    ),
+    (
+        'the caret is at the start of the query',
+        '                cursor: guitk::text::TextCursor::from(self.criteria.query.len()),\n',
+        '                cursor: guitk::text::TextCursor::from(0),\n',
+        [CARET],
+    ),
+    (
+        'AltGr+S sorts',
+        '        let ctrl = textline::is_ctrl_chord(key.modifiers);\n',
+        '        let ctrl = key.modifiers.ctrl;\n',
+        [ALTGR],
+    ),
+    (
+        'a command\'s letter is typed',
+        '                if !textline::types_into_field(key) {\n',
+        '                if !key.types_text() {\n',
+        [ALTGR],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "filesearch", timeout=600, only=only))

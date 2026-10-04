@@ -1441,10 +1441,12 @@ enum FilterRowKind {
 // ─── Application ─────────────────────────────────────────────────────
 
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::field;
 use guitk::frame::{Frame, Rect};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
+use guitk::textedit;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
@@ -1586,6 +1588,10 @@ pub struct FileSearchApp {
     pub root: Option<std::path::PathBuf>,
     /// What the pointer is over, so it can be drawn lit and named.
     hover: Option<Target>,
+    /// How wide the mark is round the query's box while it has the keyboard:
+    /// the user's focus width (`App::appearance_changed`), the toolkit's
+    /// until it is known.
+    focus_ring_width: f32,
     /// Every box the last paint recorded; see [`FileSearchApp::target_at`].
     last_hits: Vec<(Target, Rect)>,
     /// The wheel's remainder over the results, so a trackpad's fractions add
@@ -1636,6 +1642,7 @@ impl FileSearchApp {
             filters_scroll: 0.0,
             root: None,
             hover: None,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             last_hits: Vec::new(),
             results_wheel: wheel::Accumulator::default(),
             unreadable_saved: Vec::new(),
@@ -1690,6 +1697,23 @@ impl FileSearchApp {
         // A new answer starts at its top.
         self.selected_result = None;
         self.results_scroll = 0;
+    }
+
+    /// How the query's box is drawn now: it has the keyboard whenever
+    /// nothing covers it -- every key that types goes to it -- and neither
+    /// that nor the light under the pointer while the shortcut card or the
+    /// folder picker is over it; red while a query has found nothing, once
+    /// any search of the files' contents has finished.
+    fn query_box_state(&self) -> field::State {
+        let open = !self.show_help && !self.picker.is_open();
+        field::State {
+            hovered: open && self.hover == Some(Target::SearchBox),
+            focused: open,
+            disabled: false,
+            invalid: !self.criteria.query.trim().is_empty()
+                && self.results.is_empty()
+                && self.content.is_none(),
+        }
     }
 
     /// Start reading the files the filters leave for the query.
@@ -2012,7 +2036,10 @@ impl FileSearchApp {
         if let Some(answered) = self.handle_key_help_card(key) {
             return answered;
         }
-        let ctrl = key.modifiers.ctrl;
+        // Ctrl alone: Ctrl+Alt is AltGr, which types -- Polish `ś` is
+        // AltGr+S, which sorted by size -- and the Windows key's chords are
+        // the desktop's.
+        let ctrl = textline::is_ctrl_chord(key.modifiers);
         match key.key {
             Key::Up => self.step_selection(-1),
             Key::Down => self.step_selection(1),
@@ -2104,11 +2131,14 @@ impl FileSearchApp {
                 self.criteria.include_directories = !self.criteria.include_directories;
                 self.rerun_with_filters()
             }
+            // What a key typed, AltGr's among it -- refused with every Ctrl
+            // key once, so German `@` could not be typed -- and not a
+            // command's letter: Alt+X typed an `x`, and Windows+E an `e`.
             _ => {
-                if key.text.is_empty() || ctrl {
+                if !textline::types_into_field(key) {
                     return EventResult::Ignored;
                 }
-                self.criteria.query.push_str(&key.text);
+                self.criteria.query.extend(key.typed());
                 self.execute_search();
                 EventResult::Consumed
             }
@@ -2340,42 +2370,62 @@ impl FileSearchApp {
             overflow: TextOverflow::Ellipsis,
         });
 
-        // Search input
+        // Search input: the toolkit's field. Every key that types goes to it,
+        // so it has the keyboard whenever nothing covers it.
         let search = search_box_rect(width);
-        self.palette.push_surface(
-            f,
-            search.x,
-            search.y,
-            search.w,
-            search.h,
-            6.0,
-            Surface::Card,
-        );
+        let state = self.query_box_state();
+        field::draw(f, &self.palette, search, state, self.focus_ring_width);
         f.hit(Target::SearchBox, search);
-
-        let search_text = if self.criteria.query.is_empty() {
-            "Search files...  ext:pdf or in:Documents narrow it".to_string()
-        } else {
-            self.criteria.query.clone()
-        };
-        f.push(RenderCommand::Text {
-            x: search.x + 12.0,
-            y: 36.0,
-            text: search_text,
-            font_size: 13.0,
-            color: if self.criteria.query.is_empty() {
-                self.palette.subtext0
-            } else {
-                self.palette.text
-            },
-            font_weight: FontWeightHint::Regular,
-            max_width: Some((search.w - 190.0).max(0.0)),
-            overflow: TextOverflow::Ellipsis,
-        });
 
         // Save this search, then the match mode, both inside the box's right
         // end. The mode was a label; it is the switch Ctrl+R turns now.
         let (save, mode) = search_switch_rects(search);
+
+        // The query, with the caret after it -- scrolled so the end being
+        // typed stays in view -- up to the switches; empty, what it is for.
+        let line = guitk::text::line_height(13.0, FontWeightHint::Regular);
+        let inner = Rect::new(
+            search.x + 12.0,
+            search.y + (search.h - line) / 2.0,
+            (save.x - 8.0 - (search.x + 12.0)).max(0.0),
+            line,
+        );
+        if self.criteria.query.is_empty() {
+            f.push(RenderCommand::Text {
+                x: inner.x,
+                y: inner.y,
+                text: "Search files...  ext:pdf or in:Documents narrow it".to_string(),
+                font_size: 13.0,
+                color: self.palette.subtext0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(inner.w),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+        let mut tree = RenderTree::new();
+        textedit::draw(
+            &mut tree,
+            &textedit::SingleLine {
+                text: &self.criteria.query,
+                // Typed and erased at its end, so the end is where the caret
+                // is.
+                cursor: guitk::text::TextCursor::from(self.criteria.query.len()),
+                selection_anchor: None,
+                focused: state.focused,
+                x: inner.x,
+                y: inner.y,
+                width: inner.w,
+                line_height: line,
+                font_size: 13.0,
+                weight: FontWeightHint::Regular,
+                color: self.palette.text,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+        f.extend(tree.commands);
+
         let saved = self.current_search_is_saved();
         let save_label = if saved { "★ Saved" } else { "☆ Save" };
         self.draw_button(f, save, save_label, Target::SaveSearch);
@@ -3562,6 +3612,10 @@ impl App for FileSearchApp {
         self.palette = *palette;
     }
 
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
+    }
+
     fn title(&self) -> String {
         if self.criteria.query.is_empty() {
             "File Search".to_owned()
@@ -4468,19 +4522,24 @@ mod tests {
         // by analogy with the seven other apps, where the picker IS in that
         // function -- and failed against correct code. The render path is
         // per-app and has to be read off the app.
+        //
+        // Looked for as the picker's own commands, in order, rather than as a
+        // frame that grew by their number: what is under the picker changes
+        // when it comes up -- the query's box gives up its keyboard mark --
+        // so a count says nothing about whether the picker is in the frame.
         let mut app = FileSearchApp::new();
-        let before = app.render(1024.0, 768.0).commands.len();
         app.open_folder_dialog();
         assert!(app.picker.is_open(), "no picker came up");
-        let after = app.render(1024.0, 768.0).commands.len();
-        let own = app.picker.render(&app.palette, 1024.0, 768.0).len();
+        let frame = app.render(1024.0, 768.0).commands;
+        let own = app.picker.render(&app.palette, 1024.0, 768.0);
         assert!(
-            own > 0,
+            !own.is_empty(),
             "the picker itself draws nothing, so this proves nothing"
         );
         assert!(
-            after >= before + own,
-            "the frame does not contain the picker's own {own} command(s) ({before} before, {after} after) -- something else grew instead"
+            frame.windows(own.len()).any(|w| w == own.as_slice()),
+            "the frame does not contain the picker's own {} command(s)",
+            own.len()
         );
     }
 
@@ -6413,5 +6472,209 @@ mod tests {
         );
         // The box still shows what was typed.
         assert_eq!(app.criteria.query, "report ext:pdf in:2025");
+    }
+    // -- The query's box is the toolkit's field (lane C,
+    //    c-e-a-theme-can-shape-the-controls)
+
+    /// The window size these tests draw and point at.
+    const W: f32 = 1280.0;
+    const H: f32 = 800.0;
+
+    /// A key held with `modifiers` that typed `text`.
+    fn key_with(key: Key, text: &str, modifiers: Modifiers) -> Event {
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: text.to_string(),
+        })
+    }
+
+    fn mouse(kind: MouseEventKind, (x, y): (f32, f32)) -> Event {
+        Event::Mouse(MouseEvent { x, y, kind })
+    }
+
+    /// Whether the window, drawn at `W` by `H`, draws exactly the toolkit's
+    /// field for the query's box in `state` -- and, unless `state` has the
+    /// keyboard, not the focused one as well.
+    fn draws_query_box(app: &mut FileSearchApp, p: &Palette, state: field::State) -> bool {
+        let rect = search_box_rect(W);
+        let ring = app.focus_ring_width;
+        let seq = |s: field::State| {
+            let mut v: Vec<RenderCommand> = Vec::new();
+            field::draw(&mut v, p, rect, s, ring);
+            v
+        };
+        let cmds = app.render(W, H).commands;
+        let has = |want: &[RenderCommand]| cmds.windows(want.len()).any(|w| w == want);
+        has(&seq(state))
+            && (state.focused
+                || !has(&seq(field::State {
+                    focused: true,
+                    ..state
+                })))
+    }
+
+    /// **The query's box is the toolkit's field**: it has the keyboard --
+    /// every key that types goes to it -- marked as the theme marks a field
+    /// in the user's width, lit under the pointer and not after it leaves,
+    /// red while a query finds nothing, and neither marked nor lit under the
+    /// shortcut card. It was a card, the same whether it had the keyboard or
+    /// not, with no caret.
+    #[test]
+    fn the_query_box_is_the_toolkits_field() {
+        let mut app = indexed();
+        let mut p = app.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut app, &p);
+        App::appearance_changed(
+            &mut app,
+            &appearance::AppearanceSettings {
+                focus_ring_scale: 2.5,
+                ..Default::default()
+            },
+        );
+        assert!(
+            app.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        let focused = field::State {
+            focused: true,
+            ..field::State::default()
+        };
+        assert!(
+            draws_query_box(&mut app, &p, focused),
+            "the query's box does not have the keyboard"
+        );
+
+        // Over the box's typing, left of its switches.
+        let rect = search_box_rect(W);
+        let at = (rect.x + 40.0, rect.y + rect.h / 2.0);
+        assert_eq!(
+            app.handle_event(&mouse(MouseEventKind::Move, at)),
+            EventResult::Consumed
+        );
+        assert!(
+            draws_query_box(
+                &mut app,
+                &p,
+                field::State {
+                    hovered: true,
+                    ..focused
+                }
+            ),
+            "the pointer does not light the box"
+        );
+        app.handle_event(&mouse(MouseEventKind::Leave, at));
+        assert!(
+            draws_query_box(&mut app, &p, focused),
+            "the light stays after the pointer leaves"
+        );
+
+        for c in "zzzzqqqq".chars() {
+            app.handle_event(&typed(c));
+        }
+        assert!(app.results.is_empty());
+        assert!(
+            draws_query_box(
+                &mut app,
+                &p,
+                field::State {
+                    invalid: true,
+                    ..focused
+                }
+            ),
+            "a query that finds nothing does not turn the box red"
+        );
+
+        app.show_help = true;
+        assert!(
+            draws_query_box(
+                &mut app,
+                &p,
+                field::State {
+                    invalid: true,
+                    ..field::State::default()
+                }
+            ),
+            "the box keeps the keyboard's mark under the shortcut card"
+        );
+    }
+
+    /// **AltGr types into the query, and a command does not.** Every key
+    /// held with Ctrl was refused, and AltGr arrives as Ctrl+Alt: German `@`
+    /// could not be typed, and AltGr+S -- Polish `ś` -- sorted by size. Alt+X
+    /// typed an `x`, and Windows+E an `e`.
+    #[test]
+    fn altgr_types_into_the_query_and_a_command_does_not() {
+        let mut app = indexed();
+        let altgr = Modifiers {
+            ctrl: true,
+            alt: true,
+            ..Modifiers::NONE
+        };
+        let sort = (app.sort_column, app.sort_ascending);
+        app.handle_event(&key_with(Key::S, "\u{15b}", altgr));
+        app.handle_event(&key_with(Key::Q, "@", altgr));
+        assert_eq!(
+            app.criteria.query, "\u{15b}@",
+            "AltGr's letters were not typed"
+        );
+        assert_eq!(
+            (app.sort_column, app.sort_ascending),
+            sort,
+            "AltGr+S sorted the results"
+        );
+        for (k, t, m) in [
+            (
+                Key::X,
+                "x",
+                Modifiers {
+                    alt: true,
+                    ..Modifiers::NONE
+                },
+            ),
+            (Key::K, "k", Modifiers::ctrl()),
+            (
+                Key::E,
+                "e",
+                Modifiers {
+                    super_key: true,
+                    ..Modifiers::NONE
+                },
+            ),
+        ] {
+            app.handle_event(&key_with(k, t, m));
+        }
+        assert_eq!(
+            app.criteria.query, "\u{15b}@",
+            "a command's letter was typed"
+        );
+    }
+
+    /// **The caret is after the query, inside its box and short of the
+    /// switches.**
+    #[test]
+    fn the_caret_follows_the_query_in_its_box() {
+        let mut app = indexed();
+        for c in "report".chars() {
+            app.handle_event(&typed(c));
+        }
+        let cmds = app.render(W, H).commands;
+        let at = cmds
+            .iter()
+            .position(|c| matches!(c, RenderCommand::RichText { text, .. } if text == "report"))
+            .expect("the query is not drawn in its box");
+        let caret = match cmds.get(at + 1) {
+            Some(RenderCommand::Line { x1, x2, .. }) if (x1 - x2).abs() < 0.01 => *x1,
+            other => panic!("no caret after the query: {other:?}"),
+        };
+        let rect = search_box_rect(W);
+        let (save, _) = search_switch_rects(rect);
+        let end = rect.x + 12.0 + guitk::text::measure("report", 13.0, FontWeightHint::Regular);
+        assert!(
+            (caret - end).abs() < 0.5 && caret < save.x,
+            "the caret is at {caret}, not after the query at {end}, short of {save:?}"
+        );
     }
 }

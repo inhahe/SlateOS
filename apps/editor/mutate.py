@@ -180,6 +180,60 @@ INPUT_MUTATIONS = [
     ),
 ]
 
+FIND_BAR = "the_find_bar_takes_the_pointer_and_its_boxes_are_the_toolkits_fields"
+
+# The find bar takes the pointer over itself, and its boxes are the toolkit's
+# fields (2026-10-04; lane C, c-e-a-theme-can-shape-the-controls).
+MAIN_MUTATIONS += [
+    (
+        "a find box never lights",
+        "            hovered: open && self.find_box_under_pointer() == Some(field),\n",
+        "            hovered: false,\n",
+        [FIND_BAR],
+    ),
+    (
+        "both find boxes are marked",
+        "            focused: open && self.find_field == field,\n",
+        "            focused: open,\n",
+        [FIND_BAR],
+    ),
+    (
+        "a find box shows the keys under an open menu",
+        "        self.external_prompt.is_some() || self.question.is_some() || self.menu_bar.is_open()\n",
+        "        self.external_prompt.is_some() || self.question.is_some()\n",
+        [FIND_BAR],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [FIND_BAR],
+    ),
+]
+
+INPUT_MUTATIONS += [
+    (
+        "a change in the find box's light asks for no redraw",
+        "                (self.find_box_under_pointer() != before).then_some(Response::Redraw)\n",
+        "                None\n",
+        [FIND_BAR],
+    ),
+    (
+        "a press on the find bar goes through to the text",
+        "            MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_)\n"
+        "                if self.find_visible && self.find_panel_rect().contains(mouse.x, mouse.y) =>\n",
+        "            MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_)\n"
+        "                if false && self.find_visible =>\n",
+        [FIND_BAR],
+    ),
+    (
+        "a press on a find box gives it no keys",
+        "                    Some(field) if field != self.find_field => {\n",
+        "                    Some(field) if false && field != self.find_field => {\n",
+        [FIND_BAR],
+    ),
+]
+
 if __name__ == "__main__":
     # Each table is given only the filters that name one of its own rows: the
     # harness refuses a filter that selects nothing in its table, so handing

@@ -113,6 +113,16 @@ pub struct EncoderConfig {
     /// four at 1280x720). The encoder's only parallelism: a picture of one
     /// column encodes on one thread.
     pub tile_columns: u8,
+    /// The colour space written into every key frame's header, which tells
+    /// a decoder how to turn the pictures back into RGB: libvpx's
+    /// `vpx_color_space_t` (`vpxenc --color-space`) -- 0 unknown, `vpxenc`'s
+    /// default; 1 BT.601; 2 BT.709; 3 SMPTE 170M; 4 SMPTE 240M; 5 BT.2020.
+    /// Pictures from [`crate::rgb::argb_to_yuv420`] are BT.601
+    /// ([`crate::rgb::COLOR_SPACE`]). Left unknown, a decoder guesses -- and
+    /// players guess BT.709 for pictures 1280 wide or more, shifting their
+    /// colours. sRGB (7) needs 4:4:4, which this encoder does not code, and 6
+    /// is reserved: both are refused.
+    pub color_space: u8,
 }
 
 impl EncoderConfig {
@@ -141,6 +151,7 @@ impl EncoderConfig {
             buffer_optimal_ms: 600,
             keyframe_max_distance: 9999,
             tile_columns: 6,
+            color_space: 0,
         }
     }
 
@@ -192,6 +203,7 @@ impl EncoderConfig {
             error_resilient_mode: false,
             tile_columns: u32::from(self.tile_columns),
             tile_rows: 0,
+            color_space: self.color_space,
         }
     }
 }
@@ -292,8 +304,9 @@ impl Encoder {
     /// # Errors
     ///
     /// [`Error::Unsupported`] if a dimension is 0 or above 65536, the frame
-    /// rate or the timebase has a zero term, the bitrate is zero, or the
-    /// quantiser bounds are out of order or past 63.
+    /// rate or the timebase has a zero term, the bitrate is zero, the
+    /// quantiser bounds are out of order or past 63, or the colour space is
+    /// one this encoder does not code (above 5).
     pub fn new(config: EncoderConfig) -> Result<Self, Error> {
         let max = crate::frame::MAX_DIMENSION;
         if config.width == 0 || config.height == 0 || config.width > max || config.height > max {
@@ -310,6 +323,11 @@ impl Encoder {
         }
         if config.min_quantizer > config.max_quantizer || config.max_quantizer > 63 {
             return Err(Error::Unsupported("the quantiser bounds are out of range"));
+        }
+        if config.color_space > 5 {
+            return Err(Error::Unsupported(
+                "a colour space this encoder does not code (sRGB needs 4:4:4; 6 is reserved)",
+            ));
         }
         Ok(Self::with_oxcf(config.oxcf()))
     }
@@ -643,7 +661,7 @@ impl Encoder {
         let mut h = FrameHeader {
             profile: 0,
             bit_depth: 8,
-            color_space: 0,
+            color_space: cpi.oxcf.color_space,
             full_range: false,
             ss_x: 1,
             ss_y: 1,
@@ -1530,6 +1548,39 @@ mod tests {
         Partition, SEG_LVL_ALT_LF, SEG_LVL_ALT_Q, SEG_LVL_REF_FRAME, SEG_LVL_SKIP, TX_MODE_SELECT,
     };
     use crate::enc::encodeframe::{BlockModes, InterModes};
+
+    /// The colour space the configuration names is the one every key frame
+    /// declares, and so the one a decoder reports; spaces this encoder does
+    /// not code are refused rather than written.
+    #[test]
+    fn the_colour_space_reaches_the_decoder() {
+        let pic = picture(64, 48, 3);
+        for space in [0u8, 1, 2, 5] {
+            let mut enc = Encoder::new(EncoderConfig {
+                color_space: space,
+                ..EncoderConfig::realtime(64, 48, 300)
+            })
+            .unwrap();
+            let mut dec = crate::Decoder::new();
+            for _ in 0..3 {
+                let frame = enc.encode(views(&pic, 64, 48)).unwrap();
+                let Some(shown) = dec.decode(&frame).unwrap() else {
+                    panic!("colour space {space}: no picture");
+                };
+                assert_eq!(shown.color(), (space, false), "colour space {space}");
+            }
+        }
+        for space in [6u8, 7, 8] {
+            assert!(
+                Encoder::new(EncoderConfig {
+                    color_space: space,
+                    ..EncoderConfig::realtime(64, 48, 300)
+                })
+                .is_err(),
+                "colour space {space}"
+            );
+        }
+    }
 
     /// A configuration whose quantiser is pinned: both bounds the same.
     fn fixed_q(w: u32, h: u32, quantizer: u8) -> EncoderConfig {

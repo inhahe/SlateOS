@@ -48,6 +48,8 @@ settingsfile = { path = "../settingsfile", features = ["testing"] }
 # `osfont::testing::colour_face`, a face with a colour glyph, so the colour
 # path from `blit_run` to the backend is tested without a real emoji font.
 osfont = { path = "../font", features = ["testing"] }
+# The remote stream's frames decoded and converted as a viewer would.
+videocodec = { path = "../video/codec" }
 
 [lints]
 workspace = true

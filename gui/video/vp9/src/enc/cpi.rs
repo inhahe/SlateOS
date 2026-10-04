@@ -90,6 +90,9 @@ pub(crate) struct Oxcf {
     pub error_resilient_mode: bool,
     pub tile_columns: u32,
     pub tile_rows: u32,
+    /// libvpx's `vpx_color_space_t`, written into every key frame's header
+    /// (`VP9E_SET_COLOR_SPACE`).
+    pub color_space: u8,
 }
 
 impl Oxcf {

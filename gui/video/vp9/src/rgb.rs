@@ -1,24 +1,25 @@
 //! Pictures in RGB, for callers whose pixels are not YUV -- a screen's, a
-//! window's. VP9 codes 4:2:0 YUV; these convert to it and back with BT.601's
-//! weights at limited range ("studio swing": luma 16 to 235), in 8-bit fixed
-//! point.
+//! window's -- as the 4:2:0 YUV VP9 codes: BT.601's weights at limited range
+//! ("studio swing": luma 16 to 235), in 8-bit fixed point, libyuv's
+//! `ARGBToI420` (version 1924, revision `644251f2`, the one libavif 1.4.2
+//! pins): luma from each pixel, chroma from the rounded mean of each 2x2
+//! block, a last odd column or row taken twice. (Earlier libyuv averaged a
+//! block on x86 as two rounded averages of pairs, `pavgb`, which rounds up
+//! more often; 1924 does the exact mean everywhere.)
 //!
-//! To YUV is libyuv's `ARGBToI420` (version 1924, revision `644251f2`, the
-//! one libavif 1.4.2 pins): luma from each pixel, chroma from the rounded mean
-//! of each 2x2 block, a last odd column or row taken twice. (Earlier libyuv
-//! averaged a block on x86 as two rounded averages of pairs, `pavgb`, which
-//! rounds up more often; 1924 does the exact mean everywhere.) Back to RGB is
-//! the textbook inverse, each chroma sample serving its 2x2 block. A picture
-//! through both comes back within a few levels, except where colour changes
-//! inside a 2x2 block -- which no 4:2:0 coding keeps.
+//! An encoder coding these pictures should say so: [`COLOR_SPACE`], in
+//! [`crate::EncoderConfig::color_space`]. The way back to RGB is not here:
+//! a decoded picture becomes pixels through `gui/video/yuv` (libavif's
+//! conversion, which every picture and frame SlateOS shows goes through) or
+//! `gui/video/codec`, which reads the colour space from the stream.
 //!
 //! Pixels are `0xAARRGGBB` words, as SlateOS's compositor holds them. Alpha
-//! is not coded: it is ignored on the way in, and opaque on the way out.
+//! is not coded: it is ignored.
 //!
-//! The forward conversion is translated into Rust from libyuv's
-//! `source/row_common.cc` (`RGBToY`, `RGBToU`, `RGBToV`, `ARGBToUVRow_C`)
-//! and `source/convert.cc` (`ARGBToI420`), copyright the LibYuv Project
-//! Authors, used under libyuv's BSD licence (`licenses/libyuv-LICENSE`).
+//! Translated into Rust from libyuv's `source/row_common.cc` (`RGBToY`,
+//! `RGBToU`, `RGBToV`, `ARGBToUVRow_C`) and `source/convert.cc`
+//! (`ARGBToI420`), copyright the LibYuv Project Authors, used under libyuv's
+//! BSD licence (`licenses/libyuv-LICENSE`).
 
 #![allow(
     clippy::arithmetic_side_effects,
@@ -28,6 +29,11 @@
 )]
 
 use crate::{Error, PlaneView};
+
+/// The colour space of the pictures [`argb_to_yuv420`] makes, as an
+/// encoder's key frames declare it ([`crate::EncoderConfig::color_space`]):
+/// libvpx's `VPX_CS_BT_601`.
+pub const COLOR_SPACE: u8 = 1;
 
 /// A 4:2:0 picture of 8-bit samples: luma `width` x `height`, chroma half
 /// each way, rounded up -- what [`crate::Encoder`] takes.
@@ -178,53 +184,6 @@ pub fn argb_to_yuv420(
     Ok(out)
 }
 
-/// A 4:2:0 picture of 8-bit samples -- such as [`crate::Picture::plane8`]'s
-/// planes -- as `0xFFRRGGBB` pixels, `width * height` of them, row by row:
-/// BT.601's inverse at limited range, each chroma sample serving its 2x2
-/// block.
-///
-/// # Errors
-///
-/// [`Error::Unsupported`] if the chroma planes are not half the luma's size,
-/// rounded up, or a plane's data is too short for its stride.
-pub fn yuv420_to_argb(planes: [PlaneView<'_, u8>; 3]) -> Result<Vec<u32>, Error> {
-    let [y, u, v] = planes;
-    let (w, h) = (y.width, y.height);
-    let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
-    if (u.width, u.height, v.width, v.height) != (cw, ch, cw, ch) {
-        return Err(Error::Unsupported("chroma planes not half the luma's size"));
-    }
-    let fits = |p: &PlaneView<'_, u8>| {
-        p.width == 0
-            || p.height == 0
-            || ((p.height - 1).checked_mul(p.stride))
-                .and_then(|n| n.checked_add(p.width))
-                .is_some_and(|n| n <= p.data.len())
-    };
-    if !(fits(&y) && fits(&u) && fits(&v)) || y.stride < w || u.stride < cw || v.stride < cw {
-        return Err(Error::Unsupported(
-            "a plane's data is too short for its stride",
-        ));
-    }
-    let mut out = vec![0u32; w * h];
-    for (r, dst) in out.chunks_exact_mut(w.max(1)).enumerate() {
-        let ys = y.data.get(r * y.stride..).unwrap_or(&[]);
-        let us = u.data.get((r / 2) * u.stride..).unwrap_or(&[]);
-        let vs = v.data.get((r / 2) * v.stride..).unwrap_or(&[]);
-        for (x, d) in dst.iter_mut().enumerate() {
-            let c = i32::from(ys.get(x).copied().unwrap_or(16)) - 16;
-            let dd = i32::from(us.get(x / 2).copied().unwrap_or(128)) - 128;
-            let e = i32::from(vs.get(x / 2).copied().unwrap_or(128)) - 128;
-            let clip = |n: i32| ((n + 128) >> 8).clamp(0, 255) as u32;
-            let red = clip(298 * c + 409 * e);
-            let green = clip(298 * c - 100 * dd - 208 * e);
-            let blue = clip(298 * c + 516 * dd);
-            *d = 0xff00_0000 | (red << 16) | (green << 8) | blue;
-        }
-    }
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -274,40 +233,85 @@ mod tests {
         assert_eq!(yuv.u[2], rgb_to_u(0, 0, 195), "the last row");
     }
 
-    /// Through both, a picture whose colour is constant on each 2x2 block
-    /// comes back within three levels on every channel -- each way rounds,
-    /// the forward way down -- and black, white and grey within one.
+    /// Through `argb_to_yuv420` and back to RGB as a viewer converts it --
+    /// `yuv::reformat`, libavif's conversion, at the colour space
+    /// [`COLOR_SPACE`] declares (BT.601, limited range) -- a picture comes
+    /// back within a few levels wherever its colour is the same all around,
+    /// and black, white and grey within one. Red and green come back within
+    /// two (each way rounds); blue within four, because libyuv weighs blue
+    /// by 128/64 where BT.601 says 129/64 (it caps the weight unless built
+    /// with `LIBYUV_UNLIMITED_DATA`, as neither libavif's copy nor Chrome's
+    /// is), so a strong blue comes back a level or two dark. The picture is
+    /// blocks of 8x8 of one colour, and only the pixels at least two from a
+    /// block's edge are compared: the conversion back upsamples chroma
+    /// bilinearly, which near an edge mixes in the next block's colour.
     #[test]
     fn a_round_trip_comes_back_close() {
-        let (w, h) = (34usize, 18usize);
-        let mut pic = vec![0u32; w * h];
+        let (w, h) = (48usize, 32usize);
+        let colour = |r: usize, c: usize| {
+            let (br, bc) = ((r / 8) as u32, (c / 8) as u32);
+            let red = (bc * 41) & 0xff;
+            let green = (br * 53 + bc * 7) & 0xff;
+            let blue = (br * 29 + 200 - bc * 3) & 0xff;
+            0xff00_0000 | (red << 16) | (green << 8) | blue
+        };
+        let pic: Vec<u32> = (0..h)
+            .flat_map(|r| (0..w).map(move |c| colour(r, c)))
+            .collect();
+        let back = to_rgb(&argb_to_yuv420(&pic, w, h, w).unwrap());
+        // The worst difference on each channel: red, green, blue.
+        let mut worst = [0u32; 3];
         for r in 0..h {
             for c in 0..w {
-                let (br, bc) = ((r / 2) as u32, (c / 2) as u32);
-                let red = (bc * 15) & 0xff;
-                let green = (br * 29 + bc * 7) & 0xff;
-                let blue = (br * 13 + 200 - bc) & 0xff;
-                pic[r * w + c] = 0xff00_0000 | (red << 16) | (green << 8) | blue;
+                let interior = (2..6).contains(&(r % 8)) && (2..6).contains(&(c % 8));
+                let (a, b) = (pic[r * w + c], back[r * w + c]);
+                assert_eq!(b >> 24, 0xff, "opaque");
+                if !interior {
+                    continue;
+                }
+                for (worst, shift) in worst.iter_mut().zip([16, 8, 0]) {
+                    let (x, y) = ((a >> shift) & 0xff, (b >> shift) & 0xff);
+                    *worst = (*worst).max(x.abs_diff(y));
+                }
             }
         }
-        let yuv = argb_to_yuv420(&pic, w, h, w).unwrap();
-        let back = yuv420_to_argb(yuv.planes()).unwrap();
-        for (i, (&a, &b)) in pic.iter().zip(&back).enumerate() {
-            for shift in [0, 8, 16] {
-                let (x, y) = ((a >> shift) & 0xff, (b >> shift) & 0xff);
-                // Colours a long way out of the limited range's gamut lose
-                // more; these stay inside it.
-                assert!(x.abs_diff(y) <= 3, "pixel {i}: {a:08x} came back {b:08x}");
-            }
-            assert_eq!(b >> 24, 0xff, "opaque");
-        }
+        assert!(
+            worst[0] <= 2 && worst[1] <= 2 && worst[2] <= 4,
+            "the worst red, green and blue: {worst:?}"
+        );
         for grey in [0u32, 0x80, 0xff] {
             let p = 0xff00_0000 | (grey << 16) | (grey << 8) | grey;
-            let back = yuv420_to_argb(argb_to_yuv420(&[p; 4], 2, 2, 2).unwrap().planes()).unwrap();
-            for &b in &back {
+            for &b in &to_rgb(&argb_to_yuv420(&[p; 4], 2, 2, 2).unwrap()) {
                 assert!((b & 0xff).abs_diff(grey) <= 1, "{grey} came back {b:08x}");
             }
         }
+    }
+
+    /// `yuv` back to pixels as a viewer converts it: libavif's conversion
+    /// at BT.601, limited range -- [`COLOR_SPACE`] is libvpx's BT.601, which
+    /// a decoder reports as H.273's BT.470BG (5).
+    fn to_rgb(yuv: &Yuv420) -> Vec<u32> {
+        let [y, u, v] = yuv.planes().map(|p| ::yuv::Plane {
+            samples: p.data,
+            stride: p.stride,
+            width: p.width,
+            height: p.height,
+        });
+        ::yuv::reformat::to_argb(&::yuv::reformat::Picture {
+            width: yuv.width,
+            height: yuv.height,
+            depth: 8,
+            format: ::yuv::reformat::Format::Yuv420,
+            matrix: 5,
+            primaries: 1,
+            full_range: false,
+            y,
+            u: Some(u),
+            v: Some(v),
+            alpha: None,
+            alpha_premultiplied: false,
+        })
+        .unwrap()
     }
 
     #[test]
@@ -315,9 +319,6 @@ mod tests {
         assert!(argb_to_yuv420(&[0; 4], 0, 2, 2).is_err());
         assert!(argb_to_yuv420(&[0; 4], 2, 2, 1).is_err());
         assert!(argb_to_yuv420(&[0; 3], 2, 2, 2).is_err());
-        let yuv = argb_to_yuv420(&[0; 6], 3, 2, 3).unwrap();
-        let mut planes = yuv.planes();
-        planes[1].width = 1;
-        assert!(yuv420_to_argb(planes).is_err());
+        assert!(argb_to_yuv420(&[0; 6], 3, 2, 3).is_ok());
     }
 }

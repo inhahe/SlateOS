@@ -18133,9 +18133,16 @@ mod tests {
         attach(&mut comp, 0);
         let stream = comp.start_stream();
         let mut viewer = SceneViewer::new();
-        let mut decoder = vp9::Decoder::new();
-        // Every frame the viewer holds for the game, decoded in order; the
-        // last one's picture. A stop is not expected until the end.
+        let mut decoder = videocodec::Decoder::new(
+            videocodec::Codec::Vp9,
+            &[],
+            videocodec::ColourHint::default(),
+            videocodec::Limits::default(),
+        )
+        .unwrap();
+        // Every frame the viewer holds for the game, decoded and converted in
+        // order as a viewer would; the last one's pixels. A stop is not
+        // expected until the end.
         let mut take = |viewer: &mut SceneViewer| -> Option<Vec<u32>> {
             let held = viewer.windows.get_mut(&game.raw())?;
             let mut last = None;
@@ -18144,9 +18151,23 @@ mod tests {
                     panic!("a stop while the game still presents its buffer");
                 };
                 assert_eq!((video.width, video.height), (160, 96));
-                let picture = decoder.decode(&video.frame).unwrap()?;
-                let planes = [0, 1, 2].map(|p| picture.plane8(p).unwrap());
-                last = Some(vp9::rgb::yuv420_to_argb(planes).unwrap());
+                decoder
+                    .send(&videocodec::Packet {
+                        data: &video.frame,
+                        alpha: None,
+                        time: 0,
+                        duration: 0,
+                        keyframe: false,
+                    })
+                    .unwrap();
+                while let Some(picture) = decoder.receive() {
+                    // The stream says it is BT.601 (VP9's colour space 1,
+                    // H.273's 5), as the compositor converted it; a stream
+                    // that said nothing would be guessed (6 at this size,
+                    // 1 -- BT.709 -- at 1280 wide).
+                    assert_eq!(picture.colour().matrix, 5);
+                    last = Some(picture.to_frame().unwrap().pixels);
+                }
             }
             last
         };

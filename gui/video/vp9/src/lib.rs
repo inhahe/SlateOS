@@ -44,8 +44,9 @@
 //! - `frame`: the planes frames are decoded into.
 //! - `context`: which probabilities each decision is coded with, from the
 //!   blocks around it -- read by the decoder and written by the encoder.
-//! - [`rgb`]: pictures of `0xAARRGGBB` pixels to the 4:2:0 YUV VP9 codes, and
-//!   back -- for a caller whose pixels are a screen's or a window's.
+//! - [`rgb`]: pictures of `0xAARRGGBB` pixels to the 4:2:0 YUV VP9 codes --
+//!   for a caller whose pixels are a screen's or a window's -- and the colour
+//!   space to declare them in. (Back to pixels is `gui/video/yuv`'s.)
 //!
 //! # The encoder
 //!

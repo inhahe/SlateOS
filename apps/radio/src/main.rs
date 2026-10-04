@@ -27,6 +27,7 @@ use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
 use guitk::scroll_window;
 use guitk::style::CornerRadii;
+use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use oswindow::{Event, RenderTree};
 use std::process::ExitCode;
@@ -540,6 +541,9 @@ struct RadioApp {
     /// read by the renderer and written by nobody, so Down past the tenth
     /// station moved a selection that stayed off screen for good.
     station_view: ListViewport,
+    /// The wheel's unspent fraction of a station row, so that a touchpad's
+    /// small turns add up to rows rather than each counting as one.
+    station_wheel: wheel::Accumulator,
 
     // Playback
     play_state: PlayState,
@@ -616,6 +620,7 @@ impl RadioApp {
             genre_filter: None,
             genre_view: ListViewport::new(0),
             station_view: ListViewport::new(0),
+            station_wheel: wheel::Accumulator::default(),
             play_state: PlayState::Stopped,
             current_station: None,
             volume: 75,
@@ -712,7 +717,7 @@ impl RadioApp {
         self.genre_view.select(index, Genre::ALL.len());
         // The filter decides which stations exist, so a position into the old
         // list would name a different station or none at all.
-        self.select_station(0);
+        self.restart_station_list();
         let label = genre.map_or("All", Genre::label);
         self.status_message = format!("Genre: {label}");
     }
@@ -1098,17 +1103,19 @@ impl RadioApp {
                 if !self.station_list_rect().contains(x, y) {
                     return false;
                 }
+                // The view scrolls and the picked station stays picked, as
+                // `ListViewport::scroll_by` -- the toolkit's door for the
+                // wheel -- has it: any key that moves the selection brings the
+                // view back to it. The wheel used to move the selection, one
+                // station per event whatever the event's size, so a six-notch
+                // flick moved one row and a touchpad's every fifth of a notch
+                // moved a whole one. Now it moves by the distance turned, three
+                // rows a notch, the fractions added up.
+                let rows = self.station_wheel.rows(dy);
                 let len = self.filtered_stations().len();
-                // `dy` is in notches, positive away from the user, which
-                // scrolls towards the start of the list.
-                if dy > 0.0 {
-                    self.station_view.select_prev(len);
-                } else if dy < 0.0 {
-                    self.station_view.select_next(len);
-                } else {
-                    return false;
-                }
-                true
+                let before = self.station_view.first_visible();
+                self.station_view.scroll_by(rows, len);
+                self.station_view.first_visible() != before
             }
             _ => false,
         }
@@ -1284,7 +1291,15 @@ impl RadioApp {
     /// Show a screen, starting at the top of the list it puts up.
     pub fn show_screen(&mut self, screen: Screen) {
         self.screen = screen;
+        self.restart_station_list();
+    }
+
+    /// Back to the first station of a list that has just been replaced -- by
+    /// another screen or another genre -- forgetting with the old position any
+    /// fraction of a notch the wheel had banked over the old list.
+    fn restart_station_list(&mut self) {
         self.select_station(0);
+        self.station_wheel.reset();
     }
 
     /// Render the whole window to a list of render commands.
@@ -3053,21 +3068,88 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_wheel_moves_the_selection() {
-        let mut app = sized();
+    /// A turn of the wheel over the middle of the station list.
+    fn turn(app: &RadioApp, dy: f32) -> Event {
         let pane = app.station_list_rect();
-        let (x, y) = (pane.x + 40.0, pane.y + pane.h / 2.0);
-        app.handle_key(&key(Key::Down));
-        let before = app.selected_station();
-        assert!(app.handle_event(&Event::Mouse(MouseEvent {
-            x,
-            y,
-            kind: MouseEventKind::Scroll { dx: 0.0, dy: 1.0 },
-        })));
+        Event::Mouse(MouseEvent {
+            x: pane.x + 40.0,
+            y: pane.y + pane.h / 2.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy },
+        })
+    }
+
+    /// **The wheel scrolls the station list by the distance turned, and the
+    /// picked station stays picked.** It moved the selection, one station per
+    /// event whatever the event's size: a six-notch flick moved one row, and a
+    /// touchpad's every fifth of a notch a whole one. A key that moves the
+    /// selection brings the view back to it.
+    #[test]
+    fn the_wheel_scrolls_the_list_by_the_distance_turned() {
+        let mut app = RadioApp::new();
+        // Short, so that the list scrolls at least six rows.
+        app.set_size(900.0, 400.0);
+        let len = app.filtered_stations().len();
+        let first = |app: &RadioApp| app.station_view.first_visible();
+        let picked = app.selected_station();
         assert!(
-            app.selected_station() < before,
-            "a notch away from the user goes towards the start of the list"
+            app.station_view.visible_range(len).len() + 6 <= len,
+            "the fixture must scroll six rows: {len} stations"
+        );
+
+        assert!(
+            app.handle_event(&turn(&app, -1.0)),
+            "a notch towards the reader moved nothing"
+        );
+        assert_eq!(first(&app), 3, "a notch is three rows");
+        assert_eq!(
+            app.selected_station(),
+            picked,
+            "the wheel moved the selection"
+        );
+        app.handle_event(&turn(&app, -0.5));
+        assert_eq!(first(&app), 4, "half a notch is a row and a half");
+        app.handle_event(&turn(&app, -0.5));
+        assert_eq!(first(&app), 6, "and the other half adds up");
+        app.handle_event(&turn(&app, 2.0));
+        assert_eq!(
+            first(&app),
+            0,
+            "a notch away from the reader is three rows back"
+        );
+        assert!(!app.handle_event(&turn(&app, 1.0)), "moved above the top");
+
+        app.handle_event(&turn(&app, -3.0));
+        assert!(
+            !app.station_view
+                .visible_range(len)
+                .contains(&app.selected_station()),
+            "the fixture must scroll the selection out of view"
+        );
+        app.handle_key(&key(Key::Down));
+        assert!(
+            app.station_view
+                .visible_range(len)
+                .contains(&app.selected_station()),
+            "a key that moved the selection left it out of view"
+        );
+    }
+
+    /// **A fraction of a notch belongs to the list it was turned over.** Half
+    /// a notch is a row and a half; another genre, and the next half notch is
+    /// a row and a half again, not the two rows the leftover half would make
+    /// of it.
+    #[test]
+    fn a_fraction_of_a_notch_does_not_outlive_the_list() {
+        let mut app = RadioApp::new();
+        app.set_size(900.0, 400.0);
+        app.handle_event(&turn(&app, -0.5));
+        assert_eq!(app.station_view.first_visible(), 1);
+        app.set_genre_filter(None);
+        app.handle_event(&turn(&app, -0.5));
+        assert_eq!(
+            app.station_view.first_visible(),
+            1,
+            "half a notch over the old list moved the new one"
         );
     }
 

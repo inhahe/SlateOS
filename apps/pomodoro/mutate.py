@@ -7,7 +7,10 @@ program is not testing the program.
 Covers what changed on 2026-09-27: "Notification Sound: On" was a row the
 arrows flipped and nothing else read -- a session ends in silence either way,
 because nothing here plays a sound.  The settings say so beneath their rows
-now, and the rows leave room for it at any height they fit in.
+now, and the rows leave room for it at any height they fit in.  The first
+rows, added 2026-10-04, cover the list of keys' hold on the pointer: a press
+with it up puts it away and reaches nothing under it, and the wheel scrolls
+nothing it covers.
 
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
@@ -23,8 +26,40 @@ from mutation_harness import sweep  # noqa: E402  (path set above)
 SRC = Path(__file__).parent / "src" / "main.rs"
 
 SOUND = "the_sound_row_says_nothing_plays_it"
+CARD = "the_shortcut_card_takes_a_press_rather_than_passing_it_on"
 
 MUTATIONS = [
+    # The list of keys takes a press rather than letting it reach the button
+    # under it, and the wheel scrolls nothing it covers (known-issues
+    # E-a-press-goes-through-the-shortcut-card-to-the-control-drawn-under-it).
+    (
+        "a press goes through the list of keys",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n"
+        "                    self.show_help = false;\n"
+        "                    return EventResult::Consumed;\n"
+        "                }\n",
+        "",
+        [CARD],
+    ),
+    (
+        "only the left button puts the list of keys away",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n",
+        "                MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_) => {\n",
+        [CARD],
+    ),
+    (
+        "a press under the list of keys leaves it up",
+        "                    self.show_help = false;\n"
+        "                    return EventResult::Consumed;\n",
+        "                    return EventResult::Consumed;\n",
+        [CARD],
+    ),
+    (
+        "the wheel scrolls what the list of keys covers",
+        "                MouseEventKind::Scroll { .. } => return EventResult::Ignored,\n",
+        "",
+        [CARD],
+    ),
     (
         "the note is not drawn",
         "        if below + 12.0 <= layout.content.bottom() {",

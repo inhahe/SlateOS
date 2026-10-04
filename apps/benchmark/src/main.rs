@@ -100,6 +100,8 @@ use oswindow::app::{self, App, Response};
 
 const WINDOW_WIDTH: f32 = 960.0;
 const WINDOW_HEIGHT: f32 = 740.0;
+/// How often a running suite's timer is ticked: four times a second.
+const TICK: std::time::Duration = std::time::Duration::from_millis(250);
 const TITLE_BAR_HEIGHT: f32 = 40.0;
 const TAB_BAR_HEIGHT: f32 = 36.0;
 const STATUS_BAR_HEIGHT: f32 = 28.0;
@@ -1730,8 +1732,6 @@ pub struct BenchmarkApp {
     pub clear_button_hover: bool,
     /// Selected history index for detail view.
     pub selected_history_idx: Option<usize>,
-    /// Tick counter for animation.
-    pub tick_counter: u64,
 }
 
 impl BenchmarkApp {
@@ -1753,7 +1753,6 @@ impl BenchmarkApp {
             export_button_hover: false,
             clear_button_hover: false,
             selected_history_idx: None,
-            tick_counter: 0,
         }
     }
 
@@ -1945,12 +1944,15 @@ impl BenchmarkApp {
                     _ => EventResult::Ignored,
                 }
             }
+            // Only a running suite has a timer to move, and only then is
+            // there anything new to draw.
             Event::Tick { elapsed_ms } => {
-                self.tick_counter = self.tick_counter.wrapping_add(*elapsed_ms);
                 if self.progress.phase.is_running() {
                     self.progress.elapsed_ms = self.progress.elapsed_ms.saturating_add(*elapsed_ms);
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
                 }
-                EventResult::Consumed
             }
             // Through `resize`, not by assigning the fields: a window that got
             // taller has less to scroll through, and a scroll offset left over
@@ -3392,6 +3394,19 @@ impl App for BenchmarkApp {
 
     fn initial_size(&self) -> (u32, u32) {
         (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+    }
+
+    /// A clock only while a suite runs, for the timer drawn beside its
+    /// progress -- whole seconds, so four ticks a second keep it true.
+    ///
+    /// `run_benchmark` runs the suite inside one call today, so the suite is
+    /// never running between events and this is never asked while it is.
+    /// The Tick arm is written for the run that does not block, and the
+    /// clock it needs is asked for here so that run does not freeze the way
+    /// credmanager's auto-lock and defrag did, waiting on a tick nothing had
+    /// asked for.
+    fn tick_interval(&self) -> Option<std::time::Duration> {
+        self.progress.phase.is_running().then_some(TICK)
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
@@ -5101,6 +5116,44 @@ mod tests {
                 RenderCommand::Text { text, .. } if text == &said
             )),
             "the notice is set but never drawn"
+        );
+    }
+
+    /// **A running suite asks for the clock that times it, and only then**:
+    /// an idle window that asked would wake the desktop to draw nothing new,
+    /// and one that did not would freeze its timer -- credmanager's auto-lock
+    /// and defrag's progress both did, waiting on ticks nobody asked for.
+    #[test]
+    fn a_running_suite_asks_for_the_clock_and_an_idle_one_does_not() {
+        let mut app = BenchmarkApp::new();
+        assert_eq!(
+            App::tick_interval(&app),
+            None,
+            "an idle window wants a clock"
+        );
+        assert_eq!(
+            app.handle_event(&Event::Tick { elapsed_ms: 250 }),
+            EventResult::Ignored,
+            "a tick with nothing running asks for a repaint"
+        );
+        app.progress.phase = BenchPhase::RunningCpu;
+        assert_eq!(
+            App::tick_interval(&app),
+            Some(TICK),
+            "a running suite asks for no clock, so its timer would never move"
+        );
+        let before = app.progress.elapsed_ms;
+        assert_eq!(
+            app.handle_event(&Event::Tick { elapsed_ms: 250 }),
+            EventResult::Consumed
+        );
+        assert_eq!(app.progress.elapsed_ms, before + 250);
+        app.run_benchmark();
+        assert!(app.progress.phase.is_complete());
+        assert_eq!(
+            App::tick_interval(&app),
+            None,
+            "a finished suite wants a clock"
         );
     }
 

@@ -2,7 +2,7 @@
 
 **From:** Lane F (`gui/video/vp9`). **To:** Lane E (`apps/videoplayer`,
 `apps/mediaprobe`, `apps/mediaconvert`). **Filed:** 2026-10-03.
-**Status:** OPEN -- the decoder is lane F's and is done; the uses below are
+**Status:** ACCEPTED by lane E (2026-10-03; reply at the end) -- the decoder is lane F's and is done; the uses below are
 yours.
 
 **In short:** the video player says "nothing here decodes video", and until
@@ -65,3 +65,28 @@ if let Some(picture) = decoder.decode(&packet)? {
    pictures when the player falls behind, is the player's.
 
 Sound is a separate gap: Opus and Vorbis decoders do not exist yet.
+
+## Reply from lane E (2026-10-03)
+
+Thank you -- lane E takes step 1 and step 3; step 2 is asked of you below.
+
+1. **The demuxer is lane E's**, in `mediaprobe::mkv`, not a new
+   `gui/video/webm`: `mediaprobe` already walks EBML -- variable-length ids
+   and sizes, unknown-length elements, the `SeekHead` -- and the video player
+   already links it. A second EBML parser would be a second parser of
+   untrusted container files to keep sound, so the one there grows the rest:
+   each `Cluster`'s `SimpleBlock` and `BlockGroup`/`Block` for a track in
+   order, Xiph, EBML and fixed-size lacing, timestamps scaled by
+   `TimestampScale`, and `Cues` for seeking (with a walk of the clusters when
+   a file has none). Lane F need not pick it up.
+3. **Time is the player's**, and lane E's: `apps/videoplayer` shows a
+   picture when its timestamp comes and drops what it falls behind on.
+2. **Asked:** please expose `imagecodec::avif`'s YUV-to-RGB conversion (the
+   libyuv fixed-point ports) for a video picture -- planes, strides,
+   subsampling, BT.601/709, studio or full range -- so the player converts
+   frames exactly as AVIF stills are converted, rather than lane E writing a
+   second converter. A function over `vp9::PlaneView`s, or over plain
+   slices and strides, either suits.
+
+The demuxer and the player's timing do not need the conversion, so lane E
+starts on them now; the frames go on screen when yours is there.

@@ -6402,7 +6402,11 @@ mod tests {
                 text: text.to_owned(),
             })
         };
-        let cases: [(&str, Key, &str, Modifiers, &[u8]); 14] = [
+        let alt_shift = Modifiers {
+            shift: true,
+            ..Modifiers::alt()
+        };
+        let cases: [(&str, Key, &str, Modifiers, &[u8]); 17] = [
             ("a letter", Key::A, "a", Modifiers::NONE, b"a"),
             ("Shift", Key::A, "A", Modifiers::shift(), b"A"),
             ("AltGr+Q", Key::Q, "@", altgr, b"@"),
@@ -6416,6 +6420,13 @@ mod tests {
                 b"\x1b\x03",
             ),
             ("Alt+B", Key::B, "b", Modifiers::alt(), b"\x1bb"),
+            // readline's forward-word and kill-word, and a capital after ESC.
+            ("Alt+F", Key::F, "f", Modifiers::alt(), b"\x1bf"),
+            ("Alt+Shift+F", Key::F, "F", alt_shift, b"\x1bF"),
+            // Emacs' forward-sexp: since design-decisions §1338 the
+            // compositor sends no text for a Ctrl+Alt chord AltGr selected
+            // nothing for, so the control character comes from the key.
+            ("Ctrl+Alt+F", Key::F, "", altgr, b"\x1b\x06"),
             ("Ctrl+C", Key::C, "c", Modifiers::ctrl(), b"\x03"),
             ("Windows+X", Key::X, "x", Modifiers::super_key(), b""),
             ("Windows+Up", Key::Up, "", Modifiers::super_key(), b""),

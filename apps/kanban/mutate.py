@@ -391,6 +391,38 @@ MUTATIONS = [
     ),
 ]
 
+FIELD = "the_input_dialogs_box_is_the_toolkits_field"
+CARET = "the_input_dialogs_caret_follows_the_typing"
+
+MUTATIONS += [
+    # The input dialog's box is the toolkit's field (2026-10-04; lane C,
+    # c-e-a-theme-can-shape-the-controls).
+    (
+        "the dialog's box never has the keyboard",
+        "        focused: !app.show_help,\n",
+        "        focused: false,\n",
+        [FIELD, CARET],
+    ),
+    (
+        "the dialog's box keeps its mark under the card",
+        "        focused: !app.show_help,\n",
+        "        focused: true,\n",
+        [FIELD],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [FIELD],
+    ),
+    (
+        "the caret is at the start of the typing",
+        "            cursor: text::TextCursor::from(app.input_buffer.len()),\n",
+        "            cursor: text::TextCursor::from(0),\n",
+        [CARET],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "kanban", timeout=900, only=only))

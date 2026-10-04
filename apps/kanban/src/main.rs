@@ -21,10 +21,13 @@ use appearance::Surface;
 use guitk::color::Color;
 use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Event, Key, KeyEvent};
+use guitk::field;
+use guitk::frame::Rect;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow, content_bottom};
 use guitk::scroll_window;
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::textedit;
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
 use std::process::ExitCode;
@@ -2033,6 +2036,10 @@ struct KanbanApp {
     show_filter_bar: bool,
     input_buffer: String,
     input_mode: InputMode,
+    /// How wide the mark is round the input dialog's box while it has the
+    /// keyboard: the user's focus width (`App::appearance_changed`), the
+    /// toolkit's until it is known.
+    focus_ring_width: f32,
     /// The last stamp [`stamp`](Self::stamp) gave, so the next is later.
     ///
     /// It was a counter from 1000, which after a restart would have stamped
@@ -2111,6 +2118,7 @@ impl KanbanApp {
             show_filter_bar: false,
             input_buffer: String::new(),
             input_mode: InputMode::None,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             last_stamp: 0,
             persist: false,
             kept_text: String::new(),
@@ -4367,6 +4375,25 @@ fn render_board_list(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_start
 }
 
 /// Render input overlay (for card title entry, etc.).
+/// The input dialog's box, in a window `width` by `height`.
+fn input_field_rect(width: f32, height: f32) -> Rect {
+    let (dlg_w, dlg_h) = (400.0, 120.0);
+    let (dlg_x, dlg_y) = ((width - dlg_w) / 2.0, (height - dlg_h) / 2.0);
+    Rect::new(dlg_x + 16.0, dlg_y + 42.0, dlg_w - 32.0, 30.0)
+}
+
+/// How the input dialog's box is drawn: with the keyboard -- every key that
+/// types goes into it -- unless the shortcut card is over it. Never lit under
+/// the pointer: it has no press of its own.
+fn input_field_state(app: &KanbanApp) -> field::State {
+    field::State {
+        hovered: false,
+        focused: !app.show_help,
+        disabled: false,
+        invalid: false,
+    }
+}
+
 fn render_input_overlay(tree: &mut RenderTree, app: &KanbanApp, width: f32, height: f32) {
     if app.input_mode == InputMode::None {
         return;
@@ -4432,26 +4459,35 @@ fn render_input_overlay(tree: &mut RenderTree, app: &KanbanApp, width: f32, heig
         overflow: TextOverflow::Clip,
     });
 
-    // Input field
-    app.palette.push_surface(
+    // Input field: the toolkit's field, with the keyboard unless the
+    // shortcut card is over the dialog, and the typing with its caret --
+    // scrolled so the end being typed stays in view. It was a card with no
+    // caret, and a long title was cut off with an ellipsis at the very
+    // letters being typed.
+    let input = input_field_rect(width, height);
+    let state = input_field_state(app);
+    field::draw(tree, &app.palette, input, state, app.focus_ring_width);
+    let line = text::line_height(13.0, FontWeightHint::Regular);
+    textedit::draw(
         tree,
-        dlg_x + 16.0,
-        dlg_y + 42.0,
-        dlg_w - 32.0,
-        30.0,
-        4.0,
-        Surface::Card,
+        &textedit::SingleLine {
+            text: &app.input_buffer,
+            // Typed and erased at its end, so the end is where the caret is.
+            cursor: text::TextCursor::from(app.input_buffer.len()),
+            selection_anchor: None,
+            focused: state.focused,
+            x: input.x + 8.0,
+            y: input.y + (input.h - line) / 2.0,
+            width: (input.w - 16.0).max(0.0),
+            line_height: line,
+            font_size: 13.0,
+            weight: FontWeightHint::Regular,
+            color: app.palette.text,
+            selection_bg: app.palette.accent,
+            selection_fg: app.palette.crust,
+            caret_width: textedit::CARET_WIDTH,
+        },
     );
-    tree.push(RenderCommand::Text {
-        x: dlg_x + 24.0,
-        y: dlg_y + 48.0,
-        text: app.input_buffer.clone(),
-        color: app.palette.text,
-        font_size: 13.0,
-        font_weight: FontWeightHint::Regular,
-        max_width: Some(dlg_w - 48.0),
-        overflow: TextOverflow::Ellipsis,
-    });
 
     // Hint
     tree.push(RenderCommand::Text {
@@ -5325,6 +5361,10 @@ fn handle_input_key(app: &mut KanbanApp, key: &KeyEvent) -> bool {
 impl App for KanbanApp {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -9474,5 +9514,90 @@ mod tests {
                 "a stamp after a restart is earlier than a kept one"
             );
         });
+    }
+    // -- The input dialog's box is the toolkit's field (lane C,
+    //    c-e-a-theme-can-shape-the-controls)
+
+    /// **The input dialog's box is the toolkit's field**: it has the
+    /// keyboard -- every key that types goes into it -- marked as the theme
+    /// marks a field in the user's width, and gives the mark up under the
+    /// shortcut card. It was a card with no caret.
+    #[test]
+    fn the_input_dialogs_box_is_the_toolkits_field() {
+        let (w, h) = (1200.0, 800.0);
+        let mut app = KanbanApp::new();
+        let mut p = app.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        app.theme_changed(&p);
+        app.appearance_changed(&appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        });
+        let ring = app.focus_ring_width;
+        assert!(
+            ring > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        app.input_mode = InputMode::NewCardTitle;
+        let rect = input_field_rect(w, h);
+        let draws = |app: &KanbanApp, s: field::State| {
+            let seq = |s: field::State| {
+                let mut v: Vec<RenderCommand> = Vec::new();
+                field::draw(&mut v, &p, rect, s, ring);
+                v
+            };
+            let cmds = render_app(app, w, h).commands;
+            let has = |want: &[RenderCommand]| cmds.windows(want.len()).any(|w| w == want);
+            has(&seq(s)) && (s.focused || !has(&seq(field::State { focused: true, ..s })))
+        };
+        let focused = field::State {
+            focused: true,
+            ..field::State::default()
+        };
+        assert!(
+            draws(&app, focused),
+            "the dialog's box does not have the keyboard"
+        );
+        app.show_help = true;
+        assert!(
+            draws(&app, field::State::default()),
+            "the dialog's box keeps the keyboard's mark under the shortcut card"
+        );
+    }
+
+    /// **The caret follows the typing, and a long title scrolls under it**
+    /// rather than being cut off with an ellipsis at the letters being typed.
+    #[test]
+    fn the_input_dialogs_caret_follows_the_typing() {
+        let (w, h) = (1200.0, 800.0);
+        let mut app = KanbanApp::new();
+        app.input_mode = InputMode::NewCardTitle;
+        let rect = input_field_rect(w, h);
+        let caret_after = |app: &KanbanApp| -> f32 {
+            let cmds = render_app(app, w, h).commands;
+            let at = cmds
+                .iter()
+                .position(
+                    |c| matches!(c, RenderCommand::RichText { text, .. } if *text == app.input_buffer),
+                )
+                .expect("the typing is not drawn in the box");
+            match cmds.get(at + 1) {
+                Some(RenderCommand::Line { x1, x2, .. }) if (x1 - x2).abs() < 0.01 => *x1,
+                other => panic!("no caret after the typing: {other:?}"),
+            }
+        };
+        app.input_buffer = "Plan".to_string();
+        let end = rect.x + 8.0 + text::measure("Plan", 13.0, FontWeightHint::Regular);
+        let caret = caret_after(&app);
+        assert!(
+            (caret - end).abs() < 0.5,
+            "the caret is at {caret}, not after the typing at {end}"
+        );
+        app.input_buffer = "w".repeat(200);
+        let caret = caret_after(&app);
+        assert!(
+            caret > rect.x && caret < rect.right(),
+            "the caret of a long title is at {caret}, outside the box {rect:?}"
+        );
     }
 }

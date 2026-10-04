@@ -234,6 +234,89 @@ INPUT_MUTATIONS += [
     ),
 ]
 
+# The list of keys (2026-10-04): F1 did nothing, and the menus printed only
+# their own rows' keys -- not Ctrl+T, Alt+Z, the find bar's or the moves.
+ADDS = "every_key_the_list_adds_does_something"
+REACHES = "the_shortcut_list_reaches_the_window"
+MODAL = "the_shortcut_list_takes_the_keys_and_a_press"
+MENU = "every_shortcut_a_menu_advertises_is_really_bound"
+
+F1_ANCHOR = "        if plain && key.key == Key::F1 {\n"
+CLOSE_ANCHOR = "            if plain && matches!(key.key, Key::F1 | Key::Escape) {\n"
+PRESS_ANCHOR = (
+    "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n"
+    "                    self.show_help = false;\n"
+    "                    return Response::Redraw;\n"
+)
+
+INPUT_MUTATIONS += [
+    (
+        "the list of keys never comes up",
+        F1_ANCHOR + "            self.show_help = true;\n",
+        F1_ANCHOR,
+        [REACHES],
+    ),
+    (
+        "Alt+F1 raises the list",
+        F1_ANCHOR,
+        "        if key.key == Key::F1 {\n",
+        [REACHES],
+    ),
+    (
+        "the list is not modal for the keys",
+        "            return Response::Redraw;\n        }\n        if self.external_prompt.is_some() {\n",
+        "        }\n        if self.external_prompt.is_some() {\n",
+        [MODAL],
+    ),
+    (
+        "Escape leaves the list up",
+        CLOSE_ANCHOR,
+        "            if plain && matches!(key.key, Key::F1) {\n",
+        [REACHES],
+    ),
+    (
+        "Alt+Escape puts the list away",
+        CLOSE_ANCHOR,
+        "            if matches!(key.key, Key::F1 | Key::Escape) {\n",
+        [REACHES],
+    ),
+    (
+        "a press leaves the list up",
+        PRESS_ANCHOR,
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n"
+        "                    return Response::Redraw;\n",
+        [MODAL],
+    ),
+    (
+        "a press reaches what the list covers",
+        PRESS_ANCHOR,
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n"
+        "                    self.show_help = false;\n",
+        [MODAL],
+    ),
+    (
+        "the wheel scrolls what the list covers",
+        "                MouseEventKind::Release(_) => {}\n                _ => return Response::Idle,\n",
+        "                _ => {}\n",
+        [MODAL],
+    ),
+    (
+        "Ctrl+Shift+Z, advertised beside Ctrl+Y, does not redo",
+        "            Key::Z => self.run(if shift { Command::Redo } else { Command::Undo }),\n",
+        "            Key::Z => self.run(Command::Undo),\n",
+        [MENU],
+    ),
+]
+
+MAIN_MUTATIONS += [
+    (
+        "the list of keys is not drawn",
+        "        if self.show_help {\n            guitk::shortcut::render_card(\n",
+        "        if false {\n            guitk::shortcut::render_card(\n",
+        [REACHES],
+    ),
+]
+
 if __name__ == "__main__":
     # Each table is given only the filters that name one of its own rows: the
     # harness refuses a filter that selects nothing in its table, so handing

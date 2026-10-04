@@ -3793,10 +3793,14 @@ lane C's `guitk`.
   opens a file's pictures.
   - `[x]` Matroska and WebM, demultiplexed (`gui/video/matroska`,
     design-decisions §1345): written from RFC 9559 with FFmpeg's behaviour
-    where the RFC leaves a choice -- every packet of eleven fixtures and
-    thirty seeks held to `ffprobe`'s, and every frame of VP9, VP9 with
-    alpha and AV1 played through it held to ffmpeg's decoders. What it
-    leaves out: `known-issues/F-the-matroska-demuxer-leaves-out-what-no-webm-file-needs.md`.
+    where the RFC leaves a choice -- every packet of 37 fixtures and 78
+    seeks held to `ffprobe`'s, and every frame of VP9, VP9 with alpha and
+    AV1 played through it held to ffmpeg's decoders. The tree's one
+    Matroska demuxer: `apps/mediaprobe`'s cases moved into its suite
+    (`requests/f-e-two-matroska-demuxers-which-stays.md`), with a mutation
+    sweep (`mutate.py`). A seek without Cues walks only as far as it must;
+    with them, it goes by the Cues alone (§1348). What it leaves out:
+    `known-issues/F-the-matroska-demuxer-leaves-out-what-no-webm-file-needs.md`.
   - `[x]` A frame-level API for a player (`gui/video/codec`, crate
     `videocodec`, design-decisions §1346): `Video::open(file)`, then
     `next_frame()` -- each picture in order with its time, duration and
@@ -3830,7 +3834,10 @@ lane C's `guitk`.
       fixtures held to ffmpeg and libavif frame by frame.
     - `[ ]` MP4.
   - `[ ]` Sound needs Opus and Vorbis decoders, which nothing has yet (the
-    music player has none either).
+    music player has none either). When it comes, its seek owes Opus a
+    pre-roll: start `matroska::Track::seek_pre_roll` (80 ms) before the
+    time and drop what decodes before it -- the demuxer's seek, like
+    FFmpeg's, leaves that to its caller (`tests/beyond_ffprobe.rs`).
 
 - `[-]` `[F]` **A display transport over channel IPC** for local clients,
   beside the TCP one. The point is the peer's identity: the kernel attests a

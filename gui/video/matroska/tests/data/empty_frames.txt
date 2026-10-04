@@ -1,0 +1,7 @@
+# empty_frames.mkv: what ffprobe makes of it (generate_fixtures.py).
+stream 0 snow 1/1000
+packet 0 10 10 3 137 K__ d8f42eac494a5891c0151dd92c039506 -
+packet 0 30 10 4 137 K__ 9aad8723b78a15d039d8c5b9bac6b34e -
+packet 0 40 10 0 155 K__ d41d8cd98f00b204e9800998ecf8427e 1
+packet 0 50 10 0 178 K__ d41d8cd98f00b204e9800998ecf8427e -
+packet 0 60 10 5 196 K__ ad8d909fc06685233115895303e00415 -

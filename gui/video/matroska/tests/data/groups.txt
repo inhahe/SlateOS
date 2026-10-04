@@ -1,0 +1,5 @@
+# groups.mkv: what ffprobe makes of it (generate_fixtures.py).
+stream 0 vp9 1/1000
+stream 1 opus 1/1000
+packet 0 0 33 1 352 K__ 865c0c0b4ab0e063e5caa3387c1a8741 -
+packet 0 33 33 1 392 ___ 83878c91171338902e0fe0fb97a8c47a -

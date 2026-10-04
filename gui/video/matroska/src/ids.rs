@@ -5,6 +5,9 @@ use crate::ebml::Id;
 
 // EBML.
 pub const EBML: Id = 0x1A45_DFA3;
+/// Void and CRC-32: EBML's own, which may stand anywhere.
+pub const VOID: Id = 0xEC;
+pub const CRC_32: Id = 0xBF;
 pub const EBML_READ_VERSION: Id = 0x42F7;
 pub const EBML_MAX_ID_LENGTH: Id = 0x42F2;
 pub const EBML_MAX_SIZE_LENGTH: Id = 0x42F3;
@@ -101,11 +104,14 @@ pub const CUE_CLUSTER_POSITION: Id = 0xF1;
 
 // Cluster.
 pub const TIMESTAMP: Id = 0xE7;
+pub const CLUSTER_POSITION: Id = 0xA7;
+pub const CLUSTER_PREV_SIZE: Id = 0xAB;
 pub const SIMPLE_BLOCK: Id = 0xA3;
 pub const BLOCK_GROUP: Id = 0xA0;
 pub const BLOCK: Id = 0xA1;
 pub const BLOCK_DURATION: Id = 0x9B;
 pub const REFERENCE_BLOCK: Id = 0xFB;
+pub const CODEC_STATE: Id = 0xA4;
 pub const DISCARD_PADDING: Id = 0x75A2;
 pub const BLOCK_ADDITIONS: Id = 0x75A1;
 pub const BLOCK_MORE: Id = 0xA6;

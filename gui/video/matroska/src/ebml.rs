@@ -460,7 +460,38 @@ mod tests {
             r.binary(Size::Known(1 << 27), MAX_BINARY),
             Err(Error::Truncated)
         );
+        // A size no allocation could meet: refused before one is tried,
+        // which would abort the process.
+        assert_eq!(
+            r.binary(Size::Known(1 << 62), u64::MAX),
+            Err(Error::Truncated)
+        );
         assert!(r.seek_to(4).is_err(), "past the end");
+    }
+
+    #[test]
+    fn a_child_running_past_its_parent_is_an_error() {
+        // A parent of 4 bytes (0x84) holding a child that claims 5 (0x85).
+        let mut r = reader(&[
+            0x1a, 0x45, 0xdf, 0xa3, 0x84, 0x42, 0x82, 0x85, b'w', 0, 0, 0, 0,
+        ]);
+        let parent = r.header().unwrap().unwrap();
+        assert_eq!(
+            r.children(&parent, |_, _| Ok(())),
+            Err(Error::Invalid("an element running past its parent"))
+        );
+        // The same child inside a parent that holds it.
+        let mut r = reader(&[
+            0x1a, 0x45, 0xdf, 0xa3, 0x88, 0x42, 0x82, 0x85, b'w', 0, 0, 0, 0,
+        ]);
+        let parent = r.header().unwrap().unwrap();
+        let mut seen = Vec::new();
+        r.children(&parent, |_, c| {
+            seen.push(c.id);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(seen, [0x4282]);
     }
 
     #[test]

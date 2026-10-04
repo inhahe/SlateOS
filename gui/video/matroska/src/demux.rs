@@ -108,6 +108,41 @@ struct Skip {
     key_for: Option<u64>,
 }
 
+/// Where reading is, whole: what a walk puts aside, and restores when it is
+/// done.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Place {
+    state: State,
+    pos: u64,
+    last_good: u64,
+    segment_end: u64,
+}
+
+/// A walk through the Clusters for their key frames: how a track without
+/// Cues is sought in.
+///
+/// FFmpeg's seek in such a file reads on from the key frames it already
+/// knows until it meets one of the seek's track past the time sought
+/// (`matroska_read_seek`'s loop, or `seek_frame_generic`), then goes to the
+/// latest at or before it. So does this. The walk begins at the first
+/// Cluster with the first seek that needs it, goes each time only as far as
+/// that seek needs, and is left where it stopped for the next: a seek near
+/// the start of a long file without Cues -- a live recording's, a browser's
+/// `MediaRecorder`'s -- reads its first Clusters, not all of them, and a seek
+/// back reads nothing.
+#[derive(Clone, Debug)]
+struct Walk {
+    /// Every read track's key frames found so far, in file order.
+    found: Vec<Cue>,
+    /// Per subtitle track, where its last frame walked ends: the walk reads
+    /// the file afresh, so it keeps these apart from playing's.
+    subtitle_ends: Vec<(u64, i64)>,
+    /// Where it goes on from; `None` once it has reached the end.
+    next: Option<Place>,
+    /// Where it begins: the first Cluster, as the file was opened.
+    start: Option<Place>,
+}
+
 /// A Matroska or WebM file being read.
 pub struct Demuxer<R> {
     r: Reader<R>,
@@ -125,7 +160,8 @@ pub struct Demuxer<R> {
     segment_end: u64,
     /// Where the first Cluster begins, if there is one.
     first_cluster: Option<u64>,
-    /// Where the Cues are, if the file says, and them once read.
+    /// Where the Cues are, if the file says -- before its first Cluster or
+    /// through its SeekHead, where FFmpeg looks -- and them once read.
     cues_at: Option<u64>,
     cues: Option<Vec<Cue>>,
     state: State,
@@ -138,9 +174,9 @@ pub struct Demuxer<R> {
     /// Per subtitle track, where its last frame ends: FFmpeg marks a
     /// subtitle starting before that not a key frame.
     subtitle_ends: Vec<(u64, i64)>,
-    /// While indexing a file without Cues: the key frames found, in place
-    /// of packets.
+    /// While walking for key frames: those found, in place of packets.
     indexing: Option<Vec<Cue>>,
+    walk: Walk,
 }
 
 /// The most SeekHead entries followed, chained SeekHeads included.
@@ -190,11 +226,25 @@ impl<R: Read + Seek> Demuxer<R> {
             skip: Skip::default(),
             subtitle_ends: Vec::new(),
             indexing: None,
+            walk: Walk {
+                found: Vec::new(),
+                subtitle_ends: Vec::new(),
+                next: None,
+                start: None,
+            },
         };
         d.read_description()?;
         if let Some(at) = d.first_cluster {
             d.r.seek_to(at)?;
             d.state = State::Segment;
+            let start = Place {
+                state: State::Segment,
+                pos: at,
+                last_good: at,
+                segment_end: d.segment_end,
+            };
+            d.walk.start = Some(start);
+            d.walk.next = Some(start);
         }
         Ok(d)
     }
@@ -388,8 +438,7 @@ impl<R: Read + Seek> Demuxer<R> {
     fn time_tracks(&mut self) {
         let scale = self.info.timestamp_scale;
         let mut next = 0usize;
-        let mut first_of: Vec<u64> = Vec::new();
-        for (number, timing) in &mut self.declared {
+        for (_, timing) in &mut self.declared {
             let Some(_) = timing else { continue };
             let Some(track) = self.tracks.get(next) else {
                 *timing = None;
@@ -418,14 +467,10 @@ impl<R: Read + Seek> Demuxer<R> {
                 den,
                 delay,
             });
-            // Only the first entry of a number counts (FFmpeg's
-            // `matroska_find_track_by_num`).
-            if first_of.contains(number) {
-                *timing = None;
-            }
-            first_of.push(*number);
             next += 1;
         }
+        // Only the first entry of a number counts, read or ignored: a block
+        // goes to the track FFmpeg's `matroska_find_track_by_num` finds.
         let mut seen = Vec::new();
         self.declared.retain(|(n, _)| {
             let first = !seen.contains(n);
@@ -461,6 +506,11 @@ impl<R: Read + Seek> Demuxer<R> {
     }
 
     /// Read one element: `false` at the end.
+    ///
+    /// Each element FFmpeg knows where it stands -- one of the Segment's own,
+    /// a Cluster's, a BlockGroup's, or EBML's Void and CRC-32 anywhere --
+    /// is noted as the last good one when it begins (`last_good`), so that
+    /// a resync starts where FFmpeg's does: one byte past it.
     fn step(&mut self) -> Result<bool, Error> {
         match self.state {
             State::Done => Ok(false),
@@ -486,13 +536,14 @@ impl<R: Read + Seek> Demuxer<R> {
                     };
                     return Ok(true);
                 }
-                if h.id == ids::CUES {
-                    self.cues_at.get_or_insert(h.start);
-                }
+                // Anything else is passed over -- Cues too: FFmpeg reads Cues
+                // only before the first Cluster or where the SeekHead points.
                 let end = h
                     .end()
                     .ok_or(Error::Invalid("a top-level element of unknown size"))?;
-                self.last_good = h.start;
+                if counts(Level::Segment, &h) {
+                    self.last_good = h.start;
+                }
                 self.r.seek_to(end.min(self.segment_end))?;
                 Ok(true)
             }
@@ -524,7 +575,9 @@ impl<R: Read + Seek> Demuxer<R> {
                 if end.is_some_and(|e| child_end > e) || child_end > self.r.len() {
                     return Err(Error::Invalid("an element running past its Cluster"));
                 }
-                self.last_good = h.start;
+                if counts(Level::Cluster, &h) {
+                    self.last_good = h.start;
+                }
                 match h.id {
                     ids::TIMESTAMP => {
                         let t = self.r.uint(h.size, 0)?;
@@ -534,30 +587,16 @@ impl<R: Read + Seek> Demuxer<R> {
                             timestamp: t,
                         };
                     }
-                    ids::SIMPLE_BLOCK if self.indexing.is_some() => {
-                        let head = self
-                            .r
-                            .binary(Size::Known(head_len(&h)), block::HEADER_MAX)?;
-                        if let Ok((track, relative, flags)) = block::header(&head) {
-                            self.index_key(track, relative, flags & 0x80 != 0, timestamp, start);
-                        }
-                    }
                     ids::SIMPLE_BLOCK => {
                         let data = self.r.binary(h.size, MAX_BINARY)?;
                         if !data.is_empty() {
-                            self.block(&data, h.data, timestamp, None)?;
-                        }
-                    }
-                    ids::BLOCK_GROUP if self.indexing.is_some() => {
-                        let (head, references) = self.read_group_head(&h)?;
-                        if let Ok((track, relative, _)) = block::header(&head) {
-                            self.index_key(track, relative, references == 0, timestamp, start);
+                            self.block(&data, h.data, timestamp, start, None)?;
                         }
                     }
                     ids::BLOCK_GROUP => {
                         let (data, pos, group) = self.read_group(&h)?;
                         if !data.is_empty() {
-                            self.block(&data, pos, timestamp, Some(group))?;
+                            self.block(&data, pos, timestamp, start, Some(group))?;
                         }
                     }
                     _ => {}
@@ -569,6 +608,7 @@ impl<R: Read + Seek> Demuxer<R> {
     }
 
     /// A `BlockGroup`: its `Block`'s bytes and where they are, and the rest.
+    /// Each element inside it FFmpeg knows is the last good one in turn.
     fn read_group(&mut self, h: &Header) -> Result<(Vec<u8>, u64, Group), Error> {
         let mut data = Vec::new();
         let mut pos = h.data;
@@ -578,7 +618,11 @@ impl<R: Read + Seek> Demuxer<R> {
             discard_padding: 0,
             additions: Vec::new(),
         };
+        let last_good = &mut self.last_good;
         self.r.children(h, |r, c| {
+            if counts(Level::Group, c) {
+                *last_good = c.start;
+            }
             match c.id {
                 ids::BLOCK => {
                     pos = c.data;
@@ -593,11 +637,17 @@ impl<R: Read + Seek> Demuxer<R> {
                 }
                 ids::DISCARD_PADDING => g.discard_padding = r.sint(c.size, 0)?,
                 ids::BLOCK_ADDITIONS => r.children(c, |r, more| {
+                    if counts(Level::Additions, more) {
+                        *last_good = more.start;
+                    }
                     if more.id != ids::BLOCK_MORE {
                         return Ok(());
                     }
                     let (mut id, mut bytes) = (1, Vec::new());
                     r.children(more, |r, f| {
+                        if counts(Level::More, f) {
+                            *last_good = f.start;
+                        }
                         match f.id {
                             ids::BLOCK_ADD_ID => id = r.uint(f.size, 1)?,
                             ids::BLOCK_ADDITIONAL => bytes = r.binary(f.size, MAX_BINARY)?,
@@ -615,54 +665,21 @@ impl<R: Read + Seek> Demuxer<R> {
         Ok((data, pos, g))
     }
 
-    /// A `BlockGroup`'s `Block` header and how many references it has, for
-    /// indexing: the frames are not read.
-    fn read_group_head(&mut self, h: &Header) -> Result<(Vec<u8>, usize), Error> {
-        let (mut head, mut references) = (Vec::new(), 0usize);
-        self.r.children(h, |r, c| {
-            match c.id {
-                ids::BLOCK => head = r.binary(Size::Known(head_len(c)), block::HEADER_MAX)?,
-                ids::REFERENCE_BLOCK => references = references.saturating_add(1),
-                _ => {}
-            }
-            Ok(())
-        })?;
-        Ok((head, references))
-    }
-
-    /// While indexing: note a key frame of a read track.
-    fn index_key(&mut self, track: u64, relative: i16, key: bool, cluster_time: u64, cluster: u64) {
-        if !key {
-            return;
-        }
-        let Some(timing) = self.timing(track) else {
-            return;
-        };
-        let Some(t) = self.tracks.get(timing.index) else {
-            return;
-        };
-        if let Some(time) = block_timestamp(t, timing, cluster_time, relative)
-            && let Some(index) = self.indexing.as_mut()
-        {
-            index.push(Cue {
-                time,
-                track,
-                cluster,
-            });
-        }
-    }
-
-    /// A block's frames, as packets queued in order: FFmpeg's
-    /// `matroska_parse_block`.
+    /// A block's frames, as packets queued in order -- or, while walking for
+    /// key frames, its key frame noted and its frames only checked. FFmpeg's
+    /// `matroska_parse_block` does both, in this order: the track, the key
+    /// frame noted, then the laces, then each frame's encoding undone --
+    /// either of the last two can fail after the key frame is noted.
     fn block(
         &mut self,
         data: &[u8],
         position: u64,
         cluster_time: u64,
+        cluster: u64,
         group: Option<Group>,
     ) -> Result<(), Error> {
-        let b: Block = block::parse(data)?;
-        let Some(&(_, timing)) = self.declared.iter().find(|(n, _)| *n == b.track) else {
+        let (number, relative, flags) = block::header(data)?;
+        let Some(&(_, timing)) = self.declared.iter().find(|(n, _)| *n == number) else {
             return Err(Error::Invalid("a block for a track that is not declared"));
         };
         let Some(timing) = timing else {
@@ -676,7 +693,7 @@ impl<R: Read + Seek> Demuxer<R> {
             return Ok(());
         }
         let (mut keyframe, block_duration, discard_padding, additions) = match group {
-            None => (b.flags & 0x80 != 0, 0, 0, Vec::new()),
+            None => (flags & 0x80 != 0, 0, 0, Vec::new()),
             Some(g) => (
                 g.references == 0,
                 g.duration,
@@ -684,41 +701,58 @@ impl<R: Read + Seek> Demuxer<R> {
                 g.additions,
             ),
         };
-        let mut timestamp = block_timestamp(track, timing, cluster_time, b.relative);
+        let mut timestamp = block_timestamp(track, timing, cluster_time, relative);
+        // A walk reads the file afresh, so it keeps subtitles' ends of its own.
+        let walking = self.indexing.is_some();
+        let subtitle_ends = if walking {
+            &mut self.walk.subtitle_ends
+        } else {
+            &mut self.subtitle_ends
+        };
         if let Some(t) = timestamp
             && track.kind == TrackKind::Subtitle
         {
-            let ended = self
-                .subtitle_ends
+            let ended = subtitle_ends
                 .iter()
-                .find(|(n, _)| *n == b.track)
+                .find(|(n, _)| *n == number)
                 .map_or(0, |(_, e)| *e);
             if t < ended {
                 keyframe = false;
             }
         }
 
-        // After a seek: the demuxer's dropping, then the seek's track's.
-        if let Some(until) = self.skip.until
-            && track.kind != TrackKind::Subtitle
-        {
-            if timestamp.is_none_or(|t| t < until) {
-                return Ok(());
+        if let Some(found) = self.indexing.as_mut() {
+            if keyframe && let Some(time) = timestamp {
+                found.push(Cue {
+                    time,
+                    track: number,
+                    cluster,
+                });
             }
-            // A key frame ends it -- and so does another track's frame that
-            // is not one, which FFmpeg reports as "keyframes not correctly
-            // marked" and gives out.
-            if keyframe || self.skip.key_for != Some(b.track) {
-                self.skip.until = None;
+        } else {
+            // After a seek: the demuxer's dropping, then the seek's track's.
+            if let Some(until) = self.skip.until
+                && track.kind != TrackKind::Subtitle
+            {
+                if timestamp.is_none_or(|t| t < until) {
+                    return Ok(());
+                }
+                // A key frame ends it -- and so does another track's frame
+                // that is not one, which FFmpeg reports as "keyframes not
+                // correctly marked" and gives out.
+                if keyframe || self.skip.key_for != Some(number) {
+                    self.skip.until = None;
+                }
             }
-        }
-        if self.skip.key_for == Some(b.track) {
-            if !keyframe {
-                return Ok(());
+            if self.skip.key_for == Some(number) {
+                if !keyframe {
+                    return Ok(());
+                }
+                self.skip.key_for = None;
             }
-            self.skip.key_for = None;
         }
 
+        let b: Block = block::parse(data)?;
         let laces = b.frames.len();
         let laces_u64 = u64::try_from(laces).unwrap_or(1).max(1);
         let mut duration = block_duration;
@@ -736,9 +770,9 @@ impl<R: Read + Seek> Demuxer<R> {
             && let Some(t) = timestamp
         {
             let end = t.saturating_add(i64::try_from(duration).unwrap_or(i64::MAX));
-            match self.subtitle_ends.iter_mut().find(|(n, _)| *n == b.track) {
+            match subtitle_ends.iter_mut().find(|(n, _)| *n == number) {
                 Some((_, e)) => *e = (*e).max(end),
-                None => self.subtitle_ends.push((b.track, end)),
+                None => subtitle_ends.push((number, end)),
             }
         }
 
@@ -750,7 +784,12 @@ impl<R: Read + Seek> Demuxer<R> {
             let lace_duration = mul_div(duration, n_u64.saturating_add(1), laces_u64)
                 .wrapping_sub(mul_div(duration, n_u64, laces_u64));
             let stored = data.get(range.clone()).unwrap_or_default();
+            // Undone while walking too, as FFmpeg's walk does: a frame that
+            // does not inflate ends the Cluster there as well.
             let frame = track.encoding.undo(stored)?.into_owned();
+            if walking {
+                continue;
+            }
             let frame_additions: Vec<(u64, Vec<u8>)> = additions
                 .iter()
                 .filter(|(_, bytes)| !bytes.is_empty())
@@ -759,7 +798,7 @@ impl<R: Read + Seek> Demuxer<R> {
             // An empty frame with no additions is no packet.
             if !(frame.is_empty() && additions.is_empty()) {
                 self.queue.push_back(Packet {
-                    track: b.track,
+                    track: number,
                     timestamp,
                     duration: lace_duration,
                     // Every frame of a key block is a key frame, as FFmpeg has
@@ -781,12 +820,14 @@ impl<R: Read + Seek> Demuxer<R> {
 
     /// After damage: look past it for the next top-level element and go
     /// on from there; `false` if none is left. FFmpeg's `matroska_resync`.
+    ///
+    /// The frames a damaged block gave before its damage stay queued, as
+    /// FFmpeg delivers the laces it queued before one failed.
     #[allow(
         clippy::arithmetic_side_effects,
         reason = "positions are within the file (`at` stays under its length, and an ID is found only after four bytes of the scan, so its start is at or past where the scan began); `filled` counts bytes read"
     )]
     fn resync(&mut self) -> Result<bool, Error> {
-        self.queue.clear();
         let mut at = self.last_good.saturating_add(1);
         let len = self.r.len();
         let mut window = 0u32;
@@ -819,70 +860,98 @@ impl<R: Read + Seek> Demuxer<R> {
 
     /// Go to the latest key frame of `track` at or before `timestamp` (in
     /// the track's ticks), so that the next packet is the first to decode
-    /// from: through the Cues if the file has them, by walking the Clusters'
-    /// timestamps if not.
+    /// from: through the Cues if the file has them for the track, by walking
+    /// the Clusters for its key frames if not -- only as far as the first
+    /// key frame past the time ([`Walk`]).
     ///
     /// Packets before the key frame's time are then dropped, of every track
     /// but subtitles, and the track's own until its key frame -- as after
     /// FFmpeg's seek.
     ///
+    /// The Cues are read alone, as a freshly opened FFmpeg reads them: its
+    /// index also holds every key frame it has read since, so that once it
+    /// has read past a key frame the Cues leave out, it may seek to that one
+    /// instead (design-decisions §1348). And the seek is the demuxer's: a
+    /// sound decoder that must decode [`crate::Track::seek_pre_roll`] before
+    /// its output is right is given it by a caller who seeks that much
+    /// earlier, as FFmpeg's callers do.
+    ///
     /// # Errors
     ///
-    /// When `track` is not one of [`Self::tracks`], or the source fails.
+    /// When `track` is not one of [`Self::tracks`], has no key frame to go
+    /// to (FFmpeg's seek fails too), or the source fails. Reading then goes
+    /// on where it was.
     pub fn seek(&mut self, track: u64, timestamp: i64) -> Result<(), Error> {
         if self.timing(track).is_none() {
             return Err(Error::Invalid("a seek in a track that is not read"));
         }
-        let index = self.index()?;
-        let entries: Vec<&Cue> = index.iter().filter(|c| c.track == track).collect();
+        let mut entries: Vec<Cue> = self
+            .cues()?
+            .iter()
+            .filter(|c| c.track == track)
+            .copied()
+            .collect();
+        if entries.is_empty() {
+            // No Cues for the track -- none at all, too few for FFmpeg to
+            // use, or only other tracks' -- so its key frames, walked to.
+            self.walk_until(track, timestamp)?;
+            entries = self
+                .walk
+                .found
+                .iter()
+                .filter(|c| c.track == track)
+                .copied()
+                .collect();
+            // FFmpeg's index is in time order, and of two key frames at one
+            // time it keeps the later: a stable sort keeps the file's order
+            // among equal times, and the search below takes the last.
+            entries.sort_by_key(|c| c.time);
+        }
         let target = match entries.first() {
             Some(first) => timestamp.max(first.time),
             None => timestamp,
         };
-        let entry = entries
+        let Some(entry) = entries
             .iter()
             .rev()
             .find(|c| c.time <= target)
             .or(entries.first())
             .copied()
-            .copied();
-        let (pos, time) = match entry {
-            Some(c) => (c.cluster, c.time),
-            None => match self.first_cluster {
-                Some(first) => (first, i64::MIN),
-                None => {
-                    self.state = State::Done;
-                    return Ok(());
-                }
-            },
+        else {
+            if self.first_cluster.is_none() {
+                // Nothing to play, so nothing to go to.
+                self.state = State::Done;
+                return Ok(());
+            }
+            return Err(Error::Invalid("a seek in a track with no key frame"));
         };
         self.queue.clear();
-        self.r.seek_to(pos)?;
-        self.last_good = pos;
+        self.r.seek_to(entry.cluster)?;
+        self.last_good = entry.cluster;
         self.state = State::Segment;
         self.subtitle_ends.clear();
         self.skip = Skip {
-            until: Some(time),
+            until: Some(entry.time),
             key_for: Some(track),
         };
         Ok(())
     }
 
-    /// The index to seek with: the Cues if the file has a usable set, or
-    /// else the key frames found by reading the blocks' headers.
-    fn index(&mut self) -> Result<Vec<Cue>, Error> {
+    /// The file's Cues, read the first time a seek wants them; empty if it
+    /// has none FFmpeg would use. Reading stays where it was.
+    fn cues(&mut self) -> Result<&[Cue], Error> {
         if self.cues.is_none() {
+            let reading = self.r.pos();
             let cues = match self.cues_at {
+                // Damaged Cues are no Cues, as FFmpeg's seek then falls
+                // back to reading.
                 Some(at) => self.read_cues(at).unwrap_or_default(),
                 None => Vec::new(),
             };
             self.cues = Some(cues);
+            self.r.seek_to(reading)?;
         }
-        let cues = self.cues.clone().unwrap_or_default();
-        if !cues.is_empty() {
-            return Ok(cues);
-        }
-        self.scan_keyframes()
+        Ok(self.cues.as_deref().unwrap_or_default())
     }
 
     fn read_cues(&mut self, at: u64) -> Result<Vec<Cue>, Error> {
@@ -899,35 +968,77 @@ impl<R: Read + Seek> Demuxer<R> {
         )
     }
 
-    /// Without Cues: every read track's key frames, from the blocks' headers
-    /// alone -- the latest at or before a time is where FFmpeg's seek lands
-    /// in such a file. Reading resumes where it was.
-    fn scan_keyframes(&mut self) -> Result<Vec<Cue>, Error> {
-        let Some(first) = self.first_cluster else {
-            return Ok(Vec::new());
+    fn place(&self) -> Place {
+        Place {
+            state: self.state,
+            pos: self.r.pos(),
+            last_good: self.last_good,
+            segment_end: self.segment_end,
+        }
+    }
+
+    fn go_to(&mut self, p: Place) -> Result<(), Error> {
+        self.state = p.state;
+        self.last_good = p.last_good;
+        self.segment_end = p.segment_end;
+        self.r.seek_to(p.pos)
+    }
+
+    /// Walk on through the Clusters, noting every read track's key frames
+    /// from the blocks' headers alone, until one of `track` later than
+    /// `time` is found or the file ends ([`Walk`]). Reading then goes on
+    /// where it was.
+    ///
+    /// FFmpeg's test is the same, on the frames it reads: a key frame of
+    /// the seek's track past the time ends its walk.
+    fn walk_until(&mut self, track: u64, time: i64) -> Result<(), Error> {
+        let past = |c: &Cue| c.track == track && c.time > time;
+        if self.walk.found.iter().any(past) {
+            return Ok(());
+        }
+        let Some(from) = self.walk.next else {
+            return Ok(());
         };
-        let saved = (self.state, self.r.pos(), self.last_good, self.segment_end);
-        self.indexing = Some(Vec::new());
-        self.state = State::Segment;
-        let mut result = self.r.seek_to(first);
+        let reading = self.place();
+        self.indexing = Some(core::mem::take(&mut self.walk.found));
+        let mut result = self.go_to(from);
+        let mut ended = false;
         while result.is_ok() {
+            let found = self.indexing.as_ref().and_then(|f| f.last());
+            if found.is_some_and(past) {
+                break;
+            }
             match self.step() {
                 Ok(true) => {}
-                Ok(false) => break,
+                Ok(false) => {
+                    ended = true;
+                    break;
+                }
                 Err(Error::Io(kind)) => result = Err(Error::Io(kind)),
                 Err(_) => match self.resync() {
                     Ok(true) => {}
-                    Ok(false) => break,
+                    Ok(false) => {
+                        ended = true;
+                        break;
+                    }
                     Err(e) => result = Err(e),
                 },
             }
         }
-        let mut index = self.indexing.take().unwrap_or_default();
-        (self.state, _, self.last_good, self.segment_end) = saved;
-        self.r.seek_to(saved.1)?;
-        result?;
-        index.sort_by_key(|c| c.time);
-        Ok(index)
+        self.walk.found = self.indexing.take().unwrap_or_default();
+        self.walk.next = match result {
+            // The source failed partway: where the walk stood is not to be
+            // trusted, so the next seek walks again from the start.
+            Err(_) => {
+                self.walk.found.clear();
+                self.walk.subtitle_ends.clear();
+                self.walk.start
+            }
+            Ok(()) if ended => None,
+            Ok(()) => Some(self.place()),
+        };
+        self.go_to(reading)?;
+        result
     }
 }
 
@@ -955,12 +1066,50 @@ fn block_timestamp(track: &Track, timing: Timing, cluster_time: u64, relative: i
     )
 }
 
-/// How much of a block element to read for its header.
-fn head_len(h: &Header) -> u64 {
-    match h.size {
-        Size::Known(n) => n.min(block::HEADER_MAX),
-        Size::Unknown => 0,
-    }
+/// Where an element stands, for [`counts`].
+#[derive(Clone, Copy, Debug)]
+enum Level {
+    /// A child of the Segment.
+    Segment,
+    /// A child of a Cluster.
+    Cluster,
+    /// A child of a `BlockGroup`.
+    Group,
+    /// A child of a `BlockAdditions`.
+    Additions,
+    /// A child of a `BlockMore`.
+    More,
+}
+
+/// Whether FFmpeg counts `h` good where it stands -- an element its syntax
+/// tables know there, or EBML's Void or CRC-32 anywhere, of a size its type
+/// allows (`ebml_parse`'s `update_pos` and `max_lengths`) -- so that a resync
+/// after damage starts one byte past it, as FFmpeg's does. An element it does
+/// not know it passes over without counting: damage after one resyncs from
+/// before it.
+fn counts(level: Level, h: &Header) -> bool {
+    let Size::Known(size) = h.size else {
+        return false;
+    };
+    // FFmpeg's limits by type: 8 bytes for a number, 256 MiB for bytes, none
+    // for a master element or one it does not read.
+    let limit = match (level, h.id) {
+        (_, ids::VOID | ids::CRC_32) => u64::MAX,
+        (Level::Segment, id) if ids::is_top_level(id) => u64::MAX,
+        (Level::Cluster, ids::TIMESTAMP) => 8,
+        (Level::Cluster, ids::SIMPLE_BLOCK) => MAX_BINARY,
+        (Level::Cluster, ids::BLOCK_GROUP | ids::CLUSTER_POSITION | ids::CLUSTER_PREV_SIZE) => {
+            u64::MAX
+        }
+        (Level::Group, ids::BLOCK) => MAX_BINARY,
+        (Level::Group, ids::BLOCK_DURATION | ids::DISCARD_PADDING | ids::REFERENCE_BLOCK) => 8,
+        (Level::Group, ids::BLOCK_ADDITIONS | ids::CODEC_STATE) => u64::MAX,
+        (Level::Additions, ids::BLOCK_MORE) => u64::MAX,
+        (Level::More, ids::BLOCK_ADD_ID) => 8,
+        (Level::More, ids::BLOCK_ADDITIONAL) => MAX_BINARY,
+        _ => return false,
+    };
+    size <= limit
 }
 
 /// The FFmpeg-shaped stand-in for a read track's timing until the

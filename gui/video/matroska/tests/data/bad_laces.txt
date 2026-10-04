@@ -1,0 +1,5 @@
+# bad_laces.mkv: what ffprobe makes of it (generate_fixtures.py).
+stream 0 vp9 1/1000
+stream 1 opus 1/1000
+packet 0 1000 40 4 432 K__ d0cab90d8d20d57e2f2b9be52f7dd25d -
+packet 0 2000 40 4 513 K__ 98bd1c45684cf587ac2347a92dd7bb51 -

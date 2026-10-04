@@ -1,0 +1,6 @@
+# ignored_tracks.mkv: what ffprobe makes of it (generate_fixtures.py).
+stream 0 snow 1/1000
+stream 1 snow 1/1000
+packet 0 0 10 4 196 K__ da6c56969ff19daf215df520e6739e19 -
+packet 0 10 10 4 226 ___ c761ef7ce648456241b3eba09a776641 -
+packet 0 100 10 4 264 K__ 961006ee4501824485bcf9dc8a74808f -

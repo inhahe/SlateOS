@@ -3277,6 +3277,16 @@ impl AlarmClockApp {
     pub fn handle_event(&mut self, event: &Event, size: (f32, f32)) -> Action {
         match event {
             Event::Mouse(mouse) => match mouse.kind {
+                // The card is modal for the pointer as it is for the keys: a
+                // press, with any button, puts it away rather than reaching
+                // the control drawn under it, and the wheel does not scroll
+                // what it covers. A move is still followed, so the light is
+                // right when the card goes.
+                MouseEventKind::Press(_) if self.show_help => {
+                    self.show_help = false;
+                    Action::Redraw
+                }
+                MouseEventKind::Scroll { .. } if self.show_help => Action::None,
                 MouseEventKind::Press(button) => self.handle_click(mouse.x, mouse.y, button, size),
                 MouseEventKind::Scroll { dx: _, dy } => self.scroll(mouse.x, mouse.y, dy, size),
                 // What is under the pointer is drawn lit; only a change in it
@@ -3682,12 +3692,23 @@ impl Probe for AlarmClockApp {
         self.frame(size.0, size.1)
     }
 
+    // Through `handle_event`, the window's own way in: a probe that called
+    // the press handler directly went round whatever the event routing
+    // does first -- the shortcut card's hold on the pointer among it -- and
+    // a test of what a press does passed against a path no window takes.
     fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Self::Outcome {
-        self.handle_click(x, y, button, size)
+        self.handle_event(
+            &Event::Mouse(guitk::event::MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }),
+            size,
+        )
     }
 
     fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Self::Outcome {
-        self.handle_key(key, size)
+        self.handle_event(&Event::Key(key.clone()), size)
     }
 }
 
@@ -4600,6 +4621,79 @@ mod tests {
         assert!(
             app.editor.is_some(),
             "control: N does nothing even with the card down"
+        );
+    }
+
+    /// **A press while the card is up puts it away and does nothing else,
+    /// and the wheel scrolls nothing under it.** A press used to go straight
+    /// through the card to the control drawn under it. The controls at the
+    /// end are the same press and turn with the card down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let size = AlarmClockApp::SIZE;
+        let mut app = AlarmClockApp::new();
+        for minute in 0..30 {
+            app.create_alarm(7, minute);
+        }
+        let mouse = |app: &mut AlarmClockApp, x: f32, y: f32, kind: MouseEventKind| {
+            app.handle_event(&Event::Mouse(guitk::event::MouseEvent { x, y, kind }), size)
+        };
+        let card_up = |app: &AlarmClockApp| drawn(app).contains("F1 closes this");
+        let (ax, ay) = probe::rect_of(&app, Target::AddAlarm)
+            .expect("the Add Alarm button")
+            .centre();
+        let list = AlarmClockApp::alarm_list_rect(AlarmClockApp::content_rect(size.0, size.1));
+        let (lx, ly) = list.centre();
+
+        probe::key(&mut app, &probe::press(Key::F1));
+        assert!(card_up(&app));
+        mouse(
+            &mut app,
+            lx,
+            ly,
+            MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+        );
+        assert!(
+            app.alarm_scroll.abs() < f32::EPSILON,
+            "the wheel scrolled the list under the card"
+        );
+        assert!(card_up(&app), "a turn of the wheel put the card away");
+        assert_eq!(
+            mouse(&mut app, ax, ay, MouseEventKind::Press(MouseButton::Left)),
+            Action::Redraw
+        );
+        assert!(!card_up(&app), "the press did not put the card away");
+        assert!(
+            app.editor.is_none(),
+            "the press went through the card and opened the new alarm"
+        );
+
+        // Any button: the right one does nothing to a control, but it is
+        // still a press on the card.
+        probe::key(&mut app, &probe::press(Key::F1));
+        mouse(&mut app, ax, ay, MouseEventKind::Press(MouseButton::Right));
+        assert!(!card_up(&app), "a right-button press left the card up");
+
+        // A move under the card is not a press, and leaves it up.
+        probe::key(&mut app, &probe::press(Key::F1));
+        mouse(&mut app, ax, ay, MouseEventKind::Move);
+        assert!(card_up(&app), "a move put the card away");
+        probe::key(&mut app, &probe::press(Key::F1));
+
+        mouse(
+            &mut app,
+            lx,
+            ly,
+            MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+        );
+        assert!(
+            app.alarm_scroll > 0.0,
+            "control: the wheel scrolls nothing at all"
+        );
+        mouse(&mut app, ax, ay, MouseEventKind::Press(MouseButton::Left));
+        assert!(
+            app.editor.is_some(),
+            "control: the press does nothing even with the card down"
         );
     }
 

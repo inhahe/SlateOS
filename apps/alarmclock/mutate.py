@@ -353,6 +353,28 @@ MUTATIONS = [
         "        let _ = settings;",
         ["the_text_boxes_are_the_toolkits_fields"],
     ),
+    # -- the shortcut card's hold on the pointer
+    (
+        "a press goes through the shortcut card",
+        "                MouseEventKind::Press(_) if self.show_help => {\n"
+        "                    self.show_help = false;\n"
+        "                    Action::Redraw\n"
+        "                }\n",
+        "",
+        ["the_shortcut_card_takes_a_press_rather_than_passing_it_on"],
+    ),
+    (
+        "only the left button puts the card away",
+        "                MouseEventKind::Press(_) if self.show_help => {\n",
+        "                MouseEventKind::Press(MouseButton::Left) if self.show_help => {\n",
+        ["the_shortcut_card_takes_a_press_rather_than_passing_it_on"],
+    ),
+    (
+        "the wheel scrolls what the card covers",
+        "                MouseEventKind::Scroll { .. } if self.show_help => Action::None,\n",
+        "",
+        ["the_shortcut_card_takes_a_press_rather_than_passing_it_on"],
+    ),
 ]
 
 if __name__ == "__main__":

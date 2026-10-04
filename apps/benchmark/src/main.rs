@@ -1924,6 +1924,16 @@ impl BenchmarkApp {
                 let x = mouse_event.x;
                 let y = mouse_event.y;
                 match mouse_event.kind {
+                    // The card is modal for the pointer as it is for the
+                    // keys: a press, with any button, puts it away rather
+                    // than reaching the control drawn under it, and the wheel
+                    // does not scroll what it covers. A move still goes
+                    // through, so the light is right when the card goes.
+                    MouseEventKind::Press(_) if self.show_help => {
+                        self.show_help = false;
+                        EventResult::Consumed
+                    }
+                    MouseEventKind::Scroll { .. } if self.show_help => EventResult::Ignored,
                     MouseEventKind::Press(MouseButton::Left) => self.handle_click(x, y),
                     MouseEventKind::Move => self.handle_mouse_move(x, y),
                     // `dy` counts wheel *notches*, not pixels — see
@@ -5116,6 +5126,64 @@ mod tests {
                 RenderCommand::Text { text, .. } if text == &said
             )),
             "the notice is set but never drawn"
+        );
+    }
+
+    /// **A press while the card is up puts it away and does nothing else,
+    /// and the wheel scrolls nothing under it.** A press used to go straight
+    /// through the card to the control drawn under it. The controls at the
+    /// end are the same press and turn with the card down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let mut app = BenchmarkApp::new();
+        // Short, so the overview has somewhere to scroll.
+        app.handle_event(&Event::Resize {
+            width: WINDOW_WIDTH as u32,
+            height: 260,
+        });
+        assert!(app.max_scroll() > 0.0, "the fixture must scroll");
+        let card_up = |app: &BenchmarkApp| app.show_help;
+        let (x, y) =
+            guitk::probe::rect_of_sized(&app, Target::Tab(Tab::History), (app.width, app.height))
+                .expect("the History tab")
+                .centre();
+        let mouse = |app: &mut BenchmarkApp, kind: MouseEventKind| {
+            app.handle_event(&Event::Mouse(MouseEvent { x, y, kind }))
+        };
+        let tab = app.active_tab;
+
+        app.handle_event(&Event::Key(guitk::probe::press(Key::F1)));
+        assert!(card_up(&app));
+        mouse(&mut app, MouseEventKind::Scroll { dx: 0.0, dy: -3.0 });
+        assert!(
+            app.scroll_y.abs() < f32::EPSILON,
+            "the wheel scrolled the page under the card"
+        );
+        assert_eq!(
+            mouse(&mut app, MouseEventKind::Press(MouseButton::Left)),
+            EventResult::Consumed
+        );
+        assert!(!card_up(&app), "the press did not put the card away");
+        assert_eq!(
+            app.active_tab, tab,
+            "the press went through the card to a tab"
+        );
+
+        // Any button: the right one does nothing to a control, but it is
+        // still a press on the card.
+        app.handle_event(&Event::Key(guitk::probe::press(Key::F1)));
+        mouse(&mut app, MouseEventKind::Press(MouseButton::Right));
+        assert!(!card_up(&app), "a right-button press left the card up");
+
+        mouse(&mut app, MouseEventKind::Scroll { dx: 0.0, dy: -3.0 });
+        assert!(
+            app.scroll_y > 0.0,
+            "control: the wheel scrolls nothing at all"
+        );
+        mouse(&mut app, MouseEventKind::Press(MouseButton::Left));
+        assert_ne!(
+            app.active_tab, tab,
+            "control: the press does nothing even with the card down"
         );
     }
 

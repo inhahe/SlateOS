@@ -59,6 +59,28 @@ MUTATIONS = [
         '            && key.modifiers.ctrl',
         ['a_chord_is_neither_a_key_of_the_window_nor_typing'],
     ),
+    # -- the shortcut card's hold on the pointer
+    (
+        'a press goes through the shortcut card',
+        '            MouseEventKind::Press(_) if ui.show_help => {\n'
+        '                ui.show_help = false;\n'
+        '                EventResult::Consumed\n'
+        '            }\n',
+        '',
+        ['the_shortcut_card_takes_a_press_rather_than_passing_it_on'],
+    ),
+    (
+        'only the left button puts the card away',
+        '            MouseEventKind::Press(_) if ui.show_help => {\n',
+        '            MouseEventKind::Press(MouseButton::Left) if ui.show_help => {\n',
+        ['the_shortcut_card_takes_a_press_rather_than_passing_it_on'],
+    ),
+    (
+        'the wheel scrolls what the card covers',
+        '            MouseEventKind::Scroll { .. } if ui.show_help => EventResult::Ignored,\n',
+        '',
+        ['the_shortcut_card_takes_a_press_rather_than_passing_it_on'],
+    ),
     # -- the clock, 2026-10-03: none was asked for, so a defrag never moved
     (
         'a running defrag asks for no clock',

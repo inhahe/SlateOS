@@ -4223,12 +4223,23 @@ impl Probe for NetManagerApp {
         render_frame(self, size.0, size.1)
     }
 
+    // Through `handle_event`, the window's own way in: a probe that called
+    // the press handler directly went round whatever the event routing
+    // does first -- the shortcut card's hold on the pointer among it -- and
+    // a test of what a press does passed against a path no window takes.
     fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Action {
-        self.handle_click(x, y, button, size)
+        self.handle_event(
+            &Event::Mouse(guitk::event::MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }),
+            size,
+        )
     }
 
-    fn key_at(&mut self, key: &KeyEvent, _size: (f32, f32)) -> Action {
-        self.handle_key(key)
+    fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Action {
+        self.handle_event(&Event::Key(key.clone()), size)
     }
 }
 

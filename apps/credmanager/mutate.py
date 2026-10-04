@@ -604,6 +604,22 @@ MAIN = [
         '',
         [SLIDER_SETS],
     ),
+    # -- an entry's times, 2026-10-03: counts of seconds, not dates
+    (
+        "an entry's creation is a count of seconds",
+        '    let created_text = format!("Created: {}", stamp(entry.created_at));\n',
+        '    let created_text = format!(\n'
+        '        "Created: {} seconds ago",\n'
+        '        state.now.saturating_sub(entry.created_at)\n'
+        '    );\n',
+        ['an_entrys_times_are_dates'],
+    ),
+    (
+        "an entry's change is dated by its creation",
+        '    let modified_text = format!("Modified: {}", stamp(entry.modified_at));\n',
+        '    let modified_text = format!("Modified: {}", stamp(entry.created_at));\n',
+        ['an_entrys_times_are_dates'],
+    ),
     (
         'the event that finds the lock due is taken as well',
         '    if state.advance_clock(event) {\n'

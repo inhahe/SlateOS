@@ -3516,6 +3516,16 @@ impl AppState {
         }
         match event {
             Event::Mouse(mouse) => match mouse.kind {
+                // The card is modal for the pointer as it is for the keys: a
+                // press, with any button, puts it away rather than reaching
+                // the control drawn under it, and the wheel does not scroll
+                // what it covers. A move or a release still goes through, so
+                // the light stays right and a drag still ends.
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) if self.show_help => {
+                    self.show_help = false;
+                    Action::Redraw
+                }
+                MouseEventKind::Scroll { .. } if self.show_help => Action::None,
                 MouseEventKind::Press(button) => self.handle_click(mouse.x, mouse.y, button, size),
                 MouseEventKind::DoubleClick(button) => {
                     self.handle_double_click(mouse.x, mouse.y, button, size)
@@ -3786,12 +3796,23 @@ impl Probe for AppState {
         build_frame(self, size.0, size.1)
     }
 
+    // Through `handle_event`, the window's own way in: a probe that called
+    // the press handler directly went round whatever the event routing
+    // does first -- the shortcut card's hold on the pointer among it -- and
+    // a test of what a press does passed against a path no window takes.
     fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Action {
-        self.handle_click(x, y, button, size)
+        self.handle_event(
+            &Event::Mouse(guitk::event::MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }),
+            size,
+        )
     }
 
     fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Action {
-        self.handle_key(key, size)
+        self.handle_event(&Event::Key(key.clone()), size)
     }
 }
 
@@ -5272,6 +5293,108 @@ mod tests {
             archive: Some(create_sample_archive()),
             ..AppState::default()
         }
+    }
+
+    /// **A press while the card is up puts it away and does nothing else,
+    /// and the wheel scrolls nothing under it.** A press -- or the second of
+    /// a double-click, which opens an entry -- used to go straight through
+    /// the card to the row drawn under it. The controls at the end are the
+    /// same press and turn with the card down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let size = SIZE;
+        let mut state = loaded();
+        // Long enough for the list to have somewhere to scroll.
+        let archive = state.archive.as_mut().expect("archive");
+        for i in 0..200 {
+            archive.add_entry(ArchiveEntry {
+                path: format!("bulk{i}.txt"),
+                name: format!("bulk{i}.txt"),
+                size: 10,
+                compressed_size: 5,
+                is_dir: false,
+                modified: 0,
+                crc32: Some(0),
+                encrypted: false,
+                method: String::from("Deflate"),
+                depth: 0,
+                expanded: false,
+                selected: false,
+                id: 0,
+            });
+        }
+        state.view_mode = ViewMode::FlatList;
+        let selected = |state: &AppState| {
+            state
+                .archive
+                .as_ref()
+                .map_or(0, |a| a.entries.iter().filter(|e| e.selected).count())
+        };
+        let card_up = |state: &AppState| {
+            build_frame(state, size.0, size.1)
+                .commands()
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("F1 closes this")))
+        };
+        let mouse = |state: &mut AppState, (x, y): (f32, f32), kind: MouseEventKind| {
+            state.handle_event(&Event::Mouse(MouseEvent { x, y, kind }), size)
+        };
+        let row = build_frame(&state, size.0, size.1)
+            .rect_of(|t| matches!(t, Target::FileRow(_)))
+            .expect("a file row")
+            .centre();
+        let before = selected(&state);
+
+        state.handle_key(&guitk::probe::press(Key::F1), size);
+        assert!(card_up(&state));
+        mouse(
+            &mut state,
+            row,
+            MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+        );
+        assert!(
+            state.list_scroll_y.abs() < f32::EPSILON,
+            "the wheel scrolled the list under the card"
+        );
+        assert_eq!(
+            mouse(&mut state, row, MouseEventKind::Press(MouseButton::Left)),
+            Action::Redraw
+        );
+        assert!(!card_up(&state), "the press did not put the card away");
+        assert_eq!(
+            selected(&state),
+            before,
+            "the press went through the card and chose a row"
+        );
+
+        // Any button, and a double-click's second press.
+        state.handle_key(&guitk::probe::press(Key::F1), size);
+        mouse(&mut state, row, MouseEventKind::Press(MouseButton::Right));
+        assert!(!card_up(&state), "a right-button press left the card up");
+        state.handle_key(&guitk::probe::press(Key::F1), size);
+        mouse(
+            &mut state,
+            row,
+            MouseEventKind::DoubleClick(MouseButton::Left),
+        );
+        assert!(!card_up(&state), "a double-click left the card up");
+        assert_eq!(selected(&state), before, "a double-click reached the row");
+
+        mouse(
+            &mut state,
+            row,
+            MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+        );
+        assert!(
+            state.list_scroll_y > 0.0,
+            "control: the wheel scrolls nothing at all"
+        );
+        mouse(&mut state, row, MouseEventKind::Press(MouseButton::Left));
+        assert_ne!(
+            selected(&state),
+            before,
+            "control: the press chooses nothing even with the card down"
+        );
     }
 
     /// [`loaded`], but backed by a real file, and the directory to remove.

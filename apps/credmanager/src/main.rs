@@ -5409,10 +5409,18 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
     );
     y += 12.0;
 
-    let created_text = format!(
-        "Created: {} seconds ago",
-        state.now.saturating_sub(entry.created_at)
-    );
+    // Dates, as every program here renders an instant (`guitk::datetime`);
+    // UTC, explicitly, until the system has a zone of its own (known-issues
+    // `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`). They were counts of seconds --
+    // "Created: 31536000 seconds ago" for an entry a year old -- a number to
+    // work out rather than a date to read.
+    let stamp = |secs: u64| {
+        guitk::datetime::stamp(
+            i64::try_from(secs).unwrap_or(i64::MAX),
+            &guitk::tzrules::Tz::utc(),
+        )
+    };
+    let created_text = format!("Created: {}", stamp(entry.created_at));
     draw_text(
         frame,
         field_label_x,
@@ -5425,10 +5433,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
     );
     y += 18.0;
 
-    let modified_text = format!(
-        "Modified: {} seconds ago",
-        state.now.saturating_sub(entry.modified_at)
-    );
+    let modified_text = format!("Modified: {}", stamp(entry.modified_at));
     draw_text(
         frame,
         field_label_x,
@@ -7469,9 +7474,9 @@ fn dispatch_event(state: &mut AppState, event: &Event) -> EventResult {
         return EventResult::Consumed;
     }
     match event {
-        // Consumed, so the entry's "created" and "modified" times are drawn
-        // again as of now.
-        Event::Tick { .. } => EventResult::Consumed,
+        // A tick that did not lock changed nothing drawn: the entry's times
+        // are dates, not spans counted to now.
+        Event::Tick { .. } => EventResult::Ignored,
         Event::Key(key_event) if key_event.pressed => handle_key(state, key_event),
         Event::Mouse(mouse_event) => handle_mouse(state, mouse_event),
         Event::Resize { width, height } => {
@@ -12237,6 +12242,32 @@ mod tests {
         state.selected_entry_id = Some(id);
         state.refresh_filter();
         (state, id)
+    }
+
+    /// **An entry's times are dates**: they were counts of seconds to now,
+    /// "Created: 31536000 seconds ago" for an entry a year old.
+    #[test]
+    fn an_entrys_times_are_dates() {
+        let mut state = unlocked_app();
+        // 2023-11-14 22:13:20 UTC, and a day later.
+        let id = state.vault.add_entry(
+            EntryData::Login(LoginData::new("bank.example", "ann", "pw")),
+            1_700_000_000,
+        );
+        assert!(state.vault.update_entry(
+            id,
+            EntryData::Login(LoginData::new("bank.example", "ann", "pw2")),
+            1_700_086_400,
+        ));
+        state.selected_entry_id = Some(id);
+        state.refresh_filter();
+        let shown = drawn(&state);
+        assert!(
+            shown.contains("Created: 2023-11-14 22:13")
+                && shown.contains("Modified: 2023-11-15 22:13"),
+            "{shown}"
+        );
+        assert!(!shown.contains("seconds ago"), "{shown}");
     }
 
     #[test]

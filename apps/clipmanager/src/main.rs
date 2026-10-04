@@ -2898,6 +2898,16 @@ impl AppState {
         }
         match event {
             Event::Mouse(mouse) => match mouse.kind {
+                // The card is modal for the pointer as it is for the keys: a
+                // press, with any button, puts it away rather than reaching
+                // the control drawn under it, and the wheel scrolls nothing
+                // it covers. A move is still followed, so the light is right
+                // when the card goes.
+                MouseEventKind::Press(_) if self.show_help => {
+                    self.show_help = false;
+                    Action::Redraw
+                }
+                MouseEventKind::Scroll { .. } if self.show_help => Action::None,
                 MouseEventKind::Press(button) => self.handle_click(mouse.x, mouse.y, button, size),
                 // What is under the pointer is drawn lit; only a change in it
                 // is worth a redraw.
@@ -3186,12 +3196,23 @@ impl Probe for AppState {
         build_frame(self, size.0, size.1)
     }
 
+    // Through `handle_event`, the window's own way in: a probe that called
+    // the press handler directly went round whatever the event routing
+    // does first -- the shortcut card's hold on the pointer among it -- and
+    // a test of what a press does passed against a path no window takes.
     fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Action {
-        self.handle_click(x, y, button, size)
+        self.handle_event(
+            &Event::Mouse(guitk::event::MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }),
+            size,
+        )
     }
 
     fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Action {
-        self.handle_key(key, size)
+        self.handle_event(&Event::Key(key.clone()), size)
     }
 }
 
@@ -4610,6 +4631,77 @@ mod tests {
         let results = store.search("number 15");
         // Should match "entry number 15", "entry number 150", etc.
         assert!(!results.is_empty());
+    }
+
+    /// **A press while the card is up puts it away and does nothing else,
+    /// and the wheel scrolls nothing under it.** A press used to go straight
+    /// through the card to the control drawn under it. The controls at the
+    /// end are the same press and turn with the card down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let size = (WINDOW_WIDTH, 400.0);
+        let mut state = AppState::new();
+        for i in 0..30 {
+            state
+                .store
+                .add(format!("e{i}"), ClipType::PlainText, i, String::new());
+        }
+        state.refresh_filter();
+        state.window_size = size;
+        let at = |state: &AppState, target: Target| {
+            guitk::probe::rect_of_sized(state, target, size)
+                .unwrap_or_else(|| panic!("{target:?} is not drawn"))
+                .centre()
+        };
+        let mouse = |state: &mut AppState, (x, y): (f32, f32), kind: MouseEventKind| {
+            state.handle_event(&Event::Mouse(guitk::event::MouseEvent { x, y, kind }), size)
+        };
+        let tab = at(&state, Target::Tab(ActiveTab::Templates));
+        let first = state.filtered_ids.first().copied().expect("an entry");
+        let row = at(&state, Target::Entry(first));
+        let before = state.active_tab;
+
+        state.handle_key(&guitk::probe::press(Key::F1), size);
+        assert!(state.show_help);
+        mouse(
+            &mut state,
+            row,
+            MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+        );
+        assert_eq!(
+            state.scroll_offset, 0,
+            "the wheel scrolled the list under the card"
+        );
+        assert_eq!(
+            mouse(&mut state, tab, MouseEventKind::Press(MouseButton::Left)),
+            Action::Redraw
+        );
+        assert!(!state.show_help, "the press did not put the card away");
+        assert_eq!(
+            state.active_tab, before,
+            "the press went through the card to a tab"
+        );
+
+        // Any button: the right one does nothing to a control, but it is
+        // still a press on the card.
+        state.handle_key(&guitk::probe::press(Key::F1), size);
+        mouse(&mut state, tab, MouseEventKind::Press(MouseButton::Right));
+        assert!(!state.show_help, "a right-button press left the card up");
+
+        mouse(
+            &mut state,
+            row,
+            MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+        );
+        assert!(
+            state.scroll_offset > 0,
+            "control: the wheel scrolls nothing at all"
+        );
+        mouse(&mut state, tab, MouseEventKind::Press(MouseButton::Left));
+        assert_ne!(
+            state.active_tab, before,
+            "control: the press does nothing even with the card down"
+        );
     }
 
     #[test]

@@ -3230,6 +3230,38 @@ fn route_event(state: &mut CalendarApp, event: &Event) -> EventResult {
     {
         return track_pointer(state, mouse);
     }
+    // The shortcut card is modal, and drawn over everything: while it is up,
+    // F1, `?` and Escape put it away and every other key is its own; a press,
+    // with any button, puts it away rather than reaching the control drawn
+    // under it; and the wheel turns nothing it covers. It was modal for none
+    // of it -- N opened a new event under it, Ctrl+S a save dialog, and a
+    // click acted on whatever it was drawn over. A move is followed above, so
+    // the light is right when it goes, and a release still ends a drag.
+    if state.show_help {
+        match event {
+            Event::Key(key) if key.pressed => {
+                let plain = textline::is_plain(key.modifiers);
+                let closes = match key.key {
+                    Key::F1 | Key::Escape => plain,
+                    Key::Slash => plain && key.modifiers.shift,
+                    _ => false,
+                };
+                if closes {
+                    state.show_help = false;
+                }
+                return EventResult::Consumed;
+            }
+            Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                    state.show_help = false;
+                    return EventResult::Consumed;
+                }
+                MouseEventKind::Scroll { .. } => return EventResult::Ignored,
+                _ => {}
+            },
+            _ => {}
+        }
+    }
     // The form and the question before a delete are modal: every key and
     // every press is theirs while they are up.
     if state.form.is_some() {
@@ -3548,12 +3580,8 @@ fn handle_key(state: &mut CalendarApp, key: &KeyEvent) -> EventResult {
             state.show_help = !state.show_help;
             EventResult::Consumed
         }
-        // Before the plain `Escape` arm below, which would otherwise take this
-        // and clear the selection while the list stayed up.
-        Key::Escape if state.show_help => {
-            state.show_help = false;
-            EventResult::Consumed
-        }
+        // (While the list is up its own keys never get here: `route_event`
+        // takes every key the card is up for.)
         Key::Escape => {
             state.selected_event_id = Option::None;
             EventResult::Consumed
@@ -6162,6 +6190,80 @@ mod tests {
         assert!(
             !help_text(&app).contains("? closes this"),
             "Escape did not close it"
+        );
+    }
+
+    /// **The card is modal for the keys and the pointer**: while it is up,
+    /// F1, `?` and Escape put it away and nothing else does or acts; a press
+    /// puts it away and does nothing else; the wheel turns nothing under it.
+    /// It was modal for none of it. The controls at the end are the same
+    /// key, press and turn with the card down.
+    #[test]
+    fn the_shortcut_card_takes_every_key_and_press_while_it_is_up() {
+        let mut app = sample_app(june_2024());
+        let card_up = |app: &CalendarApp| help_text(app).contains("? closes this");
+        let bar = app.layout().sidebar.expect("the sidebar fits at 1280x720");
+        let (bx, by) = bar.centre();
+        let wheel = |app: &mut CalendarApp| {
+            handle_event(
+                app,
+                &Event::Mouse(MouseEvent {
+                    x: bx,
+                    y: by,
+                    kind: MouseEventKind::Scroll { dx: 0.0, dy: -1.0 },
+                }),
+            )
+        };
+        let month = app.mini_cal_month;
+
+        probe::key(&mut app, &probe::press(Key::F1));
+        assert!(card_up(&app));
+        probe::key(&mut app, &probe::press(Key::N));
+        assert!(app.form.is_none(), "N opened a new event under the card");
+        probe::key(&mut app, &probe::ctrl(Key::S));
+        assert!(
+            !app.picker.is_open(),
+            "Ctrl+S opened the save dialog under the card"
+        );
+        wheel(&mut app);
+        assert_eq!(
+            app.mini_cal_month, month,
+            "the wheel turned the month under the card"
+        );
+        assert!(
+            card_up(&app),
+            "a key or turn that is not the card's put it away"
+        );
+
+        probe::click(&mut app, Target::NewEvent);
+        assert!(!card_up(&app), "the press did not put the card away");
+        assert!(
+            app.form.is_none(),
+            "the press went through the card to New event"
+        );
+
+        // Any button, and the card's own keys.
+        probe::key(&mut app, &probe::press(Key::F1));
+        probe::click_with(&mut app, Target::NewEvent, MouseButton::Right);
+        assert!(!card_up(&app), "a right-button press left the card up");
+        probe::key(&mut app, &probe::press(Key::F1));
+        for stroke in guitk::shortcut::keystrokes("?").unwrap_or_else(|e| panic!("{e}")) {
+            handle_event(&mut app, &Event::Key(stroke));
+        }
+        assert!(!card_up(&app), "? did not put the card away");
+        probe::key(&mut app, &probe::press(Key::F1));
+        probe::key(&mut app, &probe::press(Key::Escape));
+        assert!(!card_up(&app), "Escape did not put the card away");
+
+        wheel(&mut app);
+        assert_ne!(
+            app.mini_cal_month, month,
+            "control: the wheel turns nothing"
+        );
+        probe::key(&mut app, &probe::press(Key::N));
+        assert!(
+            app.form.is_some(),
+            "control: N does nothing with the card down"
         );
     }
 

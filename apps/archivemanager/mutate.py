@@ -198,6 +198,34 @@ MAIN = [
         '',
         ['a_folders_arrow_opens_it_without_showing_it', 'a_click_on_a_folder_shows_it'],
     ),
+    # -- the shortcut card's hold on the pointer
+    (
+        'a press goes through the shortcut card',
+        '                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) if self.show_help => {\n'
+        '                    self.show_help = false;\n'
+        '                    Action::Redraw\n'
+        '                }\n',
+        '',
+        ['the_shortcut_card_takes_a_press_rather_than_passing_it_on'],
+    ),
+    (
+        "a double-click's second press goes through the card",
+        '                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) if self.show_help => {\n',
+        '                MouseEventKind::Press(_) if self.show_help => {\n',
+        ['the_shortcut_card_takes_a_press_rather_than_passing_it_on'],
+    ),
+    (
+        'only the left button puts the card away',
+        '                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) if self.show_help => {\n',
+        '                MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_) if self.show_help => {\n',
+        ['the_shortcut_card_takes_a_press_rather_than_passing_it_on'],
+    ),
+    (
+        'the wheel scrolls what the card covers',
+        '                MouseEventKind::Scroll { .. } if self.show_help => Action::None,\n',
+        '',
+        ['the_shortcut_card_takes_a_press_rather_than_passing_it_on'],
+    ),
 ]
 
 BACKEND = [

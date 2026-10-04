@@ -99,6 +99,23 @@ MUTATIONS = [
         "                return if self.hovered_row.is_some() {",
         [BOX],
     ),
+    # -- the shortcut card's hold on the pointer
+    (
+        "a press goes through the shortcut card",
+        "        if self.show_help {\n"
+        "            if matches!(mouse.kind, MouseEventKind::Press(_)) {\n",
+        "        if false {\n"
+        "            if matches!(mouse.kind, MouseEventKind::Press(_)) {\n",
+        ["the_shortcut_card_takes_a_press_rather_than_passing_it_on"],
+    ),
+    (
+        "only the left button puts the card away",
+        "            if matches!(mouse.kind, MouseEventKind::Press(_)) {\n"
+        "                self.show_help = false;\n",
+        "            if matches!(mouse.kind, MouseEventKind::Press(MouseButton::Left)) {\n"
+        "                self.show_help = false;\n",
+        ["the_shortcut_card_takes_a_press_rather_than_passing_it_on"],
+    ),
 ]
 
 if __name__ == "__main__":

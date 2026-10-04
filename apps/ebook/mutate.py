@@ -274,6 +274,23 @@ MAIN = [
         '',
         ['a_chord_is_neither_a_readers_key_nor_typing'],
     ),
+    # -- the shortcut card's hold on the pointer
+    (
+        'a press goes through the shortcut card',
+        '        if self.show_help {\n'
+        '            // The card is modal for the pointer as it is for the keys: a\n',
+        '        if false {\n'
+        '            // The card is modal for the pointer as it is for the keys: a\n',
+        ['test_mouse_click_library_under_the_card'],
+    ),
+    (
+        'only the left button puts the card away',
+        '            if matches!(event.kind, MouseEventKind::Press(_)) {\n'
+        '                self.show_help = false;\n',
+        '            if matches!(event.kind, MouseEventKind::Press(MouseButton::Left)) {\n'
+        '                self.show_help = false;\n',
+        ['test_mouse_click_library_under_the_card'],
+    ),
 ]
 
 TABLES = {

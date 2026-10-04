@@ -3504,6 +3504,21 @@ fn handle_mouse_event(
     let mx = mouse.x;
     let my = mouse.y;
 
+    if state.show_help {
+        // The card is modal for the pointer as it is for the keys: a press,
+        // with any button, puts it away rather than reaching the control
+        // drawn under it, and the wheel scrolls nothing it covers. A move
+        // still updates the light below, so it is right when the card goes.
+        match mouse.kind {
+            MouseEventKind::Press(_) => {
+                state.show_help = false;
+                return EventResult::Consumed;
+            }
+            MouseEventKind::Scroll { .. } => return EventResult::Ignored,
+            _ => {}
+        }
+    }
+
     match &mouse.kind {
         MouseEventKind::Press(MouseButton::Left) => {
             // Check toolbar buttons
@@ -3892,6 +3907,83 @@ mod tests {
         assert!(
             state.search_focused,
             "control: Ctrl+F does nothing even with the card down"
+        );
+    }
+
+    /// **A press while the card is up puts it away and does nothing else,
+    /// and the wheel scrolls nothing under it.** A press used to go straight
+    /// through the card to the control drawn under it. The controls at the
+    /// end are the same press and turn with the card down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let mut state = app_with_scrollable_tree();
+        let mouse = |state: &mut DeviceManagerState, x: f32, y: f32, kind: MouseEventKind| {
+            handle_event(
+                state,
+                &Event::Mouse(guitk::event::MouseEvent { x, y, kind }),
+            )
+        };
+        // The search bar, where the drawing puts it.
+        let (sx, sy) = (
+            SIDEBAR_WIDTH / 2.0,
+            TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT + SEARCH_BAR_HEIGHT / 2.0,
+        );
+        // The device tree, which overflows this window.
+        let (px, py) = tree_point(&state);
+        let f1 = Event::Key(KeyEvent {
+            key: Key::F1,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        });
+
+        handle_event(&mut state, &f1);
+        assert!(state.show_help);
+        mouse(
+            &mut state,
+            px,
+            py,
+            MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+        );
+        assert_eq!(
+            state.tree_scroll, 0,
+            "the wheel scrolled the tree under the card"
+        );
+        assert_eq!(
+            mouse(&mut state, sx, sy, MouseEventKind::Press(MouseButton::Left)),
+            EventResult::Consumed
+        );
+        assert!(!state.show_help, "the press did not put the card away");
+        assert!(
+            !state.search_focused,
+            "the press went through the card to the search bar"
+        );
+
+        // Any button: the right one does nothing to a control, but it is
+        // still a press on the card.
+        handle_event(&mut state, &f1);
+        mouse(
+            &mut state,
+            sx,
+            sy,
+            MouseEventKind::Press(MouseButton::Right),
+        );
+        assert!(!state.show_help, "a right-button press left the card up");
+
+        mouse(
+            &mut state,
+            px,
+            py,
+            MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+        );
+        assert!(
+            state.tree_scroll > 0,
+            "control: the wheel scrolls nothing at all"
+        );
+        mouse(&mut state, sx, sy, MouseEventKind::Press(MouseButton::Left));
+        assert!(
+            state.search_focused,
+            "control: the press does nothing even with the card down"
         );
     }
 

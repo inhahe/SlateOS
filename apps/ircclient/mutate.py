@@ -169,9 +169,34 @@ MAIN = [
     ),
     (
         "Escape does not put the card away",
-        "            let closes = matches!(event.key, Key::F1 | Key::Escape);\n",
-        "            let closes = matches!(event.key, Key::F1);\n",
+        "                textline::is_plain(event.modifiers) && matches!(event.key, Key::F1 | Key::Escape);\n",
+        "                textline::is_plain(event.modifiers) && matches!(event.key, Key::F1);\n",
         ["the_shortcut_card_takes_every_key_and_press_while_it_is_up"],
+    ),
+    # -- a chord is neither typing nor one of the line's keys (2026-10-04)
+    (
+        "a chord puts the card away",
+        "                textline::is_plain(event.modifiers) && matches!(event.key, Key::F1 | Key::Escape);\n",
+        "                matches!(event.key, Key::F1 | Key::Escape);\n",
+        ["a_chord_is_neither_typed_into_the_line_nor_one_of_its_keys"],
+    ),
+    (
+        "a command's letter is typed into the line",
+        "        if textline::types_into_field(event) {\n",
+        "        if event.types_text() {\n",
+        ["a_chord_is_neither_typed_into_the_line_nor_one_of_its_keys"],
+    ),
+    (
+        "AltGr's characters are not typed",
+        "        if textline::types_into_field(event) {\n",
+        "        if textline::is_plain(event.modifiers) && event.types_text() {\n",
+        ["a_chord_is_neither_typed_into_the_line_nor_one_of_its_keys"],
+    ),
+    (
+        "a chord is one of the line's keys",
+        "        if !textline::is_plain(event.modifiers) {\n            return false;\n        }\n",
+        "",
+        ["a_chord_is_neither_typed_into_the_line_nor_one_of_its_keys"],
     ),
     (
         "a press goes through the card",

@@ -1993,11 +1993,30 @@ impl IrcClientApp {
         // went into the message line under it, and Enter sent that line to
         // the channel the card covered.
         if self.show_help {
-            let closes = matches!(event.key, Key::F1 | Key::Escape);
+            let closes =
+                textline::is_plain(event.modifiers) && matches!(event.key, Key::F1 | Key::Escape);
             if closes {
                 self.show_help = false;
             }
             return closes;
+        }
+        // What a key typed goes into the message line -- AltGr's among it,
+        // and not a command's letter. The compositor hands a chord its letter
+        // as text (Ctrl+K arrives carrying `k`, Alt+X carrying `x`), and with
+        // no check here every chord typed its letter into the line, ready to
+        // be sent to the channel by the next Enter.
+        if textline::types_into_field(event) {
+            self.input_text.extend(event.typed());
+            // Typing leaves the history: the line being edited is the user's
+            // own, not the recalled one it started from.
+            self.input_history_idx = None;
+            return true;
+        }
+        // The line's own keys are plain. A chord with Alt or the Windows key
+        // is the window's or the desktop's, and arrives carrying its key:
+        // Alt+Enter sent the line.
+        if !textline::is_plain(event.modifiers) {
+            return false;
         }
         match event.key {
             Key::Enter => self.submit_input(),
@@ -2031,17 +2050,7 @@ impl IrcClientApp {
                 self.show_help = !self.show_help;
                 true
             }
-            _ => {
-                let typed: String = event.typed().collect();
-                if typed.is_empty() {
-                    return false;
-                }
-                self.input_text.push_str(&typed);
-                // Typing leaves the history: the line being edited is the
-                // user's own, not the recalled one it started from.
-                self.input_history_idx = None;
-                true
-            }
+            _ => false,
         }
     }
 
@@ -5165,5 +5174,70 @@ mod tests {
             "hello /connect a b c"
         );
         assert_eq!(without_password("/msg bob hi there"), "/msg bob hi there");
+    }
+    /// A key held with `modifiers` that typed `text`.
+    fn chord(k: Key, text: &str, modifiers: Modifiers) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        })
+    }
+
+    /// **A command's letter is not typed into the message line, and a chord
+    /// is not one of the line's keys.** The compositor hands a chord its
+    /// letter as text -- Ctrl+K arrives carrying `k`, Alt+X carrying `x`,
+    /// Windows+E carrying `e` -- and with no check every chord typed its
+    /// letter into the line, ready for the next Enter to send to the
+    /// channel; Alt+Enter sent the line itself. AltGr -- Ctrl+Alt -- types:
+    /// German `@` is AltGr+Q.
+    #[test]
+    fn a_chord_is_neither_typed_into_the_line_nor_one_of_its_keys() {
+        let ctrl = Modifiers {
+            ctrl: true,
+            ..Modifiers::NONE
+        };
+        let alt = Modifiers {
+            alt: true,
+            ..Modifiers::NONE
+        };
+        let win = Modifiers {
+            super_key: true,
+            ..Modifiers::NONE
+        };
+        let altgr = Modifiers {
+            ctrl: true,
+            alt: true,
+            ..Modifiers::NONE
+        };
+        let mut app = joined();
+        for (k, t, m) in [(Key::K, "k", ctrl), (Key::X, "x", alt), (Key::E, "e", win)] {
+            assert!(!app.handle_event(&chord(k, t, m)), "{m:?}+{k:?} was taken");
+        }
+        assert_eq!(app.input_text, "", "a command's letter was typed");
+        app.handle_event(&chord(Key::Q, "@", altgr));
+        assert_eq!(app.input_text, "@", "AltGr+Q did not type its @");
+
+        app.input_text = String::from("hello");
+        let sent = app.outbox.len();
+        for m in [ctrl, alt, win] {
+            app.handle_event(&chord(Key::Enter, "\r", m));
+        }
+        assert_eq!(app.input_text, "hello", "a chord on Enter sent the line");
+        assert_eq!(app.outbox.len(), sent);
+        let shown = app.nick_list_visible;
+        app.handle_event(&chord(Key::Tab, "\t", ctrl));
+        assert_eq!(app.nick_list_visible, shown, "Ctrl+Tab is not Tab");
+        app.handle_event(&chord(Key::F1, "", alt));
+        assert!(!app.show_help, "Alt+F1 put the card up");
+
+        // Nor does a chord put the card away: it is F1 or Escape, plain.
+        app.handle_event(&key(Key::F1));
+        assert!(app.show_help);
+        app.handle_event(&chord(Key::Escape, "", alt));
+        assert!(app.show_help, "Alt+Escape put the card away");
+        app.handle_event(&key(Key::Escape));
+        assert!(!app.show_help);
     }
 }

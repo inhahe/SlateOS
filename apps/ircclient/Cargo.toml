@@ -8,6 +8,9 @@ edition = "2024"
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 oswindow = { path = "../../gui/window" }
+# Whether a key types or is a command: a chord arrives carrying its letter,
+# and AltGr arrives as Ctrl+Alt and types.
+textline = { path = "../textline" }
 
 [lints]
 workspace = true

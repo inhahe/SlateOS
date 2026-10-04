@@ -13,12 +13,13 @@ members = [
     # libyuv's and libavif's conversions and scaling their pictures are
     # drawn with; codec (videocodec), the one a program calls for a file's
     # frames; and opus, libopus's decoder for their sound, ported as vp9 was
-    # (§1350).
+    # (§1350), and vorbis, Tremor's, ported the same way (§1352).
     "gui/video/codec",
     "gui/video/matroska",
     "gui/video/mp4",
     "gui/video/opus",
     "gui/video/rav1d",
+    "gui/video/vorbis",
     "gui/video/vp8",
     "gui/video/vp9",
     "gui/video/yuv",
@@ -766,6 +767,16 @@ codegen-units = 1
 opt-level = 3
 codegen-units = 1
 
+# vorbis (the Vorbis decoder, `gui/video/vorbis`): the same kind of work, in
+# Tremor's fixed point -- an MDCT, floors, residues and the window over every
+# sample. Counted with callgrind over the encoded streams in its `tests/data`
+# (27.6 s of sound in 1 to 8 channels; `tests/bench.rs`, one pass): 771 M
+# instructions at `-Os` with 16 codegen units, 675 M at `-O3` with one; Tremor
+# itself (`-O2`; `tools/bench.c`) takes 627 M. Lane F, 2026-10-04.
+[profile.release.package.vorbis]
+opt-level = 3
+codegen-units = 1
+
 # And in debug builds rav1d alone is optimised, keeping its debug assertions
 # (its `DisjointMut` overlap checks among them): unoptimised it takes 11 ms to
 # decode a 37x19 picture, which makes `imagecodec`'s tests that decode
@@ -793,6 +804,12 @@ opt-level = 3
 # more, through every decoder: 453 s unoptimised, 30 s so (2026-10-04).
 # Overflow checks and debug assertions stay on, as everywhere in dev.
 [profile.dev.package.opus]
+opt-level = 3
+
+# And vorbis (`gui/video/vorbis`): its tests decode 44 streams some 35 ways
+# each, damaged headers and packets among them: 36 s unoptimised, 4 s so
+# (2026-10-04).
+[profile.dev.package.vorbis]
 opt-level = 3
 
 # The same for `xz`, whose tests hold its encoder to XZ Utils' output byte

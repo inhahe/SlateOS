@@ -4545,6 +4545,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "vorbis"
+version = "0.1.0"
+
+[[package]]
 name = "vp8"
 version = "0.1.0"
 dependencies = [

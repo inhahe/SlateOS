@@ -3884,7 +3884,13 @@ lane C's `guitk`.
       the errors and the decoder's state as well as the sound), the RFC
       8251 vectors when present, and its parsers and filters over millions
       of made-up inputs. design-decisions §1350.
-    - `[ ]` Vorbis.
+    - `[x]` The Vorbis decoder, `gui/video/vorbis`: Tremor, Xiph's integer
+      decoder, ported -- every codebook form, floors 0 and 1, residues 0 to
+      2, submaps and coupling, every block size -- and held to Tremor
+      sample for sample: 44 streams of its own (20 encoded by libvorbis and
+      FFmpeg, 24 with made-up setups no encoder writes) decoded whole, with
+      damaged packets and with damaged setup headers, 1496 results in all,
+      refusals included. design-decisions §1352.
     - `[-]` In `videocodec`, and out to the speakers: a file's sound decoded
       beside its pictures.
       - `[x]` `videocodec::Sound`: a Matroska or WebM file's Opus track,
@@ -3893,9 +3899,13 @@ lane C's `guitk`.
         fixtures held to ffprobe's blocks and libopus's samples; a damaged
         packet concealed; a seek pre-rolled by `SeekPreRoll`.
         design-decisions §1351.
+      - `[ ]` A Vorbis track in `videocodec::Sound`: its three headers from
+        the track's Xiph-laced private data, timed as FFmpeg times it.
       - `[ ]` Out to the speakers: the kernel's PCM interface
         (`kernel/src/audio_alsa.rs`) reachable from a program, which is
-        lane A's; then the video player plays its sound, which is lane E's.
+        lane A's (`requests/e-ad-no-application-can-reach-the-sound-device.md`,
+        lane E's request); then the video player plays its sound, which is
+        lane E's.
       - `[ ]` MP4's sound: Opus in MP4 (its `dOps` box, the edit list and the
         pre-skip together, as FFmpeg's `mov.c` reads them); AAC, which most
         MP4 files carry, is a decoder of its own.

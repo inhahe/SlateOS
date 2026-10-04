@@ -2038,6 +2038,7 @@ dependencies = [
  "scratchdir",
  "settingsfile",
  "sha2",
+ "textline",
  "tzrules",
  "userdb",
  "yamldoc",

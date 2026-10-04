@@ -99,11 +99,11 @@ MAIN = [
     ),
     (
         "the slash key is a shortcut again",
-        "        if ev.types_text() {",
+        "        self.load_query();\n        let edit = textline::apply_key(",
         "        if ev.single_char() == Some('/') {\n"
-        "            return EventResult::Ignored;\n"
+        "            return false;\n"
         "        }\n"
-        "        if ev.types_text() {",
+        "        self.load_query();\n        let edit = textline::apply_key(",
         ["the_slash_key_types_rather_than_being_a_shortcut_that_cannot_fire"],
     ),
     (
@@ -333,8 +333,8 @@ MAIN = [
     ),
     (
         "the caret shows wherever the keys go",
-        "                let shown = if keyboard {",
-        "                let shown = if true {",
+        "                        focused: keyboard,\n",
+        "                        focused: true,\n",
         ["the_search_field_is_the_toolkits_and_marked_while_the_keys_come_to_it"],
     ),
     (
@@ -360,6 +360,116 @@ MAIN = [
         "        self.focus_ring_width = settings.focus_ring_width();",
         "        let _ = settings;",
         ["the_search_field_is_the_toolkits_and_marked_while_the_keys_come_to_it"],
+    ),
+]
+
+# The query edits at a caret (2026-10-04,
+# known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box): it
+# took typing at its end and Backspace from it, and nothing else; AltGr was
+# refused with every key held with Alt.
+EDITS = "the_query_edits_at_a_caret"
+LIST = "the_list_keeps_its_keys_beside_the_query"
+ALTGR = "altgr_types_into_the_query_and_is_not_a_ctrl_chord"
+OTHER = "typing_on_another_screen_goes_on_the_querys_end"
+SHOWN = "the_query_edits_what_it_shows"
+EMPTY = "an_empty_query_shows_its_caret_only_with_the_keyboard"
+HOME_END = "home_and_end_reach_both_ends_of_a_list"
+CLICK = "the_search_field_answers_a_click_on_its_own_pixels"
+
+MAIN += [
+    (
+        "a cut or a copy takes nothing to the clipboard",
+        "            self.clipboard = copied;\n",
+        "            let _ = copied;\n",
+        [EDITS],
+    ),
+    (
+        "an edit of the query is not searched for",
+        "            self.query = self.query_editor.text().to_owned();\n            self.search();\n",
+        "            self.query = self.query_editor.text().to_owned();\n",
+        [EDITS],
+    ),
+    (
+        "a key finds the editor holding another query",
+        "        if self.query_editor.text() != self.query {\n            self.query_editor.set_text(&self.query);",
+        "        if false {\n            self.query_editor.set_text(&self.query);",
+        [SHOWN],
+    ),
+    (
+        "the query's keys are the list's",
+        "        if self.screen == Screen::Search && self.query_key(ev, font) {\n"
+        "            return EventResult::Consumed;\n"
+        "        }\n"
+        "\n"
+        "        let action = match ev.key {",
+        "        let action = match ev.key {",
+        [EDITS, LIST],
+    ),
+    (
+        "Ctrl+A, C, X and V are nobody's",
+        "            if self.screen == Screen::Search && self.query_key(ev, font) {\n"
+        "                return EventResult::Consumed;\n"
+        "            }\n"
+        "            return EventResult::Ignored;\n",
+        "            return EventResult::Ignored;\n",
+        [EDITS],
+    ),
+    (
+        "Ctrl+Home and Ctrl+End are the query's",
+        "                Key::Home => Some(Action::Move(Step::First)),\n"
+        "                Key::End => Some(Action::Move(Step::Last)),\n"
+        "                // The two keys",
+        "                // The two keys",
+        [HOME_END],
+    ),
+    (
+        "typing on another screen goes where the caret was left",
+        "            self.query_editor.set_text(&self.query);\n            self.query_key(ev, font);\n",
+        "            self.query_key(ev, font);\n",
+        [OTHER],
+    ),
+    (
+        "AltGr is refused with Alt",
+        "        if textline::is_alt_or_windows_chord(m) {\n",
+        "        if m.alt || m.super_key {\n",
+        [ALTGR],
+    ),
+    (
+        "AltGr is a Ctrl chord",
+        "        if textline::is_ctrl_chord(m) {\n",
+        "        if m.ctrl {\n",
+        [ALTGR],
+    ),
+    (
+        "the query's caret is drawn at its start",
+        "                let (cursor, anchor) = if keyboard {\n                    self.query_caret()",
+        "                let (cursor, anchor) = if false {\n                    self.query_caret()",
+        [EDITS],
+    ),
+    (
+        "the query's selection is not drawn",
+        "                        selection_anchor: anchor,\n",
+        "                        selection_anchor: None,\n",
+        [EDITS],
+    ),
+    (
+        "an empty query's caret shows wherever the keys go",
+        "                if keyboard {\n                    textedit::push_caret(",
+        "                if true {\n                    textedit::push_caret(",
+        [EMPTY],
+    ),
+    (
+        "a press puts the caret at the start",
+        "                    ev.x - area.x,\n",
+        "                    0.0,\n",
+        [EDITS],
+    ),
+    (
+        "a press in the field does not place the caret",
+        "                self.query_editor.set_selection_anchor(None);\n"
+        "                self.query_editor.set_cursor(cursor);\n",
+        "                let _ = cursor;\n",
+        [EDITS, CLICK],
     ),
 ]
 

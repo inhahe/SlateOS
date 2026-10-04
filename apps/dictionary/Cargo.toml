@@ -16,5 +16,9 @@ oswindow = { path = "../../gui/window" }
 # truncates the target before writing it.
 safeio = { path = "../safeio" }
 
+# The query's keys, and what is a chord: a caret, a selection, and typing
+# that is not a command's letter.
+textline = { path = "../textline" }
+
 [lints]
 workspace = true

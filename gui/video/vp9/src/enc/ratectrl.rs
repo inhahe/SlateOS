@@ -171,27 +171,17 @@ fn round_to_int(v: f64) -> i32 {
 pub(crate) struct RateControl {
     pub minq: MinqLuts,
     pub avg_frame_bandwidth: i32,
-    pub min_frame_bandwidth: i32,
     pub max_frame_bandwidth: i32,
     pub this_frame_target: i32,
     pub projected_frame_size: i32,
-    pub sb64_target_rate: i32,
     pub last_q: [i32; 2],
     pub avg_frame_qindex: [i32; 2],
     pub last_boosted_qindex: i32,
-    pub last_kf_qindex: i32,
     pub buffer_level: i64,
     pub bits_off_target: i64,
     pub starting_buffer_level: i64,
     pub optimal_buffer_level: i64,
     pub maximum_buffer_size: i64,
-    pub rolling_target_bits: i32,
-    pub rolling_actual_bits: i32,
-    pub long_rolling_target_bits: i32,
-    pub long_rolling_actual_bits: i32,
-    pub total_actual_bits: i64,
-    pub total_target_bits: i64,
-    pub total_target_vs_actual: i64,
     pub avg_frame_low_motion: i32,
     pub frames_to_key: i32,
     pub frames_since_key: i32,
@@ -211,18 +201,10 @@ pub(crate) struct RateControl {
     pub rc_2_frame: i32,
     pub worst_quality: i32,
     pub best_quality: i32,
-    pub ni_frames: i32,
-    pub ni_tot_qi: i32,
-    pub ni_av_qi: i32,
-    pub tot_q: f64,
-    pub avg_q: f64,
-    pub source_alt_ref_active: bool,
-    pub source_alt_ref_pending: bool,
     pub this_key_frame_forced: bool,
     pub high_source_sad: bool,
     pub reset_high_source_sad: bool,
     pub force_max_q: bool,
-    pub last_avg_frame_bandwidth: i32,
 }
 
 /// libvpx's `vp9_rc_get_default_min_gf_interval`.
@@ -265,28 +247,18 @@ impl RateControl {
         Self {
             minq: MinqLuts::new(),
             avg_frame_bandwidth: 0,
-            min_frame_bandwidth: 0,
             max_frame_bandwidth: 0,
             this_frame_target: 0,
             projected_frame_size: 0,
-            sb64_target_rate: 0,
             last_q: [oxcf.best_allowed_q, oxcf.worst_allowed_q],
             // One-pass CBR starts both averages at the worst quality.
             avg_frame_qindex: [oxcf.worst_allowed_q, oxcf.worst_allowed_q],
             last_boosted_qindex: 0,
-            last_kf_qindex: 0,
             buffer_level: 0,
             bits_off_target: 0,
             starting_buffer_level: 0,
             optimal_buffer_level: 0,
             maximum_buffer_size: 0,
-            rolling_target_bits: 0,
-            rolling_actual_bits: 0,
-            long_rolling_target_bits: 0,
-            long_rolling_actual_bits: 0,
-            total_actual_bits: 0,
-            total_target_bits: 0,
-            total_target_vs_actual: 0,
             avg_frame_low_motion: 0,
             frames_to_key: 0,
             // "Sensible default for first frame."
@@ -307,25 +279,12 @@ impl RateControl {
             rc_2_frame: 0,
             worst_quality: oxcf.worst_allowed_q,
             best_quality: oxcf.best_allowed_q,
-            ni_frames: 0,
-            ni_tot_qi: 0,
-            ni_av_qi: oxcf.worst_allowed_q,
-            tot_q: 0.0,
-            avg_q: qindex_to_q(oxcf.worst_allowed_q),
-            source_alt_ref_active: false,
-            source_alt_ref_pending: false,
             this_key_frame_forced: false,
             high_source_sad: false,
             reset_high_source_sad: false,
             force_max_q: false,
-            last_avg_frame_bandwidth: 0,
         }
     }
-}
-
-/// A 64-bit value rounded to `n` bits: libvpx's `ROUND64_POWER_OF_TWO`.
-fn round64_power_of_two(v: i64, n: u32) -> i64 {
-    (v + (1 << n >> 1)) >> n
 }
 
 impl Cpi {
@@ -357,10 +316,6 @@ impl Cpi {
         let rc = &mut self.rc;
         let oxcf = &self.oxcf;
         rc.avg_frame_bandwidth = round_to_int(oxcf.target_bandwidth as f64 / self.framerate);
-        let vbr_min_bits =
-            (i64::from(rc.avg_frame_bandwidth) * i64::from(oxcf.two_pass_vbrmin_section) / 100)
-                .min(i64::from(i32::MAX));
-        rc.min_frame_bandwidth = (vbr_min_bits as i32).max(FRAME_OVERHEAD_BITS);
         let vbr_max_bits =
             (i64::from(rc.avg_frame_bandwidth) * i64::from(oxcf.two_pass_vbrmax_section) / 100)
                 .min(i64::from(i32::MAX));
@@ -431,7 +386,6 @@ impl Cpi {
             cm.key_frame = true;
             rc.frames_to_key = self.oxcf.key_freq;
             rc.kf_boost = DEFAULT_KF_BOOST;
-            rc.source_alt_ref_active = false;
         } else {
             cm.key_frame = false;
         }
@@ -528,13 +482,11 @@ impl Cpi {
         target.min(rc.max_frame_bandwidth)
     }
 
-    /// libvpx's `vp9_rc_set_frame_target`, without dynamic resizing.
+    /// libvpx's `vp9_rc_set_frame_target`, without dynamic resizing. (Its
+    /// per-superblock rate is what cyclic refresh's band reads, and comes
+    /// with it.)
     fn rc_set_frame_target(&mut self, target: i32) {
-        let rc = &mut self.rc;
-        rc.this_frame_target = target;
-        let area = i64::from(self.common.width) * i64::from(self.common.height);
-        let sb64_target_rate = i64::from(rc.this_frame_target) * 64 * 64 / area.max(1);
-        rc.sb64_target_rate = sb64_target_rate.min(i64::from(i32::MAX)) as i32;
+        self.rc.this_frame_target = target;
     }
 
     /// The rate correction factor this frame's model uses: libvpx's
@@ -895,11 +847,6 @@ impl Cpi {
             rc.last_q[INTER_FRAME] = qindex;
             rc.avg_frame_qindex[INTER_FRAME] =
                 (3 * rc.avg_frame_qindex[INTER_FRAME] + qindex + 2) >> 2;
-            rc.ni_frames += 1;
-            rc.tot_q += qindex_to_q(qindex);
-            rc.avg_q = rc.tot_q / f64::from(rc.ni_frames);
-            rc.ni_tot_qi += qindex;
-            rc.ni_av_qi = rc.ni_tot_qi / rc.ni_frames;
         }
         // The last boosted (key or golden) quantiser, or a lower one.
         if qindex < rc.last_boosted_qindex
@@ -909,9 +856,6 @@ impl Cpi {
         {
             rc.last_boosted_qindex = qindex;
         }
-        if intra_only {
-            rc.last_kf_qindex = qindex;
-        }
         // update_buffer_level_postencode.
         rc.bits_off_target -= i64::from(rc.projected_frame_size);
         rc.bits_off_target = rc.bits_off_target.min(rc.maximum_buffer_size);
@@ -919,35 +863,9 @@ impl Cpi {
             rc.bits_off_target = rc.bits_off_target.max(-rc.maximum_buffer_size);
         }
         rc.buffer_level = rc.bits_off_target;
-        if !intra_only {
-            rc.rolling_target_bits = round64_power_of_two(
-                i64::from(rc.rolling_target_bits) * 3 + i64::from(rc.this_frame_target),
-                2,
-            ) as i32;
-            rc.rolling_actual_bits = round64_power_of_two(
-                i64::from(rc.rolling_actual_bits) * 3 + i64::from(rc.projected_frame_size),
-                2,
-            ) as i32;
-            rc.long_rolling_target_bits = round64_power_of_two(
-                i64::from(rc.long_rolling_target_bits) * 31 + i64::from(rc.this_frame_target),
-                5,
-            ) as i32;
-            rc.long_rolling_actual_bits = round64_power_of_two(
-                i64::from(rc.long_rolling_actual_bits) * 31 + i64::from(rc.projected_frame_size),
-                5,
-            ) as i32;
-        }
-        rc.total_actual_bits += i64::from(rc.projected_frame_size);
-        if self.common.show_frame {
-            rc.total_target_bits += i64::from(rc.avg_frame_bandwidth);
-        }
-        rc.total_target_vs_actual = rc.total_actual_bits - rc.total_target_bits;
         // update_golden_frame_stats (no alt-ref in one-pass realtime).
         if self.refresh_golden_frame {
             rc.frames_since_golden = 0;
-            if !rc.source_alt_ref_pending {
-                rc.source_alt_ref_active = false;
-            }
             if rc.frames_till_gf_update_due > 0 {
                 rc.frames_till_gf_update_due -= 1;
             }
@@ -967,7 +885,6 @@ impl Cpi {
         if !intra_only {
             rc.reset_high_source_sad = false;
         }
-        rc.last_avg_frame_bandwidth = rc.avg_frame_bandwidth;
     }
 }
 

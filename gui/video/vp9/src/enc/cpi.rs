@@ -71,7 +71,6 @@ pub(crate) struct Oxcf {
     /// The longest gap between key frames: libvpx's `key_freq`.
     pub key_freq: i32,
     pub auto_key: bool,
-    pub two_pass_vbrmin_section: i32,
     pub two_pass_vbrmax_section: i32,
     pub min_gf_interval: i32,
     pub max_gf_interval: i32,
@@ -139,7 +138,6 @@ pub(crate) struct Cpi {
     pub quants: Quants,
     /// Frames per second, as measured from the timestamps.
     pub framerate: f64,
-    pub refresh_last_frame: bool,
     pub refresh_golden_frame: bool,
     pub refresh_alt_ref_frame: bool,
     /// Whether the caller forces this frame to be a key frame: libvpx's
@@ -200,10 +198,9 @@ impl Cpi {
             oxcf,
             common,
             rc: RateControl::new(&oxcf),
-            cr: CyclicRefresh::new(mi_rows, mi_cols),
+            cr: CyclicRefresh::new(),
             quants: Quants::new(Deltas::default(), 0),
             framerate: oxcf.init_framerate,
-            refresh_last_frame: true,
             refresh_golden_frame: false,
             refresh_alt_ref_frame: false,
             force_key_frame: false,

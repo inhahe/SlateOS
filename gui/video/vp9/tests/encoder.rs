@@ -160,13 +160,12 @@ fn frames_match_vpxenc_realtime() {
     for (i, (picture, want)) in input.iter().zip(&reference.packets).enumerate().take(1) {
         let planes = [0, 1, 2].map(|p| picture.plane8(p).unwrap());
         let got = encoder.encode(planes).unwrap();
-        if &got != want {
-            let first = got.iter().zip(want.iter()).position(|(a, b)| a != b);
-            panic!(
-                "frame {i}: {} bytes against libvpx's {}, first difference at byte {first:?}",
-                got.len(),
-                want.len()
-            );
-        }
+        let first = got.iter().zip(want.iter()).position(|(a, b)| a != b);
+        assert!(
+            &got == want,
+            "frame {i}: {} bytes against libvpx's {}, first difference at byte {first:?}",
+            got.len(),
+            want.len()
+        );
     }
 }

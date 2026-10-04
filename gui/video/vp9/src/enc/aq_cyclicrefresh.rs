@@ -36,17 +36,9 @@ pub(crate) struct CyclicRefresh {
     pub percent_refresh: i32,
     /// The largest quantiser drop, as a percentage of the frame's.
     pub max_qdelta_perc: i32,
-    /// Where the band starts, as a superblock index.
-    pub sb_index: usize,
-    pub time_for_refresh: i32,
     pub actual_num_seg1_blocks: i32,
     pub actual_num_seg2_blocks: i32,
-    /// Per 8x8 cell: the quantiser it was last coded at.
-    pub last_coded_q_map: Vec<u8>,
-    pub motion_thresh: i16,
     pub rate_ratio_qdelta: f64,
-    pub rate_boost_fac: i32,
-    pub low_content_avg: f64,
     pub qindex_delta: [i32; 3],
     pub reduce_refresh: bool,
     pub weight_segment: f64,
@@ -58,20 +50,13 @@ pub(crate) struct CyclicRefresh {
 
 impl CyclicRefresh {
     /// libvpx's `vp9_cyclic_refresh_alloc`.
-    pub(crate) fn new(mi_rows: usize, mi_cols: usize) -> Self {
-        let cells = mi_rows * mi_cols;
+    pub(crate) fn new() -> Self {
         Self {
             percent_refresh: 0,
             max_qdelta_perc: 0,
-            sb_index: 0,
-            time_for_refresh: 0,
             actual_num_seg1_blocks: 0,
             actual_num_seg2_blocks: 0,
-            last_coded_q_map: vec![MAXQ as u8; cells],
-            motion_thresh: 0,
             rate_ratio_qdelta: 0.0,
-            rate_boost_fac: 0,
-            low_content_avg: 0.0,
             qindex_delta: [0; 3],
             reduce_refresh: false,
             weight_segment: 0.0,
@@ -125,9 +110,8 @@ impl Cpi {
         }
         cr.percent_refresh = if cr.reduce_refresh { 5 } else { 10 };
         cr.max_qdelta_perc = 60;
-        cr.time_for_refresh = 0;
-        cr.motion_thresh = 32;
-        cr.rate_boost_fac = 15;
+        // libvpx also sets the band's refresh wait, motion threshold and
+        // second segment's boost here; they come with the band.
         // A larger quantiser drop for the first few refresh cycles after a
         // key frame.
         if cr.percent_refresh > 0 && rc.frames_since_key < 4 * (100 / cr.percent_refresh) {
@@ -144,14 +128,12 @@ impl Cpi {
                 cr.percent_refresh = if cr.skip_flat_static_blocks { 10 } else { 15 };
             }
             cr.rate_ratio_qdelta = 2.0;
-            cr.rate_boost_fac = 10;
         }
         // Small pictures.
         if u64::from(cm.width) * u64::from(cm.height) <= 352 * 288 {
-            if rc.avg_frame_bandwidth < 3000 {
-                cr.motion_thresh = 64;
-                cr.rate_boost_fac = 13;
-            } else {
+            // (Below 3000 bits a frame libvpx changes only the band's
+            // motion threshold and boost.)
+            if rc.avg_frame_bandwidth >= 3000 {
                 cr.max_qdelta_perc = 70;
                 cr.rate_ratio_qdelta = cr.rate_ratio_qdelta.max(2.5);
             }
@@ -244,9 +226,6 @@ impl Cpi {
     /// cleared, the band back at the start.
     pub(crate) fn cyclic_refresh_setup(&mut self) {
         let scene_change_detected = self.rc.high_source_sad;
-        if self.common.current_video_frame == 0 {
-            self.cr.low_content_avg = 0.0;
-        }
         debug_assert!(
             !self.cr.apply_cyclic_refresh || scene_change_detected,
             "the refresh's inter-frame band comes with inter frames"
@@ -255,8 +234,7 @@ impl Cpi {
         // which a key frame does not code).
         self.common.seg.enabled = false;
         if self.common.key_frame || scene_change_detected {
-            self.cr.last_coded_q_map.fill(MAXQ as u8);
-            self.cr.sb_index = 0;
+            // libvpx also resets the band's start and quantiser map here.
             self.cr.reduce_refresh = false;
             self.cr.counter_encode_maxq_scene_change = 0;
         }

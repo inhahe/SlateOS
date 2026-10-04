@@ -129,7 +129,6 @@ impl EncoderConfig {
             key_freq: i32::try_from(self.keyframe_max_distance).unwrap_or(i32::MAX),
             // libvpx's VPX_KF_AUTO with a minimum distance of 0.
             auto_key: self.keyframe_max_distance != 0,
-            two_pass_vbrmin_section: 0,
             two_pass_vbrmax_section: 2000,
             min_gf_interval: 0,
             max_gf_interval: 0,
@@ -270,7 +269,6 @@ impl Encoder {
         // vp9_get_compressed_data.
         cpi.common.reset_frame_context = 0;
         cpi.common.refresh_frame_context = true;
-        cpi.refresh_last_frame = true;
         cpi.refresh_golden_frame = false;
         cpi.refresh_alt_ref_frame = false;
         cpi.common.show_frame = true;
@@ -292,7 +290,8 @@ impl Encoder {
             seg.update_data = false;
             seg.tree_probs = [255; 7];
             seg.clear_all_features();
-            cpi.rc.source_alt_ref_active = false;
+            // (libvpx also clears its alt-ref bookkeeping here, which only a
+            // lagged encode -- one with alt-ref frames -- reads.)
             cpi.common.error_resilient_mode = cpi.oxcf.error_resilient_mode;
             cpi.common.frame_parallel_decoding_mode = cpi.oxcf.frame_parallel_decoding_mode;
             if cpi.common.error_resilient_mode {
@@ -368,9 +367,6 @@ impl Encoder {
         let (mi, mut counts, tile_tokens) = fe.finish();
 
         // loopfilter_frame.
-        if cpi.common.key_frame {
-            cpi.refresh_last_frame = true;
-        }
         let lf = &mut cpi.common.lf.params;
         lf.sharpness_level = 0;
         lf.filter_level = pick_filter_level_from_q(q, cpi.common.key_frame);
@@ -411,7 +407,13 @@ impl Encoder {
                 .get(cm.frame_context_idx)
                 .cloned()
                 .unwrap_or_else(FrameContext::defaults);
-            probs::adapt_coef_probs(&mut fc, &pre, &counts.counts, true, false);
+            probs::adapt_coef_probs(
+                &mut fc,
+                &pre,
+                &counts.counts,
+                cm.frame_is_intra_only(),
+                cm.last_key_frame,
+            );
         }
         cm.last_key_frame = cm.key_frame;
         cpi.rc_postencode_update(u64::try_from(out.len()).unwrap_or(u64::MAX));

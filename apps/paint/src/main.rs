@@ -1281,6 +1281,8 @@ struct ToolbarLayout {
 struct PickerLayout {
     dialog: Area,
     tracks: [Area; 4],
+    /// The hex box, beside its "Hex:" label.
+    hex: Area,
     ok: Area,
     cancel: Area,
 }
@@ -1288,6 +1290,11 @@ struct PickerLayout {
 // ============================================================================
 // Color picker state
 // ============================================================================
+
+/// The size the colour dialog's hex box draws its text at.
+const HEX_TEXT_SIZE: f32 = 12.0;
+/// How far the hex box's text sits in from its edges.
+const HEX_TEXT_INSET: f32 = 4.0;
 
 /// Color picker with RGB sliders and hex input.
 #[derive(Clone, Debug)]
@@ -1769,6 +1776,9 @@ pub struct PaintApp {
     /// palette is the forty-eight swatches you paint with, which are the
     /// user's content and must not follow the desktop theme.
     theme: Palette,
+    /// How wide the keyboard's mark around a box is: the user's setting
+    /// (`App::appearance_changed`).
+    focus_ring_width: f32,
 }
 
 impl PaintApp {
@@ -1795,6 +1805,7 @@ impl PaintApp {
             question: None,
             quit: false,
             theme: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             window_width,
             window_height,
             canvas_width,
@@ -3671,6 +3682,7 @@ impl PaintApp {
         PickerLayout {
             dialog: Area::new(x, y, w, h),
             tracks: [track(0), track(1), track(2), track(3)],
+            hex: Area::new(slider_x + 32.0, hex_y - 2.0, 100.0, 20.0),
             ok: Area::new(slider_x, btn_y, 70.0, 24.0),
             cancel: Area::new(slider_x + 80.0, btn_y, 70.0, 24.0),
         }
@@ -4853,26 +4865,56 @@ impl PaintApp {
             overflow: TextOverflow::Clip,
         });
 
-        self.theme.push_surface(
+        // The toolkit's field (lane C, c-e-a-theme-can-shape-the-controls):
+        // the theme's well and edge, the keyboard's mark at the user's width
+        // -- every hex digit typed while the dialog is up goes here, so it has
+        // the keyboard as long as the dialog does -- and red while what it
+        // holds is not a whole colour, which Enter would not take. It was a
+        // slider's track with the text on it, no mark and no caret.
+        let hex = layout.hex;
+        let typed = self.color_picker.hex_input.as_str();
+        guitk::field::draw(
             cmds,
-            slider_x + 32.0,
-            hex_y - 2.0,
-            100.0,
-            20.0,
-            3.0,
-            Surface::ControlTrack,
+            &self.theme,
+            guitk::frame::Rect::new(hex.x, hex.y, hex.w, hex.h),
+            guitk::field::State {
+                hovered: false,
+                focused: true,
+                disabled: false,
+                invalid: !typed.is_empty() && typed.len() != 6,
+            },
+            self.focus_ring_width,
         );
-
-        cmds.push(RenderCommand::Text {
-            x: slider_x + 36.0,
-            y: hex_y + 2.0,
-            text: format!("#{}", self.color_picker.hex_input.as_str()),
-            font_size: 12.0,
-            color: self.theme.text,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(92.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        let shown = format!("#{typed}");
+        let line = text::line_height(HEX_TEXT_SIZE, FontWeightHint::Regular);
+        let mut tree = RenderTree::new();
+        guitk::textedit::draw(
+            &mut tree,
+            &guitk::textedit::SingleLine {
+                text: &shown,
+                // After the `#`, which is drawn and never typed.
+                cursor: text::TextCursor::from(
+                    self.color_picker
+                        .hex_input
+                        .cursor
+                        .min(typed.len())
+                        .saturating_add(1),
+                ),
+                selection_anchor: None,
+                focused: true,
+                x: hex.x + HEX_TEXT_INSET,
+                y: hex.y + (hex.h - line) / 2.0,
+                width: (hex.w - 2.0 * HEX_TEXT_INSET).max(0.0),
+                line_height: line,
+                font_size: HEX_TEXT_SIZE,
+                weight: FontWeightHint::Regular,
+                color: self.theme.text,
+                selection_bg: self.theme.accent,
+                selection_fg: self.theme.crust,
+                caret_width: guitk::textedit::CARET_WIDTH,
+            },
+        );
+        cmds.extend(tree.commands);
 
         // OK / Cancel buttons
         let btn_y = hex_y + 28.0;
@@ -5186,6 +5228,10 @@ pub enum SpecialKey {
 impl App for PaintApp {
     fn theme_changed(&mut self, palette: &Palette) {
         self.theme = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     /// The picture's name, marked `*` while it has changes not saved.
@@ -8347,5 +8393,90 @@ mod tests {
             press(&mut app, Key::Left, true);
         }
         assert_eq!(app.color_picker.red, 0, "it went below zero");
+    }
+
+    /// **The colour dialog's hex box is the toolkit's field**, with the
+    /// keyboard's mark at the user's width -- every hex digit typed while the
+    /// dialog is up goes into it -- red while it holds less than a whole
+    /// colour, which Enter would not take, and its caret after what it holds.
+    /// It was a slider's track with the text on it: no mark, no caret.
+    #[test]
+    fn the_hex_box_is_the_toolkits_field_with_the_keyboard() {
+        let mut app = PaintApp::new(640.0, 480.0);
+        let mut p = app.theme;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut app, &p);
+        App::appearance_changed(
+            &mut app,
+            &appearance::AppearanceSettings {
+                focus_ring_scale: 2.5,
+                ..appearance::AppearanceSettings::default()
+            },
+        );
+        assert!(
+            app.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        app.open_color_dialog(true);
+        let hex = app.picker_layout().hex;
+        let rect = guitk::frame::Rect::new(hex.x, hex.y, hex.w, hex.h);
+        let draws = |app: &PaintApp, invalid: bool| {
+            let mut want: Vec<RenderCommand> = Vec::new();
+            guitk::field::draw(
+                &mut want,
+                &p,
+                rect,
+                guitk::field::State {
+                    hovered: false,
+                    focused: true,
+                    disabled: false,
+                    invalid,
+                },
+                app.focus_ring_width,
+            );
+            app.render_commands()
+                .windows(want.len())
+                .any(|w| w == want.as_slice())
+        };
+        let caret_x = |app: &PaintApp| {
+            app.render_commands().iter().find_map(|c| match c {
+                RenderCommand::Line { x1, x2, y1, .. }
+                    if (x1 - x2).abs() < f32::EPSILON && rect.contains(*x1, *y1 + 1.0) =>
+                {
+                    Some(*x1)
+                }
+                _ => None,
+            })
+        };
+        let hex_key = |app: &mut PaintApp, c: char| {
+            app.handle_event(&Event::Key(KeyEvent {
+                key: Key::A,
+                pressed: true,
+                modifiers: guitk::event::Modifiers::NONE,
+                text: c.to_string(),
+            }));
+        };
+
+        assert!(
+            draws(&app, false),
+            "the box holding a whole colour is not the field with the keyboard"
+        );
+        let full = caret_x(&app).expect("no caret in the box");
+        hex_key(&mut app, 'a');
+        assert_eq!(app.color_picker.hex_input.as_str(), "A");
+        assert!(draws(&app, true), "a colour half typed is not red");
+        let one = caret_x(&app).expect("no caret in the box");
+        assert!(one < full, "the caret is not after what the box holds");
+        let after =
+            hex.x + HEX_TEXT_INSET + text::measure("#A", HEX_TEXT_SIZE, FontWeightHint::Regular);
+        assert!(
+            (one - after).abs() < 0.5,
+            "the caret is at {one}, not after `#A` at {after}"
+        );
+        for c in "bcdef".chars() {
+            hex_key(&mut app, c);
+        }
+        assert_eq!(app.color_picker.hex_input.as_str(), "ABCDEF");
+        assert!(draws(&app, false), "a whole colour is red");
     }
 }

@@ -117,6 +117,30 @@ MUTATIONS = [
 ]
 
 CARD = 'the_shortcut_card_takes_a_press_rather_than_passing_it_on'
+TOUCHPAD = 'a_touchpads_small_turns_add_up_to_rows'
+FRACTION = 'a_fraction_of_a_notch_does_not_outlive_the_rows'
+
+MUTATIONS += [
+    # The table's wheel adds a touchpad's small turns up (2026-10-04).
+    (
+        "each event's rows are rounded on their own",
+        '                let rows = self.table_wheel.rows(dy);\n',
+        '                let rows = wheel::rows_f(dy).round() as isize;\n',
+        [TOUCHPAD],
+    ),
+    (
+        'a turn that moves nothing says it moved',
+        '                if self.scroll_offset == before {\n',
+        '                if false {\n',
+        [TOUCHPAD],
+    ),
+    (
+        'a fraction of a notch outlives the rows',
+        '        self.table_wheel.reset();\n',
+        '',
+        [FRACTION],
+    ),
+]
 
 MUTATIONS += [
     # The list of keys takes the pointer (2026-10-04; known-issues

@@ -31,6 +31,7 @@ use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, M
 use guitk::frame::Rect;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
+use guitk::scroll_window;
 use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::wheel;
@@ -1503,6 +1504,9 @@ pub struct StartupUI {
     pub dialog: DialogState,
     /// First visible row of the table, as an index into the filtered list.
     pub scroll_offset: usize,
+    /// The wheel's unspent fraction of a table row: `scroll_offset` is a
+    /// whole row, so a touchpad's small turns are added up here.
+    table_wheel: wheel::Accumulator,
     pub window_width: f32,
     pub window_height: f32,
     /// Whether typing goes to the search box. A click puts the caret there and
@@ -1535,6 +1539,7 @@ impl StartupUI {
             show_help: false,
             dialog: DialogState::Closed,
             scroll_offset: 0,
+            table_wheel: wheel::Accumulator::default(),
             window_width: WINDOW_WIDTH,
             window_height: WINDOW_HEIGHT,
             search_focused: false,
@@ -1880,22 +1885,35 @@ impl StartupUI {
 
     fn handle_scroll(&mut self, x: f32, y: f32, dy: f32) -> EventResult {
         match self.target_at(x, y) {
+            // Through an accumulator: each event's rows were rounded on their
+            // own, so a fifth of a notch -- 0.6 of a row -- moved a whole row,
+            // five times what was turned, and a sixth of one moved nothing.
             Some(Target::Table | Target::Row(_)) => {
-                self.scroll_rows(wheel::rows_f(dy));
-                EventResult::Consumed
+                let rows = self.table_wheel.rows(dy);
+                let before = self.scroll_offset;
+                self.scroll_rows(rows);
+                if self.scroll_offset == before {
+                    EventResult::Ignored
+                } else {
+                    EventResult::Consumed
+                }
             }
             _ => EventResult::Ignored,
         }
     }
 
     /// Move the viewport by `rows`, positive towards the end of the list.
-    fn scroll_rows(&mut self, rows: f32) {
-        if !rows.is_finite() {
-            return;
-        }
-        let current = isize::try_from(self.scroll_offset).unwrap_or(isize::MAX);
-        let moved = current.saturating_add(rows.round() as isize).max(0);
-        self.scroll_offset = usize::try_from(moved).unwrap_or(0);
+    fn scroll_rows(&mut self, rows: isize) {
+        self.scroll_offset = scroll_window::shift(self.scroll_offset, rows);
+        self.clamp_scroll();
+    }
+
+    /// Back to the top of a table whose rows have just been replaced -- the
+    /// search changed what it holds -- forgetting with the old position any
+    /// fraction of a notch the wheel had banked over the old rows.
+    fn restart_table(&mut self) {
+        self.scroll_offset = 0;
+        self.table_wheel.reset();
         self.clamp_scroll();
     }
 
@@ -2071,8 +2089,7 @@ impl StartupUI {
         // refused them, and took the letter a Windows-key chord carries.
         if self.search_focused && textline::types_into_field(key) {
             self.search_query.extend(key.typed());
-            self.scroll_offset = 0;
-            self.clamp_scroll();
+            self.restart_table();
             return EventResult::Consumed;
         }
         // Every other key is taken plain, nothing held but Shift; but
@@ -2082,8 +2099,7 @@ impl StartupUI {
             && !textline::is_alt_or_windows_chord(key.modifiers)
         {
             self.search_query.pop();
-            self.scroll_offset = 0;
-            self.clamp_scroll();
+            self.restart_table();
             return EventResult::Consumed;
         }
         if !textline::is_plain(key.modifiers) {
@@ -2143,7 +2159,7 @@ impl StartupUI {
             self.search_focused = false;
         } else if !self.search_query.is_empty() {
             self.search_query.clear();
-            self.scroll_offset = 0;
+            self.restart_table();
         } else if self.selected_id.is_some() {
             self.selected_id = Option::None;
         } else if !self.status.is_empty() {
@@ -5333,6 +5349,65 @@ mod tests {
         assert_eq!(ui.scroll_offset, 0, "the wheel scrolled past the top");
     }
 
+    /// A turn of the wheel over the middle of the table, at `SHORT`.
+    fn turn(ui: &mut StartupUI, dy: f32) -> EventResult {
+        let (x, y) = probe::rect_of_sized(ui, Target::Table, SHORT)
+            .unwrap()
+            .centre();
+        ui.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy },
+        }))
+    }
+
+    /// **A touchpad's small turns add up to rows.** Each event's rows were
+    /// rounded on their own: a fifth of a notch -- 0.6 of a row -- moved a
+    /// whole row, five times what was turned, and a sixth of one moved
+    /// nothing at all.
+    #[test]
+    fn a_touchpads_small_turns_add_up_to_rows() {
+        let mut ui = StartupUI::with_sample_entries();
+        ui.resize(SHORT.0, SHORT.1);
+        assert_eq!(
+            turn(&mut ui, -0.25),
+            EventResult::Ignored,
+            "three quarters of a row moved a whole one"
+        );
+        assert_eq!(ui.scroll_offset, 0);
+        for _ in 0..3 {
+            turn(&mut ui, -0.25);
+        }
+        assert_eq!(
+            ui.scroll_offset, 3,
+            "four quarter notches are one notch, three rows"
+        );
+    }
+
+    /// **A fraction of a notch belongs to the rows it was turned over.** A
+    /// quarter notch, a search cleared -- which replaces the rows -- and a
+    /// quarter notch again: the second is not the first's other half.
+    #[test]
+    fn a_fraction_of_a_notch_does_not_outlive_the_rows() {
+        let mut ui = StartupUI::with_sample_entries();
+        ui.resize(SHORT.0, SHORT.1);
+        turn(&mut ui, -0.25);
+        turn(&mut ui, -0.25);
+        assert_eq!(ui.scroll_offset, 1, "half a notch is a row and a half");
+        ui.search_query = String::from("a");
+        ui.key_at(&probe::press(Key::Escape), SHORT);
+        assert!(
+            ui.search_query.is_empty(),
+            "Escape did not clear the search"
+        );
+        assert_eq!(ui.scroll_offset, 0);
+        turn(&mut ui, -0.25);
+        assert_eq!(
+            ui.scroll_offset, 0,
+            "a fraction turned over the old rows moved the new ones"
+        );
+    }
+
     #[test]
     fn the_wheel_over_the_toolbar_leaves_the_table_alone() {
         let mut ui = StartupUI::with_sample_entries();
@@ -5392,7 +5467,7 @@ mod tests {
         let id = ui.visible_entries().first().map(|e| e.id).unwrap();
         probe::click_sized(&mut ui, Target::Row(id), MouseButton::Left, SHORT);
         assert_eq!(ui.selected_id, Some(id));
-        ui.scroll_rows(3.0);
+        ui.scroll_rows(3);
         assert_eq!(ui.scroll_offset, 3);
         assert_eq!(ui.selected_id, Some(id));
         assert!(

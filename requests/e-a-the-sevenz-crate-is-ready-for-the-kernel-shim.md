@@ -41,7 +41,9 @@ Measured against 7-Zip 26.00 while porting:
 
 `sevenz` agrees with 7-Zip 26.00 on all 18,198 one-byte corruptions of its
 small archives and the targeted chunk mutants, with several threads and
-with one, and on 12 crafted archives (`sevenz/tests/data/generate.py`).
+with one, and on 12 crafted archives (`sevenz/tests/data/generate.py`); and
+gives back the file of each one-file archive 7-Zip made for what those have
+too little of -- RISC-V code whose register pairs 7-Zip's encoder escapes.
 
 ## The API, for the shim
 
@@ -52,7 +54,7 @@ with one, and on 12 crafted archives (`sevenz/tests/data/generate.py`).
 | `SevenZEntry::is_dir` | `entry.is_dir()`; also `is_anti()` (a deletion record, not a file), `has_stream()`, `size()`, `crc()`, `mtime()` |
 | `MAX_OUTPUT` (256 MiB) | the `limit` of `read_folder` / `read`, per folder |
 | `KernelError::CorruptedData` / `NotSupported` | `sevenz::Error`: not a 7z, cut short, header damaged, unsupported, data error, CRC failed, password required, over the limit -- 7-Zip's own kinds; it has `Display` |
-| `self_test()` | the crate's tests: 53 unit tests and 6 against 7-Zip's archives and verdicts |
+| `self_test()` | the crate's tests: 55 unit tests and 7 against 7-Zip's archives and verdicts |
 
 An encrypted archive needs `Archive::open_with_password`; the kernel has no
 password to give, and `open` refuses it as `PasswordRequired` -- which is

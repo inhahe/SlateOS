@@ -423,6 +423,31 @@ MUTATIONS = [
         '        if false {',
         ['a_chord_is_neither_a_finance_key_nor_typing'],
     ),
+    # -- the text boxes, the toolkit's fields (c-e-a-theme-can-shape-the-controls)
+    (
+        'the search box is drawn the same wherever the pointer is',
+        '                hovered: self.hover == Some(Target::Search),',
+        '                hovered: false,',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        'the search box is not marked while it has the keyboard',
+        '                focused: self.search_active,',
+        '                focused: false,',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        'a form field is not marked while it has the keyboard',
+        '                hovered: self.hover == Some(Target::Field(field)),\n                focused,',
+        '                hovered: self.hover == Some(Target::Field(field)),\n                focused: false,',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        "the text boxes take the toolkit's focus width, not the user's",
+        '        self.focus_ring_width = settings.focus_ring_width();',
+        '        let _ = settings;',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
 ]
 
 if __name__ == "__main__":

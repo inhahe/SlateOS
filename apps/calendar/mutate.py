@@ -564,6 +564,43 @@ MUTATIONS = [
         '    let plain = true;',
         ['a_key_held_with_a_modifier_is_not_the_calendars'],
     ),
+    # -- the text boxes, the toolkit's fields (c-e-a-theme-can-shape-the-controls)
+    (
+        'the search box is drawn the same wherever the pointer is',
+        '                    hovered: self.hover == Some(Target::SearchField),',
+        '                    hovered: false,',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        'the search box is not marked while it has the keyboard',
+        '                    focused: self.search_focused,',
+        '                    focused: false,',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        'a form field is drawn the same wherever the pointer is',
+        '                hovered: self.hover == Some(Target::Field(field)),',
+        '                hovered: false,',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        'the pointer is not followed',
+        '        MouseEventKind::Move => state.target_at(mouse.x, mouse.y),',
+        '        MouseEventKind::Move => None,',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        "the pointer is not followed under the form",
+        '        && matches!(mouse.kind, MouseEventKind::Move | MouseEventKind::Leave)',
+        '        && matches!(mouse.kind, MouseEventKind::Move | MouseEventKind::Leave)\n        && state.form.is_none()',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        "the text boxes take the toolkit's focus width, not the user's",
+        '        self.focus_ring_width = settings.focus_ring_width();',
+        '        let _ = settings;',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
 ]
 
 # The model, the events file and iCalendar moved to apps/calendarstore on

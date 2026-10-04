@@ -4761,26 +4761,32 @@ fn draw_small_button(
 
 /// Draw one of the panel's two text boxes, with a caret when it has the
 /// keyboard, and record it as a target that takes the keyboard.
+#[allow(clippy::too_many_arguments)] // one box's whole description
 fn draw_find_box(
     f: &mut Frame<Target>,
     pal: &Palette,
     rect: Rect,
     value: &str,
     focused: bool,
+    hovered: bool,
+    focus_width: f32,
     target: Target,
 ) {
-    pal.push_surface(f, rect.x, rect.y, rect.w, rect.h, 4.0, Surface::Card);
-    if focused {
-        f.push(RenderCommand::StrokeRect {
-            x: rect.x,
-            y: rect.y,
-            width: rect.w,
-            height: rect.h,
-            color: pal.blue,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(4.0),
-        });
-    }
+    // The toolkit's field, in the theme's shape (lane C,
+    // c-e-a-theme-can-shape-the-controls): the well, its edge, and the
+    // focus mark at the user's width on the box the keys type into.
+    guitk::field::draw(
+        f,
+        pal,
+        rect,
+        guitk::field::State {
+            hovered,
+            focused,
+            disabled: false,
+            invalid: false,
+        },
+        focus_width,
+    );
     f.push(RenderCommand::Text {
         x: rect.x + 4.0,
         y: rect.y + 4.0,
@@ -4814,11 +4820,13 @@ fn draw_find_box(
 /// for keys, not targets for a pointer", which was true only because nothing
 /// in the app took a pointer. They keep their keys in their labels, because a
 /// button that names its key teaches it.
+#[allow(clippy::too_many_arguments)] // the panel, its place and its marks
 pub fn draw_find_replace(
     f: &mut Frame<Target>,
     state: &FindReplaceState,
     pal: &Palette,
     hover: Option<Target>,
+    focus_width: f32,
     x: f32,
     y: f32,
     width: f32,
@@ -4863,6 +4871,8 @@ pub fn draw_find_replace(
         Rect::new(x + 70.0, y + 4.0, box_w, FIND_ROW_H),
         &state.query,
         !state.focus_replacement,
+        hover == Some(Target::FindQuery),
+        focus_width,
         Target::FindQuery,
     );
     draw_find_box(
@@ -4871,6 +4881,8 @@ pub fn draw_find_replace(
         Rect::new(x + 70.0, y + 32.0, box_w, FIND_ROW_H),
         &state.replacement,
         state.focus_replacement,
+        hover == Some(Target::FindReplacement),
+        focus_width,
         Target::FindReplacement,
     );
 
@@ -5213,6 +5225,9 @@ pub struct App {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// The user's focus width, which the find panel's boxes draw their
+    /// focus mark at (`appearance_changed`).
+    focus_ring_width: f32,
 }
 
 /// A pending prompt shown when the active document's file changed on disk.
@@ -5342,6 +5357,7 @@ impl App {
         let toc = extract_toc(&text);
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             picker: guitk::dialog::FilePicker::new(),
             file_status: None,
             tick_ms_carry: 0,
@@ -5963,6 +5979,7 @@ impl App {
                 &self.find_state,
                 pal,
                 self.hover,
+                self.focus_ring_width,
                 0.0,
                 content_y,
                 width,
@@ -7858,6 +7875,10 @@ impl oswindow::app::App for App {
         self.palette = *palette;
     }
 
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
+    }
+
     fn title(&self) -> String {
         "Markdown Editor".to_string()
     }
@@ -9619,7 +9640,18 @@ mod tests {
     fn test_render_find_replace_hidden() {
         let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let state = FindReplaceState::new();
-        let frame = drawn(|f| draw_find_replace(f, &state, &pal, None, 0.0, 0.0, 1200.0));
+        let frame = drawn(|f| {
+            draw_find_replace(
+                f,
+                &state,
+                &pal,
+                None,
+                guitk::style::FOCUS_RING_WIDTH,
+                0.0,
+                0.0,
+                1200.0,
+            );
+        });
         assert!(frame.commands().is_empty()); // hidden by default
         assert!(
             frame.hits().is_empty(),
@@ -9632,7 +9664,18 @@ mod tests {
         let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut state = FindReplaceState::new();
         state.visible = true;
-        let frame = drawn(|f| draw_find_replace(f, &state, &pal, None, 0.0, 0.0, 1200.0));
+        let frame = drawn(|f| {
+            draw_find_replace(
+                f,
+                &state,
+                &pal,
+                None,
+                guitk::style::FOCUS_RING_WIDTH,
+                0.0,
+                0.0,
+                1200.0,
+            );
+        });
         assert!(!frame.commands().is_empty());
     }
 
@@ -11906,16 +11949,88 @@ mod tests {
         assert!(!app.find_state.visible);
     }
 
+    /// The find panel's boxes are the toolkit's fields, in the theme's shape
+    /// (lane C, c-e-a-theme-can-shape-the-controls): the box the keys type
+    /// into is marked at the user's focus width, and the one under the
+    /// pointer is lit.
+    #[test]
+    fn the_find_boxes_are_the_toolkits_fields() {
+        let mut app = App::new(1280.0, 800.0);
+        let mut palette = app.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        oswindow::app::App::theme_changed(&mut app, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        oswindow::app::App::appearance_changed(&mut app, &settings);
+        app.find_state.visible = true;
+        let query = probe::rect_of(&app, Target::FindQuery).expect("the find box");
+        let replacement = probe::rect_of(&app, Target::FindReplacement).expect("the replace box");
+        let (x, y) = replacement.centre();
+        app.on_event(&mouse(x, y, MouseEventKind::Move));
+        let cmds = Probe::draw(&app, App::SIZE).commands().to_vec();
+        let draws = |rect: Rect, state: guitk::field::State| {
+            let seq = |s: guitk::field::State| {
+                let mut want: Vec<RenderCommand> = Vec::new();
+                guitk::field::draw(&mut want, &palette, rect, s, width);
+                want
+            };
+            let cmds = &cmds;
+            let has = |want: &[RenderCommand]| {
+                !want.is_empty() && cmds.windows(want.len()).any(|w| w == want)
+            };
+            // Not focused means no focus mark either: an unfocused box's commands
+            // begin a focused one's under a ring or an underline, so finding them
+            // alone says nothing about the mark.
+            has(&seq(state))
+                && (state.focused
+                    || !has(&seq(guitk::field::State {
+                        focused: true,
+                        ..state
+                    })))
+        };
+        let focused = guitk::field::State {
+            focused: true,
+            ..guitk::field::State::default()
+        };
+        let hovered = guitk::field::State {
+            hovered: true,
+            ..guitk::field::State::default()
+        };
+        assert!(
+            draws(query, focused),
+            "the box the keys type into is not marked at the user's width"
+        );
+        assert!(
+            draws(replacement, hovered),
+            "the box under the pointer is not lit"
+        );
+    }
+
     /// The find panel says which box is typing and whether case matters.
     #[test]
     fn the_find_panel_draws_its_focus_and_its_case_switch() {
         let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let outlines = |state: &FindReplaceState| {
-            drawn(|f| draw_find_replace(f, state, &pal, None, 0.0, 0.0, 1200.0))
-                .commands()
-                .iter()
-                .filter(|c| matches!(c, RenderCommand::StrokeRect { .. }))
-                .count()
+            drawn(|f| {
+                draw_find_replace(
+                    f,
+                    state,
+                    &pal,
+                    None,
+                    guitk::style::FOCUS_RING_WIDTH,
+                    0.0,
+                    0.0,
+                    1200.0,
+                );
+            })
+            .commands()
+            .iter()
+            .filter(|c| matches!(c, RenderCommand::StrokeRect { .. }))
+            .count()
         };
         let mut state = FindReplaceState::new();
         state.visible = true;

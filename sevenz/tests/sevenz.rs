@@ -127,6 +127,35 @@ fn archives_7zip_made_are_read() {
     assert!(skipped.is_empty(), "skipped {skipped:?}, read {read_ok:?}");
 }
 
+/// Archives of one file each, made for what the input tree has too little of
+/// (`single.txt`) -- RISC-V code whose AUIPC pairs 7-Zip's encoder escapes,
+/// above all -- give their file back whole.
+#[test]
+fn single_file_archives_give_back_their_file() {
+    let list = std::fs::read_to_string(data_dir().join("single.txt")).unwrap();
+    let mut n = 0;
+    for line in list.lines().filter(|l| !l.starts_with('#')) {
+        let mut f = line.splitn(4, ' ');
+        let name = f.next().unwrap();
+        let size: usize = f.next().unwrap().parse().unwrap();
+        let hash = u64::from_str_radix(f.next().unwrap(), 16).unwrap();
+        let file = f.next().unwrap();
+        let data = read(&format!("made/{name}"));
+        let archive = Archive::open(&data).unwrap();
+        let entries: Vec<_> = archive.entries().collect();
+        assert_eq!(entries.len(), 1, "{name}");
+        assert_eq!(entries[0].name().unwrap(), file, "{name}");
+        let got = entries[0].read(1 << 24).unwrap();
+        assert!(
+            got.len() == size && fnv(&got) == hash,
+            "{name}: {file} differs"
+        );
+        assert_eq!(archive.warnings(), sevenz::Warnings::default(), "{name}");
+        n += 1;
+    }
+    assert!(n >= 2, "single.txt lists {n} archives");
+}
+
 /// LZMA2 streams of several chunks under one dictionary, and of several
 /// blocks each with its own, decode whole either way 7-Zip decodes them.
 #[test]
@@ -168,6 +197,9 @@ fn methods_are_named_as_7zip_names_them() {
         ("bzip2.7z", "BZip2"),
         ("copy.7z", "Copy"),
         ("lzma2-files.7z", "LZMA2:16"),
+        // A property other than lc changed: lc is named only when it differs.
+        ("lzma-pb0.7z", "LZMA:12:pb0"),
+        ("riscv-pairs.7z", "RISCV Copy"),
     ] {
         let data = read(&format!("made/{name}"));
         let archive = Archive::open_with_password(&data, PASSWORD).unwrap();

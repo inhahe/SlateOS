@@ -2,9 +2,16 @@
 name = "mediaprobe"
 version = "0.1.0"
 edition = "2024"
-description = "SlateOS video file facts for applications: container, length and each track's codec, picture, rate and language, read from headers without decoding."
+description = "SlateOS video file facts for applications: container, length and each track's codec, picture, rate and language, read from headers without decoding -- and Matroska's and WebM's frames, demuxed, for a player."
 
 [dependencies]
+
+[dev-dependencies]
+# The demuxer is held to libvpx's own pictures: libvpx's VP9 test vectors
+# (tests/data, libvpx's licence beside them) demuxed here, decoded by lane
+# F's port of libvpx, and each picture hashed as libvpx's md5_helper does.
+vp9 = { path = "../../gui/video/vp9" }
+md5 = { path = "../../md5" }
 
 [lints]
 workspace = true

@@ -1400,10 +1400,10 @@ pub(crate) fn decode(
             _ => break,
         }
     }
-    if ppmd.extra {
-        // CHECK_EXTRA_ERROR: the stream ran out.
-        return Ok(crate::lzma_coder::Coded { out, ok: false });
-    }
+    // A symbol decoded from past the end of the input (`extra`,
+    // CHECK_EXTRA_ERROR) is not output, and ends the loop with the output
+    // short of its size -- which every arm below refuses -- so the stream
+    // running out needs no test of its own here.
     let ok = match sym {
         // All the output decoded: the range coder must be finished.
         Symbol::Byte(_) => out.len() == out_size && ppmd.code == 0,

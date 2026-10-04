@@ -87,6 +87,43 @@ MUTATIONS = [
         '        let typed: String = key.typed().collect();',
         ['a_chord_is_neither_an_undelete_key_nor_typing'],
     ),
+    # -- the toolkit's radio buttons and check boxes (c-e-the-toolkit-has-switches-...)
+    (
+        "the chosen scan mode is not dotted",
+        "            self.scan_mode == mode,\n",
+        "            false,\n",
+        ['the_scan_modes_are_the_toolkits_radio_buttons'],
+    ),
+    (
+        "a scan mode is drawn the same wherever the pointer is",
+        "                hovered: self.hover == Some(Control::Mode(mode)),",
+        "                hovered: false,",
+        ['the_scan_modes_are_the_toolkits_radio_buttons'],
+    ),
+    (
+        "a row's box is drawn the same wherever the pointer is",
+        "            hovered: self.hover == Some(Control::File(index)),",
+        "            hovered: false,",
+        ['a_rows_box_is_the_toolkits_check_box'],
+    ),
+    (
+        "a file to be recovered is not ticked",
+        "            if file.selected {\n                CheckState::Checked",
+        "            if false {\n                CheckState::Checked",
+        ['a_rows_box_is_the_toolkits_check_box'],
+    ),
+    (
+        "the pointer is not followed",
+        "                let over = self.control_at(mouse.x, mouse.y);",
+        "                let over = None::<Control>;",
+        ['the_scan_modes_are_the_toolkits_radio_buttons', 'a_rows_box_is_the_toolkits_check_box'],
+    ),
+    (
+        "the pointer leaving the window leaves its control lit",
+        "                if self.hover.take().is_some() {",
+        "                if self.hover.is_some() {",
+        ['a_rows_box_is_the_toolkits_check_box'],
+    ),
 ]
 
 if __name__ == "__main__":

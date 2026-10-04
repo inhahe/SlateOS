@@ -7,8 +7,14 @@
 //! was written -- a live recording's `Cluster` -- runs to its parent's end,
 //! so the walk ends there, and the `SeekHead` says where `Info` and `Tracks`
 //! are past it.
+//!
+//! The frames themselves, for a player, are [`Demuxer`]'s (`demux.rs`), on
+//! the same element walk.
 
 use std::io::{self, Read, Seek};
+
+mod demux;
+pub use demux::{Demuxer, Packet, Stream};
 
 use crate::{Codec, Container, Kind, MAX_CHILDREN, Probe, Track, language, read_at, text};
 

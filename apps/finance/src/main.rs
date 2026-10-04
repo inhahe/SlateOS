@@ -599,6 +599,9 @@ struct FinanceApp {
     show_help: bool,
     /// What the pointer is over, so it can be drawn lit.
     hover: Option<Target>,
+    /// The user's focus width, which the text boxes draw their focus mark
+    /// at (`appearance_changed`).
+    focus_ring_width: f32,
     /// Every box the last paint recorded, for hover and the wheel.
     last_hits: Vec<(Target, Rect)>,
     /// The wheel's remainder.
@@ -690,6 +693,7 @@ impl FinanceApp {
             budget_scroll: 0,
             show_help: false,
             hover: None,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             last_hits: Vec::new(),
             wheel: wheel::Accumulator::default(),
             persist: false,
@@ -3039,19 +3043,20 @@ impl FinanceApp {
     /// The search box: what is typed, a caret while typing, and -- once there
     /// is a query -- that it reaches every month.
     fn render_search(&self, f: &mut Frame<Target>, rect: Rect) {
-        self.palette
-            .push_surface(f, rect.x, rect.y, rect.w, rect.h, 6.0, Surface::Card);
-        if self.search_active {
-            f.push(RenderCommand::StrokeRect {
-                x: rect.x,
-                y: rect.y,
-                width: rect.w,
-                height: rect.h,
-                color: self.palette.blue,
-                line_width: 2.0,
-                corner_radii: CornerRadii::all(6.0),
-            });
-        }
+        // The toolkit's field, in the theme's shape (lane C,
+        // c-e-a-theme-can-shape-the-controls).
+        guitk::field::draw(
+            f,
+            &self.palette,
+            rect,
+            guitk::field::State {
+                hovered: self.hover == Some(Target::Search),
+                focused: self.search_active,
+                disabled: false,
+                invalid: false,
+            },
+            self.focus_ring_width,
+        );
         let room = (rect.w - 110.0).max(0.0);
         let placeholder = self.search_query.is_empty() && !self.search_active;
         f.push(RenderCommand::Text {
@@ -3727,21 +3732,20 @@ impl FinanceApp {
     /// wants while it is empty and the keys are elsewhere.
     fn render_text_field(&self, f: &mut Frame<Target>, form: &Form, field: FormField, rect: Rect) {
         let focused = self.field == field;
-        self.palette
-            .push_surface(f, rect.x, rect.y, rect.w, rect.h, 4.0, Surface::Card);
-        f.push(RenderCommand::StrokeRect {
-            x: rect.x,
-            y: rect.y,
-            width: rect.w,
-            height: rect.h,
-            color: if focused {
-                self.palette.blue
-            } else {
-                self.palette.surface1
+        // The toolkit's field, in the theme's shape (lane C,
+        // c-e-a-theme-can-shape-the-controls).
+        guitk::field::draw(
+            f,
+            &self.palette,
+            rect,
+            guitk::field::State {
+                hovered: self.hover == Some(Target::Field(field)),
+                focused,
+                disabled: false,
+                invalid: false,
             },
-            line_width: if focused { 2.0 } else { 1.0 },
-            corner_radii: CornerRadii::all(4.0),
-        });
+            self.focus_ring_width,
+        );
         if let Some(input) = form.input_ref(field) {
             if input.text().is_empty() && !focused {
                 f.push(RenderCommand::Text {
@@ -4151,6 +4155,10 @@ impl FinanceApp {
 impl App for FinanceApp {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -6056,6 +6064,88 @@ mod tests {
         assert_eq!(
             app.selected_id, chosen,
             "a press behind the form chose a row"
+        );
+    }
+
+    /// The search box and the form's fields are the toolkit's (lane C,
+    /// c-e-a-theme-can-shape-the-controls): lit under the pointer, out when it
+    /// leaves, and marked at the user's focus width while they have the
+    /// keyboard.
+    #[test]
+    fn the_text_boxes_are_the_toolkits_fields() {
+        let mut app = one_account();
+        let mut palette = app.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut app, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        App::appearance_changed(&mut app, &settings);
+        let draws = |app: &FinanceApp, rect: Rect, state: guitk::field::State| {
+            let seq = |s: guitk::field::State| {
+                let mut want: Vec<RenderCommand> = Vec::new();
+                guitk::field::draw(&mut want, &palette, rect, s, width);
+                want
+            };
+            let frame = app.frame();
+            let cmds = frame.commands();
+            let has = |want: &[RenderCommand]| {
+                !want.is_empty() && cmds.windows(want.len()).any(|w| w == want)
+            };
+            // Not focused means no focus mark either: an unfocused box's
+            // commands begin a focused one's.
+            has(&seq(state))
+                && (state.focused
+                    || !has(&seq(guitk::field::State {
+                        focused: true,
+                        ..state
+                    })))
+        };
+        let idle = guitk::field::State::default();
+        let lit = guitk::field::State {
+            hovered: true,
+            ..idle
+        };
+        let keyed = guitk::field::State {
+            focused: true,
+            ..idle
+        };
+        let pointer = |app: &mut FinanceApp, x: f32, y: f32, kind: MouseEventKind| {
+            app.handle_event(&Event::Mouse(MouseEvent { x, y, kind }))
+        };
+
+        let search = probe::rect_of(&app, Target::Search).expect("the search box");
+        assert!(
+            draws(&app, search, idle),
+            "the search box is not the toolkit's"
+        );
+        let (x, y) = search.centre();
+        pointer(&mut app, x, y, MouseEventKind::Move);
+        assert!(
+            draws(&app, search, lit),
+            "the box under the pointer is not lit"
+        );
+        pointer(&mut app, -1.0, -1.0, MouseEventKind::Leave);
+        assert!(
+            draws(&app, search, idle),
+            "the box stayed lit after the pointer left"
+        );
+        probe::click(&mut app, Target::Search);
+        assert!(
+            draws(&app, search, keyed),
+            "the search box with the keyboard is not marked at the user's width"
+        );
+        app.handle_event(&Event::Key(probe::press(Key::Escape)));
+
+        probe::click(&mut app, Target::NewTransaction);
+        let amount = probe::rect_of(&app, Target::Field(FormField::Amount)).expect("amount");
+        probe::click(&mut app, Target::Field(FormField::Amount));
+        assert!(
+            draws(&app, amount, keyed),
+            "the field with the keyboard is not marked at the user's width"
         );
     }
 

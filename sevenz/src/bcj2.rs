@@ -265,7 +265,6 @@ pub(crate) fn decode(inputs: [&[u8]; 4], out_size: usize) -> Coded {
     // `ReadInStream`: each input is read once, whole; what a CALL or JUMP
     // stream holds past its last whole four bytes is kept back.
     let mut read = [false; 4];
-    let mut extra = [0usize; 4];
     let mut crit_ok = true;
 
     loop {
@@ -282,11 +281,7 @@ pub(crate) fn decode(inputs: [&[u8]; 4], out_size: usize) -> Coded {
         // The decoder wants more of input `state`.
         let len = inputs.get(state).map_or(0, |i| i.len());
         if read.get(state).copied().unwrap_or(true) {
-            // Read before: nothing more. Bytes held back of a 32-bit
-            // stream are a damaged stream.
-            if extra.get(state).copied().unwrap_or(0) != 0 {
-                crit_ok = false;
-            }
+            // Read before: nothing more.
             break;
         }
         if let Some(r) = read.get_mut(state) {
@@ -294,15 +289,12 @@ pub(crate) fn decode(inputs: [&[u8]; 4], out_size: usize) -> Coded {
         }
         let mut avail = len;
         if is_32bit_stream(state) {
-            let e = len & 3;
-            if let Some(x) = extra.get_mut(state) {
-                *x = e;
-            }
-            if len > 0 && len < 4 {
-                crit_ok = false;
-                break;
-            }
-            avail -= e;
+            // Four bytes at a time. The one to three past the last four
+            // are never read, so a stream that has them is not used to its
+            // last byte and `ok` below refuses it -- `Bcj2Coder.cpp`'s
+            // extra-bytes error, with no flag of its own: whichever way
+            // decoding ends, it cannot end `ok` with them unread.
+            avail -= len & 3;
         }
         if avail == 0 {
             // An empty input: decoding stops here.

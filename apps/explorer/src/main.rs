@@ -1252,6 +1252,12 @@ pub struct ExplorerState {
     /// Kept so the thumb follows the grab point rather than jumping its top to
     /// the pointer on the first move.
     thumb_grab: Option<f32>,
+    /// The user's focus width, which the toolkit's dialogs and address bar
+    /// are handed as they are made (`appearance_changed`).
+    focus_ring_width: f32,
+    /// Whether the pointer is over the scrollbar's column: the bar lights
+    /// under it, and a theme's overlay bar widens from a line only then.
+    scrollbar_hovered: bool,
     /// Navigation history (back stack).
     pub history_back: VecDeque<PathBuf>,
     /// Navigation history (forward stack).
@@ -1495,6 +1501,8 @@ impl ExplorerState {
             viewport: ListViewport::new(0),
             wheel: WheelAccumulator::default(),
             thumb_grab: None,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
+            scrollbar_hovered: false,
             history_back: VecDeque::new(),
             history_forward: VecDeque::new(),
             view_mode: ViewMode::Details,
@@ -1833,7 +1841,8 @@ impl ExplorerState {
         // Pre-filled with the query in force, so refining a search is an edit
         // rather than a retype. Empty when this is a fresh one.
         let initial = self.search_showing.clone().unwrap_or_default();
-        let dialog = InputDialog::prompt("Find", "Name contains:", &initial);
+        let dialog = InputDialog::prompt("Find", "Name contains:", &initial)
+            .with_focus_ring_width(self.focus_ring_width);
         self.modal = Some(Modal::Search { dialog });
     }
 
@@ -4158,7 +4167,8 @@ impl ExplorerState {
     fn report(&mut self, outcome: Outcome) {
         self.status_message = outcome.message;
         if let Some(detail) = outcome.failure {
-            let mut dialog = AlertDialog::error("Could not finish", &detail);
+            let mut dialog = AlertDialog::error("Could not finish", &detail)
+                .with_focus_ring_width(self.focus_ring_width);
             dialog.show();
             self.modal = Some(Modal::Notice { dialog });
         }
@@ -4702,7 +4712,8 @@ impl ExplorerState {
 
     /// Ask for a name and make a folder with it.
     fn ask_new_folder(&mut self) -> bool {
-        let mut dialog = InputDialog::prompt("New folder", "Name:", "");
+        let mut dialog = InputDialog::prompt("New folder", "Name:", "")
+            .with_focus_ring_width(self.focus_ring_width);
         dialog.show();
         self.modal = Some(Modal::NewFolder { dialog });
         true
@@ -5510,29 +5521,27 @@ impl ExplorerState {
         true
     }
 
-    /// Draw the scrollbar, if there is one.
+    /// Whether the pointer at (`x`, `y`) is over the scrollbar's column, kept;
+    /// returns whether that changed, and so whether to draw again.
+    fn hover_scrollbar(&mut self, x: f32, y: f32) -> bool {
+        let over = self.scrollbar_track().is_some_and(|t| t.contains(x, y));
+        let changed = over != self.scrollbar_hovered;
+        self.scrollbar_hovered = over;
+        changed
+    }
+
+    /// Draw the scrollbar, if there is one -- by the toolkit, in the theme's
+    /// widget style (thin, or out of the way until the pointer comes to
+    /// it), inside the same column a press on it is taken in.
     fn render_scrollbar(&self, tree: &mut RenderTree) {
-        let Some(track) = self.scrollbar_track() else {
+        let (Some(track), Some(thumb)) = (self.scrollbar_track(), self.scrollbar_thumb()) else {
             return;
         };
-        // The toolkit's `Rect` names its sides `w`/`h` where explorer's names
-        // them `width`/`height`; converted here, at the one call that crosses.
-        let track_gui = track;
-        let thumb = scrollbar::thumb(
-            track_gui,
-            self.scroll_len(),
-            self.visible_capacity(),
-            self.scroll_first(),
-        );
-        tree.fill_rect(track.x, track.y, track.w, track.h, self.palette.mantle);
-        tree.fill_rounded_rect(
-            thumb.x + 1.0,
-            thumb.y,
-            thumb.w - 2.0,
-            thumb.h,
-            self.palette.surface2,
-            guitk::style::CornerRadii::all(4.0),
-        );
+        let state = scrollbar::BarState {
+            hovered: self.scrollbar_hovered,
+            dragging: self.thumb_grab.is_some(),
+        };
+        scrollbar::draw(tree, &self.palette, track, thumb, state);
     }
 
     /// How many icon cells fit across the file pane.
@@ -6269,6 +6278,14 @@ impl oswindow::app::App for ExplorerState {
         self.palette = *palette;
     }
 
+    /// The user's appearance past the colours: the focus mark's width, which
+    /// the address bar -- the toolkit's -- cannot read for itself (lane C,
+    /// c-e-a-theme-can-shape-the-controls, part 3).
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
+        self.pathbar.set_focus_ring_width(self.focus_ring_width);
+    }
+
     /// The folder's name first, then the application's.
     ///
     /// That order is what a task bar full of windows needs: the strip of
@@ -6509,6 +6526,17 @@ impl ExplorerState {
     }
 
     fn handle_mouse(&mut self, m: &MouseEvent) -> bool {
+        // The scrollbar's hover is kept on every move, whatever else the move
+        // does, and dropped when the pointer leaves the window.
+        let hover_changed = match m.kind {
+            MouseEventKind::Move => self.hover_scrollbar(m.x, m.y),
+            MouseEventKind::Leave => std::mem::take(&mut self.scrollbar_hovered),
+            _ => false,
+        };
+        self.handle_mouse_action(m) || hover_changed
+    }
+
+    fn handle_mouse_action(&mut self, m: &MouseEvent) -> bool {
         match m.kind {
             // The scrollbar first: it is drawn over the rows, so a press on it
             // is not a press on the file underneath.
@@ -7119,7 +7147,8 @@ impl ExplorerState {
             &format!("Permanently delete {subject}?"),
             "Delete permanently",
         )
-        .with_detail("This cannot be undone. It leaves the recycle bin and cannot be put back.");
+        .with_detail("This cannot be undone. It leaves the recycle bin and cannot be put back.")
+        .with_focus_ring_width(self.focus_ring_width);
         dialog.show();
         self.modal = Some(Modal::ConfirmBin {
             dialog,
@@ -7146,7 +7175,8 @@ impl ExplorerState {
             ),
             "Empty recycle bin",
         )
-        .with_detail("This cannot be undone. Nothing in the bin can be put back afterwards.");
+        .with_detail("This cannot be undone. Nothing in the bin can be put back afterwards.")
+        .with_focus_ring_width(self.focus_ring_width);
         dialog.show();
         self.modal = Some(Modal::ConfirmBin {
             dialog,
@@ -7251,7 +7281,7 @@ impl ExplorerState {
             .with_detail("This cannot be undone. The data is erased, not recycled."),
         };
 
-        let mut dialog = dialog;
+        let mut dialog = dialog.with_focus_ring_width(self.focus_ring_width);
         dialog.show();
         self.modal = Some(Modal::Confirm { dialog, action });
         true
@@ -7287,8 +7317,9 @@ impl ExplorerState {
             .is_some_and(|n| n.to_str().is_none())
             .then(|| current.clone());
 
-        let mut dialog =
-            InputDialog::prompt("Rename", "New name:", &current).with_initial_text(&current);
+        let mut dialog = InputDialog::prompt("Rename", "New name:", &current)
+            .with_initial_text(&current)
+            .with_focus_ring_width(self.focus_ring_width);
         dialog.show();
         self.modal = Some(Modal::Rename {
             dialog,
@@ -8869,6 +8900,114 @@ mod tests {
         assert!(
             state.viewport.first_visible() > 0,
             "dragging the thumb to the bottom scrolled nothing"
+        );
+    }
+
+    /// The scrollbar is the toolkit's, drawn in the theme's widget style (lane
+    /// C, c-e-a-theme-can-shape-the-controls): under an overlay style the
+    /// thumb is a line at the column's edge until the pointer comes to the
+    /// column, and the column takes a press either way.
+    #[test]
+    fn the_scrollbar_follows_the_themes_style_and_lights_under_the_pointer() {
+        let dir = crate::guarded_scratch("explorer-sb-style");
+        dir_with_files(&dir.path(""), 200);
+        let mut state = state_at(&dir.path(""));
+        state.palette.widget_style.scrollbar.visibility =
+            guitk::widget_style::ScrollbarVisibility::Overlay;
+        let track = state.scrollbar_track().expect("a bar");
+        let thumb = state.scrollbar_thumb().expect("a thumb");
+        let bar_width = |state: &mut ExplorerState| {
+            let tree = state.render();
+            tree.commands
+                .iter()
+                .find_map(|c| match c {
+                    guitk::render::RenderCommand::FillRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                        ..
+                    } if (*y - thumb.y).abs() < 0.01
+                        && (*height - thumb.h).abs() < 0.01
+                        && (x + width - track.right()).abs() < 0.01 =>
+                    {
+                        Some(*width)
+                    }
+                    _ => None,
+                })
+                .expect("the thumb is drawn at the column's edge")
+        };
+        assert!((bar_width(&mut state) - scrollbar::IDLE_WIDTH).abs() < 0.01);
+        let over = MouseEvent {
+            x: track.x + 1.0,
+            y: track.y + track.h / 2.0,
+            kind: MouseEventKind::Move,
+        };
+        assert!(
+            state.handle_mouse(&over),
+            "coming to the bar did not redraw"
+        );
+        assert!(bar_width(&mut state) > scrollbar::IDLE_WIDTH);
+        let gone = MouseEvent {
+            x: -1.0,
+            y: -1.0,
+            kind: MouseEventKind::Leave,
+        };
+        assert!(
+            state.handle_mouse(&gone),
+            "leaving the window did not redraw"
+        );
+        assert!((bar_width(&mut state) - scrollbar::IDLE_WIDTH).abs() < 0.01);
+        // A press on the column, away from the thin line, takes the thumb.
+        assert!(press(&mut state, track.x + 1.0, thumb.y + 2.0));
+        assert!(state.thumb_grab.is_some());
+    }
+
+    /// The address bar and the dialogs draw their focus mark at the user's
+    /// focus width, which only the explorer can hand them.
+    #[test]
+    fn the_address_bar_and_the_dialogs_take_the_users_focus_width() {
+        use oswindow::app::App as _;
+        let dir = crate::guarded_scratch("explorer-focus-width");
+        let mut state = state_at(&dir.path(""));
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let want = settings.focus_ring_width();
+        assert!(want > guitk::style::FOCUS_RING_WIDTH);
+        state.appearance_changed(&settings);
+        // Editing, the bar has the keyboard and draws its mark.
+        state.pathbar.handle_key_event(&guitk::event::KeyEvent {
+            key: Key::L,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::ctrl(),
+            text: String::new(),
+        });
+        let drawn = state.pathbar.render(&state.palette, 400, 28);
+        let has_mark = |cmds: &[guitk::render::RenderCommand]| {
+            cmds.iter().any(|cmd| {
+                matches!(
+                    cmd,
+                    guitk::render::RenderCommand::StrokeRect { line_width, .. }
+                        if (*line_width - want).abs() < 0.001
+                )
+            })
+        };
+        assert!(has_mark(&drawn), "no mark {want} wide on the address bar");
+        // A dialog the explorer puts up -- New folder's name box has the
+        // keyboard -- draws it as wide.
+        state.pathbar.handle_key_event(&guitk::event::KeyEvent {
+            key: Key::Escape,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        });
+        assert!(state.ask_new_folder());
+        let tree = state.render();
+        assert!(
+            has_mark(&tree.commands),
+            "no mark {want} wide on the dialog"
         );
     }
 

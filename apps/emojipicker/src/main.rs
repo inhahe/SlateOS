@@ -1195,6 +1195,12 @@ pub struct EmojiPickerState {
     pub last_selected: Option<String>,
     /// Whether the search field is focused.
     pub search_focused: bool,
+    /// Whether the pointer is over the search field's band: its edge is
+    /// warmed towards the accent then, as every field's is.
+    search_hovered: bool,
+    /// The user's focus width, which the search field's focus mark is
+    /// drawn at (`App::appearance_changed`).
+    focus_ring_width: f32,
     /// Width of the window being drawn into.
     pub width: f32,
     /// Height of the window being drawn into.
@@ -1222,6 +1228,8 @@ impl EmojiPickerState {
             is_open: true,
             last_selected: Option::None,
             search_focused: false,
+            search_hovered: false,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
         }
@@ -1388,10 +1396,21 @@ impl EmojiPickerState {
             return;
         };
 
-        fill(frame, field, self.palette.surface0, 6.0);
-        if self.search_focused {
-            stroke(frame, field, self.palette.blue, 1.5, 6.0);
-        }
+        // The toolkit's field, in the theme's shape (lane C,
+        // c-e-a-theme-can-shape-the-controls): its well, its edge and, while
+        // it has the keyboard, its focus mark at the user's width.
+        guitk::field::draw(
+            frame,
+            &self.palette,
+            field,
+            guitk::field::State {
+                hovered: self.search_hovered,
+                focused: self.search_focused,
+                disabled: false,
+                invalid: false,
+            },
+            self.focus_ring_width,
+        );
 
         let text_y = field.y + (field.h - LABEL_FONT_SIZE) / 2.0;
         label(
@@ -1735,10 +1754,20 @@ fn handle_mouse(state: &mut EmojiPickerState, mouse: &MouseEvent) -> EventResult
         }
 
         MouseEventKind::Move => {
-            state.hovered_emoji = match state.target_at(x, y) {
+            let target = state.target_at(x, y);
+            state.hovered_emoji = match target {
                 Some(Target::Cell(i)) => Some(i),
                 _ => Option::None,
             };
+            state.search_hovered = matches!(target, Some(Target::SearchField));
+            EventResult::Consumed
+        }
+
+        // Nothing is under a pointer that has left: a cell or the field
+        // left lit would say otherwise until the pointer came back.
+        MouseEventKind::Leave => {
+            state.hovered_emoji = Option::None;
+            state.search_hovered = false;
             EventResult::Consumed
         }
 
@@ -1765,6 +1794,10 @@ fn handle_mouse(state: &mut EmojiPickerState, mouse: &MouseEvent) -> EventResult
 impl App for EmojiPickerState {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -3090,6 +3123,122 @@ mod tests {
         for tab in &tabs {
             assert!(!tab.icon().is_empty());
         }
+    }
+
+    /// Whether `cmds` hold the toolkit's field box at `rect` in `state`, at
+    /// focus width `width`, command for command.
+    fn draws_field(
+        cmds: &[RenderCommand],
+        palette: &Palette,
+        rect: Rect,
+        state: guitk::field::State,
+        width: f32,
+    ) -> bool {
+        let seq = |s: guitk::field::State| {
+            let mut want: Vec<RenderCommand> = Vec::new();
+            guitk::field::draw(&mut want, palette, rect, s, width);
+            want
+        };
+        let has = |want: &[RenderCommand]| {
+            !want.is_empty() && cmds.windows(want.len()).any(|w| w == want)
+        };
+        // Not focused means no focus mark either: an unfocused box's commands
+        // begin a focused one's under a ring or an underline, so finding them
+        // alone says nothing about the mark.
+        has(&seq(state))
+            && (state.focused
+                || !has(&seq(guitk::field::State {
+                    focused: true,
+                    ..state
+                })))
+    }
+
+    /// The search field is the toolkit's, in the theme's shape (lane C,
+    /// c-e-a-theme-can-shape-the-controls): lit under the pointer, out when
+    /// the pointer leaves, and marked at the user's focus width while it has
+    /// the keyboard.
+    #[test]
+    fn the_search_field_is_the_toolkits_lit_under_the_pointer_and_focused_at_the_users_width() {
+        let mut state = EmojiPickerState::new();
+        let mut palette = state.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut state, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        App::appearance_changed(&mut state, &settings);
+        let field = state.layout().search_field().expect("a search field");
+        let drawn = |state: &EmojiPickerState, s: guitk::field::State| {
+            let frame = state.frame(state.width, state.height);
+            draws_field(frame.commands(), &palette, field, s, width)
+        };
+        let idle = guitk::field::State::default();
+        assert!(drawn(&state, idle), "the field is not the toolkit's");
+
+        let (cx, cy) = field.centre();
+        let at = |kind| Event::Mouse(MouseEvent { x: cx, y: cy, kind });
+        handle_event(&mut state, &at(MouseEventKind::Move));
+        let hovered = guitk::field::State {
+            hovered: true,
+            ..idle
+        };
+        assert!(
+            drawn(&state, hovered),
+            "the field is not lit under the pointer"
+        );
+        handle_event(
+            &mut state,
+            &Event::Mouse(MouseEvent {
+                x: -1.0,
+                y: -1.0,
+                kind: MouseEventKind::Leave,
+            }),
+        );
+        assert!(
+            drawn(&state, idle),
+            "the field stayed lit after the pointer left"
+        );
+
+        handle_event(&mut state, &at(MouseEventKind::Press(MouseButton::Left)));
+        let focused = guitk::field::State {
+            focused: true,
+            ..idle
+        };
+        assert!(
+            drawn(&state, focused),
+            "the focused field is not marked at the user's width"
+        );
+    }
+
+    #[test]
+    fn leaving_the_window_puts_out_the_cell_under_the_pointer() {
+        let mut state = EmojiPickerState::new();
+        let cell = probe::rect_of(&state, Target::Cell(0)).expect("a cell");
+        let (x, y) = cell.centre();
+        handle_event(
+            &mut state,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Move,
+            }),
+        );
+        assert_eq!(state.hovered_emoji, Some(0));
+        handle_event(
+            &mut state,
+            &Event::Mouse(MouseEvent {
+                x: -1.0,
+                y: -1.0,
+                kind: MouseEventKind::Leave,
+            }),
+        );
+        assert_eq!(
+            state.hovered_emoji, None,
+            "the cell stayed lit after the pointer left"
+        );
     }
 
     #[test]

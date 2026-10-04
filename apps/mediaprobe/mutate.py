@@ -1,13 +1,14 @@
-"""Mutation test for the video file readers.
+"""Mutation test for mediaprobe's Matroska demuxer (`src/mkv/demux.rs`).
 
-Breaks one piece of production code at a time and checks that the test which
-claims to cover it is the one that fails.  A test that passes against a broken
-reader is not testing the reader.
+Each row puts back one way of not reading Matroska as RFC 9559 says --
+a flag ignored, a lacing misread, a cluster's end missed, a cue passed
+over -- and names the tests that have to notice. The decisive ones demux
+libvpx's VP9 vectors and hold every picture decoded from them to libvpx's
+MD5s (`tests/vp9_vectors.rs`); the rest lay files out block by block.
 
-The crate is four files -- the crate root, and a reader each for MP4,
-Matroska and AVI -- and the harness mutates one file a sweep, so this runs a
-sweep a file.  A wrong length or a wrong codec in a media info panel is
-believed; every row is a way to be wrong and still return an answer.
+Breaks one piece of production code at a time and checks that the tests
+which claim to cover it are the ones that fail.  A test that passes against
+a broken program is not testing the program.
 
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
@@ -20,515 +21,147 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 
 from mutation_harness import sweep  # noqa: E402  (path set above)
 
-SRC = Path(__file__).parent / "src"
+SRC = Path(__file__).parent / "src" / "mkv" / "demux.rs"
 
-MP4 = "an_mp4_is_read_for_its_length_its_picture_and_its_sound"
-QT = "a_quicktime_file_is_named_so_even_without_ftyp"
-MP3ESDS = "an_mp4a_entry_is_mp3_when_its_descriptor_says_so"
-V1 = "version_1_headers_have_64_bit_times"
-FRAG = "a_fragmented_mp4_is_timed_by_its_mehd_and_else_by_its_longest_track"
-LARGE = "a_box_with_a_64_bit_size_is_stepped_over"
-TOEND = "a_box_sized_to_the_end_of_the_file_is_read"
-UNKNOWNLEN = "an_unknown_movie_length_is_taken_from_the_tracks"
-ESDSFIELDS = "an_esds_with_optional_fields_is_read_past_them"
-TITLE = "the_title_is_read_in_both_styles"
-SUBS = "subtitles_disabled_tracks_and_a_presentation_size"
-QTV2 = "a_quicktime_version_2_sound_description_is_read_where_it_moved"
-ENTRIES = "every_sample_entry_names_its_codec"
-MKV = "a_matroska_file_is_read_for_its_length_its_picture_and_its_sound"
-WEBM = "a_webm_file_is_named_so_by_its_header"
-FLAGS = "a_track_says_its_name_language_and_flags"
-SCALE = "the_duration_is_in_ticks_of_the_timestamp_scale"
-AUDIODEF = "an_audio_track_takes_matroskas_defaults_and_its_output_rate"
-SEEKHEAD = "what_a_cluster_of_unknown_length_hides_is_found_through_the_seek_head"
-VINT = "an_ebml_integer_is_as_long_as_its_leading_zeros_say"
-AVI = "an_avi_is_read_for_its_length_its_picture_and_its_sound"
-ODML = "an_opendml_avi_counts_its_frames_past_the_first_gigabyte"
-STRN = "a_stream_says_its_name_and_whether_it_is_off"
-TWO_PICTURES = "the_first_picture_sets_the_length"
-EXT = "an_extensible_wave_format_names_its_sub_format_and_a_blank_compression_its_handler"
-NOTVIDEO = "what_is_not_a_video_says_nothing"
-PREFERRED = "the_preferred_track_is_the_default_one"
+ORDER = "simple_blocks_come_out_in_order_with_their_times"
+LACES = "each_lacing_gives_its_frames"
+BAD_LACE = "a_lace_that_does_not_add_up_is_dropped"
+GROUP = "a_block_group_is_a_key_frame_without_a_reference"
+UNKNOWN = "a_cluster_of_unknown_length_ends_where_the_next_begins"
+SEEK = "a_seek_goes_to_the_cluster_of_the_time_sought_with_cues_or_without"
+CUE = "a_seek_goes_to_a_cue_not_past_it"
+WALK = "a_walk_stops_at_the_first_cluster_past_the_time"
+SCALE = "the_timestamp_scale_is_the_files"
+ENCODING = "header_stripping_is_undone_and_other_compression_passed_over"
+RESYNC = "bad_bytes_are_searched_past_for_the_next_cluster"
+VECTORS = "every_frame_demuxed_decodes_to_libvpx_pictures"
+KEY = "a_seek_lands_on_a_frame_decoding_can_start_at"
+DELAY = "a_codec_delay_is_taken_off_its_tracks_timestamps"
+PRE_ROLL = "a_seek_starts_a_pre_roll_before_the_time_sought"
 
-LIB = [
+DEMUX = [
     (
-        "a NaN length is a length",
-        "    probe.duration_secs = probe.duration_secs.filter(|s| s.is_finite() && *s > 0.0);",
-        "    probe.duration_secs = probe.duration_secs.filter(|_| true);",
-        [SCALE],
+        "a SimpleBlock's key flag is ignored",
+        "keyframe.unwrap_or(block.flags & 0x80 != 0)",
+        "keyframe.unwrap_or(false)",
+        [ORDER, KEY],
     ),
     (
-        "the container is not said",
-        "    probe.container = container;\n",
-        "",
-        [MP4],
+        "a block group with a reference is a key frame",
+        "self.queue_block(block, c.time, Some(!referenced), duration);",
+        "self.queue_block(block, c.time, Some(true), duration);",
+        [GROUP],
     ),
     (
-        "a Matroska file is read as an MP4",
-        "        Container::Matroska | Container::WebM => mkv::probe(r, len)?,",
-        "        Container::Matroska | Container::WebM => mp4::probe(r, len)?,",
-        [MKV],
+        "Xiph lacing stops at 254",
+        "                    if byte != 255 {",
+        "                    if byte < 254 {",
+        [LACES],
     ),
     (
-        "any RIFF file is an AVI",
-        '        } else if head.get(..4) == Some(b"RIFF") && head.get(8..12) == Some(b"AVI ") {',
-        '        } else if head.get(..4) == Some(b"RIFF") {',
-        [NOTVIDEO],
+        "EBML lacing differences are taken unsigned",
+        "size = size.checked_add(i128::from(raw).checked_sub(bias)?)?;",
+        "size = size.checked_add(i128::from(raw))?;",
+        [LACES],
     ),
     (
-        "a line break in a title is kept",
-        "            .map(|c| if c.is_control() { ' ' } else { c })",
-        "            .map(|c| c)",
-        [FLAGS],
-    ),
-    (
-        "undetermined is a language",
-        '    (!c.is_empty() && !c.eq_ignore_ascii_case("und")).then(|| c.to_owned())',
-        "    (!c.is_empty()).then(|| c.to_owned())",
-        [FLAGS],
-    ),
-    (
-        "the preferred track ignores the default",
-        "            .find(|t| t.kind == kind && t.default)",
-        "            .find(|t| t.kind == kind)",
-        [PREFERRED],
-    ),
-]
-
-MP4_ROWS = [
-    (
-        "a 64-bit size is the header's length",
-        "            Some(large) => (16, large),",
-        "            Some(_) => (16, 16),",
-        [LARGE],
-    ),
-    (
-        "a box to the end of the file is nothing",
-        "        0 => (8_u64, limit.saturating_sub(at)),",
-        "        0 => return Ok(None),",
-        [TOEND],
-    ),
-    (
-        "the movie length is not read",
-        "            probe.duration_secs = secs(scale, duration);\n",
-        "",
-        # Not the full fixture's: its tracks are as long as the movie, and the
-        # longest track's length is the fallback.
-        [QT],
-    ),
-    (
-        "a version 1 header is read as version 0",
-        "    if b.first() == Some(&1) {\n        let scale",
-        "    if false {\n        let scale",
-        [V1],
-    ),
-    (
-        "an unknown length is 49 days",
-        "be32(b, 16).filter(|&d| d != u32::MAX).map(u64::from)",
-        "be32(b, 16).map(u64::from)",
-        [UNKNOWNLEN],
-    ),
-    (
-        "mehd is not read",
-        "    if probe.duration_secs.is_none()\n        && let Some(mvex)",
-        "    if false\n        && let Some(mvex)",
-        [FRAG],
-    ),
-    (
-        "the longest track is not the length",
-        "    if probe.duration_secs.is_none() {\n        probe.duration_secs = longest_track;\n    }",
-        "",
-        [FRAG],
-    ),
-    (
-        "the longest track is the shortest",
-        "longest_track.map_or(s, |l| l.max(s))",
-        "longest_track.map_or(s, |l| l.min(s))",
-        [FRAG],
-    ),
-    (
-        "a disabled track is the default",
-        "        track.default = be32(&b, 0).is_some_and(|v| v & 1 != 0);",
-        "        track.default = true;",
-        [SUBS],
-    ),
-    (
-        "the presentation size is not taken",
-        "        track.width = track.width.or(presented.0);",
-        "        track.width = track.width.or(None);",
-        [SUBS],
-    ),
-    (
-        "the language is read two bytes late",
-        "        let at = if b.first() == Some(&1) { 32 } else { 20 };",
-        "        let at = if b.first() == Some(&1) { 32 } else { 22 };",
-        [MP4],
-    ),
-    (
-        "a picture track is not a picture",
-        '            Some(b"vide") => Kind::Video,',
-        '            Some(b"vid ") => Kind::Video,',
-        [MP4],
-    ),
-    (
-        "sbtl is not a subtitle",
-        '            Some(b"sbtl" | b"text" | b"subt" | b"clcp") => Kind::Subtitle,',
-        '            Some(b"text" | b"subt" | b"clcp") => Kind::Subtitle,',
-        [SUBS],
-    ),
-    (
-        "the frame rate is the frame count",
-        "            track.frame_rate = be32(&b, 8).map(|count| f64::from(count) / secs);",
-        "            track.frame_rate = be32(&b, 8).map(f64::from);",
-        [MP4],
-    ),
-    (
-        "the sample entry is read four bytes early",
-        "box_at(r, stsd.body.saturating_add(8), stsd.end, len)",
-        "box_at(r, stsd.body.saturating_add(4), stsd.end, len)",
-        [MP4],
-    ),
-    (
-        "the width is the height",
-        "            track.width = be16(&b, 24).map(u32::from).filter(|&w| w > 0);",
-        "            track.width = be16(&b, 26).map(u32::from).filter(|&w| w > 0);",
-        [MP4],
-    ),
-    (
-        "QuickTime version 2 sound is read as version 0",
-        "            let children_at = if be16(&b, 8) == Some(2) {",
-        "            let children_at = if false {",
-        [QTV2],
-    ),
-    (
-        "a 16.16 rate is read whole",
-        "                track.sample_rate = be32(&b, 24).map(|v| v >> 16);",
-        "                track.sample_rate = be32(&b, 24);",
-        [MP4],
-    ),
-    (
-        "the channels are the sample size",
-        "                track.channels = be16(&b, 16);",
-        "                track.channels = be16(&b, 18);",
-        [MP3ESDS],
-    ),
-    (
-        "an mp4a's descriptor is not read",
-        '            if &entry.kind == b"mp4a" {',
+        "fixed lacing need not divide evenly",
+        "            if rest.checked_rem(count)? != 0 {",
         "            if false {",
-        [MP3ESDS],
+        [BAD_LACE],
     ),
     (
-        "the descriptor is looked for past QuickTime version 1's fields",
-        "                if be16(&b, 8) == Some(1) { 44 } else { 28 }",
-        "                if be16(&b, 8) == Some(1) { 44 } else { 44 }",
-        [MP3ESDS],
+        "laced frames share the first one's time",
+        "            let offset = default_ns.map_or(0, |d| {",
+        "            let offset = None::<u64>.map_or(0, |d| {",
+        [LACES],
     ),
     (
-        "a dependent stream's id is read as the configuration",
-        "    if flags & 0x80 != 0 {",
-        "    if false {",
-        [ESDSFIELDS],
+        "every laced frame is a key frame",
+        "                keyframe: keyframe && i == 0,",
+        "                keyframe,",
+        [LACES],
     ),
     (
-        "a URL is read as the configuration",
-        "    if flags & 0x40 != 0 {",
-        "    if false {",
-        [ESDSFIELDS],
+        "a cluster of unknown length runs on into the next",
+        "        if TOP_LEVEL.contains(&el.id) {",
+        "        if false {",
+        [UNKNOWN],
     ),
     (
-        "an OCR stream's id is read as the configuration",
-        "    if flags & 0x20 != 0 {",
-        "    if false {",
-        [ESDSFIELDS],
+        "a cluster's timestamp is ignored",
+        "                next.time = uint(&b).unwrap_or(0);",
+        "                next.time = 0;",
+        [ORDER],
     ),
     (
-        "object type 0x6B is not MP3",
-        "        0x69 | 0x6B => Some(Codec::Mp3),",
-        "        0x69 => Some(Codec::Mp3),",
-        [MP3ESDS],
-    ),
-    (
-        "four bytes that are not letters are named",
-        "    if code.iter().all(|b| b.is_ascii_graphic() || *b == b' ') {",
-        "    if true {",
-        [ENTRIES],
-    ),
-    (
-        "ISO meta is read as QuickTime's",
-        '        let first = if peek.as_slice() == b"hdlr" {',
-        "        let first = if true {",
-        [TITLE],
-    ),
-    (
-        "the title's type and locale are read as text",
-        "            if let Some(title) = b.get(8..).and_then(text) {",
-        "            if let Some(title) = b.get(0..).and_then(text) {",
-        [TITLE],
-    ),
-]
-
-MKV_ROWS = [
-    (
-        "an id loses its marker",
-        "    let Some((id, id_len)) = vint(&head, 0, true) else {",
-        "    let Some((id, id_len)) = vint(&head, 0, false) else {",
-        [MKV],
-    ),
-    (
-        "a length keeps its marker",
-        "    let Some((size, size_len)) = vint(&head, id_len, false) else {",
-        "    let Some((size, size_len)) = vint(&head, id_len, true) else {",
-        [MKV],
-    ),
-    (
-        "the marker mask is a bit short",
-        "        0xFF_u8.checked_shr(u32::try_from(n).ok()?).unwrap_or(0)",
-        "        0xFF_u8.checked_shr(u32::try_from(n).ok()?.saturating_sub(1)).unwrap_or(0)",
-        [VINT],
-    ),
-    (
-        "a cut-short integer is read as zeros",
-        "        value = value.checked_shl(8)? | u64::from(*b.get(at.checked_add(i)?)?);",
-        "        value = value.checked_shl(8)? | u64::from(b.get(at.checked_add(i)?).copied().unwrap_or(0));",
-        [VINT],
-    ),
-    (
-        "Info is not read",
-        "            INFO => info = Some(el),",
-        "            INFO => {}",
-        [MKV],
-    ),
-    (
-        "Tracks are not read",
-        "            TRACKS => tracks = Some(el),",
-        "            TRACKS => {}",
-        [MKV],
-    ),
-    (
-        "the seek head is not read",
-        "            SEEK_HEAD => seeks.extend(read_seek_head(r, el, len)?),",
-        "            SEEK_HEAD => {}",
-        [SEEKHEAD],
-    ),
-    (
-        "a seek position is from the file's start",
-        "        let at = segment.body.saturating_add(position);",
-        "        let at = position;",
-        [SEEKHEAD],
-    ),
-    (
-        "the walk stops at the first of Info and Tracks",
-        "(info.is_none() || tracks.is_none())",
-        "(info.is_none() && tracks.is_none())",
-        [MKV],
-    ),
-    (
-        "the timestamp scale is ignored",
-        "                    scale = s;",
-        "                    let _ = s;",
+        "the timestamp scale is a millisecond whatever the file says",
+        "                        self.scale = s;",
+        "                        let _ = s;",
         [SCALE],
     ),
     (
-        "a four-byte float is no float",
-        "        4 => Some(f64::from(f32::from_be_bytes(b.try_into().ok()?))),",
-        "        4 => None,",
-        [SCALE],
+        "a seek walks the clusters though there are cues",
+        "        let target = if self.cues.is_empty() {",
+        "        let target = if true {",
+        [CUE],
     ),
     (
-        "the title is not read",
-        "            TITLE => probe.title = text(value),",
-        "            TITLE => {}",
-        [FLAGS],
+        "a seek takes the first cue, not the last before the time",
+        "                .max_by_key(|c| c.time)",
+        "                .min_by_key(|c| c.time)",
+        [SEEK],
     ),
     (
-        "a track is not default unless it says",
-        "        default: true,\n",
-        "        default: false,\n",
-        [MKV],
+        "a walk does not stop at a later cluster",
+        "                Some(t) if t > ticks => break,",
+        "                Some(t) if t > ticks => {}",
+        [WALK],
     ),
     (
-        "English is not the default language",
-        '    let (mut iso, mut bcp47) = (Some(String::from("eng")), None);',
-        "    let (mut iso, mut bcp47) = (None, None);",
-        [MKV],
+        "a stripped header is not put back",
+        "            data.extend_from_slice(&stream.strip);",
+        "            let _ = &stream.strip;",
+        [ENCODING],
     ),
     (
-        "ISO 639-2 wins over BCP 47",
-        "    track.language = bcp47.or(iso).as_deref().and_then(language);",
-        "    track.language = iso.or(bcp47).as_deref().and_then(language);",
-        [FLAGS],
+        "a compressed track is read as it is",
+        "                    } else {\n                        stream.readable = false;",
+        "                    } else {\n                        let _ = &stream;",
+        [ENCODING],
     ),
     (
-        "a forced flag of 0 is forced",
-        "            FLAG_FORCED => track.forced = uint(value) == Some(1),",
-        "            FLAG_FORCED => track.forced = uint(value).is_some(),",
-        [FLAGS],
+        "bad bytes are not searched past",
+        "            if let Some(i) = chunk.windows(4).position(|w| w == CLUSTER_ID_BYTES) {",
+        "            if let Some(i) = None::<usize> {",
+        [RESYNC],
     ),
     (
-        "the default flag is read backwards",
-        "            FLAG_DEFAULT => track.default = uint(value) != Some(0),",
-        "            FLAG_DEFAULT => track.default = uint(value) == Some(0),",
-        [FLAGS],
+        "a block's track number keeps its marker bit",
+        "    let (track, n) = vint(b, 0, false)?;",
+        "    let (track, n) = vint(b, 0, true)?;",
+        [ORDER, VECTORS],
     ),
     (
-        "the frame rate is the frame's nanoseconds",
-        "        let fps = frame_ns.map(|ns| 1e9 / ns as f64);",
-        "        let fps = frame_ns.map(|ns| ns as f64);",
-        [MKV],
+        "a codec delay is not taken off the timestamps",
+        "i64::try_from(start.saturating_add(offset).saturating_sub(delay))",
+        "i64::try_from(start.saturating_add(offset))",
+        [DELAY],
     ),
     (
-        "the height is the width",
-        "                        PIXEL_HEIGHT => track.height = pixels(),",
-        "                        PIXEL_HEIGHT => track.width = pixels(),",
-        [MKV],
+        "a seek starts no pre-roll early",
+        "        let block_ns = time_ns.saturating_add(delay).saturating_sub(pre_roll);",
+        "        let block_ns = time_ns.saturating_add(delay);",
+        [PRE_ROLL],
     ),
     (
-        "the coded rate wins over the output rate",
-        "    track.sample_rate = whole_hertz(output.unwrap_or(coded));",
-        "    track.sample_rate = whole_hertz(coded);",
-        [AUDIODEF],
-    ),
-    (
-        "no 8 kHz default",
-        "    let (mut coded, mut output, mut channels) = (8000.0, None, 1_u64);",
-        "    let (mut coded, mut output, mut channels) = (0.0, None, 1_u64);",
-        [AUDIODEF],
-    ),
-    (
-        "no one-channel default",
-        "    let (mut coded, mut output, mut channels) = (8000.0, None, 1_u64);",
-        "    let (mut coded, mut output, mut channels) = (8000.0, None, 0_u64);",
-        [AUDIODEF],
-    ),
-    (
-        "WebM is Matroska",
-        '    if doc_type.as_deref() == Some("webm") {',
-        "    if false {",
-        [WEBM],
-    ),
-    (
-        "an AAC id with a profile is not AAC",
-        '        id if id.starts_with("A_AAC") => Codec::Aac,',
-        '        id if id == "A_AAC" => Codec::Aac,',
-        [AUDIODEF],
+        "a seek reads the played time as block time",
+        "        let block_ns = time_ns.saturating_add(delay).saturating_sub(pre_roll);",
+        "        let block_ns = time_ns.saturating_sub(pre_roll);",
+        [PRE_ROLL],
     ),
 ]
-
-AVI_ROWS = [
-    (
-        "the header list is not found",
-        '        if &id == b"LIST" && head.get(8..12) == Some(b"hdrl") {',
-        '        if &id == b"LIST" && head.get(8..12) == Some(b"movi") {',
-        [AVI],
-    ),
-    (
-        "a top-level chunk's pad byte is not stepped over",
-        "            .saturating_add(u64::from(size & 1));",
-        "            .saturating_add(0);",
-        [STRN],
-    ),
-    (
-        "a chunk's pad byte is not stepped over",
-        "        at = end.saturating_add(size & 1);",
-        "        at = end;",
-        [STRN],
-    ),
-    (
-        "the main header's count is its frame time",
-        "                main_frames = le32(body, 16);",
-        "                main_frames = le32(body, 0);",
-        [STRN],
-    ),
-    (
-        "OpenDML's count is not used",
-        "            let frames = opendml_frames.unwrap_or(length);",
-        "            let frames = length;",
-        [ODML],
-    ),
-    (
-        "a stream that is off is on",
-        "                track.default = le32(body, 8).is_some_and(|f| f & 1 == 0);",
-        "                track.default = true;",
-        [STRN],
-    ),
-    (
-        "a top-down picture's height is negative",
-        "                    .map(|v| i32::from_le_bytes(v.to_le_bytes()).unsigned_abs())",
-        "                    .map(|v| v)",
-        [ODML],
-    ),
-    (
-        "a blank compression is a codec",
-        "                .filter(|c| c != &[0; 4])",
-        "                .filter(|_| true)",
-        [EXT],
-    ),
-    (
-        "the extensible sub-format is not read",
-        "            if tag == Some(0xFFFE) {",
-        "            if false {",
-        [EXT],
-    ),
-    (
-        "the frame rate is upside down",
-        "                track.frame_rate = Some(f64::from(rate) / f64::from(scale));",
-        "                track.frame_rate = Some(f64::from(scale) / f64::from(rate));",
-        [AVI],
-    ),
-    (
-        "MP3 is MP2",
-        "        0x0055 => Codec::Mp3,",
-        "        0x0055 => Codec::Mp2,",
-        [AVI],
-    ),
-    (
-        "a lowercase code is not known",
-        "    upper.make_ascii_uppercase();\n",
-        "",
-        [ODML],
-    ),
-    (
-        "the stream's name is not read",
-        '            b"strn" => track.name = text(body),',
-        '            b"strn" => {}',
-        [STRN],
-    ),
-    (
-        "the sound's clock is the picture's",
-        "    let clock = clock.filter(|_| track.kind == Kind::Video);\n",
-        "",
-        [STRN],
-    ),
-    (
-        "the last picture's clock is taken, not the first's",
-        "                    video_clock = video_clock.or(clock);",
-        "                    video_clock = clock.or(video_clock);",
-        [TWO_PICTURES],
-    ),
-]
-
-TABLES = {
-    "lib.rs": LIB,
-    "mp4.rs": MP4_ROWS,
-    "mkv.rs": MKV_ROWS,
-    "avi.rs": AVI_ROWS,
-}
 
 if __name__ == "__main__":
     only = sys.argv[1:]
-    names = [name for rows in TABLES.values() for name, *_ in rows]
-    unmatched = [o for o in only if not any(o in n for n in names)]
-    if unmatched:
-        print(f"{len(unmatched)} filter(s) name no row in any table:")
-        for o in unmatched:
-            print(f"  {o!r}")
-        raise SystemExit(2)
-    worst = 0
-    for file, rows in TABLES.items():
-        mine = [o for o in only if any(o in name for name, *_ in rows)]
-        if only and not mine:
-            continue
-        print(f"\n######## {file} ########")
-        worst = max(worst, sweep(SRC / file, rows, "mediaprobe", timeout=600, only=mine))
-    raise SystemExit(worst)
+    raise SystemExit(sweep(SRC, DEMUX, "mediaprobe", timeout=900, only=only or None))

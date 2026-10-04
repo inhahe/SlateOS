@@ -1035,12 +1035,19 @@ pub struct CalendarApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// What the pointer is over, which is drawn lit.
+    hover: Option<Target>,
+    /// The user's focus width, which the text boxes draw their focus mark
+    /// at (`appearance_changed`).
+    focus_ring_width: f32,
 }
 
 impl CalendarApp {
     pub fn new(width: f32, height: f32, today: Date) -> Self {
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            hover: None,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             width,
             height,
             view: CalendarView::Month,
@@ -1878,18 +1885,19 @@ impl CalendarApp {
     /// it is empty and the keys are elsewhere, what it wants.
     fn draw_form_text(&self, frame: &mut Frame, form: &EventForm, field: FormField, rect: Rect) {
         let focused = self.form_field == field;
-        self.palette
-            .push_surface(frame, rect.x, rect.y, rect.w, rect.h, 4.0, Surface::Card);
-        stroke(
+        // The toolkit's field, in the theme's shape (lane C,
+        // c-e-a-theme-can-shape-the-controls).
+        guitk::field::draw(
             frame,
+            &self.palette,
             rect,
-            if focused {
-                self.palette.blue
-            } else {
-                self.palette.surface1
+            guitk::field::State {
+                hovered: self.hover == Some(Target::Field(field)),
+                focused,
+                disabled: false,
+                invalid: false,
             },
-            4.0,
-            if focused { 2.0 } else { 1.0 },
+            self.focus_ring_width,
         );
         if let Some(input) = form.input_ref(field) {
             if input.text().is_empty() && !focused {
@@ -2167,10 +2175,20 @@ impl CalendarApp {
         }
 
         if let Some(search) = layout.search {
-            fill(frame, search, self.palette.surface0, 4.0);
-            if self.search_focused {
-                stroke(frame, search, self.palette.blue, 4.0, 1.5);
-            }
+            // The toolkit's field, in the theme's shape (lane C,
+            // c-e-a-theme-can-shape-the-controls).
+            guitk::field::draw(
+                frame,
+                &self.palette,
+                search,
+                guitk::field::State {
+                    hovered: self.hover == Some(Target::SearchField),
+                    focused: self.search_focused,
+                    disabled: false,
+                    invalid: false,
+                },
+                self.focus_ring_width,
+            );
             let empty = self.search_query.is_empty();
             label(
                 frame,
@@ -3204,6 +3222,14 @@ fn route_event(state: &mut CalendarApp, event: &Event) -> EventResult {
         Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
         Picked::Ignored => {}
     }
+    // What is under the pointer is drawn lit -- the form's fields under the
+    // form, the calendar's controls without it -- so the pointer is followed
+    // before the modal branches below, which drop all but a press.
+    if let Event::Mouse(mouse) = event
+        && matches!(mouse.kind, MouseEventKind::Move | MouseEventKind::Leave)
+    {
+        return track_pointer(state, mouse);
+    }
     // The form and the question before a delete are modal: every key and
     // every press is theirs while they are up.
     if state.form.is_some() {
@@ -3675,6 +3701,21 @@ fn handle_confirm_key(state: &mut CalendarApp, id: u64, key: &KeyEvent) -> Event
     EventResult::Consumed
 }
 
+/// The pointer moved or left: what is under it now is drawn lit. Only a
+/// change in that is worth a redraw.
+fn track_pointer(state: &mut CalendarApp, mouse: &MouseEvent) -> EventResult {
+    let over = match mouse.kind {
+        MouseEventKind::Move => state.target_at(mouse.x, mouse.y),
+        _ => None,
+    };
+    if over == state.hover {
+        EventResult::Ignored
+    } else {
+        state.hover = over;
+        EventResult::Consumed
+    }
+}
+
 fn handle_mouse(state: &mut CalendarApp, mouse: &MouseEvent) -> EventResult {
     let (x, y) = (mouse.x, mouse.y);
 
@@ -3795,6 +3836,10 @@ impl App for CalendarApp {
         self.palette = *palette;
     }
 
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
+    }
+
     fn title(&self) -> String {
         String::from("Calendar")
     }
@@ -3839,6 +3884,118 @@ impl App for CalendarApp {
             question.render(&palette, width, height, &mut tree);
         }
         tree
+    }
+}
+
+#[cfg(test)]
+mod field_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+    use guitk::probe;
+
+    /// The search box and the event form's fields are the toolkit's (lane C,
+    /// c-e-a-theme-can-shape-the-controls): lit under the pointer, out when it
+    /// leaves, and marked at the user's focus width while they have the
+    /// keyboard.
+    #[test]
+    fn the_text_boxes_are_the_toolkits_fields() {
+        let today = Date {
+            year: 2026,
+            month: 9,
+            day: 8,
+        };
+        let mut app = CalendarApp::new(DEFAULT_WIDTH, DEFAULT_HEIGHT, today);
+        let mut palette = app.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut app, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        App::appearance_changed(&mut app, &settings);
+        let draws = |app: &CalendarApp, rect: Rect, state: guitk::field::State| {
+            let seq = |s: guitk::field::State| {
+                let mut want: Vec<RenderCommand> = Vec::new();
+                guitk::field::draw(&mut want, &palette, rect, s, width);
+                want
+            };
+            let frame = app.frame(app.width, app.height);
+            let cmds = frame.commands();
+            let has = |want: &[RenderCommand]| {
+                !want.is_empty() && cmds.windows(want.len()).any(|w| w == want)
+            };
+            // Not focused means no focus mark either: an unfocused box's
+            // commands begin a focused one's.
+            has(&seq(state))
+                && (state.focused
+                    || !has(&seq(guitk::field::State {
+                        focused: true,
+                        ..state
+                    })))
+        };
+        let idle = guitk::field::State::default();
+        let lit = guitk::field::State {
+            hovered: true,
+            ..idle
+        };
+        let keyed = guitk::field::State {
+            focused: true,
+            ..idle
+        };
+        let pointer = |app: &mut CalendarApp, x: f32, y: f32, kind: MouseEventKind| {
+            handle_event(app, &Event::Mouse(MouseEvent { x, y, kind }))
+        };
+
+        let search = probe::rect_of(&app, Target::SearchField).expect("the search box");
+        assert!(
+            draws(&app, search, idle),
+            "the search box is not the toolkit's"
+        );
+        let (x, y) = search.centre();
+        assert_eq!(
+            pointer(&mut app, x, y, MouseEventKind::Move),
+            EventResult::Consumed
+        );
+        assert_eq!(
+            pointer(&mut app, x + 1.0, y, MouseEventKind::Move),
+            EventResult::Ignored,
+            "a move that changed nothing redrew the window"
+        );
+        assert!(
+            draws(&app, search, lit),
+            "the box under the pointer is not lit"
+        );
+        assert_eq!(
+            pointer(&mut app, -1.0, -1.0, MouseEventKind::Leave),
+            EventResult::Consumed
+        );
+        assert!(
+            draws(&app, search, idle),
+            "the box stayed lit after the pointer left"
+        );
+        probe::click(&mut app, Target::SearchField);
+        assert!(
+            draws(&app, search, keyed),
+            "the search box with the keyboard is not marked at the user's width"
+        );
+
+        probe::click(&mut app, Target::NewEvent);
+        let first = app.form_field;
+        let rect = probe::rect_of(&app, Target::Field(first)).expect("the first field");
+        assert!(
+            draws(&app, rect, keyed),
+            "the field with the keyboard is not marked at the user's width"
+        );
+        let place = probe::rect_of(&app, Target::Field(FormField::Place)).expect("place");
+        let (px, py) = place.centre();
+        pointer(&mut app, px, py, MouseEventKind::Move);
+        assert!(
+            draws(&app, place, lit),
+            "a form field under the pointer is not lit"
+        );
     }
 }
 

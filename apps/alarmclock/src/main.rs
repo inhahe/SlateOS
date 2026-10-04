@@ -1903,12 +1903,19 @@ pub struct AlarmClockApp {
     palette: Palette,
     /// Whether the shortcut card is up.
     show_help: bool,
+    /// What the pointer is over, which is drawn lit.
+    hover: Option<Target>,
+    /// The user's focus width, which the text boxes draw their focus mark
+    /// at (`appearance_changed`).
+    focus_ring_width: f32,
 }
 
 impl AlarmClockApp {
     pub fn new() -> Self {
         Self {
             show_help: false,
+            hover: None,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             active_tab: ActiveTab::default(),
             time_format: TimeFormat::default(),
@@ -2726,15 +2733,19 @@ impl AlarmClockApp {
         // Label.
         let label_rect = Rect::new(x, row_y, w, label_h);
         let focused = self.focus == Some(Focus::Label);
-        fill(
+        // The toolkit's field, in the theme's shape (lane C,
+        // c-e-a-theme-can-shape-the-controls).
+        guitk::field::draw(
             f,
+            &self.palette,
             label_rect,
-            if focused {
-                self.palette.surface2
-            } else {
-                self.palette.surface1
+            guitk::field::State {
+                hovered: self.hover == Some(Target::EditLabel),
+                focused,
+                disabled: false,
+                invalid: false,
             },
-            6.0,
+            self.focus_ring_width,
         );
         let body = if editor.label.is_empty() && !focused {
             "Label…".to_string()
@@ -2857,15 +2868,19 @@ impl AlarmClockApp {
             let fx = content.x + i as f32 * (field_w + CHIP_GAP);
             let rect = Rect::new(fx, custom_y, field_w, CUSTOM_H);
             let focused = self.focus == Some(Focus::Custom(hms));
-            fill(
+            // The toolkit's field, in the theme's shape (lane C,
+            // c-e-a-theme-can-shape-the-controls).
+            guitk::field::draw(
                 f,
+                &self.palette,
                 rect,
-                if focused {
-                    self.palette.surface2
-                } else {
-                    self.palette.surface1
+                guitk::field::State {
+                    hovered: self.hover == Some(Target::CustomField(hms)),
+                    focused,
+                    disabled: false,
+                    invalid: false,
                 },
-                6.0,
+                self.focus_ring_width,
             );
             let entry = self.custom.get(hms.index()).map_or("", String::as_str);
             let (body, color) = if entry.is_empty() {
@@ -3264,6 +3279,24 @@ impl AlarmClockApp {
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::Press(button) => self.handle_click(mouse.x, mouse.y, button, size),
                 MouseEventKind::Scroll { dx: _, dy } => self.scroll(mouse.x, mouse.y, dy, size),
+                // What is under the pointer is drawn lit; only a change in it
+                // is worth a redraw.
+                MouseEventKind::Move => {
+                    let over = self.frame(size.0, size.1).hit_test(mouse.x, mouse.y);
+                    if over == self.hover {
+                        Action::None
+                    } else {
+                        self.hover = over;
+                        Action::Redraw
+                    }
+                }
+                MouseEventKind::Leave => {
+                    if self.hover.take().is_some() {
+                        Action::Redraw
+                    } else {
+                        Action::None
+                    }
+                }
                 _ => Action::None,
             },
             Event::Key(key) => self.handle_key(key, size),
@@ -3451,6 +3484,10 @@ impl App for AlarmClockApp {
         self.palette = *palette;
     }
 
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
+    }
+
     fn title(&self) -> String {
         "Clock".to_string()
     }
@@ -3518,6 +3555,120 @@ impl App for AlarmClockApp {
             self.clamp_scrolls(size.0, size.1);
         }
         self.frame(width, height).into_tree()
+    }
+}
+
+#[cfg(test)]
+mod field_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+    use guitk::event::MouseEvent;
+    use guitk::probe;
+
+    /// The alarm's label and the timer's fields are the toolkit's (lane C,
+    /// c-e-a-theme-can-shape-the-controls): lit under the pointer, out when it
+    /// leaves, and marked at the user's focus width while they have the
+    /// keyboard.
+    #[test]
+    fn the_text_boxes_are_the_toolkits_fields() {
+        let mut app = AlarmClockApp::new();
+        let mut palette = app.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut app, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        App::appearance_changed(&mut app, &settings);
+        let size = AlarmClockApp::SIZE;
+        let draws = |app: &AlarmClockApp, rect: Rect, state: guitk::field::State| {
+            let seq = |s: guitk::field::State| {
+                let mut want: Vec<RenderCommand> = Vec::new();
+                guitk::field::draw(&mut want, &palette, rect, s, width);
+                want
+            };
+            let frame = app.frame(size.0, size.1);
+            let cmds = frame.commands();
+            let has = |want: &[RenderCommand]| {
+                !want.is_empty() && cmds.windows(want.len()).any(|w| w == want)
+            };
+            // Not focused means no focus mark either: an unfocused box's
+            // commands begin a focused one's.
+            has(&seq(state))
+                && (state.focused
+                    || !has(&seq(guitk::field::State {
+                        focused: true,
+                        ..state
+                    })))
+        };
+        let idle = guitk::field::State::default();
+        let lit = guitk::field::State {
+            hovered: true,
+            ..idle
+        };
+        let keyed = guitk::field::State {
+            focused: true,
+            ..idle
+        };
+        let pointer = |app: &mut AlarmClockApp, x: f32, y: f32, kind: MouseEventKind| {
+            app.handle_event(&Event::Mouse(MouseEvent { x, y, kind }), size)
+        };
+
+        probe::click(&mut app, Target::AddAlarm);
+        let label = probe::rect_of(&app, Target::EditLabel).expect("the label field");
+        assert!(
+            draws(&app, label, idle),
+            "the label field is not the toolkit's"
+        );
+        let (x, y) = label.centre();
+        assert_eq!(
+            pointer(&mut app, x, y, MouseEventKind::Move),
+            Action::Redraw
+        );
+        assert_eq!(
+            pointer(&mut app, x + 1.0, y, MouseEventKind::Move),
+            Action::None,
+            "a move that changed nothing redrew the window"
+        );
+        assert!(
+            draws(&app, label, lit),
+            "the field under the pointer is not lit"
+        );
+        assert_eq!(
+            pointer(&mut app, -1.0, -1.0, MouseEventKind::Leave),
+            Action::Redraw
+        );
+        assert!(
+            draws(&app, label, idle),
+            "the field stayed lit after the pointer left"
+        );
+        probe::click(&mut app, Target::EditLabel);
+        assert!(
+            draws(&app, label, keyed),
+            "the field with the keyboard is not marked at the user's width"
+        );
+        probe::click(&mut app, Target::EditCancel);
+
+        probe::click(&mut app, Target::Tab(ActiveTab::Timer));
+        let minutes = probe::rect_of(&app, Target::CustomField(HmsField::Minutes))
+            .expect("the timer's minutes");
+        probe::click(&mut app, Target::CustomField(HmsField::Minutes));
+        let (mx, my) = minutes.centre();
+        pointer(&mut app, mx, my, MouseEventKind::Move);
+        assert!(
+            draws(
+                &app,
+                minutes,
+                guitk::field::State {
+                    hovered: true,
+                    ..keyed
+                }
+            ),
+            "the timer's field is not the toolkit's, lit and marked"
+        );
     }
 }
 

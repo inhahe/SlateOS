@@ -2392,6 +2392,9 @@ pub struct EmailApp {
     clipboard: String,
     /// How wide carets are drawn: the user's `caret_width_scale` applied.
     caret_width: f32,
+    /// The user's focus width, which the text boxes draw their focus mark
+    /// at.
+    focus_ring_width: f32,
     /// How far the list is scrolled, in rows, and the message read, in lines.
     pub list_scroll: usize,
     pub read_scroll: usize,
@@ -2461,6 +2464,7 @@ impl EmailApp {
             picker_for: PickerFor::Open,
             clipboard: String::new(),
             caret_width: textedit::CARET_WIDTH,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             list_scroll: 0,
             read_scroll: 0,
             hover: None,
@@ -3981,26 +3985,20 @@ impl EmailApp {
         }
         // The search box: a press puts the keyboard in it.
         let search = Rect::new(128.0, 10.0, 320.0, 28.0);
-        self.palette.push_surface(
+        // The toolkit's field, in the theme's shape (lane C,
+        // c-e-a-theme-can-shape-the-controls).
+        guitk::field::draw(
             f,
-            search.x,
-            search.y,
-            search.w,
-            search.h,
-            6.0,
-            Surface::Card,
+            &self.palette,
+            search,
+            guitk::field::State {
+                hovered: self.hover == Some(Target::SearchBox),
+                focused: self.searching,
+                disabled: false,
+                invalid: false,
+            },
+            self.focus_ring_width,
         );
-        if self.searching {
-            f.push(RenderCommand::StrokeRect {
-                x: search.x,
-                y: search.y,
-                width: search.w,
-                height: search.h,
-                color: self.palette.blue,
-                line_width: 2.0,
-                corner_radii: CornerRadii::all(6.0),
-            });
-        }
         let (shown, color) = if self.search_query.is_empty() && !self.searching {
             ("Search mail (Ctrl+F)".to_string(), self.palette.subtext0)
         } else if self.searching {
@@ -4575,21 +4573,20 @@ impl EmailApp {
         focused: bool,
         field: ComposeField,
     ) {
-        self.palette
-            .push_surface(f, rect.x, rect.y, rect.w, rect.h, 4.0, Surface::Card);
-        f.push(RenderCommand::StrokeRect {
-            x: rect.x,
-            y: rect.y,
-            width: rect.w,
-            height: rect.h,
-            color: if focused {
-                self.palette.blue
-            } else {
-                self.palette.surface1
+        // The toolkit's field, in the theme's shape (lane C,
+        // c-e-a-theme-can-shape-the-controls).
+        guitk::field::draw(
+            f,
+            &self.palette,
+            rect,
+            guitk::field::State {
+                hovered: self.hover == Some(Target::Field(field)),
+                focused,
+                disabled: false,
+                invalid: false,
             },
-            line_width: if focused { 2.0 } else { 1.0 },
-            corner_radii: CornerRadii::all(4.0),
-        });
+            self.focus_ring_width,
+        );
         if input.text().is_empty() && !focused {
             let hint = match field {
                 ComposeField::From => "Your name <you@example.com>",
@@ -4646,21 +4643,20 @@ impl EmailApp {
     fn render_body(&self, f: &mut Frame<Target>, compose: &Compose) {
         let rect = self.field_rect(ComposeField::Body);
         let focused = compose.field == ComposeField::Body;
-        self.palette
-            .push_surface(f, rect.x, rect.y, rect.w, rect.h, 4.0, Surface::Card);
-        f.push(RenderCommand::StrokeRect {
-            x: rect.x,
-            y: rect.y,
-            width: rect.w,
-            height: rect.h,
-            color: if focused {
-                self.palette.blue
-            } else {
-                self.palette.surface1
+        // The toolkit's field, in the theme's shape (lane C,
+        // c-e-a-theme-can-shape-the-controls).
+        guitk::field::draw(
+            f,
+            &self.palette,
+            rect,
+            guitk::field::State {
+                hovered: self.hover == Some(Target::Field(ComposeField::Body)),
+                focused,
+                disabled: false,
+                invalid: false,
             },
-            line_width: if focused { 2.0 } else { 1.0 },
-            corner_radii: CornerRadii::all(4.0),
-        });
+            self.focus_ring_width,
+        );
         f.hit(Target::Field(ComposeField::Body), rect);
         let area = Rect::new(
             rect.x + 8.0,
@@ -5069,10 +5065,11 @@ fn mime_for(name: &str) -> &'static str {
 // ─── Main ────────────────────────────────────────────────────────────
 
 impl App for EmailApp {
-    /// The carets' width, the one appearance setting this window reads that
-    /// is not a colour.
+    /// The carets' and the focus marks' widths, the appearance settings this
+    /// window reads that are not colours.
     fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
         self.caret_width = settings.caret_width();
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn theme_changed(&mut self, palette: &Palette) {
@@ -6924,6 +6921,110 @@ mod tests {
     // -- The window over mail kept in files ------------------------------------
 
     use guitk::probe::{self, Probe};
+
+    /// The search box and the compose form's fields are the toolkit's (lane
+    /// C, c-e-a-theme-can-shape-the-controls): lit under the pointer, out when
+    /// it leaves, and marked at the user's focus width while they have the
+    /// keyboard.
+    #[test]
+    fn the_text_boxes_are_the_toolkits_fields() {
+        let mut app = seeded();
+        let mut palette = app.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut app, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        App::appearance_changed(&mut app, &settings);
+        let draws = |app: &EmailApp, rect: Rect, state: guitk::field::State| {
+            let seq = |s: guitk::field::State| {
+                let mut want: Vec<RenderCommand> = Vec::new();
+                guitk::field::draw(&mut want, &palette, rect, s, width);
+                want
+            };
+            let frame = app.frame();
+            let cmds = frame.commands();
+            let has = |want: &[RenderCommand]| {
+                !want.is_empty() && cmds.windows(want.len()).any(|w| w == want)
+            };
+            // Not focused means no focus mark either: an unfocused box's
+            // commands begin a focused one's.
+            has(&seq(state))
+                && (state.focused
+                    || !has(&seq(guitk::field::State {
+                        focused: true,
+                        ..state
+                    })))
+        };
+        let idle = guitk::field::State::default();
+        let search = probe::rect_of(&app, Target::SearchBox).expect("the search box");
+        assert!(
+            draws(&app, search, idle),
+            "the search box is not the toolkit's"
+        );
+        let (x, y) = search.centre();
+        let at = |kind| Event::Mouse(MouseEvent { x, y, kind });
+        app.handle_event(&at(MouseEventKind::Move));
+        let lit = guitk::field::State {
+            hovered: true,
+            ..idle
+        };
+        assert!(
+            draws(&app, search, lit),
+            "the box under the pointer is not lit"
+        );
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x: -1.0,
+            y: -1.0,
+            kind: MouseEventKind::Leave,
+        }));
+        assert!(
+            draws(&app, search, idle),
+            "the box stayed lit after the pointer left"
+        );
+        probe::click(&mut app, Target::SearchBox);
+        let keyed = guitk::field::State {
+            focused: true,
+            ..idle
+        };
+        assert!(
+            draws(&app, search, keyed),
+            "the search box with the keyboard is not marked at the user's width"
+        );
+        app.handle_event(&press(Key::Escape));
+
+        probe::click(&mut app, Target::Compose);
+        let subject =
+            probe::rect_of(&app, Target::Field(ComposeField::Subject)).expect("the subject");
+        let body = probe::rect_of(&app, Target::Field(ComposeField::Body)).expect("the body");
+        probe::click(&mut app, Target::Field(ComposeField::Subject));
+        let (bx, by) = body.centre();
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x: bx,
+            y: by,
+            kind: MouseEventKind::Move,
+        }));
+        assert!(
+            draws(&app, subject, keyed),
+            "the subject with the keyboard is not marked"
+        );
+        assert!(
+            draws(&app, body, lit),
+            "the body under the pointer is not lit"
+        );
+        // And a one-line field under it, not only the body.
+        let to = probe::rect_of(&app, Target::Field(ComposeField::To)).expect("the To field");
+        let (tx, ty) = to.centre();
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x: tx,
+            y: ty,
+            kind: MouseEventKind::Move,
+        }));
+        assert!(draws(&app, to, lit), "a field under the pointer is not lit");
+    }
 
     impl Probe for EmailApp {
         type Target = Target;

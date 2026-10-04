@@ -54,6 +54,7 @@ use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, Mou
 use guitk::frame::{Frame, Rect};
 use guitk::probe::Probe;
 use guitk::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree, TextOverflow};
+use guitk::scrollbar;
 use guitk::text;
 use guitk::wheel;
 use oswindow::app::{App, Response};
@@ -76,7 +77,11 @@ const WINDOW_WIDTH: f32 = 80.0 * 8.4 + BAR_W;
 /// Twenty-four rows of roughly the default cell height.
 const WINDOW_HEIGHT: f32 = 24.0 * 18.0;
 
-/// How wide the scrollback bar down the right-hand edge is.
+/// How wide the scrollback bar's column down the right-hand edge is: the
+/// toolkit's scrollbar column, the same in every theme. A theme's widget
+/// style chooses what is drawn inside it -- the full column or a thin bar at
+/// its edge -- and never its width, so the grid beside it does not move
+/// when the theme does.
 ///
 /// Reserved whether or not there is anything to show in it. A bar that appears
 /// only when there is scrollback would take its width out of the grid the
@@ -84,7 +89,16 @@ const WINDOW_HEIGHT: f32 = 24.0 * 18.0;
 /// you scrolled it** is a terminal that redraws the program you are running
 /// under it: `vim` would repaint at a different width every time output crossed
 /// the top of the window.
-const BAR_W: f32 = 10.0;
+const BAR_W: f32 = scrollbar::WIDTH;
+
+/// The shortest the scrollback bar's thumb gets, in pixels.
+///
+/// A thumb sized in proportion to a ten-thousand-line scrollback in a
+/// twenty-four-row window is a quarter of a pixel: a bar with nothing in
+/// it. Smaller than the toolkit's `scrollbar::MIN_THUMB`, which is sized
+/// for a thumb to be taken hold of, because this one never is -- a press
+/// on the bar pages -- and only has to be seen.
+const THUMB_FLOOR: f32 = 4.0;
 
 /// How long the visual bell stays up, in milliseconds.
 const BELL_MS: u64 = 100;
@@ -896,6 +910,13 @@ pub struct TerminalState {
     /// three lines for any non-zero value, so a trackpad's stream of
     /// 0.2-notch events flew fifteen times too fast through the scrollback.
     wheel: wheel::Accumulator,
+    /// The user's palette, for what the toolkit draws for the terminal --
+    /// the scrollback bar, in the theme's widget style. The grid's own
+    /// colours are `config.colors`, the palette's terminal table.
+    palette: Palette,
+    /// Whether the pointer is over the bar's column: it lights under it,
+    /// and a theme's overlay bar widens from a line only then.
+    bar_hovered: bool,
 
     /// Output buffer — bytes to send back to the child process (e.g., cursor
     /// position reports, keyboard input translated to escape sequences).
@@ -990,6 +1011,9 @@ impl TerminalState {
             selection: None,
             scroll_offset: 0,
             wheel: wheel::Accumulator::default(),
+            // Dark, as `ColorScheme::default` is, until the theme is given.
+            palette: Palette::for_mode(false),
+            bar_hovered: false,
             output_buffer: Vec::new(),
             origin_mode: false,
             auto_wrap: true,
@@ -1502,6 +1526,14 @@ terminal, so what you type goes nowhere.\r\n"
     /// Whether this terminal has the keyboard.
     pub fn is_focused(&self) -> bool {
         self.focused
+    }
+
+    /// Whether the pointer is over the scrollback bar's column, as the last
+    /// pointer event left it: the bar is drawn lit, and a theme's overlay
+    /// bar widened from a line. For a host that hands this terminal the
+    /// pointer (tmux) and redraws only when what is lit changes.
+    pub fn is_bar_hovered(&self) -> bool {
+        self.bar_hovered
     }
 
     /// Send pasted text to the child, as a paste.
@@ -3259,22 +3291,19 @@ terminal, so what you type goes nowhere.\r\n"
         if bar.is_empty() {
             return;
         }
-        let scheme = &self.config.colors;
-        fill(f, bar, scheme.ansi[0]);
+        // The whole column takes a press, whatever is drawn in it: it is
+        // reserved (`BAR_W`), and a press there pages rather than selecting.
         f.hit(Target::ScrollTrack, bar);
 
         let total = self.buffer_len();
         let shown = l.rows.min(self.rows());
         if total == 0 || shown == 0 || total <= shown {
-            // Nothing has scrolled off yet: the whole buffer is on screen, so a
-            // thumb would fill the track and say nothing.
+            // Nothing has scrolled off yet: the whole buffer is on screen, so
+            // no bar is drawn. A thumb filling its track says nothing, and a
+            // bare track beside a terminal with no history is a stripe that
+            // reads as broken (`guitk::scrollbar::needed`).
             return;
         }
-        let span = ratio(shown, total);
-        // A thumb thinner than a couple of pixels cannot be seen or aimed at,
-        // so a very long scrollback gets a floor rather than a sliver.
-        let thumb_h = (bar.h * span).max(4.0).min(bar.h);
-        let travel = (bar.h - thumb_h).max(0.0);
         let top_row = self.viewport_top();
         let last_top = total.saturating_sub(shown);
         let progress = if last_top == 0 {
@@ -3282,8 +3311,20 @@ terminal, so what you type goes nowhere.\r\n"
         } else {
             ratio(top_row.min(last_top), last_top)
         };
-        let thumb = Rect::new(bar.x, bar.y + travel * progress, bar.w, thumb_h);
-        fill(f, thumb, scheme.foreground);
+        // The toolkit's arithmetic, which every scrollbar in the tree shares:
+        // the size says how much of the buffer is on screen, the position
+        // where, and a long scrollback gets a floor rather than a sliver.
+        let thumb = scrollbar::thumb_of(bar, ratio(shown, total), progress, THUMB_FLOOR);
+        // Drawn by the toolkit in the theme's widget style (lane C,
+        // c-e-a-theme-can-shape-the-controls) -- the full column or a thin
+        // bar at its edge, a track or none -- while the hit boxes stay the
+        // column and the thumb's whole span across it. A press on the bar
+        // pages, so the thumb is never held.
+        let state = scrollbar::BarState {
+            hovered: self.bar_hovered,
+            dragging: false,
+        };
+        scrollbar::draw(f, &self.palette, bar, thumb, state);
         f.hit(Target::ScrollThumb, thumb);
     }
 
@@ -3438,6 +3479,7 @@ terminal, so what you type goes nowhere.\r\n"
                 self.selection_start(event.x, event.y);
             }
             MouseEventKind::Move => {
+                self.bar_hovered = l.bar.contains(event.x, event.y);
                 if let Some(ref sel) = self.selection
                     && sel.active
                 {
@@ -3447,6 +3489,7 @@ terminal, so what you type goes nowhere.\r\n"
             MouseEventKind::Release(MouseButton::Left) => {
                 self.selection_end();
             }
+            MouseEventKind::Leave => self.bar_hovered = false,
             MouseEventKind::Scroll { dy, .. } => {
                 // `scroll_offset` runs *backwards* here -- it counts lines up
                 // into the scrollback, where every other list in the tree
@@ -3708,6 +3751,7 @@ impl App for TerminalState {
     /// Adopt the user's colours (§822), the sixteen too (§1410) -- see
     /// `ColorScheme::from_palette`.
     fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
         self.config.colors = ColorScheme::from_palette(palette);
     }
 
@@ -3875,7 +3919,9 @@ mod tests {
         TerminalState, cells_that_fit, ratio, scale, u32_f32,
     };
     use guitk::render::{FontFamily, FontWeightHint};
+    use guitk::scrollbar;
     use guitk::text;
+    use guitk::widget_style::{ScrollbarStyle, ScrollbarVisibility, ScrollbarWidth};
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -4730,46 +4776,99 @@ mod tests {
         }
     }
 
+    /// Every form a theme's widget style can give the scrollback bar
+    /// (`guitk::scrollbar::draw`), with the pointer away from it and over it:
+    /// the full column or a thin bar, always there or an overlaid line.
+    fn bar_forms() -> Vec<(String, ScrollbarStyle, bool)> {
+        let mut forms = Vec::new();
+        for width in [ScrollbarWidth::Normal, ScrollbarWidth::Thin] {
+            for visibility in [ScrollbarVisibility::Always, ScrollbarVisibility::Overlay] {
+                for hovered in [false, true] {
+                    let name = format!("{width:?}, {visibility:?}, hovered {hovered}");
+                    forms.push((name, ScrollbarStyle { width, visibility }, hovered));
+                }
+            }
+        }
+        forms
+    }
+
     #[test]
-    fn every_hit_box_has_ink_painted_at_exactly_that_rectangle() {
+    fn every_hit_box_stands_where_its_part_is_drawn() {
         // A hit box is meant to be recorded by the pass that paints the thing
-        // it stands for, at the rectangle it painted. Nothing in the type
-        // system says so -- `f.hit` takes any rectangle at all -- and a thumb
-        // hit-boxed anywhere but where the thumb was drawn is a scrollbar you
-        // cannot grab.
+        // it stands for, where it painted it. Nothing in the type system says
+        // so -- `f.hit` takes any rectangle at all -- and a thumb hit-boxed
+        // anywhere but where the thumb was drawn is a scrollbar whose clicks
+        // land somewhere else.
+        //
+        // The bar is the toolkit's, which draws it *inside* its column, as
+        // wide as the theme's style says and against the column's outer edge,
+        // while the hit boxes stay the whole column and the thumb's whole span
+        // across it: a thin bar is taken hold of over more than it looks and
+        // never less. So in every form a theme can give it, the track's box is
+        // the column whatever is drawn there -- the column is reserved, and a
+        // press in it pages rather than selecting -- and the thumb's box
+        // spans the column and has the thumb's ink in it, at its exact height
+        // and against its right edge.
         //
         // The grid is the exception and is checked separately below: it is a
         // band of many cells rather than one filled rectangle, and most of
         // those cells are the default background and are not painted at all.
-        for (name, term) in states() {
-            for (w, h) in sizes() {
-                let frame = term.frame(w, h);
-                let fills: Vec<Rect> = frame
-                    .commands()
-                    .iter()
-                    .filter_map(|c| match c {
-                        RenderCommand::FillRect {
-                            x,
-                            y,
-                            width,
-                            height,
-                            ..
-                        } => Some(Rect::new(*x, *y, *width, *height)),
-                        _ => None,
-                    })
-                    .collect();
-                for (target, rect) in frame.hits() {
-                    if matches!(target, Target::Grid) {
-                        continue;
+        let near = |a: f32, b: f32| (a - b).abs() < 0.01;
+        for (form, style, hovered) in bar_forms() {
+            for (name, mut term) in states() {
+                term.palette.widget_style.scrollbar = style;
+                term.bar_hovered = hovered;
+                for (w, h) in sizes() {
+                    let frame = term.frame(w, h);
+                    let fills: Vec<Rect> = frame
+                        .commands()
+                        .iter()
+                        .filter_map(|c| match c {
+                            RenderCommand::FillRect {
+                                x,
+                                y,
+                                width,
+                                height,
+                                ..
+                            } => Some(Rect::new(*x, *y, *width, *height)),
+                            _ => None,
+                        })
+                        .collect();
+                    let l = Layout::solve(w, h, term.config.cell_width, term.config.cell_height);
+                    let column = l.bar.intersect(l.window);
+                    for (target, rect) in frame.hits() {
+                        match target {
+                            Target::Grid => {}
+                            Target::ScrollTrack => {
+                                let col = column.expect("a track with no column");
+                                assert!(
+                                    near(rect.x, col.x)
+                                        && near(rect.y, col.y)
+                                        && near(rect.w, col.w)
+                                        && near(rect.h, col.h),
+                                    "{name}, {form}: the track is hit-boxed at {rect:?} in a \
+                                     {w}x{h} window, not over its column at {col:?}"
+                                );
+                            }
+                            Target::ScrollThumb => {
+                                let col = column.expect("a thumb with no column");
+                                assert!(
+                                    near(rect.x, col.x) && near(rect.w, col.w),
+                                    "{name}, {form}: the thumb is hit-boxed at {rect:?} in a \
+                                     {w}x{h} window, not across its column at {col:?}"
+                                );
+                                assert!(
+                                    fills.iter().any(|f| f.w > 0.0
+                                        && near(f.y, rect.y)
+                                        && near(f.h, rect.h)
+                                        && near(f.right(), rect.right())
+                                        && f.x >= rect.x - 0.01),
+                                    "{name}, {form}: the thumb is hit-boxed at {rect:?} in a \
+                                     {w}x{h} window, where no thumb was drawn"
+                                );
+                            }
+                        }
                     }
-                    assert!(
-                        fills.iter().any(|f| (f.x - rect.x).abs() < 0.01
-                            && (f.y - rect.y).abs() < 0.01
-                            && (f.w - rect.w).abs() < 0.01
-                            && (f.h - rect.h).abs() < 0.01),
-                        "{name}: {target:?} is hit-boxed at {rect:?} in a {w}x{h} window, \
-                         where nothing was painted"
-                    );
                 }
             }
         }
@@ -5041,9 +5140,100 @@ mod tests {
             rect_of_sized(&term, Target::ScrollThumb, AIM).is_none(),
             "a terminal with nothing scrolled off drew a thumb"
         );
+        let column = rect_of_sized(&term, Target::ScrollTrack, AIM)
+            .expect("and the track takes a press regardless, because the bar is reserved");
+        // ...but nothing is drawn in it: a bare track beside a terminal with
+        // no history is a stripe that reads as broken.
+        let painted = term.frame(AIM.0, AIM.1).commands().iter().any(|c| {
+            matches!(c, RenderCommand::FillRect { x, y, width, height, .. }
+                if *width > 0.0 && *height > 0.0
+                    && inside(column, Rect::new(*x, *y, *width, *height)))
+        });
+        assert!(!painted, "a terminal with nothing scrolled off drew a bar");
+    }
+
+    /// The bar is the toolkit's, drawn in the theme's widget style (lane C,
+    /// c-e-a-theme-can-shape-the-controls): under an overlay style the thumb
+    /// is a line at the column's edge until the pointer comes to the column,
+    /// it is lit while the pointer is there, and the column takes a press
+    /// either way.
+    #[test]
+    fn the_bar_follows_the_themes_style_and_lights_under_the_pointer() {
+        let mut term = fed_terminal(400);
+        term.resize_to_window(AIM.0, AIM.1);
+        // A light theme, to tell the theme's colours from the terminal's
+        // dark default.
+        let mut palette = Palette::for_mode(true);
+        palette.widget_style.scrollbar.visibility = ScrollbarVisibility::Overlay;
+        App::theme_changed(&mut term, &palette);
+        let track = rect_of_sized(&term, Target::ScrollTrack, AIM).expect("a track");
+        let thumb = rect_of_sized(&term, Target::ScrollThumb, AIM).expect("a thumb");
+        let drawn = |term: &TerminalState| {
+            term.frame(AIM.0, AIM.1)
+                .commands()
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::FillRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                        color,
+                        ..
+                    } if (*y - thumb.y).abs() < 0.01
+                        && (*height - thumb.h).abs() < 0.01
+                        && (x + width - track.right()).abs() < 0.01 =>
+                    {
+                        Some((*width, *color))
+                    }
+                    _ => None,
+                })
+                .expect("the thumb is drawn at the column's edge")
+        };
+        let pointer =
+            |x: f32, y: f32, kind: MouseEventKind| Event::Mouse(MouseEvent { x, y, kind });
+        let idle = drawn(&term);
         assert!(
-            rect_of_sized(&term, Target::ScrollTrack, AIM).is_some(),
-            "and the track is there regardless, because the bar is reserved"
+            (idle.0 - scrollbar::IDLE_WIDTH).abs() < 0.01,
+            "an overlaid bar at rest is a line, not {} wide",
+            idle.0
+        );
+        assert_eq!(idle.1, palette.surface2, "in the theme's colour");
+
+        term.handle_event(&pointer(
+            track.x + 1.0,
+            track.y + track.h / 2.0,
+            MouseEventKind::Move,
+        ));
+        let lit = drawn(&term);
+        assert!(
+            lit.0 > scrollbar::IDLE_WIDTH,
+            "the pointer at the bar did not widen it"
+        );
+        assert_ne!(lit.1, idle.1, "the pointer at the bar did not light it");
+
+        term.handle_event(&pointer(-1.0, -1.0, MouseEventKind::Leave));
+        assert_eq!(
+            drawn(&term),
+            idle,
+            "the pointer left the window and the bar stayed lit"
+        );
+
+        term.handle_event(&pointer(track.x + 1.0, track.y + 4.0, MouseEventKind::Move));
+        term.handle_event(&pointer(10.0, 10.0, MouseEventKind::Move));
+        assert_eq!(
+            drawn(&term),
+            idle,
+            "the pointer went to the grid and the bar stayed lit"
+        );
+
+        // A press on the column, clear of the thin line, still pages: the
+        // thumb is at the live end, so a press at the top goes back a page.
+        let before = term.viewport_top();
+        term.click_at(track.x + 1.0, track.y + 2.0, MouseButton::Left, AIM);
+        assert!(
+            term.viewport_top() < before,
+            "a press on the column did not page"
         );
     }
 
@@ -6402,7 +6592,11 @@ mod tests {
                 text: text.to_owned(),
             })
         };
-        let cases: [(&str, Key, &str, Modifiers, &[u8]); 14] = [
+        let alt_shift = Modifiers {
+            shift: true,
+            ..Modifiers::alt()
+        };
+        let cases: [(&str, Key, &str, Modifiers, &[u8]); 17] = [
             ("a letter", Key::A, "a", Modifiers::NONE, b"a"),
             ("Shift", Key::A, "A", Modifiers::shift(), b"A"),
             ("AltGr+Q", Key::Q, "@", altgr, b"@"),
@@ -6416,6 +6610,13 @@ mod tests {
                 b"\x1b\x03",
             ),
             ("Alt+B", Key::B, "b", Modifiers::alt(), b"\x1bb"),
+            // readline's forward-word and kill-word, and a capital after ESC.
+            ("Alt+F", Key::F, "f", Modifiers::alt(), b"\x1bf"),
+            ("Alt+Shift+F", Key::F, "F", alt_shift, b"\x1bF"),
+            // Emacs' forward-sexp: since design-decisions §1338 the
+            // compositor sends no text for a Ctrl+Alt chord AltGr selected
+            // nothing for, so the control character comes from the key.
+            ("Ctrl+Alt+F", Key::F, "", altgr, b"\x1b\x06"),
             ("Ctrl+C", Key::C, "c", Modifiers::ctrl(), b"\x03"),
             ("Windows+X", Key::X, "x", Modifiers::super_key(), b""),
             ("Windows+Up", Key::Up, "", Modifiers::super_key(), b""),

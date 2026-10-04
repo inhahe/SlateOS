@@ -361,6 +361,31 @@ MAIN = [
         '                if key.modifiers.ctrl {\n                    return EventResult::Ignored;\n                }\n                let typed: String = key.typed().collect();',
         ['a_chord_is_neither_a_torrent_key_nor_typing'],
     ),
+    # -- the text boxes, the toolkit's fields (c-e-a-theme-can-shape-the-controls)
+    (
+        "the search box is drawn the same wherever the pointer is",
+        '                hovered: self.hover == Some(Target::Search),',
+        '                hovered: false,',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        "the search box is not marked while it has the keyboard",
+        '                focused: self.search_active,',
+        '                focused: false,',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        "a link this client cannot read is not drawn red",
+        '                invalid: self.magnet_error.is_some(),',
+        '                invalid: false,',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        "the text boxes take the toolkit's focus width, not the user's",
+        '        self.focus_ring_width = settings.focus_ring_width();',
+        '        let _ = settings;',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
 ]
 
 TRACKER = [

@@ -269,6 +269,25 @@ MUTATIONS = [
         "    let ctrl = key.modifiers.ctrl;\n    match key.key {",
         ["an_altgr_letter_is_typed_into_a_box"],
     ),
+    # -- the text boxes, the toolkit's fields (c-e-a-theme-can-shape-the-controls)
+    (
+        "a text box is drawn the same wherever the pointer is",
+        "                hovered: self.hover == Some(target),",
+        "                hovered: false,",
+        ["the_text_boxes_are_the_toolkits_fields"],
+    ),
+    (
+        "a value the rule cannot take is not drawn red",
+        "                invalid,\n",
+        "                invalid: false,\n",
+        ["the_text_boxes_are_the_toolkits_fields"],
+    ),
+    (
+        "the text boxes take the toolkit's focus width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();",
+        "        let _ = settings;",
+        ["the_text_boxes_are_the_toolkits_fields"],
+    ),
 ]
 
 if __name__ == "__main__":

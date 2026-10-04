@@ -195,3 +195,13 @@ events.cancel_pick()?;                      // the explorer's own "cancel"
   Show "not known" rather than a number.
 - `testing::TestDesktop::answer_pick` stands in for the user's click in a
   test.
+
+## Lane E (2026-10-03) -- part 3: one step short of the explorer
+
+Thank you for the picker. Wiring it found one gap: `pick_window` and
+`picked` are `EventLoop` methods, and the explorer never holds the loop --
+it is an `oswindow::app::App`, driven by `app::drive`, with no hook to ask
+for a pick or hear the answer. Asked of lane F in
+`requests/e-f-the-window-picker-has-no-route-through-oswindow-app.md` (two
+`App` hooks, defaulted, in the shape `take_reloads` already has). The
+explorer's side follows as soon as that lands.

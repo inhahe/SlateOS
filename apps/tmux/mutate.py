@@ -397,6 +397,43 @@ MUTATIONS = [
         '',
         ['a_chord_is_neither_a_multiplexer_key_nor_typing'],
     ),
+    # -- the pointer over a pane's scrollback bar --
+    (
+        "the pointer is handed to a pane only during a drag",
+        "                        MouseEventKind::Move => self.hover(event),",
+        "                        MouseEventKind::Move => EventResult::Ignored,",
+        ["a_panes_bar_lights_under_the_pointer_and_goes_out_when_it_leaves"],
+    ),
+    (
+        "a pane the pointer has left is never told",
+        "        if let Some(old) = self.hovered.take()",
+        "        if let Some(old) = None::<PaneId>",
+        [
+            "a_panes_bar_lights_under_the_pointer_and_goes_out_when_it_leaves",
+            "a_drag_across_the_bar_does_not_leave_it_lit",
+        ],
+    ),
+    (
+        "the pointer leaving the window is not passed on",
+        "                self.set_hovered(None);\n",
+        "",
+        [
+            "a_panes_bar_lights_under_the_pointer_and_goes_out_when_it_leaves",
+            "a_drag_across_the_bar_does_not_leave_it_lit",
+        ],
+    ),
+    (
+        "a drag's pane is not recorded as the one under the pointer",
+        "                self.set_hovered(Some(id));\n",
+        "",
+        ["a_drag_across_the_bar_does_not_leave_it_lit"],
+    ),
+    (
+        "every move over a pane redraws the window",
+        "            self.forward_mouse(id, event);\n        }\n        if self.lit_bars() == before {",
+        "            self.forward_mouse(id, event);\n        }\n        if self.lit_bars() == before && false {",
+        ["a_panes_bar_lights_under_the_pointer_and_goes_out_when_it_leaves"],
+    ),
 ]
 
 if __name__ == "__main__":

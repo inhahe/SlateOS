@@ -2085,6 +2085,9 @@ pub struct SoundRecorderApp {
     /// Where the press that began the drag landed.
     press_x: f32,
     hover: Option<Target>,
+    /// The user's focus width, which the marker-name field draws its
+    /// focus mark at (`appearance_changed`).
+    focus_ring_width: f32,
     last_hits: Vec<(Target, Rect)>,
     wheel: wheel::Accumulator,
     pub window_width: f32,
@@ -2139,6 +2142,7 @@ impl SoundRecorderApp {
             drag: None,
             press_x: 0.0,
             hover: None,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             last_hits: Vec::new(),
             wheel: wheel::Accumulator::default(),
             window_width: 980.0,
@@ -3558,14 +3562,11 @@ impl SoundRecorderApp {
                 self.palette.subtext1,
                 80.0,
             );
-            let name = Rect::new(
-                row.x + 104.0,
-                y + 1.0,
-                (row.w - 110.0).max(0.0),
-                MARKER_ROW_H - 4.0,
-            );
+            let name = marker_name_rect(row);
             match (&self.rename, chosen) {
-                (Some(input), true) => self.render_field(f, input, name),
+                (Some(input), true) => {
+                    self.render_field(f, input, name, self.hover == Some(Target::MarkerRow(i)));
+                }
                 _ => self.text(
                     f,
                     name.x,
@@ -3580,19 +3581,22 @@ impl SoundRecorderApp {
         }
     }
 
-    /// The marker name being written.
-    fn render_field(&self, f: &mut Frame<Target>, input: &TextInput, rect: Rect) {
-        self.palette
-            .push_surface(f, rect.x, rect.y, rect.w, rect.h, 4.0, Surface::Card);
-        f.push(RenderCommand::StrokeRect {
-            x: rect.x,
-            y: rect.y,
-            width: rect.w,
-            height: rect.h,
-            color: self.palette.blue,
-            line_width: 2.0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+    /// The marker name being written: the toolkit's field, in the theme's
+    /// shape (lane C, c-e-a-theme-can-shape-the-controls), with the
+    /// keyboard while it is up, lit while the pointer is on its row.
+    fn render_field(&self, f: &mut Frame<Target>, input: &TextInput, rect: Rect, hovered: bool) {
+        guitk::field::draw(
+            f,
+            &self.palette,
+            rect,
+            guitk::field::State {
+                hovered,
+                focused: true,
+                disabled: false,
+                invalid: false,
+            },
+            self.focus_ring_width,
+        );
         let mut tree = RenderTree::new();
         textedit::draw(
             &mut tree,
@@ -3920,9 +3924,24 @@ impl Default for SoundRecorderApp {
 // Entry point
 // ============================================================================
 
+/// Where a marker's name is drawn in its row -- and, while it is being
+/// written, its field.
+fn marker_name_rect(row: Rect) -> Rect {
+    Rect::new(
+        row.x + 104.0,
+        row.y + 1.0,
+        (row.w - 110.0).max(0.0),
+        MARKER_ROW_H - 4.0,
+    )
+}
+
 impl App for SoundRecorderApp {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -4880,6 +4899,69 @@ mod tests {
     // -- The window, driven as a user drives it --------------------------------
 
     use guitk::probe::{self, Probe};
+
+    /// The marker-name field is the toolkit's (lane C,
+    /// c-e-a-theme-can-shape-the-controls): marked at the user's focus width
+    /// while a name is written, lit while the pointer is on its row.
+    #[test]
+    fn the_marker_name_field_is_the_toolkits() {
+        let (_dir, mut app) = fixture("name-field");
+        let mut palette = app.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut app, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        App::appearance_changed(&mut app, &settings);
+        app.handle_event(&key(Key::End));
+        app.handle_event(&key(Key::M));
+        app.handle_event(&key(Key::F2));
+        assert!(app.rename.is_some());
+        // The marker just put down, which is the one being named.
+        let chosen = app
+            .open
+            .as_ref()
+            .and_then(|o| o.chosen_marker)
+            .expect("a chosen marker");
+        let row = probe::rect_of(&app, Target::MarkerRow(chosen)).expect("the marker's row");
+        let field = marker_name_rect(row);
+        let draws = |app: &SoundRecorderApp, state: guitk::field::State| {
+            let mut want: Vec<RenderCommand> = Vec::new();
+            guitk::field::draw(&mut want, &palette, field, state, width);
+            let frame = app.frame();
+            frame
+                .commands()
+                .windows(want.len())
+                .any(|w| w == want.as_slice())
+        };
+        let keyed = guitk::field::State {
+            focused: true,
+            ..guitk::field::State::default()
+        };
+        assert!(
+            draws(&app, keyed),
+            "the name being written is not marked at the user's width"
+        );
+        let (x, y) = row.centre();
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Move,
+        }));
+        assert!(
+            draws(
+                &app,
+                guitk::field::State {
+                    hovered: true,
+                    ..keyed
+                }
+            ),
+            "the field is not lit with its row under the pointer"
+        );
+    }
 
     impl Probe for SoundRecorderApp {
         type Target = Target;

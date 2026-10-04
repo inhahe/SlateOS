@@ -969,6 +969,11 @@ struct Multiplexer {
     /// The pane a press in its grid started a selection in, which the drag
     /// and the release belong to wherever the pointer goes.
     drag: Option<PaneId>,
+    /// The pane the pointer was last handed to, which is told when the
+    /// pointer leaves it: a pane hears of the pointer only while it is over
+    /// that pane, so it has no other way to learn that its bar is no longer
+    /// under it.
+    hovered: Option<PaneId>,
     /// The user's colours, replaced whenever the theme changes.
     palette: Palette,
     /// How shells are started. `None` in the tests of everything else, where a
@@ -1020,6 +1025,7 @@ impl Multiplexer {
             window_height: WINDOW_HEIGHT,
             focused: true,
             drag: None,
+            hovered: None,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             spawner,
             quit: false,
@@ -1068,6 +1074,9 @@ impl Multiplexer {
         }
         if self.drag == Some(id) {
             self.drag = None;
+        }
+        if self.hovered == Some(id) {
+            self.hovered = None;
         }
     }
 
@@ -2273,17 +2282,88 @@ impl Multiplexer {
                 // A selection's drag belongs to the pane it started in,
                 // wherever the pointer has wandered since.
                 let Some(id) = self.drag else {
-                    return EventResult::Ignored;
+                    return match event.kind {
+                        MouseEventKind::Move => self.hover(event),
+                        _ => EventResult::Ignored,
+                    };
                 };
                 if matches!(event.kind, MouseEventKind::Release(_)) {
                     self.drag = None;
                 }
+                self.set_hovered(Some(id));
                 self.forward_mouse(id, event);
                 EventResult::Consumed
+            }
+            MouseEventKind::Leave => {
+                let before = self.lit_bars();
+                self.set_hovered(None);
+                if self.lit_bars() == before {
+                    EventResult::Ignored
+                } else {
+                    EventResult::Consumed
+                }
             }
             MouseEventKind::Scroll { dy, .. } => self.wheel(event, *dy),
             _ => EventResult::Ignored,
         }
+    }
+
+    /// The pointer moved with no drag under way.
+    ///
+    /// The pane it is over is handed it, so that pane's scrollback bar lights
+    /// under it -- and widens, in a theme whose bars are a line until a hand
+    /// goes to them -- and a pane it has left is told it went. Found by the
+    /// same hit test a press is, so a pane under a chooser or the help card
+    /// is not lit through it. Only a change in what is lit is worth a
+    /// redraw: the pointer crosses panes far more often than bars.
+    fn hover(&mut self, event: &MouseEvent) -> EventResult {
+        self.relayout();
+        let size = (self.window_width, self.window_height);
+        let under = match self.frame_at(size).hit_test(event.x, event.y) {
+            Some(Target::Pane(id, _)) => Some(id),
+            _ => None,
+        };
+        let before = self.lit_bars();
+        self.set_hovered(under);
+        if let Some(id) = under {
+            self.forward_mouse(id, event);
+        }
+        if self.lit_bars() == before {
+            EventResult::Ignored
+        } else {
+            EventResult::Consumed
+        }
+    }
+
+    /// The pointer is now handed to `pane`, or to no pane. One it was handed
+    /// to before is told it has gone -- wherever that pane is now, on screen
+    /// or not, since a window switch can take a pane away from under a
+    /// pointer that never moved.
+    fn set_hovered(&mut self, pane: Option<PaneId>) {
+        if self.hovered == pane {
+            return;
+        }
+        if let Some(old) = self.hovered.take()
+            && let Some(left) = self.find_pane_mut(old)
+        {
+            // Where a pointer that has left is does not matter to it.
+            left.term.handle_event(&Event::Mouse(MouseEvent {
+                x: -1.0,
+                y: -1.0,
+                kind: MouseEventKind::Leave,
+            }));
+        }
+        self.hovered = pane;
+    }
+
+    /// The panes whose scrollback bar is lit under the pointer: at most one,
+    /// unless something has gone wrong, which the comparison would show.
+    fn lit_bars(&self) -> Vec<PaneId> {
+        self.panes
+            .iter()
+            .filter(|p| p.term.is_bar_hovered())
+            .map(|p| p.id)
+            .collect()
     }
 
     /// A left press on `target`.
@@ -3888,6 +3968,88 @@ mod tests {
         }));
         prefixed(&mut mux, 'y');
         assert_eq!(mux.clipboard, "alpha bravo");
+    }
+
+    /// A pane's scrollback bar lights under the pointer and goes out when the
+    /// pointer leaves -- for another pane, for the pane's own grid, or for
+    /// outside the window -- and the window is redrawn only when what is lit
+    /// changes.
+    #[test]
+    fn a_panes_bar_lights_under_the_pointer_and_goes_out_when_it_leaves() {
+        let mut mux = Multiplexer::new();
+        let left = mux.active_pane_id().unwrap();
+        prefixed(&mut mux, '%');
+        let right = mux.active_pane_id().unwrap();
+        assert_ne!(left, right, "the split made a second pane");
+        let pointer =
+            |x: f32, y: f32, kind: MouseEventKind| Event::Mouse(MouseEvent { x, y, kind });
+        let lit = |mux: &Multiplexer, id: PaneId| mux.find_pane(id).unwrap().term.is_bar_hovered();
+        let bar = rect_of(&mux, Target::Pane(left, TermTarget::ScrollTrack)).expect("a bar");
+        let at_bar = pointer(bar.x + 2.0, bar.y + bar.h / 2.0, MouseEventKind::Move);
+
+        assert_eq!(mux.handle_event(&at_bar), EventResult::Consumed);
+        assert!(lit(&mux, left), "the bar under the pointer is not lit");
+        assert!(!lit(&mux, right));
+        assert_eq!(
+            mux.handle_event(&at_bar),
+            EventResult::Ignored,
+            "a move along the bar redrew the window"
+        );
+
+        let grid = rect_of(&mux, Target::Pane(right, TermTarget::Grid)).expect("a grid");
+        let at_right = pointer(grid.x + 4.0, grid.y + 4.0, MouseEventKind::Move);
+        assert_eq!(mux.handle_event(&at_right), EventResult::Consumed);
+        assert!(
+            !lit(&mux, left),
+            "the bar stayed lit after the pointer went to another pane"
+        );
+
+        mux.handle_event(&at_bar);
+        let own = rect_of(&mux, Target::Pane(left, TermTarget::Grid)).expect("a grid");
+        mux.handle_event(&pointer(own.x + 4.0, own.y + 4.0, MouseEventKind::Move));
+        assert!(
+            !lit(&mux, left),
+            "the bar stayed lit after the pointer went to its grid"
+        );
+
+        mux.handle_event(&at_bar);
+        let gone = pointer(-1.0, -1.0, MouseEventKind::Leave);
+        assert_eq!(mux.handle_event(&gone), EventResult::Consumed);
+        assert!(
+            !lit(&mux, left),
+            "the bar stayed lit after the pointer left the window"
+        );
+        assert_eq!(mux.handle_event(&gone), EventResult::Ignored);
+    }
+
+    /// A drag that crosses a pane's bar leaves it lit only while the pointer
+    /// is there: the next move away puts it out, though the drag is over.
+    #[test]
+    fn a_drag_across_the_bar_does_not_leave_it_lit() {
+        let mut mux = Multiplexer::new();
+        let id = mux.active_pane_id().unwrap();
+        let grid = rect_of(&mux, Target::Pane(id, TermTarget::Grid)).expect("a grid");
+        let bar = rect_of(&mux, Target::Pane(id, TermTarget::ScrollTrack)).expect("a bar");
+        let pointer =
+            |x: f32, y: f32, kind: MouseEventKind| Event::Mouse(MouseEvent { x, y, kind });
+        let y = grid.y + 4.0;
+        mux.handle_event(&pointer(
+            grid.x + 1.0,
+            y,
+            MouseEventKind::Press(MouseButton::Left),
+        ));
+        mux.handle_event(&pointer(bar.x + 2.0, y, MouseEventKind::Move));
+        assert!(mux.find_pane(id).unwrap().term.is_bar_hovered());
+        mux.handle_event(&pointer(
+            bar.x + 2.0,
+            y,
+            MouseEventKind::Release(MouseButton::Left),
+        ));
+        mux.handle_event(&pointer(-1.0, -1.0, MouseEventKind::Leave));
+        assert!(
+            !mux.find_pane(id).unwrap().term.is_bar_hovered(),
+            "the bar a drag crossed stayed lit after the pointer left"
+        );
     }
 
     #[test]

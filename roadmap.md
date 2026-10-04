@@ -2900,15 +2900,18 @@ word; text inside them that says "lane C" is history.
     (3ae172794): `settings --page about`, each notice's attribution on a
     line of its own and its texts read when opened; lane C may delete
     `gui/desktop/src/about.rs`;
-  - ~~the controls' shapes: a picker in Settings, the programs' own text
+  - the controls' shapes: a picker in Settings, the programs' own text
     fields and scrollbars, the user's focus width
-    (`c-e-a-theme-can-shape-the-controls.md`)~~ **done 2026-10-03**: the
-    Controls and Motion pickers; every hand-drawn scrollbar (explorer,
-    terminal and tmux's panes, the dictionary's -- now pressable) and text
-    box (seven programs) drawn by the toolkit in the theme's shape; the
-    explorer's address bar and dialogs at the user's focus width. Nothing of
-    lane E's animates a transition of its own, so the motion request's
-    second part had nothing to convert (`c-e-a-theme-can-set-the-motion.md`);
+    (`c-e-a-theme-can-shape-the-controls.md`) -- **mostly done 2026-10-03**:
+    the Controls and Motion pickers; every hand-drawn scrollbar (explorer,
+    terminal and tmux's panes, the dictionary's -- now pressable); the
+    explorer's address bar and dialogs at the user's focus width; the text
+    boxes of seven programs. **Remaining:** the hand-drawn text boxes of some
+    forty more programs (every program that calls
+    `textline::types_into_field` draws its own box), one program at a time.
+    Nothing of lane E's animates a transition of its own, so the motion
+    request's second part had nothing to convert
+    (`c-e-a-theme-can-set-the-motion.md`, done);
   - ~~day and night wallpapers on Settings' Wallpaper page
     (`c-e-day-and-night-wallpapers-need-a-place-in-settings.md`)~~ **done
     2026-09-29** (3a7073848): a morning and an evening picture, each with

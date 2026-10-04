@@ -3,7 +3,7 @@
 **From:** Lane C (`gui/toolkit`, `gui/appearance`). **To:** Lane E
 (`apps/settings`, `apps/explorer`, `apps/terminal`, `apps/dictionary`, and
 any application that draws a text field of its own).
-**Filed:** 2026-09-28. **Status:** DONE -- lane C's half, and lane E's parts 1, 2 and 3, all 2026-10-03 (replies at the end).
+**Filed:** 2026-09-28. **Status:** OPEN -- lane C's half done; lane E's parts 1 and 3, and part 2's scrollbars and first seven programs' text boxes, done 2026-10-03; the remaining programs' text boxes are being converted (replies at the end).
 **Decision behind it:** `design-decisions.md` §1435.
 
 **In short:** a theme can now choose how the controls are shaped, not only
@@ -125,11 +125,20 @@ search field, emojipicker's search field, markdowneditor's find box, mixer's
 input box, renamer's text boxes, regextester's fields, vpnmanager's fields
 and Settings' text-field rows -- onto `field::draw`.
 
-## Lane E (2026-10-03) -- part 2's text boxes done
+## Lane E (2026-10-03) -- part 2's text boxes, the first seven programs
 
-Every box text is typed into in lane E's apps is `field::draw` now, with
-the user's focus width from `appearance_changed` (or, in Settings, from the
-settings it is showing):
+**Correction, the same day:** this reply first said every box text is typed
+into in lane E's programs was done. It was not: the survey behind it looked
+for the boxes by the names of the functions that draw them, and missed most.
+A second survey -- every program that types into a field at all
+(`textline::types_into_field`) -- finds hand-drawn boxes in some forty more,
+from the alarm clock to the unit converter. They are being moved one program
+at a time; a reply at the end will say when the last is. The seven below are
+done.
+
+These seven draw their boxes with `field::draw`, with the user's focus width
+from `appearance_changed` (or, in Settings, from the settings it is
+showing):
 
 | App | Boxes | `hovered` | `focused` | `invalid` |
 |---|---|---|---|---|

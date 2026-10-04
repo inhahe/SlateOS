@@ -185,6 +185,74 @@ MUTATIONS += [
     ),
 ]
 
+# The search is drawn, in the toolkit's field, and keeps the case it was
+# typed in (2026-10-04; lane C, c-e-a-theme-can-shape-the-controls).
+SEARCH = "the_search_is_drawn_in_the_toolkits_field"
+
+MUTATIONS += [
+    (
+        "the search is typed blind",
+        "        self.render_search_box(cmds);\n",
+        "",
+        [SEARCH],
+    ),
+    (
+        "the search box never has the keyboard's mark",
+        "            focused: self.screen == UiScreen::Results && !self.show_help,\n",
+        "            focused: false,\n",
+        [SEARCH],
+    ),
+    (
+        "the search box keeps its mark under the list of keys",
+        "            focused: self.screen == UiScreen::Results && !self.show_help,\n",
+        "            focused: self.screen == UiScreen::Results,\n",
+        [SEARCH],
+    ),
+    (
+        "a search that matches nothing is not red",
+        "            invalid: !self.filter.filename_search.is_empty() && self.visible_files().is_empty(),\n",
+        "            invalid: false,\n",
+        [SEARCH],
+    ),
+    (
+        "the search box shows away from the results",
+        "        (self.screen == UiScreen::Results).then(|| {\n",
+        "        true.then(|| {\n",
+        [SEARCH],
+    ),
+    (
+        "the search's caret is at its start",
+        "                    cursor: TextCursor::from(query.len()),\n",
+        "                    cursor: TextCursor::default(),\n",
+        [SEARCH],
+    ),
+    (
+        "an empty search box with the keyboard has no caret",
+        "                textedit::push_caret(\n"
+        "                    &mut tree,\n"
+        "                    x,\n"
+        "                    y,\n"
+        "                    line,\n"
+        "                    self.palette.text,\n"
+        "                    textedit::CARET_WIDTH,\n"
+        "                );\n",
+        "                let _ = (x, y, line);\n",
+        [SEARCH],
+    ),
+    (
+        "the search is kept in lower case",
+        "        self.filename_search = term.to_owned();\n",
+        "        self.filename_search = term.to_lowercase();\n",
+        [SEARCH],
+    ),
+    (
+        "a search in capitals finds no name in small letters",
+        "                .contains(&self.filename_search.to_lowercase())\n",
+        "                .contains(&self.filename_search)\n",
+        [SEARCH],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "undelete", timeout=900, only=only))

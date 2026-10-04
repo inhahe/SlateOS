@@ -20,7 +20,7 @@ which `tests/avif.rs` compares this crate's pixels against: Pillow 12.1.1
 under Pillow 12.3.0 (libavif 1.4.2, dav1d 1.5.3, libyuv 1924) found every
 answer the same -- libyuv's scaling did not change between the two. Both are
 Windows builds, so libyuv's C, not its x86 SIMD, did the scaling (see
-`src/avif/scale.rs`).
+`gui/video/yuv/src/scale.rs`).
 
 Deep and grey pictures have alpha, for the reason `generate_avif_pixels.py`
 gives: Pillow converts pictures without alpha to 24-bit RGB, which libyuv

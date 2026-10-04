@@ -1,0 +1,8 @@
+# vp9_alpha.webm: what ffprobe makes of it (generate_fixtures.py).
+stream 0 vp9 1/1000
+packet 0 0 100 488 431 K__ a25d8567b1df1946e6afb5bf719c122d 1
+packet 0 100 100 55 966 ___ eaecc44e7620f2e28032ec992c395d47 1
+packet 0 200 100 58 1057 ___ 887089c82bad7433564f65f541f74576 1
+packet 0 300 100 72 1151 ___ 48bd2f0bdf32a5c78e2f290c4bc018ba 1
+packet 0 400 100 67 1259 ___ df51b769703a3023522b9a9971301380 1
+packet 0 500 100 79 1362 ___ 94b0e2824c1c866fbf46d1edd6eb1ece 1

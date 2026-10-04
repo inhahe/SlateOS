@@ -51,18 +51,6 @@ libavif:
   texts:
     - libavif-LICENSE.txt
 
-# The revision libavif 1.4.2 pins, 644251f252a84bf8ce91ff0aca86a9b16b069ab8,
-# whose include/libyuv/version.h says 1924: src/avif/scale.rs and
-# gui/video/vp9's src/rgb.rs follow it, and src/avif/libyuv.rs's conversions,
-# ported from libavif 1.3.0's pin (4db2af62, 1909), are unchanged in it.
-# gui/video/vp9 uses this entry rather than naming libyuv again.
-libyuv:
-  version: 1924
-  licence: BSD-3-Clause
-  texts:
-    - libyuv-LICENSE
-    - libyuv-PATENTS
-
 # image-rs is MIT or Apache-2.0 at the user's choice; it is used here under
 # MIT. Named as the project rather than as its crate (`image`), because the
 # crate itself is not a dependency: src/bmp.rs is adapted from its BMP decoder.

@@ -14,6 +14,8 @@ path = "src/lib.rs"
 [dev-dependencies]
 # The conformance test's frame fingerprints, as libvpx's `test/md5_helper.h`.
 md5 = { path = "../../../md5" }
+# `rgb`'s round trip back to pixels, as a viewer converts a decoded picture.
+yuv = { path = "../yuv" }
 
 [lints]
 workspace = true

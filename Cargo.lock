@@ -610,6 +610,7 @@ dependencies = [
  "keylayout",
  "osfont",
  "settingsfile",
+ "videocodec",
  "vp9",
 ]
 
@@ -1668,6 +1669,7 @@ dependencies = [
  "crc32",
  "deflate",
  "rav1d",
+ "yuv",
 ]
 
 [[package]]
@@ -2337,6 +2339,16 @@ dependencies = [
  "guitk",
  "oswindow",
  "textline",
+]
+
+[[package]]
+name = "matroska"
+version = "0.1.0"
+dependencies = [
+ "deflate",
+ "md5",
+ "rav1d",
+ "vp9",
 ]
 
 [[package]]
@@ -4482,6 +4494,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "videocodec"
+version = "0.1.0"
+dependencies = [
+ "matroska",
+ "md5",
+ "rav1d",
+ "vp8",
+ "vp9",
+ "yuv",
+]
+
+[[package]]
 name = "videoplayer"
 version = "0.1.0"
 dependencies = [
@@ -4508,10 +4532,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "vp8"
+version = "0.1.0"
+dependencies = [
+ "md5",
+]
+
+[[package]]
 name = "vp9"
 version = "0.1.0"
 dependencies = [
  "md5",
+ "yuv",
 ]
 
 [[package]]
@@ -4692,6 +4724,10 @@ dependencies = [
 
 [[package]]
 name = "yamldoc"
+version = "0.1.0"
+
+[[package]]
+name = "yuv"
 version = "0.1.0"
 
 [[package]]

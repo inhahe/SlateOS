@@ -3775,7 +3775,7 @@ lane C's `guitk`.
     out of it, bit-exact against Pillow. Playing them in the viewer is lane
     E's (`requests/f-bce-avif-pictures-open-and-animate.md`).
   - `[x]` Frames coded at another size than their `ispe`, rescaled as libavif
-    rescales them (`src/avif/scale.rs`): libyuv's `ScalePlane` and
+    rescales them (`gui/video/yuv/src/scale.rs`): libyuv's `ScalePlane` and
     `ScalePlane_12` with `kFilterBox`, every method they choose by the sizes,
     as libyuv's C computes it (design-decisions §1344). Held to libyuv 1924
     built with its x86 code off on 62,208 size combinations and 57 larger
@@ -3786,6 +3786,51 @@ lane C's `guitk`.
     twice dav1d's time, one thread); making rav1d faster waits on
     `open-questions.md` F-Q4 -- dav1d's assembly, or SIMD in Rust
     (known-issues.md, "[F] AVIF decoding has no committed benchmark").
+
+- `[-]` `[F]` **Video files** (`roadmap-detailed.md` §3.2, "OS-level video
+  codec support"): the video player (`apps/videoplayer`, lane E) has its
+  window and a file's description (`apps/mediaprobe`), and nothing that
+  opens a file's pictures.
+  - `[x]` Matroska and WebM, demultiplexed (`gui/video/matroska`,
+    design-decisions §1345): written from RFC 9559 with FFmpeg's behaviour
+    where the RFC leaves a choice -- every packet of eleven fixtures and
+    thirty seeks held to `ffprobe`'s, and every frame of VP9, VP9 with
+    alpha and AV1 played through it held to ffmpeg's decoders. What it
+    leaves out: `known-issues/F-the-matroska-demuxer-leaves-out-what-no-webm-file-needs.md`.
+  - `[x]` A frame-level API for a player (`gui/video/codec`, crate
+    `videocodec`, design-decisions §1346): `Video::open(file)`, then
+    `next_frame()` -- each picture in order with its time, duration and
+    key-frame flag, as `0xAARRGGBB` pixels (imagecodec's form) -- and
+    `seek(time, Exact | KeyFrame)`; `next_picture()` for a player that drops
+    late pictures before paying for their conversion; `Decoder` beneath it
+    for packets from elsewhere. VP9 (every profile, WebM's alpha), AV1.
+    Colour by the stream's own matrix and range -- the bitstream's word, then
+    the file's, then mpv's guess from the size -- through the same libavif
+    conversion as AVIF stills (`gui/video/yuv`); crop and display aspect
+    from the file. Fifteen fixtures, every frame's pixels held to libavif
+    1.3.0 converting ffmpeg's decoded planes and every time to ffprobe
+    (`tests/data/generate_fixtures.py`, `tools/libavif_reformat_reference.c`),
+    with seeks, damage and a playback thread. What it leaves to colour
+    management: `known-issues/F-video-is-shown-without-colour-management.md`.
+  - `[-]` VP8 video (libvpx's decoder, ported as VP9's was), and MP4
+    (`apps/mediaprobe` reads its headers; the sample tables are like
+    AVIF's sequences').
+    - `[x]` The decoder, `gui/video/vp8`: libvpx v1.17.0's, every picture
+      of all 62 of its test vectors hashing to libvpx's MD5s
+      (`tests/vectors.rs`), and 446 damaged copies of them decoding to
+      libvpx's pictures, corruption marks and errors frame by frame
+      (`tests/damage.rs`, from `tools/damage_reference.c`).
+    - `[x]` Faster than libvpx's C: motion compensation and the loop
+      filter written in lanes the compiler vectorises, 1.99 G instructions
+      for 20 frames of 1080p against libvpx C's 6.46 G (its SIMD's 0.86 G;
+      `tests/bench.rs`). Its row threads are not ported:
+      `known-issues/F-vp8-decodes-on-one-thread.md`.
+    - `[x]` In `videocodec`: WebM's VP8, alpha included, coloured as FFmpeg
+      reads VP8 (BT.601 at any size, its clamping bit the range); five
+      fixtures held to ffmpeg and libavif frame by frame.
+    - `[ ]` MP4.
+  - `[ ]` Sound needs Opus and Vorbis decoders, which nothing has yet (the
+    music player has none either).
 
 - `[-]` `[F]` **A display transport over channel IPC** for local clients,
   beside the TCP one. The point is the peer's identity: the kernel attests a

@@ -21,6 +21,7 @@ use crate::include::common::bitdepth::BitDepth8;
 use crate::include::common::bitdepth::BitDepth16;
 use crate::include::dav1d::data::Rav1dData;
 use crate::include::dav1d::dav1d::Rav1dSettings;
+use crate::include::dav1d::headers::Rav1dFrameType;
 use crate::include::dav1d::headers::Rav1dPixelLayout;
 use crate::include::dav1d::picture::Rav1dPicture;
 use crate::src::c_arc::CArc;
@@ -28,6 +29,7 @@ use crate::src::c_box::CBox;
 use crate::src::error::Rav1dError;
 use crate::src::internal::Rav1dContext;
 use crate::src::lib::rav1d_close;
+use crate::src::lib::rav1d_flush;
 use crate::src::lib::rav1d_get_picture;
 use crate::src::lib::rav1d_open;
 use crate::src::lib::rav1d_send_data;
@@ -134,6 +136,23 @@ impl Data {
         Ok(Self(Rav1dData::from(CArc::wrap(CBox::from_box(owned))?)))
     }
 
+    /// A copy of `bytes` that carries `timestamp` and `duration` -- in
+    /// whatever unit the caller keeps time in -- through to the picture it
+    /// decodes to ([`Picture::timestamp`]): dav1d's `Dav1dDataProps`. A
+    /// decoder decoding several frames at once hands pictures back calls
+    /// after the data they came from, so this is how a caller knows which is
+    /// which.
+    ///
+    /// # Errors
+    ///
+    /// As [`Data::new`].
+    pub fn with_time(bytes: &[u8], timestamp: i64, duration: i64) -> Result<Self, Error> {
+        let mut data = Self::new(bytes)?;
+        data.0.m.timestamp = timestamp;
+        data.0.m.duration = duration;
+        Ok(data)
+    }
+
     /// Whether the decoder has taken it all.
     pub fn is_consumed(&self) -> bool {
         self.0.data.is_none()
@@ -197,6 +216,20 @@ impl Decoder {
         rav1d_get_picture(self.context()?, &mut out)?;
         Ok(Picture(out))
     }
+
+    /// `dav1d_flush`: forget everything sent and every picture not yet
+    /// taken, as a seek must. The sequence header is forgotten too, so the
+    /// next data must carry one -- or follow the stream's configuration OBUs
+    /// (a Matroska or MP4 track's `av1C`), sent first.
+    ///
+    /// # Errors
+    ///
+    /// Only for a decoder that is already closed, which the safe interface
+    /// never leaves one.
+    pub fn flush(&mut self) -> Result<(), Error> {
+        rav1d_flush(self.context()?);
+        Ok(())
+    }
 }
 
 impl Drop for Decoder {
@@ -245,6 +278,23 @@ pub struct Plane<T> {
 /// A decoded picture.
 pub struct Picture(Rav1dPicture);
 
+// SAFETY: a picture the decoder has handed out is finished. dav1d -- and so
+// rav1d -- outputs a frame only once every row of it is decoded (with frame
+// threads, after waiting on the frame's condition variable under the task
+// lock, which also orders the worker's writes before this thread's reads);
+// film grain is applied into a copy; and from then on the decoder only reads
+// the frame, as a reference for the frames after it, perhaps on its worker
+// threads. So for as long as this holds it, the picture's pixels are
+// immutable, its buffers live as long as the `Arc` this holds (whose count is
+// atomic), and they are freed through rav1d's picture allocator, which any
+// thread may call. Moving a picture to another thread, and reading it there
+// while decoder threads read it too, is reading immutable memory from two
+// threads. What keeps the compiler from seeing this is the raw pointer in
+// `Rav1dPictureDataComponentInner` behind the picture's `DisjointMut` -- the
+// same pointer upstream's own threads reach through the `unsafe impl Send`s
+// of `src/internal.rs`.
+unsafe impl Send for Picture {}
+
 impl Picture {
     /// The frame's size in pixels.
     pub fn size(&self) -> (u32, u32) {
@@ -284,6 +334,28 @@ impl Picture {
     /// The frame header's spatial layer.
     pub fn spatial_id(&self) -> Option<u8> {
         Some(self.0.frame_hdr.as_ref()?.rav1d.spatial_id)
+    }
+
+    /// Whether this is a key frame -- one decoding can start from.
+    pub fn is_key_frame(&self) -> bool {
+        self.0
+            .frame_hdr
+            .as_ref()
+            .is_some_and(|h| h.rav1d.frame_type == Rav1dFrameType::Key)
+    }
+
+    /// The timestamp of the data the picture was decoded from
+    /// ([`Data::with_time`]); `None` for data that carried none.
+    pub fn timestamp(&self) -> Option<i64> {
+        // dav1d's "no timestamp" is INT64_MIN.
+        let t = self.0.m.timestamp;
+        (t != i64::MIN).then_some(t)
+    }
+
+    /// The duration of the data the picture was decoded from
+    /// ([`Data::with_time`]); 0 for data that carried none.
+    pub fn duration(&self) -> i64 {
+        self.0.m.duration
     }
 
     /// The size of plane `index`: 0 luma, 1 and 2 chroma.
@@ -405,6 +477,50 @@ mod tests {
         for i in 0..3 {
             assert_eq!(one.plane_u8(i), four.plane_u8(i));
         }
+    }
+
+    /// A picture carries the time of the data it was decoded from, and says
+    /// it is a key frame; data with no time gives a picture with none.
+    #[test]
+    fn a_picture_carries_its_datas_time() {
+        let mut decoder = Decoder::new(&still(1)).unwrap();
+        let mut data = Data::with_time(&WHITE_1X1, 42, 7).unwrap();
+        decoder.send(&mut data).unwrap();
+        let picture = decoder.picture().unwrap();
+        assert_eq!((picture.timestamp(), picture.duration()), (Some(42), 7));
+        assert!(picture.is_key_frame());
+        let untimed = decode(&WHITE_1X1, 1).unwrap();
+        assert_eq!((untimed.timestamp(), untimed.duration()), (None, 0));
+    }
+
+    /// A flush drops a picture not yet taken, and the sequence header: the
+    /// frame alone no longer decodes until a sequence header comes again.
+    #[test]
+    fn a_flush_forgets_pictures_and_the_sequence_header() {
+        let mut decoder = Decoder::new(&still(1)).unwrap();
+        let mut data = Data::new(&WHITE_1X1).unwrap();
+        decoder.send(&mut data).unwrap();
+        decoder.flush().unwrap();
+        assert_eq!(decoder.picture().err(), Some(Error::Again));
+
+        // The temporal delimiter (two bytes) and the frame, without the
+        // sequence header between them (nine bytes from the third).
+        let frame: Vec<u8> = WHITE_1X1[..2]
+            .iter()
+            .chain(&WHITE_1X1[11..])
+            .copied()
+            .collect();
+        let mut alone = Data::new(&frame).unwrap();
+        let sent = decoder.send(&mut alone);
+        assert!(
+            sent.is_err() || decoder.picture().is_err(),
+            "a frame decoded with no sequence header"
+        );
+
+        let mut again = Data::new(&WHITE_1X1).unwrap();
+        decoder.send(&mut again).unwrap();
+        let picture = decoder.picture().unwrap();
+        assert_eq!(picture.plane_u8(0).unwrap().samples, [253]);
     }
 
     #[test]

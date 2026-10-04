@@ -59,6 +59,10 @@ impl VideoStream {
     fn new(width: u32, height: u32) -> Option<Self> {
         let config = EncoderConfig {
             timebase: (1, 1000),
+            // What `argb_to_yuv420` converts with, said in every key frame,
+            // so that no viewer guesses -- players guess BT.709 for a window
+            // 1280 wide or more, which would shift its colours.
+            color_space: vp9::rgb::COLOR_SPACE,
             ..EncoderConfig::realtime(width, height, video_kbps(width, height))
         };
         Some(Self {

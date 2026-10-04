@@ -2551,8 +2551,8 @@ dependencies = [
  "hwquery",
  "oswindow",
  "scratchdir",
-]
  "textline",
+]
 
 [[package]]
 name = "netstat"
@@ -4524,8 +4524,8 @@ dependencies = [
  "pathtext",
  "safeio",
  "scratchdir",
-]
  "textline",
+]
 
 [[package]]
 name = "wall"

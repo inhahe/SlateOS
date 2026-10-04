@@ -165,6 +165,12 @@ pub(crate) struct Common {
     /// The last frame's type and whether it is shown.
     pub(crate) key_frame: bool,
     pub(crate) show_frame: bool,
+    /// The last key frame's colour space bit (0 for VP8's YUV, which the
+    /// specification likens to BT.601; 1 reserved) and clamping type bit (0
+    /// if pixels must be clamped). libvpx reads both and goes by neither;
+    /// they are kept for a caller choosing a colour, as FFmpeg does.
+    pub(crate) color_space: u8,
+    pub(crate) clamping_type: u8,
     /// Log2 of the token partitions' count.
     multi_token_partition: u8,
     quant: Quant,
@@ -204,6 +210,8 @@ impl Common {
             mb_cols: 0,
             key_frame: true,
             show_frame: false,
+            color_space: 0,
+            clamping_type: 0,
             multi_token_partition: 0,
             quant: Quant::default(),
             refresh_golden: false,
@@ -329,9 +337,9 @@ pub(crate) fn decode_frame(
     // partition sizes and the coefficients.
     let mut bc = BoolDecoder::new(&data[start..]);
     if tag.key_frame {
-        let _colour_space = bc.read_bit();
+        c.color_space = u8::from(bc.read_bit());
         // libvpx's `clamp_type`: its decoder clamps whatever this says.
-        let _clamping = bc.read_bit();
+        c.clamping_type = u8::from(bc.read_bit());
     }
     read_segmentation(c, &mut bc);
     let simple_filter = bc.read_bit();

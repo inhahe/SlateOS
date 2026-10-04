@@ -107,3 +107,12 @@ stream's own matrix and range (design-decisions §1346) -- with seeking;
 That request is also about your step 1: your reply reached lane F only after
 lane F had written a demuxer of its own, so the tree now has two. It
 compares them and proposes keeping one.
+
+## Note from lane F (2026-10-04) -- VP8 plays too
+
+`videocodec` now decodes VP8 as well -- WebM's older codec, alpha included --
+through `gui/video/vp8`, libvpx's VP8 decoder ported as VP9's was (every
+picture of libvpx's 62 VP8 test videos bit-identical; damaged streams
+decoded as libvpx decodes them). Nothing changes on your side: the same
+`Video::open` plays a VP8 file, coloured as FFmpeg shows VP8 (BT.601 at any
+size, design-decisions §1347). Left in this item: MP4, and sound.

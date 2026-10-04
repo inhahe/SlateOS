@@ -8,7 +8,8 @@ publish = false
 [dependencies]
 # The container: Matroska and WebM.
 matroska = { path = "../matroska" }
-# The codecs: VP9, libvpx's decoder ported; AV1, rav1d vendored.
+# The codecs: VP8 and VP9, libvpx's decoders ported; AV1, rav1d vendored.
+vp8 = { path = "../vp8" }
 vp9 = { path = "../vp9" }
 rav1d = { path = "../rav1d" }
 # YUV to pixels, exactly as an AVIF still of the same picture is converted.

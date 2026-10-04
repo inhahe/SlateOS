@@ -23,9 +23,9 @@
 //!
 //! # What plays
 //!
-//! Matroska and WebM files; VP9, every profile (8-, 10- and 12-bit; 4:2:0,
-//! 4:2:2, 4:4:0, 4:4:4; RGB), with WebM's alpha channel; and AV1. Not yet:
-//! VP8, MP4, and sound (`roadmap.md`, "Video files").
+//! Matroska and WebM files; VP8, and VP9 in every profile (8-, 10- and
+//! 12-bit; 4:2:0, 4:2:2, 4:4:0, 4:4:4; RGB), each with WebM's alpha channel;
+//! and AV1. Not yet: MP4, and sound (`roadmap.md`, "Video files").
 //!
 //! # Colour
 //!
@@ -48,11 +48,13 @@
 //!
 //! # A hostile file
 //!
-//! Errors, never a panic. A damaged packet costs its own picture and those
-//! that depend on it -- decoding resumes at the next key frame, as players
-//! do -- and [`Video::next_frame`] reads on past it; only the source failing
-//! ends the reading. Pictures larger than [`Limits::max_pixels`] are refused
-//! before anything is allocated for them.
+//! Errors, never a panic. A packet that fails to decode costs its own
+//! picture, and what follows is decoded as each codec's reference decoder
+//! decodes it: VP9 from its next key frame (libvpx's resync), VP8 on from
+//! what its references hold (as libvpx shows it, and as FFmpeg's decoder
+//! does), AV1 as dav1d does. [`Video::next_frame`] reads on past it; only
+//! the source failing ends the reading. Pictures larger than
+//! [`Limits::max_pixels`] are refused before anything is allocated for them.
 
 mod colour;
 mod decoder;
@@ -145,6 +147,8 @@ pub enum Error {
     NoVideo,
     /// The video is in a codec this does not decode.
     Codec(Codec),
+    /// A VP8 packet did not decode.
+    Vp8(vp8::Error),
     /// A VP9 packet did not decode.
     Vp9(vp9::Error),
     /// An AV1 packet did not decode.
@@ -163,6 +167,7 @@ impl fmt::Display for Error {
             Self::Container(e) => write!(f, "the video file could not be read: {e}"),
             Self::NoVideo => f.write_str("the file has no video that can be played"),
             Self::Codec(c) => write!(f, "the video is {c}, which is not decoded here yet"),
+            Self::Vp8(e) => write!(f, "{e}"),
             Self::Vp9(e) => write!(f, "{e}"),
             Self::Av1(e) => write!(f, "{e}"),
             Self::Colour(yuv::reformat::Error::Unsupported) => {

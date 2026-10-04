@@ -20,7 +20,12 @@ use std::io::Cursor;
 use videocodec::{Frame, SeekMode, Video};
 
 /// Every fixture, each a path the conversion or the file can take.
-const FIXTURES: [&str; 15] = [
+const FIXTURES: [&str; 20] = [
+    "vp8_sd.webm",
+    "vp8_hd.webm",
+    "vp8_odd.webm",
+    "vp8_tagged.webm",
+    "vp8_alpha.webm",
     "vp9_sd_untagged.webm",
     "vp9_hd_untagged.webm",
     "vp9_bt709_sd.webm",
@@ -143,7 +148,12 @@ fn every_fixture_plays_as_ffmpeg_and_libavif_show_it() {
 /// `next_frame` gives -- crop and all.
 #[test]
 fn a_picture_converted_later_is_the_same_frame() {
-    for name in ["vp9_cropped.mkv", "av1_444_10bit.webm", "vp9_alpha.webm"] {
+    for name in [
+        "vp9_cropped.mkv",
+        "av1_444_10bit.webm",
+        "vp9_alpha.webm",
+        "vp8_alpha.webm",
+    ] {
         let (_, want) = answers(name);
         let mut video = open(name);
         let mut k = 0;
@@ -230,6 +240,7 @@ fn a_damaged_file_plays_what_it_can_and_never_panics() {
         "av1_444_10bit.webm",
         "vp9_cropped.mkv",
         "vp9_440.webm",
+        "vp8_alpha.webm",
     ] {
         let bytes = std::fs::read(path(name)).unwrap();
         let play = |data: &[u8]| {

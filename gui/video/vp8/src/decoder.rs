@@ -49,6 +49,9 @@ const BUFFERS: usize = 4;
 pub struct Picture {
     frame: Arc<Frame>,
     corrupted: bool,
+    /// The two colour bits of the key frame it follows.
+    color_space: u8,
+    clamping_type: u8,
 }
 
 /// One plane of a [`Picture`]: `height` rows of `width` samples, `stride`
@@ -99,6 +102,24 @@ impl Picture {
     #[must_use]
     pub fn corrupted(&self) -> bool {
         self.corrupted
+    }
+
+    /// The colour space bit of the key frame the picture follows: 0 for
+    /// VP8's YUV, which its specification (RFC 6386 §9.2) likens to BT.601;
+    /// 1 is reserved. libvpx reads it and goes by nothing; FFmpeg takes 0 for
+    /// BT.601 (its `BT470BG` matrix) and 1 for unspecified.
+    #[must_use]
+    pub fn color_space(&self) -> u8 {
+        self.color_space
+    }
+
+    /// The clamping type bit of the key frame the picture follows: 0 if the
+    /// decoder must clamp reconstructed pixels, 1 if no clamping is needed.
+    /// libvpx clamps whatever it says; FFmpeg takes 1 for full range samples
+    /// and 0 for the studio range.
+    #[must_use]
+    pub fn clamping_type(&self) -> u8 {
+        self.clamping_type
     }
 }
 
@@ -353,6 +374,8 @@ impl Decoder {
         Ok(self.slots[to_show].as_ref().map(|frame| Picture {
             frame: Arc::clone(frame),
             corrupted: self.corrupted[to_show],
+            color_space: c.color_space,
+            clamping_type: c.clamping_type,
         }))
     }
 }

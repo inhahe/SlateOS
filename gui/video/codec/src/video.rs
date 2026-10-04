@@ -9,9 +9,10 @@
 //! marked default and in a codec decoded here, else the first decodable one;
 //! [`Video::open_track`] names another.
 //!
-//! **Alpha.** WebM's transparency is a second VP9 stream in each block's
-//! `BlockAdditional` 1, used only where the track says it is (`AlphaMode`
-//! 1), as RFC 9559 defines it and Chrome reads it.
+//! **Alpha.** WebM's transparency is a second stream of the track's codec
+//! (VP8 or VP9) in each block's `BlockAdditional` 1, used only where the
+//! track says it is (`AlphaMode` 1), as RFC 9559 defines it and Chrome reads
+//! it.
 //!
 //! **Crop.** A track's `PixelCrop` is applied to each converted frame -- the
 //! picture's pixels outside the crop cut away, those inside exactly as the
@@ -135,7 +136,7 @@ impl<R: Read + Seek> Video<R> {
                 // Decodable first, then enabled, then marked default; the
                 // file's order among equals (`min_by_key` keeps the first).
                 None => videos.iter().copied().min_by_key(|t| {
-                    let decodable = matches!(codec_of(t), Codec::Vp9 | Codec::Av1);
+                    let decodable = matches!(codec_of(t), Codec::Vp8 | Codec::Vp9 | Codec::Av1);
                     (!decodable, !t.enabled, !t.default)
                 }),
             }

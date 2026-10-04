@@ -3825,7 +3825,9 @@ lane C's `guitk`.
       for 20 frames of 1080p against libvpx C's 6.46 G (its SIMD's 0.86 G;
       `tests/bench.rs`). Its row threads are not ported:
       `known-issues/F-vp8-decodes-on-one-thread.md`.
-    - `[ ]` In `videocodec`: WebM's VP8, alpha included.
+    - `[x]` In `videocodec`: WebM's VP8, alpha included, coloured as FFmpeg
+      reads VP8 (BT.601 at any size, its clamping bit the range); five
+      fixtures held to ffmpeg and libavif frame by frame.
     - `[ ]` MP4.
   - `[ ]` Sound needs Opus and Vorbis decoders, which nothing has yet (the
     music player has none either).

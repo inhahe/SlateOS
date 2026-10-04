@@ -2,10 +2,11 @@
 //! the order the file holds them, giving back the pictures they show in the
 //! order they are shown.
 //!
-//! VP9 decodes a packet at a time -- at most one picture each, the last
-//! frame of a superframe that is shown, as libvpx gives it -- and WebM's
-//! alpha channel, where a packet carries one, is a second VP9 stream decoded
-//! beside it (as Chrome and FFmpeg's libvpx wrapper decode it). AV1 goes
+//! VP8 and VP9 decode a packet at a time -- at most one picture each (for
+//! VP9, the last frame of a superframe that is shown), as libvpx gives it --
+//! and WebM's alpha channel, where a packet carries one, is a second stream
+//! of the same codec decoded beside it (as Chrome and FFmpeg's libvpx
+//! wrapper decode it). AV1 goes
 //! through dav1d's queue: a packet in, a picture out when one is ready, each
 //! picture carrying the time of the packet it came from, since with frame
 //! threads it comes out a few packets later.
@@ -21,9 +22,9 @@ use crate::{Codec, ColourHint, Error, Limits};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Packet<'a> {
     pub data: &'a [u8],
-    /// For VP9 with WebM's transparency, the alpha channel's packet: the
-    /// block's `BlockAdditional` with ID 1, itself a VP9 frame whose luma
-    /// is the alpha.
+    /// For VP8 or VP9 with WebM's transparency, the alpha channel's packet:
+    /// the block's `BlockAdditional` with ID 1, itself a frame of the same
+    /// codec whose luma is the alpha.
     pub alpha: Option<&'a [u8]>,
     /// When the picture it shows is shown, in nanoseconds.
     pub time: i64,
@@ -45,6 +46,14 @@ pub struct Decoder {
 }
 
 enum Inner {
+    // Boxed, as VP9's are: a VP8 decoder's probabilities, kept and saved,
+    // make it some kilobytes.
+    Vp8 {
+        picture: Box<vp8::Decoder>,
+        /// The alpha channel's decoder, made when the first alpha packet
+        /// comes.
+        alpha: Option<Box<vp8::Decoder>>,
+    },
     // Boxed: a VP9 decoder's saved probability contexts make it some
     // kilobytes, where dav1d's lives behind a handle.
     Vp9 {
@@ -74,8 +83,8 @@ struct Av1 {
 impl Decoder {
     /// A decoder for `codec`, set up with the track's `config` -- the codec's
     /// configuration as the file stores it: an AV1 track's `av1C` record (its
-    /// Matroska `CodecPrivate`); nothing for VP9 -- and `hint`, what the file
-    /// says of the track's colour.
+    /// Matroska `CodecPrivate`); nothing for VP8 and VP9 -- and `hint`, what
+    /// the file says of the track's colour.
     ///
     /// # Errors
     ///
@@ -89,12 +98,16 @@ impl Decoder {
     ) -> Result<Self, Error> {
         let max_pixels = limits.max_pixels;
         let codec = match codec {
+            Codec::Vp8 => Inner::Vp8 {
+                picture: Box::new(vp8::Decoder::with_max_pixels(max_pixels)),
+                alpha: None,
+            },
             Codec::Vp9 => Inner::Vp9 {
                 picture: Box::new(vp9::Decoder::with_max_pixels(max_pixels)),
                 alpha: None,
             },
             Codec::Av1 => Inner::Av1(Av1::new(config, max_pixels)?),
-            Codec::Vp8 | Codec::Other => return Err(Error::Codec(codec)),
+            Codec::Other => return Err(Error::Codec(codec)),
         };
         Ok(Self {
             codec,
@@ -113,6 +126,30 @@ impl Decoder {
     /// usable: decoding resumes at the next key frame.
     pub fn send(&mut self, packet: &Packet<'_>) -> Result<(), Error> {
         match &mut self.codec {
+            Inner::Vp8 { picture, alpha } => {
+                // As VP9's below: the alpha first, and an alpha that does not
+                // decode leaves its picture opaque.
+                let alpha_picture = match packet.alpha {
+                    Some(bytes) => alpha
+                        .get_or_insert_with(|| {
+                            Box::new(vp8::Decoder::with_max_pixels(self.max_pixels))
+                        })
+                        .decode(bytes)
+                        .unwrap_or(None),
+                    None => None,
+                };
+                if let Some(shown) = picture.decode(packet.data).map_err(Error::Vp8)? {
+                    self.ready.push_back(Picture::new(
+                        packet,
+                        Planes::Vp8 {
+                            picture: shown,
+                            alpha: alpha_picture,
+                        },
+                        self.hint,
+                    ));
+                }
+                Ok(())
+            }
             Inner::Vp9 { picture, alpha } => {
                 // The alpha stream is decoded first and whatever becomes of
                 // the picture, so that the two stay in step.
@@ -159,8 +196,8 @@ impl Decoder {
     /// The codec's own, for a frame still being decoded that fails.
     pub fn finish(&mut self) -> Result<(), Error> {
         match &mut self.codec {
-            // libvpx's decoder holds nothing back.
-            Inner::Vp9 { .. } => Ok(()),
+            // libvpx's decoders hold nothing back.
+            Inner::Vp8 { .. } | Inner::Vp9 { .. } => Ok(()),
             Inner::Av1(av1) => av1.drain(&mut self.ready, self.hint),
         }
     }
@@ -174,6 +211,11 @@ impl Decoder {
     pub fn reset(&mut self) -> Result<(), Error> {
         self.ready.clear();
         match &mut self.codec {
+            Inner::Vp8 { picture, alpha } => {
+                **picture = vp8::Decoder::with_max_pixels(self.max_pixels);
+                *alpha = None;
+                Ok(())
+            }
             Inner::Vp9 { picture, alpha } => {
                 **picture = vp9::Decoder::with_max_pixels(self.max_pixels);
                 *alpha = None;
@@ -307,11 +349,9 @@ mod tests {
 
     #[test]
     fn codecs_not_decoded_here_are_refused() {
-        for codec in [Codec::Vp8, Codec::Other] {
-            assert!(matches!(
-                Decoder::new(codec, &[], ColourHint::default(), Limits::default()),
-                Err(Error::Codec(c)) if c == codec
-            ));
-        }
+        assert!(matches!(
+            Decoder::new(Codec::Other, &[], ColourHint::default(), Limits::default()),
+            Err(Error::Codec(Codec::Other))
+        ));
     }
 }

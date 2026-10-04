@@ -12,9 +12,10 @@ Where the answers come from -- none of it from the crate itself:
 - **Which frames, and when.** ffprobe's `-show_frames`: FFmpeg's demuxer and
   decoders (`-fflags +noparse+nofillin`, so that the times and durations are
   the file's own, as `gui/video/matroska`'s fixtures take them).
-- **Their pixels.** ffmpeg decodes each frame to raw planes -- its own VP9
-  decoder, libvpx's where the video has alpha, libdav1d for AV1, each
-  bit-exact to the reference decoder gui/video's decoders are held to -- and
+- **Their pixels.** ffmpeg decodes each frame to raw planes -- its own VP8
+  and VP9 decoders, libvpx's where the video has alpha, libdav1d for AV1,
+  each bit-exact to the reference decoder gui/video's decoders are held to --
+  and
   libavif 1.3.0 converts each frame's planes exactly as it converts an AVIF
   still: `../../tools/libavif_reformat_reference.c`, built in WSL as its
   header says, with libyuv's C. The colour it converts with is the one this
@@ -55,6 +56,9 @@ SRC = f"testsrc2=size={{}}:rate={RATE}:duration={FRAMES / RATE}"
 VP9 = ["-c:v", "libvpx-vp9", "-deadline", "good", "-cpu-used", "4", "-crf", "40",
        "-b:v", "0", "-g", "3", "-keyint_min", "3", "-threads", "1", "-row-mt", "0",
        "-tile-columns", "0"]
+# libvpx's VP8 takes -crf only under a bitrate cap.
+VP8 = ["-c:v", "libvpx", "-deadline", "good", "-cpu-used", "4", "-crf", "40",
+       "-b:v", "1M", "-g", "3", "-keyint_min", "3", "-threads", "1", "-auto-alt-ref", "0"]
 AV1 = ["-c:v", "libaom-av1", "-cpu-used", "8", "-crf", "50", "-b:v", "0", "-g", "3",
        "-keyint_min", "3", "-threads", "1", "-row-mt", "0", "-tiles", "1x1"]
 
@@ -114,6 +118,29 @@ FIXTURES = {
     "vp9_alpha.webm": (
         SRC.format("176x144") + ALPHA, VP9 + ["-pix_fmt", "yuva420p"], "yuva420p",
         ("420", 8, 1), (6, 1, "limited"), "libvpx-vp9"),
+    # VP8's key frames say YUV, which FFmpeg reads as BT.601 at any size:
+    # 1280 wide is BT.601 here, where untagged VP9 is guessed BT.709.
+    "vp8_sd.webm": (
+        SRC.format("176x144"), VP8 + ["-pix_fmt", "yuv420p"], "yuv420p",
+        ("420", 8, 0), (5, 1, "limited"), None),
+    "vp8_hd.webm": (
+        SRC.format("1280x48"), VP8 + ["-pix_fmt", "yuv420p"], "yuv420p",
+        ("420", 8, 0), (5, 1, "limited"), None),
+    # An odd size: chroma rounded up, the last macroblocks partly outside.
+    "vp8_odd.webm": (
+        SRC.format("175x143"), VP8 + ["-pix_fmt", "yuv420p"], "yuv420p",
+        ("420", 8, 0), (5, 1, "limited"), None),
+    # The file says BT.709 and SMPTE 170M primaries: the bitstream's BT.601
+    # stands over the file's matrix, and the primaries are the file's.
+    "vp8_tagged.webm": (
+        SRC.format("176x144"), VP8 + ["-pix_fmt", "yuv420p", "-colorspace", "bt709",
+                                      "-color_primaries", "smpte170m", "-color_range", "tv"],
+        "yuv420p", ("420", 8, 0), (5, 6, "limited"), None),
+    # WebM's transparency over VP8, decoded by libvpx (FFmpeg's own VP8
+    # decoder does not read the alpha).
+    "vp8_alpha.webm": (
+        SRC.format("176x144") + ALPHA, VP8 + ["-pix_fmt", "yuva420p"], "yuva420p",
+        ("420", 8, 1), (5, 1, "limited"), "libvpx"),
     "av1_bt709.webm": (
         SRC.format("176x144"), AV1 + ["-pix_fmt", "yuv420p", "-colorspace", "bt709",
                                       "-color_primaries", "bt709", "-color_trc", "bt709",
@@ -414,18 +441,18 @@ def main():
     tools = Tools(args.ffmpeg, args.harness)
     for name, (source, encode, pix_fmt, (fmt, depth, alpha), colour, decoder) in FIXTURES.items():
         tools.encode(name, source, encode)
+        # FFmpeg's own decoders where the pixels need libvpx's (for the
+        # alpha): ffmpeg's libvpx wrapper does not mark key frames, nor read
+        # VP8's colour bits, and the frames, times and durations are the same.
+        own = None if decoder in ("libvpx", "libvpx-vp9") else decoder
         probe = tools.frames(name, decoder)
-        check_colour(name, colour, probe)
+        check_colour(name, colour, tools.frames(name, own))
         width, height = probe["streams"][0]["width"], probe["streams"][0]["height"]
         raw = tools.raw(name, decoder, pix_fmt)
         pixels = pixels_md5(tools, raw, len(probe["frames"]), width, height, fmt, depth, alpha,
                             colour)
-        codec = "av1" if name.startswith("av1") else "vp9"
-        # The frames' list from FFmpeg's own VP9 decoder even where the pixels
-        # need libvpx's (for the alpha): ffmpeg's libvpx wrapper does not mark
-        # key frames, and the frames, times and durations are the same.
-        listed_by = None if decoder == "libvpx-vp9" else decoder
-        answer(tools, name, listed_by, pixels,
+        codec = name.split("_", 1)[0]
+        answer(tools, name, own, pixels,
                stream_info(tools, name, decoder, codec, width, height, alpha))
     write_cropped(tools)
 

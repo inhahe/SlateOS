@@ -1,7 +1,7 @@
 //! A decoded picture, and its conversion to pixels.
 //!
 //! A [`Picture`] holds the decoder's planes as the decoder made them --
-//! VP9's in place, without a copy -- so that a player that has fallen
+//! VP8's and VP9's in place, without a copy -- so that a player that has fallen
 //! behind can drop pictures without paying for their conversion, and
 //! converts only the ones it shows ([`Picture::to_frame`]).
 //!
@@ -40,6 +40,11 @@ pub struct Picture {
 
 /// The decoder's planes.
 pub(crate) enum Planes {
+    Vp8 {
+        picture: vp8::Picture,
+        /// The alpha stream's picture, whose luma is the alpha.
+        alpha: Option<vp8::Picture>,
+    },
     Vp9 {
         picture: vp9::Picture,
         /// The alpha stream's picture, whose luma is the alpha.
@@ -76,6 +81,7 @@ impl Picture {
     /// Its width and height in pixels.
     pub fn size(&self) -> (u32, u32) {
         match &self.planes {
+            Planes::Vp8 { picture, .. } => (picture.width(), picture.height()),
             Planes::Vp9 { picture, .. } => (picture.width(), picture.height()),
             Planes::Av1(p) => p.size(),
         }
@@ -86,6 +92,9 @@ impl Picture {
     pub fn colour(&self) -> Colour {
         let (width, height) = self.size();
         let said = match &self.planes {
+            Planes::Vp8 { picture, .. } => {
+                ColourHint::vp8(picture.color_space(), picture.clamping_type())
+            }
             Planes::Vp9 { picture, .. } => {
                 let (space, full_range) = picture.color();
                 ColourHint::vp9(space, full_range)
@@ -123,6 +132,7 @@ impl Picture {
     pub fn to_pixels(&self, out: &mut Vec<u32>) -> Result<(), Error> {
         let colour = self.colour();
         let result = match &self.planes {
+            Planes::Vp8 { picture, alpha } => vp8_pixels(picture, alpha.as_ref(), colour, out),
             Planes::Vp9 { picture, alpha } => vp9_pixels(picture, alpha.as_ref(), colour, out),
             Planes::Av1(p) => av1_pixels(p, colour, out),
         };
@@ -333,6 +343,43 @@ fn rows_doubled<T: Sample>(chroma: Plane<'_, T>, height: usize) -> PlaneBuf<T> {
         push(chroma.row(c), chroma.row(c), near);
     }
     out
+}
+
+/// A VP8 plane as `yuv` reads it, in place.
+fn view8(p: vp8::PlaneView<'_>) -> Plane<'_, u8> {
+    Plane {
+        samples: p.data,
+        stride: p.stride,
+        width: p.width,
+        height: p.height,
+    }
+}
+
+/// A VP8 picture's pixels: always 8-bit 4:2:0, with WebM's alpha where its
+/// alpha stream's picture fits it (the same size; else shown opaque, as
+/// for VP9).
+fn vp8_pixels(
+    picture: &vp8::Picture,
+    alpha: Option<&vp8::Picture>,
+    colour: Colour,
+    out: &mut Vec<u32>,
+) -> Result<(), Error> {
+    let size = |n: u32| usize::try_from(n).map_err(|_| Error::Colour(reformat::Error::Size));
+    let (width, height) = (size(picture.width())?, size(picture.height())?);
+    let alpha = alpha.filter(|a| (a.width(), a.height()) == (picture.width(), picture.height()));
+    let [Some(y), Some(u), Some(v)] = [0, 1, 2].map(|i| picture.plane(i).map(view8)) else {
+        return Err(Error::Colour(reformat::Error::Size));
+    };
+    Planar {
+        width,
+        height,
+        depth: 8,
+        subsampling: (1, 1),
+        y,
+        chroma: Some((u, v)),
+        alpha: alpha.and_then(|a| a.plane(0)).map(view8),
+    }
+    .convert(colour, out)
 }
 
 /// A VP9 plane as `yuv` reads it, in place.

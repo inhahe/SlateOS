@@ -43,6 +43,22 @@ pub struct Colour {
 }
 
 impl ColourHint {
+    /// What a VP8 key frame says, as FFmpeg reads it (`libavcodec/vp8.c`):
+    /// its colour space bit 0 -- the only value the specification defines,
+    /// YUV "similar to BT.601" -- is BT.601 (FFmpeg's `BT470BG` matrix, 5),
+    /// and 1 says nothing; its clamping type bit 1 is the full range, and 0
+    /// the studio range. libvpx reads both bits and goes by neither. FFmpeg's
+    /// reading is what players built on it show, so a VP8 picture is BT.601
+    /// whatever its size or its file says -- unlike untagged VP9, whose HD
+    /// sizes are guessed BT.709.
+    pub(crate) fn vp8(color_space: u8, clamping_type: u8) -> Self {
+        Self {
+            matrix: (color_space == 0).then_some(5),
+            primaries: None,
+            full_range: Some(clamping_type == 1),
+        }
+    }
+
     /// What a VP9 frame says: libvpx's `vpx_color_space_t` and its range
     /// bit. VP9 has no primaries, and an unknown or reserved space says
     /// nothing. The numbers are FFmpeg's (`libavcodec/vp9.c`): BT.601 is
@@ -190,6 +206,25 @@ mod tests {
             resolve(ColourHint::vp9(3, false), NOTHING, 1920, 1080).matrix,
             6
         );
+    }
+
+    #[test]
+    fn vp8_is_bt601_at_any_size_and_says_its_range() {
+        // HD VP8 stays BT.601, where HD VP9 that says nothing is guessed
+        // BT.709; the file's matrix gives way to the bitstream's word.
+        let file = ColourHint {
+            matrix: Some(1),
+            primaries: Some(1),
+            full_range: Some(true),
+        };
+        let c = resolve(ColourHint::vp8(0, 0), file, 1920, 1080);
+        assert_eq!((c.matrix, c.primaries, c.full_range), (5, 1, false));
+        let c = resolve(ColourHint::vp8(0, 1), NOTHING, 176, 144);
+        assert_eq!((c.matrix, c.full_range), (5, true));
+        // The reserved colour space says nothing: the file's word, or the
+        // size's guess.
+        assert_eq!(resolve(ColourHint::vp8(1, 0), file, 176, 144).matrix, 1);
+        assert_eq!(resolve(ColourHint::vp8(1, 0), NOTHING, 176, 144).matrix, 6);
     }
 
     #[test]

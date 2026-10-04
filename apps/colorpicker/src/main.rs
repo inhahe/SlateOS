@@ -811,10 +811,17 @@ pub struct ColorPickerApp {
     clipboard: String,
     /// Hex input buffer.
     hex_input: String,
-    /// Whether the value box has keyboard focus and is taking hex digits.
     /// Whether the shortcut card is up.
     show_help: bool,
+    /// Whether the value box is open, taking hex digits -- which it does
+    /// only while the shortcut card is down, the card taking every key.
     editing: bool,
+    /// Whether the pointer is over the value box, which lights it when a
+    /// press there would open it (`render_format_values`).
+    box_hovered: bool,
+    /// The user's focus width, which the value box draws its focus mark at
+    /// (`appearance_changed`).
+    focus_ring_width: f32,
     /// The slider the pointer is currently dragging, if any.
     ///
     /// Held for the whole gesture rather than re-hit-testing each move,
@@ -868,6 +875,8 @@ impl ColorPickerApp {
             hex_input: String::new(),
             show_help: false,
             editing: false,
+            box_hovered: false,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             dragging: None,
             status: String::new(),
             window_size: (WINDOW_WIDTH, WINDOW_HEIGHT),
@@ -1279,12 +1288,32 @@ impl ColorPickerApp {
         }
     }
 
-    /// Continue a slider drag.
-    pub fn handle_move(&mut self, x: f32, size: (f32, f32)) -> Action {
-        match self.dragging {
-            Some(channel) => self.drag_slider(channel, x, size),
-            None => Action::None,
+    /// Follow the pointer: continue a slider drag, or light the value box.
+    ///
+    /// A drag holds the pointer until the button comes up -- the slider it
+    /// began on keeps it however far it wanders -- so nothing else lights
+    /// under it meanwhile.
+    pub fn handle_move(&mut self, x: f32, y: f32, size: (f32, f32)) -> Action {
+        if let Some(channel) = self.dragging {
+            return self.drag_slider(channel, x, size);
         }
+        let over = self.hit_test(x, y, size) == Some(Target::ValueBox);
+        if over == self.box_hovered {
+            return Action::None;
+        }
+        self.box_hovered = over;
+        Action::Redraw
+    }
+
+    /// The pointer has left the window: end any drag, since the moves that
+    /// follow are not ours to see and continuing would leave the slider
+    /// stuck to a pointer we cannot track, and put the box's light out.
+    fn pointer_left(&mut self) -> Action {
+        let ended = self.handle_release();
+        if std::mem::take(&mut self.box_hovered) {
+            return Action::Redraw;
+        }
+        ended
     }
 
     /// End a slider drag.
@@ -1441,12 +1470,19 @@ impl ColorPickerApp {
         match event {
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::Press(button) => self.handle_click(mouse.x, mouse.y, button, size),
-                MouseEventKind::Move => self.handle_move(mouse.x, size),
-                MouseEventKind::Release(_) => self.handle_release(),
-                // A pointer that leaves the window mid-drag ends the drag: the
-                // moves that follow are not ours to see, so continuing would
-                // leave the slider stuck to a pointer we cannot track.
-                MouseEventKind::Leave => self.handle_release(),
+                MouseEventKind::Move => self.handle_move(mouse.x, mouse.y, size),
+                MouseEventKind::Release(_) => {
+                    // A drag that ends lets go of the pointer, so what it is
+                    // over now lights without waiting for it to move.
+                    let ended = self.handle_release();
+                    let relit = self.handle_move(mouse.x, mouse.y, size);
+                    if ended == Action::Redraw || relit == Action::Redraw {
+                        Action::Redraw
+                    } else {
+                        Action::None
+                    }
+                }
+                MouseEventKind::Leave => self.pointer_left(),
                 _ => Action::None,
             },
             Event::Key(key) => self.handle_key(key, size),
@@ -1735,51 +1771,43 @@ impl ColorPickerApp {
 
     fn render_format_values(&self, cmds: &mut Frame, y: &mut f32, width: f32) {
         let field_w = width - 2.0 * PADDING;
+        let rect = Rect::new(PADDING, *y, field_w, 30.0);
 
-        // Input field background
-        self.palette.push_surface(
+        // The toolkit's field, in the theme's shape (lane C,
+        // c-e-a-theme-can-shape-the-controls).  While the box is open its
+        // edge says whether what is in it would be accepted -- a hex field
+        // that only tells you at Enter is a field you have to guess at --
+        // and an empty buffer is neither right nor wrong yet, so it stays
+        // plain rather than starting out red.  Lit under the pointer, except
+        // where a press would not reach it: under the card, which takes the
+        // press, or with the eyedropper armed, which samples it instead.
+        let has_keyboard = self.editing && !self.show_help;
+        guitk::field::draw(
             cmds,
-            PADDING,
-            *y,
-            field_w,
-            30.0,
-            SMALL_RADIUS,
-            Surface::Card,
+            &self.palette,
+            rect,
+            guitk::field::State {
+                hovered: self.box_hovered && !self.show_help && !self.eyedropper.active,
+                focused: has_keyboard,
+                disabled: false,
+                // The buffer is empty whenever the box is closed (`cancel_edit`,
+                // `commit_edit`), so a closed box is never red.
+                invalid: !self.hex_input.is_empty()
+                    && PickedColor::from_hex_str(&self.hex_input).is_none(),
+            },
+            self.focus_ring_width,
         );
-        cmds.hit(Target::ValueBox, Rect::new(PADDING, *y, field_w, 30.0));
-
-        // While typing, the border says whether what is in the box would be
-        // accepted — a hex field that only tells you at Enter is a field you
-        // have to guess at. An empty buffer is neither right nor wrong yet,
-        // so it stays neutral rather than starting out red.
-        let border = if self.editing {
-            match (
-                self.hex_input.is_empty(),
-                PickedColor::from_hex_str(&self.hex_input).is_some(),
-            ) {
-                (true, _) => self.palette.blue,
-                (false, true) => self.palette.green,
-                (false, false) => self.palette.red,
-            }
-        } else {
-            self.palette.overlay0
-        };
-        cmds.push(RenderCommand::StrokeRect {
-            x: PADDING,
-            y: *y,
-            width: field_w,
-            height: 30.0,
-            color: border,
-            line_width: if self.editing { 2.0 } else { 1.0 },
-            corner_radii: CornerRadii::all(SMALL_RADIUS),
-        });
+        cmds.hit(Target::ValueBox, rect);
 
         // A caret is drawn as part of the text rather than as a separate
         // command, because there is no cursor within the buffer to place one
         // at: typing always appends and Backspace always removes from the
-        // end, so the caret is only ever at the end.
-        let text = if self.editing {
+        // end, so the caret is only ever at the end.  And only while typing
+        // goes here: with the card up, the keys go to the card.
+        let text = if has_keyboard {
             format!("{}_", self.hex_input)
+        } else if self.editing {
+            self.hex_input.clone()
         } else {
             self.current.format_as(self.active_format)
         };
@@ -2338,6 +2366,10 @@ impl ColorPickerApp {
 impl App for ColorPickerApp {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -3537,18 +3569,210 @@ mod tests {
             ColorPickerApp::SIZE,
         );
 
-        app.handle_event(
-            &Event::Mouse(MouseEvent {
-                x: -1.0,
-                y: -1.0,
-                kind: MouseEventKind::Leave,
-            }),
-            ColorPickerApp::SIZE,
+        assert_eq!(
+            app.handle_event(
+                &Event::Mouse(MouseEvent {
+                    x: -1.0,
+                    y: -1.0,
+                    kind: MouseEventKind::Leave,
+                }),
+                ColorPickerApp::SIZE,
+            ),
+            Action::Redraw,
+            "the drag's colour went into Recent and the strip was not repainted"
         );
+        assert_eq!(app.history.len(), 1);
         let parked = app.current;
         // Moves that arrive after the pointer left are not ours to act on.
         move_to(&mut app, track.x + track.w);
         assert_eq!(app.current, parked);
+    }
+
+    /// **The value box is the toolkit's field** (lane C,
+    /// c-e-a-theme-can-shape-the-controls): lit under the pointer and out
+    /// when it goes, marked at the user's focus width while it takes the
+    /// keys, and red while what is in it would be refused.
+    #[test]
+    fn the_value_box_is_the_toolkits_field() {
+        use guitk::field::State;
+        let mut app = ColorPickerApp::create();
+        let mut palette = app.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut app, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        App::appearance_changed(&mut app, &settings);
+        let size = ColorPickerApp::SIZE;
+        let rect = rect_of(&app, Target::ValueBox).expect("the value box is drawn");
+        let draws = |app: &ColorPickerApp, s: State| {
+            let seq = |f: State| {
+                let mut want: Vec<RenderCommand> = Vec::new();
+                guitk::field::draw(&mut want, &palette, rect, f, width);
+                want
+            };
+            let frame = app.frame(size.0, size.1);
+            let cmds = frame.commands();
+            let has = |want: &[RenderCommand]| {
+                !want.is_empty() && cmds.windows(want.len()).any(|w| w == want)
+            };
+            // Not focused means no focus mark either: an unfocused box's
+            // commands begin a focused one's.
+            has(&seq(s)) && (s.focused || !has(&seq(State { focused: true, ..s })))
+        };
+        let texts = |app: &ColorPickerApp| -> Vec<String> {
+            app.frame(size.0, size.1)
+                .commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let pointer = |app: &mut ColorPickerApp, x: f32, y: f32, kind: MouseEventKind| {
+            app.handle_event(&Event::Mouse(MouseEvent { x, y, kind }), size)
+        };
+        let idle = State::default();
+        let lit = State {
+            hovered: true,
+            ..idle
+        };
+        let keyed = State {
+            focused: true,
+            ..lit
+        };
+
+        assert!(
+            draws(&app, idle),
+            "the value box is not the toolkit's field"
+        );
+
+        // Lit under the pointer, out when it moves off or leaves.
+        let (x, y) = rect.centre();
+        assert_eq!(
+            pointer(&mut app, x, y, MouseEventKind::Move),
+            Action::Redraw
+        );
+        assert!(draws(&app, lit), "the box does not light under the pointer");
+        assert_eq!(
+            pointer(&mut app, x + 1.0, y, MouseEventKind::Move),
+            Action::None,
+            "a move within the box repaints"
+        );
+        assert_eq!(
+            pointer(&mut app, x, rect.y - 1.0, MouseEventKind::Move),
+            Action::Redraw
+        );
+        assert!(
+            draws(&app, idle),
+            "the box stays lit after the pointer moves off"
+        );
+        pointer(&mut app, x, y, MouseEventKind::Move);
+        assert_eq!(
+            pointer(&mut app, -1.0, -1.0, MouseEventKind::Leave),
+            Action::Redraw
+        );
+        assert!(
+            draws(&app, idle),
+            "the box stays lit after the pointer leaves the window"
+        );
+
+        // Open, it is marked at the user's width and shows a caret.
+        pointer(&mut app, x, y, MouseEventKind::Move);
+        click(&mut app, Target::ValueBox);
+        assert!(
+            draws(&app, keyed),
+            "the open box is not marked at the user's focus width"
+        );
+        assert!(texts(&app).contains(&format!("{}_", app.hex_input)));
+
+        // A colour that would be refused is red as it is typed.
+        key(&mut app, &press(Key::Backspace));
+        let typed = app.hex_input.clone();
+        assert!(
+            PickedColor::from_hex_str(&typed).is_none(),
+            "the test needs a refusable colour, not {typed:?}"
+        );
+        let refused = State {
+            invalid: true,
+            ..keyed
+        };
+        assert!(
+            draws(&app, refused),
+            "{typed:?}, which Enter would refuse, is not shown red"
+        );
+
+        // Under the shortcut card, which takes the keys and the press, it is
+        // neither lit nor marked and has no caret -- but keeps what it holds,
+        // red and all.
+        key(&mut app, &press(Key::F1));
+        assert!(
+            draws(
+                &app,
+                State {
+                    invalid: true,
+                    ..idle
+                }
+            ),
+            "the box is lit or marked under the shortcut card, or not red"
+        );
+        let shown = texts(&app);
+        assert!(
+            shown.contains(&typed) && !shown.contains(&format!("{typed}_")),
+            "under the card the box shows a caret, or not what was typed: {shown:?}"
+        );
+        key(&mut app, &press(Key::F1));
+        assert!(
+            draws(&app, refused),
+            "control: the card down gives the mark back"
+        );
+
+        // An empty box is neither right nor wrong yet.
+        while !app.hex_input.is_empty() {
+            key(&mut app, &press(Key::Backspace));
+        }
+        assert!(draws(&app, keyed), "the empty box starts out red");
+        key(&mut app, &press(Key::Escape));
+        assert!(!app.editing);
+        assert!(draws(&app, lit), "the closed box is still marked");
+        // Nor lit under the card -- checked here, with nothing red, because a
+        // red edge is red lit or not.
+        key(&mut app, &press(Key::F1));
+        assert!(draws(&app, idle), "the box lights under the shortcut card");
+        key(&mut app, &press(Key::F1));
+
+        // With the eyedropper armed a press samples the box rather than
+        // opening it, so it does not light.
+        key(&mut app, &ctrl(Key::E));
+        assert!(app.eyedropper.active);
+        assert!(
+            draws(&app, idle),
+            "the box lights with the eyedropper armed"
+        );
+        key(&mut app, &ctrl(Key::E));
+        assert!(draws(&app, lit), "control: disarmed, the box lights again");
+
+        // A slider's drag holds the pointer: the box does not light under it
+        // until the button comes up, and then does at once.
+        let row = rect_of(&app, Target::Slider(Channel::R)).expect("the R slider is drawn");
+        let (sx, sy) = row.centre();
+        pointer(&mut app, sx, sy, MouseEventKind::Move);
+        assert!(draws(&app, idle));
+        app.handle_click(sx, sy, MouseButton::Left, size);
+        pointer(&mut app, x, y, MouseEventKind::Move);
+        assert!(draws(&app, idle), "the box lit under a slider's drag");
+        assert_eq!(
+            pointer(&mut app, x, y, MouseEventKind::Release(MouseButton::Left)),
+            Action::Redraw
+        );
+        assert!(
+            draws(&app, lit),
+            "the box did not light when the drag let go over it"
+        );
     }
 
     #[test]

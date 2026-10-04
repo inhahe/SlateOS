@@ -33,9 +33,11 @@
 //! The AV1 frames are decoded by rav1d, the Rust port of dav1d -- the decoder
 //! libavif, Chrome and Pillow use -- driven as libavif drives dav1d
 //! (`avif/decode.rs`): the same settings, the same send-and-drain loop, a
-//! grid's tiles checked and put together by libavif's rules. A frame whose
-//! size, depth or chroma layout is not the container's is refused, as Chrome
-//! refuses it.
+//! grid's tiles checked and put together by libavif's rules. A frame coded
+//! at another size than its item's `ispe` (or its track's) is brought to that
+//! size as libavif brings it, by libyuv's scaling (`avif/scale.rs`). After
+//! that, a frame whose size, depth or chroma layout is not the container's
+//! is refused, as Chrome refuses it.
 //!
 //! The conversion to pixels is libavif's `avifImageYUVToRGB` as Chrome calls
 //! it -- 8-bit BGRA, straight alpha, libavif's default upsampling -- with
@@ -50,9 +52,6 @@
 //! still viewer shows; [`Animation`] plays every frame, as libavif's
 //! `avifDecoderNextImage` and `avifDecoderNthImage` decode them
 //! (`avif/animation.rs`).
-//!
-//! Not yet: a frame coded at another size than its item's `ispe` -- which
-//! libavif rescales with libyuv's box filter -- is refused as unsupported.
 //!
 //! # Hostile input
 //!
@@ -81,6 +80,8 @@ mod decode;
 mod libyuv;
 mod movie;
 mod obu;
+#[cfg(feature = "avif")]
+mod scale;
 mod setup;
 mod stream;
 

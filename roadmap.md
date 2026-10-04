@@ -3774,9 +3774,14 @@ lane C's `guitk`.
     durations, a finite loop and an alpha track that ends early), in order and
     out of it, bit-exact against Pillow. Playing them in the viewer is lane
     E's (`requests/f-bce-avif-pictures-open-and-animate.md`).
-  - `[ ]` Frames coded at another size than their `ispe`, rescaled as libavif
-    rescales them (known-issues.md, "[F] An AVIF frame coded at another
-    size").
+  - `[x]` Frames coded at another size than their `ispe`, rescaled as libavif
+    rescales them (`src/avif/scale.rs`): libyuv's `ScalePlane` and
+    `ScalePlane_12` with `kFilterBox`, every method they choose by the sizes,
+    as libyuv's C computes it (design-decisions §1344). Held to libyuv 1924
+    built with its x86 code off on 62,208 size combinations and 57 larger
+    cases at 8, 10 and 12 bits, and to Pillow -- 12.1.1 and 12.3.0 agree --
+    byte for byte on 28 fixtures made here
+    (`tests/data/generate_avif_rescale.py`).
   - `[-]` Speed: the committed benchmark is in (`bench_avif_decode`: about
     twice dav1d's time, one thread); making rav1d faster waits on
     `open-questions.md` F-Q4 -- dav1d's assembly, or SIMD in Rust

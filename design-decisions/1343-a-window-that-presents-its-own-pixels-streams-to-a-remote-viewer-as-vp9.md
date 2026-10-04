@@ -32,9 +32,11 @@ screenshots) still go exact, as before.
   so the convention is internal. Alpha is not carried: the stream is opaque.
 - *Protocol:* scene version 3 gives each window a video update -- nothing, a
   frame, or a stop -- after its pictures (`guiremote::scene`). A frame carries
-  at most one compressed frame per window; the viewer queues them for its
-  owner to decode in order, and refuses a frame for a window already holding
-  64 untaken, which a stream restart (a new session) clears.
+  at most one compressed frame per window; the viewer queues the updates,
+  frames and stops alike, for its owner to obey in order (a stop drops the
+  untaken frames before it, which will never show), and refuses a frame for a
+  window already holding 64 untaken, which a stream restart (a new session)
+  clears.
 
 **Alternatives.**
 

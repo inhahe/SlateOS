@@ -371,15 +371,22 @@ MUTATIONS = [
     ),
     (
         "a field refuses what AltGr types",
-        "                if !textline::types_into_field(key) {",
-        "                if !textline::types_into_field(key) || key.modifiers.ctrl {",
+        "                self.sync_search_editor();\n                let before = (\n",
+        "                if key.modifiers.ctrl {\n"
+        "                    return EventResult::Ignored;\n"
+        "                }\n"
+        "                self.sync_search_editor();\n                let before = (\n",
         ["altgr_types_into_a_field_and_runs_no_shortcut"],
     ),
     (
         "a field types a command's letter",
-        "                if !textline::types_into_field(key) {",
-        "                if !key.types_text() {",
-        ["a_command_types_nothing_and_alt_or_windows_is_no_shortcut"],
+        "                self.sync_search_editor();\n                let before = (\n",
+        "                if key.types_text() && !textline::types_into_field(key) {\n"
+        "                    self.search_query.push_str(&key.text);\n"
+        "                    return EventResult::Consumed;\n"
+        "                }\n"
+        "                self.sync_search_editor();\n                let before = (\n",
+        ["a_command_types_nothing_and_alt_or_windows_is_no_shortcut", "the_search_box_edits_like_a_field"],
     ),
     # -- the shortcut card's hold on the pointer
     (
@@ -461,6 +468,96 @@ MUTATIONS += [
         "            self.ask(Asking::NotebookName(id), &current);\n",
         "            self.ask(Asking::NotebookName(id), \"\");\n",
         [RENAMED],
+    ),
+]
+
+# The toolbar answers the pointer, and its search box is the toolkit's
+# field, edited by textline's editor (2026-10-04).
+TOOLBAR = "every_toolbar_control_answers_a_press"
+SEARCH_FIELD = "the_search_box_is_the_toolkits_field"
+SEARCH_EDITS = "the_search_box_edits_like_a_field"
+
+MUTATIONS += [
+    (
+        "a press on the toolbar reaches nothing",
+        "        if let Some(control) = self.toolbar_control_at(event.x, event.y) {\n"
+        "            return self.press_toolbar(control, event.x);\n"
+        "        }\n",
+        "",
+        [TOOLBAR, SEARCH_FIELD],
+    ),
+    (
+        "Sort does not sort",
+        "            ToolbarControl::Sort => self.cycle_sort(),\n",
+        "            ToolbarControl::Sort => {}\n",
+        [TOOLBAR],
+    ),
+    (
+        "the star does not switch",
+        "                self.toggle_favorites_filter();\n                self.reanchor_selection();\n",
+        "                self.reanchor_selection();\n",
+        [TOOLBAR],
+    ),
+    (
+        "a press in the search box takes no keyboard",
+        "            ToolbarControl::Search => self.press_search(x),\n",
+        "            ToolbarControl::Search => {}\n",
+        [TOOLBAR, SEARCH_FIELD, SEARCH_EDITS],
+    ),
+    (
+        "Blank makes a note called Blank",
+        '            ToolbarControl::Template(NoteTemplate::Blank) => self.ask(Asking::NewNote, ""),\n',
+        "",
+        [TOOLBAR],
+    ),
+    (
+        "a template makes no note",
+        "                let id = self.create_note_from_template(template, notebook);\n"
+        "                self.selected_note = Some(id);\n",
+        "                let _ = (template, notebook);\n",
+        [TOOLBAR],
+    ),
+    (
+        "the search box is never lit",
+        "            hovered: self.search_hovered && !covered,\n",
+        "            hovered: false,\n",
+        [SEARCH_FIELD],
+    ),
+    (
+        "the pointer leaves the search box lit",
+        "                self.search_hovered = over;\n",
+        "                self.search_hovered |= over;\n",
+        [SEARCH_FIELD],
+    ),
+    (
+        "the search box never has the keyboard's mark",
+        "            focused: self.searching() && !covered,\n",
+        "            focused: false,\n",
+        [SEARCH_FIELD],
+    ),
+    (
+        "the search box keeps its mark under the name dialog",
+        "        let covered = self.show_help || self.question.is_some() || self.asking.is_some();\n",
+        "        let covered = self.show_help || self.question.is_some();\n",
+        [SEARCH_FIELD],
+    ),
+    (
+        "a query that finds nothing is not red",
+        "            invalid: !self.search_query.is_empty() && self.visible_notes().is_empty(),\n",
+        "            invalid: false,\n",
+        [SEARCH_FIELD],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings.focus_ring_width();\n",
+        [SEARCH_FIELD],
+    ),
+    (
+        "a press in the search box leaves the caret at the end",
+        "        self.search_editor.set_selection_anchor(None);\n        self.search_editor.set_cursor(cursor);\n",
+        "        self.search_editor.set_selection_anchor(None);\n",
+        [SEARCH_EDITS],
     ),
 ]
 

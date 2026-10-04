@@ -79,13 +79,16 @@ use appearance::Palette;
 use appearance::Surface;
 use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::field;
 use guitk::menu::{ContextMenu, MenuItem};
 use guitk::modal::{DialogResult, InputDialog};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::text::TextCursor;
 use guitk::textarea::{self, TextArea};
-use guitk::textinput::KeyEdit;
+use guitk::textedit;
+use guitk::textinput::{KeyEdit, TextInput};
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
 use std::process::ExitCode;
@@ -185,6 +188,58 @@ pub enum Asking {
     /// A name for a notebook that does not exist yet.
     NewNotebook,
 }
+
+/// A control in the toolbar.
+///
+/// The toolbar drew a sort button, a favourites switch, a search box and
+/// four template buttons, and a press on any of them did nothing: only the
+/// keys reached sorting, the favourites and the search, and nothing at all
+/// reached the templates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolbarControl {
+    /// The sort order: a press steps it on.
+    Sort,
+    /// Whether only favourites are listed: a press switches it.
+    Favorites,
+    /// The search box: a press gives it the keyboard.
+    Search,
+    /// A press makes a note from this template.
+    Template(NoteTemplate),
+}
+
+/// The templates the toolbar offers, in order.
+const TOOLBAR_TEMPLATES: [NoteTemplate; 4] = [
+    NoteTemplate::Blank,
+    NoteTemplate::MeetingNotes,
+    NoteTemplate::TodoList,
+    NoteTemplate::Journal,
+];
+
+/// The label on a template's toolbar button: shorter than the template's
+/// name, which is the title of the note it makes.
+fn template_button_label(template: NoteTemplate) -> &'static str {
+    match template {
+        NoteTemplate::MeetingNotes => "Meeting",
+        NoteTemplate::TodoList => "Todo",
+        other => other.label(),
+    }
+}
+
+/// Where the template buttons' "New:" label starts.
+const TEMPLATES_X: f32 = 530.0;
+
+/// The search box's left edge and width.
+const SEARCH_X: f32 = 310.0;
+const SEARCH_W: f32 = 200.0;
+
+/// The size the search box's text is drawn at, and how far in from either
+/// side of the box it sits.
+const SEARCH_TEXT_SIZE: f32 = 12.0;
+const SEARCH_TEXT_INSET: f32 = 8.0;
+
+/// The most characters the search holds: far more than anything searched
+/// for, and a stop for a paste of a whole note.
+const SEARCH_CAPACITY: usize = 256;
 
 /// What an open menu is about.
 ///
@@ -1640,6 +1695,14 @@ pub struct NotesApp {
     question: Option<unsaved::Question<Pending>>,
     /// A name being asked for, and the dialog asking.
     asking: Option<(Asking, InputDialog)>,
+    /// The search box's caret and selection, laid over `search_query`,
+    /// which stays the truth: reloaded whenever the query has changed under
+    /// it (Escape in the list clears the search).
+    search_editor: TextInput,
+    /// Whether the pointer is over the search box: its edge is warmed.
+    search_hovered: bool,
+    /// What Ctrl+C or Ctrl+X last took from the search box, for Ctrl+V.
+    search_clipboard: String,
     /// How wide the mark is round what has the keyboard in the name dialog:
     /// the user's focus width, the toolkit's until it is known.
     focus_ring_width: f32,
@@ -1694,6 +1757,9 @@ impl NotesApp {
             store_error: None,
             question: None,
             asking: None,
+            search_editor: TextInput::new(),
+            search_hovered: false,
+            search_clipboard: String::new(),
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             quit: false,
         }
@@ -2966,8 +3032,22 @@ impl NotesApp {
                 return EventResult::Consumed;
             }
         }
-        if !matches!(event.kind, MouseEventKind::Press(MouseButton::Left)) {
-            return EventResult::Ignored;
+        match event.kind {
+            // The search box is lit under the pointer.
+            MouseEventKind::Move | MouseEventKind::Leave => {
+                let over = matches!(event.kind, MouseEventKind::Move)
+                    && self.toolbar_control_at(event.x, event.y) == Some(ToolbarControl::Search);
+                if over == self.search_hovered {
+                    return EventResult::Ignored;
+                }
+                self.search_hovered = over;
+                return EventResult::Consumed;
+            }
+            MouseEventKind::Press(MouseButton::Left) => {}
+            _ => return EventResult::Ignored,
+        }
+        if let Some(control) = self.toolbar_control_at(event.x, event.y) {
+            return self.press_toolbar(control, event.x);
         }
         if let Some(tag) = self.tag_at(event.x, event.y) {
             // Clicking the active one clears it. The chip is already drawn
@@ -3076,11 +3156,11 @@ impl NotesApp {
             // plain `/` require Ctrl as well, and the search box could not be
             // opened the way every other program opens it.
             Key::Slash => {
-                self.text_entry = Some(TextEntry::Search);
+                self.focus_search();
                 EventResult::Consumed
             }
             Key::F if ctrl => {
-                self.text_entry = Some(TextEntry::Search);
+                self.focus_search();
                 EventResult::Consumed
             }
             // Everything is kept as it changes, so there is nothing for Ctrl+S
@@ -3408,29 +3488,51 @@ impl NotesApp {
         if let TextEntry::NoteBody(id) = entry {
             return self.handle_body_key(id, key);
         }
-        // What is left is the search box.
+        // What is left is the search box: Escape and Enter put the keyboard
+        // back in the list, plain; every other key is the editor's
+        // (`textline::apply_key`) -- the caret keys, Backspace and Delete,
+        // Ctrl+A, C, X and V, and typing, which knows a command from AltGr:
+        // Polish `ś` is AltGr+S, and a command carries its letter as text
+        // and types none of it. The box had no caret: Backspace from the end
+        // was its only edit.
         match key.key {
-            Key::Escape | Key::Enter => {
+            Key::Escape | Key::Enter if textline::is_plain(key.modifiers) => {
                 self.text_entry = None;
                 EventResult::Consumed
             }
-            Key::Backspace => {
-                if self.search_query.pop().is_none() {
-                    return EventResult::Ignored;
-                }
-                self.reanchor_selection();
-                EventResult::Consumed
-            }
             _ => {
-                // AltGr arrives as Ctrl+Alt and types -- Polish `ś` is
-                // AltGr+S. A command carries its letter as text and types
-                // none of it: Ctrl or Alt on its own, the Windows key.
-                if !textline::types_into_field(key) {
+                self.sync_search_editor();
+                let before = (
+                    self.search_editor.cursor(),
+                    self.search_editor.selection_anchor(),
+                );
+                let edit = textline::apply_key(
+                    &mut self.search_editor,
+                    key,
+                    SEARCH_CAPACITY,
+                    &self.search_clipboard,
+                    SEARCH_TEXT_SIZE,
+                );
+                if let Some(copied) = edit.copied {
+                    self.search_clipboard = copied;
+                }
+                if !edit.handled {
                     return EventResult::Ignored;
                 }
-                self.search_query.extend(key.typed());
-                self.reanchor_selection();
-                EventResult::Consumed
+                if self.search_editor.text() != self.search_query {
+                    self.search_query = self.search_editor.text().to_owned();
+                    self.reanchor_selection();
+                    return EventResult::Consumed;
+                }
+                if (
+                    self.search_editor.cursor(),
+                    self.search_editor.selection_anchor(),
+                ) == before
+                {
+                    EventResult::Ignored
+                } else {
+                    EventResult::Consumed
+                }
             }
         }
     }
@@ -3743,6 +3845,181 @@ impl NotesApp {
         cmds
     }
 
+    /// Every control in the toolbar and the box it is drawn in, `(x, y, w,
+    /// h)`: one list that the drawing and a press both read, so nothing is
+    /// drawn where a press does not reach it.
+    fn toolbar_controls(&self) -> Vec<(ToolbarControl, (f32, f32, f32, f32))> {
+        let mut controls = vec![
+            (ToolbarControl::Sort, (160.0, 6.0, 100.0, 24.0)),
+            (ToolbarControl::Favorites, (270.0, 6.0, 24.0, 24.0)),
+            (ToolbarControl::Search, (SEARCH_X, 6.0, SEARCH_W, 24.0)),
+        ];
+        let mut x = TEMPLATES_X + 35.0;
+        for template in TOOLBAR_TEMPLATES {
+            let w = text::padded_width(
+                template_button_label(template),
+                8.0,
+                11.0,
+                FontWeightHint::Regular,
+            );
+            controls.push((ToolbarControl::Template(template), (x, 6.0, w, 24.0)));
+            x += w + 4.0;
+        }
+        controls
+    }
+
+    /// The toolbar control drawn at `(x, y)`, if one is.
+    fn toolbar_control_at(&self, x: f32, y: f32) -> Option<ToolbarControl> {
+        self.toolbar_controls()
+            .into_iter()
+            .find(|(_, (cx, cy, cw, ch))| x >= *cx && x < cx + cw && y >= *cy && y < cy + ch)
+            .map(|(control, _)| control)
+    }
+
+    /// A press on a toolbar control, at `x`.
+    fn press_toolbar(&mut self, control: ToolbarControl, x: f32) -> EventResult {
+        match control {
+            ToolbarControl::Sort => self.cycle_sort(),
+            ToolbarControl::Favorites => {
+                self.toggle_favorites_filter();
+                self.reanchor_selection();
+            }
+            ToolbarControl::Search => self.press_search(x),
+            // A blank note is asked a title first, as Ctrl+N asks: a note
+            // titled "Blank" is no help finding it again.
+            ToolbarControl::Template(NoteTemplate::Blank) => self.ask(Asking::NewNote, ""),
+            ToolbarControl::Template(template) => {
+                let notebook = self.notebook_for_new_note();
+                let id = self.create_note_from_template(template, notebook);
+                self.selected_note = Some(id);
+                self.active_panel = ActivePanel::Editor;
+            }
+        }
+        EventResult::Consumed
+    }
+
+    /// Give the search box the keyboard, its caret at the end of the query.
+    fn focus_search(&mut self) {
+        self.text_entry = Some(TextEntry::Search);
+        self.search_editor.set_text(&self.search_query);
+    }
+
+    /// Reload the search's editor if the query has changed under it.
+    fn sync_search_editor(&mut self) {
+        if self.search_editor.text() != self.search_query {
+            self.search_editor.set_text(&self.search_query);
+        }
+    }
+
+    /// Whether the search box has the keyboard.
+    fn searching(&self) -> bool {
+        self.text_entry == Some(TextEntry::Search)
+    }
+
+    /// Where the search's caret is drawn: the editor's while the box has the
+    /// keyboard (the end, if the query changed under the editor), the start
+    /// otherwise. One answer for the drawing and for a press.
+    fn search_cursor(&self) -> TextCursor {
+        if !self.searching() {
+            TextCursor::default()
+        } else if self.search_editor.text() == self.search_query {
+            self.search_editor.cursor()
+        } else {
+            TextCursor::from(self.search_query.len())
+        }
+    }
+
+    /// A press in the search box at `x`: it takes the keyboard, with the
+    /// caret under the pointer.
+    fn press_search(&mut self, x: f32) {
+        let drawn = self.search_cursor();
+        if self.searching() {
+            self.sync_search_editor();
+        } else {
+            // Writing in a note ends where the keyboard goes elsewhere.
+            self.finish_note_body();
+            self.focus_search();
+        }
+        let cursor = textedit::cursor_at_click(
+            self.search_editor.text(),
+            drawn,
+            (SEARCH_W - 2.0 * SEARCH_TEXT_INSET).max(0.0),
+            SEARCH_TEXT_SIZE,
+            FontWeightHint::Regular,
+            x - SEARCH_X - SEARCH_TEXT_INSET,
+        );
+        self.search_editor.set_selection_anchor(None);
+        self.search_editor.set_cursor(cursor);
+    }
+
+    /// How the search box is drawn: lit under the pointer, with the
+    /// keyboard's mark while it has the keyboard -- not under the list of
+    /// keys or a dialog, which cover it -- and red while the query finds no
+    /// note in what is listed.
+    fn search_state(&self) -> field::State {
+        let covered = self.show_help || self.question.is_some() || self.asking.is_some();
+        field::State {
+            hovered: self.search_hovered && !covered,
+            focused: self.searching() && !covered,
+            disabled: false,
+            invalid: !self.search_query.is_empty() && self.visible_notes().is_empty(),
+        }
+    }
+
+    /// The search box at `(x, y, w, h)`: the toolkit's field, holding the
+    /// query with the editor's caret and selection while it has the
+    /// keyboard, or a grey hint while it is empty and idle.
+    fn render_search_box(&self, cmds: &mut Vec<RenderCommand>, (x, y, w, h): (f32, f32, f32, f32)) {
+        let state = self.search_state();
+        let rect = guitk::frame::Rect::new(x, y, w, h);
+        field::draw(cmds, &self.palette, rect, state, self.focus_ring_width);
+        let line = text::line_height(SEARCH_TEXT_SIZE, FontWeightHint::Regular);
+        let (tx, ty, tw) = (
+            x + SEARCH_TEXT_INSET,
+            y + (h - line) / 2.0,
+            (w - 2.0 * SEARCH_TEXT_INSET).max(0.0),
+        );
+        if self.search_query.is_empty() && !state.focused {
+            cmds.push(RenderCommand::Text {
+                x: tx,
+                y: ty,
+                text: "Search notes...".to_owned(),
+                color: self.palette.subtext0,
+                font_size: SEARCH_TEXT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(tw),
+                overflow: TextOverflow::Ellipsis,
+            });
+            return;
+        }
+        let editing = self.searching() && self.search_editor.text() == self.search_query;
+        let mut typed = RenderTree::new();
+        textedit::draw(
+            &mut typed,
+            &textedit::SingleLine {
+                text: &self.search_query,
+                cursor: self.search_cursor(),
+                selection_anchor: if editing {
+                    self.search_editor.selection_anchor()
+                } else {
+                    None
+                },
+                focused: state.focused,
+                x: tx,
+                y: ty,
+                width: tw,
+                line_height: line,
+                font_size: SEARCH_TEXT_SIZE,
+                weight: FontWeightHint::Regular,
+                color: self.palette.text,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: self.caret_width,
+            },
+        );
+        cmds.extend(typed.commands);
+    }
+
     fn render_toolbar(&self, cmds: &mut Vec<RenderCommand>, width: f32) {
         // Toolbar background
         self.palette.push_surface(
@@ -3767,88 +4044,9 @@ impl NotesApp {
             overflow: TextOverflow::Ellipsis,
         });
 
-        // Sort button
-        let sort_label = format!("Sort: {}", self.sort_order.label());
-        self.palette
-            .push_surface(cmds, 160.0, 6.0, 100.0, 24.0, CORNER_RADIUS, Surface::Card);
+        // The template buttons' label, before the first of them.
         cmds.push(RenderCommand::Text {
-            x: 168.0,
-            y: 12.0,
-            text: sort_label,
-            color: self.palette.text,
-            font_size: 11.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(90.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Favorites toggle
-        let fav_color = if self.show_favorites_only {
-            self.palette.yellow
-        } else {
-            self.palette.overlay0
-        };
-        self.palette.push_surface(
-            cmds,
-            270.0,
-            6.0,
-            24.0,
-            24.0,
-            CORNER_RADIUS,
-            if self.show_favorites_only {
-                Surface::Selected
-            } else {
-                Surface::Card
-            },
-        );
-        cmds.push(RenderCommand::Text {
-            x: 276.0,
-            y: 12.0,
-            text: "*".to_owned(),
-            color: fav_color,
-            font_size: 14.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Search box
-        let search_x = 310.0;
-        let search_w = 200.0;
-        self.palette.push_surface(
-            cmds,
-            search_x,
-            6.0,
-            search_w,
-            24.0,
-            CORNER_RADIUS,
-            Surface::Card,
-        );
-        let search_text = if self.search_query.is_empty() {
-            "Search notes...".to_owned()
-        } else {
-            self.search_query.clone()
-        };
-        let search_color = if self.search_query.is_empty() {
-            self.palette.overlay0
-        } else {
-            self.palette.text
-        };
-        cmds.push(RenderCommand::Text {
-            x: search_x + 8.0,
-            y: 12.0,
-            text: search_text,
-            color: search_color,
-            font_size: 12.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(search_w - 16.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Template buttons area
-        let tmpl_x = 530.0;
-        cmds.push(RenderCommand::Text {
-            x: tmpl_x,
+            x: TEMPLATES_X,
             y: 12.0,
             text: "New:".to_owned(),
             color: self.palette.subtext0,
@@ -3858,34 +4056,74 @@ impl NotesApp {
             overflow: TextOverflow::Clip,
         });
 
-        // Show a few template buttons
-        let template_labels = ["Blank", "Meeting", "Todo", "Journal"];
-        let template_colors = [
-            self.palette.overlay0,
-            self.palette.teal,
-            self.palette.green,
-            self.palette.mauve,
-        ];
-        let mut tx = tmpl_x + 35.0;
-        for (i, label) in template_labels.iter().enumerate() {
-            let btn_w = text::padded_width(label, 8.0, 11.0, FontWeightHint::Regular);
-            let color = template_colors
-                .get(i)
-                .copied()
-                .unwrap_or(self.palette.overlay0);
-            self.palette
-                .push_surface(cmds, tx, 6.0, btn_w, 24.0, CORNER_RADIUS, Surface::Card);
-            cmds.push(RenderCommand::Text {
-                x: tx + 8.0,
-                y: 12.0,
-                text: (*label).to_owned(),
-                color,
-                font_size: 11.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(btn_w - 12.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            tx += btn_w + 4.0;
+        // The controls, where `toolbar_controls` puts them -- the same list
+        // a press is read against.
+        for (control, (x, y, w, h)) in self.toolbar_controls() {
+            match control {
+                ToolbarControl::Sort => {
+                    self.palette
+                        .push_surface(cmds, x, y, w, h, CORNER_RADIUS, Surface::Card);
+                    cmds.push(RenderCommand::Text {
+                        x: x + 8.0,
+                        y: y + 6.0,
+                        text: format!("Sort: {}", self.sort_order.label()),
+                        color: self.palette.text,
+                        font_size: 11.0,
+                        font_weight: FontWeightHint::Regular,
+                        max_width: Some(w - 10.0),
+                        overflow: TextOverflow::Ellipsis,
+                    });
+                }
+                ToolbarControl::Favorites => {
+                    self.palette.push_surface(
+                        cmds,
+                        x,
+                        y,
+                        w,
+                        h,
+                        CORNER_RADIUS,
+                        if self.show_favorites_only {
+                            Surface::Selected
+                        } else {
+                            Surface::Card
+                        },
+                    );
+                    cmds.push(RenderCommand::Text {
+                        x: x + 6.0,
+                        y: y + 6.0,
+                        text: "*".to_owned(),
+                        color: if self.show_favorites_only {
+                            self.palette.yellow
+                        } else {
+                            self.palette.overlay0
+                        },
+                        font_size: 14.0,
+                        font_weight: FontWeightHint::Bold,
+                        max_width: None,
+                        overflow: TextOverflow::Clip,
+                    });
+                }
+                ToolbarControl::Search => self.render_search_box(cmds, (x, y, w, h)),
+                ToolbarControl::Template(template) => {
+                    self.palette
+                        .push_surface(cmds, x, y, w, h, CORNER_RADIUS, Surface::Card);
+                    cmds.push(RenderCommand::Text {
+                        x: x + 8.0,
+                        y: y + 6.0,
+                        text: template_button_label(template).to_owned(),
+                        color: match template {
+                            NoteTemplate::MeetingNotes => self.palette.teal,
+                            NoteTemplate::TodoList => self.palette.green,
+                            NoteTemplate::Journal => self.palette.mauve,
+                            _ => self.palette.overlay0,
+                        },
+                        font_size: 11.0,
+                        font_weight: FontWeightHint::Regular,
+                        max_width: Some(w - 12.0),
+                        overflow: TextOverflow::Ellipsis,
+                    });
+                }
+            }
         }
 
         // Separator line below toolbar
@@ -6773,6 +7011,228 @@ mod tests {
         assert!(
             app.find_note(nid).expect("the note").tags.is_empty(),
             "an empty tag was added"
+        );
+    }
+
+    /// The middle of the toolbar control `control`, where it is drawn.
+    fn toolbar_centre(app: &NotesApp, control: ToolbarControl) -> (f32, f32) {
+        let (_, (x, y, w, h)) = app
+            .toolbar_controls()
+            .into_iter()
+            .find(|(c, _)| *c == control)
+            .expect("the control is in the toolbar");
+        (x + w / 2.0, y + h / 2.0)
+    }
+
+    /// **Every toolbar control answers a press.** The sort button, the
+    /// favourites switch, the search box and the template buttons were drawn,
+    /// and a press on any of them did nothing; nothing at all made a note
+    /// from a template.
+    #[test]
+    fn every_toolbar_control_answers_a_press() {
+        let (mut app, _, _, _) = app_with_two_notebooks();
+        let press = |app: &mut NotesApp, control: ToolbarControl| {
+            let (x, y) = toolbar_centre(app, control);
+            app.handle_event(&click_at(x, y))
+        };
+
+        let sort = app.sort_order;
+        assert_eq!(press(&mut app, ToolbarControl::Sort), EventResult::Consumed);
+        assert_ne!(app.sort_order, sort, "Sort did not step the order on");
+
+        let favourites = app.show_favorites_only;
+        press(&mut app, ToolbarControl::Favorites);
+        assert_ne!(
+            app.show_favorites_only, favourites,
+            "the star did not switch"
+        );
+        press(&mut app, ToolbarControl::Favorites);
+
+        press(&mut app, ToolbarControl::Search);
+        assert_eq!(
+            app.text_entry,
+            Some(TextEntry::Search),
+            "the box took no keyboard"
+        );
+        app.handle_event(&plain_key(Key::Escape));
+
+        for (template, title) in [
+            (
+                NoteTemplate::MeetingNotes,
+                NoteTemplate::MeetingNotes.label(),
+            ),
+            (NoteTemplate::TodoList, NoteTemplate::TodoList.label()),
+            (NoteTemplate::Journal, NoteTemplate::Journal.label()),
+        ] {
+            press(&mut app, ToolbarControl::Template(template));
+            let id = app.selected_note.expect("the new note is selected");
+            let note = app.find_note(id).expect("the note");
+            assert_eq!(note.title, title, "{template:?} made the wrong note");
+            assert_eq!(note.kind, template.kind());
+        }
+
+        press(&mut app, ToolbarControl::Template(NoteTemplate::Blank));
+        assert!(
+            matches!(app.asking, Some((Asking::NewNote, _))),
+            "Blank asked for no title"
+        );
+    }
+
+    /// Whether the window draws exactly the toolkit's field for the search
+    /// box in `state` -- and, unless `state` has the keyboard, not the
+    /// focused one as well.
+    fn draws_search(app: &NotesApp, state: field::State) -> bool {
+        let rect = guitk::frame::Rect::new(SEARCH_X, 6.0, SEARCH_W, 24.0);
+        let seq = |s: field::State| {
+            let mut v: Vec<RenderCommand> = Vec::new();
+            field::draw(&mut v, &app.palette, rect, s, app.focus_ring_width);
+            v
+        };
+        let cmds = app.render_commands(app.window_width, app.window_height);
+        let has = |want: &[RenderCommand]| cmds.windows(want.len()).any(|w| w == want);
+        has(&seq(state))
+            && (state.focused
+                || !has(&seq(field::State {
+                    focused: true,
+                    ..state
+                })))
+    }
+
+    /// **The search box is the toolkit's field**: lit under the pointer,
+    /// with the keyboard in the theme's mark at the user's width, red while
+    /// the query finds no note in what is listed, and giving up its mark
+    /// under the list of keys and the name dialog, which cover it. It was a
+    /// card-coloured box with no caret at all.
+    #[test]
+    fn the_search_box_is_the_toolkits_field() {
+        let (mut app, _, _, _) = app_with_two_notebooks();
+        let mut p = app.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        app.theme_changed(&p);
+        app.appearance_changed(&appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..appearance::AppearanceSettings::default()
+        });
+        assert!(
+            app.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        let idle = field::State::default();
+        assert!(
+            draws_search(&app, idle),
+            "the search box is not the toolkit's field"
+        );
+
+        let (x, y) = toolbar_centre(&app, ToolbarControl::Search);
+        let moved = |kind| Event::Mouse(MouseEvent { x, y, kind });
+        app.handle_event(&moved(MouseEventKind::Move));
+        let lit = field::State {
+            hovered: true,
+            ..idle
+        };
+        assert!(
+            draws_search(&app, lit),
+            "the box under the pointer is not lit"
+        );
+        app.handle_event(&moved(MouseEventKind::Leave));
+        assert!(
+            draws_search(&app, idle),
+            "the box stayed lit with the pointer gone"
+        );
+
+        app.handle_event(&click_at(x, y));
+        let focused = field::State {
+            focused: true,
+            ..idle
+        };
+        assert!(
+            draws_search(&app, focused),
+            "the box with the keyboard has no mark"
+        );
+        for ch in ["z", "q", "x"] {
+            app.handle_event(&typed_key(ch));
+        }
+        assert!(app.visible_notes().is_empty());
+        let red = field::State {
+            invalid: true,
+            ..focused
+        };
+        assert!(
+            draws_search(&app, red),
+            "a query that finds nothing is not red"
+        );
+
+        let covered = field::State {
+            focused: false,
+            ..red
+        };
+        app.show_help = true;
+        assert!(
+            draws_search(&app, covered),
+            "the box keeps its mark under the card"
+        );
+        app.show_help = false;
+        // The pointer is over the box when the dialog comes up over it: the
+        // dialog takes the pointer, so nothing under it is lit -- nor marked.
+        // With nothing in the box, which would be red: red is the edge
+        // whether the box is lit or not.
+        app.search_query.clear();
+        app.handle_event(&moved(MouseEventKind::Move));
+        app.ask(Asking::NewNotebook, "");
+        assert!(
+            draws_search(&app, idle),
+            "the box keeps its light or its mark under the dialog"
+        );
+    }
+
+    /// **The search box edits like a field, and a chord is not typed into
+    /// it**: the caret keys, Ctrl+A, typing over a selection, a press that
+    /// puts the caret under the pointer -- and Ctrl+S types no `s`, AltGr
+    /// types.
+    #[test]
+    fn the_search_box_edits_like_a_field() {
+        let (mut app, _, _, _) = app_with_two_notebooks();
+        app.handle_event(&plain_key(Key::Slash));
+        for ch in ["n", "o", "t", "e"] {
+            app.handle_event(&typed_key(ch));
+        }
+        let held = |key: Key, text: &str, ctrl: bool, alt: bool| {
+            Event::Key(KeyEvent {
+                key,
+                pressed: true,
+                modifiers: guitk::event::Modifiers {
+                    ctrl,
+                    alt,
+                    ..guitk::event::Modifiers::NONE
+                },
+                text: text.to_owned(),
+            })
+        };
+        app.handle_event(&held(Key::S, "s", true, false));
+        assert_eq!(app.search_query, "note", "Ctrl+S typed its letter");
+        app.handle_event(&held(Key::S, "\u{15b}", true, true));
+        assert_eq!(app.search_query, "note\u{15b}", "AltGr did not type");
+        app.handle_event(&plain_key(Key::Backspace));
+        app.handle_event(&plain_key(Key::Home));
+        app.handle_event(&plain_key(Key::Delete));
+        assert_eq!(
+            app.search_query, "ote",
+            "Home and Delete did not edit the start"
+        );
+        app.handle_event(&held(Key::A, "a", true, false));
+        app.handle_event(&typed_key("A"));
+        assert_eq!(
+            app.search_query, "A",
+            "typing did not replace the selection"
+        );
+
+        // A press at the box's left edge puts the caret before the query.
+        app.handle_event(&plain_key(Key::Escape));
+        app.handle_event(&click_at(SEARCH_X + SEARCH_TEXT_INSET + 1.0, 18.0));
+        app.handle_event(&typed_key(" "));
+        assert_eq!(
+            app.search_query, " A",
+            "the caret did not go where the press was"
         );
     }
 

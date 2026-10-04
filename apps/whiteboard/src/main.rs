@@ -2604,6 +2604,23 @@ impl WhiteboardApp {
     }
 
     fn handle_mouse(&mut self, event: &MouseEvent) -> bool {
+        // The list of keys is modal for the pointer as it is for the keys, and
+        // drawn over the board: a press with any button puts it away and does
+        // nothing else -- it used to choose the tool or page under it, or
+        // begin a shape on the canvas there -- and the wheel zooms nothing it
+        // covers. A move or a release is not a press, and passes, so a shape
+        // or a pan begun before the list came up still ends where it is let
+        // go.
+        if self.show_help {
+            match event.kind {
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                    self.show_help = false;
+                    return true;
+                }
+                MouseEventKind::Scroll { .. } => return false,
+                _ => {}
+            }
+        }
         let (x, y) = (event.x, event.y);
         match event.kind {
             MouseEventKind::Press(MouseButton::Left) => {
@@ -6956,6 +6973,69 @@ mod tests {
             "press, move and release are the three halves of drawing and all \
              three had to arrive from somewhere"
         );
+    }
+
+    /// **A press with the list of keys up puts it away and does nothing
+    /// else, and the wheel zooms nothing under it.** A press on the canvas
+    /// under the list began a shape there, and the wheel zoomed the board. A
+    /// shape begun before the list came up still ends where it is let go. The
+    /// controls are the same press and turn with the list down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let mut app = board();
+        app.current_tool = Tool::Rectangle;
+        let (x, y) = canvas_centre(&app);
+        let f1 = Event::Key(KeyEvent {
+            key: Key::F1,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        });
+        let zoom = app.zoom;
+
+        app.handle_event(&f1);
+        assert!(app.show_help);
+        assert!(app.handle_event(&click_at(x, y)));
+        assert!(!app.show_help, "the press did not put the list away");
+        assert!(
+            matches!(app.drag, DragState::None),
+            "the press began a shape under the list"
+        );
+        app.handle_event(&f1);
+        app.handle_event(&mouse(x, y, MouseEventKind::Press(MouseButton::Middle)));
+        assert!(!app.show_help, "a middle-button press left the list up");
+        assert!(matches!(app.drag, DragState::None), "the press began a pan");
+        app.handle_event(&f1);
+        app.handle_event(&mouse(x, y, MouseEventKind::Scroll { dx: 0.0, dy: 1.0 }));
+        assert!(
+            (app.zoom - zoom).abs() < f32::EPSILON,
+            "the wheel zoomed under the list"
+        );
+        assert!(app.show_help, "the wheel put the list away");
+        app.handle_event(&f1);
+
+        // A shape begun with the list down ends where it is let go, list or
+        // no list.
+        app.handle_event(&click_at(x, y));
+        assert!(
+            !matches!(app.drag, DragState::None),
+            "control: the press began nothing"
+        );
+        app.handle_event(&f1);
+        app.handle_event(&mouse(x + 80.0, y + 60.0, MouseEventKind::Move));
+        app.handle_event(&mouse(
+            x + 80.0,
+            y + 60.0,
+            MouseEventKind::Release(MouseButton::Left),
+        ));
+        assert_eq!(
+            app.current_page().shapes.len(),
+            1,
+            "the release did not end the shape begun before the list came up"
+        );
+        app.handle_event(&f1);
+        app.handle_event(&mouse(x, y, MouseEventKind::Scroll { dx: 0.0, dy: 1.0 }));
+        assert!(app.zoom > zoom, "control: the wheel zooms nothing at all");
     }
 
     #[test]

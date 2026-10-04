@@ -240,6 +240,49 @@ MUTATIONS = [
     ),
 ]
 
+CARD = "the_shortcut_card_takes_a_press_rather_than_passing_it_on"
+
+MUTATIONS += [
+    # The list of keys takes the pointer (2026-10-04; known-issues
+    # E-a-press-goes-through-the-shortcut-card-to-the-control-drawn-under-it).
+    (
+        "a press goes through the list of keys",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n"
+        "                    self.show_help = false;\n"
+        "                    return true;\n"
+        "                }\n",
+        "",
+        [CARD],
+    ),
+    (
+        "only the left button puts the list of keys away",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n",
+        "                MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_) => {\n",
+        [CARD],
+    ),
+    (
+        "a press under the list of keys leaves it up",
+        "                    self.show_help = false;\n"
+        "                    return true;\n",
+        "                    return true;\n",
+        [CARD],
+    ),
+    (
+        "the wheel zooms what the list of keys covers",
+        "                MouseEventKind::Scroll { .. } => return false,\n",
+        "",
+        [CARD],
+    ),
+    (
+        "the list of keys takes a release, and a shape never ends",
+        "                MouseEventKind::Scroll { .. } => return false,\n"
+        "                _ => {}\n",
+        "                MouseEventKind::Scroll { .. } => return false,\n"
+        "                _ => return false,\n",
+        [CARD],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "whiteboard", timeout=900, only=only))

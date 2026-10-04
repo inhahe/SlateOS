@@ -2180,6 +2180,20 @@ impl ScreenRecorderApp {
 
     /// Handle a mouse event.
     fn handle_mouse(&mut self, mouse: &MouseEvent) -> EventResult {
+        // The list of keys is modal for the pointer as it is for the keys, and
+        // drawn over everything: a press with any button puts it away and does
+        // nothing else -- it used to open the view or begin the region drag
+        // under it. A move or a release is not a press, and passes, so a drag
+        // begun before the list came up still ends where it is let go.
+        if self.show_help
+            && matches!(
+                mouse.kind,
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_)
+            )
+        {
+            self.show_help = false;
+            return EventResult::Consumed;
+        }
         // The sidebar: a click opens the view, and the pointer over one
         // lights it. It was drawn with an active row and a hover state and
         // answered neither -- the views were reachable only by their keys,
@@ -4596,6 +4610,77 @@ mod tests {
         assert!((x - 100.0).abs() < 0.01 && (y - 80.0).abs() < 0.01);
         assert!((w - 200.0).abs() < 0.01 && (h - 180.0).abs() < 0.01);
         assert_eq!(app.capture_mode, CaptureMode::CustomRegion);
+    }
+
+    /// **A press with the list of keys up puts it away and does nothing
+    /// else.** It opened the view under the list, or began a region drag
+    /// there. A drag begun before the list came up still ends where it is let
+    /// go. The control is the same press with the list down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let mut app = ScreenRecorderApp::new();
+        let views = ActiveView::all();
+        let (i, &view) = views
+            .iter()
+            .enumerate()
+            .find(|(_, v)| **v != app.active_view)
+            .expect("another view");
+        #[allow(clippy::cast_precision_loss)]
+        let y = SIDEBAR_NAV_TOP + i as f32 * SIDEBAR_ITEM_H + SIDEBAR_ITEM_H / 2.0;
+        let shown = app.active_view;
+
+        app.handle_event(&press(Key::F1));
+        assert!(app.show_help);
+        assert_eq!(
+            app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Left), 40.0, y)),
+            EventResult::Consumed
+        );
+        assert!(!app.show_help, "the press did not put the list away");
+        assert_eq!(
+            app.active_view, shown,
+            "the press opened a view under the list"
+        );
+        app.handle_event(&press(Key::F1));
+        app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Right), 40.0, y));
+        assert!(!app.show_help, "a right-button press left the list up");
+
+        // The region selector, armed: a press under the list begins no drag.
+        app.handle_event(&press(Key::Num3));
+        assert!(app.region_selector.active, "3 should arm the selector");
+        app.handle_event(&press(Key::F1));
+        app.handle_event(&mouse(
+            MouseEventKind::Press(MouseButton::Left),
+            100.0,
+            80.0,
+        ));
+        assert!(!app.region_selector.dragging, "a drag began under the list");
+        // But one begun before the list came up ends where it is let go.
+        app.handle_event(&mouse(
+            MouseEventKind::Press(MouseButton::Left),
+            100.0,
+            80.0,
+        ));
+        assert!(app.region_selector.dragging);
+        app.handle_event(&press(Key::F1));
+        app.handle_event(&mouse(MouseEventKind::Move, 300.0, 260.0));
+        app.handle_event(&mouse(
+            MouseEventKind::Release(MouseButton::Left),
+            300.0,
+            260.0,
+        ));
+        assert!(
+            !app.region_selector.dragging,
+            "the release did not end the drag"
+        );
+        assert!(app.selected_region.is_some(), "the drag set no region");
+        app.handle_event(&press(Key::Escape));
+
+        // The control.
+        app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Left), 40.0, y));
+        assert_eq!(
+            app.active_view, view,
+            "control: the press opens nothing even with the list down"
+        );
     }
 
     #[test]

@@ -4030,7 +4030,7 @@ mod tests {
         let model = open(&path).unwrap();
         match save(&model, Vec::new()) {
             Err(e @ SaveError::Unwritable { .. }) => {
-                assert!(e.to_string().contains("7-Zip"), "{e}")
+                assert!(e.to_string().contains("7-Zip"), "{e}");
             }
             other => panic!("expected the 7z to be refused, got {other:?}"),
         }

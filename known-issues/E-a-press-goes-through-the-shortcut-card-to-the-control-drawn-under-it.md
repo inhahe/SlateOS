@@ -14,13 +14,14 @@ is read by the drawing and by the key handler, and by nothing that handles a
 press.
 
 **Found** 2026-10-03, converting colorpicker's value box to the toolkit's
-field. Fixed the same day in colorpicker, contacts and dbviewer.
+field. Fixed the same day in colorpicker, contacts and dbviewer; then in
+alarmclock and archivemanager (2026-10-04).
 
 **Still to do.** A scan the same day found 66 more applications whose
 production code draws `guitk::shortcut::render_card` and has no function
 handling a mouse event that reads the card's flag:
 
-alarmclock, archivemanager, benchmark, calendar, camera, charmap,
+benchmark, calendar, camera, charmap,
 clipmanager, defrag, devicemanager, diagram, diskanalyzer, diskcleanup,
 diskimager, ebook, email, explorer, fileassoc, filediff, finance, flashcards,
 fontmanager, habits, hexeditor, imageviewer, ircclient, jsonviewer, kanban,

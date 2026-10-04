@@ -10,6 +10,8 @@ guitk = { path = "../../gui/toolkit" }
 # an application should no more name the display protocol than a Unix program
 # names the socket layer.
 oswindow = { path = "../../gui/window" }
+# Which keys are commands rather than typing, and which are plain.
+textline = { path = "../textline" }
 
 [lints]
 workspace = true

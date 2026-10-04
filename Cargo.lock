@@ -1520,6 +1520,7 @@ dependencies = [
  "oswindow",
  "pathtext",
  "settingsfile",
+ "textline",
  "tzrules",
  "yamldoc",
 ]

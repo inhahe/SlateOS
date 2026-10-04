@@ -577,6 +577,56 @@ MUTATIONS = [
     ),
 ]
 
+RENAME = "a_node_is_renamed_in_the_toolkits_field_with_a_caret"
+FIND = "the_find_bars_box_is_the_toolkits_field"
+
+MUTATIONS += [
+    # The node being renamed and the find bar's query are typed into the
+    # toolkit's field (2026-10-04; lane C, c-e-a-theme-can-shape-the-controls).
+    (
+        "the node being renamed never has the keyboard",
+        "            focused: !self.show_help,\n",
+        "            focused: false,\n",
+        [RENAME],
+    ),
+    (
+        "the node being renamed keeps its mark under the shortcut list",
+        "            focused: !self.show_help,\n",
+        "            focused: true,\n",
+        [RENAME],
+    ),
+    (
+        "the caret is at the start of the name",
+        "                cursor: text::TextCursor::from(self.edit_buffer.len()),\n",
+        "                cursor: text::TextCursor::from(0),\n",
+        [RENAME],
+    ),
+    (
+        "the find box never has the keyboard",
+        "            focused: self.show_search && self.editing_node.is_none() && !self.show_help,\n",
+        "            focused: false,\n",
+        [FIND],
+    ),
+    (
+        "the find box keeps its mark while a node is renamed",
+        "            focused: self.show_search && self.editing_node.is_none() && !self.show_help,\n",
+        "            focused: self.show_search && !self.show_help,\n",
+        [FIND],
+    ),
+    (
+        "a query that finds nothing is not red",
+        "            invalid: !self.search_query.is_empty() && self.search_results.is_empty(),\n",
+        "            invalid: false,\n",
+        [FIND],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [RENAME, FIND],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "mindmap", timeout=900, only=only))

@@ -17,7 +17,11 @@ Two tables:
   what the file is, and every field quoted; a backup is the vault sealed,
   restored only with its master password and only after asking. And the
   entry's own controls (2026-09-27): Edit changes what the form shows and
-  keeps what it does not; Delete asks first.
+  keeps what it does not; Delete asks first.  And the auto-lock (2026-10-03),
+  which never fired in a window: no clock was asked for, so no tick came.
+  It is asked for at the deadline now; a window runs on the wall clock, a
+  test on ticks whose part seconds are carried; and the event that finds the
+  lock due is not taken.
 * **vaultfile.rs** -- the file itself: a header that asks for too much work is
   refused before any is done, and contents are read whole or not at all.
 
@@ -58,6 +62,9 @@ EDIT_KIND = "an_entry_being_edited_keeps_its_kind"
 CARD_KEPT = "a_card_number_left_alone_stays_as_it_was_kept"
 DELETE_ASKS = "delete_asks_first_and_then_takes_the_entry_out_of_the_vault"
 BUTTONS_ON_ENTRY = "edit_and_delete_can_be_pressed_on_an_entry"
+LOCKS_ITSELF = "left_alone_the_vault_locks_itself_on_time"
+LOCK_DUE = "the_event_that_finds_the_lock_due_is_not_taken"
+WALL_CLOCK = "a_window_runs_on_the_wall_clock"
 
 MAIN = [
     (
@@ -302,6 +309,60 @@ MAIN = [
         '            && textline::is_ctrl_chord(key.modifiers)',
         '            && key.modifiers.ctrl',
         ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
+    ),
+    # -- the auto-lock, 2026-10-03: no clock was asked for, so it never fired
+    (
+        'no clock is asked for',
+        '        self.vault\n'
+        '            .auto_lock_in(self.now)\n'
+        '            .map(std::time::Duration::from_secs)\n',
+        '        None\n',
+        [LOCKS_ITSELF],
+    ),
+    (
+        "the auto-lock falls due at the last use, not a timeout after it",
+        '        let due = self.last_access.saturating_add(timeout_seconds);\n',
+        '        let due = self.last_access;\n',
+        [LOCKS_ITSELF],
+    ),
+    (
+        "a tick's part second is dropped",
+        '                    let total = carry_ms.saturating_add(*elapsed_ms);\n',
+        '                    let total = *elapsed_ms;\n',
+        [LOCKS_ITSELF],
+    ),
+    (
+        'the part second is not carried',
+        '                    *carry_ms = total % 1000;\n',
+        '                    *carry_ms = 0;\n',
+        [LOCKS_ITSELF],
+    ),
+    (
+        "a window's clock is not the wall clock",
+        '            Clock::Wall => self.now = unix_now(),\n',
+        '            Clock::Wall => {}\n',
+        [WALL_CLOCK],
+    ),
+    (
+        'the lock is looked for only at a tick',
+        '        if self.vault.should_auto_lock(self.now) {\n'
+        '            self.lock_vault();\n'
+        '            return true;\n',
+        '        if matches!(event, Event::Tick { .. }) && self.vault.should_auto_lock(self.now) {\n'
+        '            self.lock_vault();\n'
+        '            return true;\n',
+        [LOCK_DUE],
+    ),
+    (
+        'the event that finds the lock due is taken as well',
+        '    if state.advance_clock(event) {\n'
+        '        // Locked by the time that has passed. The event is not taken: it was\n'
+        '        // meant for a vault that is no longer open -- a key would go into the\n'
+        '        // master password, a press land on the lock screen.\n'
+        '        return EventResult::Consumed;\n'
+        '    }\n',
+        '    state.advance_clock(event);\n',
+        [LOCK_DUE],
     ),
 ]
 

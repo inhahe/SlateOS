@@ -862,6 +862,17 @@ impl Vault {
         self.state == VaultState::Unlocked
     }
 
+    /// Seconds from `now` until the auto-lock falls due, or `None` while the
+    /// vault is locked and there is nothing to lock.
+    fn auto_lock_in(&self, now: u64) -> Option<u64> {
+        if self.state == VaultState::Locked {
+            return None;
+        }
+        let timeout_seconds = u64::from(self.auto_lock_minutes).saturating_mul(60);
+        let due = self.last_access.saturating_add(timeout_seconds);
+        Some(due.saturating_sub(now))
+    }
+
     /// Check if auto-lock timeout has been exceeded.
     fn should_auto_lock(&self, now: u64) -> bool {
         if self.state == VaultState::Locked {
@@ -3203,6 +3214,23 @@ fn unix_now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
+/// What moves [`AppState::now`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Clock {
+    /// The system's wall clock, read as each event arrives: what a window
+    /// runs on. The auto-lock is a span of real time -- a machine asleep for
+    /// an hour has been away from its vault for an hour -- and an entry's
+    /// times are dates.
+    Wall,
+    /// Moved only by ticks, by the time each says elapsed, carrying the part
+    /// of a second the last one left over: what the tests run on, so one can
+    /// say "fifteen minutes pass" without waiting them.
+    Ticked {
+        /// Milliseconds elapsed and not yet a whole second.
+        carry_ms: u64,
+    },
+}
+
 /// Top-level application state.
 struct AppState {
     vault: Vault,
@@ -3243,7 +3271,12 @@ struct AppState {
     /// a generator the user simply has not pressed yet.
     generator_error: Option<String>,
     show_password: bool,
+    /// The time, in seconds since the Unix epoch, as of the event being
+    /// taken: what the auto-lock measures the vault's idleness against, and
+    /// what an entry's times are stamped with.
     now: u64,
+    /// What moves [`Self::now`]: the wall clock in a window, ticks in a test.
+    clock: Clock,
     /// Filtered and sorted entry IDs for the list.
     filtered_ids: Vec<u64>,
     /// Cached audit results.
@@ -3321,6 +3354,7 @@ impl AppState {
             generator_error: None,
             show_password: false,
             now: 1000000,
+            clock: Clock::Ticked { carry_ms: 0 },
             filtered_ids: Vec::new(),
             audit_issues: Vec::new(),
             master_input: String::new(),
@@ -3706,12 +3740,32 @@ impl AppState {
         self.audit_issues = audit_vault(&self.vault, self.now);
     }
 
-    fn tick(&mut self, elapsed_ms: u64) {
-        self.now = self.now.saturating_add(elapsed_ms / 1000);
-
+    /// Bring [`Self::now`] up to date for `event`, and lock the vault if it
+    /// has been left alone for its auto-lock time. Returns whether it locked.
+    ///
+    /// Run before the event is taken, not after: after an hour away, the key
+    /// that wakes the window must find the vault locked, rather than count as
+    /// the use that keeps it open.
+    fn advance_clock(&mut self, event: &Event) -> bool {
+        match &mut self.clock {
+            Clock::Wall => self.now = unix_now(),
+            Clock::Ticked { carry_ms } => {
+                if let Event::Tick { elapsed_ms } = event {
+                    // The carry, because ticks come at the auto-lock's
+                    // deadline and whenever else the harness runs the loop,
+                    // and `elapsed_ms / 1000` lost every tick's part second:
+                    // all of it, for a tick shorter than one.
+                    let total = carry_ms.saturating_add(*elapsed_ms);
+                    self.now = self.now.saturating_add(total / 1000);
+                    *carry_ms = total % 1000;
+                }
+            }
+        }
         if self.vault.should_auto_lock(self.now) {
             self.lock_vault();
+            return true;
         }
+        false
     }
 }
 
@@ -7292,11 +7346,16 @@ fn handle_event(state: &mut AppState, event: &Event) -> EventResult {
 }
 
 fn dispatch_event(state: &mut AppState, event: &Event) -> EventResult {
+    if state.advance_clock(event) {
+        // Locked by the time that has passed. The event is not taken: it was
+        // meant for a vault that is no longer open -- a key would go into the
+        // master password, a press land on the lock screen.
+        return EventResult::Consumed;
+    }
     match event {
-        Event::Tick { elapsed_ms } => {
-            state.tick(*elapsed_ms);
-            EventResult::Consumed
-        }
+        // Consumed, so the entry's "created" and "modified" times are drawn
+        // again as of now.
+        Event::Tick { .. } => EventResult::Consumed,
         Event::Key(key_event) if key_event.pressed => handle_key(state, key_event),
         Event::Mouse(mouse_event) => handle_mouse(state, mouse_event),
         Event::Resize { width, height } => {
@@ -7937,6 +7996,18 @@ impl App for AppState {
         (DEFAULT_WINDOW_WIDTH as u32, DEFAULT_WINDOW_HEIGHT as u32)
     }
 
+    /// A clock only while there is a vault open to lock, and only for the
+    /// moment its auto-lock falls due. The harness never pushes a wake later,
+    /// so use in the meantime costs one early tick, after which this is asked
+    /// again. There was no clock at all, the trait's default being none: no
+    /// tick ever came, and the vault never locked itself however long it was
+    /// left.
+    fn tick_interval(&self) -> Option<std::time::Duration> {
+        self.vault
+            .auto_lock_in(self.now)
+            .map(std::time::Duration::from_secs)
+    }
+
     fn on_event(&mut self, event: &Event) -> Response {
         // Ctrl+Q closes the window. Ctrl+L is *not* a close -- it locks the
         // vault, which is the point of having it. A Ctrl chord, not Ctrl
@@ -8028,6 +8099,7 @@ impl Probe for AppState {
 /// the gap from theoretical into visible.
 fn main() -> ExitCode {
     let mut state = AppState::open(vault_path());
+    state.clock = Clock::Wall;
     state.now = unix_now();
     app::launch("credmanager", &mut state)
 }
@@ -9500,12 +9572,119 @@ mod tests {
         assert_eq!(state.filtered_ids.len(), 1);
     }
 
-    #[test]
-    fn test_app_state_tick() {
+    // == The auto-lock ========================================================
+
+    /// The unlocked test vault, with the time its auto-lock takes.
+    fn unlocked_for_the_clock() -> (AppState, u64) {
         let mut state = AppState::for_test();
-        let old_now = state.now;
-        state.tick(5000);
-        assert!(state.now > old_now);
+        assert!(state.vault.unlock(TEST_MASTER_PASSWORD, state.now));
+        let timeout = u64::from(state.vault.auto_lock_minutes) * 60;
+        (state, timeout)
+    }
+
+    fn tick(state: &mut AppState, elapsed_ms: u64) {
+        handle_event(state, &Event::Tick { elapsed_ms });
+    }
+
+    /// **Left alone for its auto-lock time, the vault locks itself** -- which
+    /// it never did in a window: the app asked for no clock, so no tick came.
+    /// The clock is asked for at the deadline. Ticks a millisecond short of
+    /// it leave the vault open and the millisecond after locks it, which is
+    /// the carry `elapsed_ms / 1000` lost.
+    #[test]
+    fn left_alone_the_vault_locks_itself_on_time() {
+        use std::time::Duration;
+        let (mut state, timeout) = unlocked_for_the_clock();
+        assert_eq!(
+            App::tick_interval(&state),
+            Some(Duration::from_secs(timeout)),
+            "the clock is not asked for at the auto-lock's deadline"
+        );
+        tick(&mut state, 400);
+        tick(&mut state, 400);
+        tick(&mut state, timeout * 1000 - 801);
+        assert!(state.vault.is_unlocked(), "locked before its time");
+        assert_eq!(App::tick_interval(&state), Some(Duration::from_secs(1)));
+        tick(&mut state, 1);
+        assert!(
+            !state.vault.is_unlocked(),
+            "the vault did not lock itself when its time came"
+        );
+        assert_eq!(
+            App::tick_interval(&state),
+            None,
+            "a locked vault, with nothing to lock, still wants a clock"
+        );
+    }
+
+    /// **Use puts the lock off**, and the clock asked for with it.
+    #[test]
+    fn use_puts_the_auto_lock_off() {
+        use std::time::Duration;
+        let (mut state, timeout) = unlocked_for_the_clock();
+        tick(&mut state, (timeout - 60) * 1000);
+        assert_eq!(App::tick_interval(&state), Some(Duration::from_mins(1)));
+        type_in(&mut state, "a");
+        assert_eq!(state.search_query, "a", "control: the key was taken");
+        assert_eq!(
+            App::tick_interval(&state),
+            Some(Duration::from_secs(timeout)),
+            "use did not put the lock off"
+        );
+        tick(&mut state, 60 * 1000);
+        assert!(
+            state.vault.is_unlocked(),
+            "locked a minute after it was used"
+        );
+    }
+
+    /// **The event that finds the lock due is not taken.** A machine asleep
+    /// past the deadline sends no tick: the first key after it must find the
+    /// vault locked rather than count as the use that keeps it open -- and
+    /// must not be typed into the master password either.
+    #[test]
+    fn the_event_that_finds_the_lock_due_is_not_taken() {
+        let (mut state, timeout) = unlocked_for_the_clock();
+        // Time passes with no tick, as it does across a sleep.
+        state.now += timeout;
+        type_in(&mut state, "x");
+        assert!(
+            !state.vault.is_unlocked(),
+            "a key after the deadline kept the vault open"
+        );
+        assert!(
+            state.search_query.is_empty() && state.master_input.is_empty(),
+            "the key that found the lock due was taken as well"
+        );
+    }
+
+    /// **A window runs on the wall clock**, read at every event: an entry's
+    /// times are dates, and a span spent asleep counts towards the auto-lock.
+    #[test]
+    fn a_window_runs_on_the_wall_clock() {
+        let (mut state, _) = unlocked_for_the_clock();
+        state.clock = Clock::Wall;
+        let before = unix_now();
+        handle_event(
+            &mut state,
+            &Event::Mouse(MouseEvent {
+                x: 1.0,
+                y: 1.0,
+                kind: MouseEventKind::Move,
+            }),
+        );
+        let after = unix_now();
+        assert!(
+            (before..=after).contains(&state.now),
+            "{} is not the time it is ({before}..={after})",
+            state.now
+        );
+        // And the wall clock's time is the one the auto-lock counts against:
+        // the test vault was opened in 1970.
+        assert!(
+            !state.vault.is_unlocked(),
+            "fifty years idle, and the vault is still open"
+        );
     }
 
     #[test]

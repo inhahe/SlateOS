@@ -362,7 +362,7 @@ MUTATIONS = [
     ),
     (
         "a dialog row is handed to its control uncut",
-        "        let cut = |r: Rect| r.intersect(dialog).unwrap_or(Rect::EMPTY);\n"
+        "        let cut = |r: Rect| r.intersect(room).unwrap_or(Rect::EMPTY);\n"
         "        let mut label = |frame: &mut Frame, text: &str| {",
         "        let cut = |r: Rect| r;\n"
         "        let mut label = |frame: &mut Frame, text: &str| {",
@@ -576,6 +576,86 @@ MUTATIONS += [
         '        let ring = self.focus_ring_width.max(0.0).ceil();\n',
         '        let ring = 0.0_f32;\n',
         [BOUNDS],
+    ),
+]
+
+# The list of keys (2026-10-04): F1 did nothing, and Delete and Space --
+# which ask to delete a task and turn one off -- could be found only by
+# pressing them.
+EVERY = "every_advertised_key_does_something"
+REACHES = "the_shortcut_list_reaches_the_window"
+QUESTION = "a_question_mark_is_typed_into_a_box_and_f1_still_raises_the_list"
+MODAL = "the_shortcut_list_takes_the_keys_and_a_press"
+
+HELP_ANCHOR = "        if plain && (key.key == Key::F1 || question && self.focus.is_none()) {\n"
+CLOSE_ANCHOR = "            if plain && (matches!(key.key, Key::F1 | Key::Escape) || question) {\n"
+PRESS_ANCHOR = "        Event::Mouse(m) if ui.show_help => match m.kind {\n"
+
+MUTATIONS += [
+    (
+        "the list of keys never comes up",
+        "            self.show_help = true;\n            return true;\n",
+        "            return true;\n",
+        [REACHES],
+    ),
+    (
+        "F1 raises nothing from a box",
+        HELP_ANCHOR,
+        "        if plain && self.focus.is_none() && (key.key == Key::F1 || question) {\n",
+        [QUESTION],
+    ),
+    (
+        "? raises the list from a box",
+        HELP_ANCHOR,
+        "        if plain && (key.key == Key::F1 || question) {\n",
+        [QUESTION],
+    ),
+    (
+        "Alt+F1 raises the list",
+        HELP_ANCHOR,
+        "        if key.key == Key::F1 || plain && question && self.focus.is_none() {\n",
+        [REACHES],
+    ),
+    (
+        "the list is not modal for the keys",
+        "                self.show_help = false;\n"
+        "            }\n"
+        "            return true;\n"
+        "        }\n",
+        "                self.show_help = false;\n"
+        "            }\n"
+        "        }\n",
+        [MODAL],
+    ),
+    (
+        "Escape leaves the list up",
+        CLOSE_ANCHOR,
+        "            if plain && (matches!(key.key, Key::F1) || question) {\n",
+        [REACHES],
+    ),
+    (
+        "Alt+Escape puts the list away",
+        CLOSE_ANCHOR,
+        "            if matches!(key.key, Key::F1 | Key::Escape) || question {\n",
+        [REACHES],
+    ),
+    (
+        "the list of keys is not drawn",
+        "        if self.show_help {\n            frame.discard_hits();\n",
+        "        if false {\n            frame.discard_hits();\n",
+        [REACHES, QUESTION],
+    ),
+    (
+        "a press reaches what the list covers",
+        PRESS_ANCHOR,
+        "        Event::Mouse(m) if ui.show_help && !matches!(m.kind, MouseEventKind::Press(_)) => match m.kind {\n",
+        [MODAL],
+    ),
+    (
+        "the wheel scrolls what the list covers",
+        PRESS_ANCHOR,
+        "        Event::Mouse(m) if ui.show_help && !matches!(m.kind, MouseEventKind::Scroll { .. }) => match m.kind {\n",
+        [MODAL],
     ),
 ]
 

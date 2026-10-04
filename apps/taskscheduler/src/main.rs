@@ -1834,7 +1834,27 @@ pub struct SchedulerUI {
     /// The text box the pointer is over, if any, so it is drawn lit (lane C,
     /// c-e-a-theme-can-shape-the-controls).
     hover: Option<Target>,
+    /// Whether the list of keys is up.
+    pub show_help: bool,
 }
+
+/// The keys this window answers, as the F1 list shows them.
+///
+/// It had no list: F1 did nothing, and every key here could be found only by
+/// pressing it -- Delete, which puts a task's deletion to the user, and
+/// Space, which turns a task off, among them.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1 / ?", "This list"),
+    ("Ctrl+N", "A new task"),
+    ("Enter", "Edit the task, or save the dialog"),
+    ("Space", "Turn the task on or off"),
+    ("Delete", "Delete the task (it asks first)"),
+    ("Up / Down", "Move through the list"),
+    ("PageUp / PageDown", "A page at a time"),
+    ("Home / End", "The first or the last"),
+    ("Tab", "The other tab, or the next box"),
+    ("Escape", "Close the dialog"),
+];
 
 impl SchedulerUI {
     pub fn new() -> Self {
@@ -1842,6 +1862,7 @@ impl SchedulerUI {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             hover: None,
+            show_help: false,
             tab: UiTab::Tasks,
             dialog: UiDialog::None,
             scheduler: TaskScheduler::new(),
@@ -2252,6 +2273,21 @@ impl SchedulerUI {
             UiDialog::ConfirmDelete(id) => {
                 self.render_confirm_delete_dialog(&mut frame, &layout, id);
             }
+        }
+
+        // The list of keys over everything, the dialog included: it is the
+        // one thing on screen a reader asked for explicitly. Nothing under it
+        // takes a press.
+        if self.show_help {
+            frame.discard_hits();
+            guitk::shortcut::render_card(
+                &mut frame,
+                &self.palette,
+                (layout.window.w, layout.window.h),
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
         }
 
         frame
@@ -3764,6 +3800,24 @@ impl SchedulerUI {
         if !key.pressed {
             return false;
         }
+        // The list of keys first: it is drawn over everything, and modal while
+        // it is up -- a plain F1, `?` or Escape puts it away, and no other key
+        // reaches what it covers, where Delete would ask to delete a task.
+        let plain = textline::is_plain(key.modifiers);
+        let question = key.key == Key::Slash && key.modifiers.shift;
+        if self.show_help {
+            if plain && (matches!(key.key, Key::F1 | Key::Escape) || question) {
+                self.show_help = false;
+            }
+            return true;
+        }
+        // F1 raises it from anywhere, a dialog's box included, because it is
+        // never typed; `?` is typed in a box, so it raises the list only where
+        // no box has the keyboard.
+        if plain && (key.key == Key::F1 || question && self.focus.is_none()) {
+            self.show_help = true;
+            return true;
+        }
         if matches!(self.dialog, UiDialog::None) {
             return self.handle_key_main(key);
         }
@@ -3953,6 +4007,16 @@ fn handle_event(ui: &mut SchedulerUI, event: &Event) -> EventResult {
     }
 
     match event {
+        // The list of keys is modal for the pointer as it is for the keys: a
+        // press with any button puts it away and does nothing else, and the
+        // wheel scrolls nothing it covers.
+        Event::Mouse(m) if ui.show_help => match m.kind {
+            MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                ui.show_help = false;
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        },
         Event::Mouse(m) => match m.kind {
             MouseEventKind::Press(MouseButton::Left) => result(ui.handle_click(m.x, m.y)),
             MouseEventKind::Scroll { dy, .. } => result(ui.handle_scroll(dy)),
@@ -6558,6 +6622,198 @@ mod tests {
             dark,
             fills(&mut app),
             "high contrast reached every other surface but not this window"
+        );
+    }
+
+    // -- The list of keys ------------------------------------------------------
+
+    fn key_of(k: Key, modifiers: Modifiers, text: &str) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        }
+    }
+
+    fn hit(ui: &mut SchedulerUI, k: Key, modifiers: Modifiers) -> EventResult {
+        handle_event(ui, &Event::Key(key_of(k, modifiers, "")))
+    }
+
+    fn mouse(ui: &mut SchedulerUI, x: f32, y: f32, kind: MouseEventKind) -> EventResult {
+        handle_event(ui, &Event::Mouse(MouseEvent { x, y, kind }))
+    }
+
+    fn task_ids(ui: &SchedulerUI) -> Vec<u64> {
+        ui.scheduler.list_tasks().iter().map(|t| t.id).collect()
+    }
+
+    /// **Every key the list of keys advertises is answered by this window**,
+    /// over a long list with a task chosen in the middle of it -- Escape with
+    /// a dialog up, the only place it is a key.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let mut ui = ui_with_tasks(40);
+                let ids = task_ids(&ui);
+                ui.select_task(ids[10]);
+                if *label == "Escape" {
+                    ui.open_add_dialog();
+                }
+                assert_eq!(
+                    handle_event(&mut ui, &Event::Key(stroke.clone())),
+                    EventResult::Consumed,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The list of keys reaches the window**, and goes on F1, `?` or a plain
+    /// Escape -- not on Alt+Escape, which is the desktop's.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut ui = ui_with_tasks(3);
+        assert!(
+            !drawn_text(&ui)
+                .iter()
+                .any(|t| t.contains("F1 or ? closes this")),
+            "the list is up before anybody asked for it"
+        );
+        for chord in [Modifiers::alt(), Modifiers::super_key()] {
+            hit(&mut ui, Key::F1, chord);
+            assert!(
+                !ui.show_help,
+                "{chord:?}+F1, the desktop's, raised the list"
+            );
+        }
+        hit(&mut ui, Key::F1, Modifiers::NONE);
+        let missing = guitk::shortcut::missing_rows(&drawn_text(&ui), SHORTCUTS);
+        assert!(missing.is_empty(), "{missing:?}");
+        hit(&mut ui, Key::Escape, Modifiers::alt());
+        assert!(ui.show_help, "Alt+Escape put the list away");
+        hit(&mut ui, Key::Escape, Modifiers::NONE);
+        assert!(!ui.show_help, "Escape left the list up");
+        handle_event(
+            &mut ui,
+            &Event::Key(key_of(Key::Slash, Modifiers::shift(), "?")),
+        );
+        assert!(ui.show_help, "? raised nothing");
+        handle_event(
+            &mut ui,
+            &Event::Key(key_of(Key::Slash, Modifiers::shift(), "?")),
+        );
+        assert!(!ui.show_help, "? left the list up");
+        hit(&mut ui, Key::F1, Modifiers::NONE);
+        hit(&mut ui, Key::F1, Modifiers::NONE);
+        assert!(!ui.show_help, "F1 left the list up");
+    }
+
+    /// **`?` is typed into a box**, where it is a character, and F1 raises the
+    /// list from there, where it never is -- over the dialog.
+    #[test]
+    fn a_question_mark_is_typed_into_a_box_and_f1_still_raises_the_list() {
+        let mut ui = SchedulerUI::new();
+        ui.open_add_dialog();
+        assert_eq!(ui.focus, Some(FormField::Name));
+        handle_event(
+            &mut ui,
+            &Event::Key(key_of(Key::Slash, Modifiers::shift(), "?")),
+        );
+        assert!(!ui.show_help, "? raised the list from the name box");
+        assert_eq!(ui.form.name, "?", "? was not typed");
+        hit(&mut ui, Key::F1, Modifiers::NONE);
+        assert!(ui.show_help, "F1 did not raise the list from the name box");
+        assert!(
+            drawn_text(&ui)
+                .iter()
+                .any(|t| t.contains("F1 or ? closes this")),
+            "the list is not drawn over the dialog"
+        );
+    }
+
+    /// **The list of keys is modal**: with it up, no key, press or turn of the
+    /// wheel reaches what it covers -- where Delete would ask to delete the
+    /// task and Space would turn it off. The controls are the same with it
+    /// down.
+    #[test]
+    fn the_shortcut_list_takes_the_keys_and_a_press() {
+        let mut ui = ui_with_tasks(40);
+        let ids = task_ids(&ui);
+        ui.select_task(ids[0]);
+        let row = probe::rect_of(&ui, Target::TaskRow(ids[3])).expect("a fourth row");
+        let (rx, ry) = (row.x + row.w / 2.0, row.y + row.h / 2.0);
+        let enabled = |ui: &SchedulerUI| ui.scheduler.list_tasks()[0].enabled;
+        let was = enabled(&ui);
+
+        hit(&mut ui, Key::F1, Modifiers::NONE);
+        for (k, m) in [
+            (Key::Delete, Modifiers::NONE),
+            (Key::Space, Modifiers::NONE),
+            (Key::Down, Modifiers::NONE),
+            (Key::Tab, Modifiers::NONE),
+            (Key::N, Modifiers::ctrl()),
+        ] {
+            assert_eq!(
+                hit(&mut ui, k, m),
+                EventResult::Consumed,
+                "{k:?} was not taken"
+            );
+        }
+        assert!(
+            ui.show_help,
+            "a key other than F1, ? or Escape put the list away"
+        );
+        assert!(
+            matches!(ui.dialog, UiDialog::None),
+            "a dialog opened under the list"
+        );
+        assert_eq!(
+            enabled(&ui),
+            was,
+            "Space turned the task off under the list"
+        );
+        assert_eq!(
+            ui.selected_task_id,
+            Some(ids[0]),
+            "Down moved under the list"
+        );
+        assert_eq!(ui.tab, UiTab::Tasks, "Tab switched the tab under the list");
+        assert_eq!(
+            mouse(
+                &mut ui,
+                rx,
+                ry,
+                MouseEventKind::Scroll { dx: 0.0, dy: -3.0 }
+            ),
+            EventResult::Ignored
+        );
+        assert_eq!(
+            ui.task_list_scroll, 0,
+            "the wheel scrolled the tasks under it"
+        );
+        assert!(ui.show_help, "the wheel put the list away");
+        mouse(&mut ui, rx, ry, MouseEventKind::Press(MouseButton::Left));
+        assert!(!ui.show_help, "the press did not put the list away");
+        assert_eq!(
+            ui.selected_task_id,
+            Some(ids[0]),
+            "the press chose a task under it"
+        );
+        hit(&mut ui, Key::F1, Modifiers::NONE);
+        mouse(&mut ui, rx, ry, MouseEventKind::Press(MouseButton::Right));
+        assert!(!ui.show_help, "a right-button press left the list up");
+
+        // The controls.
+        mouse(&mut ui, rx, ry, MouseEventKind::Press(MouseButton::Left));
+        assert_eq!(ui.selected_task_id, Some(ids[3]));
+        hit(&mut ui, Key::Space, Modifiers::NONE);
+        assert_ne!(
+            ui.scheduler.list_tasks()[3].enabled,
+            was,
+            "Space does not turn a task off at all"
         );
     }
 }

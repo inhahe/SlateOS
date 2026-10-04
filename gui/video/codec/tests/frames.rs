@@ -20,7 +20,7 @@ use std::io::Cursor;
 use videocodec::{Frame, SeekMode, Video};
 
 /// Every fixture, each a path the conversion or the file can take.
-const FIXTURES: [&str; 20] = [
+const FIXTURES: [&str; 28] = [
     "vp8_sd.webm",
     "vp8_hd.webm",
     "vp8_odd.webm",
@@ -41,6 +41,14 @@ const FIXTURES: [&str; 20] = [
     "av1_mono.webm",
     "av1_444_10bit.webm",
     "vp9_cropped.mkv",
+    "vp9.mp4",
+    "av1.mp4",
+    "av1_fragmented.mp4",
+    "vp9_pasp.mp4",
+    "vp9_cut.mp4",
+    "av1_cut.mp4",
+    "vp9_colr.mp4",
+    "vp9_clap.mp4",
 ];
 
 /// One frame as the answers give it.
@@ -169,7 +177,9 @@ fn a_picture_converted_later_is_the_same_frame() {
 /// An exact seek gives the frame showing at the time sought -- the latest
 /// at or before it, or the first for a time before them all -- and then the
 /// frames after it; a key-frame seek gives the latest key frame at or before
-/// the time, and the frames after that.
+/// the time, and the frames after that -- or, before the first key frame
+/// shown, the first frame: an MP4 file cut between key frames shows none
+/// until its next, the one before the cut being decoded and not shown.
 #[test]
 fn every_seek_lands_on_the_frame_showing_then() {
     for name in FIXTURES {
@@ -211,7 +221,7 @@ fn every_seek_lands_on_the_frame_showing_then() {
                 .position(|l| *l == first)
                 .unwrap_or_else(|| panic!("{name}: a seek to {target} gave {first:?}"));
             assert!(
-                want[at].key,
+                want[at].key || at == 0,
                 "{name}: a seek to {target} landed on a frame not key"
             );
             let key_before = want
@@ -241,6 +251,8 @@ fn a_damaged_file_plays_what_it_can_and_never_panics() {
         "vp9_cropped.mkv",
         "vp9_440.webm",
         "vp8_alpha.webm",
+        "vp9_cut.mp4",
+        "av1_cut.mp4",
     ] {
         let bytes = std::fs::read(path(name)).unwrap();
         let play = |data: &[u8]| {
@@ -260,13 +272,20 @@ fn a_damaged_file_plays_what_it_can_and_never_panics() {
             }
         };
         let mut damaged = bytes.clone();
-        // The headers -- everything before the first Cluster's ID -- byte by
-        // byte; the clusters, whose damage the demuxer reads past, sparsely.
-        let headers = bytes
-            .windows(4)
-            .position(|w| w == [0x1F, 0x43, 0xB6, 0x75])
-            .unwrap_or(bytes.len());
-        let positions = (0..headers).chain((headers..bytes.len()).step_by(61));
+        // The headers byte by byte -- Matroska's, everything before the
+        // first Cluster's ID; MP4's, the moov, which ffmpeg writes after the
+        // media -- and the media, whose damage the decoders read past,
+        // sparsely.
+        let find = |id: &[u8]| bytes.windows(id.len()).position(|w| w == id);
+        let headers = match find(b"moov") {
+            Some(type_at) if name.ends_with(".mp4") => type_at.saturating_sub(4)..bytes.len(),
+            _ => 0..find(&[0x1F, 0x43, 0xB6, 0x75]).unwrap_or(bytes.len()),
+        };
+        let positions = headers.clone().chain(
+            (0..bytes.len())
+                .step_by(61)
+                .filter(|at| !headers.contains(at)),
+        );
         for at in positions {
             damaged[at] ^= 0xff;
             play(&damaged);
@@ -308,4 +327,31 @@ fn a_file_without_the_video_asked_for_is_refused() {
     ));
     let file = File::open(path("vp9_sd_untagged.webm")).unwrap();
     assert_eq!(Video::open_track(file, 1).unwrap().info().track, 1);
+    // An MP4 track is named by its ID.
+    let file = File::open(path("vp9.mp4")).unwrap();
+    assert_eq!(Video::open_track(file, 1).unwrap().info().track, 1);
+    let file = File::open(path("vp9.mp4")).unwrap();
+    assert!(matches!(
+        Video::open_track(file, 2),
+        Err(videocodec::Error::NoVideo)
+    ));
+}
+
+/// MP4 holds H.264 more often than anything else, which is not decoded here
+/// yet: such a file is refused by its codec's name, not taken for damage.
+#[test]
+fn an_mp4_in_a_codec_not_decoded_here_is_refused_by_name() {
+    let h264 = format!(
+        "{}/../mp4/tests/data/h264_bframes.mp4",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let refused = Video::open(File::open(h264).unwrap());
+    assert!(matches!(
+        refused,
+        Err(videocodec::Error::Codec(videocodec::Codec::H264))
+    ));
+    assert_eq!(
+        refused.err().unwrap().to_string(),
+        "the video is H.264, which is not decoded here yet"
+    );
 }

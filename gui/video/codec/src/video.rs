@@ -1,37 +1,44 @@
 //! A file's video, frame by frame: [`Video`].
 //!
-//! It reads the file's packets in order, keeps those of its video track,
-//! decodes them, and gives back each picture with its time -- converted
+//! It reads the file's packets in order -- from a Matroska (WebM) or an MP4
+//! file alike (`container.rs`) -- keeps those of its video track, decodes
+//! them, and gives back each picture with its time: converted
 //! ([`Video::next_frame`]), or not yet ([`Video::next_picture`], for a player
 //! that has fallen behind and drops pictures without converting them).
 //!
-//! **Which track.** Of the file's video tracks, the first that is enabled,
-//! marked default and in a codec decoded here, else the first decodable one;
-//! [`Video::open_track`] names another.
+//! **Which track.** Of the file's video tracks, the first that is decodable,
+//! enabled and marked default, else the first decodable one;
+//! [`Video::open_track`] names another. (An MP4 track is always enabled, and
+//! marked default by `tkhd`'s "enabled" flag, as FFmpeg reads it.)
 //!
 //! **Alpha.** WebM's transparency is a second stream of the track's codec
 //! (VP8 or VP9) in each block's `BlockAdditional` 1, used only where the
 //! track says it is (`AlphaMode` 1), as RFC 9559 defines it and Chrome reads
-//! it.
+//! it. MP4 has none.
 //!
-//! **Crop.** A track's `PixelCrop` is applied to each converted frame -- the
-//! picture's pixels outside the crop cut away, those inside exactly as the
-//! whole picture converts them -- where it fits the frame; a frame it does
-//! not fit is shown whole, as FFmpeg shows it.
+//! **Crop.** A track's crop -- Matroska's `PixelCrop`, MP4's clean aperture
+//! (`clap`) -- is applied to each converted frame, the picture's pixels
+//! outside it cut away and those inside exactly as the whole picture
+//! converts them, where it fits the frame; a frame it does not fit is shown
+//! whole, as FFmpeg shows it.
+//!
+//! **Edit lists.** An MP4 file's edit list says which stretch of a track
+//! plays: the frames before it that later ones are coded from are decoded
+//! and not shown (`gui/video/mp4` marks them, as FFmpeg's demuxer does), and
+//! the times are the edit list's.
 //!
 //! **Seeking** ([`Video::seek`]) goes to the latest key frame at or before
-//! the time (`gui/video/matroska`'s seek, held to FFmpeg's), then either
+//! the time (the container's seek, each held to FFmpeg's), then either
 //! gives back frames from it ([`SeekMode::KeyFrame`], for scrubbing) or
 //! decodes quietly up to the frame showing at that time and gives back
 //! that one first ([`SeekMode::Exact`]).
 
 use std::io::{Read, Seek};
 
-use matroska::{Demuxer, TrackKind};
-
+use crate::container::{Container, Sample};
 use crate::decoder::{Decoder, Packet};
 use crate::picture::Picture;
-use crate::{Codec, ColourHint, Error, Frame, Limits, time};
+use crate::{Codec, Error, Frame, Limits, time};
 
 /// Where a seek lands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,7 +54,8 @@ pub enum SeekMode {
 /// What a file says of its video, before a frame is decoded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VideoInfo {
-    /// The track's number in the file.
+    /// The track's number in the file: Matroska's track number, MP4's
+    /// track ID.
     pub track: u64,
     pub codec: Codec,
     /// The size of its frames, as the file declares it (after any crop).
@@ -70,7 +78,9 @@ pub struct VideoInfo {
 
 /// A file's video track, decoded frame by frame.
 pub struct Video<R> {
-    demuxer: Demuxer<R>,
+    demuxer: Container<R>,
+    /// What the container's packets name the track by.
+    key: u64,
     info: VideoInfo,
     /// The track's tick: `num / den` seconds.
     time_base: (u64, u64),
@@ -95,20 +105,21 @@ pub struct Video<R> {
 }
 
 impl<R: Read + Seek> Video<R> {
-    /// The video of the Matroska or WebM file `source`: its best track
-    /// (see the module documentation).
+    /// The video of `source` -- a Matroska, WebM or MP4 file -- from its
+    /// best track (see the module documentation).
     ///
     /// # Errors
     ///
-    /// [`Error::Container`] when the file cannot be read; [`Error::NoVideo`]
-    /// when it has no video track; [`Error::Codec`] when none of its video
-    /// is in a codec decoded here (the codec of the one it would have
-    /// played).
+    /// [`Error::Container`] when the file cannot be read, or is none of
+    /// those; [`Error::NoVideo`] when it has no video track; [`Error::Codec`]
+    /// when none of its video is in a codec decoded here (the codec of the
+    /// one it would have played).
     pub fn open(source: R) -> Result<Self, Error> {
         Self::open_with(source, None, Limits::default())
     }
 
-    /// The video track numbered `track` of `source`.
+    /// The video track numbered `track` of `source` (as
+    /// [`VideoInfo::track`] numbers it).
     ///
     /// # Errors
     ///
@@ -124,51 +135,40 @@ impl<R: Read + Seek> Video<R> {
     ///
     /// As [`Self::open_track`].
     pub fn open_with(source: R, track: Option<u64>, limits: Limits) -> Result<Self, Error> {
-        let demuxer = Demuxer::open(source)?;
-        let chosen = {
-            let videos: Vec<&matroska::Track> = demuxer
-                .tracks()
-                .iter()
-                .filter(|t| t.kind == TrackKind::Video && t.video.is_some() && t.readable())
-                .collect();
-            match track {
-                Some(n) => videos.iter().find(|t| t.number == n).copied(),
-                // Decodable first, then enabled, then marked default; the
-                // file's order among equals (`min_by_key` keeps the first).
-                None => videos.iter().copied().min_by_key(|t| {
-                    let decodable = matches!(codec_of(t), Codec::Vp8 | Codec::Vp9 | Codec::Av1);
-                    (!decodable, !t.enabled, !t.default)
-                }),
-            }
-            .ok_or(Error::NoVideo)?
-            .clone()
-        };
-        let time_base = demuxer.time_base(chosen.number).ok_or(Error::NoVideo)?;
-        let picture = chosen.video.ok_or(Error::NoVideo)?;
-        let codec = codec_of(&chosen);
-        let hint = ColourHint::matroska(picture.colour.as_ref());
-        let decoder = Decoder::new(codec, &chosen.codec_private, hint, limits)?;
+        let demuxer = Container::open(source)?;
+        let videos = demuxer.videos();
+        let chosen = match track {
+            Some(n) => videos.iter().find(|t| t.number == n),
+            // Decodable first, then enabled, then marked default; the
+            // file's order among equals (`min_by_key` keeps the first).
+            None => videos.iter().min_by_key(|t| {
+                let decodable = matches!(t.codec, Codec::Vp8 | Codec::Vp9 | Codec::Av1);
+                (!decodable, !t.enabled, !t.default)
+            }),
+        }
+        .ok_or(Error::NoVideo)?;
+        let decoder = Decoder::new(chosen.codec, &chosen.config, chosen.hint, limits)?;
+        let width = cropped(chosen.width, chosen.crop[0], chosen.crop[2]);
+        let height = cropped(chosen.height, chosen.crop[1], chosen.crop[3]);
+        let (display_width, display_height) = chosen.display_size(width, height);
         let info = VideoInfo {
             track: chosen.number,
-            codec,
-            width: cropped(picture.pixel_width, picture.crop[0], picture.crop[2]),
-            height: cropped(picture.pixel_height, picture.crop[1], picture.crop[3]),
-            display_width: 0,
-            display_height: 0,
-            frame_duration: chosen.default_duration,
-            duration: segment_duration(&demuxer),
-            alpha: picture.alpha_mode == 1,
+            codec: chosen.codec,
+            width,
+            height,
+            display_width,
+            display_height,
+            frame_duration: chosen.frame_duration,
+            duration: demuxer.duration(),
+            alpha: chosen.alpha,
         };
-        let (display_width, display_height) = display_size(&picture, info.width, info.height);
+        let (key, time_base, crop) = (chosen.key, chosen.time_base, chosen.crop);
         Ok(Self {
             demuxer,
-            info: VideoInfo {
-                display_width,
-                display_height,
-                ..info
-            },
+            key,
+            info,
             time_base,
-            crop: picture.crop,
+            crop,
             decoder,
             next_time: 0,
             target: None,
@@ -244,7 +244,7 @@ impl<R: Read + Seek> Video<R> {
                 return Ok(self.held.take());
             }
             match self.demuxer.next_packet()? {
-                Some(packet) if packet.track == self.info.track => self.send(&packet),
+                Some(sample) if sample.track == self.key => self.send(&sample),
                 Some(_) => {}
                 None => {
                     if let Err(e) = self.decoder.finish() {
@@ -274,7 +274,7 @@ impl<R: Read + Seek> Video<R> {
     /// [`Error::Container`] when the source fails.
     pub fn seek(&mut self, time: i64, mode: SeekMode) -> Result<(), Error> {
         let ticks = time::to_ticks(time, self.time_base);
-        self.demuxer.seek(self.info.track, ticks)?;
+        self.demuxer.seek(self.key, ticks)?;
         self.decoder.reset()?;
         self.held = None;
         self.after = None;
@@ -295,27 +295,27 @@ impl<R: Read + Seek> Video<R> {
     }
 
     /// Hand the decoder one of the track's packets.
-    fn send(&mut self, packet: &matroska::Packet) {
-        let time = packet
-            .timestamp
+    fn send(&mut self, sample: &Sample) {
+        let time = sample
+            .time
             .map_or(self.next_time, |t| time::to_ns(t, self.time_base));
-        let duration = time::duration_to_ns(packet.duration, self.time_base);
+        let duration = time::duration_to_ns(sample.duration, self.time_base);
         self.next_time = time.saturating_add_unsigned(duration);
+        if let Some(config) = &sample.new_config {
+            self.decoder.configure(config);
+        }
         let alpha = if self.info.alpha {
-            packet
-                .additions
-                .iter()
-                .find(|(id, _)| *id == 1)
-                .map(|(_, bytes)| bytes.as_slice())
+            sample.alpha.as_deref()
         } else {
             None
         };
         let sent = self.decoder.send(&Packet {
-            data: &packet.data,
+            data: &sample.data,
             alpha,
             time,
             duration,
-            keyframe: packet.keyframe,
+            keyframe: sample.keyframe,
+            discard: sample.discard,
         });
         if let Err(e) = sent {
             self.damage(e);
@@ -373,111 +373,21 @@ impl<R: Read + Seek> Video<R> {
     }
 }
 
-/// A track's codec, as this crate names it.
-fn codec_of(track: &matroska::Track) -> Codec {
-    match track.codec {
-        matroska::Codec::Vp8 => Codec::Vp8,
-        matroska::Codec::Vp9 => Codec::Vp9,
-        matroska::Codec::Av1 => Codec::Av1,
-        _ => Codec::Other,
-    }
-}
-
 /// `size` less the two crops, as a `u32` (0 for a crop that leaves
-/// nothing, which the demuxer refuses anyway).
+/// nothing, which Matroska's demuxer refuses anyway).
 fn cropped(size: u64, a: u64, b: u64) -> u32 {
     u32::try_from(size.saturating_sub(a.saturating_add(b))).unwrap_or(u32::MAX)
-}
-
-/// The size to show a `width` x `height` frame at: its height, and the width
-/// the file's `DisplayWidth` : `DisplayHeight` gives it -- FFmpeg's reading,
-/// which turns the two into a pixel's shape (in every unit but "unknown",
-/// 4) -- rounded to the nearest pixel.
-fn display_size(video: &matroska::Video, width: u32, height: u32) -> (u32, u32) {
-    match (
-        video.display_unit,
-        video.display_width,
-        video.display_height,
-    ) {
-        (0..=3, Some(dw), Some(dh)) if dw > 0 && dh > 0 && height > 0 => {
-            // height * dw / dh, rounded half up: (2 * height * dw + dh) /
-            // (2 * dh), which a u128 holds for any u32 height and u64 ratio.
-            let shown = u128::from(height)
-                .checked_mul(u128::from(dw))
-                .and_then(|v| v.checked_mul(2))
-                .and_then(|v| v.checked_add(u128::from(dh)))
-                .and_then(|v| v.checked_div(u128::from(dh).checked_mul(2)?));
-            match shown.and_then(|s| u32::try_from(s).ok()) {
-                Some(shown) => (shown.max(1), height),
-                None => (width, height),
-            }
-        }
-        _ => (width, height),
-    }
-}
-
-/// The segment's duration in nanoseconds, if the file gives one that is a
-/// finite, non-negative number of ticks.
-#[allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "a timestamp scale is far inside f64's integer-exact range, and the product is checked finite, non-negative and in range first"
-)]
-fn segment_duration<R: Read + Seek>(demuxer: &Demuxer<R>) -> Option<u64> {
-    let info = demuxer.info();
-    let ns = info.duration? * info.timestamp_scale as f64;
-    (ns.is_finite() && ns >= 0.0 && ns < u64::MAX as f64).then_some(ns as u64)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn video(unit: u64, dw: Option<u64>, dh: Option<u64>) -> matroska::Video {
-        matroska::Video {
-            pixel_width: 720,
-            pixel_height: 576,
-            crop: [0; 4],
-            display_width: dw,
-            display_height: dh,
-            display_unit: unit,
-            alpha_mode: 0,
-            colour: None,
-        }
-    }
-
-    #[test]
-    fn the_display_size_keeps_the_height_and_takes_the_files_shape() {
-        // 720x576 PAL shown 16:9: 1024x576.
-        assert_eq!(
-            display_size(&video(0, Some(1024), Some(576)), 720, 576),
-            (1024, 576)
-        );
-        assert_eq!(
-            display_size(&video(3, Some(16), Some(9)), 720, 576),
-            (1024, 576)
-        );
-        // 4:3, rounded to the nearest pixel: 576 * 4 / 3 = 768.
-        assert_eq!(
-            display_size(&video(3, Some(4), Some(3)), 720, 576),
-            (768, 576)
-        );
-        // Nothing said, a zero, or an unknown unit: the frame's own size.
-        assert_eq!(display_size(&video(0, None, None), 720, 576), (720, 576));
-        assert_eq!(
-            display_size(&video(0, Some(0), Some(9)), 720, 576),
-            (720, 576)
-        );
-        assert_eq!(
-            display_size(&video(4, Some(16), Some(9)), 720, 576),
-            (720, 576)
-        );
-    }
-
     #[test]
     fn a_crop_leaves_the_rest() {
         assert_eq!(cropped(100, 10, 20), 70);
         assert_eq!(cropped(100, 60, 60), 0);
+        // A crop past the picture leaves nothing, rather than wrapping.
+        assert_eq!(cropped(64, u64::MAX, 48), 0);
     }
 }

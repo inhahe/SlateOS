@@ -4497,6 +4497,7 @@ version = "0.1.0"
 dependencies = [
  "matroska",
  "md5",
+ "mp4",
  "rav1d",
  "vp8",
  "vp9",

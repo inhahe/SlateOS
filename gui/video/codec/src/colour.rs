@@ -112,6 +112,20 @@ impl ColourHint {
             },
         }
     }
+
+    /// What an MP4 track's `colr` and `vpcC` say, as `gui/video/mp4` keeps
+    /// it: FFmpeg's numbers, a code point it has no name for already made
+    /// unspecified.
+    pub(crate) fn mp4(colour: Option<&mp4::Colour>) -> Self {
+        let Some(c) = colour else {
+            return Self::default();
+        };
+        Self {
+            matrix: said(c.matrix, true),
+            primaries: said(c.primaries, false),
+            full_range: c.full_range,
+        }
+    }
 }
 
 /// `value` if it says something: not unspecified, not reserved, and an H.273
@@ -267,6 +281,27 @@ mod tests {
         );
         assert_eq!(file(1, 1, 1).full_range, Some(false));
         assert_eq!(ColourHint::matroska(None), NOTHING);
+        // MP4's: the same words, and `nclc`'s silence on the range.
+        let mp4 = |p, m, full_range| {
+            ColourHint::mp4(Some(&mp4::Colour {
+                primaries: p,
+                transfer: 2,
+                matrix: m,
+                full_range,
+            }))
+        };
+        assert_eq!(mp4(2, 2, None), NOTHING);
+        assert_eq!(mp4(0, 3, None), NOTHING);
+        assert_eq!(
+            mp4(9, 9, Some(true)),
+            ColourHint {
+                matrix: Some(9),
+                primaries: Some(9),
+                full_range: Some(true),
+            }
+        );
+        assert_eq!(mp4(1, 0, Some(false)).matrix, Some(0));
+        assert_eq!(ColourHint::mp4(None), NOTHING);
         assert_eq!(ColourHint::av1(None), NOTHING);
         let av1 = ColourHint::av1(Some(rav1d::safe::Colour {
             primaries: 2,

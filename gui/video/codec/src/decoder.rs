@@ -10,6 +10,12 @@
 //! through dav1d's queue: a packet in, a picture out when one is ready, each
 //! picture carrying the time of the packet it came from, since with frame
 //! threads it comes out a few packets later.
+//!
+//! A packet marked [`Packet::discard`] -- one an MP4 edit list leaves out,
+//! kept in the file only because those after it are coded from it -- is
+//! decoded like any other, and its picture dropped, as FFmpeg drops it
+//! (`AV_FRAME_FLAG_DISCARD`). An AV1 picture is matched to its packet by a
+//! tag dav1d carries for it, whatever order its threads finish in.
 
 use std::collections::VecDeque;
 
@@ -32,6 +38,9 @@ pub struct Packet<'a> {
     pub duration: u64,
     /// Whether the file marks it a key frame.
     pub keyframe: bool,
+    /// Decoded for the packets after it, and its own picture not shown: a
+    /// frame the file's edit list leaves out.
+    pub discard: bool,
 }
 
 /// One track's decoder.
@@ -64,6 +73,10 @@ enum Inner {
     },
     Av1(Av1),
 }
+
+/// The tag dav1d carries through to the picture of a packet marked
+/// [`Packet::discard`].
+const DISCARD: u8 = 1;
 
 /// How many times [`Av1::push`] hands dav1d the same packet before giving
 /// up: each pass takes the packet or a picture, so two or three suffice; this
@@ -107,7 +120,9 @@ impl Decoder {
                 alpha: None,
             },
             Codec::Av1 => Inner::Av1(Av1::new(config, max_pixels)?),
-            Codec::Other => return Err(Error::Codec(codec)),
+            Codec::H264 | Codec::Hevc | Codec::Mpeg4 | Codec::Other => {
+                return Err(Error::Codec(codec));
+            }
         };
         Ok(Self {
             codec,
@@ -138,7 +153,9 @@ impl Decoder {
                         .unwrap_or(None),
                     None => None,
                 };
-                if let Some(shown) = picture.decode(packet.data).map_err(Error::Vp8)? {
+                if let Some(shown) = picture.decode(packet.data).map_err(Error::Vp8)?
+                    && !packet.discard
+                {
                     self.ready.push_back(Picture::new(
                         packet,
                         Planes::Vp8 {
@@ -166,7 +183,9 @@ impl Decoder {
                         .unwrap_or(None),
                     None => None,
                 };
-                if let Some(shown) = picture.decode(packet.data).map_err(Error::Vp9)? {
+                if let Some(shown) = picture.decode(packet.data).map_err(Error::Vp9)?
+                    && !packet.discard
+                {
                     self.ready.push_back(Picture::new(
                         packet,
                         Planes::Vp9 {
@@ -179,6 +198,17 @@ impl Decoder {
                 Ok(())
             }
             Inner::Av1(av1) => av1.send(packet, &mut self.ready, self.hint),
+        }
+    }
+
+    /// A new setup for the packets from the next on -- an MP4 track whose
+    /// samples change to another sample entry: AV1's configuration record,
+    /// whose sequence header is sent before the next packet. VP8 and VP9
+    /// have none to take.
+    pub fn configure(&mut self, config: &[u8]) {
+        if let Inner::Av1(av1) = &mut self.codec {
+            av1.config = config_obus(config).to_vec();
+            av1.configure = true;
         }
     }
 
@@ -269,8 +299,9 @@ impl Av1 {
             return Ok(());
         }
         let duration = i64::try_from(packet.duration).unwrap_or(i64::MAX);
+        let tag = if packet.discard { DISCARD } else { 0 };
         let mut data =
-            av1::Data::with_time(packet.data, packet.time, duration).map_err(Error::Av1)?;
+            av1::Data::with_tag(packet.data, packet.time, duration, tag).map_err(Error::Av1)?;
         self.push(&mut data, ready, hint)
     }
 
@@ -292,7 +323,7 @@ impl Av1 {
                 Err(e) => return Err(Error::Av1(e)),
             }
             match self.decoder.picture() {
-                Ok(p) => ready.push_back(Picture::av1(p, hint)),
+                Ok(p) => keep(p, ready, hint),
                 Err(av1::Error::Again) => {}
                 Err(e) => return Err(Error::Av1(e)),
             }
@@ -311,7 +342,7 @@ impl Av1 {
         loop {
             match self.decoder.picture() {
                 Ok(p) => {
-                    ready.push_back(Picture::av1(p, hint));
+                    keep(p, ready, hint);
                     empty_once = false;
                 }
                 Err(av1::Error::Again) if empty_once => return Ok(()),
@@ -319,6 +350,13 @@ impl Av1 {
                 Err(e) => return Err(Error::Av1(e)),
             }
         }
+    }
+}
+
+/// `picture` made ready, unless its packet was marked to be discarded.
+fn keep(picture: av1::Picture, ready: &mut VecDeque<Picture>, hint: ColourHint) {
+    if picture.tag() != Some(DISCARD) {
+        ready.push_back(Picture::av1(picture, hint));
     }
 }
 

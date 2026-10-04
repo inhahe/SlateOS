@@ -34,12 +34,14 @@ use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::field;
 use guitk::filetypes::FileCategory;
 use guitk::frame::Rect;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
+use guitk::textedit;
 use guitk::{scroll_window, text, wheel};
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
@@ -238,6 +240,20 @@ fn list_area(size: (f32, f32)) -> Rect {
 fn view_button_width(label: &str) -> f32 {
     let text = text::measure(label, FONT_SIZE, FontWeightHint::Regular);
     (text + 2.0 * PADDING).max(BUTTON_WIDTH * 0.75)
+}
+
+/// The path field in a window `width` wide: it shrinks with the window rather
+/// than running off the edge, and never below 80 pixels, leaving room for the
+/// Scan button and the view tabs beside it. The toolbar draws it here and the
+/// pointer is tested against it here.
+fn path_input_rect(width: f32) -> Rect {
+    let scan_width = BUTTON_WIDTH.max(70.0);
+    let modes_width: f32 = ViewMode::ALL
+        .iter()
+        .map(|(_, label)| view_button_width(label) + 4.0)
+        .sum();
+    let input_width = (width - 4.0 * PADDING - scan_width - modes_width).clamp(80.0, INPUT_WIDTH);
+    Rect::new(PADDING, 7.0, input_width, INPUT_HEIGHT)
 }
 
 /// Width of one breadcrumb button, sized to its segment and capped.
@@ -1221,10 +1237,16 @@ pub struct DiskAnalyzerUI {
     pub scan_error: Option<String>,
     /// Text in the path input field.
     pub path_input: String,
-    /// Whether the path field has the keyboard.
     /// Whether the shortcut card is up.
     pub show_help: bool,
+    /// Whether the path field has the keyboard.
     pub path_focused: bool,
+    /// Whether the pointer is over the path field, which lights its edge.
+    pub path_hovered: bool,
+    /// How wide the mark is round the path field while it has the keyboard:
+    /// the user's focus width (`App::appearance_changed`), the toolkit's until
+    /// it is known.
+    pub focus_ring_width: f32,
     /// Index of the first list-view row to draw.
     ///
     /// A row index rather than a pixel offset: the list draws whole rows only
@@ -1300,6 +1322,8 @@ impl DiskAnalyzerUI {
             path_input,
             show_help: false,
             path_focused: false,
+            path_hovered: false,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             scroll_offset: 0,
             list_rows: Vec::new(),
             largest_rows: Vec::new(),
@@ -1651,6 +1675,19 @@ impl DiskAnalyzerUI {
 
     // -- toolbar ---------------------------------------------------------------
 
+    /// How the path field is drawn now: lit under the pointer, marked while
+    /// it has the keyboard -- and neither while the shortcut card covers it,
+    /// when it can be neither pointed at nor typed into.
+    fn path_field_state(&self) -> field::State {
+        let open = !self.show_help;
+        field::State {
+            hovered: open && self.path_hovered,
+            focused: open && self.path_focused,
+            disabled: false,
+            invalid: false,
+        }
+    }
+
     fn render_toolbar(&self, frame: &mut Frame, width: f32) {
         self.palette.push_surface(
             frame,
@@ -1664,56 +1701,64 @@ impl DiskAnalyzerUI {
 
         // Path input field. It shrinks with the window rather than running off
         // the edge, and never below the width of the buttons beside it.
-        let scan_width = BUTTON_WIDTH.max(70.0);
-        let modes_width: f32 = ViewMode::ALL
-            .iter()
-            .map(|(_, label)| view_button_width(label) + 4.0)
-            .sum();
-        let input_width =
-            (width - 4.0 * PADDING - scan_width - modes_width).clamp(80.0, INPUT_WIDTH);
-        let input = Rect::new(PADDING, 7.0, input_width, INPUT_HEIGHT);
-        self.palette.push_surface(
-            frame,
-            input.x,
-            input.y,
-            input.w,
-            input.h,
-            CORNER_RADIUS,
-            Surface::Card,
-        );
-        if self.path_focused {
-            // The caret would be the usual signal, and there is no caret here
-            // because there is no text-editing widget behind this field. An
-            // outline is what is left that still says "your typing goes here";
-            // a focused field that looks exactly like an unfocused one is how a
-            // user types a path into nothing.
-            frame.push(RenderCommand::StrokeRect {
-                x: input.x,
-                y: input.y,
-                width: input.w,
-                height: input.h,
-                color: self.palette.blue,
-                line_width: 1.0,
-                corner_radii: CornerRadii::all(CORNER_RADIUS),
-            });
-        }
-        frame.push(RenderCommand::Text {
-            x: input.x + 8.0,
-            y: 14.0,
-            text: self.path_input.clone(),
-            color: self.palette.text,
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(input.w - 16.0),
+        let input = path_input_rect(width);
+        let state = self.path_field_state();
+        field::draw(frame, &self.palette, input, state, self.focus_ring_width);
+        let inner = Rect::new(input.x + 8.0, 14.0, (input.w - 16.0).max(0.0), 0.0);
+        if state.focused {
+            // The typing, with the caret after it -- and scrolled once it is
+            // wider than the field, so the end being typed stays in view.
+            let mut tree = RenderTree::new();
+            textedit::draw(
+                &mut tree,
+                &textedit::SingleLine {
+                    text: &self.path_input,
+                    // Typed and erased at its end, so the end is where the
+                    // caret is.
+                    cursor: guitk::text::TextCursor::from(self.path_input.len()),
+                    selection_anchor: None,
+                    focused: true,
+                    x: inner.x,
+                    y: inner.y,
+                    width: inner.w,
+                    line_height: text::line_height(FONT_SIZE, FontWeightHint::Regular),
+                    font_size: FONT_SIZE,
+                    weight: FontWeightHint::Regular,
+                    color: self.palette.text,
+                    selection_bg: self.palette.accent,
+                    selection_fg: self.palette.crust,
+                    caret_width: textedit::CARET_WIDTH,
+                },
+            );
+            frame.extend(tree.commands);
+        } else {
             // Cut at the front: a path's tail is the part that says which
             // directory it is, and the head is the part every sibling shares.
-            overflow: TextOverflow::Ellipsis,
-        });
+            // An ellipsis at the end -- which is what this drew, under this
+            // same comment -- kept the shared head and cut off the name.
+            frame.push(RenderCommand::Text {
+                x: inner.x,
+                y: inner.y,
+                text: text::elide_start(
+                    &self.path_input,
+                    inner.w,
+                    "…",
+                    FONT_SIZE,
+                    FontWeightHint::Regular,
+                ),
+                color: self.palette.text,
+                font_size: FONT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(inner.w),
+                overflow: TextOverflow::Clip,
+            });
+        }
         frame.hit(Target::PathInput, input);
 
         // Scan button — which is a Cancel button while a scan is running,
         // because a scan of a large disk is minutes long and a user who started
         // the wrong one has no other way out.
+        let scan_width = BUTTON_WIDTH.max(70.0);
         let scan = Rect::new(input.right() + PADDING, 7.0, scan_width, BUTTON_HEIGHT);
         let scanning = self.scanning();
         frame.push(RenderCommand::FillRect {
@@ -2644,22 +2689,40 @@ impl DiskAnalyzerUI {
                 MouseEventKind::Scroll { .. } if self.show_help => Action::None,
                 MouseEventKind::Press(button) => self.handle_click(mouse.x, mouse.y, button, size),
                 MouseEventKind::Move => {
-                    let before = (self.hovered_rect, self.tooltip_text.clone());
+                    let before = (
+                        self.hovered_rect,
+                        self.tooltip_text.clone(),
+                        self.path_hovered,
+                    );
                     if self.view_mode == ViewMode::Treemap {
                         self.hover_treemap(mouse.x, mouse.y);
                     }
-                    if before == (self.hovered_rect, self.tooltip_text.clone()) {
+                    // The field's own rectangle rather than a hit test, which
+                    // would draw the whole window -- treemap and all -- on
+                    // every movement of the pointer.
+                    self.path_hovered = path_input_rect(size.0).contains(mouse.x, mouse.y);
+                    if before
+                        == (
+                            self.hovered_rect,
+                            self.tooltip_text.clone(),
+                            self.path_hovered,
+                        )
+                    {
                         Action::None
                     } else {
                         Action::Redraw
                     }
                 }
                 MouseEventKind::Leave => {
-                    if self.hovered_rect.is_none() && self.tooltip_text.is_empty() {
+                    if self.hovered_rect.is_none()
+                        && self.tooltip_text.is_empty()
+                        && !self.path_hovered
+                    {
                         return Action::None;
                     }
                     self.hovered_rect = None;
                     self.tooltip_text.clear();
+                    self.path_hovered = false;
                     Action::Redraw
                 }
                 MouseEventKind::Scroll { dy, .. } => {
@@ -2732,6 +2795,10 @@ fn lighten_color(color: Color, amount: u8) -> Color {
 impl App for DiskAnalyzerUI {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -4643,6 +4710,164 @@ mod tests {
         ui.path_input = "/é".to_string();
         probe::key(&mut ui, &press(Key::Backspace));
         assert_eq!(ui.path_input, "/");
+    }
+
+    /// A pointer event at `(x, y)`.
+    fn pointer(kind: MouseEventKind, (x, y): (f32, f32)) -> Event {
+        Event::Mouse(MouseEvent { x, y, kind })
+    }
+
+    /// **The path field is the toolkit's field** (lane C,
+    /// `c-e-a-theme-can-shape-the-controls`): lit under the pointer and dark
+    /// again when it leaves, marked in the theme's way and the user's width
+    /// while it has the keyboard, and neither while the shortcut card covers
+    /// it. It was a card with a one-pixel blue outline for focus, whatever
+    /// the theme said a field looks like.
+    #[test]
+    fn the_path_field_is_the_toolkits_field() {
+        let mut ui = loaded();
+        let mut p = ui.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut ui, &p);
+        App::appearance_changed(
+            &mut ui,
+            &appearance::AppearanceSettings {
+                focus_ring_scale: 2.5,
+                ..Default::default()
+            },
+        );
+        let ring = ui.focus_ring_width;
+        assert!(
+            ring > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive: {ring}"
+        );
+        let rect = path_input_rect(SIZE.0);
+        let seq = |s: field::State| {
+            let mut v: Vec<RenderCommand> = Vec::new();
+            field::draw(&mut v, &p, rect, s, ring);
+            v
+        };
+        let has = |cmds: &[RenderCommand], want: &[RenderCommand]| {
+            cmds.windows(want.len()).any(|w| w == want)
+        };
+        let draws = |ui: &DiskAnalyzerUI, s: field::State| {
+            let f = ui.frame(SIZE.0, SIZE.1);
+            let cmds = f.commands();
+            has(cmds, &seq(s))
+                && (s.focused || !has(cmds, &seq(field::State { focused: true, ..s })))
+        };
+        let rest = field::State::default();
+        let lit = field::State {
+            hovered: true,
+            ..rest
+        };
+        assert!(draws(&ui, rest), "the field at rest is not the toolkit's");
+
+        // Lit while the pointer is over it, and not after it leaves -- checked
+        // before the field has the keyboard, whose mark can hide the light.
+        let (cx, cy) = rect.centre();
+        assert_eq!(
+            ui.handle_event(&pointer(MouseEventKind::Move, (cx, cy)), SIZE),
+            Action::Redraw
+        );
+        assert!(
+            draws(&ui, lit),
+            "the pointer over the field does not light it"
+        );
+        ui.handle_event(&pointer(MouseEventKind::Leave, (cx, cy)), SIZE);
+        assert!(draws(&ui, rest), "the light stays after the pointer leaves");
+        ui.handle_event(&pointer(MouseEventKind::Move, (cx, cy)), SIZE);
+        assert_eq!(
+            ui.handle_event(
+                &pointer(MouseEventKind::Move, (cx, rect.bottom() + 40.0)),
+                SIZE
+            ),
+            Action::Redraw
+        );
+        assert!(
+            draws(&ui, rest),
+            "the light stays after the pointer moves off"
+        );
+
+        probe::click(&mut ui, Target::PathInput);
+        assert!(
+            draws(
+                &ui,
+                field::State {
+                    focused: true,
+                    ..rest
+                }
+            ),
+            "the field with the keyboard is not marked as the theme marks it"
+        );
+
+        ui.handle_event(&pointer(MouseEventKind::Move, (cx, cy)), SIZE);
+        ui.show_help = true;
+        assert!(
+            draws(&ui, rest),
+            "the field is lit or marked through the shortcut card"
+        );
+    }
+
+    /// Every string the window draws, plain or styled.
+    fn words(ui: &DiskAnalyzerUI) -> Vec<String> {
+        ui.frame(SIZE.0, SIZE.1)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } | RenderCommand::RichText { text, .. } => {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **A long path shows its end, and the typing shows its caret.** The
+    /// field cut a long path with an ellipsis at the end, under a comment
+    /// saying the end is the part that names the folder -- so every deep
+    /// path read as the same shared head. And there was no caret at all.
+    #[test]
+    fn a_long_path_shows_its_end_and_the_typing_its_caret() {
+        let mut ui = loaded();
+        let long = format!("/{}/the-folder-that-matters", "shared-head/".repeat(12));
+        ui.path_input.clone_from(&long);
+        let shown = words(&ui)
+            .into_iter()
+            .find(|t| t.ends_with("the-folder-that-matters"))
+            .expect("the end of a long path is not shown");
+        assert!(
+            shown.starts_with('…') && shown.len() < long.len(),
+            "a long path is not cut at its front: {shown:?}"
+        );
+
+        probe::click(&mut ui, Target::PathInput);
+        let rect = path_input_rect(SIZE.0);
+        let caret = |ui: &DiskAnalyzerUI, typed: &str| -> f32 {
+            let f = ui.frame(SIZE.0, SIZE.1);
+            let cmds = f.commands();
+            let at = cmds
+                .iter()
+                .position(|c| matches!(c, RenderCommand::RichText { text, .. } if text == typed))
+                .expect("the typing is not drawn");
+            match cmds.get(at + 1) {
+                Some(RenderCommand::Line { x1, x2, .. }) if (x1 - x2).abs() < 0.01 => *x1,
+                other => panic!("no caret after the typing: {other:?}"),
+            }
+        };
+        let x = caret(&ui, &long);
+        assert!(
+            x > rect.x && x < rect.right(),
+            "the caret of a long path is at {x}, outside the field {rect:?}"
+        );
+
+        ui.path_input = String::from("/home");
+        let end = rect.x + 8.0 + text::measure("/home", FONT_SIZE, FontWeightHint::Regular);
+        let x = caret(&ui, "/home");
+        assert!(
+            (x - end).abs() < 0.5,
+            "the caret is at {x}, not after the typing at {end}"
+        );
     }
 
     #[test]

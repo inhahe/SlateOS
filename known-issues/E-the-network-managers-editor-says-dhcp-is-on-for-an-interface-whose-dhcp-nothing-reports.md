@@ -1,5 +1,5 @@
 ### [E] The network manager's editor says DHCP is on for an interface whose DHCP nothing reports -- 2026-10-04
-**Status:** OPEN
+**Status:** OPEN until the fix -- lane E's a3089416c, 2026-10-04: the editor's DHCP state is an `Option<bool>`, `None` for an interface the kernel lists -- has had a boot test on `main`; then this moves to `known-issues-resolved/`.
 
 **In short:** for every interface read from the kernel, the IP
 Configuration tab shows "DHCP: Enabled", and its editor opens with the
@@ -20,17 +20,21 @@ Properties summary reads `dhcp`.
 interface, open IP Configuration: "DHCP: Enabled". Properties: "DHCP: Not
 reported". Press Edit: the boxes are greyed out.
 
-**The proper fix.** The switch needs a third position, "not reported",
-for an interface whose DHCP state is unknown:
+**The fix (a3089416c).** The switch has a third position, "not
+reported", for an interface whose DHCP state is unknown:
 
-- The IP tab reads "DHCP: Not reported", as Properties does, and the
-  switch is drawn in neither position.
-- Edit opens the editor with the switch still unset. Choosing a
-  position is part of the edit: "static" enables the address boxes and
-  the DNS list, and "DHCP" is refused by Apply as today.
-- Apply on an unset switch asks which is meant rather than guessing.
-- `IpConfig::dhcp_enabled` becomes `Option<bool>`, or a three-valued
-  enum, so that an unknown cannot be read as either answer by accident.
+- `IpConfig::dhcp_enabled` is an `Option<bool>`, so that an unknown
+  cannot be read as either answer by accident. Every interface read from
+  the kernel starts at `None`.
+- The IP tab reads "DHCP: Not reported", as Properties does. The switch
+  is drawn off, as it is for a configuration set by hand.
+- Under "not reported" the address boxes and the DNS list can be
+  changed, and Apply sends the configuration typed. Typing addresses and
+  pressing Apply says what is meant, so nothing is asked. (Asking was
+  the first proposal here; it would have put a question between every
+  user and every change on a real machine, where nothing is reported.)
+- Pressing the switch goes to on, then off. Only "on" disables the
+  boxes, and Apply refuses it as before.
 
 Found while converting the address boxes to the toolkit's field
 (2026-10-04): the boxes are now disabled under DHCP, which made the

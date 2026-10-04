@@ -11,8 +11,13 @@ guitk = { path = "../../gui/toolkit" }
 oswindow = { path = "../../gui/window" }
 
 # What a video file holds -- its container, length and tracks -- read from
-# its headers. There is no decoder, so this is what opening a file can do.
+# its headers, for the Media Info tab, the playlist and the track choices.
 mediaprobe = { path = "../mediaprobe" }
+# The pictures: lane F's video library, which demuxes a Matroska, WebM or MP4
+# file, decodes its VP8, VP9 or AV1 and converts each picture to pixels
+# (requests/f-e-two-matroska-demuxers-which-stays.md). The player keeps the
+# timing and the display.
+videocodec = { path = "../../gui/video/codec" }
 
 # Where the settings are kept: `<config>/videoplayer.yaml`, one file per
 # program (C-Q26, option A).

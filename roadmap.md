@@ -2937,13 +2937,19 @@ word; text inside them that says "lane C" is history.
   file (f661f4c01); the three modules lane C's palette refusal waited on
   (16d1a710a).
 
-- `[ ]` `[E]` **The video player plays** -- lane F's `videocodec` turns a
+- `[x]` `[E]` **The video player plays** -- lane F's `videocodec` turns a
   file into frames, and lane F's Matroska reader stays as the tree's one
   (`requests/f-e-two-matroska-demuxers-which-stays.md`, answered
   2026-10-04):
-  - `[ ]` `apps/videoplayer` plays through `videocodec::Video` -- open,
+  - `[x]` `apps/videoplayer` plays through `videocodec::Video` -- open,
     `next_frame`, `seek`, late pictures dropped through `next_picture`
-    without their conversion -- keeping timing and display its own;
+    without their conversion -- keeping timing and display its own --
+    2026-10-04 (design-decisions §1234): a film's pictures decode on a
+    thread of their own (`src/pictures.rs`), shown as the player's clock
+    reaches them; every jump of the clock moves the picture; a drag of the
+    seek bar shows key frames; the film ends when its last picture's time
+    is up. WebM, Matroska and MP4 in VP8, VP9 and AV1; H.264 and HEVC
+    files open and say why they show no picture;
   - `[x]` `mkv/demux.rs` is retired with its tests and its mutation sweep,
     lane F's port of both being on `main` -- 2026-10-04;
     `tests/vp9_vectors.rs` holds `matroska::Demuxer` to libvpx's pictures
@@ -2957,6 +2963,24 @@ word; text inside them that says "lane C" is history.
     divergence from ffprobe found on the way -- a SeekHead `matroska`
     refuses a whole file over -- is
     `requests/e-f-matroska-refuses-a-file-over-its-seekhead.md`.
+
+- `[ ]` `[E]` **The video player's sound and picture controls** -- what the
+  player still draws and does not do, each saying so where it is drawn
+  since 2026-10-04:
+  - `[ ]` the film's sound: `videocodec::Sound` (lane F,
+    `requests/f-e-a-videos-sound-decodes-now.md`) gives a film's Opus,
+    timed on the pictures' clock; it has nowhere to go until a program can
+    reach the sound device
+    (`requests/e-ad-no-application-can-reach-the-sound-device.md`). Then
+    the sound becomes the clock (design-decisions §1234), and the volume
+    and the Equalizer tab act;
+  - `[ ]` the Adjustments tab's sliders move, and the picture is shown
+    through them -- brightness, contrast, saturation, hue, gamma and
+    sharpness, applied on the decoding thread;
+  - `[ ]` a screenshot of the picture on screen, in the Settings tab's
+    format;
+  - `[ ]` Resume Playback: where a film was left is kept, and it opens
+    there.
 
 - `[x]` `[E]` **Text boxes with a caret** --
   `known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box.md`:

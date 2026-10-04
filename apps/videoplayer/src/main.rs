@@ -1,9 +1,14 @@
 //! Video Player application for SlateOS.
 //!
-//! Full-featured media player with playlist management, subtitle support,
-//! audio track selection, playback controls, and a modern UI. Supports
-//! common container formats (MP4, MKV, AVI, WebM, MOV) and codecs
-//! (H.264, H.265, VP9, AV1, AAC, Opus, FLAC).
+//! A media player with playlist management, subtitle support, track
+//! selection and playback controls. It reads what a file holds -- MP4, MOV,
+//! Matroska, WebM, AVI -- through `apps/mediaprobe`, and plays the pictures
+//! of a Matroska, WebM or MP4 file in VP8, VP9 or AV1 through lane F's
+//! `videocodec`, decoded on a thread of their own (`pictures`). The clock and
+//! the display are the player's own. Not yet: H.264 and HEVC pictures (most
+//! MP4 files) and any sound, which have nowhere to come from or go to.
+
+mod pictures;
 
 use appearance::Edge;
 use appearance::Palette;
@@ -22,10 +27,12 @@ use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
 use guitk::style::CornerRadii;
 use guitk::text;
 use mediaprobe::Codec;
-use oswindow::app::{self, App, Response};
+use oswindow::app::{self, App, ImageChange, Response};
 use oswindow::{Event, RenderTree};
+use pictures::{Frame, Pictures, SeekMode, WakerSlot};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::task::Waker;
 
 /// Seed used when the system has no entropy to offer.
 ///
@@ -62,11 +69,22 @@ const CONTENT_TOP: f32 = 40.0;
 const TAB_MAX_WIDTH: f32 = 120.0;
 /// Air around a tab inside its slot.
 const TAB_PADDING: f32 = 4.0;
-/// How often the picture and the on-screen message are advanced.
+/// How often the clock and the on-screen message are advanced when nothing
+/// sooner is due.
 ///
 /// `std::time::Duration`, not this file's own millisecond `Duration`: the two
 /// share a name and only one of them is what the harness's clock speaks.
 const FRAME_TICK: std::time::Duration = std::time::Duration::from_millis(100);
+/// How often a playing film's clock is advanced while its next picture is
+/// still being decoded: a sixtieth of a second, so that the picture is shown
+/// within a display frame of its time once it comes. A picture already come
+/// asks for its own time instead (`App::tick_interval`).
+const PICTURE_POLL: std::time::Duration = std::time::Duration::from_micros(16_667);
+/// The shortest wait the clock asks for: a picture due now is shown on the
+/// next turn of the loop, not in a spin.
+const SOONEST_TICK: std::time::Duration = std::time::Duration::from_millis(1);
+/// The number the film's picture is uploaded under, in this window's images.
+const PICTURE_IMAGE: u64 = 1;
 /// What the window says instead of a picture, with no file open.
 ///
 /// Three lines. The third is about the playlist, which outlives the window:
@@ -74,24 +92,18 @@ const FRAME_TICK: std::time::Duration = std::time::Duration::from_millis(100);
 /// that path, and a playlist is the kind of thing somebody reads later to find
 /// out what they have.
 ///
-/// The second said "it has no filesystem access, so nothing has been read",
-/// long after both stopped being true; what is still true is the first half
-/// of the first line's old wording -- nothing decodes a picture -- and a file
-/// can now be opened for everything but that.
-const CANNOT_PLAY_LINES: [&str; 3] = [
-    "This player cannot play a file: nothing here decodes video.",
-    "Ctrl+O opens one to read what it holds -- its length, its picture's size and codec, its sound and its subtitles.",
+/// The first said "This player cannot play a file: nothing here decodes
+/// video" until 2026-10-04, when the pictures of WebM, Matroska and MP4
+/// files began to play (`pictures`); the second says what plays and what
+/// does not, since a film in H.264 opens and shows no picture.
+const NO_FILE_LINES: [&str; 3] = [
+    "No film is open: Ctrl+O opens one.",
+    "WebM, Matroska and MP4 films play, in VP8, VP9 or AV1 -- not yet in H.264 or HEVC -- and no sound plays yet.",
     "The playlist is empty because nothing was opened -- it is not a list of files you have.",
 ];
 
-/// What the window says where the picture would be, with a file open.
-const NO_PICTURE_LINES: [&str; 2] = [
-    "No picture: nothing here decodes video.",
-    "What the file holds is on the Media Info tab (I).",
-];
-
-/// What Play says, with a file open and nothing to decode it.
-const CANNOT_DECODE: &str = "Cannot play: nothing here decodes video";
+/// What the window says under why a file open shows no picture.
+const NO_PICTURE_HINT: &str = "What the file holds is on the Media Info tab (I).";
 
 /// How far Left and Right seek, and Shift with them, in milliseconds.
 ///
@@ -101,15 +113,6 @@ const CANNOT_DECODE: &str = "Cannot play: nothing here decodes video";
 /// consulted: the two agreed only because nobody had touched either.
 const SEEK_SMALL_MS: i64 = 10_000;
 const SEEK_LARGE_MS: i64 = 60_000;
-
-/// What a row whose setting acts on playback says beside its value.
-///
-/// Resume, what happens at the end of a film, hardware decoding and
-/// deinterlacing all act on a film being played, and nothing here plays one.
-/// They stay -- they are what the user will want set when something does --
-/// but a row that reads "On" and changes nothing has to say so, for the
-/// reason `NO_SCREENSHOTS` gives about the screenshot options.
-const NOT_APPLIED: &str = "Not applied: nothing here decodes video";
 
 const WINDOW_WIDTH: f32 = 1280.0;
 const WINDOW_HEIGHT: f32 = 720.0;
@@ -122,16 +125,23 @@ const MIN_WINDOW_HEIGHT: f32 = 320.0;
 /// **The shortcut for this was already removed as impossible.** `Shortcuts
 /// ::list` used to advertise `Ctrl+S` (take a screenshot) and no longer does,
 /// because a help panel that promises what the program cannot do is the same
-/// defect one level up. The reason that stands is that no frame is decoded:
-/// there is nothing to take a picture of.
+/// defect one level up. Frames are decoded since 2026-10-04, so a screenshot
+/// is possible now; nothing takes one yet.
 ///
 /// The settings block was left behind, still naming a format, a quality and a
-/// subtitle option. `CANNOT_PLAY_LINES` does say nothing decodes -- but it is
-/// drawn where the picture would be, and relying on a reader having seen it
-/// before reaching a settings panel is what `apps/mediaconvert` got wrong:
-/// three lines about the queue did not reach the panel that configured it.
-const NO_SCREENSHOTS: &str = "Not applied: this player cannot take a \
-screenshot -- no frame is decoded.";
+/// subtitle option, and says so where it is: relying on a reader having seen
+/// a line elsewhere before reaching a settings panel is what
+/// `apps/mediaconvert` got wrong -- three lines about the queue did not reach
+/// the panel that configured it.
+const NO_SCREENSHOTS: &str = "Not applied: this player takes no screenshots yet.";
+
+/// What the Adjustments tab says under its sliders: nothing moves them, and
+/// the picture is shown as it was decoded.
+const ADJUSTMENTS_NOT_APPLIED: &str =
+    "Not applied: these cannot be changed yet, and the picture is shown as decoded.";
+
+/// What the Equalizer tab says: there is no sound for it to shape.
+const EQUALIZER_NOT_APPLIED: &str = "Not applied: no sound plays here yet.";
 
 // ============================================================================
 // Media container and codec types
@@ -1914,11 +1924,11 @@ pub struct Shortcuts;
 impl Shortcuts {
     /// Every shortcut the player has.
     ///
-    /// `Ctrl+S` (take a screenshot) was listed here and is not: no frame is
-    /// decoded, so there is nothing to take, and a help panel that promises
-    /// what the program cannot do is the same defect one level up. `Ctrl+O`
-    /// was removed for want of a file chooser and is back: the toolkit has
-    /// one, and a file opens to be read for what it holds.
+    /// `Ctrl+S` (take a screenshot) was listed here and is not: nothing
+    /// takes one, and a help panel that promises what the program cannot do
+    /// is the same defect one level up. `Ctrl+O` was removed for want of a
+    /// file chooser and is back: the toolkit has one, and a file opens to be
+    /// read for what it holds and, where its pictures decode, played.
     pub const fn list() -> &'static [Shortcut] {
         const fn sc(
             keys: &'static str,
@@ -2598,14 +2608,28 @@ impl SettingRow {
         }
     }
 
-    /// Whether this row's setting acts on a film being played -- which
-    /// nothing here does, so the panel says [`NOT_APPLIED`] beside it.
+    /// Why this row's setting changes nothing, where it does not: the panel
+    /// says it beside the value, and the message a change raises says it
+    /// too. A row that reads "On" and changes nothing has to say so, for the
+    /// reason `NO_SCREENSHOTS` gives about the screenshot options.
+    ///
+    /// Until 2026-10-04 the four said one thing -- "nothing here decodes
+    /// video" -- and it stopped being true for all of them at once when the
+    /// pictures began to play; each says its own reason now.
     #[must_use]
-    pub fn needs_decoding(self) -> bool {
-        matches!(
-            self,
-            Self::ResumePlayback | Self::HardwareDecode | Self::OnFinish | Self::Deinterlace
-        )
+    pub fn not_applied(self) -> Option<&'static str> {
+        match self {
+            Self::ResumePlayback => Some("Not applied: where a film was left is not kept yet"),
+            Self::HardwareDecode => Some("Not applied: there is no hardware decoder here"),
+            Self::OnFinish => Some("Not applied: the end of a film follows the repeat mode (R)"),
+            Self::Deinterlace => {
+                Some("Not applied: no film played here is interlaced (VP8, VP9 and AV1 never are)")
+            }
+            Self::RememberVolume
+            | Self::SubtitleAutoLoad
+            | Self::AudioLanguage
+            | Self::SubtitleLanguage => None,
+        }
     }
 
     /// Move this row to its next value. Booleans flip; lists step and wrap.
@@ -2785,6 +2809,112 @@ fn format_bitrate(bps: u64) -> String {
 // ============================================================================
 
 /// The video player application.
+/// The picture on screen: its size, and when its time is up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ShownPicture {
+    width: u32,
+    height: u32,
+    /// When it stops being the picture showing, in nanoseconds on the film's
+    /// clock: its time plus how long it lasts, where the file says.
+    until: i64,
+}
+
+/// The time `fraction` of the way through `length`, to the nearest
+/// millisecond: where a press on the seek bar lands, the same for the preview
+/// under the pointer and for the seek when it is let go.
+fn fraction_of(length: Duration, fraction: f64) -> Duration {
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        reason = "the fraction is clamped to 0..=1 and a length in ms is far inside f64's exact range"
+    )]
+    let ms = (length.as_millis() as f64 * fraction.clamp(0.0, 1.0)).round() as u64;
+    Duration::from_millis(ms)
+}
+
+/// `position` in nanoseconds, the pictures' unit.
+fn nanos(position: Duration) -> i64 {
+    i64::try_from(position.as_millis()).map_or(i64::MAX, |ms| ms.saturating_mul(1_000_000))
+}
+
+/// Open `path`'s video and start decoding its pictures on a thread of their
+/// own; with what the file says of its video.
+///
+/// # Errors
+///
+/// Why the file shows no picture, fit to show after "No picture: ": it
+/// cannot be opened, is not a Matroska, WebM or MP4 file, has no video, or
+/// its video is in a codec not decoded here -- `videocodec`'s words.
+fn start_pictures(
+    path: &Path,
+    waker: &WakerSlot,
+) -> Result<(Pictures, videocodec::VideoInfo), String> {
+    let file =
+        std::fs::File::open(path).map_err(|e| format!("the file could not be opened: {e}"))?;
+    let video = videocodec::Video::open(file).map_err(|e| e.to_string())?;
+    let info = *video.info();
+    let pictures = Pictures::start(video, std::sync::Arc::clone(waker))
+        .map_err(|e| format!("the decoder could not be started: {e}"))?;
+    Ok((pictures, info))
+}
+
+/// Whether `change` is to the film's picture.
+fn is_picture(change: &ImageChange) -> bool {
+    match change {
+        ImageChange::Upload { id, .. } | ImageChange::Patch { id, .. } => *id == PICTURE_IMAGE,
+        ImageChange::Drop(id) => *id == PICTURE_IMAGE,
+    }
+}
+
+/// Where a picture whose display shape is `width` by `height` is drawn in
+/// `area`, as `mode` fits it: whole and as large as fits (Fit), covering the
+/// area and cut at its edges (Fill), stretched to it (Stretch), at its own
+/// size (Original), or whole in a shape of the user's (Custom). Centred, but
+/// for Stretch, which is the area itself.
+fn place_picture(area: Rect, width: f32, height: f32, mode: AspectMode) -> Rect {
+    if width <= 0.0 || height <= 0.0 || area.w <= 0.0 || area.h <= 0.0 {
+        return area;
+    }
+    let (w, h) = match mode {
+        AspectMode::Stretch => return area,
+        AspectMode::Fit => {
+            let scale = (area.w / width).min(area.h / height);
+            (width * scale, height * scale)
+        }
+        AspectMode::Fill => {
+            let scale = (area.w / width).max(area.h / height);
+            (width * scale, height * scale)
+        }
+        AspectMode::Original => (width, height),
+        AspectMode::Custom {
+            width: aspect_w,
+            height: aspect_h,
+        } => {
+            #[allow(
+                clippy::cast_precision_loss,
+                reason = "an aspect ratio's terms are small whole numbers"
+            )]
+            let aspect = if aspect_w > 0 && aspect_h > 0 {
+                aspect_w as f32 / aspect_h as f32
+            } else {
+                width / height
+            };
+            if area.w / area.h > aspect {
+                (area.h * aspect, area.h)
+            } else {
+                (area.w, area.w / aspect)
+            }
+        }
+    };
+    Rect {
+        x: area.x + (area.w - w) / 2.0,
+        y: area.y + (area.h - h) / 2.0,
+        w,
+        h,
+    }
+}
+
 pub struct VideoPlayerApp {
     // Window
     pub width: f32,
@@ -2869,12 +2999,32 @@ pub struct VideoPlayerApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
-    /// Whether anything here turns a file into pictures and sound. Nothing
-    /// does: there is no decoder. The transport -- play, the clock, the end of
-    /// a file, repeat -- is written and tested for the day one exists; until
-    /// then `play` says why it will not, rather than running a clock over a
-    /// black picture and calling that playing.
+    /// Whether the file on screen plays: set when it is opened, from whether
+    /// its pictures decode ([`Self::pictures`]). Play refuses a file that
+    /// does not, and says why ([`Self::no_picture`]), rather than running a
+    /// clock over a black picture and calling that playing.
+    ///
+    /// Tests set it alone, to drive the transport -- play, the clock, the end
+    /// of a file, repeat -- over a file with nothing to decode.
     pub decodes: bool,
+    /// The pictures of the file on screen, decoded on a thread of their own,
+    /// while it has a video this player decodes.
+    pictures: Option<Pictures>,
+    /// What the file on screen says of its video, where it decodes: the
+    /// shape to show its pictures at, and how long each lasts.
+    picture_info: Option<videocodec::VideoInfo>,
+    /// Why the file on screen shows no picture, where it shows none: its
+    /// video's codec, or no video at all, in `videocodec`'s words.
+    no_picture: Option<String>,
+    /// The picture on screen, uploaded as [`PICTURE_IMAGE`].
+    shown: Option<ShownPicture>,
+    /// Pictures to upload or drop before the next frame is drawn.
+    pending_images: Vec<ImageChange>,
+    /// The window's waker, for each film's decoding thread to wake it when a
+    /// picture comes ([`App::attach_waker`]).
+    waker: WakerSlot,
+    /// The film's pictures stopped being read: said once, when it happened.
+    failure_said: bool,
     /// Whether a change on the Settings tab is written to the settings file.
     /// Only in the window [`keep_settings`](Self::keep_settings) was called
     /// on -- the one `main` opens -- so no test writes the developer's own.
@@ -2965,6 +3115,13 @@ impl VideoPlayerApp {
             osd_message: None,
             osd_remaining_ms: 0,
             decodes: false,
+            pictures: None,
+            picture_info: None,
+            no_picture: None,
+            shown: None,
+            pending_images: Vec::new(),
+            waker: WakerSlot::default(),
+            failure_said: false,
             keeps_settings: false,
             picker: FilePicker::default(),
         }
@@ -2979,8 +3136,17 @@ impl VideoPlayerApp {
             return;
         }
         if !self.decodes {
-            self.show_osd(CANNOT_DECODE);
+            let why = self
+                .no_picture
+                .clone()
+                .unwrap_or_else(|| String::from("nothing here decodes this file"));
+            self.show_osd(&format!("Cannot play: {why}"));
             return;
+        }
+        // A film played to its end starts again from its beginning, rather
+        // than ending again at once.
+        if self.run_out() {
+            self.jump_to(Duration::ZERO);
         }
         self.state = PlaybackState::Playing;
         self.show_osd("Play");
@@ -3006,19 +3172,179 @@ impl VideoPlayerApp {
 
     pub fn stop(&mut self) {
         self.state = PlaybackState::Stopped;
-        self.position = Duration::ZERO;
+        self.jump_to(Duration::ZERO);
         self.show_osd("Stopped");
     }
 
+    /// Go to `position`, no further than the file's length where it says
+    /// one.
     pub fn seek_to(&mut self, position: Duration) {
-        if let Some(file) = &self.current_file {
-            let max_pos = file.duration;
-            self.position = if position > max_pos {
-                max_pos
-            } else {
-                position
-            };
+        if self.current_file.is_none() {
+            return;
         }
+        let position = match self.length() {
+            Some(length) if position > length => length,
+            _ => position,
+        };
+        self.jump_to(position);
+    }
+
+    /// Move the clock to `position`, and the picture with it: the one showing
+    /// then, decoded from the key frame before it. Every jump of the clock
+    /// comes through here -- a seek, a chapter, a stop, a repeat -- so the
+    /// picture never stays behind at the old time.
+    fn jump_to(&mut self, position: Duration) {
+        self.position = position;
+        if let Some(pictures) = &mut self.pictures {
+            pictures.seek(nanos(position), SeekMode::Exact);
+            self.failure_said = false;
+        }
+    }
+
+    /// How long the file on screen plays, where it says: its header's
+    /// length, else its video's.
+    fn length(&self) -> Option<Duration> {
+        let file = self.current_file.as_ref()?;
+        if file.duration > Duration::ZERO {
+            return Some(file.duration);
+        }
+        self.picture_info
+            .and_then(|info| info.duration)
+            .map(|ns| Duration::from_millis(ns / 1_000_000))
+    }
+
+    /// Whether the file on screen has run out at the clock: every picture
+    /// shown and the last one's time up, or the pictures failed -- or, with
+    /// nothing decoding, the file's length reached.
+    fn run_out(&self) -> bool {
+        match &self.pictures {
+            Some(pictures) => {
+                (pictures.ended() || pictures.failed().is_some())
+                    && self
+                        .shown
+                        .as_ref()
+                        .is_none_or(|shown| nanos(self.position) >= shown.until)
+            }
+            None => self
+                .current_file
+                .as_ref()
+                .is_some_and(|file| self.position >= file.duration),
+        }
+    }
+
+    // ========================================================================
+    // Pictures
+    // ========================================================================
+
+    /// Start decoding the file on screen's pictures, or note why it has
+    /// none; [`Self::decodes`] says which.
+    fn open_pictures(&mut self) {
+        self.close_pictures();
+        let Some(path) = self.current_file.as_ref().map(|file| file.path.clone()) else {
+            self.decodes = false;
+            return;
+        };
+        match start_pictures(&path, &self.waker) {
+            Ok((pictures, info)) => {
+                self.pictures = Some(pictures);
+                self.picture_info = Some(info);
+                self.decodes = true;
+            }
+            Err(why) => {
+                self.decodes = false;
+                self.no_picture = Some(why);
+            }
+        }
+    }
+
+    /// Stop decoding the file on screen's pictures, and take its picture off
+    /// the screen.
+    fn close_pictures(&mut self) {
+        self.pictures = None;
+        self.picture_info = None;
+        self.no_picture = None;
+        self.failure_said = false;
+        self.pending_images.retain(|change| !is_picture(change));
+        if self.shown.take().is_some() {
+            self.pending_images.push(ImageChange::Drop(PICTURE_IMAGE));
+        }
+    }
+
+    /// Show the picture the clock is on, if it is not the one on screen, and
+    /// say once that the pictures stopped, if they did. Returns whether
+    /// anything changed that a frame should show.
+    fn refresh_picture(&mut self) -> bool {
+        // While the seek bar is dragged the picture is the key frame the drag
+        // asked for, held there: the frames after it are not run through to
+        // catch up with a clock the drag is about to move.
+        let now = if self.seeking {
+            i64::MIN
+        } else {
+            nanos(self.position)
+        };
+        let frame = self.pictures.as_mut().and_then(|p| p.show_at(now));
+        let changed = frame.is_some();
+        if let Some(frame) = frame {
+            self.show_picture(&frame);
+        }
+        let failed = self
+            .pictures
+            .as_ref()
+            .and_then(Pictures::failed)
+            .map(str::to_owned);
+        match failed {
+            Some(why) if !self.failure_said => {
+                self.failure_said = true;
+                self.show_osd(&format!("The picture stopped: {why}"));
+                true
+            }
+            _ => changed,
+        }
+    }
+
+    /// Put `frame` on screen: uploaded as [`PICTURE_IMAGE`], in place of any
+    /// upload of an earlier picture not sent yet.
+    fn show_picture(&mut self, frame: &Frame) {
+        let lasts = if frame.duration > 0 {
+            frame.duration
+        } else {
+            self.picture_info
+                .and_then(|info| info.frame_duration)
+                .unwrap_or(0)
+        };
+        self.shown = Some(ShownPicture {
+            width: frame.width,
+            height: frame.height,
+            until: frame.time.saturating_add_unsigned(lasts),
+        });
+        self.pending_images.retain(|change| !is_picture(change));
+        self.pending_images.push(ImageChange::Upload {
+            id: PICTURE_IMAGE,
+            width: frame.width,
+            height: frame.height,
+            stride: frame.width.saturating_mul(4),
+            format: oswindow::PixelFormat::Argb8888,
+            bytes: guitk::canvas::WireBytes::from_le_argb(&frame.pixels),
+        });
+    }
+
+    /// Where the picture on screen is drawn in `area`, at its display shape
+    /// -- the file's aspect, which a picture of non-square pixels is shown at
+    /// -- fitted as the aspect mode says.
+    fn picture_rect(&self, area: Rect) -> Option<Rect> {
+        let shown = self.shown.as_ref()?;
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a picture's sides and display sides are far inside f32's exact range"
+        )]
+        let (width, height) = match self.picture_info {
+            Some(info) if info.width > 0 && info.height > 0 => (
+                shown.width as f32 * info.display_width as f32 / info.width as f32,
+                shown.height as f32 * info.display_height as f32 / info.height as f32,
+            ),
+            _ => (shown.width as f32, shown.height as f32),
+        };
+        Some(place_picture(area, width, height, self.aspect_mode))
     }
 
     pub fn seek_forward(&mut self, ms: u64) {
@@ -3036,16 +3362,16 @@ impl VideoPlayerApp {
     }
 
     pub fn seek_to_fraction(&mut self, fraction: f64) {
-        if let Some(file) = &self.current_file {
-            let target_ms = (file.duration.as_millis() as f64 * fraction.clamp(0.0, 1.0)) as u64;
-            self.position = Duration::from_millis(target_ms);
+        if let Some(length) = self.length() {
+            self.jump_to(fraction_of(length, fraction));
         }
     }
 
     pub fn seek_to_chapter(&mut self, index: usize) {
         if let Some(chapter) = self.chapters.get(index) {
-            self.position = chapter.start;
-            self.show_osd(&format!("Chapter: {}", chapter.title));
+            let (start, said) = (chapter.start, format!("Chapter: {}", chapter.title));
+            self.jump_to(start);
+            self.show_osd(&said);
         }
     }
 
@@ -3068,7 +3394,8 @@ impl VideoPlayerApp {
         if let Some((idx, ch)) = self.current_chapter() {
             // If we're more than 3 seconds into the chapter, go to its start
             if self.position.saturating_sub(ch.start).as_secs() > 3 {
-                self.position = ch.start;
+                let start = ch.start;
+                self.jump_to(start);
             } else if idx > 0 {
                 self.seek_to_chapter(idx.saturating_sub(1));
             }
@@ -3284,6 +3611,8 @@ impl VideoPlayerApp {
             }
             Err(why) => {
                 self.current_file = None;
+                self.close_pictures();
+                self.decodes = false;
                 self.state = PlaybackState::Stopped;
                 self.position = Duration::ZERO;
                 self.show_osd(&why);
@@ -3346,8 +3675,9 @@ impl VideoPlayerApp {
 
     /// Make `file` the one on screen: at its start, stopped, the sound and
     /// subtitles in the preferred languages chosen (the file's own where it
-    /// has none in them), and nothing of the last file's -- its chapters or
-    /// loaded subtitles -- carried over.
+    /// has none in them), its pictures decoding where it has a video this
+    /// player decodes, and nothing of the last file's -- its picture, its
+    /// chapters or loaded subtitles -- carried over.
     fn show_file(&mut self, file: MediaFile) {
         self.selected_audio_track = opening_audio(&file, self.preferences.audio_preferred_lang);
         self.selected_subtitle_track =
@@ -3357,6 +3687,7 @@ impl VideoPlayerApp {
         self.state = PlaybackState::Stopped;
         self.chapters.clear();
         self.external_subtitles.clear();
+        self.open_pictures();
     }
 
     /// Take the settings kept in the settings file, and keep every change
@@ -3466,18 +3797,18 @@ impl VideoPlayerApp {
     // Progress display
     // ========================================================================
 
+    /// How far through the file the clock is, from 0 to 1. Never past 1: a
+    /// film's pictures may run on past the length its header gives, and the
+    /// bar stays full while they do.
     pub fn progress_fraction(&self) -> f64 {
-        match &self.current_file {
-            Some(file) => self.position.progress_of(file.duration),
-            None => 0.0,
-        }
+        self.length()
+            .map_or(0.0, |length| self.position.progress_of(length).min(1.0))
     }
 
     pub fn remaining_duration(&self) -> Duration {
-        match &self.current_file {
-            Some(file) => file.duration.saturating_sub(self.position),
-            None => Duration::ZERO,
-        }
+        self.length().map_or(Duration::ZERO, |length| {
+            length.saturating_sub(self.position)
+        })
     }
 
     pub fn time_display(&self) -> String {
@@ -3647,9 +3978,9 @@ impl VideoPlayerApp {
                     if let Some(&row) = SettingRow::ALL.get(self.settings_row) {
                         row.cycle(&mut self.preferences);
                         let mut said = format!("{}: {}", row.label(), row.value(&self.preferences));
-                        if row.needs_decoding() && !self.decodes {
+                        if let Some(why) = row.not_applied() {
                             said.push_str(" -- ");
-                            said.push_str(NOT_APPLIED);
+                            said.push_str(why);
                         }
                         self.show_osd(&said);
                         self.save_settings();
@@ -3696,13 +4027,22 @@ impl VideoPlayerApp {
             self.position = self
                 .position
                 .saturating_add(Duration::from_millis(advanced));
-            if let Some(file) = &self.current_file
-                && self.position >= file.duration
-            {
-                // The end of a file is the start of the next one, or a stop.
-                self.position = file.duration;
+            self.refresh_picture();
+            if self.run_out() {
+                // The end of a file is the start of the next one, or a stop:
+                // with nothing decoding, at its length, which the clock does
+                // not pass; with pictures, when the last one's time is up.
+                if self.pictures.is_none()
+                    && let Some(file) = &self.current_file
+                {
+                    self.position = file.duration;
+                }
                 self.at_end_of_file();
             }
+            moved = true;
+        } else if self.refresh_picture() {
+            // A picture a seek asked for while paused, come without a wake
+            // (a window that gave no waker).
             moved = true;
         }
 
@@ -3728,7 +4068,7 @@ impl VideoPlayerApp {
     /// What happens when the picture runs out.
     fn at_end_of_file(&mut self) {
         match self.repeat {
-            RepeatMode::One => self.position = Duration::ZERO,
+            RepeatMode::One => self.jump_to(Duration::ZERO),
             RepeatMode::All => self.playlist_next(),
             RepeatMode::Off => {
                 if self
@@ -3843,11 +4183,13 @@ impl VideoPlayerApp {
                 }
                 if self.seek_bar().contains(event.x, event.y) {
                     // A press on the bar starts a drag: the preview follows the
-                    // pointer and the picture only moves when it is let go, so
-                    // dragging across a film does not seek to every pixel of
-                    // the way there.
+                    // pointer, and the picture with it -- the key frame at or
+                    // before the time under the pointer, which costs nothing
+                    // more to decode -- and the clock only moves when it is
+                    // let go, so dragging across a film does not seek to
+                    // every pixel of the way there.
                     self.seeking = true;
-                    self.seek_preview_position = Some(self.preview_at(event.x));
+                    self.preview(event.x);
                     return true;
                 }
                 false
@@ -3856,7 +4198,7 @@ impl VideoPlayerApp {
                 let woke = !self.controls_visible;
                 self.wake_controls();
                 if self.seeking {
-                    self.seek_preview_position = Some(self.preview_at(event.x));
+                    self.preview(event.x);
                     return true;
                 }
                 woke
@@ -3874,19 +4216,24 @@ impl VideoPlayerApp {
         }
     }
 
+    /// Follow a drag along the seek bar to `x`: the time there, and the key
+    /// frame at or before it, which the picture's thread passes over
+    /// everything to reach -- a newer drag supersedes an older one unshown.
+    fn preview(&mut self, x: f32) {
+        let at = self.preview_at(x);
+        let moved = self.seek_preview_position != Some(at);
+        self.seek_preview_position = Some(at);
+        if moved && let Some(pictures) = &mut self.pictures {
+            pictures.seek(nanos(at), SeekMode::KeyFrame);
+            self.failure_said = false;
+        }
+    }
+
     /// The position a point on the seek bar names.
     fn preview_at(&self, x: f32) -> Duration {
         let fraction = self.seek_fraction_at(x);
-        self.current_file.as_ref().map_or(Duration::ZERO, |file| {
-            #[allow(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                clippy::cast_precision_loss,
-                reason = "the fraction is clamped to 0..=1 and a duration in ms fits f64"
-            )]
-            let ms = (file.duration.as_millis() as f64 * fraction) as u64;
-            Duration::from_millis(ms)
-        })
+        self.length()
+            .map_or(Duration::ZERO, |length| fraction_of(length, fraction))
     }
 
     pub fn render_commands(&self) -> Vec<RenderCommand> {
@@ -4143,16 +4490,22 @@ impl VideoPlayerApp {
             corner_radii: CornerRadii::ZERO,
         });
 
-        // With no file, what this player cannot do, where a picture would be.
+        // With no file, how to open one and what plays, where a picture would
+        // be.
         //
-        // It said "No file loaded" and "Ctrl+O to open" here -- and Ctrl+O is
+        // It said "No file loaded" and "Ctrl+O to open" here -- and Ctrl+O was
         // bound to nothing -- while the true lines were drawn at the top of the
         // window, under the video area and the tab bar that were then drawn
-        // over them. Keyed on there being no file, so they retire themselves
-        // the day something can open one.
+        // over them.
+        let area = Rect {
+            x: 0.0,
+            y: top,
+            w: self.width,
+            h: video_h.max(0.0),
+        };
         if self.current_file.is_none() {
             let avail = (self.width - 32.0).max(0.0);
-            for (i, line) in CANNOT_PLAY_LINES.iter().enumerate() {
+            for (i, line) in NO_FILE_LINES.iter().enumerate() {
                 #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
                 let ty = top + video_h / 2.0 - 30.0 + i as f32 * 22.0;
                 if avail <= 0.0 || ty < top || ty + 22.0 > top + video_h {
@@ -4177,9 +4530,26 @@ impl VideoPlayerApp {
                     overflow: TextOverflow::Ellipsis,
                 });
             }
-        } else {
+        } else if let Some(at) = self.picture_rect(area) {
+            // The picture, cut to the area: Fill and Original can be larger.
+            cmds.push(RenderCommand::PushClip {
+                x: area.x,
+                y: area.y,
+                width: area.w,
+                height: area.h,
+            });
+            cmds.push(RenderCommand::Image {
+                x: at.x,
+                y: at.y,
+                width: at.w,
+                height: at.h,
+                image_id: PICTURE_IMAGE,
+            });
+            cmds.push(RenderCommand::PopClip);
+        } else if let Some(why) = &self.no_picture {
             // Where the picture would be: that there is none, and why; then
-            // what the picture is, as far as the file says.
+            // what the picture is, as far as the file says. (A file whose
+            // pictures are decoding and have not come yet shows black.)
             let avail = (self.width - 32.0).max(0.0);
             let what = self.current_file.as_ref().and_then(|file| {
                 let vs = file.primary_video()?;
@@ -4188,9 +4558,8 @@ impl VideoPlayerApp {
                     None => vs.codec.name().to_string(),
                 })
             });
-            let lines = NO_PICTURE_LINES
-                .iter()
-                .map(|l| (*l).to_string())
+            let lines = [format!("No picture: {why}."), NO_PICTURE_HINT.to_owned()]
+                .into_iter()
                 .chain(what);
             for (i, line) in lines.enumerate() {
                 #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
@@ -4217,7 +4586,10 @@ impl VideoPlayerApp {
                     overflow: TextOverflow::Ellipsis,
                 });
             }
+        }
 
+        // Over the picture, or where it would be.
+        if self.current_file.is_some() {
             // Subtitle display
             if self.subtitle_enabled
                 && let Some(cue) = self.active_subtitle_cue()
@@ -5096,6 +5468,17 @@ impl VideoPlayerApp {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
+        // Beside the switch it qualifies: on or off, nothing is shaped.
+        cmds.push(RenderCommand::Text {
+            x: 352.0,
+            y: top + 26.0,
+            text: EQUALIZER_NOT_APPLIED.to_owned(),
+            font_size: 11.0,
+            color: self.palette.subtext0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((self.width - 372.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
 
         // Preamp
         cmds.push(RenderCommand::Text {
@@ -5295,6 +5678,16 @@ impl VideoPlayerApp {
             max_width: Some(300.0),
             overflow: TextOverflow::Ellipsis,
         });
+        cmds.push(RenderCommand::Text {
+            x: 20.0,
+            y: top + 42.0,
+            text: ADJUSTMENTS_NOT_APPLIED.to_owned(),
+            font_size: 11.0,
+            color: self.palette.subtext0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((self.width - 40.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
 
         let adj = &self.video_adjustments;
         let sliders = [
@@ -5487,7 +5880,7 @@ impl VideoPlayerApp {
             } else {
                 self.palette.subtext1
             };
-            let not_applied = row.needs_decoding() && !self.decodes;
+            let not_applied = row.not_applied();
             cmds.push(RenderCommand::Text {
                 x: value_x,
                 y: sy + 6.0,
@@ -5495,15 +5888,15 @@ impl VideoPlayerApp {
                 font_size: 13.0,
                 color: value_color,
                 font_weight: FontWeightHint::Bold,
-                max_width: Some(if not_applied { 140.0 } else { 200.0 }),
+                max_width: Some(if not_applied.is_some() { 140.0 } else { 200.0 }),
                 overflow: TextOverflow::Ellipsis,
             });
-            if not_applied {
+            if let Some(note) = not_applied {
                 let note_x = value_x + 150.0;
                 cmds.push(RenderCommand::Text {
                     x: note_x,
                     y: sy + 7.0,
-                    text: NOT_APPLIED.to_string(),
+                    text: note.to_string(),
                     font_size: 11.0,
                     color: self.palette.subtext0,
                     font_weight: FontWeightHint::Regular,
@@ -5837,9 +6230,56 @@ impl App for VideoPlayerApp {
     /// A clock while a film is playing or a message is on its way out.
     ///
     /// A paused player with the controls up has nothing to advance, and waking
-    /// the machine to establish that is `known-issues.md` lesson 47.
+    /// the machine to establish that is `known-issues.md` lesson 47. A
+    /// playing film's next picture asks for its own time -- the wait until it
+    /// is due, at the speed playing -- so it is shown when due rather than up
+    /// to a tick late; one still being decoded, a sixtieth of a second.
     fn tick_interval(&self) -> Option<std::time::Duration> {
-        self.has_work().then_some(FRAME_TICK)
+        if !self.has_work() {
+            return None;
+        }
+        if self.state != PlaybackState::Playing || self.seeking {
+            return Some(FRAME_TICK);
+        }
+        let Some(pictures) = &self.pictures else {
+            return Some(FRAME_TICK);
+        };
+        let Some(due) = pictures.due() else {
+            return Some(PICTURE_POLL);
+        };
+        let ahead = due.saturating_sub(nanos(self.position)).max(0);
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss,
+            reason = "a wait of at most a tick's nanoseconds over a speed of one of seven small presets"
+        )]
+        let wait = (ahead.min(i64::try_from(FRAME_TICK.as_nanos()).unwrap_or(i64::MAX)) as f64
+            / self.speed.value()) as u64;
+        Some(std::time::Duration::from_nanos(wait).clamp(SOONEST_TICK, FRAME_TICK))
+    }
+
+    /// The waker each film's decoding thread wakes the window with when a
+    /// picture comes -- shared, so a film opened from the command line,
+    /// before the window was, is woken too.
+    fn attach_waker(&mut self, waker: Waker) {
+        // The harness attaches one waker a window; were a second offered, the
+        // first already wakes the same loop, so it is kept and this dropped.
+        self.waker.get_or_init(|| waker);
+    }
+
+    /// A picture, the film's end or a failure has come from the decoding
+    /// thread: shown at once if the clock is on it.
+    fn on_wake(&mut self) -> Response {
+        if self.refresh_picture() {
+            Response::Redraw
+        } else {
+            Response::Idle
+        }
+    }
+
+    fn take_images(&mut self) -> Vec<ImageChange> {
+        std::mem::take(&mut self.pending_images)
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
@@ -6007,16 +6447,15 @@ mod tests {
     /// second application of eighteen where that was true, and the second
     /// where removing the fabrication broke no tests at all -- 151 passed
     /// before and after. The other was `apps/email`.
-    /// The screenshot options are drawn with the fact that none can be taken.
+    /// The screenshot options are drawn with the fact that none is taken.
     ///
-    /// **`Ctrl+S` was already removed from `Shortcuts::list` as impossible**:
-    /// no frame is decoded, so there is nothing to take. The settings block
-    /// was left behind, still naming a format, a quality and a subtitle option.
-    ///
-    /// `CANNOT_PLAY_LINES` does say nothing decodes -- but it is drawn where
-    /// the picture would be. Relying on a reader having passed it before reaching a
-    /// settings panel is exactly what `apps/mediaconvert` got wrong: three
-    /// lines about the queue did not reach the panel that configured it.
+    /// **`Ctrl+S` was already removed from `Shortcuts::list`**: nothing
+    /// takes a screenshot (frames are decoded since 2026-10-04; nothing saves
+    /// one). The settings block was left behind, still naming a format, a
+    /// quality and a subtitle option, and says so where it is: relying on a
+    /// reader having passed a line elsewhere before reaching a settings panel
+    /// is exactly what `apps/mediaconvert` got wrong -- three lines about the
+    /// queue did not reach the panel that configured it.
     /// **C opens the chapter list, and it says so when there are none.**
     ///
     /// `chapter_list_visible` was declared, initialised and inverted by `C`
@@ -6189,30 +6628,34 @@ test to be about anything -- it drew {} text command(s)",
             Some(audio.index),
             "its own sound is chosen"
         );
-        // Where the picture would be: that there is none, and what it is.
+        // Where the picture would be: that there is none, why, and what it
+        // is -- an H.264 picture, which nothing here decodes yet.
         let shown = texts(&app);
-        for line in NO_PICTURE_LINES {
+        for line in [
+            "No picture: the video is H.264, which is not decoded here yet.",
+            NO_PICTURE_HINT,
+        ] {
             assert!(shown.iter().any(|t| t == line), "never said {line:?}");
         }
         assert!(shown.iter().any(|t| t == "1920x1080 H.264"), "{shown:?}");
-        assert!(
-            !shown
-                .iter()
-                .any(|t| CANNOT_PLAY_LINES.contains(&t.as_str()))
-        );
+        assert!(!shown.iter().any(|t| NO_FILE_LINES.contains(&t.as_str())));
+        assert!(!app.decodes, "an H.264 file plays");
     }
 
-    /// Play says why it will not, rather than running a clock over a black
-    /// picture: nothing here decodes a frame.
+    /// Play says why a film will not play, rather than running a clock over a
+    /// black picture: its pictures are in a codec nothing here decodes.
     #[test]
-    fn play_says_there_is_no_decoder_rather_than_pretending() {
+    fn play_says_why_a_film_does_not_play_rather_than_pretending() {
         let dir = Scratch::new("play");
         let path = dir.file("film.mkv", &mediaprobe::testing::mkv(640, 360, 30, 24));
         let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
         app.open_path(&path);
         app.handle_event(&press(Key::Space));
         assert_eq!(app.state, PlaybackState::Stopped);
-        assert_eq!(app.osd_message.as_deref(), Some(CANNOT_DECODE));
+        assert_eq!(
+            app.osd_message.as_deref(),
+            Some("Cannot play: the video is H.264, which is not decoded here yet")
+        );
         app.tick(5000);
         assert_eq!(
             app.position,
@@ -6227,12 +6670,18 @@ test to be about anything -- it drew {} text command(s)",
     fn what_cannot_be_opened_says_why() {
         let dir = Scratch::new("refuse");
         let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
-        for (name, bytes) in [
-            ("a.webm", mediaprobe::testing::webm(320, 240, 5, 30)),
-            ("b.avi", mediaprobe::testing::avi(320, 240, 5, 25)),
+        // The WebM's VP9 decodes, so it plays; the AVI is read for what it
+        // holds, and opened.
+        for (name, bytes, opening) in [
+            (
+                "a.webm",
+                mediaprobe::testing::webm(320, 240, 5, 30),
+                "Now playing",
+            ),
+            ("b.avi", mediaprobe::testing::avi(320, 240, 5, 25), "Opened"),
         ] {
             let said = app.open_path(&dir.file(name, &bytes));
-            assert!(said.starts_with("Opened"), "{name}: {said}");
+            assert!(said.starts_with(opening), "{name}: {said}");
         }
         assert_eq!(
             app.current_file.as_ref().unwrap().container,
@@ -6364,7 +6813,7 @@ test to be about anything -- it drew {} text command(s)",
     /// torrent client's "looks broken rather than idle" and the photo
     /// manager's "so the first window is not an empty grid".
     #[test]
-    fn the_window_says_it_cannot_play() {
+    fn the_window_says_how_to_open_a_film_and_what_plays() {
         let app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
         let texts: Vec<String> = app
             .render_commands()
@@ -6374,17 +6823,23 @@ test to be about anything -- it drew {} text command(s)",
                 _ => None,
             })
             .collect();
-        for line in CANNOT_PLAY_LINES {
+        for line in NO_FILE_LINES {
             assert!(
                 texts.iter().any(|t| t == line),
                 "the window never said {line:?}"
             );
         }
         assert!(
-            CANNOT_PLAY_LINES
+            NO_FILE_LINES
                 .iter()
                 .any(|l| l.contains("not a list of files you have")),
             "nothing forecloses reading the empty playlist as a library",
+        );
+        assert!(
+            NO_FILE_LINES
+                .iter()
+                .any(|l| l.contains("H.264") && l.contains("sound")),
+            "nothing says what does not play",
         );
     }
 
@@ -8759,7 +9214,7 @@ as many times as before",
     fn the_warning_lines_are_not_painted_over() {
         let app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
         let commands: Vec<RenderCommand> = app.render_commands();
-        for line in CANNOT_PLAY_LINES {
+        for line in NO_FILE_LINES {
             let (at, x, y, reach) = commands
                 .iter()
                 .enumerate()
@@ -8783,7 +9238,7 @@ as many times as before",
             // a warning is as unreadable as a fill over it.
             let crowded = commands.iter().any(|c| {
                 matches!(c, RenderCommand::Text { text, x: tx, y: ty, max_width: tw, .. }
-                    if !CANNOT_PLAY_LINES.contains(&text.as_str())
+                    if !NO_FILE_LINES.contains(&text.as_str())
                         && (ty - y).abs() < 10.0
                         && *tx < reach
                         && tx + tw.unwrap_or(f32::INFINITY) > x)
@@ -9321,16 +9776,18 @@ as many times as before",
         });
     }
 
+    /// **A row that changes nothing says why, beside it and when changed**,
+    /// each its own reason -- which stays true whatever file plays.
     #[test]
-    fn a_row_that_acts_on_playback_says_it_is_not_applied() {
+    fn a_row_that_changes_nothing_says_why() {
         let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
         app.active_tab = PlayerTab::Settings;
-        let playback: Vec<SettingRow> = SettingRow::ALL
+        let inert: Vec<SettingRow> = SettingRow::ALL
             .into_iter()
-            .filter(|r| r.needs_decoding())
+            .filter(|r| r.not_applied().is_some())
             .collect();
         assert_eq!(
-            playback,
+            inert,
             [
                 SettingRow::ResumePlayback,
                 SettingRow::HardwareDecode,
@@ -9339,17 +9796,17 @@ as many times as before",
             ]
         );
         let notes = |app: &VideoPlayerApp| {
-            drawn_texts(app)
+            let drawn = drawn_texts(app);
+            inert
                 .iter()
-                .filter(|t| *t == NOT_APPLIED)
+                .filter(|r| drawn.iter().any(|t| Some(t.as_str()) == r.not_applied()))
                 .count()
         };
-        assert_eq!(notes(&app), playback.len());
+        assert_eq!(notes(&app), inert.len(), "a reason is not drawn");
         change_setting(&mut app, SettingRow::HardwareDecode, 1);
+        let why = SettingRow::HardwareDecode.not_applied().unwrap();
         assert!(
-            app.osd_message
-                .as_deref()
-                .is_some_and(|m| m.contains(NOT_APPLIED)),
+            app.osd_message.as_deref().is_some_and(|m| m.contains(why)),
             "{:?}",
             app.osd_message
         );
@@ -9357,15 +9814,19 @@ as many times as before",
         assert!(
             app.osd_message
                 .as_deref()
-                .is_some_and(|m| !m.contains(NOT_APPLIED)),
+                .is_some_and(|m| !m.contains("Not applied")),
             "a row that acts said it does not"
         );
         app.decodes = true;
         assert_eq!(
             notes(&app),
-            0,
-            "a player that decodes says nothing is not applied"
+            inert.len(),
+            "a film playing makes none of them true"
         );
+        // Not one of them blames the decoding, which happens now.
+        for row in inert {
+            assert!(!row.not_applied().unwrap().contains("decodes video"));
+        }
     }
 
     #[test]
@@ -9453,5 +9914,616 @@ as many times as before",
             PlayerTab::Player,
             "Alt+F1, the desktop's, was taken"
         );
+    }
+
+    // == The pictures (2026-10-04) ==============================================
+
+    /// `tests/data/red-then-blue.webm`: 16 by 16, ten frames a second for 0.8
+    /// seconds, red to 0.4 and blue after, key frames at 0 and 0.4
+    /// (`tests/data/README.md`).
+    const RED_THEN_BLUE: &[u8] = include_bytes!("../tests/data/red-then-blue.webm");
+
+    /// A player with the red-then-blue film open, paused at its start, its
+    /// first picture come.
+    fn film_open(dir: &Scratch) -> VideoPlayerApp {
+        let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let path = dir.file("red-then-blue.webm", RED_THEN_BLUE);
+        let said = app.open_path(&path);
+        assert!(app.decodes, "the film does not play: {said}");
+        app.pause();
+        settle(&mut app);
+        app
+    }
+
+    /// Wait for the picture's thread until the picture on screen is the one
+    /// the clock is on: what a window's wakes bring it.
+    fn settle(app: &mut VideoPlayerApp) {
+        let wait = std::time::Duration::from_secs(10);
+        loop {
+            app.refresh_picture();
+            let now = if app.seeking {
+                i64::MIN
+            } else {
+                nanos(app.position)
+            };
+            let Some(pictures) = &mut app.pictures else {
+                return;
+            };
+            let caught_up = pictures.due().is_some_and(|due| due > now)
+                || pictures.ended()
+                || pictures.failed().is_some();
+            if caught_up || !pictures.wait(wait) {
+                return;
+            }
+        }
+    }
+
+    /// The last picture uploaded: its size and its first pixel's colour.
+    fn uploaded(app: &mut VideoPlayerApp) -> Option<(u32, u32, [u8; 3])> {
+        app.take_images()
+            .into_iter()
+            .rev()
+            .find_map(|change| match change {
+                ImageChange::Upload {
+                    id,
+                    width,
+                    height,
+                    bytes,
+                    ..
+                } if id == PICTURE_IMAGE => {
+                    // The wire's order: blue, green, red, alpha.
+                    let px = bytes.as_slice();
+                    Some((width, height, [px[2], px[1], px[0]]))
+                }
+                _ => None,
+            })
+    }
+
+    fn red(rgb: [u8; 3]) -> bool {
+        rgb[0] > 200 && rgb[1] < 60 && rgb[2] < 60
+    }
+
+    fn blue(rgb: [u8; 3]) -> bool {
+        rgb[2] > 200 && rgb[0] < 60 && rgb[1] < 60
+    }
+
+    /// When the picture on screen stops showing, in milliseconds: which
+    /// picture it is, a tenth of a second after its own time.
+    fn shown_until(app: &VideoPlayerApp) -> Option<i64> {
+        app.shown.map(|shown| shown.until / 1_000_000)
+    }
+
+    /// Where the picture is drawn, if it is.
+    fn picture_drawn(app: &VideoPlayerApp) -> Option<(f32, f32, f32, f32)> {
+        app.render_commands().iter().find_map(|c| match c {
+            RenderCommand::Image {
+                image_id,
+                x,
+                y,
+                width,
+                height,
+            } if *image_id == PICTURE_IMAGE => Some((*x, *y, *width, *height)),
+            _ => None,
+        })
+    }
+
+    /// **A film's first picture is on screen as soon as it is opened**, its
+    /// own size, fitted to the area the picture is drawn in -- and no line
+    /// says there is none.
+    #[test]
+    fn a_film_opened_shows_its_first_picture() {
+        let dir = Scratch::new("first-picture");
+        let mut app = film_open(&dir);
+        let (width, height, rgb) = uploaded(&mut app).expect("no picture was uploaded");
+        assert_eq!((width, height), (16, 16));
+        assert!(red(rgb), "{rgb:?}");
+        assert_eq!(shown_until(&app), Some(100));
+        // Fit: a square picture in a wide area is as tall as the area, and
+        // centred across it.
+        let (x, y, w, h) = picture_drawn(&app).expect("the picture is not drawn");
+        let area_h = app.height - CONTENT_TOP - CONTROLS_HEIGHT;
+        assert!(
+            (h - area_h).abs() < 0.5 && (w - area_h).abs() < 0.5,
+            "{w}x{h}"
+        );
+        assert!((x - (app.width - area_h) / 2.0).abs() < 0.5, "{x}");
+        assert!((y - CONTENT_TOP).abs() < 0.5, "{y}");
+        assert!(
+            !drawn_texts(&app)
+                .iter()
+                .any(|t| t.starts_with("No picture") || NO_FILE_LINES.contains(&t.as_str())),
+            "a line says there is no picture over the one there is"
+        );
+    }
+
+    /// **The picture follows the clock**: red through the film's first 0.4
+    /// seconds, blue after; the picture showing is the latest one due.
+    #[test]
+    fn the_picture_follows_the_clock() {
+        let dir = Scratch::new("clock");
+        let mut app = film_open(&dir);
+        drop(app.take_images());
+        app.play();
+        // The picture of 0.1 s has come already (`film_open` waited for it):
+        // a tick past its time shows it, with no wake.
+        app.tick(150);
+        assert_eq!(
+            shown_until(&app),
+            Some(200),
+            "a tick did not move the picture"
+        );
+        app.tick(100);
+        settle(&mut app);
+        assert_eq!(shown_until(&app), Some(300), "the picture of 0.2 s");
+        let uploads = app
+            .pending_images
+            .iter()
+            .filter(|c| matches!(c, ImageChange::Upload { .. }))
+            .count();
+        assert_eq!(
+            uploads, 1,
+            "a picture superseded before it was sent is sent"
+        );
+        assert!(red(uploaded(&mut app).expect("the picture did not move").2));
+        app.tick(200);
+        settle(&mut app);
+        assert_eq!(shown_until(&app), Some(500), "the picture of 0.4 s");
+        assert!(blue(
+            uploaded(&mut app).expect("the picture did not move").2
+        ));
+    }
+
+    /// **Paused, the picture stays**: nothing is taken past the clock.
+    #[test]
+    fn a_paused_film_keeps_its_picture() {
+        let dir = Scratch::new("paused");
+        let mut app = film_open(&dir);
+        drop(app.take_images());
+        app.tick(500);
+        settle(&mut app);
+        assert_eq!(app.position, Duration::ZERO);
+        assert_eq!(shown_until(&app), Some(100));
+        assert!(
+            uploaded(&mut app).is_none(),
+            "a paused film's picture moved"
+        );
+    }
+
+    /// **A seek shows the picture at the time sought**, decoded from the key
+    /// frame before it, forward and back, with the film paused.
+    #[test]
+    fn a_seek_shows_the_picture_at_the_time_sought() {
+        let dir = Scratch::new("seek");
+        let mut app = film_open(&dir);
+        drop(app.take_images());
+        app.seek_to(Duration::from_millis(650));
+        // The first picture to come after the seek is the one at the time
+        // sought -- not the key frame before it, run on from.
+        let pictures = app.pictures.as_mut().expect("decoding");
+        while pictures.due().is_none() {
+            assert!(pictures.wait(std::time::Duration::from_secs(10)));
+        }
+        assert_eq!(
+            pictures.due(),
+            Some(600_000_000),
+            "the seek's first picture"
+        );
+        settle(&mut app);
+        assert_eq!(shown_until(&app), Some(700), "the picture of 0.6 s");
+        assert!(blue(
+            uploaded(&mut app).expect("no picture after the seek").2
+        ));
+        app.seek_to(Duration::from_millis(150));
+        settle(&mut app);
+        assert_eq!(shown_until(&app), Some(200), "the picture of 0.1 s");
+        assert!(red(uploaded(&mut app)
+            .expect("no picture after the seek")
+            .2));
+        // The keys seek too: ten seconds on is past the end, held to it.
+        app.handle_event(&press(Key::Right));
+        settle(&mut app);
+        assert_eq!(app.position, Duration::from_millis(800));
+        assert_eq!(shown_until(&app), Some(800), "the last picture");
+    }
+
+    /// **Stop goes back to the first picture.**
+    #[test]
+    fn stop_shows_the_first_picture() {
+        let dir = Scratch::new("stop");
+        let mut app = film_open(&dir);
+        app.seek_to(Duration::from_millis(650));
+        settle(&mut app);
+        drop(app.take_images());
+        app.stop();
+        settle(&mut app);
+        assert_eq!(
+            (app.state, app.position),
+            (PlaybackState::Stopped, Duration::ZERO)
+        );
+        assert_eq!(shown_until(&app), Some(100));
+        assert!(red(uploaded(&mut app)
+            .expect("no picture after the stop")
+            .2));
+    }
+
+    /// **The film ends when its last picture's time is up** -- not when it
+    /// is first shown, and not never.
+    #[test]
+    fn the_film_ends_when_its_last_picture_has_been_shown() {
+        let dir = Scratch::new("end");
+        let mut app = film_open(&dir);
+        app.repeat = RepeatMode::Off;
+        app.play();
+        app.tick(750);
+        settle(&mut app);
+        assert_eq!(shown_until(&app), Some(800), "the last picture");
+        assert!(
+            app.pictures.as_ref().is_some_and(Pictures::ended),
+            "control: the film's end has come"
+        );
+        // The end known, and the clock still inside the last picture's time.
+        app.tick(10);
+        assert_eq!(
+            app.state,
+            PlaybackState::Playing,
+            "the film ended with its last picture still showing"
+        );
+        app.tick(100);
+        assert_eq!(
+            app.state,
+            PlaybackState::Paused,
+            "a film alone in its playlist stops at its end"
+        );
+        // Play at the end plays it again, rather than ending again at once.
+        drop(app.take_images());
+        app.play();
+        settle(&mut app);
+        assert_eq!(app.position, Duration::ZERO);
+        assert!(red(uploaded(&mut app).expect("not back at the start").2));
+        app.tick(50);
+        assert_eq!(app.state, PlaybackState::Playing);
+    }
+
+    /// **Repeat One plays the pictures again from the first.**
+    #[test]
+    fn repeat_one_plays_the_pictures_again() {
+        let dir = Scratch::new("repeat");
+        let mut app = film_open(&dir);
+        app.repeat = RepeatMode::One;
+        app.play();
+        app.tick(750);
+        settle(&mut app);
+        drop(app.take_images());
+        app.tick(100);
+        settle(&mut app);
+        assert_eq!(app.state, PlaybackState::Playing);
+        assert_eq!(app.position, Duration::ZERO);
+        assert_eq!(shown_until(&app), Some(100));
+        assert!(red(uploaded(&mut app).expect("the first picture again").2));
+    }
+
+    /// **Dragging the seek bar shows the key frame under the pointer**, and
+    /// the clock stays where it was until the drag ends, at the time itself.
+    #[test]
+    fn dragging_the_seek_bar_shows_the_key_frames_on_the_way() {
+        let dir = Scratch::new("drag");
+        let mut app = film_open(&dir);
+        app.seek_to(Duration::from_millis(650));
+        settle(&mut app);
+        drop(app.take_images());
+        let bar = app.seek_bar();
+        let at = |fraction: f32| bar.x + bar.w * fraction;
+        let y = bar.y + bar.h / 2.0;
+        // 0.8 s long: 20% is 0.16 s, whose key frame is the one at the start
+        // -- held there, not run on to the clock's 0.65 s.
+        app.handle_event(&mouse(at(0.2), y, MouseEventKind::Press(MouseButton::Left)));
+        settle(&mut app);
+        assert_eq!(shown_until(&app), Some(100), "the key frame of 0 s");
+        assert!(red(uploaded(&mut app)
+            .expect("no picture while dragging")
+            .2));
+        assert_eq!(
+            app.position,
+            Duration::from_millis(650),
+            "the clock moved mid-drag"
+        );
+        // On to 70%, 0.56 s: the key frame at 0.4 s.
+        app.handle_event(&mouse(at(0.7), y, MouseEventKind::Move));
+        settle(&mut app);
+        assert_eq!(shown_until(&app), Some(500), "the key frame of 0.4 s");
+        assert!(blue(
+            uploaded(&mut app).expect("no picture while dragging").2
+        ));
+        app.handle_event(&mouse(
+            at(0.7),
+            y,
+            MouseEventKind::Release(MouseButton::Left),
+        ));
+        settle(&mut app);
+        assert_eq!(app.position, Duration::from_millis(560));
+        assert_eq!(shown_until(&app), Some(600), "the picture of 0.5 s");
+    }
+
+    /// **A seek's picture comes on the next tick** to a window that gave no
+    /// waker, paused or not.
+    #[test]
+    fn a_paused_film_shows_a_seeks_picture_on_its_next_tick() {
+        let dir = Scratch::new("tick-seek");
+        let mut app = film_open(&dir);
+        app.seek_to(Duration::from_millis(650));
+        // The seek's picture has come -- `wait` takes it from the queue, as
+        // the next tick would find it there; a frame decoded before the seek
+        // and handed over after it is passed by.
+        let pictures = app.pictures.as_mut().expect("decoding");
+        while pictures.due().is_none() {
+            assert!(pictures.wait(std::time::Duration::from_secs(10)));
+        }
+        assert!(app.tick(100), "a tick that showed a picture moved nothing");
+        assert_eq!(shown_until(&app), Some(700));
+        assert_eq!(app.state, PlaybackState::Paused);
+    }
+
+    /// A film whose every read fails, as a disk that has gone does.
+    struct Unreadable;
+
+    impl pictures::Source for Unreadable {
+        type Picture = ();
+
+        fn next(&mut self) -> Result<Option<()>, String> {
+            Err(String::from("the disk failed"))
+        }
+
+        fn time((): &()) -> i64 {
+            0
+        }
+
+        fn convert(&mut self, (): &()) -> Result<Frame, String> {
+            Err(String::from("nothing to convert"))
+        }
+
+        fn seek(&mut self, _time: i64, _mode: SeekMode) -> Result<(), String> {
+            Err(String::from("the disk failed"))
+        }
+    }
+
+    /// **A film whose pictures stop says so, once**, and is over -- rather
+    /// than a clock running on over the last picture forever.
+    #[test]
+    fn a_film_whose_pictures_stop_says_so_once() {
+        let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.current_file = Some(sample_media_file());
+        app.decodes = true;
+        app.pictures = Some(Pictures::start(Unreadable, WakerSlot::default()).unwrap());
+        app.play();
+        settle(&mut app);
+        assert_eq!(
+            app.osd_message.as_deref(),
+            Some("The picture stopped: the disk failed")
+        );
+        // A wake, which looks again and does nothing else, says nothing again.
+        app.osd_message = None;
+        assert_eq!(app.on_wake(), Response::Idle);
+        assert_eq!(app.osd_message, None, "said again");
+        app.tick(10);
+        assert_eq!(app.state, PlaybackState::Paused, "the film went on");
+    }
+
+    /// **A film whose header gives no length takes its video's**: the seek
+    /// bar and a seek's limit are the film's, not nothing.
+    #[test]
+    fn a_film_whose_header_gives_no_length_takes_its_videos() {
+        let dir = Scratch::new("length");
+        let mut app = film_open(&dir);
+        app.current_file.as_mut().unwrap().duration = Duration::ZERO;
+        assert_eq!(app.length(), Some(Duration::from_millis(800)));
+        app.seek_to(Duration::from_secs(10));
+        assert_eq!(app.position, Duration::from_millis(800));
+        assert!((app.progress_fraction() - 1.0).abs() < 1e-9);
+    }
+
+    /// **Opening a file whose pictures do not decode takes the last film's
+    /// picture away**, and says why there is none.
+    #[test]
+    fn opening_a_file_that_does_not_decode_takes_the_picture_away() {
+        let dir = Scratch::new("away");
+        let mut app = film_open(&dir);
+        drop(app.take_images());
+        let h264 = dir.file("film.mkv", &mediaprobe::testing::mkv(640, 360, 30, 24));
+        app.open_path(&h264);
+        let changes = app.take_images();
+        assert!(
+            changes.contains(&ImageChange::Drop(PICTURE_IMAGE)),
+            "{changes:?}"
+        );
+        assert!(picture_drawn(&app).is_none(), "the last film's picture");
+        assert!(
+            drawn_texts(&app)
+                .iter()
+                .any(|t| t == "No picture: the video is H.264, which is not decoded here yet."),
+            "{:?}",
+            drawn_texts(&app)
+        );
+    }
+
+    /// **The picture is placed as the aspect mode says.**
+    #[test]
+    fn the_picture_is_placed_as_the_aspect_mode_says() {
+        let area = Rect {
+            x: 0.0,
+            y: 40.0,
+            w: 400.0,
+            h: 200.0,
+        };
+        let square = |mode| place_picture(area, 100.0, 100.0, mode);
+        let rect = |x, y, w, h| Rect { x, y, w, h };
+        assert_eq!(square(AspectMode::Fit), rect(100.0, 40.0, 200.0, 200.0));
+        assert_eq!(square(AspectMode::Fill), rect(0.0, -60.0, 400.0, 400.0));
+        assert_eq!(square(AspectMode::Stretch), area);
+        assert_eq!(
+            square(AspectMode::Original),
+            rect(150.0, 90.0, 100.0, 100.0)
+        );
+        assert_eq!(
+            square(AspectMode::Custom {
+                width: 4,
+                height: 1
+            }),
+            rect(0.0, 90.0, 400.0, 100.0)
+        );
+        // Nothing to place: the area.
+        assert_eq!(place_picture(area, 0.0, 10.0, AspectMode::Fit), area);
+    }
+
+    /// **A picture of non-square pixels is drawn at the file's shape**: its
+    /// display size, not its pixels'.
+    #[test]
+    fn a_picture_is_drawn_at_its_display_shape() {
+        let dir = Scratch::new("shape");
+        let mut app = film_open(&dir);
+        let mut info = app.picture_info.expect("the film's video");
+        // The file says to show its 16 by 16 pixels twice as wide.
+        info.display_width = 32;
+        app.picture_info = Some(info);
+        let (_, _, w, h) = picture_drawn(&app).expect("the picture is not drawn");
+        assert!((w / h - 2.0).abs() < 0.01, "{w}x{h}");
+    }
+
+    /// **A playing film's clock asks for its next picture's time**, so that
+    /// the picture is shown when due rather than up to a tick late; paused,
+    /// it asks for none beyond the message on screen.
+    #[test]
+    fn the_clock_asks_for_the_next_pictures_time() {
+        let dir = Scratch::new("interval");
+        let mut app = film_open(&dir);
+        app.play();
+        settle(&mut app);
+        assert_eq!(
+            app.tick_interval(),
+            Some(std::time::Duration::from_millis(100))
+        );
+        app.tick(30);
+        settle(&mut app);
+        assert_eq!(
+            app.tick_interval(),
+            Some(std::time::Duration::from_millis(70))
+        );
+        app.speed = PlaybackSpeed::DOUBLE;
+        assert_eq!(
+            app.tick_interval(),
+            Some(std::time::Duration::from_millis(35)),
+            "twice as fast, half the wait"
+        );
+        app.pause();
+        app.osd_remaining_ms = 0;
+        assert_eq!(app.tick_interval(), None);
+    }
+
+    /// **A film opened before the window gives its waker still wakes it** --
+    /// a film named on the command line starts decoding before the window
+    /// opens -- and a wake shows the picture that came.
+    #[test]
+    fn a_film_opened_before_the_waker_is_given_wakes_the_window() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::Wake;
+        struct Count(AtomicUsize);
+        impl Wake for Count {
+            fn wake(self: std::sync::Arc<Self>) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+            fn wake_by_ref(self: &std::sync::Arc<Self>) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let dir = Scratch::new("waker");
+        let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.open_path(&dir.file("red-then-blue.webm", RED_THEN_BLUE));
+        let count = std::sync::Arc::new(Count(AtomicUsize::new(0)));
+        app.attach_waker(Waker::from(std::sync::Arc::clone(&count)));
+        // What a woken window does: the first picture, shown on a wake.
+        let mut redrawn = false;
+        for _ in 0..1_000 {
+            if app.on_wake() == Response::Redraw {
+                redrawn = true;
+                break;
+            }
+            app.pictures
+                .as_mut()
+                .expect("decoding")
+                .wait(std::time::Duration::from_secs(10));
+        }
+        assert!(redrawn, "a wake never showed the first picture");
+        // The rest of the film: some of it is handed over after the waker
+        // came, and each hand-over wakes the window.
+        app.tick(1_000);
+        settle(&mut app);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while count.0.load(Ordering::Relaxed) == 0 && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(
+            count.0.load(Ordering::Relaxed) > 0,
+            "the window was never woken"
+        );
+    }
+
+    /// A film that only notes how it is sought, and has no pictures.
+    struct Sought(std::sync::Arc<std::sync::Mutex<Vec<(i64, SeekMode)>>>);
+
+    impl pictures::Source for Sought {
+        type Picture = ();
+
+        fn next(&mut self) -> Result<Option<()>, String> {
+            Ok(None)
+        }
+
+        fn time((): &()) -> i64 {
+            0
+        }
+
+        fn convert(&mut self, (): &()) -> Result<Frame, String> {
+            Err(String::from("nothing to convert"))
+        }
+
+        fn seek(&mut self, time: i64, mode: SeekMode) -> Result<(), String> {
+            self.0.lock().unwrap().push((time, mode));
+            Ok(())
+        }
+    }
+
+    /// **A jump of the clock is an exact seek, and a drag a key frame's.**
+    ///
+    /// With the clock at the time sought the two land on the same picture
+    /// -- the thread passes over what is behind the clock -- except where a
+    /// key frame is further back than a decoder covers in `LONGEST_UNSHOWN`:
+    /// a key-frame seek would then show the pictures on the way, an exact one
+    /// only the picture at the time. So it is the mode asked for that is
+    /// held here.
+    #[test]
+    fn a_jump_of_the_clock_seeks_exactly_and_a_drag_to_a_key_frame() {
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.current_file = Some(sample_media_file());
+        app.decodes = true;
+        app.pictures = Some(
+            Pictures::start(Sought(std::sync::Arc::clone(&log)), WakerSlot::default()).unwrap(),
+        );
+        let sought = |app: &mut VideoPlayerApp| {
+            // The seek is the thread's; its end, handed over after, says it
+            // has been made.
+            let pictures = app.pictures.as_mut().expect("decoding");
+            while !pictures.ended() {
+                assert!(pictures.wait(std::time::Duration::from_secs(10)));
+            }
+            log.lock().unwrap().pop().expect("no seek was made")
+        };
+        app.seek_to(Duration::from_secs(5));
+        assert_eq!(sought(&mut app), (5_000_000_000, SeekMode::Exact));
+        let bar = app.seek_bar();
+        app.handle_event(&mouse(
+            bar.x + bar.w / 2.0,
+            bar.y + bar.h / 2.0,
+            MouseEventKind::Press(MouseButton::Left),
+        ));
+        assert_eq!(sought(&mut app).1, SeekMode::KeyFrame, "a drag");
     }
 }

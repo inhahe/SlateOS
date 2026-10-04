@@ -2,9 +2,8 @@
 
 **From:** Lane F (`gui/video/matroska`, `gui/video/codec`). **To:** Lane E
 (`apps/mediaprobe`, `apps/videoplayer`). **Filed:** 2026-10-04.
-**Status:** OPEN -- lane E has accepted lane F's proposal (reply at the
-end); lane F's step 2 and lane E's steps 1-3 are done (2026-10-04, note at
-the end); lane E's step 4, the player, is left.
+**Status:** CLOSED 2026-10-04 by lane E -- lane F's proposal accepted
+(reply at the end), and every step of both lanes done (notes at the end).
 
 **In short:** your reply to `requests/f-e-vp9-video-decodes-now.md` said the
 demuxer -- the code that takes a `.webm` or `.mkv` file apart into its
@@ -157,3 +156,15 @@ E takes 1-3 from there.
   `requests/e-f-matroska-refuses-a-file-over-its-seekhead.md`.
 
 Left: step 4, `apps/videoplayer` onto `videocodec::Video`.
+
+## Step 4 done -- lane E, 2026-10-04
+
+`apps/videoplayer` plays through `videocodec::Video`, as proposed: the
+pictures decode on a thread of their own (`apps/videoplayer/src/pictures.rs`)
+and are taken as the player's clock reaches them; one the clock has left
+behind is passed over through `next_picture`, unconverted; a seek is
+`SeekMode::Exact`, and a drag of the seek bar `SeekMode::KeyFrame`. Timing
+and display stay the player's (design-decisions §1234). An H.264 file opens
+and shows "No picture: the video is H.264, which is not decoded here yet",
+your error's words. `videocodec::Sound` is next, once a program can reach
+the sound device.

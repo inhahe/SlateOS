@@ -25,7 +25,8 @@ hexeditor, imageviewer, ircclient, jsonviewer, reminders, mindmap,
 musicplayer, notes, paint, partmanager, pdfviewer, photomanager, podcast,
 pomodoro, procexplorer, radio, remotedesktop, screenrecorder, screenshot,
 settings, spreadsheet, startupmanager, stopwatch, sudoku, sysinfo,
-systemrestore, undelete, whiteboard, wordle and worldclock.
+systemrestore, undelete, whiteboard, wordle and worldclock; and later the
+same day in netmanager and speedtest, which the scan had not named (below).
 
 **Modal for the keys no more than for the pointer.** Each card was checked
 for both, and many failed the keys too: calendar's, diagram's,
@@ -44,13 +45,14 @@ takes no press at all; its card was modal for no key.)
 may guard its card some way the scan does not see, and each was confirmed
 before it was changed. Eighteen were struck off:
 
-- *A hit box over the whole window* (15): email, finance, flashcards,
-  habits, logviewer, markdowneditor, metronome, pinball, qrcode,
-  regextester, rssreader, slides, soundrecorder, tmux and torrent each
-  record one, last, while the card is up, so every press, move and turn of
-  the wheel resolves to the card -- a guard worth copying wherever an
-  application hit-tests its frame. Their keys were checked too: logviewer's,
-  regextester's and rssreader's were fixed (above), the rest were modal.
+- *A hit box over the whole window* (16): email, finance, flashcards,
+  habits, logviewer, markdowneditor, mediaconvert, metronome, pinball,
+  qrcode, regextester, rssreader, slides, soundrecorder, tmux and torrent
+  each record one, last, while the card is up, so every press, move and
+  turn of the wheel resolves to the card -- a guard worth copying wherever
+  an application hit-tests its frame. Their keys were checked too:
+  logviewer's, regextester's and rssreader's were fixed (above), the rest
+  were modal.
 - *No press on the window* (2): kanban and passwordgen take a press only in
   their file dialogs, and both cards were already modal for the keys.
 - *No card at all* (1): sysmonitor. The `render_card(` the scan found was
@@ -59,9 +61,22 @@ before it was changed. Eighteen were struck off:
   nothing, though Delete ends the selected process -- guarded from the
   start, so the scan no longer names it.
 
-**The scan** prints the seventeen others and nothing else as of
+**The scan** prints the eighteen others and nothing else as of
 2026-10-04. Run it from the tree's root; anything else it prints is a new
-application with the bug:
+application with the bug.
+
+**It was blind to three applications until `scripts/rustscan.py` was
+fixed** (2026-10-04). `production_only` blanks every `#[cfg(test)]` item,
+and it took a `#[cfg(test)]` *member of a list* -- a struct's field, an
+enum's variant -- to run on to the next `;` in the file, blanking the
+closing brace of the struct or enum with it. Netmanager's and
+mediaconvert's window structs each hold such a field, and speedtest's
+`Source` enum such a variant. Every function body the scan matched braces
+for was then a level too deep: netmanager read as one 6,239-line `fn new`,
+which held both a mouse event and `show_help`, and passed.
+Netmanager and speedtest had the bug (a press on Start, under speedtest's
+card, began a test); mediaconvert had a hit box over the whole window
+(above).
 
 ```python
 import pathlib, re, sys

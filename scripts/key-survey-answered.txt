@@ -95,10 +95,6 @@ launcher	Num5	ditto
 launcher	Num6	ditto
 launcher	Num7	ditto
 launcher	Num8	ditto
-sysmonitor	Num3	the tab caption is digit() plus label(), so the bar reads 3 CPU
-sysmonitor	Num4	ditto
-sysmonitor	Num5	ditto
-sysmonitor	Num6	ditto
 rssreader	Num4	the move-to-folder prompt numbers its own rows, one per folder that exists
 rssreader	Num5	ditto
 rssreader	Num6	ditto

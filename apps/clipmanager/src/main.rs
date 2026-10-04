@@ -34,6 +34,9 @@ use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::text::TextCursor;
+use guitk::textedit;
+use guitk::textinput::TextInput;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 
@@ -798,6 +801,14 @@ struct AppState {
     /// Whether the shortcut card is up.
     show_help: bool,
     focus: Option<Field>,
+    /// The editor of the box with the keyboard -- its caret and selection
+    /// over that box's text -- reloaded when the keyboard moved to another
+    /// box or the text changed under it.
+    editor: TextInput,
+    /// Which box `editor` holds.
+    editor_for: Option<Field>,
+    /// What the boxes' Ctrl+C and Ctrl+X took, for their Ctrl+V.
+    clipboard: String,
     /// The line the toolbar writes: what the last button did, or why it
     /// refused. A button that silently does nothing is indistinguishable from
     /// a button that is broken.
@@ -866,6 +877,9 @@ impl AppState {
             selected_template: None,
             show_help: false,
             focus: None,
+            editor: TextInput::new(),
+            editor_for: None,
+            clipboard: String::new(),
             status: String::new(),
             window_size: (WINDOW_WIDTH, WINDOW_HEIGHT),
             tick_carry_ms: 0,
@@ -1196,6 +1210,10 @@ pub enum Target {
     ImportSelected,
 }
 
+/// The most a box holds, in characters: a search, a tag, a template's
+/// name or body -- and a paste of a page is none of them.
+const FIELD_CAPACITY: usize = 4096;
+
 /// A text box that can hold the caret.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Field {
@@ -1206,6 +1224,40 @@ enum Field {
 }
 
 impl Field {
+    /// The size the field's text is drawn at, which its caret keys and a
+    /// press measure against as well.
+    fn text_size(self) -> f32 {
+        match self {
+            Self::Search => 13.0,
+            Self::Tag => 11.0,
+            Self::TemplateName | Self::TemplateBody => 12.0,
+        }
+    }
+
+    /// Where the field's text is drawn in its box at `rect`: inside its
+    /// left and right insets -- the search box's are its `Search:` label and
+    /// its type badge -- a line of its text high, centred on the box's first
+    /// line. One answer for the drawing and for a press.
+    fn text_area(self, rect: Rect) -> Rect {
+        let (left, right) = match self {
+            Self::Search => (72.0, 128.0),
+            Self::Tag | Self::TemplateName | Self::TemplateBody => (6.0, 6.0),
+        };
+        let line = text::line_height(self.text_size(), FontWeightHint::Regular);
+        // The body's box is two lines tall and its text one, on the first.
+        let band = if self == Self::TemplateBody {
+            rect.h.min(20.0)
+        } else {
+            rect.h
+        };
+        Rect::new(
+            rect.x + left,
+            rect.y + (band - line) / 2.0,
+            (rect.w - left - right).max(0.0),
+            line,
+        )
+    }
+
     /// The box Tab moves the caret to.
     fn next(self) -> Self {
         match self {
@@ -1309,6 +1361,77 @@ impl FieldLook {
     }
 }
 
+/// A text box's text as it is drawn: what it holds, where its caret and
+/// selection are, and what it says while it is empty.
+#[derive(Clone, Copy)]
+struct BoxText<'a> {
+    field: Field,
+    value: &'a str,
+    caret: (TextCursor, Option<usize>),
+    placeholder: &'a str,
+}
+
+/// A box's text in its box at `rect`, `focused` or not: what it holds --
+/// with its caret and selection where they are while it has the keyboard,
+/// scrolled so the caret stays in view -- or, empty, what it is for, with
+/// the caret before it while it has the keyboard. The boxes drew their text
+/// with a `_` typed onto its end for a caret, cut with an ellipsis at the
+/// letters being typed.
+fn draw_box_text(frame: &mut Frame, pal: &Palette, rect: Rect, focused: bool, text: BoxText<'_>) {
+    let area = text.field.text_area(rect);
+    let size = text.field.text_size();
+    let mut tree = RenderTree::new();
+    if text.value.is_empty() {
+        tree.push(RenderCommand::Text {
+            x: area.x,
+            y: area.y,
+            text: text.placeholder.to_string(),
+            color: pal.subtext0,
+            font_size: size,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(area.w),
+            overflow: TextOverflow::Ellipsis,
+        });
+        if focused {
+            textedit::push_caret(
+                &mut tree,
+                area.x,
+                area.y,
+                area.h,
+                pal.text,
+                textedit::CARET_WIDTH,
+            );
+        }
+    } else {
+        // A box without the keyboard reads from its start.
+        let (cursor, selection_anchor) = if focused {
+            text.caret
+        } else {
+            (TextCursor::default(), None)
+        };
+        textedit::draw(
+            &mut tree,
+            &textedit::SingleLine {
+                text: text.value,
+                cursor,
+                selection_anchor,
+                focused,
+                x: area.x,
+                y: area.y,
+                width: area.w,
+                line_height: area.h,
+                font_size: size,
+                weight: FontWeightHint::Regular,
+                color: pal.text,
+                selection_bg: pal.accent,
+                selection_fg: pal.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+    }
+    frame.extend(tree.commands);
+}
+
 fn render_search_bar(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32, h: f32) {
     let focused = state.focus == Some(Field::Search);
     let box_rect = Rect::new(x, y, w, h);
@@ -1327,34 +1450,13 @@ fn render_search_bar(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32
         overflow: TextOverflow::Clip,
     });
 
-    // A caret while the box holds the keyboard, so an empty focused box does
-    // not look identical to an empty unfocused one.
-    let query_display = if state.search_query.is_empty() {
-        if focused {
-            "_".to_string()
-        } else {
-            "type to filter...".to_string()
-        }
-    } else if focused {
-        format!("{}_", state.search_query)
-    } else {
-        state.search_query.clone()
-    };
-    let query_color = if state.search_query.is_empty() && !focused {
-        state.palette.overlay0
-    } else {
-        state.palette.text
-    };
-    frame.push(RenderCommand::Text {
-        x: x + 72.0,
-        y: y + 10.0,
-        text: query_display,
-        color: query_color,
-        font_size: 13.0,
-        font_weight: FontWeightHint::Regular,
-        max_width: Some((w - 200.0).max(0.0)),
-        overflow: TextOverflow::Ellipsis,
-    });
+    draw_box_text(
+        frame,
+        &state.palette,
+        box_rect,
+        focused,
+        state.box_text(Field::Search, "type to filter..."),
+    );
 
     // The badge sits on top of the box, so it is recorded after it and wins
     // the clicks that land on both.
@@ -1634,7 +1736,7 @@ fn render_history_panel(frame: &mut Frame, state: &AppState, rect: Rect, visible
             Rect::new(detail_x, y, detail_w, h),
             state.now,
             state.field_look(Target::TagField, state.focus == Some(Field::Tag)),
-            &state.tag_input,
+            state.box_text(Field::Tag, "add a tag..."),
         ),
         None => frame.push(RenderCommand::Text {
             x: detail_x + 16.0,
@@ -1797,7 +1899,7 @@ fn render_detail_panel(
     rect: Rect,
     now: u64,
     tag: FieldLook,
-    tag_input: &str,
+    tag_text: BoxText<'_>,
 ) {
     let tag_focused = tag.state.focused;
     let Rect { x, y, w, h } = rect;
@@ -1882,27 +1984,7 @@ fn render_detail_panel(
     let add_w = 44.0_f32;
     let field = Rect::new(x + pad, cy, (w - pad * 2.0 - add_w - 6.0).max(0.0), 20.0);
     tag.draw(frame, pal, field);
-    let tag_display = if tag_input.is_empty() && !tag_focused {
-        "add a tag...".to_string()
-    } else if tag_focused {
-        format!("{tag_input}_")
-    } else {
-        tag_input.to_string()
-    };
-    frame.push(RenderCommand::Text {
-        x: field.x + 6.0,
-        y: field.y + 4.0,
-        text: tag_display,
-        color: if tag_input.is_empty() && !tag_focused {
-            pal.subtext0
-        } else {
-            pal.text
-        },
-        font_size: 11.0,
-        font_weight: FontWeightHint::Regular,
-        max_width: Some((field.w - 12.0).max(0.0)),
-        overflow: TextOverflow::Ellipsis,
-    });
+    draw_box_text(frame, pal, field, tag_focused, tag_text);
     frame.hit(Target::TagField, field);
 
     let add = Rect::new(field.right() + 6.0, cy, add_w, 20.0);
@@ -2148,8 +2230,7 @@ fn render_templates_panel(frame: &mut Frame, state: &AppState, x: f32, y: f32, w
         &state.palette,
         TemplateField {
             label: "Name:",
-            placeholder: "e.g. Email Reply",
-            value: &state.template_name_input,
+            text: state.box_text(Field::TemplateName, "e.g. Email Reply"),
             look: state.field_look(
                 Target::TemplateName,
                 state.focus == Some(Field::TemplateName),
@@ -2167,8 +2248,7 @@ fn render_templates_panel(frame: &mut Frame, state: &AppState, x: f32, y: f32, w
         &state.palette,
         TemplateField {
             label: "Body:",
-            placeholder: "Dear {name}, ...",
-            value: &state.template_body_input,
+            text: state.box_text(Field::TemplateBody, "Dear {name}, ..."),
             look: state.field_look(
                 Target::TemplateBody,
                 state.focus == Some(Field::TemplateBody),
@@ -2207,8 +2287,7 @@ fn render_templates_panel(frame: &mut Frame, state: &AppState, x: f32, y: f32, w
 /// compiler to notice.
 struct TemplateField<'a> {
     label: &'a str,
-    placeholder: &'a str,
-    value: &'a str,
+    text: BoxText<'a>,
     look: FieldLook,
     target: Target,
     height: f32,
@@ -2236,29 +2315,7 @@ fn render_template_field(
 
     let rect = Rect::new(x + 60.0, y - 2.0, (w - 60.0).max(0.0), field.height);
     field.look.draw(frame, pal, rect);
-    let focused = field.look.state.focused;
-
-    let display = if field.value.is_empty() && !focused {
-        field.placeholder.to_string()
-    } else if focused {
-        format!("{}_", field.value)
-    } else {
-        field.value.to_string()
-    };
-    frame.push(RenderCommand::Text {
-        x: rect.x + 6.0,
-        y,
-        text: display,
-        color: if field.value.is_empty() && !focused {
-            pal.subtext0
-        } else {
-            pal.text
-        },
-        font_size: 12.0,
-        font_weight: FontWeightHint::Regular,
-        max_width: Some((rect.w - 12.0).max(0.0)),
-        overflow: TextOverflow::Ellipsis,
-    });
+    draw_box_text(frame, pal, rect, field.look.state.focused, field.text);
     frame.hit(field.target, rect);
 
     y + field.height + 12.0
@@ -2391,7 +2448,8 @@ impl AppState {
         if button != MouseButton::Left {
             return Action::None;
         }
-        let Some(target) = self.hit_test(x, y, size) else {
+        let frame = build_frame(self, size.0, size.1);
+        let Some(target) = frame.hit_test(x, y) else {
             // Clicking bare background puts the caret away, so a stray
             // keystroke afterwards does not land in a box the user has stopped
             // looking at.
@@ -2401,7 +2459,139 @@ impl AppState {
             }
             return Action::None;
         };
-        self.activate(target)
+        // A box: the keyboard, and the caret under the pointer, measured
+        // against the box as it was drawn -- from the start, as a box
+        // without the keyboard is drawn, or where its caret was.
+        let pressed = match target {
+            Target::SearchBox => Some(Field::Search),
+            Target::TagField => Some(Field::Tag),
+            Target::TemplateName => Some(Field::TemplateName),
+            Target::TemplateBody => Some(Field::TemplateBody),
+            _ => None,
+        };
+        let drawn = pressed.map(|field| {
+            if self.focus == Some(field) {
+                self.box_caret(field).0
+            } else {
+                TextCursor::default()
+            }
+        });
+        let action = self.activate(target);
+        if let (Some(field), Some(drawn), Some(rect)) =
+            (pressed, drawn, frame.rect_of(|t| *t == target))
+        {
+            self.press_box(field, rect, drawn, x);
+            return Action::Redraw;
+        }
+        action
+    }
+
+    /// What `field`'s box holds.
+    fn box_value(&self, field: Field) -> &str {
+        match field {
+            Field::Search => &self.search_query,
+            Field::Tag => &self.tag_input,
+            Field::TemplateName => &self.template_name_input,
+            Field::TemplateBody => &self.template_body_input,
+        }
+    }
+
+    /// `field`'s text as it is drawn, saying `placeholder` while empty.
+    fn box_text<'a>(&'a self, field: Field, placeholder: &'a str) -> BoxText<'a> {
+        BoxText {
+            field,
+            value: self.box_value(field),
+            caret: self.box_caret(field),
+            placeholder,
+        }
+    }
+
+    /// Load `field`'s box into the editor unless it holds it already, the
+    /// caret after its text.
+    fn load_editor(&mut self, field: Field) {
+        if self.editor_for != Some(field) || self.editor.text() != self.box_value(field) {
+            let held = self.box_value(field).to_owned();
+            self.editor.set_text(&held);
+            self.editor_for = Some(field);
+        }
+    }
+
+    /// Where `field`'s caret and selection anchor are: the editor's while it
+    /// holds the box's text, after the text and none otherwise.
+    fn box_caret(&self, field: Field) -> (TextCursor, Option<usize>) {
+        let held = self.box_value(field);
+        if self.editor_for == Some(field) && self.editor.text() == held {
+            (self.editor.cursor(), self.editor.selection_anchor())
+        } else {
+            (TextCursor::from(held.len()), None)
+        }
+    }
+
+    /// A press at `x` in `field`'s box at `rect`, its caret drawn at
+    /// `drawn`: the caret under the pointer.
+    fn press_box(&mut self, field: Field, rect: Rect, drawn: TextCursor, x: f32) {
+        self.load_editor(field);
+        let area = field.text_area(rect);
+        let cursor = textedit::cursor_at_click(
+            self.box_value(field),
+            drawn,
+            area.w,
+            field.text_size(),
+            FontWeightHint::Regular,
+            x - area.x,
+        );
+        self.editor.set_selection_anchor(None);
+        self.editor.set_cursor(cursor);
+    }
+
+    /// A key for `field`'s box, which has the keyboard: the caret keys,
+    /// Backspace and Delete at the caret, Ctrl+A, C, X and V, and typing --
+    /// what AltGr types among it, and no command's letter (Alt+W typed a
+    /// `w`). `None` for a key the box does not answer; else whether it
+    /// changed the text, the caret or the selection. A search changed
+    /// filters the list again from its top.
+    fn box_key(&mut self, field: Field, key: &KeyEvent) -> Option<bool> {
+        self.load_editor(field);
+        let editor = &self.editor;
+        let before = (
+            editor.text().to_owned(),
+            editor.cursor(),
+            editor.selection_anchor(),
+        );
+        let edit = textline::apply_key(
+            &mut self.editor,
+            key,
+            FIELD_CAPACITY,
+            &self.clipboard,
+            field.text_size(),
+        );
+        if let Some(copied) = edit.copied {
+            self.clipboard = copied;
+        }
+        if !edit.handled {
+            return None;
+        }
+        if self.editor.text() != self.box_value(field) {
+            let typed = self.editor.text().to_owned();
+            match field {
+                Field::Search => self.search_query = typed,
+                Field::Tag => self.tag_input = typed,
+                Field::TemplateName => self.template_name_input = typed,
+                Field::TemplateBody => self.template_body_input = typed,
+            }
+            if field == Field::Search {
+                self.scroll_offset = 0;
+                self.refresh_filter();
+            }
+        }
+        let editor = &self.editor;
+        Some(
+            (
+                editor.text().to_owned(),
+                editor.cursor(),
+                editor.selection_anchor(),
+            ) != before,
+        )
     }
 
     /// Do whatever the named control does.
@@ -2758,7 +2948,13 @@ impl AppState {
                     self.picker.open_to_read();
                     return Action::Redraw;
                 }
-                _ => return Action::None,
+                // Ctrl+A, C, X and V are the box with the keyboard's.
+                _ => {
+                    return match self.focus.and_then(|field| self.box_key(field, key)) {
+                        Some(true) => Action::Redraw,
+                        _ => Action::None,
+                    };
+                }
             }
         }
         if let Some(field) = self.focus {
@@ -2805,61 +3001,40 @@ impl AppState {
         }
     }
 
-    /// A keystroke while a text box holds the keyboard.
+    /// A keystroke while a text box holds the keyboard: Escape lets it go,
+    /// Tab moves to the next box and Enter does what the box is for -- each
+    /// plain, as Alt+Enter added a tag -- and every other key is its
+    /// editor's (`box_key`). The boxes took typing at their end and
+    /// Backspace from it, and nothing else.
     fn handle_key_in_field(&mut self, key: &KeyEvent, field: Field) -> Action {
-        // What a key typed goes in, AltGr's among it -- and not a command's
-        // letter: Alt+W typed a `w`.
-        if textline::types_into_field(key) {
-            let typed: String = key.typed().collect();
-            self.field_mut(field).push_str(&typed);
-            if field == Field::Search {
-                self.scroll_offset = 0;
-                self.refresh_filter();
-            }
-            return Action::Redraw;
-        }
-        // The field's own keys take no chord: Alt+Enter added a tag.
-        if !textline::is_plain(key.modifiers) {
-            return Action::None;
-        }
-        match key.key {
-            Key::Escape => {
-                self.focus = None;
-                Action::Redraw
-            }
-            Key::Tab => {
-                self.focus = Some(field.next());
-                Action::Redraw
-            }
-            Key::Enter => match field {
-                Field::Search => {
+        if textline::is_plain(key.modifiers) {
+            match key.key {
+                Key::Escape => {
                     self.focus = None;
-                    Action::Redraw
+                    return Action::Redraw;
                 }
-                Field::Tag => self.activate(Target::AddTag),
-                Field::TemplateName | Field::TemplateBody => self.activate(Target::SaveTemplate),
-            },
-            Key::Backspace => {
-                if self.field_mut(field).pop().is_none() {
-                    return Action::None;
+                Key::Tab => {
+                    self.focus = Some(field.next());
+                    return Action::Redraw;
                 }
-                if field == Field::Search {
-                    self.scroll_offset = 0;
-                    self.refresh_filter();
+                Key::Enter => {
+                    return match field {
+                        Field::Search => {
+                            self.focus = None;
+                            Action::Redraw
+                        }
+                        Field::Tag => self.activate(Target::AddTag),
+                        Field::TemplateName | Field::TemplateBody => {
+                            self.activate(Target::SaveTemplate)
+                        }
+                    };
                 }
-                Action::Redraw
+                _ => {}
             }
-            _ => Action::None,
         }
-    }
-
-    /// The string behind a text box.
-    fn field_mut(&mut self, field: Field) -> &mut String {
-        match field {
-            Field::Search => &mut self.search_query,
-            Field::Tag => &mut self.tag_input,
-            Field::TemplateName => &mut self.template_name_input,
-            Field::TemplateBody => &mut self.template_body_input,
+        match self.box_key(field, key) {
+            Some(true) => Action::Redraw,
+            _ => Action::None,
         }
     }
 
@@ -5609,5 +5784,181 @@ mod tests {
             });
             assert!(!crowded, "{piece:?} shares its row with other text");
         }
+    }
+
+    // == The boxes edit at a caret =========================================
+
+    /// The x of every caret drawn inside `area`.
+    fn carets_in(state: &AppState, area: Rect) -> Vec<f32> {
+        build_frame(state, SIZE.0, SIZE.1)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Line {
+                    x1, x2, y1, width, ..
+                } if (x1 - x2).abs() < f32::EPSILON
+                    && (width - textedit::CARET_WIDTH).abs() < f32::EPSILON
+                    && area.contains(*x1, *y1 + 1.0) =>
+                {
+                    Some(*x1)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **A box edits at a caret**: the arrows, Home and End move it, typing
+    /// goes where it is, Delete deletes at it, Ctrl+A, C, X and V select,
+    /// copy, cut and paste, a press puts it where it lands -- and it and the
+    /// selection are drawn where they are, not a `_` typed onto the end. The
+    /// boxes took typing at their end and Backspace from it, and nothing
+    /// else.
+    #[test]
+    fn the_search_box_edits_at_a_caret() {
+        let mut state = with_entries(3);
+        click(&mut state, Target::SearchBox);
+        type_str(&mut state, "clp");
+        key(&mut state, &press(Key::Left));
+        type_str(&mut state, "i");
+        assert_eq!(state.search_query, "clip", "the caret did not move");
+        assert_eq!(state.filtered_ids.len(), 3, "the edit was not filtered by");
+        let rect = rect_of(&state, Target::SearchBox).expect("the search box");
+        let area = Field::Search.text_area(rect);
+        let at = area.x
+            + text::caret_x(
+                "clip",
+                TextCursor::from(3),
+                Field::Search.text_size(),
+                FontWeightHint::Regular,
+            );
+        let carets = carets_in(&state, rect);
+        assert_eq!(carets.len(), 1, "one caret in the search box");
+        assert!(
+            carets.iter().all(|x| (x - at).abs() < 0.5),
+            "the caret is drawn at {carets:?}, not after the `cli` it follows at {at}"
+        );
+
+        key(&mut state, &press(Key::Home));
+        key(&mut state, &press(Key::Delete));
+        assert_eq!(state.search_query, "lip", "Delete at the caret");
+        type_str(&mut state, "c");
+        key(&mut state, &guitk::probe::ctrl(Key::A));
+        assert!(
+            build_frame(&state, SIZE.0, SIZE.1)
+                .commands()
+                .iter()
+                .any(|c| matches!(c, RenderCommand::RichText { text, spans, .. }
+                    if text == "clip" && !spans.is_empty())),
+            "the selection is not drawn"
+        );
+        key(&mut state, &guitk::probe::ctrl(Key::C));
+        key(&mut state, &guitk::probe::ctrl(Key::X));
+        assert_eq!(state.search_query, "", "Ctrl+A and Ctrl+X");
+        key(&mut state, &guitk::probe::ctrl(Key::V));
+        assert_eq!(state.search_query, "clip", "Ctrl+C or Ctrl+V");
+
+        // A press at the start of the search puts the caret there, and one
+        // past its end at its end.
+        let mid = area.y + area.h / 2.0;
+        state.click_at(area.x + 0.5, mid, MouseButton::Left, SIZE);
+        type_str(&mut state, "<");
+        state.click_at(area.right() - 1.0, mid, MouseButton::Left, SIZE);
+        type_str(&mut state, ">");
+        assert_eq!(
+            state.search_query, "<clip>",
+            "a press did not put the caret where it landed"
+        );
+    }
+
+    /// **The template's boxes edit at a caret too**, drawn where they are,
+    /// and a press in one puts the keyboard and the caret there.
+    #[test]
+    fn a_templates_boxes_edit_at_a_caret() {
+        let mut state = with_entries(1);
+        click(&mut state, Target::Tab(ActiveTab::Templates));
+        click(&mut state, Target::TemplateName);
+        type_str(&mut state, "Reply");
+        // From the start, so a press past the end moves the caret.
+        key(&mut state, &press(Key::Home));
+        let rect = rect_of(&state, Target::TemplateName).expect("the name box");
+        let area = Field::TemplateName.text_area(rect);
+        state.click_at(
+            area.right() - 1.0,
+            area.y + area.h / 2.0,
+            MouseButton::Left,
+            SIZE,
+        );
+        type_str(&mut state, ">");
+        assert_eq!(state.template_name_input, "Reply>");
+        click(&mut state, Target::TemplateBody);
+        let body = rect_of(&state, Target::TemplateBody).expect("the body box");
+        assert_eq!(
+            carets_in(&state, body).len(),
+            1,
+            "no caret in the empty body with the keyboard"
+        );
+        type_str(&mut state, "Dear");
+        key(&mut state, &press(Key::Home));
+        type_str(&mut state, "<");
+        assert_eq!(state.template_body_input, "<Dear");
+        assert_eq!(carets_in(&state, body).len(), 1, "no caret in the body");
+    }
+
+    /// **The search's text clears its label**: drawn after `Search:`, not
+    /// over it.
+    #[test]
+    fn the_search_text_clears_its_label() {
+        let mut state = with_entries(1);
+        click(&mut state, Target::SearchBox);
+        type_str(&mut state, "clip");
+        let frame = build_frame(&state, SIZE.0, SIZE.1);
+        let label_end = frame
+            .commands()
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text {
+                    text,
+                    x,
+                    font_size,
+                    font_weight,
+                    ..
+                } if text == "Search:" => Some(x + text::measure(text, *font_size, *font_weight)),
+                _ => None,
+            })
+            .expect("the label");
+        let typed = frame
+            .commands()
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::RichText { text, x, .. } if text == "clip" => Some(*x),
+                _ => None,
+            })
+            .expect("the search");
+        assert!(
+            typed >= label_end,
+            "the search is drawn over its label: {typed} < {label_end}"
+        );
+    }
+
+    /// **A box moved to is edited from its end**, even where it holds what
+    /// the box left holds, caret and all; and **a box edits the text it
+    /// shows**, however that text came to be in it.
+    #[test]
+    fn a_box_edits_the_text_it_shows() {
+        let mut state = with_entries(1);
+        click(&mut state, Target::SearchBox);
+        type_str(&mut state, "ab");
+        key(&mut state, &press(Key::Home));
+        state.tag_input = String::from("ab");
+        key(&mut state, &press(Key::Tab));
+        assert_eq!(state.focus, Some(Field::Tag));
+        type_str(&mut state, "!");
+        assert_eq!(
+            state.tag_input, "ab!",
+            "the tag was typed at the search's caret"
+        );
+        state.tag_input = String::from("cd");
+        type_str(&mut state, "?");
+        assert_eq!(state.tag_input, "cd?", "the key edited another text");
     }
 }

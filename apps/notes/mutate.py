@@ -405,6 +405,65 @@ MUTATIONS = [
     ),
 ]
 
+# A name is asked for in the toolkit's input dialog -- a tag, a notebook's
+# new name, a new note's title, a new notebook's name -- where it was typed
+# blind into a line under the toolbar (2026-10-04; lane C,
+# c-e-a-theme-can-shape-the-controls).
+NAMED = "a_new_note_and_notebook_are_named_in_the_input_dialog"
+NO_COMMAND = "a_command_is_not_typed_into_the_name_dialog"
+RENAMED = "a_notebook_can_be_renamed"
+TAGGED = "a_tag_typed_from_the_menu_reaches_the_note"
+TAG_SHOWN = "the_tag_being_typed_is_shown"
+
+MUTATIONS += [
+    (
+        "a command is typed into the name dialog",
+        "        if let Event::Key(key) = event\n"
+        "            && textline::is_command(key.modifiers)\n"
+        "        {\n"
+        "            return EventResult::Consumed;\n"
+        "        }\n",
+        "",
+        [NO_COMMAND],
+    ),
+    (
+        "the name dialog does not have the keys",
+        "        if self.asking.is_some() && matches!(event, Event::Key(_) | Event::Mouse(_)) {\n",
+        "        if false {\n",
+        [NAMED, NO_COMMAND],
+    ),
+    (
+        "the name dialog is not drawn",
+        "            dialog.render(&palette, width, height, &mut tree);\n",
+        "            let _ = dialog;\n",
+        [NAMED, TAG_SHOWN],
+    ),
+    (
+        "Ctrl+N asks for no title",
+        "                self.ask(Asking::NewNote, \"\");\n",
+        "",
+        [NAMED],
+    ),
+    (
+        "an answered tag goes nowhere",
+        "                Asking::Tag(id) => self.commit_tag(id, &typed),\n",
+        "                Asking::Tag(_) => {}\n",
+        [TAGGED],
+    ),
+    (
+        "a renamed notebook keeps its old name",
+        "                Asking::NotebookName(id) => self.commit_notebook_name(id, &typed),\n",
+        "                Asking::NotebookName(_) => {}\n",
+        [RENAMED],
+    ),
+    (
+        "a rename starts from nothing",
+        "            self.ask(Asking::NotebookName(id), &current);\n",
+        "            self.ask(Asking::NotebookName(id), \"\");\n",
+        [RENAMED],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "notes", timeout=900, only=only))

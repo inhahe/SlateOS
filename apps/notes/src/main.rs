@@ -80,6 +80,7 @@ use appearance::Surface;
 use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::menu::{ContextMenu, MenuItem};
+use guitk::modal::{DialogResult, InputDialog};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -150,17 +151,6 @@ const STATUS_BAR_HEIGHT: f32 = 24.0;
 pub enum TextEntry {
     /// The search box. Filters as it is typed, so its text is `search_query`.
     Search,
-    /// A tag for the note the menu was raised on, applied when committed.
-    Tag(String),
-    /// A new name for the notebook the menu was raised on.
-    NotebookName(String),
-    /// A title for a note that does not exist yet.
-    ///
-    /// The title is asked for first because `create_note` takes one and a
-    /// note with no title cannot be picked out of the list afterwards.
-    NewNote(String),
-    /// A name for a notebook that does not exist yet.
-    NewNotebook(String),
     /// The body of a note, committed when the mode is left.
     ///
     /// The text is not here but in `NotesApp::body`, the toolkit's multi-line
@@ -173,6 +163,27 @@ pub enum TextEntry {
     /// is more than one line and `Enter` is how you get the second one. The id
     /// is the note the commit writes.
     NoteBody(NoteId),
+}
+
+/// What a name being asked for is for -- in the toolkit's input dialog,
+/// which holds the typing until it is answered.
+///
+/// They were four more kinds of `TextEntry`, typed blind into a nine-point
+/// line under the toolbar ("Tag: pi|"), with no box, no caret to move and no
+/// way to cancel but Escape -- which kept what had been typed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Asking {
+    /// A tag for this note.
+    Tag(NoteId),
+    /// A new name for this notebook.
+    NotebookName(NotebookId),
+    /// A title for a note that does not exist yet.
+    ///
+    /// The title is asked for first because `create_note` takes one and a
+    /// note with no title cannot be picked out of the list afterwards.
+    NewNote,
+    /// A name for a notebook that does not exist yet.
+    NewNotebook,
 }
 
 /// What an open menu is about.
@@ -1627,6 +1638,11 @@ pub struct NotesApp {
     store_error: Option<String>,
     /// The question asked when the window is closed while a save is failing.
     question: Option<unsaved::Question<Pending>>,
+    /// A name being asked for, and the dialog asking.
+    asking: Option<(Asking, InputDialog)>,
+    /// How wide the mark is round what has the keyboard in the name dialog:
+    /// the user's focus width, the toolkit's until it is known.
+    focus_ring_width: f32,
     /// Set when the question has been answered with leave, so the event loop
     /// can let the window go.
     quit: bool,
@@ -1677,6 +1693,8 @@ impl NotesApp {
             unsaved: false,
             store_error: None,
             question: None,
+            asking: None,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             quit: false,
         }
     }
@@ -2143,7 +2161,7 @@ impl NotesApp {
             let current = self
                 .find_notebook(id)
                 .map_or_else(String::new, |nb| nb.name.clone());
-            self.text_entry = Some(TextEntry::NotebookName(current));
+            self.ask(Asking::NotebookName(id), &current);
             return true;
         }
         if chosen == MENU_DELETE_NOTEBOOK {
@@ -2152,18 +2170,16 @@ impl NotesApp {
         false
     }
 
-    /// Give the notebook the menu was raised on its new name.
+    /// Give notebook `id` its new name.
     ///
     /// An empty name cancels: a notebook called nothing is not what somebody
     /// clearing the field meant to ask for.
-    fn commit_notebook_name(&mut self, typed: &str) {
+    fn commit_notebook_name(&mut self, id: NotebookId, typed: &str) {
         let name = typed.trim().to_owned();
         if name.is_empty() {
             return;
         }
-        if let Some(MenuTarget::Notebook(id)) = self.menu_target {
-            self.rename_notebook(id, &name);
-        }
+        self.rename_notebook(id, &name);
     }
 
     /// Act on whatever row of an open menu was chosen.
@@ -2180,7 +2196,7 @@ impl NotesApp {
             return false;
         };
         if chosen == MENU_ADD_TAG {
-            self.text_entry = Some(TextEntry::Tag(String::new()));
+            self.ask(Asking::Tag(id), "");
             return true;
         }
         if chosen == MENU_DELETE_NOTE {
@@ -2720,6 +2736,10 @@ impl NotesApp {
             }
             return EventResult::Consumed;
         }
+        // The name dialog has every key and press while it is up.
+        if self.asking.is_some() && matches!(event, Event::Key(_) | Event::Mouse(_)) {
+            return self.answer_asking(event);
+        }
         // The picker takes the event first while it is up, or a keystroke
         // meant for a filename lands in the note behind it.
         match self
@@ -3038,11 +3058,11 @@ impl NotesApp {
             // were inside the two unreachable creators, and there is no
             // import -- so it exported notes it could not create.
             Key::N if ctrl && key.modifiers.shift => {
-                self.text_entry = Some(TextEntry::NewNotebook(String::new()));
+                self.ask(Asking::NewNotebook, "");
                 EventResult::Consumed
             }
             Key::N if ctrl => {
-                self.text_entry = Some(TextEntry::NewNote(String::new()));
+                self.ask(Asking::NewNote, "");
                 EventResult::Consumed
             }
             // Writing in the selected note. `Enter` because that is what
@@ -3384,51 +3404,21 @@ impl NotesApp {
         let Some(entry) = self.text_entry.clone() else {
             return EventResult::Ignored;
         };
-        // The body is the field's, and every key goes there first. The arms
-        // below that name it are only there to be exhaustive.
+        // The body is the field's, and every key goes there first.
         if let TextEntry::NoteBody(id) = entry {
             return self.handle_body_key(id, key);
         }
+        // What is left is the search box.
         match key.key {
             Key::Escape | Key::Enter => {
                 self.text_entry = None;
-                if key.key == Key::Enter {
-                    match entry {
-                        TextEntry::Tag(tag) => self.commit_tag(&tag),
-                        TextEntry::NotebookName(name) => self.commit_notebook_name(&name),
-                        TextEntry::NewNote(title) => self.commit_new_note(&title),
-                        TextEntry::NewNotebook(name) => self.commit_new_notebook(&name),
-                        TextEntry::Search | TextEntry::NoteBody(_) => {}
-                    }
-                }
                 EventResult::Consumed
             }
             Key::Backspace => {
-                match entry {
-                    TextEntry::Search => {
-                        if self.search_query.pop().is_none() {
-                            return EventResult::Ignored;
-                        }
-                        self.reanchor_selection();
-                    }
-                    TextEntry::Tag(mut tag) => {
-                        tag.pop();
-                        self.text_entry = Some(TextEntry::Tag(tag));
-                    }
-                    TextEntry::NotebookName(mut name) => {
-                        name.pop();
-                        self.text_entry = Some(TextEntry::NotebookName(name));
-                    }
-                    TextEntry::NewNote(mut title) => {
-                        title.pop();
-                        self.text_entry = Some(TextEntry::NewNote(title));
-                    }
-                    TextEntry::NewNotebook(mut name) => {
-                        name.pop();
-                        self.text_entry = Some(TextEntry::NewNotebook(name));
-                    }
-                    TextEntry::NoteBody(_) => {}
+                if self.search_query.pop().is_none() {
+                    return EventResult::Ignored;
                 }
+                self.reanchor_selection();
                 EventResult::Consumed
             }
             _ => {
@@ -3438,33 +3428,67 @@ impl NotesApp {
                 if !textline::types_into_field(key) {
                     return EventResult::Ignored;
                 }
-                let typed: String = key.typed().collect();
-                match entry {
-                    TextEntry::Search => {
-                        self.search_query.push_str(&typed);
-                        self.reanchor_selection();
-                    }
-                    TextEntry::Tag(mut tag) => {
-                        tag.push_str(&typed);
-                        self.text_entry = Some(TextEntry::Tag(tag));
-                    }
-                    TextEntry::NotebookName(mut name) => {
-                        name.push_str(&typed);
-                        self.text_entry = Some(TextEntry::NotebookName(name));
-                    }
-                    TextEntry::NewNote(mut title) => {
-                        title.push_str(&typed);
-                        self.text_entry = Some(TextEntry::NewNote(title));
-                    }
-                    TextEntry::NewNotebook(mut name) => {
-                        name.push_str(&typed);
-                        self.text_entry = Some(TextEntry::NewNotebook(name));
-                    }
-                    TextEntry::NoteBody(_) => {}
-                }
+                self.search_query.extend(key.typed());
+                self.reanchor_selection();
                 EventResult::Consumed
             }
         }
+    }
+
+    /// Ask for a name -- `for_what` says which, and what it is for -- in
+    /// the toolkit's input dialog, holding `initial` to begin with.
+    pub fn ask(&mut self, for_what: Asking, initial: &str) {
+        let (title, prompt) = match for_what {
+            Asking::Tag(_) => ("Add a tag", "Tag:"),
+            Asking::NotebookName(_) => ("Rename notebook", "Name:"),
+            Asking::NewNote => ("New note", "Title:"),
+            Asking::NewNotebook => ("New notebook", "Name:"),
+        };
+        let mut dialog = InputDialog::prompt(title, prompt, "")
+            .with_initial_text(initial)
+            .with_caret_width(self.caret_width)
+            .with_focus_ring_width(self.focus_ring_width);
+        dialog.show();
+        // What else takes the keys gives them up: the dialog has them until
+        // it is answered.
+        self.text_entry = None;
+        self.note_menu = None;
+        self.show_help = false;
+        self.asking = Some((for_what, dialog));
+    }
+
+    /// Offer `event` to the name dialog, which has every key and press while
+    /// it is up, and act on its answer once there is one.
+    ///
+    /// A command is not passed on. It arrives carrying its letter as text,
+    /// and the dialog would type it -- Ctrl+S would put an `s` in the name
+    /// (`requests/e-cf-a-toolkit-field-types-the-letter-of-a-shortcut-it-does-not-know.md`).
+    /// AltGr, which arrives as Ctrl+Alt, types.
+    fn answer_asking(&mut self, event: &Event) -> EventResult {
+        if let Event::Key(key) = event
+            && textline::is_command(key.modifiers)
+        {
+            return EventResult::Consumed;
+        }
+        let Some((for_what, dialog)) = self.asking.as_mut() else {
+            return EventResult::Ignored;
+        };
+        dialog.handle_event(event);
+        let Some(answer) = dialog.result().cloned() else {
+            return EventResult::Consumed;
+        };
+        let for_what = *for_what;
+        self.asking = None;
+        // Cancel, Escape and a click away all answer nothing.
+        if let DialogResult::Text(typed) = answer {
+            match for_what {
+                Asking::Tag(id) => self.commit_tag(id, &typed),
+                Asking::NotebookName(id) => self.commit_notebook_name(id, &typed),
+                Asking::NewNote => self.commit_new_note(&typed),
+                Asking::NewNotebook => self.commit_new_notebook(&typed),
+            }
+        }
+        EventResult::Consumed
     }
 
     /// A key while note `id`'s body is being written.
@@ -3522,17 +3546,15 @@ impl NotesApp {
         }
     }
 
-    /// Put the typed tag on the note the menu was raised over.
+    /// Put the typed tag on note `id`.
     ///
     /// An empty tag cancels rather than adding one called nothing.
-    fn commit_tag(&mut self, typed: &str) {
+    fn commit_tag(&mut self, id: NoteId, typed: &str) {
         let tag = typed.trim().to_owned();
         if tag.is_empty() {
             return;
         }
-        if let Some(MenuTarget::Note(id)) = self.menu_target {
-            self.add_tag_to_note(id, &tag);
-        }
+        self.add_tag_to_note(id, &tag);
     }
 
     /// Run something on the selected note, reporting whether there was one.
@@ -3645,14 +3667,9 @@ impl NotesApp {
         let editor_w = width - editor_x;
         self.render_editor_area(&mut cmds, editor_x, content_y, editor_w, content_h);
 
-        // A tag being typed, where the save line goes and outranking it: this
-        // entry has no box of its own, so without somewhere to show the
-        // characters the user is typing into nothing they can see.
+        // While a note's body is being written, where the save line goes and
+        // outranking it: how to leave, which a multi-line box has to say.
         let prompt = match &self.text_entry {
-            Some(TextEntry::Tag(typed)) => Some(format!("Tag: {typed}|")),
-            Some(TextEntry::NotebookName(typed)) => Some(format!("Notebook name: {typed}|")),
-            Some(TextEntry::NewNote(typed)) => Some(format!("New note: {typed}|  (Enter)")),
-            Some(TextEntry::NewNotebook(typed)) => Some(format!("New notebook: {typed}|  (Enter)")),
             // The body has the editor panel to show its text in; this line
             // says how to leave, which is the part a multi-line box has to
             // state because Enter no longer means "done".
@@ -5057,6 +5074,7 @@ impl App for NotesApp {
     /// is not a colour.
     fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
         self.caret_width = settings.caret_width();
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn theme_changed(&mut self, palette: &Palette) {
@@ -5122,7 +5140,11 @@ impl App for NotesApp {
             commands: self.render_commands(width, height),
         };
         // Over everything, the picker included: they are never up together.
+        // The close question goes over the name dialog, which it can follow.
         let palette = self.palette;
+        if let Some((_, dialog)) = self.asking.as_mut() {
+            dialog.render(&palette, width, height, &mut tree);
+        }
         if let Some(question) = self.question.as_mut() {
             question.render(&palette, width, height, &mut tree);
         }
@@ -6544,12 +6566,28 @@ mod tests {
         );
     }
 
-    /// The notebook name being typed, if that is what has the keyboard.
+    /// The notebook name being typed, if that is what is being asked for.
     fn naming_notebook(app: &NotesApp) -> Option<&str> {
-        match &app.text_entry {
-            Some(TextEntry::NotebookName(text)) => Some(text.as_str()),
+        match &app.asking {
+            Some((Asking::NotebookName(_), dialog)) => Some(dialog.input_text()),
             _ => None,
         }
+    }
+
+    /// Every string the window draws, the dialogs over it included --
+    /// plain text and the input dialog's field alike.
+    fn drawn_strings(app: &mut NotesApp) -> Vec<String> {
+        let (w, h) = (app.window_width, app.window_height);
+        app.render(w, h)
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } | RenderCommand::RichText { text, .. } => {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// Right-clicking a notebook raises a menu about that notebook.
@@ -6630,8 +6668,7 @@ mod tests {
     #[test]
     fn an_empty_notebook_name_is_refused() {
         let (mut app, _, _, work) = app_with_two_notebooks();
-        app.menu_target = Some(MenuTarget::Notebook(work));
-        app.text_entry = Some(TextEntry::NotebookName(String::new()));
+        app.ask(Asking::NotebookName(work), "");
 
         app.handle_event(&plain_key(Key::Enter));
 
@@ -6642,25 +6679,27 @@ mod tests {
         );
     }
 
-    /// The name being typed is on screen.
+    /// The name being typed is on screen, in the dialog asking for it.
     #[test]
     fn the_notebook_name_being_typed_is_shown() {
         let (mut app, _, _, work) = app_with_two_notebooks();
-        app.menu_target = Some(MenuTarget::Notebook(work));
-        app.text_entry = Some(TextEntry::NotebookName("Wor".to_owned()));
+        app.ask(Asking::NotebookName(work), "Wor");
 
-        let tree = app.render(app.window_width, app.window_height);
-
-        let shown = tree.commands.iter().any(|c| {
-            matches!(c, RenderCommand::Text { text, .. } if text.contains("Notebook name: Wor"))
-        });
-        assert!(shown, "the name being typed is nowhere on screen");
+        let drawn = drawn_strings(&mut app);
+        assert!(
+            drawn.iter().any(|t| t == "Rename notebook"),
+            "nothing says what is being asked: {drawn:?}"
+        );
+        assert!(
+            drawn.iter().any(|t| t == "Wor"),
+            "the name being typed is nowhere on screen: {drawn:?}"
+        );
     }
 
-    /// The tag being typed, if that is what has the keyboard.
+    /// The tag being typed, if that is what is being asked for.
     fn tagging(app: &NotesApp) -> Option<&str> {
-        match &app.text_entry {
-            Some(TextEntry::Tag(text)) => Some(text.as_str()),
+        match &app.asking {
+            Some((Asking::Tag(_), dialog)) => Some(dialog.input_text()),
             _ => None,
         }
     }
@@ -6691,27 +6730,28 @@ mod tests {
         assert!(tagging(&app).is_none(), "still taking typing");
     }
 
-    /// The tag being typed is on screen.
+    /// The tag being typed is on screen, in the dialog asking for it.
     #[test]
     fn the_tag_being_typed_is_shown() {
-        let (mut app, _, _, _) = app_with_two_notebooks();
-        app.text_entry = Some(TextEntry::Tag("pi".to_owned()));
+        let (mut app, nid, _, _) = app_with_two_notebooks();
+        app.ask(Asking::Tag(nid), "pi");
 
-        let tree = app.render(app.window_width, app.window_height);
-
-        let shown = tree
-            .commands
-            .iter()
-            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Tag: pi")));
-        assert!(shown, "the tag being typed is nowhere on screen");
+        let drawn = drawn_strings(&mut app);
+        assert!(
+            drawn.iter().any(|t| t == "Add a tag"),
+            "nothing says what is being asked: {drawn:?}"
+        );
+        assert!(
+            drawn.iter().any(|t| t == "pi"),
+            "the tag being typed is nowhere on screen: {drawn:?}"
+        );
     }
 
     /// Escape abandons the tag without adding it.
     #[test]
     fn escape_abandons_the_tag() {
         let (mut app, nid, _, _) = app_with_two_notebooks();
-        app.menu_target = Some(MenuTarget::Note(nid));
-        app.text_entry = Some(TextEntry::Tag("half".to_owned()));
+        app.ask(Asking::Tag(nid), "half");
 
         app.handle_event(&plain_key(Key::Escape));
 
@@ -6726,8 +6766,7 @@ mod tests {
     #[test]
     fn enter_on_an_empty_tag_adds_nothing() {
         let (mut app, nid, _, _) = app_with_two_notebooks();
-        app.menu_target = Some(MenuTarget::Note(nid));
-        app.text_entry = Some(TextEntry::Tag(String::new()));
+        app.ask(Asking::Tag(nid), "");
 
         app.handle_event(&plain_key(Key::Enter));
 
@@ -6735,6 +6774,76 @@ mod tests {
             app.find_note(nid).expect("the note").tags.is_empty(),
             "an empty tag was added"
         );
+    }
+
+    /// What is typed in the name dialog, if one is asking.
+    fn asked_text(app: &NotesApp) -> Option<&str> {
+        app.asking.as_ref().map(|(_, dialog)| dialog.input_text())
+    }
+
+    /// **A new note and a new notebook are named in the toolkit's input
+    /// dialog**, which says what it is asking for, with a field to type in,
+    /// OK and Cancel. The names were typed blind into a nine-point line under
+    /// the toolbar.
+    #[test]
+    fn a_new_note_and_notebook_are_named_in_the_input_dialog() {
+        let (mut app, _, _, _) = app_with_two_notebooks();
+        app.handle_event(&ctrl_key(Key::N, false));
+        assert!(
+            matches!(app.asking, Some((Asking::NewNote, _))),
+            "Ctrl+N asked for no title"
+        );
+        let drawn = drawn_strings(&mut app);
+        assert!(drawn.iter().any(|t| t == "New note"), "{drawn:?}");
+        for ch in ["P", "l", "a", "n"] {
+            app.handle_event(&typed_key(ch));
+        }
+        assert_eq!(asked_text(&app), Some("Plan"));
+        app.handle_event(&plain_key(Key::Enter));
+        assert!(app.asking.is_none(), "the dialog stayed up");
+        let id = app.selected_note.expect("the new note is selected");
+        assert_eq!(app.find_note(id).expect("the note").title, "Plan");
+
+        app.handle_event(&ctrl_key(Key::N, true));
+        assert!(
+            matches!(app.asking, Some((Asking::NewNotebook, _))),
+            "Ctrl+Shift+N asked for no name"
+        );
+        let drawn = drawn_strings(&mut app);
+        assert!(drawn.iter().any(|t| t == "New notebook"), "{drawn:?}");
+        for ch in ["H", "o", "m", "e"] {
+            app.handle_event(&typed_key(ch));
+        }
+        app.handle_event(&plain_key(Key::Enter));
+        let nb = app.selected_notebook.expect("the new notebook is selected");
+        assert_eq!(app.find_notebook(nb).expect("the notebook").name, "Home");
+    }
+
+    /// **A command is not typed into the name dialog.** It arrives carrying
+    /// its letter as text, and the dialog would type it: Ctrl+S put an `s` in
+    /// the name. AltGr, which arrives as Ctrl+Alt, types -- Polish `ś` is
+    /// AltGr+S.
+    #[test]
+    fn a_command_is_not_typed_into_the_name_dialog() {
+        let (mut app, _, _, _) = app_with_two_notebooks();
+        app.ask(Asking::NewNotebook, "");
+        let held = |key: Key, text: &str, ctrl: bool, alt: bool| {
+            Event::Key(KeyEvent {
+                key,
+                pressed: true,
+                modifiers: guitk::event::Modifiers {
+                    ctrl,
+                    alt,
+                    ..guitk::event::Modifiers::NONE
+                },
+                text: text.to_owned(),
+            })
+        };
+        app.handle_event(&held(Key::S, "s", true, false));
+        app.handle_event(&held(Key::X, "x", false, true));
+        assert_eq!(asked_text(&app), Some(""), "a command typed its letter");
+        app.handle_event(&held(Key::S, "\u{15b}", true, true));
+        assert_eq!(asked_text(&app), Some("\u{15b}"), "AltGr did not type");
     }
 
     /// Searching still works, which the entry refactor could have broken.

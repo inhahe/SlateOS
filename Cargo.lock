@@ -2490,6 +2490,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mp4"
+version = "0.1.0"
+dependencies = [
+ "md5",
+]
+
+[[package]]
 name = "musicplayer"
 version = "0.1.0"
 dependencies = [

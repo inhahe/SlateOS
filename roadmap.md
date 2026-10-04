@@ -3832,7 +3832,14 @@ lane C's `guitk`.
     - `[x]` In `videocodec`: WebM's VP8, alpha included, coloured as FFmpeg
       reads VP8 (BT.601 at any size, its clamping bit the range); five
       fixtures held to ffmpeg and libavif frame by frame.
-    - `[ ]` MP4.
+    - `[-]` MP4.
+      - `[x]` The demuxer, `gui/video/mp4`: FFmpeg's `mov.c` translated --
+        edit lists, negative composition offsets, sound's priming,
+        fragmented files, damage -- every packet of 31 files and 14 sets of
+        seeks held to ffprobe's, and every byte of six files damaged in
+        turn. It carries FFmpeg's licence (LGPL): open-questions F-Q7.
+      - `[ ]` In `videocodec`: a file opened by what it is, MP4 or
+        Matroska, and played the same way.
   - `[ ]` Sound needs Opus and Vorbis decoders, which nothing has yet (the
     music player has none either). When it comes, its seek owes Opus a
     pre-roll: start `matroska::Track::seek_pre_roll` (80 ms) before the

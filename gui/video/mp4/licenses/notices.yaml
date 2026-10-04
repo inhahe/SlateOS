@@ -1,0 +1,18 @@
+# The third-party code gui/video/mp4 carries, read by
+# scripts/gather-notices.py: one entry per upstream project, with the texts
+# that must travel with any binary built from the crate.
+
+# The demuxer is FFmpeg's MP4 demuxer translated: src/parse.rs from
+# libavformat/mov.c's box readers (mov_read_default, mov_read_trak,
+# mov_read_stsd and the sample-table and fragment readers), src/index.rs
+# from mov_build_index, mov_merge_tts_data, mov_fix_index and
+# find_prev_closest_index, with libavformat/seek.c's
+# ff_index_search_timestamp, and src/demux.rs from mov_find_next_sample,
+# mov_finalize_packet, mov_read_packet and mov_read_seek. FFmpeg is LGPL
+# version 2.1 or later; the translation is too. Whether SlateOS keeps it so
+# is open-questions/F-Q7.md.
+FFmpeg:
+  version: 9b7439c31b (2026-03)
+  licence: LGPL-2.1-or-later
+  texts:
+    - FFmpeg-COPYING.LGPLv2.1

@@ -1828,6 +1828,9 @@ pub enum Command {
     ChangeSetting,
     /// Put up the file picker to open a video.
     Open,
+    /// Show this list of keys -- the Shortcuts tab -- or go back to the tab
+    /// that was showing.
+    ToggleShortcuts,
 }
 
 /// Which keystroke runs a command.
@@ -1931,6 +1934,22 @@ impl Shortcuts {
             }
         }
         static TABLE: &[Shortcut] = &[
+            // F1 did nothing here, though the whole table was a tab away:
+            // "press F1 to see the keys" is true of every application in the
+            // suite (design-decisions 863), and `?` too where nothing types
+            // one -- nothing here does.
+            sc(
+                "F1",
+                "These keys, or back",
+                Press::Plain(Key::F1),
+                Command::ToggleShortcuts,
+            ),
+            sc(
+                "?",
+                "These keys, or back",
+                Press::Shift(Key::Slash),
+                Command::ToggleShortcuts,
+            ),
             sc("Ctrl+O", "Open a File", Press::Ctrl(Key::O), Command::Open),
             sc(
                 "Space",
@@ -2827,6 +2846,8 @@ pub struct VideoPlayerApp {
 
     // Active tab in settings
     pub active_tab: PlayerTab,
+    /// The tab F1 opened the Shortcuts tab over, which F1 goes back to.
+    tab_before_keys: Option<PlayerTab>,
     /// Which row of the Settings tab the cursor is on.
     pub settings_row: usize,
 
@@ -2939,6 +2960,7 @@ impl VideoPlayerApp {
             recent: RecentHistory::default(),
             preferences: PlayerPreferences::default(),
             active_tab: PlayerTab::Player,
+            tab_before_keys: None,
             settings_row: 0,
             osd_message: None,
             osd_remaining_ms: 0,
@@ -3632,6 +3654,14 @@ impl VideoPlayerApp {
                         self.show_osd(&said);
                         self.save_settings();
                     }
+                }
+            }
+            Command::ToggleShortcuts => {
+                if self.active_tab == PlayerTab::Shortcuts {
+                    self.active_tab = self.tab_before_keys.take().unwrap_or(PlayerTab::Player);
+                } else {
+                    self.tab_before_keys = Some(self.active_tab);
+                    self.active_tab = PlayerTab::Shortcuts;
                 }
             }
             Command::AddBookmark => {
@@ -9371,6 +9401,57 @@ as many times as before",
         assert!(
             drawn_texts(&app).contains(&line),
             "the tab does not say the steps"
+        );
+    }
+
+    /// **F1 shows the keys, and goes back**: it did nothing, though the whole
+    /// table was a tab away. `?` does the same, nothing here typing one; each
+    /// goes back to the tab it was pressed on, and Alt+F1 is the desktop's.
+    #[test]
+    fn f1_shows_the_keys_and_goes_back() {
+        let mut app = loaded();
+        app.active_tab = PlayerTab::Settings;
+        app.handle_event(&press(Key::F1));
+        assert_eq!(
+            app.active_tab,
+            PlayerTab::Shortcuts,
+            "F1 did not show the keys"
+        );
+        assert!(
+            drawn_texts(&app).iter().any(|t| t == "Keyboard Shortcuts"),
+            "the Shortcuts tab is not drawn"
+        );
+        app.handle_event(&press(Key::F1));
+        assert_eq!(
+            app.active_tab,
+            PlayerTab::Settings,
+            "F1 did not go back to the tab it was pressed on"
+        );
+        app.handle_event(&press_with(Key::Slash, shift()));
+        assert_eq!(
+            app.active_tab,
+            PlayerTab::Shortcuts,
+            "? did not show the keys"
+        );
+        app.handle_event(&press_with(Key::Slash, shift()));
+        assert_eq!(app.active_tab, PlayerTab::Settings, "? did not go back");
+
+        // The Shortcuts tab chosen by hand: F1 goes to the player.
+        app.active_tab = PlayerTab::Shortcuts;
+        app.handle_event(&press(Key::F1));
+        assert_eq!(app.active_tab, PlayerTab::Player);
+
+        app.handle_event(&press_with(
+            Key::F1,
+            Modifiers {
+                alt: true,
+                ..Modifiers::NONE
+            },
+        ));
+        assert_eq!(
+            app.active_tab,
+            PlayerTab::Player,
+            "Alt+F1, the desktop's, was taken"
         );
     }
 }

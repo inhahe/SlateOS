@@ -83,99 +83,195 @@ fn window(
     (plane.origin() as isize + y * plane.stride as isize + x) as usize
 }
 
-/// The six-tap filter's taps for an eighth-pixel position.
-fn sixtap(frac: usize) -> [i32; 6] {
-    SUB_PEL_FILTERS[frac & 7].map(i32::from)
+/// A six-tap kernel for an eighth-pixel position, split as the passes below
+/// use it: its four taps that are never negative (0, 2, 3 and 5) and the
+/// magnitudes of the two that are never positive (1 and 4). Sums of each
+/// part fit sixteen bits -- at most 160 or 32 times a pixel -- so a pass
+/// runs in 16-bit lanes, eight to an SSE2 register, where the whole signed
+/// sum would not fit.
+#[derive(Clone, Copy, Debug)]
+struct SixTap {
+    pos: [u16; 4],
+    neg: [u16; 2],
 }
 
-/// Apply `taps` to the six pixels from `src[at - 2 * step]`, rounded,
-/// shifted and clamped: one output of libvpx's
-/// `filter_block2d_first_pass` and `_second_pass`.
-#[inline]
-fn sixtap_at(src: &[u8], at: usize, step: usize, taps: &[i32; 6]) -> u8 {
-    let s = |k: usize| i32::from(src[at + k * step - 2 * step]);
-    let sum = s(0) * taps[0]
-        + s(1) * taps[1]
-        + s(2) * taps[2]
-        + s(3) * taps[3]
-        + s(4) * taps[4]
-        + s(5) * taps[5]
-        + 64;
-    (sum >> 7).clamp(0, 255) as u8
+impl SixTap {
+    fn of(frac: usize) -> Self {
+        let t = SUB_PEL_FILTERS[frac & 7];
+        Self {
+            pos: [t[0], t[2], t[3], t[5]].map(i16::unsigned_abs),
+            neg: [t[1], t[4]].map(i16::unsigned_abs),
+        }
+    }
+
+    /// `pos - neg`, shifted and clamped to a pixel: libvpx's `(sum + 64) >>
+    /// 7` clamped to 0..=255, `pos` holding the 64.
+    #[inline(always)]
+    fn finish(pos: u16, neg: u16) -> u8 {
+        (pos.saturating_sub(neg) >> 7).min(255) as u8
+    }
 }
 
-/// Predict a `w` x `h` block (16x16, 8x8, 8x4 or 4x4) from `src` at `at`
-/// into `dst` at `dst_at`, `xfrac` and `yfrac` eighths of a pixel right and
-/// down of it: libvpx's `vp8_sixtap_predict*_c` and
+/// One row of the six-tap filter across `row` (the `W + 5` pixels from two
+/// before the first output) into `out`: one row of libvpx's
+/// `filter_block2d_first_pass`.
+#[inline(always)]
+fn sixtap_row<const W: usize>(row: &[u8], k: SixTap, out: &mut [u8]) {
+    let mut pos = [64u16; W];
+    let mut neg = [0u16; W];
+    for (offset, t) in [(0, k.pos[0]), (2, k.pos[1]), (3, k.pos[2]), (5, k.pos[3])] {
+        let seg = &row[offset..offset + W];
+        for c in 0..W {
+            pos[c] += u16::from(seg[c]) * t;
+        }
+    }
+    for (offset, t) in [(1, k.neg[0]), (4, k.neg[1])] {
+        let seg = &row[offset..offset + W];
+        for c in 0..W {
+            neg[c] += u16::from(seg[c]) * t;
+        }
+    }
+    let out = &mut out[..W];
+    for c in 0..W {
+        out[c] = SixTap::finish(pos[c], neg[c]);
+    }
+}
+
+/// One row of the six-tap filter down six rows (`rows[2]` the one the
+/// output is level with) into `out`: one row of libvpx's
+/// `filter_block2d_second_pass`.
+#[inline(always)]
+fn sixtap_column<const W: usize>(rows: [&[u8]; 6], k: SixTap, out: &mut [u8]) {
+    let mut pos = [64u16; W];
+    let mut neg = [0u16; W];
+    for (row, t) in [
+        (rows[0], k.pos[0]),
+        (rows[2], k.pos[1]),
+        (rows[3], k.pos[2]),
+        (rows[5], k.pos[3]),
+    ] {
+        let row = &row[..W];
+        for c in 0..W {
+            pos[c] += u16::from(row[c]) * t;
+        }
+    }
+    for (row, t) in [(rows[1], k.neg[0]), (rows[4], k.neg[1])] {
+        let row = &row[..W];
+        for c in 0..W {
+            neg[c] += u16::from(row[c]) * t;
+        }
+    }
+    let out = &mut out[..W];
+    for c in 0..W {
+        out[c] = SixTap::finish(pos[c], neg[c]);
+    }
+}
+
+/// One row of the bilinear filter between `a` and `b` -- neighbouring
+/// pixels, or neighbouring rows -- whose taps sum to 128: one row of
+/// libvpx's `filter_block2d_bil_first_pass` or `_second_pass`.
+#[inline(always)]
+fn bilinear<const W: usize>(a: &[u8], b: &[u8], taps: [u16; 2], out: &mut [u8]) {
+    let (a, b, out) = (&a[..W], &b[..W], &mut out[..W]);
+    for c in 0..W {
+        out[c] = ((u16::from(a[c]) * taps[0] + u16::from(b[c]) * taps[1] + 64) >> 7) as u8;
+    }
+}
+
+/// Predict a `W` x `h` block (16x16, 8x8, 8x4 or 4x4) from `src` at `src_at`
+/// into `dst` at `dst_at`, `xfrac` and `yfrac` eighths of a pixel right of
+/// and below it: libvpx's `vp8_sixtap_predict*_c` and
 /// `vp8_bilinear_predict*_c`, or the copy libvpx makes when both fractions
 /// are 0.
+///
+/// libvpx's C filters horizontally and then vertically whatever the
+/// fractions. A fraction of 0 is the kernel `{0, 0, 128, 0, 0, 0}` (or
+/// `{128, 0}`), which copies exactly, so a pass with it is skipped here; the
+/// pictures are the same, and libvpx's own SIMD skips it too.
 #[allow(
     clippy::too_many_arguments,
     reason = "libvpx's own signature: two planes, two positions and a block"
 )]
-fn predict(
+fn predict<const W: usize>(
     filter: Filter,
     src: &[u8],
     src_at: usize,
-    src_stride: usize,
+    stride: usize,
     xfrac: usize,
     yfrac: usize,
-    w: usize,
     h: usize,
     dst: &mut [u8],
     dst_at: usize,
     dst_stride: usize,
 ) {
+    let row_of = |r: usize| src_at + r * stride;
+    let out_of = |r: usize| dst_at + r * dst_stride;
     if xfrac == 0 && yfrac == 0 {
         for r in 0..h {
-            let s = src_at + r * src_stride;
-            let d = dst_at + r * dst_stride;
-            dst[d..d + w].copy_from_slice(&src[s..s + w]);
+            let (s, d) = (row_of(r), out_of(r));
+            dst[d..d + W].copy_from_slice(&src[s..s + W]);
         }
         return;
     }
     match filter {
         Filter::SixTap => {
-            // Horizontally into h + 5 rows (two above, three below), then
-            // vertically. A fraction of 0 is the filter {0, 0, 128, 0, 0, 0},
-            // which copies exactly, so libvpx's two passes are kept as two.
-            let htaps = sixtap(xfrac);
-            let vtaps = sixtap(yfrac);
-            let mut tmp = [0u8; 21 * 16];
-            for r in 0..h + 5 {
-                let s = src_at + r * src_stride - 2 * src_stride;
-                for c in 0..w {
-                    tmp[r * w + c] = sixtap_at(src, s + c, 1, &htaps);
+            let (kx, ky) = (SixTap::of(xfrac), SixTap::of(yfrac));
+            if yfrac == 0 {
+                for r in 0..h {
+                    let (s, d) = (row_of(r), out_of(r));
+                    sixtap_row::<W>(&src[s - 2..s + W + 3], kx, &mut dst[d..d + W]);
                 }
-            }
-            for r in 0..h {
-                let d = dst_at + r * dst_stride;
-                for c in 0..w {
-                    dst[d + c] = sixtap_at(&tmp, (r + 2) * w + c, w, &vtaps);
+            } else if xfrac == 0 {
+                for r in 0..h {
+                    let s = row_of(r);
+                    let rows = [0, 1, 2, 3, 4, 5].map(|j| {
+                        let at = s + j * stride - 2 * stride;
+                        &src[at..at + W]
+                    });
+                    let d = out_of(r);
+                    sixtap_column::<W>(rows, ky, &mut dst[d..d + W]);
+                }
+            } else {
+                // Horizontally into h + 5 rows (two above, three below),
+                // then vertically.
+                let mut tmp = [0u8; 21 * 16];
+                for r in 0..h + 5 {
+                    let s = row_of(r) - 2 * stride;
+                    sixtap_row::<W>(&src[s - 2..s + W + 3], kx, &mut tmp[r * W..(r + 1) * W]);
+                }
+                for r in 0..h {
+                    let rows = [0, 1, 2, 3, 4, 5].map(|j| &tmp[(r + j) * W..(r + j + 1) * W]);
+                    let d = out_of(r);
+                    sixtap_column::<W>(rows, ky, &mut dst[d..d + W]);
                 }
             }
         }
         Filter::Bilinear => {
-            // Horizontally into h + 1 rows, then vertically: libvpx's
-            // `filter_block2d_bil`. The taps sum to 128, so neither pass
-            // leaves 0..=255.
-            let [h0, h1] = BILINEAR_FILTERS[xfrac & 7].map(i32::from);
-            let [v0, v1] = BILINEAR_FILTERS[yfrac & 7].map(i32::from);
-            let mut tmp = [0u16; 17 * 16];
-            for r in 0..=h {
-                let s = src_at + r * src_stride;
-                for c in 0..w {
-                    let a = i32::from(src[s + c]);
-                    let b = i32::from(src[s + c + 1]);
-                    tmp[r * w + c] = ((a * h0 + b * h1 + 64) >> 7) as u16;
+            // libvpx's `filter_block2d_bil`: horizontally into h + 1 rows,
+            // then vertically. The taps sum to 128, so neither pass leaves
+            // 0..=255.
+            let tx = BILINEAR_FILTERS[xfrac & 7].map(i16::unsigned_abs);
+            let ty = BILINEAR_FILTERS[yfrac & 7].map(i16::unsigned_abs);
+            if yfrac == 0 {
+                for r in 0..h {
+                    let (s, d) = (row_of(r), out_of(r));
+                    bilinear::<W>(&src[s..], &src[s + 1..], tx, &mut dst[d..d + W]);
                 }
-            }
-            for r in 0..h {
-                let d = dst_at + r * dst_stride;
-                for c in 0..w {
-                    let a = i32::from(tmp[r * w + c]);
-                    let b = i32::from(tmp[(r + 1) * w + c]);
-                    dst[d + c] = ((a * v0 + b * v1 + 64) >> 7) as u8;
+            } else if xfrac == 0 {
+                for r in 0..h {
+                    let (s, d) = (row_of(r), out_of(r));
+                    bilinear::<W>(&src[s..], &src[s + stride..], ty, &mut dst[d..d + W]);
+                }
+            } else {
+                let mut tmp = [0u8; 17 * 16];
+                for r in 0..=h {
+                    let s = row_of(r);
+                    bilinear::<W>(&src[s..], &src[s + 1..], tx, &mut tmp[r * W..(r + 1) * W]);
+                }
+                for r in 0..h {
+                    let d = out_of(r);
+                    let (above, below) = (&tmp[r * W..], &tmp[(r + 1) * W..]);
+                    bilinear::<W>(above, below, ty, &mut dst[d..d + W]);
                 }
             }
         }
@@ -213,14 +309,18 @@ fn predict_block(
     let dst_plane = &mut dst.planes[p];
     let dst_at = dst_plane.at(x, y);
     let stride = dst_plane.stride;
-    predict(
+    let run = match w {
+        16 => predict::<16>,
+        8 => predict::<8>,
+        _ => predict::<4>,
+    };
+    run(
         ctx.filter,
         &src_plane.data,
         src_at,
         src_plane.stride,
         xfrac,
         yfrac,
-        w,
         h,
         &mut dst_plane.data,
         dst_at,
@@ -473,23 +573,116 @@ mod tests {
         assert_eq!(near, before);
     }
 
+    /// libvpx's C filters as they are written: both passes whatever the
+    /// fractions, in 32-bit arithmetic. `vp8_sixtap_predict*_c` and
+    /// `vp8_bilinear_predict*_c` for a `w` x `h` block at `at`.
+    #[allow(clippy::too_many_arguments, reason = "the C functions' own")]
+    fn libvpx_c(
+        filter: Filter,
+        src: &[u8],
+        at: usize,
+        stride: usize,
+        xfrac: usize,
+        yfrac: usize,
+        w: usize,
+        h: usize,
+    ) -> Vec<u8> {
+        let mut out = vec![0u8; w * h];
+        match filter {
+            Filter::SixTap => {
+                let (hf, vf) = (SUB_PEL_FILTERS[xfrac], SUB_PEL_FILTERS[yfrac]);
+                let tap = |p: u8, t: i16| i32::from(p) * i32::from(t);
+                let mut first = vec![0i32; w * (h + 5)];
+                for r in 0..h + 5 {
+                    for c in 0..w {
+                        let s = at + r * stride - 2 * stride + c;
+                        let sum: i32 = (0..6).map(|k| tap(src[s + k - 2], hf[k])).sum::<i32>() + 64;
+                        first[r * w + c] = (sum >> 7).clamp(0, 255);
+                    }
+                }
+                for r in 0..h {
+                    for c in 0..w {
+                        let sum: i32 = (0..6)
+                            .map(|k| first[(r + k) * w + c] * i32::from(vf[k]))
+                            .sum::<i32>()
+                            + 64;
+                        out[r * w + c] = (sum >> 7).clamp(0, 255) as u8;
+                    }
+                }
+            }
+            Filter::Bilinear => {
+                let (hf, vf) = (BILINEAR_FILTERS[xfrac], BILINEAR_FILTERS[yfrac]);
+                let mut first = vec![0i32; w * (h + 1)];
+                for r in 0..=h {
+                    for c in 0..w {
+                        let s = at + r * stride + c;
+                        first[r * w + c] = (i32::from(src[s]) * i32::from(hf[0])
+                            + i32::from(src[s + 1]) * i32::from(hf[1])
+                            + 64)
+                            >> 7;
+                    }
+                }
+                for r in 0..h {
+                    for c in 0..w {
+                        out[r * w + c] = ((first[r * w + c] * i32::from(vf[0])
+                            + first[(r + 1) * w + c] * i32::from(vf[1])
+                            + 64)
+                            >> 7) as u8;
+                    }
+                }
+            }
+        }
+        out
+    }
+
     #[test]
-    fn the_sixtap_filter_at_a_whole_pixel_copies() {
-        let src: Vec<u8> = (0..=255).collect();
-        let taps = sixtap(0);
-        for at in 2..250 {
-            assert_eq!(sixtap_at(&src, at, 1, &taps), src[at]);
+    fn every_fraction_and_block_predicts_as_libvpx_s_c() {
+        // A plane of noise, with runs of 0 and 255 to reach the clamps.
+        let stride = 40;
+        let mut s = 0x1234_5678u32;
+        let src: Vec<u8> = (0..stride * 40)
+            .map(|i| {
+                s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                match i % 37 {
+                    0..=3 => 0,
+                    4..=7 => 255,
+                    _ => (s >> 24) as u8,
+                }
+            })
+            .collect();
+        let at = 5 * stride + 5;
+        for filter in [Filter::SixTap, Filter::Bilinear] {
+            for (w, h) in [(16, 16), (8, 8), (8, 4), (4, 4)] {
+                for xfrac in 0..8 {
+                    for yfrac in 0..8 {
+                        if xfrac == 0 && yfrac == 0 {
+                            continue;
+                        }
+                        let want = libvpx_c(filter, &src, at, stride, xfrac, yfrac, w, h);
+                        let mut dst = vec![0u8; w * h];
+                        let run = match w {
+                            16 => predict::<16>,
+                            8 => predict::<8>,
+                            _ => predict::<4>,
+                        };
+                        run(filter, &src, at, stride, xfrac, yfrac, h, &mut dst, 0, w);
+                        assert_eq!(dst, want, "{filter:?} {w}x{h} at ({xfrac}, {yfrac})");
+                    }
+                }
+            }
         }
     }
 
     #[test]
-    fn a_half_pixel_is_between_its_neighbours() {
-        // A flat run interpolates to itself; a step interpolates between.
-        let taps = sixtap(4);
-        let flat = [100u8; 8];
-        assert_eq!(sixtap_at(&flat, 3, 1, &taps), 100);
-        let step = [0u8, 0, 0, 0, 200, 200, 200, 200];
-        assert_eq!(sixtap_at(&step, 3, 1, &taps), 100);
+    fn six_tap_kernels_are_negative_only_at_taps_1_and_4() {
+        // `SixTap` splits the kernels on this, and sums each part in 16 bits.
+        for k in SUB_PEL_FILTERS {
+            assert!(k[0] >= 0 && k[2] >= 0 && k[3] >= 0 && k[5] >= 0, "{k:?}");
+            assert!(k[1] <= 0 && k[4] <= 0, "{k:?}");
+            assert_eq!(k.iter().map(|&t| i32::from(t)).sum::<i32>(), 128);
+            let positive: i32 = [k[0], k[2], k[3], k[5]].iter().map(|&t| i32::from(t)).sum();
+            assert!(positive * 255 + 64 <= i32::from(u16::MAX));
+        }
     }
 
     #[test]

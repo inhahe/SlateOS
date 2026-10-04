@@ -3820,8 +3820,11 @@ lane C's `guitk`.
       (`tests/vectors.rs`), and 446 damaged copies of them decoding to
       libvpx's pictures, corruption marks and errors frame by frame
       (`tests/damage.rs`, from `tools/damage_reference.c`).
-    - `[ ]` As fast as libvpx's C: 12 fps on 1080p film against its 20-25
-      (`tests/bench.rs`), the gap in motion compensation.
+    - `[x]` Faster than libvpx's C: motion compensation and the loop
+      filter written in lanes the compiler vectorises, 1.99 G instructions
+      for 20 frames of 1080p against libvpx C's 6.46 G (its SIMD's 0.86 G;
+      `tests/bench.rs`). Its row threads are not ported:
+      `known-issues/F-vp8-decodes-on-one-thread.md`.
     - `[ ]` In `videocodec`: WebM's VP8, alpha included.
     - `[ ]` MP4.
   - `[ ]` Sound needs Opus and Vorbis decoders, which nothing has yet (the

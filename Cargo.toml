@@ -742,9 +742,12 @@ codegen-units = 1
 opt-level = 3
 codegen-units = 1
 
-# vp8 (the VP8 decoder, `gui/video/vp8`), for the same reason. On 217 frames
-# of 1080p film (`gui/video/vp8/tests/bench.rs`), one thread: 11.2 fps at
-# `-Os` against libvpx's 24.9 as plain C. Lane F, 2026-10-04.
+# vp8 (the VP8 decoder, `gui/video/vp8`), for the same reason: its motion
+# compensation and loop filter are written in lanes for the compiler to
+# vectorise. Counted with callgrind over the first 20 frames of 1080p film
+# (`gui/video/vp8/tests/bench.rs`'s stream): 11.09 G instructions at `-Os`
+# with 16 codegen units, 1.99 G at `-O3` with one; libvpx's C decoder takes
+# 6.46 G, its SIMD 0.86 G. Lane F, 2026-10-04.
 [profile.release.package.vp8]
 opt-level = 3
 codegen-units = 1

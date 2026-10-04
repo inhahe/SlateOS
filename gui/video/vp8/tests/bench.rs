@@ -39,8 +39,12 @@ use vp8::Decoder;
 /// libvpx v1.17.0's speed on the benchmark stream, in frames per second:
 /// (plain C, x86 SIMD), each on one thread. The fastest of five runs,
 /// measured 2026-10-04 on an Intel Core i7-8700K (six cores, twelve
-/// threads, 3.7 GHz; WSL 2 Ubuntu, gcc 13) while other work shared it.
-const LIBVPX: (f64, f64) = (24.9, 0.0);
+/// threads, 3.7 GHz; WSL 2 Ubuntu, gcc 13) while other work shared it --
+/// heavily enough that the same runs ranged over a factor of two. The port
+/// made 30.8 on the same machine, under the same load, and 40.0 at its
+/// best in WSL; callgrind's instruction counts, which the load does not
+/// move, are in the workspace `Cargo.toml` beside `vp8`'s profile.
+const LIBVPX: (f64, f64) = (24.9, 110.2);
 
 #[test]
 #[ignore = "a measurement: python gui/video/vp8/tools/make_bench_stream.py, then --release --ignored --nocapture"]

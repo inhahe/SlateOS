@@ -134,113 +134,182 @@ impl LoopFilterInfo {
     }
 }
 
-/// Clamp to a signed byte: libvpx's `vp8_signed_char_clamp`.
-#[inline]
-fn sclamp(t: i32) -> i8 {
-    t.clamp(-128, 127) as i8
-}
-
 /// A pixel as a signed byte, about 0: libvpx's `(signed char)p ^ 0x80`.
-#[inline]
+#[inline(always)]
 fn s(p: u8) -> i8 {
     (p ^ 0x80) as i8
 }
 
-/// A signed byte back to a pixel.
-#[inline]
+/// A signed byte back to a pixel: libvpx's `v ^ 0x80`.
+#[inline(always)]
 fn u(v: i8) -> u8 {
     (v as u8) ^ 0x80
 }
 
-/// Whether to filter across an edge at all: libvpx's `vp8_filter_mask`, as
-/// a bool.
-#[inline]
-#[allow(clippy::too_many_arguments, reason = "the eight pixels across an edge")]
-fn filter_mask(
-    limit: u8,
-    blimit: u8,
-    p3: u8,
-    p2: u8,
-    p1: u8,
-    p0: u8,
-    q0: u8,
-    q1: u8,
-    q2: u8,
-    q3: u8,
-) -> bool {
-    let limit = i32::from(limit);
-    let d = |a: u8, b: u8| (i32::from(a) - i32::from(b)).abs();
-    d(p3, p2) <= limit
-        && d(p2, p1) <= limit
-        && d(p1, p0) <= limit
-        && d(q1, q0) <= limit
-        && d(q2, q1) <= limit
-        && d(q3, q2) <= limit
-        && d(p0, q0) * 2 + d(p1, q1) / 2 <= i32::from(blimit)
+/// A condition as libvpx's masks hold it: all ones, or nothing.
+#[inline(always)]
+fn mask(c: bool) -> i8 {
+    -i8::from(c)
 }
 
-/// Whether the edge has high variance on either side: libvpx's
-/// `vp8_hevmask`, as a bool.
-#[inline]
-fn hev(thresh: u8, p1: u8, p0: u8, q0: u8, q1: u8) -> bool {
-    let t = i32::from(thresh);
-    (i32::from(p1) - i32::from(p0)).abs() > t || (i32::from(q1) - i32::from(q0)).abs() > t
+/// `clamp(f + 3 * d)` to a signed byte, where `d` is the difference of two
+/// signed bytes: libvpx's C computes it in an int and clamps; this adds the
+/// difference, clamped, three times with saturation, as libvpx's SSE2 does.
+/// The two agree: the sum moves the same way at each step, so once it
+/// saturates it stays saturated, and the true sum is beyond the clamp too.
+#[inline(always)]
+fn add_three(f: i8, a: i8, b: i8) -> i8 {
+    let d = a.saturating_sub(b);
+    f.saturating_add(d).saturating_add(d).saturating_add(d)
 }
 
-/// The block filter across one edge, at pixels `px[0..4]` = p1, p0, q0, q1:
-/// libvpx's `vp8_filter`.
-#[inline]
-fn filter(hev: bool, px: [u8; 4]) -> [u8; 4] {
-    let [ps1, ps0, qs0, qs1] = px.map(s);
-    let mut f = if hev {
-        sclamp(i32::from(ps1) - i32::from(qs1))
+/// The pixels across an edge at `N` positions along it: `px[k][i]` is
+/// pixel `k - 4` across the edge (p3, p2, p1, p0, q0, q1, q2, q3) at
+/// position `i`. The filters below compute on every position at once, as
+/// libvpx's SIMD does, in signed bytes with saturation where libvpx's C
+/// clamps, and with libvpx's C's masks instead of its branches -- the same
+/// values, since the C computes unconditionally too.
+type Across<const N: usize> = [[u8; N]; 8];
+
+/// Gather `rows` of the pixels across an edge at `at`, centred on it: the
+/// edge's position `i` is `at + i * along`, the pixels across it `across`
+/// apart.
+#[inline(always)]
+fn load<const N: usize>(
+    data: &[u8],
+    at: usize,
+    across: usize,
+    along: usize,
+    rows: usize,
+) -> Across<N> {
+    let mut px = [[0u8; N]; 8];
+    let first = 4 - rows / 2;
+    if along == 1 {
+        // A horizontal edge: each pixel across it is a run of N in a row.
+        for (k, out) in px.iter_mut().enumerate().skip(first).take(rows) {
+            let start = at + k * across - 4 * across;
+            out.copy_from_slice(&data[start..start + N]);
+        }
     } else {
-        0
-    };
-    f = sclamp(i32::from(f) + 3 * (i32::from(qs0) - i32::from(ps0)));
-    // Round one side +4 and the other +3, so that a value of 4 does not
-    // overshoot.
-    let filter1 = sclamp(i32::from(f) + 4) >> 3;
-    let filter2 = sclamp(i32::from(f) + 3) >> 3;
-    let q0 = u(sclamp(i32::from(qs0) - i32::from(filter1)));
-    let p0 = u(sclamp(i32::from(ps0) + i32::from(filter2)));
-    // The outer taps, only where the edge is not high variance.
-    let a = if hev { 0 } else { (filter1 + 1) >> 1 };
-    let q1 = u(sclamp(i32::from(qs1) - i32::from(a)));
-    let p1 = u(sclamp(i32::from(ps1) + i32::from(a)));
-    [p1, p0, q0, q1]
+        // A vertical edge: the pixels across it are a run of `rows` in each
+        // of N rows, transposed into lanes.
+        for i in 0..N {
+            let start = at + i * along + first - 4;
+            let run = &data[start..start + rows];
+            for (j, &p) in run.iter().enumerate() {
+                px[first + j][i] = p;
+            }
+        }
+    }
+    px
 }
 
-/// The macroblock filter across one edge, at pixels `px[0..6]` = p2, p1,
-/// p0, q0, q1, q2: libvpx's `vp8_mbfilter`.
-#[inline]
-fn mbfilter(hev: bool, px: [u8; 6]) -> [u8; 6] {
-    let [ps2, ps1, ps0, qs0, qs1, qs2] = px.map(s);
-    let mut f = sclamp(i32::from(ps1) - i32::from(qs1));
-    f = sclamp(i32::from(f) + 3 * (i32::from(qs0) - i32::from(ps0)));
-    let (mut qs0, mut ps0) = (qs0, ps0);
-    if hev {
-        // High variance: only the two pixels at the edge move.
-        let filter1 = sclamp(i32::from(f) + 4) >> 3;
-        let filter2 = sclamp(i32::from(f) + 3) >> 3;
-        qs0 = sclamp(i32::from(qs0) - i32::from(filter1));
-        ps0 = sclamp(i32::from(ps0) + i32::from(filter2));
-        return [px[0], px[1], u(ps0), u(qs0), px[4], px[5]];
+/// Put back the pixels `k` in `range` that [`load`] gathered.
+#[inline(always)]
+fn store<const N: usize>(
+    data: &mut [u8],
+    at: usize,
+    across: usize,
+    along: usize,
+    px: &Across<N>,
+    range: core::ops::Range<usize>,
+) {
+    if along == 1 {
+        for k in range {
+            let start = at + k * across - 4 * across;
+            data[start..start + N].copy_from_slice(&px[k]);
+        }
+    } else {
+        let (first, len) = (range.start, range.len());
+        for i in 0..N {
+            let start = at + i * along + first - 4;
+            let run = &mut data[start..start + len];
+            for (j, p) in run.iter_mut().enumerate() {
+                *p = px[first + j][i];
+            }
+        }
     }
-    // Otherwise libvpx's first step moves nothing (its filter is masked to
-    // 0), and the wide filter moves three pixels each side by 27/128,
-    // 18/128 and 9/128 of the difference.
-    let f = i32::from(f);
-    let w = |k: i32| sclamp((63 + f * k) >> 7);
-    let (u27, u18, u9) = (w(27), w(18), w(9));
-    [
-        u(sclamp(i32::from(ps2) + i32::from(u9))),
-        u(sclamp(i32::from(ps1) + i32::from(u18))),
-        u(sclamp(i32::from(ps0) + i32::from(u27))),
-        u(sclamp(i32::from(qs0) - i32::from(u27))),
-        u(sclamp(i32::from(qs1) - i32::from(u18))),
-        u(sclamp(i32::from(qs2) - i32::from(u9))),
-    ]
+}
+
+/// The normal filters' common start, at each position: whether to filter
+/// at all (libvpx's `vp8_filter_mask`) and whether the edge has high
+/// variance (`vp8_hevmask`), as masks. The edge sum saturates at 255, as
+/// libvpx's SSE2 lets it, which changes no answer: every threshold is below
+/// 255.
+#[inline(always)]
+fn masks<const N: usize>(px: &Across<N>, t: Thresholds) -> ([i8; N], [i8; N]) {
+    let [p3, p2, p1, p0, q0, q1, q2, q3] = px;
+    let mut m = [0i8; N];
+    let mut h = [0i8; N];
+    for i in 0..N {
+        let interior = p3[i]
+            .abs_diff(p2[i])
+            .max(p2[i].abs_diff(p1[i]))
+            .max(p1[i].abs_diff(p0[i]))
+            .max(q1[i].abs_diff(q0[i]))
+            .max(q2[i].abs_diff(q1[i]))
+            .max(q3[i].abs_diff(q2[i]));
+        let d0 = p0[i].abs_diff(q0[i]);
+        let edge = d0
+            .saturating_add(d0)
+            .saturating_add(p1[i].abs_diff(q1[i]) >> 1);
+        m[i] = mask(interior <= t.interior && edge <= t.edge);
+        h[i] = mask(p1[i].abs_diff(p0[i]) > t.hev || q1[i].abs_diff(q0[i]) > t.hev);
+    }
+    (m, h)
+}
+
+/// The block filter across `N` positions of an edge: libvpx's `vp8_filter`
+/// where `vp8_filter_mask` says to.
+#[inline(always)]
+fn filter_lanes<const N: usize>(px: &mut Across<N>, t: Thresholds) {
+    let (m, h) = masks(px, t);
+    for i in 0..N {
+        let (ps1, ps0, qs0, qs1) = (s(px[2][i]), s(px[3][i]), s(px[4][i]), s(px[5][i]));
+        // The outer taps only where the edge has high variance.
+        let f = add_three(ps1.saturating_sub(qs1) & h[i], qs0, ps0) & m[i];
+        // Round one side +4 and the other +3, so that a value of 4 does not
+        // overshoot.
+        let filter1 = f.saturating_add(4) >> 3;
+        let filter2 = f.saturating_add(3) >> 3;
+        px[4][i] = u(qs0.saturating_sub(filter1));
+        px[3][i] = u(ps0.saturating_add(filter2));
+        // And the next pixels out, only where the variance is not high.
+        // `filter1` is at most 15, so the increment cannot overflow.
+        let a = ((filter1 + 1) >> 1) & !h[i];
+        px[5][i] = u(qs1.saturating_sub(a));
+        px[2][i] = u(ps1.saturating_add(a));
+    }
+}
+
+/// The macroblock filter across `N` positions of an edge: libvpx's
+/// `vp8_mbfilter` where `vp8_filter_mask` says to.
+#[inline(always)]
+fn mbfilter_lanes<const N: usize>(px: &mut Across<N>, t: Thresholds) {
+    let (m, h) = masks(px, t);
+    for i in 0..N {
+        let (ps2, ps1, ps0) = (s(px[1][i]), s(px[2][i]), s(px[3][i]));
+        let (qs0, qs1, qs2) = (s(px[4][i]), s(px[5][i]), s(px[6][i]));
+        let f = add_three(ps1.saturating_sub(qs1), qs0, ps0) & m[i];
+        // Where the variance is high, only the two pixels at the edge move,
+        // as the block filter moves them.
+        let hf = f & h[i];
+        let filter1 = hf.saturating_add(4) >> 3;
+        let filter2 = hf.saturating_add(3) >> 3;
+        let qs0 = qs0.saturating_sub(filter1);
+        let ps0 = ps0.saturating_add(filter2);
+        // Elsewhere three pixels each side move by 27/128, 18/128 and 9/128
+        // of the difference: at most 27 either way, so no clamp is needed.
+        let w = i16::from(f & !h[i]);
+        let part = |k: i16| ((63 + w * k) >> 7) as i8;
+        let (u27, u18, u9) = (part(27), part(18), part(9));
+        px[4][i] = u(qs0.saturating_sub(u27));
+        px[3][i] = u(ps0.saturating_add(u27));
+        px[5][i] = u(qs1.saturating_sub(u18));
+        px[2][i] = u(ps1.saturating_add(u18));
+        px[6][i] = u(qs2.saturating_sub(u9));
+        px[1][i] = u(ps2.saturating_add(u9));
+    }
 }
 
 /// The thresholds one edge is filtered with.
@@ -263,63 +332,48 @@ fn block_edge(
     count: usize,
     t: Thresholds,
 ) {
-    for i in 0..count * 8 {
-        let c = at + i * along;
-        let px = |k: usize| data[c + k * across - 4 * across];
-        let (p3, p2, p1, p0, q0, q1, q2, q3) =
-            (px(0), px(1), px(2), px(3), px(4), px(5), px(6), px(7));
-        if !filter_mask(t.interior, t.edge, p3, p2, p1, p0, q0, q1, q2, q3) {
-            continue;
-        }
-        let out = filter(hev(t.hev, p1, p0, q0, q1), [p1, p0, q0, q1]);
-        for (k, v) in out.into_iter().enumerate() {
-            data[c + (k + 2) * across - 4 * across] = v;
-        }
+    if count == 2 {
+        let mut px = load::<16>(data, at, across, along, 8);
+        filter_lanes(&mut px, t);
+        store(data, at, across, along, &px, 2..6);
+    } else {
+        let mut px = load::<8>(data, at, across, along, 8);
+        filter_lanes(&mut px, t);
+        store(data, at, across, along, &px, 2..6);
     }
 }
 
 /// [`block_edge`] with the macroblock filter: libvpx's
 /// `mbloop_filter_horizontal_edge_c` and `_vertical_edge_c`.
 fn mb_edge(data: &mut [u8], at: usize, across: usize, along: usize, count: usize, t: Thresholds) {
-    for i in 0..count * 8 {
-        let c = at + i * along;
-        let px = |k: usize| data[c + k * across - 4 * across];
-        let (p3, p2, p1, p0, q0, q1, q2, q3) =
-            (px(0), px(1), px(2), px(3), px(4), px(5), px(6), px(7));
-        if !filter_mask(t.interior, t.edge, p3, p2, p1, p0, q0, q1, q2, q3) {
-            continue;
-        }
-        let out = mbfilter(hev(t.hev, p1, p0, q0, q1), [p2, p1, p0, q0, q1, q2]);
-        for (k, v) in out.into_iter().enumerate() {
-            data[c + (k + 1) * across - 4 * across] = v;
-        }
+    if count == 2 {
+        let mut px = load::<16>(data, at, across, along, 8);
+        mbfilter_lanes(&mut px, t);
+        store(data, at, across, along, &px, 1..7);
+    } else {
+        let mut px = load::<8>(data, at, across, along, 8);
+        mbfilter_lanes(&mut px, t);
+        store(data, at, across, along, &px, 1..7);
     }
 }
 
 /// The simple filter across 16 positions of an edge: libvpx's
-/// `vp8_loop_filter_simple_horizontal_edge_c` and `_vertical_edge_c`.
+/// `vp8_loop_filter_simple_horizontal_edge_c` and `_vertical_edge_c`, with
+/// `vp8_simple_filter_mask` and `vp8_simple_filter`.
 fn simple_edge(data: &mut [u8], at: usize, across: usize, along: usize, blimit: u8) {
+    let mut px = load::<16>(data, at, across, along, 4);
     for i in 0..16 {
-        let c = at + i * along;
-        let (p1, p0, q0, q1) = (
-            data[c - 2 * across],
-            data[c - across],
-            data[c],
-            data[c + across],
-        );
-        let d = |a: u8, b: u8| (i32::from(a) - i32::from(b)).abs();
-        if d(p0, q0) * 2 + d(p1, q1) / 2 > i32::from(blimit) {
-            continue;
-        }
-        // libvpx's `vp8_simple_filter`.
+        let (p1, p0, q0, q1) = (px[2][i], px[3][i], px[4][i], px[5][i]);
+        let d0 = p0.abs_diff(q0);
+        let edge = d0.saturating_add(d0).saturating_add(p1.abs_diff(q1) >> 1);
         let (ps1, ps0, qs0, qs1) = (s(p1), s(p0), s(q0), s(q1));
-        let mut f = sclamp(i32::from(ps1) - i32::from(qs1));
-        f = sclamp(i32::from(f) + 3 * (i32::from(qs0) - i32::from(ps0)));
-        let filter1 = sclamp(i32::from(f) + 4) >> 3;
-        data[c] = u(sclamp(i32::from(qs0) - i32::from(filter1)));
-        let filter2 = sclamp(i32::from(f) + 3) >> 3;
-        data[c - across] = u(sclamp(i32::from(ps0) + i32::from(filter2)));
+        let f = add_three(ps1.saturating_sub(qs1), qs0, ps0) & mask(edge <= blimit);
+        let filter1 = f.saturating_add(4) >> 3;
+        let filter2 = f.saturating_add(3) >> 3;
+        px[4][i] = u(qs0.saturating_sub(filter1));
+        px[3][i] = u(ps0.saturating_add(filter2));
     }
+    store(data, at, across, along, &px, 3..5);
 }
 
 /// Filter macroblock row `mb_row` of `frame`: libvpx's

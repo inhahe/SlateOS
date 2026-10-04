@@ -44,9 +44,19 @@
 //! - `decoder`: the frame loop -- the four buffers the frame being decoded
 //!   and the three references share, and which frames show.
 //!
-//! The decoder is libvpx's single-threaded one. (libvpx can decode
-//! macroblock rows on several threads when a stream has several token
-//! partitions; its pictures are the same either way.)
+//! # Speed
+//!
+//! The hot loops -- motion compensation and the loop filter -- are written
+//! for the compiler to vectorise for baseline x86-64 (SSE2), exactly: the
+//! six-tap filter in 16-bit lanes, its positive and negative taps summed
+//! apart so that each sum fits; the loop filter in signed bytes with
+//! saturation where libvpx's C clamps, every position of an edge at once, a
+//! vertical edge's pixels transposed into lanes first. There is no
+//! hand-written SIMD and no `unsafe`. On 1080p film (`tests/bench.rs`) that
+//! is faster than libvpx's C and about a third of the speed of its SIMD, on
+//! one thread. Not here: libvpx's decoding of macroblock rows on several
+//! threads, which it does for streams of several token partitions
+//! (`known-issues/F-vp8-decodes-on-one-thread.md`).
 //!
 //! # What a hostile stream can do
 //!

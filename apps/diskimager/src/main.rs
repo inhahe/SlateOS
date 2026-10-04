@@ -2429,6 +2429,34 @@ impl DiskImagerApp {
             return self.handle_confirm_event(event);
         }
 
+        // The shortcut card is modal: while it is up, F1 and Escape put it
+        // away and every other key is its own; a press, with any button, puts
+        // it away rather than reaching the control drawn under it; and the
+        // wheel scrolls nothing it covers. It was modal for none of it -- V,
+        // H and C changed the options under it, Ctrl+O opened a dialog, the
+        // arrows chose a drive and a click acted on whatever it covered. A
+        // move and a release still go through.
+        if self.show_help {
+            match event {
+                Event::Key(key) if key.pressed => {
+                    if textline::is_plain(key.modifiers) && matches!(key.key, Key::F1 | Key::Escape)
+                    {
+                        self.show_help = false;
+                    }
+                    return EventResult::Consumed;
+                }
+                Event::Mouse(mouse) => match mouse.kind {
+                    MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                        self.show_help = false;
+                        return EventResult::Consumed;
+                    }
+                    MouseEventKind::Scroll { .. } => return EventResult::Ignored,
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+
         match event {
             Event::Resize { width, height } => {
                 self.window_width = *width as f32;
@@ -2501,12 +2529,10 @@ impl DiskImagerApp {
         // drawn -- a colour is chosen from each. Found by
         // `scripts/frozen-flag-survey.py`.
         match key.key {
+            // (While the list is up its own keys never get here:
+            // `handle_event` takes every key the card is up for.)
             Key::F1 => {
                 self.show_help = !self.show_help;
-                return EventResult::Consumed;
-            }
-            Key::Escape if self.show_help => {
-                self.show_help = false;
                 return EventResult::Consumed;
             }
             Key::V => {
@@ -7440,6 +7466,87 @@ mod tests {
 
     fn rows_per_notch() -> usize {
         wheel::ROWS_PER_NOTCH as usize
+    }
+
+    /// **The card is modal for the keys and the pointer**: while it is up,
+    /// F1 and Escape put it away and nothing else does or acts; a press puts
+    /// it away and does nothing else; the wheel scrolls nothing under it. It
+    /// was modal for none of it. The controls at the end are the same key,
+    /// press and turn with the card down.
+    #[test]
+    fn the_shortcut_card_takes_every_key_and_press_while_it_is_up() {
+        let mut app = app_with_many_drives();
+        let key = |k: Key, modifiers: guitk::event::Modifiers| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: String::new(),
+            })
+        };
+        let plain = guitk::event::Modifiers::NONE;
+        // The second tab, where `handle_tab_click` measures it.
+        let tab = Event::Mouse(MouseEvent {
+            x: PANEL_PADDING + 120.0 + 60.0,
+            y: TOOLBAR_HEIGHT + 4.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        });
+        let verify = app.write_options.verify_after_write;
+        let first = app.active_tab;
+
+        app.handle_event(&key(Key::F1, plain));
+        assert!(app.show_help);
+        app.handle_event(&key(Key::V, plain));
+        assert_eq!(
+            app.write_options.verify_after_write, verify,
+            "V changed an option under the card"
+        );
+        app.handle_event(&key(Key::O, guitk::event::Modifiers::ctrl()));
+        assert!(
+            app.open_dialog.is_none(),
+            "Ctrl+O opened a dialog under the card"
+        );
+        app.handle_event(&wheel_at(20.0, -1.0));
+        assert_eq!(
+            app.sidebar_scroll, 0,
+            "the wheel scrolled the drives under the card"
+        );
+        assert!(
+            app.show_help,
+            "a key or turn that is not the card's put it away"
+        );
+
+        app.handle_event(&tab);
+        assert!(!app.show_help, "the press did not put the card away");
+        assert_eq!(
+            app.active_tab, first,
+            "the press went through the card to a tab"
+        );
+
+        // Any button, and Escape.
+        app.handle_event(&key(Key::F1, plain));
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x: PANEL_PADDING + 180.0,
+            y: TOOLBAR_HEIGHT + 4.0,
+            kind: MouseEventKind::Press(MouseButton::Right),
+        }));
+        assert!(!app.show_help, "a right-button press left the card up");
+        app.handle_event(&key(Key::F1, plain));
+        app.handle_event(&key(Key::Escape, plain));
+        assert!(!app.show_help, "Escape did not put the card away");
+
+        app.handle_event(&wheel_at(20.0, -1.0));
+        assert!(app.sidebar_scroll > 0, "control: the wheel scrolls nothing");
+        app.handle_event(&key(Key::V, plain));
+        assert_ne!(
+            app.write_options.verify_after_write, verify,
+            "control: V does nothing with the card down"
+        );
+        app.handle_event(&tab);
+        assert_ne!(
+            app.active_tab, first,
+            "control: the press does nothing even with the card down"
+        );
     }
 
     /// An app whose drive list is longer than the sidebar can show.

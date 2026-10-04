@@ -23,6 +23,7 @@ from mutation_harness import sweep  # noqa: E402  (path set above)
 SRC = Path(__file__).parent / "src" / "main.rs"
 
 FORMAT = "the_create_tab_names_the_format_the_copy_writes"
+CARD = "the_shortcut_card_takes_every_key_and_press_while_it_is_up"
 
 MUTATIONS = [
     (
@@ -48,6 +49,50 @@ MUTATIONS = [
         '        if !textline::is_plain(key.modifiers) {\n            return EventResult::Ignored;\n        }\n',
         '',
         ['a_key_held_with_a_modifier_is_not_the_windows_and_altgr_is_not_ctrl'],
+    ),
+    # -- the shortcut card is modal, for the keys and the pointer
+    (
+        "the card is modal for nothing",
+        '        if self.show_help {\n            match event {\n',
+        '        if false && self.show_help {\n            match event {\n',
+        [CARD],
+    ),
+    (
+        "a key that is not the card's acts behind it",
+        '                        self.show_help = false;\n'
+        '                    }\n'
+        '                    return EventResult::Consumed;\n',
+        '                        self.show_help = false;\n'
+        '                        return EventResult::Consumed;\n'
+        '                    }\n',
+        [CARD],
+    ),
+    (
+        "Escape does not put the card away",
+        '                    if textline::is_plain(key.modifiers) && matches!(key.key, Key::F1 | Key::Escape)\n',
+        '                    if textline::is_plain(key.modifiers) && matches!(key.key, Key::F1)\n',
+        [CARD],
+    ),
+    (
+        "a press goes through the card",
+        '                    MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n'
+        '                        self.show_help = false;\n'
+        '                        return EventResult::Consumed;\n'
+        '                    }\n',
+        '',
+        [CARD],
+    ),
+    (
+        "only the left button puts the card away",
+        '                    MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n',
+        '                    MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_) => {\n',
+        [CARD],
+    ),
+    (
+        "the wheel scrolls what the card covers",
+        '                    MouseEventKind::Scroll { .. } => return EventResult::Ignored,\n',
+        '',
+        [CARD],
     ),
 ]
 

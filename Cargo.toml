@@ -7,14 +7,15 @@ members = [
     # Lane F's video codecs, each its own crate under `gui/video/`, which
     # `gui/*` cannot reach and which is itself excluded below. The first is
     # rav1d, the AV1 decoder, vendored (`gui/video/rav1d/VENDORED.md`); the
-    # second, vp9, libvpx's VP9 decoder ported (design-decisions.md §1339);
-    # matroska, the Matroska and WebM demuxer their packets come from; yuv,
-    # libyuv's and libavif's conversions and scaling their pictures are drawn
-    # with; and codec (videocodec), the one a program calls for a file's
-    # frames.
+    # second, vp9, libvpx's VP9 decoder ported (design-decisions.md §1339),
+    # and vp8 its VP8 decoder, ported the same way; matroska, the Matroska
+    # and WebM demuxer their packets come from; yuv, libyuv's and libavif's
+    # conversions and scaling their pictures are drawn with; and codec
+    # (videocodec), the one a program calls for a file's frames.
     "gui/video/codec",
     "gui/video/matroska",
     "gui/video/rav1d",
+    "gui/video/vp8",
     "gui/video/vp9",
     "gui/video/yuv",
     "init/*",
@@ -741,6 +742,13 @@ codegen-units = 1
 opt-level = 3
 codegen-units = 1
 
+# vp8 (the VP8 decoder, `gui/video/vp8`), for the same reason. On 217 frames
+# of 1080p film (`gui/video/vp8/tests/bench.rs`), one thread: 11.2 fps at
+# `-Os` against libvpx's 24.9 as plain C. Lane F, 2026-10-04.
+[profile.release.package.vp8]
+opt-level = 3
+codegen-units = 1
+
 # And in debug builds rav1d alone is optimised, keeping its debug assertions
 # (its `DisjointMut` overlap checks among them): unoptimised it takes 11 ms to
 # decode a 37x19 picture, which makes `imagecodec`'s tests that decode
@@ -756,6 +764,11 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.yuv]
+opt-level = 3
+
+# And vp8 (`gui/video/vp8`): its own tests decode 446 damaged streams and
+# hundreds more at random, 70 s unoptimised (2026-10-04).
+[profile.dev.package.vp8]
 opt-level = 3
 
 # The same for `xz`, whose tests hold its encoder to XZ Utils' output byte

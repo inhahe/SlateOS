@@ -5,6 +5,9 @@
 
 # The decoder and the encoder are libvpx's, translated. The patent grant is
 # part of what libvpx is distributed under, so it travels with the licence.
+# This entry also covers gui/video/vp8, libvpx's VP8 decoder translated from
+# the same release, whose manifest does not name libvpx again, as
+# gather-notices.py requires each project named once.
 libvpx:
   version: 1.17.0
   licence: BSD-3-Clause

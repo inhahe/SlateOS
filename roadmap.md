@@ -3812,9 +3812,18 @@ lane C's `guitk`.
     (`tests/data/generate_fixtures.py`, `tools/libavif_reformat_reference.c`),
     with seeks, damage and a playback thread. What it leaves to colour
     management: `known-issues/F-video-is-shown-without-colour-management.md`.
-  - `[ ]` VP8 video (libvpx's decoder, ported as VP9's was), and MP4
+  - `[-]` VP8 video (libvpx's decoder, ported as VP9's was), and MP4
     (`apps/mediaprobe` reads its headers; the sample tables are like
     AVIF's sequences').
+    - `[x]` The decoder, `gui/video/vp8`: libvpx v1.17.0's, every picture
+      of all 62 of its test vectors hashing to libvpx's MD5s
+      (`tests/vectors.rs`), and 446 damaged copies of them decoding to
+      libvpx's pictures, corruption marks and errors frame by frame
+      (`tests/damage.rs`, from `tools/damage_reference.c`).
+    - `[ ]` As fast as libvpx's C: 12 fps on 1080p film against its 20-25
+      (`tests/bench.rs`), the gap in motion compensation.
+    - `[ ]` In `videocodec`: WebM's VP8, alpha included.
+    - `[ ]` MP4.
   - `[ ]` Sound needs Opus and Vorbis decoders, which nothing has yet (the
     music player has none either).
 

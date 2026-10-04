@@ -4095,7 +4095,7 @@ impl NotesApp {
                         color: if self.show_favorites_only {
                             self.palette.ink(self.palette.yellow)
                         } else {
-                            self.palette.overlay0
+                            self.palette.subtext0
                         },
                         font_size: 14.0,
                         font_weight: FontWeightHint::Bold,
@@ -4115,7 +4115,7 @@ impl NotesApp {
                             NoteTemplate::MeetingNotes => self.palette.ink(self.palette.teal),
                             NoteTemplate::TodoList => self.palette.ink(self.palette.green),
                             NoteTemplate::Journal => self.palette.ink(self.palette.mauve),
-                            _ => self.palette.overlay0,
+                            _ => self.palette.subtext0,
                         },
                         font_size: 11.0,
                         font_weight: FontWeightHint::Regular,

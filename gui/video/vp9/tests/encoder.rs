@@ -171,3 +171,101 @@ fn frames_match_vpxenc_realtime() {
         );
     }
 }
+
+/// The first `count` pictures the full suite's vector `name` shows, as I420:
+/// what `common::cut_reference_input` builds the second reference from.
+fn shown(name: &str, count: usize) -> Option<Vec<common::I420>> {
+    let dir = common::full_suite_dir()?;
+    let v = common::read_vector(&dir.join(name)).ok()?;
+    let mut d = Decoder::new();
+    let mut out = Vec::new();
+    for p in &v.packets {
+        let Some(picture) = d.decode(p).ok()? else {
+            continue;
+        };
+        let planes = [0, 1, 2].map(|i| {
+            let view = picture.plane8(i).unwrap();
+            (0..view.height)
+                .flat_map(|y| &view.data[y * view.stride..][..view.width])
+                .copied()
+                .collect::<Vec<u8>>()
+        });
+        out.push(common::I420 {
+            width: usize::try_from(picture.width()).unwrap(),
+            height: usize::try_from(picture.height()).unwrap(),
+            planes,
+        });
+        if out.len() == count {
+            return Some(out);
+        }
+    }
+    None
+}
+
+/// `picture`'s planes as the encoder takes them.
+fn views(picture: &common::I420) -> [PlaneView<'_, u8>; 3] {
+    [0, 1, 2].map(|i| {
+        let (width, height) = picture.plane_size(i);
+        PlaneView {
+            data: &picture.planes[i],
+            stride: width,
+            width,
+            height,
+        }
+    })
+}
+
+/// The MD5 of the second reference's input, as `vpxenc` was given it: the
+/// pictures one after another, raw.
+const CUT_INPUT_MD5: &str = "58155d770c2098e80eee156307a3c300";
+
+/// libvpx's second reference encode (`tests/data/encoder/README.md`): 150
+/// pictures of 651x357 through two scene cuts, a rising noise level, golden
+/// refreshes and a fade, with blocks hanging over the picture's edges. The
+/// encoder's frames must be byte-identical to it.
+#[test]
+#[ignore = "needs the full vector suite: python gui/video/vp9/tools/fetch_vectors.py"]
+fn frames_match_vpxenc_through_cuts_noise_and_edges() {
+    let input = common::cut_reference_input(shown)
+        .expect("the full suite is not fetched: python gui/video/vp9/tools/fetch_vectors.py");
+    let mut md5 = md5::Md5::new();
+    for p in &input {
+        md5.update(&p.raw());
+    }
+    assert_eq!(
+        md5::hex(&md5.finalize()).to_string(),
+        CUT_INPUT_MD5,
+        "the input is not what vpxenc was given"
+    );
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/encoder/rt8cut.ivf");
+    let reference = common::read_ivf(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!((input.len(), reference.packets.len()), (150, 150));
+    let (w, h) = (common::CUT_WIDTH, common::CUT_HEIGHT);
+    let mut encoder = Encoder::new(EncoderConfig::realtime(w as u32, h as u32, 600)).unwrap();
+    for (i, (picture, want)) in input.iter().zip(&reference.packets).enumerate() {
+        let got = encoder.encode(views(picture)).unwrap();
+        let first = got.iter().zip(want.iter()).position(|(a, b)| a != b);
+        assert!(
+            &got == want,
+            "frame {i}: {} bytes against libvpx's {}, first difference at byte {first:?}",
+            got.len(),
+            want.len()
+        );
+    }
+}
+
+/// Write the second reference's input, raw I420, to the file `VP9_WRITE_INPUT`
+/// names: what `vpxenc` is given to make `rt8cut.ivf`. A tool rather than a
+/// test, so it does nothing unless asked: a run of every ignored test passes
+/// through it.
+#[test]
+#[ignore = "a tool for remaking the reference: VP9_WRITE_INPUT=path"]
+fn write_cut_reference_input() {
+    let Ok(out) = std::env::var("VP9_WRITE_INPUT") else {
+        eprintln!("VP9_WRITE_INPUT is not set: nothing written");
+        return;
+    };
+    let input = common::cut_reference_input(shown).expect("the full suite is not fetched");
+    let raw: Vec<u8> = input.iter().flat_map(common::I420::raw).collect();
+    std::fs::write(out, raw).unwrap();
+}

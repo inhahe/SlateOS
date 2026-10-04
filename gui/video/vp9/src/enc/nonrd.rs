@@ -266,7 +266,9 @@ pub(crate) struct InterSettings {
     pub use_skin_detection: bool,
     /// The source's change per superblock is measured (`use_source_sad`).
     pub use_source_sad: bool,
-    /// The cyclic refresh is setting segments this frame.
+    /// The encode runs cyclic refresh (libvpx's `aq_mode ==
+    /// CYCLIC_REFRESH_AQ`), whether or not this frame codes segments: see
+    /// [`SearchFrame::cyclic_refresh`](crate::enc::pickinter::SearchFrame).
     pub cyclic_refresh: bool,
 }
 

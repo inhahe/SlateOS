@@ -677,6 +677,7 @@ impl Encoder {
         let ref_frame_flags = cpi.ref_frame_flags;
         let skip_encode_frame = cpi.skip_encode_frame;
         let vbp_threshold_8x8 = self.vbp_threshold_8x8;
+        let cyclic_refresh_mode = cpi.oxcf.cyclic_refresh && opts.fixed.is_none();
 
         // The decisions: the caller's, or libvpx's.
         let Cpi {
@@ -714,7 +715,11 @@ impl Encoder {
                     noise_level: noise.level,
                     rdmult,
                     cr_rdmult: cr.rdmult,
-                    cyclic_refresh: common.seg.enabled && opts.fixed.is_none(),
+                    // The configured mode, not whether this frame codes
+                    // segments: a scene cut codes none, and libvpx still
+                    // sizes its transforms as under cyclic refresh. A caller's
+                    // fixed segments are not the refresh's.
+                    cyclic_refresh: cyclic_refresh_mode,
                     current_video_frame: common.current_video_frame,
                     skip_encode_frame,
                     short_circuit_low_temp_var,
@@ -738,7 +743,7 @@ impl Encoder {
                     frames_since_key: rc.frames_since_key,
                     use_skin_detection: true,
                     use_source_sad: last_src.is_some(),
-                    cyclic_refresh: common.seg.enabled && opts.fixed.is_none(),
+                    cyclic_refresh: cyclic_refresh_mode,
                 },
                 state: rt,
                 cr,

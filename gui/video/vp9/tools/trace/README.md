@@ -45,8 +45,9 @@ Encode the reference input with the command in
 ~/vp9ref/build-trace/vpxenc ...`. Its output must be the reference file
 byte for byte (`cmp`): the trace statements only print.
 
-Then the port's trace, from `gui/video/vp9` (`VP9_TRACE_FRAMES=N` stops
-after N frames):
+Then the port's trace, from `gui/video/vp9`. `VP9_TRACE_INPUT` picks the
+reference -- `rt8` (the default) or `rt8cut` -- and `VP9_TRACE_FRAMES=N`
+stops after N frames:
 
     VP9_TRACE=rust.trace cargo test --release --target x86_64-pc-windows-gnu \
       -p vp9 --lib own_decisions_traced -- --ignored
@@ -55,5 +56,5 @@ and compare:
 
     python tools/trace/compare_traces.py libvpx.trace rust.trace --context 20
 
-On `tests/data/encoder/rt8.ivf` the two traces are identical: 365,835
-lines.
+The two traces are identical on both references: 365,835 lines on
+`rt8.ivf`, 867,893 on `rt8cut.ivf`.

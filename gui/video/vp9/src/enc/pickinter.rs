@@ -237,7 +237,10 @@ pub(crate) struct SearchFrame<'a> {
     /// The frame's rate-distortion multiplier, and the boosted segment's.
     pub rdmult: i32,
     pub cr_rdmult: i32,
-    /// Cyclic refresh is coding segments this frame.
+    /// The encode runs cyclic refresh: libvpx's `aq_mode ==
+    /// CYCLIC_REFRESH_AQ`, which holds on every frame -- on a scene cut too,
+    /// which codes no segments. Whether a block is boosted is its segment's
+    /// to say, and a frame without segments puts every block in segment 0.
     pub cyclic_refresh: bool,
     pub current_video_frame: u32,
     pub skip_encode_frame: bool,

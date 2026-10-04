@@ -21,6 +21,7 @@
     clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
     reason = "a test: a failure should be loud"
 )]
 
@@ -33,7 +34,7 @@ mod common;
 
 use crate::block::{MiGrid, ModeInfo};
 use crate::common::{BlockSize, PARTITION_SPLIT, Partition};
-use crate::decoder::{Decoder, Picture};
+use crate::decoder::{Decoder, PlaneView};
 use crate::enc::encodeframe::{BlockModes, Decide, FrameEncoder, InterModes};
 use crate::enc::encoder::{Encoder, EncoderConfig, FixedFrame, FrameOptions};
 use crate::tables;
@@ -89,53 +90,128 @@ impl Decide for Replay<'_> {
     }
 }
 
-/// The pictures the reference encode was made from: the first 30 that the
-/// conformance vector `vp90-2-22-svc_1280x720_1.webm` shows. `None` until
-/// the full vector suite is fetched.
-fn reference_input() -> Option<Vec<Picture>> {
+/// The first `count` pictures the full suite's vector `name` shows, as I420
+/// (`common::I420`); `None` until the suite is fetched.
+fn shown(name: &str, count: usize) -> Option<Vec<common::I420>> {
     let dir = common::full_suite_dir()?;
-    let v = common::read_vector(&dir.join("vp90-2-22-svc_1280x720_1.webm")).ok()?;
+    let v = common::read_vector(&dir.join(name)).ok()?;
     let mut d = Decoder::new();
     let mut out = Vec::new();
     for p in &v.packets {
-        if let Some(picture) = d.decode(p).ok()? {
-            out.push(picture);
-            if out.len() == 30 {
-                break;
-            }
+        let Some(picture) = d.decode(p).ok()? else {
+            continue;
+        };
+        out.push(common::I420 {
+            width: usize::try_from(picture.width()).unwrap(),
+            height: usize::try_from(picture.height()).unwrap(),
+            planes: [0, 1, 2].map(|i| {
+                let view = picture.plane8(i).unwrap();
+                (0..view.height)
+                    .flat_map(|y| &view.data[y * view.stride..][..view.width])
+                    .copied()
+                    .collect()
+            }),
+        });
+        if out.len() == count {
+            return Some(out);
         }
     }
-    Some(out)
+    None
 }
 
-/// The encoder's own decisions on the reference input, traced: every frame
+/// `picture`'s planes as the encoder takes them.
+fn views(picture: &common::I420) -> [PlaneView<'_, u8>; 3] {
+    [0, 1, 2].map(|i| {
+        let (width, height) = picture.plane_size(i);
+        PlaneView {
+            data: &picture.planes[i],
+            stride: width,
+            width,
+            height,
+        }
+    })
+}
+
+/// A reference encode (`tests/data/encoder/README.md`): the pictures it was
+/// made from, libvpx's frames, and the settings that make them.
+struct Reference {
+    input: Vec<common::I420>,
+    frames: Vec<Vec<u8>>,
+    config: EncoderConfig,
+}
+
+impl Reference {
+    fn load(input: Vec<common::I420>, ivf: &str, config: EncoderConfig) -> Self {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/encoder")
+            .join(ivf);
+        let frames = common::read_ivf(&std::fs::read(path).unwrap())
+            .unwrap()
+            .packets;
+        assert_eq!(input.len(), frames.len(), "{ivf}: pictures and frames");
+        Self {
+            input,
+            frames,
+            config,
+        }
+    }
+
+    /// The first, `rt8.ivf`: the first 30 pictures the conformance vector
+    /// `vp90-2-22-svc_1280x720_1.webm` shows.
+    fn first() -> Self {
+        let input = shown("vp90-2-22-svc_1280x720_1.webm", 30)
+            .expect("the full suite is not fetched: python gui/video/vp9/tools/fetch_vectors.py");
+        Self::load(input, "rt8.ivf", EncoderConfig::realtime(1280, 720, 1000))
+    }
+
+    /// The second, `rt8cut.ivf`: 651x357 through two scene cuts, a rising
+    /// noise level and a fade (`common::cut_reference_input`).
+    fn second() -> Self {
+        let input = common::cut_reference_input(shown)
+            .expect("the full suite is not fetched: python gui/video/vp9/tools/fetch_vectors.py");
+        let (w, h) = (common::CUT_WIDTH, common::CUT_HEIGHT);
+        let config =
+            EncoderConfig::realtime(u32::try_from(w).unwrap(), u32::try_from(h).unwrap(), 600);
+        Self::load(input, "rt8cut.ivf", config)
+    }
+
+    /// The one `VP9_TRACE_INPUT` names: `rt8` (the default) or `rt8cut`.
+    fn from_env() -> Self {
+        match std::env::var("VP9_TRACE_INPUT").as_deref() {
+            Ok("rt8cut") => Self::second(),
+            Ok("rt8") | Err(_) => Self::first(),
+            Ok(other) => panic!("VP9_TRACE_INPUT={other}: rt8 or rt8cut"),
+        }
+    }
+}
+
+/// The encoder's own decisions on a reference's input, traced: every frame
 /// is coded with [`Encoder::encode`], its decisions logged in the format of
 /// the instrumented libvpx (`crate::enc::trace`) to the file `VP9_TRACE`
 /// names (or `vp9-rust.trace` in the temporary directory), and each frame
-/// compared with libvpx's. The trace is for finding the first decision
-/// that differs, against libvpx's own: `tools/trace/README.md`.
+/// compared with libvpx's. `VP9_TRACE_INPUT` picks the reference (`rt8`, the
+/// default, or `rt8cut`) and `VP9_TRACE_FRAMES` how many of its frames. The
+/// trace is for finding the first decision that differs, against libvpx's
+/// own: `tools/trace/README.md`.
 #[test]
 #[ignore = "needs the full vector suite: python gui/video/vp9/tools/fetch_vectors.py"]
 fn own_decisions_traced() {
-    let input = reference_input()
-        .expect("the full suite is not fetched: python gui/video/vp9/tools/fetch_vectors.py");
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/encoder/rt8.ivf");
-    let reference = common::read_ivf(&std::fs::read(path).unwrap()).unwrap();
+    let reference = Reference::from_env();
     let frames: usize = std::env::var("VP9_TRACE_FRAMES")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(30);
-    let mut enc = Encoder::new(EncoderConfig::realtime(1280, 720, 1000)).unwrap();
+        .unwrap_or(reference.frames.len());
+    let mut enc = Encoder::new(reference.config).unwrap();
     crate::enc::trace::start();
     let mut first_bad = None;
-    for (i, (picture, want)) in input
+    for (i, (picture, want)) in reference
+        .input
         .iter()
-        .zip(&reference.packets)
+        .zip(&reference.frames)
         .take(frames)
         .enumerate()
     {
-        let planes = [0, 1, 2].map(|p| picture.plane8(p).unwrap());
-        let got = enc.encode(planes).unwrap();
+        let got = enc.encode(views(picture)).unwrap();
         if &got != want && first_bad.is_none() {
             first_bad = Some((i, got.len(), want.len()));
         }
@@ -155,25 +231,17 @@ fn own_decisions_traced() {
     );
 }
 
-/// Every frame of libvpx's reference encode, coded again from libvpx's own
-/// decisions, is libvpx's frame byte for byte.
-#[test]
-#[ignore = "needs the full vector suite: python gui/video/vp9/tools/fetch_vectors.py"]
-fn libvpxs_decisions_give_libvpxs_frames() {
-    let input = reference_input()
-        .expect("the full suite is not fetched: python gui/video/vp9/tools/fetch_vectors.py");
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/encoder/rt8.ivf");
-    let reference = common::read_ivf(&std::fs::read(path).unwrap()).unwrap();
-    assert_eq!((input.len(), reference.packets.len()), (30, 30));
-    let mut enc = Encoder::new(EncoderConfig::realtime(1280, 720, 1000)).unwrap();
+/// Every frame of `reference`, coded again from libvpx's own decisions, is
+/// libvpx's frame byte for byte.
+fn replay(reference: &Reference) {
+    let mut enc = Encoder::new(reference.config).unwrap();
     let mut dec = Decoder::new();
-    for (i, (picture, want)) in input.iter().zip(&reference.packets).enumerate() {
+    for (i, (picture, want)) in reference.input.iter().zip(&reference.frames).enumerate() {
         dec.decode(want).unwrap().unwrap();
         let (base_qindex, filter_level, seg) = dec.last_frame_settings();
         let mi = dec.last_mi().unwrap().clone();
-        let planes = [0, 1, 2].map(|p| picture.plane8(p).unwrap());
         let got = if i == 0 {
-            enc.encode(planes).unwrap()
+            enc.encode(views(picture)).unwrap()
         } else {
             let mut d = Replay { mi: &mi };
             let opts = FrameOptions {
@@ -185,7 +253,8 @@ fn libvpxs_decisions_give_libvpxs_frames() {
                     seg,
                 }),
             };
-            enc.encode_frame(planes, Some(&mut d), opts).unwrap()
+            enc.encode_frame(views(picture), Some(&mut d), opts)
+                .unwrap()
         };
         let first = got.iter().zip(want.iter()).position(|(a, b)| a != b);
         assert!(
@@ -195,4 +264,21 @@ fn libvpxs_decisions_give_libvpxs_frames() {
             want.len()
         );
     }
+}
+
+/// Every frame of the first reference encode, coded again from libvpx's own
+/// decisions, is libvpx's frame byte for byte.
+#[test]
+#[ignore = "needs the full vector suite: python gui/video/vp9/tools/fetch_vectors.py"]
+fn libvpxs_decisions_give_libvpxs_frames() {
+    replay(&Reference::first());
+}
+
+/// The same for the second: blocks over the picture's edges predict from
+/// the reconstruction's extended edges as libvpx's do, and the frames after
+/// a scene cut, a golden refresh and a fade are libvpx's.
+#[test]
+#[ignore = "needs the full vector suite: python gui/video/vp9/tools/fetch_vectors.py"]
+fn libvpxs_decisions_give_libvpxs_frames_through_cuts_noise_and_edges() {
+    replay(&Reference::second());
 }

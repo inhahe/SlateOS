@@ -889,10 +889,11 @@ mod tests {
     use super::*;
 
     // The expected values come from libyuv 1924 (`644251f2`) built with
-    // `LIBYUV_DISABLE_X86` -- its C, as MSVC's x86-64 build runs it -- and a
-    // harness that fills each case's source as `source` does, scales it
-    // with `ScalePlane` (8-bit) or `ScalePlane_12` (10- and 12-bit) and
-    // `kFilterBox`, and hashes the result as `Fnv::plane` does.
+    // `LIBYUV_DISABLE_X86` -- its C, as MSVC's x86-64 build runs it -- and
+    // `tools/libyuv_scale_reference.cc`, which fills each case's source as
+    // `source` does, scales it with `ScalePlane` (8-bit) or `ScalePlane_12`
+    // (10- and 12-bit) and `kFilterBox`, and hashes the result as
+    // `Fnv::plane` does. Its `cases` mode prints `CASES`' lines.
 
     /// How a case's source is filled.
     #[derive(Clone, Copy, Debug)]

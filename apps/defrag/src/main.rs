@@ -1955,6 +1955,15 @@ const TICK: std::time::Duration = std::time::Duration::from_millis(16);
 fn handle_event(ui: &mut DefragUI, event: &Event) -> EventResult {
     match event {
         Event::Mouse(m) => match m.kind {
+            // The card is modal for the pointer as it is for the keys: a
+            // press, with any button, puts it away rather than reaching the
+            // control drawn under it -- Defragment among them -- and the
+            // wheel scrolls nothing it covers.
+            MouseEventKind::Press(_) if ui.show_help => {
+                ui.show_help = false;
+                EventResult::Consumed
+            }
+            MouseEventKind::Scroll { .. } if ui.show_help => EventResult::Ignored,
             MouseEventKind::Press(MouseButton::Left) => ui.handle_click(m.x, m.y),
             MouseEventKind::Scroll { dy, .. } => ui.handle_scroll(m.x, m.y, dy),
             _ => EventResult::Ignored,
@@ -4458,6 +4467,60 @@ mod tests {
         assert_ne!(ui.file_scroll_offset, 0);
         probe::click(&mut ui, Target::FileHeader(FileSortColumn::Path));
         assert_eq!(ui.file_scroll_offset, 0);
+    }
+
+    /// **A press while the card is up puts it away and does nothing else,
+    /// and the wheel scrolls nothing under it.** A press used to go straight
+    /// through the card to the control drawn under it. The controls at the
+    /// end are the same press and turn with the card down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let mut ui = populated_ui();
+        ui.set_view_tab(ViewTab::FileList);
+        let (cx, cy) = Layout::new(ui.width, ui.height).content.centre();
+        let wheel = |ui: &mut DefragUI| {
+            handle_event(
+                ui,
+                &Event::Mouse(MouseEvent {
+                    x: cx,
+                    y: cy,
+                    kind: MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+                }),
+            )
+        };
+        let header = Target::FileHeader(FileSortColumn::Path);
+        let column = ui.file_sort_column;
+
+        probe::key(&mut ui, &probe::press(Key::F1));
+        assert!(ui.show_help);
+        wheel(&mut ui);
+        assert_eq!(
+            ui.file_scroll_offset, 0,
+            "the wheel scrolled the list under the card"
+        );
+        assert_eq!(probe::click(&mut ui, header), EventResult::Consumed);
+        assert!(!ui.show_help, "the press did not put the card away");
+        assert_eq!(
+            ui.file_sort_column, column,
+            "the press went through the card to a column's header"
+        );
+
+        // Any button: the right one does nothing to a control, but it is
+        // still a press on the card.
+        probe::key(&mut ui, &probe::press(Key::F1));
+        probe::click_with(&mut ui, header, MouseButton::Right);
+        assert!(!ui.show_help, "a right-button press left the card up");
+
+        wheel(&mut ui);
+        assert_ne!(
+            ui.file_scroll_offset, 0,
+            "control: the wheel scrolls nothing"
+        );
+        probe::click(&mut ui, header);
+        assert_ne!(
+            ui.file_sort_column, column,
+            "control: the press does nothing even with the card down"
+        );
     }
 
     #[test]

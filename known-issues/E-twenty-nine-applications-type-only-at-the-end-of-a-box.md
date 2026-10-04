@@ -24,9 +24,9 @@ the form), credmanager (the entry form, the master password, search),
 dbviewer (cell editing), defrag (the exclusion box), diagram (a shape's
 label), dictionary (the query), diskanalyzer (the path), editor (the find
 bar), filesearch (the query), hexeditor (search and Go To), kanban (its
-input), lockscreen (the password), logviewer (search), mindmap (a node's
-text and its search), passwordgen (its input), startupmanager (the dialog
-and search), tmux (its command prompt), undelete (search).
+input), lockscreen (the password), mindmap (a node's text and its search),
+passwordgen (its input), startupmanager (the dialog and search), tmux (its
+command prompt), undelete (search).
 
 Not among them: `terminal`, whose typing goes to the shell's own line
 editor; `typingtutor`, where a line typed straight through is the exercise;
@@ -81,4 +81,4 @@ the task dialog's boxes, the day of the month and the interval as digits);
 musicplayer (2026-10-04: the search box, which Enter now leaves on screen
 with the search it filters by); devicemanager (2026-10-04: the search box);
 filediff (2026-10-04: the find bar); ircclient (2026-10-04: the message
-line).
+line); logviewer (2026-10-04: the search box).

@@ -399,10 +399,12 @@ MUTATIONS = [
     ),
     (
         "the chords stop working while a search is typed",
-        "        // Chords first, and apart.",
-        "        if self.search_focused {\n            return self.handle_key_search(key);\n        }\n"
-        "        // Chords first, and apart.",
-        ["the_chords_and_f1_work_while_a_search_is_being_typed"],
+        "        if textline::is_ctrl_chord(key.modifiers) {\n            return None;\n        }\n        Some(EventResult::Ignored)\n",
+        "        Some(EventResult::Ignored)\n",
+        [
+            "the_chords_and_f1_work_while_a_search_is_being_typed",
+            "the_search_box_keeps_the_lists_keys_and_passes_the_windows_chords",
+        ],
     ),
     (
         "O does not filter by source",
@@ -453,18 +455,13 @@ MUTATIONS = [
         "        if key.modifiers.alt {\n            return EventResult::Ignored;\n        }\n        match key.key {",
         ["a_command_types_nothing_and_alt_or_windows_is_no_shortcut"],
     ),
-    (
-        "the search box types a command's letter",
-        "                if !textline::types_into_field(key) {",
-        "                if key.text.is_empty() {",
-        ["a_command_types_nothing_and_alt_or_windows_is_no_shortcut"],
-    ),
-    (
-        "the search box refuses what AltGr types",
-        "                if !textline::types_into_field(key) {",
-        "                if !textline::types_into_field(key) || key.modifiers.ctrl {",
-        ["altgr_types_into_the_search_box_and_runs_no_chord"],
-    ),
+    # No rows for "the search box types a command's letter" or "refuses
+    # what AltGr types": since 2026-10-04 the box's typing is
+    # textline::apply_key's, which makes both distinctions itself, in its own
+    # crate and with its own tests;
+    # a_command_types_nothing_and_alt_or_windows_is_no_shortcut and
+    # altgr_types_into_the_search_box_and_runs_no_chord still hold the box to
+    # them.
 ]
 
 MODAL = "the_shortcut_list_takes_every_key_while_it_is_up"
@@ -534,9 +531,86 @@ MUTATIONS += [
     ),
     (
         "the caret is at the start of the query",
-        "                cursor: text::TextCursor::from(self.filter.search_query.len()),\n",
-        "                cursor: text::TextCursor::from(0),\n",
+        "                cursor: self.search_cursor(),\n",
+        "                cursor: text::TextCursor::default(),\n",
         [CARET],
+    ),
+]
+
+# The search box edits at a caret (2026-10-04,
+# known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box): it
+# took typing at its end and Backspace from it, and nothing else.
+EDITS = "the_search_box_edits_at_a_caret"
+KEEPS = "the_search_box_keeps_the_lists_keys_and_passes_the_windows_chords"
+SLASH = "slash_selects_what_the_search_box_holds"
+SHOWN = "the_box_edits_the_search_it_shows"
+
+MUTATIONS += [
+    (
+        "a plain key the box does not answer reaches the list",
+        "            return None;\n        }\n        Some(EventResult::Ignored)\n    }\n",
+        "            return None;\n        }\n        None\n    }\n",
+        [KEEPS],
+    ),
+    (
+        "a key that changes nothing in the box is a redraw",
+        "            return Some(if moved {\n                EventResult::Consumed\n            } else {\n                EventResult::Ignored\n            });\n",
+        "            return Some(EventResult::Consumed);\n",
+        [KEEPS, "a_search_finds_lines_and_backspace_gives_them_back"],
+    ),
+    (
+        "a caret moved is not drawn",
+        "            return Some(if moved {\n                EventResult::Consumed\n            } else {\n                EventResult::Ignored\n            });\n",
+        "            return Some(EventResult::Ignored);\n",
+        [EDITS],
+    ),
+    (
+        "/ does not select what the box holds",
+        "        self.search_editor.select_all();\n",
+        "",
+        [SLASH],
+    ),
+    (
+        "a cut or a copy takes nothing to the clipboard",
+        "            self.search_clipboard = copied;\n",
+        "            let _ = copied;\n",
+        [EDITS],
+    ),
+    (
+        "an edit does not count the matches again",
+        "            self.filter.search_query = self.search_editor.text().to_owned();\n            self.update_search();\n",
+        "            self.filter.search_query = self.search_editor.text().to_owned();\n",
+        [EDITS],
+    ),
+    (
+        "a key finds the editor holding another search",
+        "        if self.search_editor.text() != self.filter.search_query {\n            self.search_editor.set_text(&self.filter.search_query);\n        }\n        let before = (\n",
+        "        let before = (\n",
+        [SHOWN],
+    ),
+    (
+        "a press finds the editor holding another search",
+        "        self.search_focused = true;\n        if self.search_editor.text() != self.filter.search_query {\n",
+        "        self.search_focused = true;\n        if false {\n",
+        [SHOWN],
+    ),
+    (
+        "a press puts the caret at the start",
+        "            x - rect.x - SEARCH_TEXT_INSET,\n",
+        "            0.0,\n",
+        [EDITS],
+    ),
+    (
+        "a press in the box does not place the caret",
+        "                    self.press_search(rect, event.x);\n                    return EventResult::Consumed;\n",
+        "                    let _ = rect;\n",
+        [EDITS],
+    ),
+    (
+        "the selection is not drawn",
+        "                selection_anchor: if editing {\n",
+        "                selection_anchor: if false {\n",
+        [EDITS],
     ),
 ]
 

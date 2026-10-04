@@ -194,16 +194,18 @@ MAIN = [
         '            Key::Tab if self.dialog == DialogKind::CreateSnapshot => {',
         ['a_chord_is_neither_a_restore_key_nor_typing_and_altgr_types'],
     ),
+    # The form's keys are textline's editor's since 2026-10-04, which refuses
+    # Alt's and the Windows key's chords and types only what a key typed: the
+    # rule is textline's, and its own table covers it. What is this program's
+    # is handing the editor the key as it came -- chord and all.
     (
-        'Alt+Backspace deletes from the form',
-        '                    && !textline::is_alt_or_windows_chord(key.modifiers) =>',
-        '                    =>',
-        ['a_chord_is_neither_a_restore_key_nor_typing_and_altgr_types'],
-    ),
-    (
-        "the form types a command's letter",
-        '            _ if self.dialog == DialogKind::CreateSnapshot && textline::types_into_field(key) => {',
-        '            _ if self.dialog == DialogKind::CreateSnapshot && key.types_text() => {',
+        "the form's editor is given the key without its chord",
+        '            &mut self.form_editor,\n            key,\n',
+        '            &mut self.form_editor,\n'
+        '            &KeyEvent {\n'
+        '                modifiers: guitk::event::Modifiers::NONE,\n'
+        '                ..key.clone()\n'
+        '            },\n',
         ['a_chord_is_neither_a_restore_key_nor_typing_and_altgr_types'],
     ),
 ]
@@ -257,6 +259,172 @@ MAIN += [
         '        if self.show_help && !matches!(mouse.kind, MouseEventKind::Scroll { .. }) {\n'
         '            return match mouse.kind {\n',
         [CARD],
+    ),
+]
+
+# The Create Snapshot form's two boxes and the search box are the toolkit's
+# field; the form's are edited by textline's editor, and the description's
+# text is drawn at last (2026-10-04; lane C, c-e-a-theme-can-shape-the-controls).
+FORM = "the_form_boxes_are_the_toolkits_field"
+EDITS = "the_form_boxes_edit_like_a_field"
+SEARCH = "the_search_box_is_the_toolkits_field"
+FOLDS = "the_search_finds_a_name_whatever_the_case_of_its_letters"
+SEARCH_FOCUS = (
+    "            focused: self.dialog == DialogKind::None && self.progress.is_none() && !self.show_help,\n"
+)
+
+MAIN += [
+    (
+        "the form box with the keyboard has no mark",
+        "            focused: field == self.form_field && !self.show_help,\n",
+        "            focused: false,\n",
+        [FORM],
+    ),
+    (
+        "the form keeps its mark under the list of keys",
+        "            focused: field == self.form_field && !self.show_help,\n",
+        "            focused: field == self.form_field,\n",
+        [FORM],
+    ),
+    (
+        "the empty name says nothing of what it will be called",
+        "            self.render_form_box(rt, field, rect, &self.default_point_name());\n",
+        '            self.render_form_box(rt, field, rect, "Enter snapshot name...");\n',
+        [FORM],
+    ),
+    (
+        "the description is never drawn",
+        '            self.render_form_box(rt, field, rect, "Optional");\n',
+        "            let _ = (field, rect);\n",
+        [FORM],
+    ),
+    (
+        "an empty box with the keyboard has no caret",
+        "                textedit::push_caret(rt, x, y, line, self.palette.text, textedit::CARET_WIDTH);\n",
+        "                let _ = (x, y, line);\n",
+        [FORM, SEARCH],
+    ),
+    (
+        "Tab leaves the keyboard where it was",
+        "                self.focus_form_field(match self.form_field {\n",
+        "                let _ = (match self.form_field {\n",
+        [FORM, EDITS],
+    ),
+    (
+        "the form types only at its end",
+        "        if self.form_editor.text() != text {\n"
+        "            self.form_editor.set_text(&text);\n"
+        "        }\n"
+        "        let edit = textline::apply_key(\n",
+        "        if textline::types_into_field(key) {\n"
+        "            self.form_text_mut().push_str(&key.text);\n"
+        "            return EventResult::Consumed;\n"
+        "        }\n"
+        "        if self.form_editor.text() != text {\n"
+        "            self.form_editor.set_text(&text);\n"
+        "        }\n"
+        "        let edit = textline::apply_key(\n",
+        [EDITS],
+    ),
+    (
+        "a box whose text changed is edited as it used to read",
+        "        if self.form_editor.text() != text {\n"
+        "            self.form_editor.set_text(&text);\n"
+        "        }\n"
+        "        let edit = textline::apply_key(\n",
+        "        let edit = textline::apply_key(\n",
+        [EDITS],
+    ),
+    (
+        "a box holds any length",
+        "            FORM_CAPACITY,\n            &self.form_clipboard,\n",
+        "            usize::MAX,\n            &self.form_clipboard,\n",
+        [EDITS],
+    ),
+    (
+        "a copy or a cut takes nothing to the clipboard",
+        "            self.form_clipboard = copied;\n",
+        "            let _ = copied;\n",
+        [EDITS],
+    ),
+    (
+        "a key the box does not answer is taken",
+        "        if !edit.handled {\n            return EventResult::Ignored;\n        }\n",
+        "",
+        [EDITS],
+    ),
+    (
+        "an edit is not written back to the form",
+        "            *self.form_text_mut() = edited;\n",
+        "            let _ = edited;\n",
+        [EDITS],
+    ),
+    (
+        "a press in a box does nothing",
+        "                    self.press_form_field(field, rect, x);\n",
+        "                    let _ = (field, rect);\n",
+        [EDITS],
+    ),
+    (
+        "a press leaves the caret where it was",
+        "        self.form_editor.set_selection_anchor(None);\n"
+        "        self.form_editor.set_cursor(cursor);\n",
+        "        let _ = cursor;\n",
+        [EDITS],
+    ),
+    (
+        "a press moves the keyboard but not the box's text",
+        "        } else {\n            self.focus_form_field(field);\n        }\n",
+        "        } else {\n            self.form_field = field;\n        }\n",
+        [EDITS],
+    ),
+    (
+        "the search box never has the keyboard",
+        SEARCH_FOCUS,
+        "            focused: false,\n",
+        [SEARCH],
+    ),
+    (
+        "the search box keeps its mark under a dialog",
+        SEARCH_FOCUS,
+        "            focused: self.progress.is_none() && !self.show_help,\n",
+        [SEARCH],
+    ),
+    (
+        "the search box keeps its mark under the work",
+        SEARCH_FOCUS,
+        "            focused: self.dialog == DialogKind::None && !self.show_help,\n",
+        [SEARCH],
+    ),
+    (
+        "the search box keeps its mark under the list of keys",
+        SEARCH_FOCUS,
+        "            focused: self.dialog == DialogKind::None && self.progress.is_none(),\n",
+        [SEARCH],
+    ),
+    (
+        "a search that finds nothing is not red",
+        "            invalid: !self.search_query.is_empty() && self.visible_rows().is_empty(),\n",
+        "            invalid: false,\n",
+        [SEARCH],
+    ),
+    (
+        "the search's caret is at its start",
+        "                TextCursor::from(self.search_query.len()),\n",
+        "                TextCursor::default(),\n",
+        [SEARCH],
+    ),
+    (
+        "the search folds only ASCII's letters",
+        "        let q = self.search_query.to_lowercase();\n",
+        "        let q = self.search_query.to_ascii_lowercase();\n",
+        [FOLDS],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [FORM, SEARCH],
     ),
 ]
 

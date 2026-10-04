@@ -249,7 +249,12 @@ fn a_damaged_file_plays_what_it_can_and_never_panics() {
             }
         };
         let mut damaged = bytes.clone();
-        let headers = 600.min(bytes.len());
+        // The headers -- everything before the first Cluster's ID -- byte by
+        // byte; the clusters, whose damage the demuxer reads past, sparsely.
+        let headers = bytes
+            .windows(4)
+            .position(|w| w == [0x1F, 0x43, 0xB6, 0x75])
+            .unwrap_or(bytes.len());
         let positions = (0..headers).chain((headers..bytes.len()).step_by(61));
         for at in positions {
             damaged[at] ^= 0xff;

@@ -6,10 +6,16 @@
 //! converts only the ones it shows ([`Picture::to_frame`]).
 //!
 //! The conversion is `gui/video/yuv`'s port of libavif's, by the colour
-//! [`crate::colour`] settles on. VP9's 4:4:0 -- chroma at full width and
-//! half height, which neither libyuv nor libavif converts -- has its chroma
-//! brought to the full height first, as libyuv brings 4:2:0's chroma down
-//! its columns, and is then converted as 4:4:4.
+//! [`crate::colour`] settles on. A frame large enough to be worth it is
+//! converted in bands of rows, one to each core (`to_argb_rows`, whose every
+//! band is exactly those rows of the whole picture). VP9's 4:4:0 -- chroma
+//! at full width and half height, which neither libyuv nor libavif converts
+//! -- has its chroma brought to the full height first, as libyuv brings
+//! 4:2:0's chroma down its columns, and is then converted as 4:4:4.
+
+use std::num::NonZeroUsize;
+use std::sync::OnceLock;
+use std::thread;
 
 use rav1d::safe as av1;
 use yuv::reformat::{self, Format, Reformat};
@@ -128,8 +134,8 @@ impl Picture {
 }
 
 /// A sample `yuv` converts, which a weighted average can be written back
-/// into.
-trait Sample: Reformat {
+/// into, and which threads converting bands of one picture can share.
+trait Sample: Reformat + Sync {
     fn narrow(v: u32) -> Self;
 }
 
@@ -183,7 +189,7 @@ impl<T: Sample> Planar<'_, T> {
             alpha: self.alpha,
             alpha_premultiplied: false,
         };
-        reformat::to_argb_into(&picture, out).map_err(Error::Colour)
+        in_bands(&picture, out)
     }
 
     /// 4:4:0: the chroma brought to the full height, then 4:4:4.
@@ -199,6 +205,81 @@ impl<T: Sample> Planar<'_, T> {
         };
         full.convert(colour, out)
     }
+}
+
+/// The fewest pixels worth a thread of their own: about half a millisecond of
+/// converting (some 4 ns a pixel, `gui/video/yuv/tests/bench.rs`), against
+/// the tens of microseconds a thread takes to start. So a 1080p frame (2
+/// million pixels) is split as many ways as there are cores, up to fifteen,
+/// and a small one is converted where it is.
+const MIN_BAND_PIXELS: usize = 1 << 17;
+
+/// How many threads a picture's bands may use: the machine's cores, asked
+/// once.
+fn cores() -> usize {
+    static CORES: OnceLock<usize> = OnceLock::new();
+    *CORES.get_or_init(|| thread::available_parallelism().map_or(1, NonZeroUsize::get))
+}
+
+/// `picture`'s pixels into `out`, a band of rows to each of the machine's
+/// cores (`yuv::reformat::to_argb_rows`, whose every band is exactly those
+/// rows of the whole picture): 8 ms for an HD frame on one thread becomes a
+/// fraction of that, for every frame a player shows.
+///
+/// # Errors
+///
+/// As `yuv::reformat::to_argb_into`; `out` is then empty.
+fn in_bands<T: Sample>(
+    picture: &reformat::Picture<'_, T>,
+    out: &mut Vec<u32>,
+) -> Result<(), Error> {
+    let pixels = picture.width.saturating_mul(picture.height);
+    // At least two rows a band, as split takes them.
+    let bands = (pixels / MIN_BAND_PIXELS).min(picture.height / 2);
+    split(picture, out, cores().min(bands))
+}
+
+/// [`in_bands`] in `bands` bands, a thread each; one or none on the calling
+/// thread.
+fn split<T: Sample>(
+    picture: &reformat::Picture<'_, T>,
+    out: &mut Vec<u32>,
+    bands: usize,
+) -> Result<(), Error> {
+    let (width, height) = (picture.width, picture.height);
+    if bands <= 1 {
+        return reformat::to_argb_into(picture, out).map_err(Error::Colour);
+    }
+    let size = Error::Colour(reformat::Error::Size);
+    let count = width.checked_mul(height).ok_or(size)?;
+    out.clear();
+    out.try_reserve_exact(count).map_err(|_| size)?;
+    out.resize(count, 0);
+    // Whole pairs of rows to a band: 4:2:0's chroma comes a pair at a time.
+    let rows = height.div_ceil(bands).next_multiple_of(2);
+    let band = rows.checked_mul(width).ok_or(size)?;
+    let results: Vec<Result<(), reformat::Error>> = thread::scope(|scope| {
+        let workers: Vec<_> = out
+            .chunks_mut(band)
+            .zip((0..).step_by(rows))
+            .map(|(pixels, first)| {
+                scope.spawn(move || reformat::to_argb_rows(picture, first, pixels))
+            })
+            .collect();
+        workers
+            .into_iter()
+            .map(|worker| {
+                worker
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect()
+    });
+    if let Some(Err(e)) = results.into_iter().find(Result::is_err) {
+        out.clear();
+        return Err(Error::Colour(e));
+    }
+    Ok(())
 }
 
 // Views copy whatever their samples are, so not derived.
@@ -477,5 +558,102 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, [0xff00_0000, 0xffff_ffff]);
+    }
+
+    /// A picture split across threads in any number of bands -- more bands
+    /// than rows to spare, bands of odd and even heights, 4:2:0 and 4:2:2 at
+    /// two depths -- is the picture converted whole.
+    #[test]
+    fn bands_on_threads_are_the_whole_picture() {
+        fn check<T: Sample + TryFrom<u32> + Default>(subsampling: (u8, u8), depth: u8) {
+            let (width, height): (usize, usize) = (9, 23);
+            let half = |n: usize, ss: u8| if ss == 1 { n.div_ceil(2) } else { n };
+            let (cw, ch) = (half(width, subsampling.0), half(height, subsampling.1));
+            let fill = |w: usize, h: usize, seed: u32| PlaneBuf::<T> {
+                width: w,
+                height: h,
+                samples: (0..w * h)
+                    .map(|i| {
+                        let v = (u32::try_from(i).unwrap().wrapping_mul(2_654_435_761) ^ seed) >> 7;
+                        T::try_from(v % (1 << depth)).ok().unwrap_or_default()
+                    })
+                    .collect(),
+            };
+            let (y, u, v) = (fill(width, height, 1), fill(cw, ch, 2), fill(cw, ch, 3));
+            let picture = reformat::Picture {
+                width,
+                height,
+                depth,
+                format: if subsampling.1 == 1 {
+                    Format::Yuv420
+                } else {
+                    Format::Yuv422
+                },
+                matrix: 1,
+                primaries: 1,
+                full_range: false,
+                y: y.view(),
+                u: Some(u.view()),
+                v: Some(v.view()),
+                alpha: None,
+                alpha_premultiplied: false,
+            };
+            let whole = reformat::to_argb(&picture).unwrap();
+            for bands in [2, 3, 5, 11, 12, 40] {
+                let mut out = Vec::new();
+                split(&picture, &mut out, bands).unwrap();
+                assert_eq!(out, whole, "{depth}-bit {subsampling:?} in {bands} bands");
+            }
+        }
+        check::<u8>((1, 1), 8);
+        check::<u8>((1, 0), 8);
+        check::<u16>((1, 1), 10);
+        check::<u16>((1, 0), 12);
+    }
+
+    /// How much the bands save, measured: a 1920x1080 8-bit 4:2:0 frame
+    /// converted on one thread and in bands on every core, back to back, the
+    /// fastest of five each -- the ratio holds on a busy machine where the
+    /// absolute times do not. Run with `--release --ignored --nocapture`.
+    #[test]
+    #[ignore = "a measurement: run with --release --ignored --nocapture"]
+    fn bench_bands() {
+        let (width, height) = (1920usize, 1080usize);
+        let fill = |w: usize, h: usize| PlaneBuf::<u8> {
+            width: w,
+            height: h,
+            samples: (0..w * h).map(|i| (i * 131 % 251) as u8).collect(),
+        };
+        let (y, u, v) = (fill(width, height), fill(960, 540), fill(960, 540));
+        let picture = reformat::Picture {
+            width,
+            height,
+            depth: 8,
+            format: Format::Yuv420,
+            matrix: 1,
+            primaries: 1,
+            full_range: false,
+            y: y.view(),
+            u: Some(u.view()),
+            v: Some(v.view()),
+            alpha: None,
+            alpha_premultiplied: false,
+        };
+        let mut out = Vec::new();
+        let mut time = |bands: usize| {
+            (0..5)
+                .map(|_| {
+                    let start = std::time::Instant::now();
+                    split(&picture, &mut out, bands).unwrap();
+                    start.elapsed().as_secs_f64() * 1000.0
+                })
+                .fold(f64::MAX, f64::min)
+        };
+        let one = time(1);
+        let many = time(cores().min(width * height / MIN_BAND_PIXELS));
+        println!(
+            "1920x1080 4:2:0: {one:.2} ms on one thread, {many:.2} ms in bands on {} cores",
+            cores()
+        );
     }
 }

@@ -31,7 +31,7 @@
 
 use alloc::vec::Vec;
 
-use crate::convert::{self as libyuv, Constants, Eight, Planes, Ten};
+use crate::convert::{self as libyuv, Constants, Eight, Planes, Rows, Ten};
 use crate::{Plane, PlaneBuf, Sample};
 
 // H.273's matrix coefficients, as libavif names them.
@@ -149,21 +149,37 @@ mod sealed {
 
 /// The sample sizes libavif converts, each with libyuv's functions for it.
 pub trait Reformat: Sample + sealed::Sealed {
-    /// `avifImageYUVToRGBLibYUV` for this sample size: whether libyuv
-    /// converted the picture, and whether the alpha it wrote is final.
+    /// `avifImageYUVToRGBLibYUV` for this sample size, for the band of rows
+    /// `out` holds from `first`: whether libyuv converted the picture, and
+    /// whether the alpha it wrote is final.
     #[doc(hidden)]
-    fn libyuv(picture: &Picture<'_, Self>, k: &Constants, out: &mut [u32]) -> (bool, bool);
+    fn libyuv(
+        picture: &Picture<'_, Self>,
+        k: &Constants,
+        first: usize,
+        out: &mut [u32],
+    ) -> (bool, bool);
 }
 
 impl Reformat for u8 {
-    fn libyuv(picture: &Picture<'_, Self>, k: &Constants, out: &mut [u32]) -> (bool, bool) {
-        libyuv_eight(picture, k, out)
+    fn libyuv(
+        picture: &Picture<'_, Self>,
+        k: &Constants,
+        first: usize,
+        out: &mut [u32],
+    ) -> (bool, bool) {
+        libyuv_eight(picture, k, first, out)
     }
 }
 
 impl Reformat for u16 {
-    fn libyuv(picture: &Picture<'_, Self>, k: &Constants, out: &mut [u32]) -> (bool, bool) {
-        libyuv_deep(picture, k, out)
+    fn libyuv(
+        picture: &Picture<'_, Self>,
+        k: &Constants,
+        first: usize,
+        out: &mut [u32],
+    ) -> (bool, bool) {
+        libyuv_deep(picture, k, first, out)
     }
 }
 
@@ -380,11 +396,20 @@ fn planes<'a, T>(picture: &Picture<'a, T>, with_alpha: bool) -> Option<Planes<'a
 
 /// `avifImageYUVToRGBLibYUV` for an 8-bit picture: whether it converted, and
 /// whether the alpha is final.
-fn libyuv_eight(picture: &Picture<'_, u8>, k: &Constants, out: &mut [u32]) -> (bool, bool) {
+fn libyuv_eight(
+    picture: &Picture<'_, u8>,
+    k: &Constants,
+    first: usize,
+    out: &mut [u32],
+) -> (bool, bool) {
     let width = picture.width;
+    let rows = Rows {
+        first,
+        height: picture.height,
+    };
     let has_alpha = picture.alpha.is_some();
     if picture.format == Format::Yuv400 {
-        libyuv::i400(k, picture.y, width, out);
+        libyuv::i400(k, picture.y, width, rows, out);
         // Without alpha in the picture, libyuv's opaque alpha is the answer.
         return (true, !has_alpha);
     }
@@ -392,9 +417,9 @@ fn libyuv_eight(picture: &Picture<'_, u8>, k: &Constants, out: &mut [u32]) -> (b
         return NOT_IMPLEMENTED;
     };
     match picture.format {
-        Format::Yuv420 => libyuv::i420_bilinear::<Eight>(k, &planes, width, out),
-        Format::Yuv422 => libyuv::i422_linear::<Eight>(k, &planes, width, out),
-        Format::Yuv444 | Format::Yuv400 => libyuv::i444::<Eight>(k, &planes, width, out),
+        Format::Yuv420 => libyuv::i420_bilinear::<Eight>(k, &planes, width, rows, out),
+        Format::Yuv422 => libyuv::i422_linear::<Eight>(k, &planes, width, rows, out),
+        Format::Yuv444 | Format::Yuv400 => libyuv::i444::<Eight>(k, &planes, width, rows, out),
     }
     (true, true)
 }
@@ -402,8 +427,17 @@ fn libyuv_eight(picture: &Picture<'_, u8>, k: &Constants, out: &mut [u32]) -> (b
 /// `avifImageYUVToRGBLibYUV` for a 10- or 12-bit picture: libyuv's deep
 /// functions where it has them (all of 10-bit colour; 12-bit 4:2:0 without
 /// alpha), and otherwise `avifImageDownshiftTo8bpc` and the 8-bit ones.
-fn libyuv_deep(picture: &Picture<'_, u16>, k: &Constants, out: &mut [u32]) -> (bool, bool) {
+fn libyuv_deep(
+    picture: &Picture<'_, u16>,
+    k: &Constants,
+    first: usize,
+    out: &mut [u32],
+) -> (bool, bool) {
     let width = picture.width;
+    let rows = Rows {
+        first,
+        height: picture.height,
+    };
     let has_alpha = picture.alpha.is_some();
     match (picture.depth, picture.format) {
         (10, Format::Yuv420 | Format::Yuv422 | Format::Yuv444) => {
@@ -411,9 +445,11 @@ fn libyuv_deep(picture: &Picture<'_, u16>, k: &Constants, out: &mut [u32]) -> (b
                 return NOT_IMPLEMENTED;
             };
             match picture.format {
-                Format::Yuv420 => libyuv::i420_bilinear::<Ten>(k, &planes, width, out),
-                Format::Yuv422 => libyuv::i422_linear::<Ten>(k, &planes, width, out),
-                Format::Yuv444 | Format::Yuv400 => libyuv::i444::<Ten>(k, &planes, width, out),
+                Format::Yuv420 => libyuv::i420_bilinear::<Ten>(k, &planes, width, rows, out),
+                Format::Yuv422 => libyuv::i422_linear::<Ten>(k, &planes, width, rows, out),
+                Format::Yuv444 | Format::Yuv400 => {
+                    libyuv::i444::<Ten>(k, &planes, width, rows, out);
+                }
             }
             (true, true)
         }
@@ -421,7 +457,7 @@ fn libyuv_deep(picture: &Picture<'_, u16>, k: &Constants, out: &mut [u32]) -> (b
             let Some(planes) = planes(picture, false) else {
                 return NOT_IMPLEMENTED;
             };
-            libyuv::i012(k, &planes, width, out);
+            libyuv::i012(k, &planes, width, rows, out);
             (true, !has_alpha)
         }
         (10 | 12, _) => {
@@ -429,8 +465,12 @@ fn libyuv_deep(picture: &Picture<'_, u16>, k: &Constants, out: &mut [u32]) -> (b
             // alpha stays deep; 4:2:2 and 4:4:4 take the 8-bit alpha
             // functions, so it is cut to 8 bits with the rest.
             let with_alpha = has_alpha && picture.format != Format::Yuv400;
-            let cut = Downshifted::of(picture, with_alpha);
-            let (converted, _) = libyuv_eight(&cut.picture(picture), k, out);
+            // Only the band's rows: grey, 4:2:2 and 4:4:4 convert a row at a
+            // time from that row's samples alone, so the band converts as the
+            // whole picture of just those rows.
+            let count = out.len().checked_div(width).unwrap_or(0);
+            let cut = Downshifted::of(picture, with_alpha, first, count);
+            let (converted, _) = libyuv_eight(&cut.picture(picture, count), k, 0, out);
             // Alpha is final if there was none, or if an 8-bit alpha function
             // carried the downshifted copy; grey's leaves it to libavif.
             (converted, !has_alpha || with_alpha)
@@ -449,8 +489,13 @@ struct Downshifted {
 }
 
 impl Downshifted {
-    fn of(picture: &Picture<'_, u16>, with_alpha: bool) -> Self {
-        let cut = |plane: Plane<'_, u16>| libyuv::convert_16_to_8(plane, picture.depth);
+    /// `picture`'s rows `first`..`first + count`, every plane's: for the
+    /// grey, 4:2:2 and 4:4:4 pictures this is used for, a plane's rows are
+    /// the picture's.
+    fn of(picture: &Picture<'_, u16>, with_alpha: bool, first: usize, count: usize) -> Self {
+        let cut = |plane: Plane<'_, u16>| {
+            libyuv::convert_16_to_8(rows_of(plane, first, count), picture.depth)
+        };
         Self {
             y: cut(picture.y),
             u: picture.u.map(cut),
@@ -463,11 +508,11 @@ impl Downshifted {
         }
     }
 
-    /// The 8-bit picture: `like`'s description at 8 bits.
-    fn picture(&self, like: &Picture<'_, u16>) -> Picture<'_, u8> {
+    /// The 8-bit picture of `height` rows: `like`'s description at 8 bits.
+    fn picture(&self, like: &Picture<'_, u16>, height: usize) -> Picture<'_, u8> {
         Picture {
             width: like.width,
-            height: like.height,
+            height,
             depth: 8,
             format: like.format,
             matrix: like.matrix,
@@ -479,6 +524,18 @@ impl Downshifted {
             alpha: self.alpha.as_ref().map(PlaneBuf::view),
             alpha_premultiplied: like.alpha_premultiplied,
         }
+    }
+}
+
+/// Rows `first`..`first + count` of `plane`, as a plane of their own: empty
+/// where the plane has none of them.
+fn rows_of<T>(plane: Plane<'_, T>, first: usize, count: usize) -> Plane<'_, T> {
+    let start = first.saturating_mul(plane.stride);
+    Plane {
+        samples: plane.samples.get(start..).unwrap_or_default(),
+        stride: plane.stride,
+        width: plane.width,
+        height: count.min(plane.height.saturating_sub(first)),
     }
 }
 
@@ -528,6 +585,43 @@ pub fn to_argb_into<T: Reformat>(
     out: &mut Vec<u32>,
 ) -> Result<(), Error> {
     out.clear();
+    let (state, count) = check(picture)?;
+    out.try_reserve_exact(count).map_err(|_| Error::Size)?;
+    out.resize(count, 0);
+    convert(picture, &state, 0, out);
+    Ok(())
+}
+
+/// [`to_argb`] for a band of the picture: rows `first` on, as many as `out`
+/// has room for, each exactly as the whole picture converts it. For a large
+/// picture converted on several threads, each its own band.
+///
+/// # Errors
+///
+/// As [`to_argb`]; and [`Error::Size`] for an `out` that is not whole rows,
+/// or rows past the picture's last.
+pub fn to_argb_rows<T: Reformat>(
+    picture: &Picture<'_, T>,
+    first: usize,
+    out: &mut [u32],
+) -> Result<(), Error> {
+    let (state, _) = check(picture)?;
+    let rows = out.len().checked_div(picture.width).ok_or(Error::Size)?;
+    let fits = out.len().is_multiple_of(picture.width)
+        && first
+            .checked_add(rows)
+            .is_some_and(|end| end <= picture.height);
+    if !fits {
+        return Err(Error::Size);
+    }
+    convert(picture, &state, first, out);
+    Ok(())
+}
+
+/// What a conversion reads, checked before anything is: the colour
+/// description, and the planes against the picture's size. The state the
+/// conversion runs on, and how many pixels the whole picture has.
+fn check<T>(picture: &Picture<'_, T>) -> Result<(State, usize), Error> {
     let state = prepare(picture)?;
     let (width, height) = (picture.width, picture.height);
     let count = width.checked_mul(height).ok_or(Error::Size)?;
@@ -550,19 +644,23 @@ pub fn to_argb_into<T: Reformat>(
     if !chroma_ok(&picture.u) || !chroma_ok(&picture.v) || !alpha_ok {
         return Err(Error::Size);
     }
-    out.try_reserve_exact(count).map_err(|_| Error::Size)?;
-    out.resize(count, 0);
+    Ok((state, count))
+}
 
+/// The conversion itself, of the band of rows `out` holds from `first`:
+/// `avifImageYUVToRGB` once [`check`] has passed.
+fn convert<T: Reformat>(picture: &Picture<'_, T>, state: &State, first: usize, out: &mut [u32]) {
+    let width = picture.width;
     // A straight-alpha destination from premultiplied colour.
     let mut unmultiply = picture.alpha.is_some() && picture.alpha_premultiplied;
 
     let (converted, alpha_done) = match libyuv_constants(picture) {
-        Some(k) => T::libyuv(picture, &k, out),
+        Some(k) => T::libyuv(picture, &k, first, out),
         None => NOT_IMPLEMENTED,
     };
     if !alpha_done {
         match &picture.alpha {
-            Some(alpha) => reformat_alpha(alpha, picture.depth, width, out),
+            Some(alpha) => reformat_alpha(alpha, picture.depth, width, first, out),
             None => fill_alpha(out),
         }
     }
@@ -578,16 +676,16 @@ pub fn to_argb_into<T: Reformat>(
                     state.depth == 8
                         && picture.format == Format::Yuv444
                         && picture.full_range
-                        && identity_full_range(picture, width, out)
+                        && identity_full_range(picture, width, first, out)
                 }
                 Mode::Coefficients => {
-                    fast_path(picture, &state, has_color, width, out);
+                    fast_path(picture, state, has_color, width, first, out);
                     true
                 }
                 Mode::YCgCo | Mode::YCgCoRe | Mode::YCgCoRo => false,
             };
         if !done {
-            slow_path(picture, &state, unmultiply, width, out);
+            slow_path(picture, state, unmultiply, width, first, out);
             // The slow path undoes premultiplication itself.
             unmultiply = false;
         }
@@ -596,7 +694,6 @@ pub fn to_argb_into<T: Reformat>(
         // `avifRGBImageUnpremultiplyAlpha`, which for 8-bit BGRA is libyuv's.
         libyuv::unattenuate(out);
     }
-    Ok(())
 }
 
 /// `avifReformatAlpha` into the top byte: a copy at 8 bits, and from deeper
@@ -609,9 +706,15 @@ pub fn to_argb_into<T: Reformat>(
     clippy::arithmetic_side_effects,
     reason = "samples are at most 16 bits, exactly representable as f32; the rounded value is clamped to 0..=255 before it is used"
 )]
-fn reformat_alpha<T: Sample>(alpha: &Plane<'_, T>, depth: u8, width: usize, out: &mut [u32]) {
+fn reformat_alpha<T: Sample>(
+    alpha: &Plane<'_, T>,
+    depth: u8,
+    width: usize,
+    first: usize,
+    out: &mut [u32],
+) {
     let max = ((1u32 << u32::from(depth).min(16)) - 1) as f32;
-    for (j, row) in out.chunks_exact_mut(width.max(1)).enumerate() {
+    for (j, row) in (first..).zip(out.chunks_exact_mut(width.max(1))) {
         for (px, &a) in row.iter_mut().zip(alpha.row(j)) {
             let a: u32 = a.into();
             let value = if depth == 8 {
@@ -633,11 +736,16 @@ fn fill_alpha(out: &mut [u32]) {
 }
 
 /// `avifImageIdentity8ToRGB8ColorFullRange`: G, B and R are Y, U and V.
-fn identity_full_range<T: Sample>(picture: &Picture<'_, T>, width: usize, out: &mut [u32]) -> bool {
+fn identity_full_range<T: Sample>(
+    picture: &Picture<'_, T>,
+    width: usize,
+    first: usize,
+    out: &mut [u32],
+) -> bool {
     let (Some(u), Some(v)) = (picture.u, picture.v) else {
         return false;
     };
-    for (j, row) in out.chunks_exact_mut(width.max(1)).enumerate() {
+    for (j, row) in (first..).zip(out.chunks_exact_mut(width.max(1))) {
         let samples = picture.y.row(j).iter().zip(u.row(j).iter().zip(v.row(j)));
         for (px, (&y, (&u, &v))) in row.iter_mut().zip(samples) {
             let (g, b, r): (u32, u32, u32) = (y.into(), u.into(), v.into());
@@ -718,11 +826,12 @@ fn fast_path<T: Sample>(
     state: &State,
     has_color: bool,
     width: usize,
+    first: usize,
     out: &mut [u32],
 ) {
     let (luma, chroma) = tables(state);
     let max = state.max_channel;
-    for (j, row) in out.chunks_exact_mut(width.max(1)).enumerate() {
+    for (j, row) in (first..).zip(out.chunks_exact_mut(width.max(1))) {
         let y_row = picture.y.row(j);
         let (u_row, v_row) = match (picture.u, picture.v) {
             (Some(u), Some(v)) if has_color => (u.row(j), v.row(j)),
@@ -759,6 +868,7 @@ fn slow_path<T: Sample>(
     state: &State,
     unmultiply: bool,
     width: usize,
+    first: usize,
     out: &mut [u32],
 ) {
     let (luma, chroma) = tables(state);
@@ -766,14 +876,16 @@ fn slow_path<T: Sample>(
     let max_f = max as f32;
     let (u_plane, v_plane) = (picture.u, picture.v);
     let has_color = u_plane.is_some() && v_plane.is_some() && picture.format != Format::Yuv400;
-    let height = out.len() / width.max(1);
+    // The whole picture's height: the adjacency at its last row depends on
+    // it, whichever band this is.
+    let height = picture.height;
     let sample = |plane: Option<Plane<'_, T>>, row: usize, col: usize| -> T {
         plane
             .and_then(|p| p.row(row).get(col).copied())
             .unwrap_or_default()
     };
     let (shift_x, shift_y) = (state.shift_x, state.shift_y);
-    for (j, row) in out.chunks_exact_mut(width.max(1)).enumerate() {
+    for (j, row) in (first..).zip(out.chunks_exact_mut(width.max(1))) {
         let uv_j = if has_color { j >> shift_y } else { 0 };
         let y_row = picture.y.row(j);
         let a_row = picture.alpha.map(|a| a.row(j));
@@ -895,6 +1007,7 @@ fn clamp_float(v: f32, max: f32) -> f32 {
 )]
 mod tests {
     use super::*;
+    use alloc::format;
     use alloc::vec;
 
     /// Planes for a `width` x `height` picture of `format`, every sample
@@ -1053,7 +1166,7 @@ mod tests {
             height: 1,
         };
         let mut out = vec![0u32; 3];
-        reformat_alpha(&plane, 10, 3, &mut out);
+        reformat_alpha(&plane, 10, 3, 0, &mut out);
         // 511 / 1023 * 255 + 0.5 = 127.88: 127.
         assert_eq!(
             out.iter().map(|px| px >> 24).collect::<Vec<_>>(),
@@ -1142,5 +1255,131 @@ mod tests {
         let mut out = vec![1u32; 4];
         assert_eq!(to_argb_into(&picture, &mut out), Err(Error::Size));
         assert!(out.is_empty());
+    }
+
+    /// Planes of varied samples, for a picture of `format` at `depth`.
+    fn varied<T: Copy + Default + TryFrom<u32>>(
+        format: Format,
+        width: usize,
+        height: usize,
+        depth: u8,
+    ) -> [PlaneBuf<T>; 4] {
+        let (cw, ch) = match format {
+            Format::Yuv444 | Format::Yuv400 => (width, height),
+            Format::Yuv422 => (width.div_ceil(2), height),
+            Format::Yuv420 => (width.div_ceil(2), height.div_ceil(2)),
+        };
+        let max = (1u32 << depth) - 1;
+        let plane = |w: usize, h: usize, seed: u32| PlaneBuf {
+            width: w,
+            height: h,
+            samples: (0..w * h)
+                .map(|i| {
+                    let v =
+                        (u32::try_from(i).unwrap().wrapping_mul(2_654_435_761) ^ seed) % (max + 1);
+                    T::try_from(v).ok().unwrap_or_default()
+                })
+                .collect(),
+        };
+        [
+            plane(width, height, 1),
+            plane(cw, ch, 7),
+            plane(cw, ch, 13),
+            plane(width, height, 29),
+        ]
+    }
+
+    /// Every band of a picture converts as those rows of the whole picture
+    /// do, on every path: libyuv's at 8, 10 and 12 bits and each sampling,
+    /// the 8-bit cut libavif makes of deep 4:2:2 and grey, libavif's float
+    /// fast and slow paths, the identity matrix, alpha deep and premultiplied.
+    #[test]
+    fn every_band_converts_as_the_whole_picture_does() {
+        fn bands<T: Reformat>(name: &str, picture: &Picture<'_, T>) {
+            let whole = to_argb(picture).unwrap();
+            let (w, h) = (picture.width, picture.height);
+            for first in 0..h {
+                for count in 1..=h - first {
+                    let mut band = vec![0u32; w * count];
+                    to_argb_rows(picture, first, &mut band).unwrap();
+                    assert_eq!(
+                        band,
+                        whole[first * w..(first + count) * w],
+                        "{name}: rows {first}..{}",
+                        first + count
+                    );
+                }
+            }
+            let mut past = vec![0u32; w * 2];
+            assert_eq!(to_argb_rows(picture, h - 1, &mut past), Err(Error::Size));
+            let mut ragged = vec![0u32; w + 1];
+            assert_eq!(to_argb_rows(picture, 0, &mut ragged), Err(Error::Size));
+        }
+        fn eight(format: Format, matrix: u16, full: bool, alpha: bool, premultiplied: bool) {
+            let [y, u, v, a] = varied::<u8>(format, 5, 7, 8);
+            let colour = format != Format::Yuv400;
+            bands(
+                &format!("8-bit {format:?} matrix {matrix}"),
+                &Picture {
+                    width: 5,
+                    height: 7,
+                    depth: 8,
+                    format,
+                    matrix,
+                    primaries: 1,
+                    full_range: full,
+                    y: y.view(),
+                    u: colour.then(|| u.view()),
+                    v: colour.then(|| v.view()),
+                    alpha: alpha.then(|| a.view()),
+                    alpha_premultiplied: premultiplied,
+                },
+            );
+        }
+        fn deep(format: Format, depth: u8, matrix: u16, alpha: bool) {
+            for height in [6, 7] {
+                let [y, u, v, a] = varied::<u16>(format, 5, height, depth);
+                let colour = format != Format::Yuv400;
+                bands(
+                    &format!("{depth}-bit {format:?} matrix {matrix} height {height}"),
+                    &Picture {
+                        width: 5,
+                        height,
+                        depth,
+                        format,
+                        matrix,
+                        primaries: 1,
+                        full_range: false,
+                        y: y.view(),
+                        u: colour.then(|| u.view()),
+                        v: colour.then(|| v.view()),
+                        alpha: alpha.then(|| a.view()),
+                        alpha_premultiplied: false,
+                    },
+                );
+            }
+        }
+        for format in [
+            Format::Yuv420,
+            Format::Yuv422,
+            Format::Yuv444,
+            Format::Yuv400,
+        ] {
+            eight(format, 1, false, false, false);
+            eight(format, 6, true, true, false);
+        }
+        // libavif's float paths: the fast (4:4:4) and the slow (4:2:0, and
+        // premultiplied alpha), the identity matrix, YCgCo.
+        eight(Format::Yuv444, 4, false, false, false);
+        eight(Format::Yuv420, 7, false, true, true);
+        eight(Format::Yuv422, 4, false, false, false);
+        eight(Format::Yuv444, 0, true, false, false);
+        eight(Format::Yuv444, 8, true, false, false);
+        deep(Format::Yuv420, 10, 9, true);
+        deep(Format::Yuv420, 12, 1, false);
+        deep(Format::Yuv422, 12, 1, true);
+        deep(Format::Yuv444, 12, 9, true);
+        deep(Format::Yuv400, 10, 1, true);
+        deep(Format::Yuv420, 10, 7, false);
     }
 }

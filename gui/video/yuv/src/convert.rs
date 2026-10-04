@@ -373,50 +373,78 @@ impl<T> Planes<'_, T> {
     }
 }
 
+/// Which rows of a picture a conversion writes: `out` holds the rows from
+/// `first` on -- as many whole rows as it has room for -- of a picture
+/// `height` rows tall. A band converts exactly as the same rows of the whole
+/// picture do, so a large picture can be converted a band to a thread.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rows {
+    pub first: usize,
+    pub height: usize,
+}
+
+impl Rows {
+    /// All of a picture `height` rows tall.
+    #[must_use]
+    pub const fn all(height: usize) -> Self {
+        Self { first: 0, height }
+    }
+}
+
 /// `I420ToARGBMatrixBilinear` / `I420AlphaToARGBMatrixBilinear` (8-bit) and
 /// `I010ToARGBMatrixBilinear` / `I010AlphaToARGBMatrixBilinear` (10-bit):
 /// 4:2:0, chroma upsampled bilinearly.
 ///
 /// The first row takes the first chroma row alone; every later pair of rows
 /// takes the two chroma rows around it, 3:1 and 1:3; and a last row left over
-/// (an even height) takes the last chroma row alone again.
+/// (an even height) takes the last chroma row alone again. libyuv walks the
+/// picture a pair at a time; each row's chroma depends only on where the row
+/// is, which is what lets a band start anywhere -- on the lower row of a
+/// pair too -- and come out as the same rows of the whole picture do.
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "row indices stay within the band, which is within the picture"
+)]
 pub fn i420_bilinear<D: Depth>(
     k: &Constants,
     planes: &Planes<'_, D::Sample>,
     width: usize,
+    rows: Rows,
     out: &mut [u32],
 ) {
     let mut u1 = vec![D::Sample::default(); width];
     let mut u2 = vec![D::Sample::default(); width];
     let mut v1 = vec![D::Sample::default(); width];
     let mut v2 = vec![D::Sample::default(); width];
-    let height = out.len().checked_div(width).unwrap_or(0);
-    let mut rows = out.chunks_exact_mut(width.max(1)).enumerate();
-    let Some((_, first)) = rows.next() else {
-        return;
-    };
-    up2_linear::<D>(planes.u.row(0), &mut u1);
-    up2_linear::<D>(planes.v.row(0), &mut v1);
-    row_444::<D>(k, planes.y.row(0), &u1, &v1, planes.alpha_row(0), first);
-    let mut chroma = 0usize;
-    // `for (y = 0; y < height - 2; y += 2)`, one chroma row a turn.
-    let pairs = height.saturating_sub(1) / 2;
-    for _ in 0..pairs {
-        let next = chroma.saturating_add(1);
-        up2_bilinear::<D>(planes.u.row(chroma), planes.u.row(next), &mut u1, &mut u2);
-        up2_bilinear::<D>(planes.v.row(chroma), planes.v.row(next), &mut v1, &mut v2);
-        for (u, v) in [(&u1, &v1), (&u2, &v2)] {
-            if let Some((row, out)) = rows.next() {
-                row_444::<D>(k, planes.y.row(row), u, v, planes.alpha_row(row), out);
-            }
+    let chroma_rows = rows.height.div_ceil(2);
+    let mut out_rows = out.chunks_exact_mut(width.max(1));
+    let mut row = rows.first;
+    while let Some(dst) = out_rows.next() {
+        // The chroma row above: row 2c + 1 is the upper of the pair between
+        // chroma rows c and c + 1, row 2c + 2 the lower.
+        let c = row.saturating_sub(1) / 2;
+        if row == 0 || c + 1 >= chroma_rows {
+            // The first row, and an even height's last: one chroma row.
+            up2_linear::<D>(planes.u.row(c), &mut u1);
+            up2_linear::<D>(planes.v.row(c), &mut v1);
+            row_444::<D>(k, planes.y.row(row), &u1, &v1, planes.alpha_row(row), dst);
+            row += 1;
+            continue;
         }
-        chroma = next;
-    }
-    if let Some((row, out)) = rows.next() {
-        // The even height's last row.
-        up2_linear::<D>(planes.u.row(chroma), &mut u1);
-        up2_linear::<D>(planes.v.row(chroma), &mut v1);
-        row_444::<D>(k, planes.y.row(row), &u1, &v1, planes.alpha_row(row), out);
+        up2_bilinear::<D>(planes.u.row(c), planes.u.row(c + 1), &mut u1, &mut u2);
+        up2_bilinear::<D>(planes.v.row(c), planes.v.row(c + 1), &mut v1, &mut v2);
+        if row % 2 == 1 {
+            row_444::<D>(k, planes.y.row(row), &u1, &v1, planes.alpha_row(row), dst);
+            row += 1;
+            let Some(dst) = out_rows.next() else {
+                break;
+            };
+            row_444::<D>(k, planes.y.row(row), &u2, &v2, planes.alpha_row(row), dst);
+        } else {
+            // A band that starts on the lower row of a pair.
+            row_444::<D>(k, planes.y.row(row), &u2, &v2, planes.alpha_row(row), dst);
+        }
+        row += 1;
     }
 }
 
@@ -427,11 +455,12 @@ pub fn i422_linear<D: Depth>(
     k: &Constants,
     planes: &Planes<'_, D::Sample>,
     width: usize,
+    rows: Rows,
     out: &mut [u32],
 ) {
     let mut u = vec![D::Sample::default(); width];
     let mut v = vec![D::Sample::default(); width];
-    for (row, out) in out.chunks_exact_mut(width.max(1)).enumerate() {
+    for (row, out) in (rows.first..).zip(out.chunks_exact_mut(width.max(1))) {
         up2_linear::<D>(planes.u.row(row), &mut u);
         up2_linear::<D>(planes.v.row(row), &mut v);
         row_444::<D>(k, planes.y.row(row), &u, &v, planes.alpha_row(row), out);
@@ -444,9 +473,10 @@ pub fn i444<D: Depth>(
     k: &Constants,
     planes: &Planes<'_, D::Sample>,
     width: usize,
+    rows: Rows,
     out: &mut [u32],
 ) {
-    for (row, out) in out.chunks_exact_mut(width.max(1)).enumerate() {
+    for (row, out) in (rows.first..).zip(out.chunks_exact_mut(width.max(1))) {
         row_444::<D>(
             k,
             planes.y.row(row),
@@ -461,8 +491,8 @@ pub fn i444<D: Depth>(
 /// `I012ToARGBMatrix`: 12-bit 4:2:0, each chroma sample used for the 2x2
 /// pixels over it. Never with alpha: libyuv has no such function, so libavif
 /// adds the alpha itself.
-pub fn i012(k: &Constants, planes: &Planes<'_, u16>, width: usize, out: &mut [u32]) {
-    for (row, out) in out.chunks_exact_mut(width.max(1)).enumerate() {
+pub fn i012(k: &Constants, planes: &Planes<'_, u16>, width: usize, rows: Rows, out: &mut [u32]) {
+    for (row, out) in (rows.first..).zip(out.chunks_exact_mut(width.max(1))) {
         let chroma = row / 2;
         row_212(
             k,
@@ -475,8 +505,8 @@ pub fn i012(k: &Constants, planes: &Planes<'_, u16>, width: usize, out: &mut [u3
 }
 
 /// `I400ToARGBMatrix`: grey. Never with alpha: libavif adds it.
-pub fn i400(k: &Constants, y: Plane<'_, u8>, width: usize, out: &mut [u32]) {
-    for (row, out) in out.chunks_exact_mut(width.max(1)).enumerate() {
+pub fn i400(k: &Constants, y: Plane<'_, u8>, width: usize, rows: Rows, out: &mut [u32]) {
+    for (row, out) in (rows.first..).zip(out.chunks_exact_mut(width.max(1))) {
         row_400(k, y.row(row), out);
     }
 }
@@ -548,6 +578,7 @@ pub fn unattenuate(pixels: &mut [u32]) {
 )]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
 
     fn plane<T: Clone>(width: usize, samples: &[T]) -> PlaneBuf<T> {
         PlaneBuf {
@@ -634,7 +665,7 @@ mod tests {
             a: None,
         };
         let mut out = vec![0u32; 8];
-        i420_bilinear::<Eight>(&JPEG, &planes, 2, &mut out);
+        i420_bilinear::<Eight>(&JPEG, &planes, 2, Rows::all(4), &mut out);
         let red = |px: u32| (px >> 16) & 0xff;
         let expect = |v: u8| red(yuv_pixel(&JPEG, Eight::y32(128), 128, u32::from(v)));
         // (3*0 + 255 + 2) >> 2 = 64 and (0 + 3*255 + 2) >> 2 = 191.
@@ -643,6 +674,56 @@ mod tests {
         assert_eq!(red(out[4]), expect(191));
         assert_eq!(red(out[6]), expect(255));
         assert!(out.iter().all(|&px| px >> 24 == 255));
+    }
+
+    /// A band of rows -- starting on an upper row of a pair, on a lower one,
+    /// on the first or the last, one row or many -- converts exactly as the
+    /// same rows of the whole picture do, at either parity of height.
+    #[test]
+    fn every_band_of_a_420_picture_is_those_rows_of_the_whole() {
+        for height in [1usize, 2, 3, 4, 7, 8] {
+            let width = 5;
+            let ch = height.div_ceil(2);
+            let y = plane(
+                width,
+                &(0..width * height)
+                    .map(|i| (i * 37 % 256) as u8)
+                    .collect::<Vec<_>>(),
+            );
+            let u = plane(
+                3,
+                &(0..3 * ch)
+                    .map(|i| (i * 91 % 256) as u8)
+                    .collect::<Vec<_>>(),
+            );
+            let v = plane(
+                3,
+                &(0..3 * ch)
+                    .map(|i| (i * 53 % 256) as u8)
+                    .collect::<Vec<_>>(),
+            );
+            let planes = Planes {
+                y: y.view(),
+                u: u.view(),
+                v: v.view(),
+                a: None,
+            };
+            let mut whole = vec![0u32; width * height];
+            i420_bilinear::<Eight>(&H709, &planes, width, Rows::all(height), &mut whole);
+            for first in 0..height {
+                for count in 1..=height - first {
+                    let mut band = vec![0u32; width * count];
+                    let rows = Rows { first, height };
+                    i420_bilinear::<Eight>(&H709, &planes, width, rows, &mut band);
+                    assert_eq!(
+                        band,
+                        whole[first * width..(first + count) * width],
+                        "height {height}, rows {first}..{}",
+                        first + count
+                    );
+                }
+            }
+        }
     }
 
     /// An odd height has no lone last row: its last pair of rows blends.
@@ -658,7 +739,7 @@ mod tests {
             a: None,
         };
         let mut out = vec![0u32; 3];
-        i420_bilinear::<Eight>(&JPEG, &planes, 1, &mut out);
+        i420_bilinear::<Eight>(&JPEG, &planes, 1, Rows::all(3), &mut out);
         let red = |px: u32| (px >> 16) & 0xff;
         let expect = |v: u8| red(yuv_pixel(&JPEG, Eight::y32(128), 128, u32::from(v)));
         assert_eq!(red(out[2]), expect(191));
@@ -676,7 +757,7 @@ mod tests {
             a: Some(a.view()),
         };
         let mut out = vec![0u32; 2];
-        i444::<Ten>(&V2020, &planes, 2, &mut out);
+        i444::<Ten>(&V2020, &planes, 2, Rows::all(1), &mut out);
         assert_eq!(out[0] >> 24, 255);
         assert_eq!(out[1] >> 24, 1);
     }
@@ -693,7 +774,7 @@ mod tests {
             a: None,
         };
         let mut out = vec![0u32; 6];
-        i012(&BT2020, &planes, 3, &mut out);
+        i012(&BT2020, &planes, 3, Rows::all(2), &mut out);
         assert_eq!(out[0], out[1]);
         assert_ne!(out[1], out[2]);
         assert_eq!(out[0], out[3]);
@@ -703,7 +784,7 @@ mod tests {
     fn grey_is_ypixel() {
         let y = plane(3, &[0u8, 128, 255]);
         let mut out = vec![0u32; 3];
-        i400(&JPEG, y.view(), 3, &mut out);
+        i400(&JPEG, y.view(), 3, Rows::all(1), &mut out);
         assert_eq!(out, [0xff00_0000, 0xff80_8080, 0xffff_ffff]);
     }
 

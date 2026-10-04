@@ -748,10 +748,14 @@ codegen-units = 1
 [profile.dev.package.rav1d]
 opt-level = 3
 
-# The same for vp9, for the same reason: `videocodec`'s test plays thousands
-# of damaged copies of its fixtures, and unoptimised VP9 decoding made it take
-# minutes (over 400 s, 2026-10-04). Debug assertions stay on.
+# The same for vp9 and yuv, for the same reason: `videocodec`'s test plays
+# thousands of damaged copies of its fixtures, decoding (vp9) and converting
+# (yuv) every frame, and unoptimised it took minutes (over 400 s, 2026-10-04).
+# Debug assertions stay on.
 [profile.dev.package.vp9]
+opt-level = 3
+
+[profile.dev.package.yuv]
 opt-level = 3
 
 # The same for `xz`, whose tests hold its encoder to XZ Utils' output byte

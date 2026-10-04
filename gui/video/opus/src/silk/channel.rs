@@ -77,6 +77,8 @@ const QUANT_LEVEL_ADJUST_Q10: i32 = 80;
 const BWE_AFTER_LOSS_Q16: i32 = 63570;
 /// `LTP_MEM_LENGTH_MS`, `SUB_FRAME_LENGTH_MS`, `MIN_LPC_ORDER`.
 const LTP_MEM_LENGTH_MS: i32 = 20;
+/// The long-term predictor's memory at its largest: 20 ms at 16 kHz.
+pub(crate) const MAX_LTP_MEM: usize = 320;
 const SUB_FRAME_LENGTH_MS: i32 = 5;
 const MIN_LPC_ORDER: usize = 10;
 /// The pitch's range: 2 to 18 ms (`PE_MIN_LAG_MS`, `PE_MAX_LAG_MS`).
@@ -306,7 +308,8 @@ impl ChannelState {
         let decode = lost == LostFlag::Normal
             || (lost == LostFlag::Lbrr && self.lbrr_flags[self.n_frames_decoded]);
         if decode {
-            let mut pulses = vec![0i16; (l + SHELL_LEN - 1) & !(SHELL_LEN - 1)];
+            let mut pulses = [0i16; MAX_FRAME_LENGTH];
+            let pulses = &mut pulses[..(l + SHELL_LEN - 1) & !(SHELL_LEN - 1)];
             self.decode_indices(
                 dec,
                 self.n_frames_decoded,
@@ -315,13 +318,13 @@ impl ChannelState {
             );
             decode_pulses(
                 dec,
-                &mut pulses,
+                pulses,
                 i32::from(self.indices.signal_type),
                 i32::from(self.indices.quant_offset_type),
                 l,
             );
             self.decode_parameters(&mut ctrl, cond_coding);
-            self.decode_core(&mut ctrl, out, &pulses);
+            self.decode_core(&mut ctrl, out, pulses);
             self.update_out_buf(out);
             self.plc(&mut ctrl, out, false);
             self.loss_cnt = 0;
@@ -500,10 +503,15 @@ impl ChannelState {
         let fl = self.frame_length;
         let subfr = self.subfr_length;
         let order = self.lpc_order;
-        let mut s_ltp = vec![0i16; ltp_mem];
-        let mut s_ltp_q15 = vec![0i32; ltp_mem + fl];
-        let mut res_q14 = vec![0i32; subfr];
-        let mut s_lpc_q14 = vec![0i32; subfr + MAX_LPC_ORDER];
+        // On the stack, as libopus's are, at their largest (16 kHz).
+        let mut s_ltp = [0i16; MAX_LTP_MEM];
+        let s_ltp = &mut s_ltp[..ltp_mem];
+        let mut s_ltp_q15 = [0i32; MAX_LTP_MEM + MAX_FRAME_LENGTH];
+        let s_ltp_q15 = &mut s_ltp_q15[..ltp_mem + fl];
+        let mut res_q14 = [0i32; MAX_SUB_FRAME_LENGTH];
+        let res_q14 = &mut res_q14[..subfr];
+        let mut s_lpc_q14 = [0i32; MAX_SUB_FRAME_LENGTH + MAX_LPC_ORDER];
+        let s_lpc_q14 = &mut s_lpc_q14[..subfr + MAX_LPC_ORDER];
         let offset_q10 = i32::from(
             QUANTIZATION_OFFSETS_Q10[self.indices.signal_type as usize >> 1]
                 [self.indices.quant_offset_type as usize],

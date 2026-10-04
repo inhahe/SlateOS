@@ -98,6 +98,11 @@ fn haar1(x: &mut [i32], n0: usize, stride: usize) {
     }
 }
 
+/// The widest band, in coefficients: the last of the 20 ms mode's, 22
+/// bins at 8 short blocks. Every band-sized buffer is no larger -- the sizes
+/// come from the mode's tables, never from a stream.
+pub(crate) const MAX_BAND: usize = 176;
+
 /// `ordery_table`: the order of the Hadamard blocks, for 2, 4, 8 and 16.
 const ORDERY_TABLE: [usize; 30] = [
     1, 0, 3, 0, 2, 1, 7, 0, 4, 3, 6, 1, 5, 2, 15, 0, 8, 7, 12, 3, 11, 4, 14, 1, 9, 6, 13, 2, 10, 5,
@@ -107,7 +112,8 @@ const ORDERY_TABLE: [usize; 30] = [
 /// another (in the Hadamard order where `hadamard`).
 fn deinterleave_hadamard(x: &mut [i32], n0: usize, stride: usize, hadamard: bool) {
     let n = n0 * stride;
-    let mut tmp = vec![0i32; n];
+    let mut tmp = [0i32; MAX_BAND];
+    let tmp = &mut tmp[..n];
     for i in 0..stride {
         let row = if hadamard {
             ORDERY_TABLE[stride - 2 + i]
@@ -118,13 +124,14 @@ fn deinterleave_hadamard(x: &mut [i32], n0: usize, stride: usize, hadamard: bool
             tmp[row * n0 + j] = x[j * stride + i];
         }
     }
-    x[..n].copy_from_slice(&tmp);
+    x[..n].copy_from_slice(tmp);
 }
 
 /// `interleave_hadamard`: the inverse of [`deinterleave_hadamard`].
 fn interleave_hadamard(x: &mut [i32], n0: usize, stride: usize, hadamard: bool) {
     let n = n0 * stride;
-    let mut tmp = vec![0i32; n];
+    let mut tmp = [0i32; MAX_BAND];
+    let tmp = &mut tmp[..n];
     for i in 0..stride {
         let row = if hadamard {
             ORDERY_TABLE[stride - 2 + i]
@@ -135,7 +142,7 @@ fn interleave_hadamard(x: &mut [i32], n0: usize, stride: usize, hadamard: bool) 
             tmp[j * stride + i] = x[row * n0 + j];
         }
     }
-    x[..n].copy_from_slice(&tmp);
+    x[..n].copy_from_slice(tmp);
 }
 
 /// `compute_qn`: the resolution of a split's angle.
@@ -787,8 +794,18 @@ pub(crate) struct AllBands<'p> {
     pub disable_inv: bool,
 }
 
+/// The folding buffer [`quant_all_bands`] needs: two channels' worth of
+/// every band but the last, at 8 short blocks.
+pub(crate) const NORM_SIZE: usize = 2 * 8 * 100;
+
 /// `quant_all_bands`, decoding: every band's shape into `x` (and `y` for
 /// stereo), with each band's collapse mask; the noise seed carried on.
+/// `norm` is libopus's `_norm`, at least [`NORM_SIZE`] long: no band reads
+/// what this frame has not written, so its contents do not matter.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "libopus's own, with its stack buffer passed in"
+)]
 pub(crate) fn quant_all_bands(
     p: &AllBands<'_>,
     x_: &mut [i32],
@@ -796,6 +813,7 @@ pub(crate) fn quant_all_bands(
     collapse_masks: &mut [u8],
     ec: &mut Decoder<'_>,
     seed: &mut u32,
+    norm: &mut [i32],
 ) {
     let c = if y_.is_some() { 2 } else { 1 };
     let m = 1usize << p.lm;
@@ -803,7 +821,11 @@ pub(crate) fn quant_all_bands(
     let norm_offset = m * ebands(p.start) as usize;
     // No norm for the last band: nothing folds from it.
     let norm_len = m * ebands(NB_EBANDS - 1) as usize - norm_offset;
-    let mut norm = vec![0i32; c * norm_len];
+    let norm = &mut norm[..c * norm_len];
+    // Where each band's folding source is copied (libopus's
+    // `lowband_scratch`): one a channel, for dual stereo.
+    let mut low_x = [0i32; MAX_BAND];
+    let mut low_y = [0i32; MAX_BAND];
     let norm2_at = norm_len;
     let mut balance = p.balance;
     let mut dual_stereo = p.dual_stereo;
@@ -847,7 +869,7 @@ pub(crate) fn quant_all_bands(
             lowband_offset = i;
         }
         if i == p.start + 1 {
-            special_hybrid_folding(&mut norm, norm2_at, p.start, m, dual_stereo);
+            special_hybrid_folding(norm, norm2_at, p.start, m, dual_stereo);
         }
         ctx.tf_change = p.tf_res[i];
 
@@ -903,15 +925,17 @@ pub(crate) fn quant_all_bands(
         // The band folded from, copied out (see the module documentation);
         // a band's own output, for later bands to fold from, goes to `norm`
         // unless it is the last.
-        let lowband_of = |norm: &[i32], at: usize| -> Option<Vec<i32>> {
-            effective_lowband.map(|e| norm[at + e..at + e + n].to_vec())
+        let lowband_of = |norm: &[i32], at: usize, into: &'_ mut [i32; MAX_BAND]| {
+            effective_lowband.map(|e| {
+                into[..n].copy_from_slice(&norm[at + e..at + e + n]);
+            })
         };
         let out_at = lo - norm_offset;
         let x = &mut x_[lo..lo + n];
         let y = y_.as_deref_mut().map(|y_all| &mut y_all[lo..lo + n]);
         match y {
             Some(y) if dual_stereo => {
-                let mut low = lowband_of(&norm, 0);
+                let low = lowband_of(norm, 0, &mut low_x).map(|()| &mut low_x[..n]);
                 let out = if last {
                     None
                 } else {
@@ -923,13 +947,13 @@ pub(crate) fn quant_all_bands(
                     n,
                     b / 2,
                     big_b,
-                    low.as_deref_mut(),
+                    low,
                     p.lm,
                     out,
                     Q15ONE,
                     x_cm as i32,
                 );
-                let mut low2 = lowband_of(&norm, norm2_at);
+                let low2 = lowband_of(norm, norm2_at, &mut low_y).map(|()| &mut low_y[..n]);
                 let out2 = if last {
                     None
                 } else {
@@ -941,7 +965,7 @@ pub(crate) fn quant_all_bands(
                     n,
                     b / 2,
                     big_b,
-                    low2.as_deref_mut(),
+                    low2,
                     p.lm,
                     out2,
                     Q15ONE,
@@ -949,7 +973,7 @@ pub(crate) fn quant_all_bands(
                 );
             }
             Some(y) => {
-                let mut low = lowband_of(&norm, 0);
+                let low = lowband_of(norm, 0, &mut low_x).map(|()| &mut low_x[..n]);
                 let out = if last {
                     None
                 } else {
@@ -962,7 +986,7 @@ pub(crate) fn quant_all_bands(
                     n,
                     b,
                     big_b,
-                    low.as_deref_mut(),
+                    low,
                     p.lm,
                     out,
                     (x_cm | y_cm) as i32,
@@ -970,7 +994,7 @@ pub(crate) fn quant_all_bands(
                 y_cm = x_cm;
             }
             None => {
-                let mut low = lowband_of(&norm, 0);
+                let low = lowband_of(norm, 0, &mut low_x).map(|()| &mut low_x[..n]);
                 let out = if last {
                     None
                 } else {
@@ -982,7 +1006,7 @@ pub(crate) fn quant_all_bands(
                     n,
                     b,
                     big_b,
-                    low.as_deref_mut(),
+                    low,
                     p.lm,
                     out,
                     Q15ONE,

@@ -183,7 +183,9 @@ impl Resampler {
     /// `silk_resampler_private_IIR_FIR`: 2x upsampled, then interpolated by
     /// a 12-phase FIR filter.
     fn iir_fir(&mut self, out: &mut [i16], input: &[i16]) {
-        let mut buf = vec![0i16; 2 * self.batch_size + ORDER_FIR_12];
+        // A batch is 10 ms at 16 kHz at most.
+        let mut buf = [0i16; 2 * 160 + ORDER_FIR_12];
+        let buf = &mut buf[..2 * self.batch_size + ORDER_FIR_12];
         buf[..ORDER_FIR_12].copy_from_slice(&self.s_fir_i16[..ORDER_FIR_12]);
         let index_increment_q16 = self.inv_ratio_q16;
         let mut at_in = 0;
@@ -201,7 +203,13 @@ impl Resampler {
             let mut index_q16 = 0;
             while index_q16 < max_index_q16 {
                 let table_index = smulwb(index_q16 & 0xFFFF, 12) as usize;
-                let b = &buf[(index_q16 >> 16) as usize..];
+                // The filter's eight taps of history, as one array: one
+                // range check, not eight. Always in range: the batch's
+                // indices stop short of the buffer's end by the order.
+                let at = (index_q16 >> 16) as usize;
+                let Ok(b) = <&[i16; ORDER_FIR_12]>::try_from(&buf[at..at + ORDER_FIR_12]) else {
+                    break;
+                };
                 let lo = &RESAMPLER_FRAC_FIR_12[table_index];
                 let hi = &RESAMPLER_FRAC_FIR_12[11 - table_index];
                 let mut res_q15 = smulbb(i32::from(b[0]), i32::from(lo[0]));
@@ -234,7 +242,8 @@ impl Resampler {
     /// the decoder's frames never do.)
     fn down_fir(&mut self, out: &mut [i16], input: &[i16]) {
         let order = self.fir_order;
-        let mut buf = vec![0i32; self.batch_size + order];
+        let mut buf = [0i32; 160 + DOWN_ORDER_FIR1];
+        let buf = &mut buf[..self.batch_size + order];
         buf[..order].copy_from_slice(&self.s_fir_i32[..order]);
         let coefs = self.coefs;
         let fir = &coefs[2..];

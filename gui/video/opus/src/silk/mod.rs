@@ -248,8 +248,7 @@ impl SilkDecoder {
         }
 
         // Each channel's frame, after two samples of history.
-        let fl = self.channels[0].frame_length;
-        let mut tmp = [vec![0i16; fl + 2], vec![0i16; fl + 2]];
+        let mut tmp = [[0i16; MAX_FRAME_LENGTH + 2]; 2];
         let has_side = if lost == LostFlag::Normal {
             !decode_only_middle
         } else {
@@ -318,11 +317,13 @@ impl SilkDecoder {
         }
         // Resampled to the output rate (from one sample into the history,
         // as libopus aligns SILK with CELT), and interleaved.
-        let mut resampled = vec![0i16; n_samples_out];
+        // A SILK frame is 20 ms at most: 960 samples at 48 kHz.
+        let mut resampled = [0i16; 960];
+        let resampled = &mut resampled[..n_samples_out];
         for n in 0..api.min(n_int) {
             let input = &tmp[n][1..=n_samples_out_dec];
             if api == 2 {
-                self.channels[n].resampler.process(&mut resampled, input);
+                self.channels[n].resampler.process(resampled, input);
                 for (i, &s) in resampled.iter().enumerate() {
                     out[n + 2 * i] = s;
                 }
@@ -339,7 +340,7 @@ impl SilkDecoder {
                 // collapsed from stereo.
                 self.channels[1]
                     .resampler
-                    .process(&mut resampled, &tmp[0][1..=n_samples_out_dec]);
+                    .process(resampled, &tmp[0][1..=n_samples_out_dec]);
                 for (i, &s) in resampled.iter().enumerate() {
                     out[1 + 2 * i] = s;
                 }

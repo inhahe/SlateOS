@@ -18,6 +18,7 @@
     reason = "sizes below 352 coefficients and pulse counts below 128; the samples' arithmetic is libopus's on Q14 values, the products within 32 bits"
 )]
 
+use super::bands::MAX_BAND;
 use super::cwrs::decode_pulses;
 use super::mathops::{cos_norm, div, ilog2, rsqrt_norm};
 use crate::entdec::Decoder;
@@ -129,11 +130,12 @@ pub(crate) fn alg_unquant(
     dec: &mut Decoder<'_>,
     gain: i32,
 ) -> u32 {
-    let mut iy = vec![0i32; n];
-    let ryy = decode_pulses(&mut iy, n as i32, k, dec);
-    normalise_residual(&iy, x, n, ryy, gain);
+    let mut iy = [0i32; MAX_BAND];
+    let iy = &mut iy[..n];
+    let ryy = decode_pulses(iy, n as i32, k, dec);
+    normalise_residual(iy, x, n, ryy, gain);
     exp_rotation(x, n, b, k, spread);
-    extract_collapse_mask(&iy, n, b)
+    extract_collapse_mask(iy, n, b)
 }
 
 /// `renormalise_vector`: `x`'s `n` coefficients scaled to norm `gain`.

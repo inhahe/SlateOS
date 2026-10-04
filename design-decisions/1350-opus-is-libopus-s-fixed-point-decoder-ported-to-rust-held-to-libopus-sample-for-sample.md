@@ -81,10 +81,13 @@ no FEC (`packet_has_lbrr`).
 
 **Speed.** On its benchmark (every test stream at 48 kHz, 151 s of sound;
 `tests/bench.rs` and `tools/bench.c`), counted with callgrind: libopus's C
-takes 4.03 G instructions, the port 5.48 G -- most of the difference
-buffers allocated and zeroed per frame where C uses its stack, and
-loops whose bounds checks the compiler keeps. Decoding is still hundreds
-of times faster than real time.
+takes 4.03 G instructions, the port 4.46 G. That was 5.48 G until its
+per-frame buffers were kept between frames (libopus's are on its stack,
+uninitialised), and the de-emphasis, the ambisonics matrix, the comb
+filter, the resampler and the FFT's simplest butterflies were written so
+that their bounds checks drop out. Natively, 391 times faster than real
+time to libopus's 426. What is left:
+`known-issues/F-opus-decodes-at-about-1.11-times-libopuss-cost.md`.
 
 **Alternatives considered.**
 

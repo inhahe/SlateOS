@@ -18,8 +18,8 @@
 )]
 
 use super::channel::{
-    ChannelState, DecoderControl, LTP_ORDER, MAX_FRAME_LENGTH, MAX_NB_SUBFR,
-    TYPE_NO_VOICE_ACTIVITY, TYPE_VOICED, lpc_analysis_filter,
+    ChannelState, DecoderControl, LTP_ORDER, MAX_FRAME_LENGTH, MAX_LTP_MEM, MAX_NB_SUBFR,
+    MAX_SUB_FRAME_LENGTH, TYPE_NO_VOICE_ACTIVITY, TYPE_VOICED, lpc_analysis_filter,
 };
 use super::fix::{
     add_sat32, clz32, div32, fix_const, inverse32_varq, lshift, lshift_sat32, rand, rshift_round,
@@ -160,7 +160,8 @@ impl ChannelState {
     /// excitations, each with its shift.
     fn plc_energy(&self, prev_gain_q10: [i32; 2]) -> ((i32, i32), (i32, i32)) {
         let subfr = self.subfr_length;
-        let mut buf = vec![0i16; 2 * subfr];
+        let mut buf = [0i16; 2 * MAX_SUB_FRAME_LENGTH];
+        let buf = &mut buf[..2 * subfr];
         for k in 0..2 {
             for i in 0..subfr {
                 let e = self.exc_q14[i + (k + self.nb_subfr - 2) * subfr];
@@ -176,8 +177,10 @@ impl ChannelState {
         let ltp_mem = self.ltp_mem_length;
         let fl = self.frame_length;
         let order = self.lpc_order;
-        let mut s_ltp_q14 = vec![0i32; ltp_mem + fl];
-        let mut s_ltp = vec![0i16; ltp_mem];
+        let mut s_ltp_q14 = [0i32; MAX_LTP_MEM + MAX_FRAME_LENGTH];
+        let s_ltp_q14 = &mut s_ltp_q14[..ltp_mem + fl];
+        let mut s_ltp = [0i16; MAX_LTP_MEM];
+        let s_ltp = &mut s_ltp[..ltp_mem];
         let prev_gain_q10 = [
             self.plc.prev_gain_q16[0] >> 6,
             self.plc.prev_gain_q16[1] >> 6,
@@ -406,7 +409,8 @@ impl ChannelState {
         }
         // Comfort noise: the buffer's excitation at a random walk, shaped by
         // the smoothed NLSFs, at the gain the concealment leaves unfilled.
-        let mut sig_q14 = vec![0i32; length + MAX_LPC_ORDER];
+        let mut sig_q14 = [0i32; MAX_FRAME_LENGTH + MAX_LPC_ORDER];
+        let sig_q14 = &mut sig_q14[..length + MAX_LPC_ORDER];
         let mut gain_q16 = smulww(
             i32::from(self.plc.rand_scale_q14),
             self.plc.prev_gain_q16[1],

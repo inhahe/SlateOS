@@ -20,7 +20,9 @@
     reason = "sizes below 2200, band counts and LM small; bit counts within a frame's 10,200 bits in eighths; the sample arithmetic wraps where C's would overflow, through the fixed-point helpers"
 )]
 
-use super::bands::{AllBands, anti_collapse, denormalise_bands, lcg_rand, quant_all_bands};
+use super::bands::{
+    AllBands, NORM_SIZE, anti_collapse, denormalise_bands, lcg_rand, quant_all_bands,
+};
 use super::energy::{unquant_coarse, unquant_finalise, unquant_fine};
 use super::kiss_fft::Cpx;
 use super::lpc::{LPC_ORDER, autocorr, fir, iir_in_place, lpc, maxabs16};
@@ -41,6 +43,18 @@ use crate::fixed::{
 
 /// Samples of history a channel keeps (`DECODE_BUFFER_SIZE`).
 pub(crate) const DECODE_BUFFER_SIZE: usize = 2048;
+/// `buf`, taken out of its owner, at least `len` long (zero-filled where it
+/// grows; what it held is kept).
+fn taken(buf: &mut Vec<i32>, len: usize) -> Vec<i32> {
+    let mut v = std::mem::take(buf);
+    if v.len() < len {
+        v.resize(len, 0);
+    }
+    v
+}
+
+/// A frame's samples, a channel, at most: 20 ms at 48 kHz.
+const MAX_FRAME: usize = SHORT_MDCT_SIZE << MAX_LM;
 /// The longest pitch period (`MAX_PERIOD`).
 const MAX_PERIOD: usize = 1024;
 /// The concealment's longest and shortest pitch lag (66.67 Hz, 480 Hz).
@@ -90,42 +104,62 @@ const COMB_GAINS: [[i32; 3]; 3] = [
     ],
 ];
 
-/// Where [`comb_filter`] reads its input and writes its output.
-enum CombIo<'a> {
-    /// `buf[at + i]` read and written: the decoder's post-filter, which
-    /// reads back samples it has already filtered (an IIR filter). The
-    /// history the period reaches back to lies before `at`.
-    InPlace { buf: &'a mut [i32], at: usize },
-    /// `x[at + i]` read, `y[i]` written: the concealment's pre-filter (an
-    /// FIR filter).
-    Into {
-        y: &'a mut [i32],
-        x: &'a [i32],
-        at: usize,
-    },
+/// Where [`comb_filter`] reads its input and writes its output -- a trait,
+/// so that each kind gets a loop of its own, with no choice made per
+/// sample.
+trait CombIo {
+    /// The input at `k` (negative: history).
+    fn x(&self, k: isize) -> i32;
+    fn set(&mut self, i: usize, v: i32);
+    /// The output from `from` to `n` the input unchanged.
+    fn copy(&mut self, from: usize, n: usize);
 }
 
-impl CombIo<'_> {
-    /// The input at `k` (negative: history).
+/// `buf[at + i]` read and written: the decoder's post-filter, which reads
+/// back samples it has already filtered (an IIR filter). The history the
+/// period reaches back to lies before `at`.
+struct InPlace<'a> {
+    buf: &'a mut [i32],
+    at: usize,
+}
+
+impl CombIo for InPlace<'_> {
+    #[inline]
     fn x(&self, k: isize) -> i32 {
-        match self {
-            Self::InPlace { buf, at } => buf[at.wrapping_add_signed(k)],
-            Self::Into { x, at, .. } => x[at.wrapping_add_signed(k)],
-        }
+        self.buf[self.at.wrapping_add_signed(k)]
     }
 
+    #[inline]
     fn set(&mut self, i: usize, v: i32) {
-        match self {
-            Self::InPlace { buf, at } => buf[*at + i] = v,
-            Self::Into { y, .. } => y[i] = v,
-        }
+        self.buf[self.at + i] = v;
     }
 
-    /// The output from `from` to `n` the input unchanged.
+    #[inline]
+    fn copy(&mut self, _from: usize, _n: usize) {}
+}
+
+/// `x[at + i]` read, `y[i]` written: the concealment's pre-filter (an FIR
+/// filter).
+struct Into<'a> {
+    y: &'a mut [i32],
+    x: &'a [i32],
+    at: usize,
+}
+
+impl CombIo for Into<'_> {
+    #[inline]
+    fn x(&self, k: isize) -> i32 {
+        self.x[self.at.wrapping_add_signed(k)]
+    }
+
+    #[inline]
+    fn set(&mut self, i: usize, v: i32) {
+        self.y[i] = v;
+    }
+
+    #[inline]
     fn copy(&mut self, from: usize, n: usize) {
-        if let Self::Into { y, x, at } = self {
-            y[from..n].copy_from_slice(&x[*at + from..*at + n]);
-        }
+        self.y[from..n].copy_from_slice(&self.x[self.at + from..self.at + n]);
     }
 }
 
@@ -137,7 +171,7 @@ impl CombIo<'_> {
     reason = "libopus's own parameters: both filters' period, gain and taps, and the cross-fade"
 )]
 fn comb_filter(
-    mut io: CombIo<'_>,
+    mut io: impl CombIo,
     t0: i32,
     t1: i32,
     n: usize,
@@ -318,6 +352,14 @@ pub(crate) struct CeltDecoder {
     background_log_e: [i32; 2 * NB_EBANDS],
     /// The inverse MDCT's FFT buffer.
     fft_scratch: Vec<Cpx>,
+    /// Buffers a frame fills before it reads them -- libopus's stack arrays
+    /// `X`, `_norm` and `freq` -- kept between frames so that one costs no
+    /// allocation and no clearing. Each is taken out for the frame and put
+    /// back after; one lost to an error on the way is made again.
+    scratch_x: Vec<i32>,
+    scratch_norm: Vec<i32>,
+    scratch_freq: Vec<i32>,
+    scratch_freq2: Vec<i32>,
 }
 
 impl CeltDecoder {
@@ -362,6 +404,10 @@ impl CeltDecoder {
             old_log_e2: [0; 2 * NB_EBANDS],
             background_log_e: [0; 2 * NB_EBANDS],
             fft_scratch: Vec::new(),
+            scratch_x: Vec::new(),
+            scratch_norm: Vec::new(),
+            scratch_freq: Vec::new(),
+            scratch_freq2: Vec::new(),
         };
         st.reset();
         Ok(st)
@@ -617,7 +663,11 @@ impl CeltDecoder {
 
         // The band shapes.
         let mut collapse_masks = [0u8; 2 * NB_EBANDS];
-        let mut x = vec![0i32; c * n];
+        // libopus's `X`: nothing reads a coefficient before the bands write
+        // it, so last frame's are no matter.
+        let mut x_buf = taken(&mut self.scratch_x, 2 * MAX_FRAME);
+        let mut norm_buf = taken(&mut self.scratch_norm, NORM_SIZE);
+        let x = &mut x_buf[..c * n];
         {
             let (x_, y_) = x.split_at_mut(n);
             let params = AllBands {
@@ -642,8 +692,10 @@ impl CeltDecoder {
                 &mut collapse_masks,
                 dec,
                 &mut self.rng,
+                &mut norm_buf,
             );
         }
+        self.scratch_norm = norm_buf;
 
         let anti_collapse_on = anti_collapse_rsv > 0 && dec.bits(1) != 0;
 
@@ -661,7 +713,7 @@ impl CeltDecoder {
 
         if anti_collapse_on {
             anti_collapse(
-                &mut x,
+                x,
                 &collapse_masks,
                 lm as i32,
                 c,
@@ -684,7 +736,8 @@ impl CeltDecoder {
         if self.prefilter_and_fold {
             self.prefilter_and_fold(n);
         }
-        self.synthesis(&x, n, start, eff_end, c, is_transient, lm, silence);
+        self.synthesis(x, n, start, eff_end, c, is_transient, lm, silence);
+        self.scratch_x = x_buf;
 
         let out_at = DECODE_BUFFER_SIZE - n;
         let window = window();
@@ -692,7 +745,7 @@ impl CeltDecoder {
             self.postfilter_period = self.postfilter_period.max(COMBFILTER_MINPERIOD);
             self.postfilter_period_old = self.postfilter_period_old.max(COMBFILTER_MINPERIOD);
             comb_filter(
-                CombIo::InPlace {
+                InPlace {
                     buf: ch,
                     at: out_at,
                 },
@@ -708,7 +761,7 @@ impl CeltDecoder {
             );
             if lm != 0 {
                 comb_filter(
-                    CombIo::InPlace {
+                    InPlace {
                         buf: ch,
                         at: out_at + SHORT_MDCT_SIZE,
                     },
@@ -833,7 +886,9 @@ impl CeltDecoder {
         let out_at = DECODE_BUFFER_SIZE - n;
         let window = window();
         let ds = self.downsample;
-        let mut freq = vec![0i32; n];
+        let mut freq_buf = taken(&mut self.scratch_freq, MAX_FRAME);
+        let mut freq2_buf = taken(&mut self.scratch_freq2, MAX_FRAME);
+        let freq = &mut freq_buf[..n];
         let imdct = |freq: &[i32], out: &mut Vec<i32>, scratch: &mut Vec<Cpx>| {
             for b in 0..blocks {
                 backward(
@@ -849,37 +904,19 @@ impl CeltDecoder {
         };
         if cc == 2 && c == 1 {
             // A mono stream copied to both channels.
-            denormalise_bands(
-                x,
-                &mut freq,
-                &self.old_band_e,
-                start,
-                eff_end,
-                m,
-                ds,
-                silence,
-            );
+            denormalise_bands(x, freq, &self.old_band_e, start, eff_end, m, ds, silence);
             let [left, right] = &mut self.decode_mem[..] else {
                 return;
             };
-            imdct(&freq, left, &mut self.fft_scratch);
-            imdct(&freq, right, &mut self.fft_scratch);
+            imdct(freq, left, &mut self.fft_scratch);
+            imdct(freq, right, &mut self.fft_scratch);
         } else if cc == 1 && c == 2 {
             // A stereo stream mixed down.
-            let mut freq2 = vec![0i32; n];
-            denormalise_bands(
-                x,
-                &mut freq,
-                &self.old_band_e,
-                start,
-                eff_end,
-                m,
-                ds,
-                silence,
-            );
+            let freq2 = &mut freq2_buf[..n];
+            denormalise_bands(x, freq, &self.old_band_e, start, eff_end, m, ds, silence);
             denormalise_bands(
                 &x[n..],
-                &mut freq2,
+                freq2,
                 &self.old_band_e[NB_EBANDS..],
                 start,
                 eff_end,
@@ -887,15 +924,15 @@ impl CeltDecoder {
                 ds,
                 silence,
             );
-            for (f, &f2) in freq.iter_mut().zip(&freq2) {
+            for (f, &f2) in freq.iter_mut().zip(freq2.iter()) {
                 *f = half32(*f).wrapping_add(half32(f2));
             }
-            imdct(&freq, &mut self.decode_mem[0], &mut self.fft_scratch);
+            imdct(freq, &mut self.decode_mem[0], &mut self.fft_scratch);
         } else {
             for ch in 0..cc {
                 denormalise_bands(
                     &x[ch * n..],
-                    &mut freq,
+                    freq,
                     &self.old_band_e[ch * NB_EBANDS..],
                     start,
                     eff_end,
@@ -903,7 +940,7 @@ impl CeltDecoder {
                     ds,
                     silence,
                 );
-                imdct(&freq, &mut self.decode_mem[ch], &mut self.fft_scratch);
+                imdct(freq, &mut self.decode_mem[ch], &mut self.fft_scratch);
             }
         }
         // Saturated, so that the post-filter cannot overflow.
@@ -912,6 +949,8 @@ impl CeltDecoder {
                 *v = saturate(*v, SIG_SAT);
             }
         }
+        self.scratch_freq = freq_buf;
+        self.scratch_freq2 = freq2_buf;
     }
 
     /// `deemphasis`: the frame's `n` samples a channel through the
@@ -922,23 +961,59 @@ impl CeltDecoder {
         let coef0 = PREEMPH[0];
         let ds = self.downsample;
         let out_at = DECODE_BUFFER_SIZE - n;
-        let put = |y: &mut i16, v: i32| {
-            *y = if accum {
-                saturate16(i32::from(*y) + sig2word16(v)) as i16
-            } else {
-                sig2word16(v) as i16
-            };
-        };
+        // The common case, at full rate and not added to SILK's samples:
+        // straight through, both channels at once when there are two
+        // (libopus's `deemphasis_stereo_simple`; the same arithmetic).
+        if ds == 1 && !accum {
+            if let [x0, x1] = &self.decode_mem[..] {
+                let (x0, x1) = (&x0[out_at..out_at + n], &x1[out_at..out_at + n]);
+                let [mut m0, mut m1] = self.preemph_mem;
+                for ((out, &a), &b) in pcm.chunks_exact_mut(2).zip(x0).zip(x1) {
+                    let tmp0 = a.wrapping_add(m0);
+                    let tmp1 = b.wrapping_add(m1);
+                    m0 = mult16_32_q15(coef0, tmp0);
+                    m1 = mult16_32_q15(coef0, tmp1);
+                    out[0] = sig2word16(tmp0) as i16;
+                    out[1] = sig2word16(tmp1) as i16;
+                }
+                self.preemph_mem = [m0, m1];
+                return;
+            }
+            if let [x0] = &self.decode_mem[..] {
+                let mut m = self.preemph_mem[0];
+                for (out, &a) in pcm.iter_mut().zip(&x0[out_at..out_at + n]) {
+                    let tmp = a.wrapping_add(m);
+                    m = mult16_32_q15(coef0, tmp);
+                    *out = sig2word16(tmp) as i16;
+                }
+                self.preemph_mem[0] = m;
+                return;
+            }
+        }
         for c in 0..cc {
             let x = &self.decode_mem[c][out_at..out_at + n];
             let mut mem = self.preemph_mem[c];
-            for (j, &v) in x.iter().enumerate() {
-                let tmp = v.wrapping_add(mem);
-                mem = mult16_32_q15(coef0, tmp);
-                // Every `ds`th sample, without filtering first: the band
-                // limit leaves nothing to alias.
-                if j % ds == 0 {
-                    put(&mut pcm[j / ds * cc + c], tmp);
+            // This channel's samples of the interleaved output.
+            let mut y = pcm.get_mut(c..).unwrap_or_default().iter_mut().step_by(cc);
+            // Every `ds`th sample is kept, without filtering first: the band
+            // limit leaves nothing to alias. Each block of `ds` samples is
+            // filtered through, the first of it kept (libopus filters all of
+            // them into a scratch buffer, then picks; the same samples).
+            for block in x.chunks(ds) {
+                let mut kept = 0;
+                for (k, &v) in block.iter().enumerate() {
+                    let tmp = v.wrapping_add(mem);
+                    mem = mult16_32_q15(coef0, tmp);
+                    if k == 0 {
+                        kept = tmp;
+                    }
+                }
+                if let Some(out) = y.next() {
+                    *out = if accum {
+                        saturate16(i32::from(*out) + sig2word16(kept)) as i16
+                    } else {
+                        sig2word16(kept) as i16
+                    };
                 }
             }
             self.preemph_mem[c] = mem;
@@ -953,7 +1028,7 @@ impl CeltDecoder {
         let mut etmp = [0i32; OVERLAP];
         for ch in &mut self.decode_mem {
             comb_filter(
-                CombIo::Into {
+                Into {
                     y: &mut etmp,
                     x: ch.as_slice(),
                     at: DECODE_BUFFER_SIZE - n,

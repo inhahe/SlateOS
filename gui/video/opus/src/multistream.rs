@@ -37,6 +37,9 @@ pub struct MultistreamDecoder {
     /// for a silent channel.
     mapping: Vec<u8>,
     decoders: Vec<Decoder>,
+    /// Each stream's samples, before they go to their channels (libopus's
+    /// `buf`, on its stack): kept, so that a packet costs no allocation.
+    buf: Vec<i16>,
 }
 
 impl MultistreamDecoder {
@@ -74,6 +77,7 @@ impl MultistreamDecoder {
             coupled_streams,
             mapping,
             decoders,
+            buf: Vec::new(),
         })
     }
 
@@ -133,8 +137,10 @@ impl MultistreamDecoder {
     ) -> Result<usize, Error> {
         let channels = self.channels;
         self.decode_native(packet, pcm.len() / channels, fec, |chan, src, stride, n| {
-            for i in 0..n {
-                pcm[i * channels + chan] = src.map_or(0, |s| s[i * stride]);
+            let out = channel_mut(pcm, chan, channels).take(n);
+            match src {
+                Some(s) => out.zip(s.iter().step_by(stride)).for_each(|(o, &v)| *o = v),
+                None => out.for_each(|o| *o = 0),
             }
         })
     }
@@ -148,9 +154,12 @@ impl MultistreamDecoder {
     ) -> Result<usize, Error> {
         let channels = self.channels;
         self.decode_native(packet, pcm.len() / channels, fec, |chan, src, stride, n| {
-            for i in 0..n {
-                pcm[i * channels + chan] =
-                    src.map_or(0.0, |s| (1.0 / 32768.0) * f32::from(s[i * stride]));
+            let out = channel_mut(pcm, chan, channels).take(n);
+            match src {
+                Some(s) => out
+                    .zip(s.iter().step_by(stride))
+                    .for_each(|(o, &v)| *o = (1.0 / 32768.0) * f32::from(v)),
+                None => out.for_each(|o| *o = 0.0),
             }
         })
     }
@@ -170,7 +179,11 @@ impl MultistreamDecoder {
         }
         // No more than 120 ms.
         let mut frame_size = frame_size.min(self.fs as usize / 25 * 3);
-        let mut buf = vec![0i16; 2 * frame_size];
+        // Every stream writes its samples here before they are read.
+        if self.buf.len() < 2 * frame_size {
+            self.buf.resize(2 * frame_size, 0);
+        }
+        let buf = &mut self.buf[..2 * frame_size];
         let streams = self.decoders.len();
         let data = data.unwrap_or(&[]);
         let do_plc = data.is_empty();
@@ -233,6 +246,14 @@ impl MultistreamDecoder {
         }
         Ok(frame_size)
     }
+}
+
+/// Output channel `chan`'s samples of interleaved `pcm`.
+fn channel_mut<T>(pcm: &mut [T], chan: usize, channels: usize) -> impl Iterator<Item = &mut T> {
+    pcm.get_mut(chan..)
+        .unwrap_or_default()
+        .iter_mut()
+        .step_by(channels)
 }
 
 /// `opus_multistream_packet_validate`: every stream's packet sound and of
@@ -351,14 +372,16 @@ impl ProjectionDecoder {
                     pcm[..n * rows].fill(0);
                 }
                 if let Some(src) = src {
-                    // `mapping_matrix_multiply_channel_out_short`: the sum
-                    // wraps to 16 bits, as C's `+=` into a short does.
-                    for i in 0..n {
-                        let sample = i32::from(src[i * stride]);
-                        for row in 0..rows {
-                            let tmp = i32::from(matrix[rows * chan + row]) * sample;
-                            let at = rows * i + row;
-                            pcm[at] = (i32::from(pcm[at]) + ((tmp + 16384) >> 15)) as i16;
+                    // `mapping_matrix_multiply_channel_out_short`: each
+                    // output frame plus this channel times its column, the
+                    // sum wrapping to 16 bits as C's `+=` into a short does.
+                    let column = &matrix[rows * chan..rows * (chan + 1)];
+                    let frames = pcm.chunks_exact_mut(rows).take(n);
+                    for (frame, &s) in frames.zip(src.iter().step_by(stride)) {
+                        let sample = i32::from(s);
+                        for (out, &m) in frame.iter_mut().zip(column) {
+                            let tmp = i32::from(m) * sample;
+                            *out = (i32::from(*out) + ((tmp + 16384) >> 15)) as i16;
                         }
                     }
                 }
@@ -383,12 +406,12 @@ impl ProjectionDecoder {
                 }
                 if let Some(src) = src {
                     // `mapping_matrix_multiply_channel_out_float`.
-                    for i in 0..n {
-                        let sample = (1.0 / 32768.0) * f32::from(src[i * stride]);
-                        for row in 0..rows {
-                            let tmp =
-                                (1.0 / 32768.0) * f32::from(matrix[rows * chan + row]) * sample;
-                            pcm[rows * i + row] += tmp;
+                    let column = &matrix[rows * chan..rows * (chan + 1)];
+                    let frames = pcm.chunks_exact_mut(rows).take(n);
+                    for (frame, &s) in frames.zip(src.iter().step_by(stride)) {
+                        let sample = (1.0 / 32768.0) * f32::from(s);
+                        for (out, &m) in frame.iter_mut().zip(column) {
+                            *out += (1.0 / 32768.0) * f32::from(m) * sample;
                         }
                     }
                 }

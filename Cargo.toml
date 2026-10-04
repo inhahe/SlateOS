@@ -759,8 +759,8 @@ codegen-units = 1
 # opus (the Opus decoder, `gui/video/opus`): filters, transforms and
 # resamplers over every sample, in libopus's fixed-point arithmetic. Counted
 # with callgrind over every stream in its `tests/data` at 48 kHz (151 s of
-# sound; `tests/bench.rs`, one pass): 6.48 G instructions at `-Os` with 16
-# codegen units, 5.48 G at `-O3` with one; libopus 1.5.2's own fixed-point
+# sound; `tests/bench.rs`, one pass): 5.32 G instructions at `-Os` with 16
+# codegen units, 4.46 G at `-O3` with one; libopus 1.5.2's own fixed-point
 # C (`-O2`, no intrinsics; `tools/bench.c`) takes 4.03 G. Lane F, 2026-10-04.
 [profile.release.package.opus]
 opt-level = 3

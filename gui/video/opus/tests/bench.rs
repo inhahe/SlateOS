@@ -34,17 +34,21 @@ use common::{data_dir, packets};
 use opus::{AnyDecoder, Decoder, Head};
 use std::time::Instant;
 
-/// libopus 1.5.2 (fixed point, gcc 13 -O2) on the same streams with
-/// `tools/bench.c`, in times real time: SILK and hybrid streams, CELT
-/// streams, the streams that switch between them, multistream streams, all. See the workspace `Cargo.toml`
-/// beside `opus`'s profile for callgrind's instruction counts, which other
-/// work on the machine does not move.
+/// libopus 1.5.2's speed on the same streams, `tools/bench.c` built with
+/// gcc 13 `-O2` against its fixed-point library (no intrinsics: the C this
+/// port translates), in times real time: SILK and hybrid streams, CELT
+/// streams, the streams that switch between them, multistream streams, all.
+/// The fastest of three passes, measured 2026-10-04 on an Intel Core
+/// i7-8700K (3.7 GHz; WSL 2 Ubuntu) while other work shared it; the port
+/// made 706, 411, 558, 154 and 391 on the same machine at the same time.
+/// Callgrind's instruction counts, which that load does not move, are in
+/// the workspace `Cargo.toml` beside `opus`'s profile.
 const LIBOPUS: [(&str, f64); 5] = [
-    ("silk+hybrid", 0.0),
-    ("celt", 0.0),
-    ("mixed", 0.0),
-    ("multistream", 0.0),
-    ("all", 0.0),
+    ("silk+hybrid", 865.0),
+    ("celt", 500.0),
+    ("mixed", 602.0),
+    ("multistream", 155.0),
+    ("all", 426.0),
 ];
 
 /// Which of the bench's groups a stream is in.

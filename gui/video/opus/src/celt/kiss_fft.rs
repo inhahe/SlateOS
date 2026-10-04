@@ -104,57 +104,62 @@ fn c_sub(a: Cpx, b: Cpx) -> Cpx {
     }
 }
 
-/// `kf_bfly2`, after a radix-4 stage (`m` is 4).
+/// `kf_bfly2`, after a radix-4 stage (`m` is 4): over groups of eight, as
+/// arrays, so that no access needs a bounds check.
 fn bfly2(f: &mut [Cpx], n: usize) {
     // libopus's `0.7071067812f`: the same `f32` as the constant.
     let tw = qconst16(std::f32::consts::FRAC_1_SQRT_2, 15);
-    for i in 0..n {
-        let base = i * 8;
-        let (a, b) = (base, base + 4);
-        let t = f[b];
-        f[b] = c_sub(f[a], t);
-        f[a] = c_add(f[a], t);
+    for group in f.chunks_exact_mut(8).take(n) {
+        let Ok(g) = <&mut [Cpx; 8]>::try_from(group) else {
+            continue;
+        };
+        let t = g[4];
+        g[4] = c_sub(g[0], t);
+        g[0] = c_add(g[0], t);
 
         let t = Cpx {
-            r: s_mul(f[b + 1].r.wrapping_add(f[b + 1].i), tw),
-            i: s_mul(f[b + 1].i.wrapping_sub(f[b + 1].r), tw),
+            r: s_mul(g[5].r.wrapping_add(g[5].i), tw),
+            i: s_mul(g[5].i.wrapping_sub(g[5].r), tw),
         };
-        f[b + 1] = c_sub(f[a + 1], t);
-        f[a + 1] = c_add(f[a + 1], t);
+        g[5] = c_sub(g[1], t);
+        g[1] = c_add(g[1], t);
 
         let t = Cpx {
-            r: f[b + 2].i,
-            i: f[b + 2].r.wrapping_neg(),
+            r: g[6].i,
+            i: g[6].r.wrapping_neg(),
         };
-        f[b + 2] = c_sub(f[a + 2], t);
-        f[a + 2] = c_add(f[a + 2], t);
+        g[6] = c_sub(g[2], t);
+        g[2] = c_add(g[2], t);
 
         let t = Cpx {
-            r: s_mul(f[b + 3].i.wrapping_sub(f[b + 3].r), tw),
-            i: s_mul(f[b + 3].i.wrapping_add(f[b + 3].r).wrapping_neg(), tw),
+            r: s_mul(g[7].i.wrapping_sub(g[7].r), tw),
+            i: s_mul(g[7].i.wrapping_add(g[7].r).wrapping_neg(), tw),
         };
-        f[b + 3] = c_sub(f[a + 3], t);
-        f[a + 3] = c_add(f[a + 3], t);
+        g[7] = c_sub(g[3], t);
+        g[3] = c_add(g[3], t);
     }
 }
 
-/// `kf_bfly4`.
+/// `kf_bfly4`: the degenerate last stage over groups of four as arrays, so
+/// that it needs no bounds checks.
 fn bfly4(f: &mut [Cpx], fstride: usize, m: usize, n: usize, mm: usize) {
     if m == 1 {
         // All the twiddles are 1.
-        for i in 0..n {
-            let o = i * 4;
-            let scratch0 = c_sub(f[o], f[o + 2]);
-            f[o] = c_add(f[o], f[o + 2]);
-            let mut scratch1 = c_add(f[o + 1], f[o + 3]);
-            f[o + 2] = c_sub(f[o], scratch1);
-            f[o] = c_add(f[o], scratch1);
-            scratch1 = c_sub(f[o + 1], f[o + 3]);
-            f[o + 1] = Cpx {
+        for group in f.chunks_exact_mut(4).take(n) {
+            let Ok(g) = <&mut [Cpx; 4]>::try_from(group) else {
+                continue;
+            };
+            let scratch0 = c_sub(g[0], g[2]);
+            g[0] = c_add(g[0], g[2]);
+            let mut scratch1 = c_add(g[1], g[3]);
+            g[2] = c_sub(g[0], scratch1);
+            g[0] = c_add(g[0], scratch1);
+            scratch1 = c_sub(g[1], g[3]);
+            g[1] = Cpx {
                 r: scratch0.r.wrapping_add(scratch1.i),
                 i: scratch0.i.wrapping_sub(scratch1.r),
             };
-            f[o + 3] = Cpx {
+            g[3] = Cpx {
                 r: scratch0.r.wrapping_sub(scratch1.i),
                 i: scratch0.i.wrapping_add(scratch1.r),
             };

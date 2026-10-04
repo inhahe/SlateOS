@@ -95,6 +95,7 @@ EDIT_ASKS = "closing_over_a_contact_being_edited_asks_and_save_keeps_it"
 EDIT_LEAVES = "closing_over_an_edit_can_leave_without_it"
 SAVE_ASKS = "closing_while_a_save_fails_asks_first"
 EDITING = "editing_keeps_what_the_form_does_not_show"
+FIELDS = "the_text_boxes_are_the_toolkits_fields"
 
 # (name, old, new, [tests that must fail])
 MUTATIONS = [
@@ -605,6 +606,142 @@ MUTATIONS = [
         '        if !plain {\n            return;\n        }\n',
         '',
         ['a_chord_is_neither_a_contacts_key_nor_typing_and_altgr_types'],
+    ),
+    # -- the shortcut card's hold on the pointer
+    (
+        'a press goes through the shortcut card',
+        '        if self.show_help {\n'
+        '            // The card is modal for the pointer as it is for the keys: a\n'
+        '            // press, with any button, puts it away rather than reaching the\n'
+        '            // control drawn under it -- Delete included, which would remove\n'
+        '            // a contact the reader cannot see for the card.\n'
+        '            if matches!(event.kind, MouseEventKind::Press(_)) {\n'
+        '                self.show_help = false;\n'
+        '            }\n'
+        '            return;\n'
+        '        }\n',
+        '',
+        ['the_shortcut_card_takes_a_press_rather_than_passing_it_on'],
+    ),
+    (
+        'only the left button puts the card away',
+        '            if matches!(event.kind, MouseEventKind::Press(_)) {\n'
+        '                self.show_help = false;\n',
+        '            if matches!(event.kind, MouseEventKind::Press(MouseButton::Left)) {\n'
+        '                self.show_help = false;\n',
+        ['the_shortcut_card_takes_a_press_rather_than_passing_it_on'],
+    ),
+    (
+        'a move puts the card away',
+        '            if matches!(event.kind, MouseEventKind::Press(_)) {\n'
+        '                self.show_help = false;\n',
+        '            if !matches!(event.kind, MouseEventKind::Leave) {\n'
+        '                self.show_help = false;\n',
+        ['the_shortcut_card_takes_a_press_rather_than_passing_it_on'],
+    ),
+    # -- the text boxes, the toolkit's fields (c-e-a-theme-can-shape-the-controls)
+    (
+        'a text box is drawn the same wherever the pointer is',
+        '            hovered: open && self.hover == Some(target),\n',
+        '            hovered: false,\n',
+        [FIELDS],
+    ),
+    (
+        'a text box is not marked while it has the keyboard',
+        '            focused: open && self.focus == focus,\n',
+        '            focused: false,\n',
+        [FIELDS],
+    ),
+    (
+        'a text box lights under a cover',
+        '            hovered: open && self.hover == Some(target),\n',
+        '            hovered: self.hover == Some(target),\n',
+        [FIELDS],
+    ),
+    (
+        'a text box is marked under a cover',
+        '            focused: open && self.focus == focus,\n',
+        '            focused: self.focus == focus,\n',
+        [FIELDS],
+    ),
+    (
+        'the close question is no cover',
+        '        self.question.is_some() || self.picker.is_open() || self.show_help\n',
+        '        self.picker.is_open() || self.show_help\n',
+        [FIELDS],
+    ),
+    (
+        'the file dialog is no cover',
+        '        self.question.is_some() || self.picker.is_open() || self.show_help\n',
+        '        self.question.is_some() || self.show_help\n',
+        [FIELDS],
+    ),
+    (
+        'the shortcut card is no cover',
+        '        self.question.is_some() || self.picker.is_open() || self.show_help\n',
+        '        self.question.is_some() || self.picker.is_open()\n',
+        [FIELDS],
+    ),
+    (
+        'the pointer is not followed',
+        '                self.hover = self.frame(size.0, size.1).hit_test(mouse.x, mouse.y);\n',
+        '                let _ = size;\n',
+        [FIELDS],
+    ),
+    (
+        'the pointer is not followed under a cover',
+        '        let Event::Mouse(mouse) = event else {\n'
+        '            return;\n'
+        '        };\n'
+        '        match mouse.kind {\n',
+        '        let Event::Mouse(mouse) = event else {\n'
+        '            return;\n'
+        '        };\n'
+        '        if self.covered() {\n'
+        '            return;\n'
+        '        }\n'
+        '        match mouse.kind {\n',
+        [FIELDS],
+    ),
+    (
+        'leaving the window leaves a box lit',
+        '            MouseEventKind::Leave => self.hover = None,\n',
+        '            MouseEventKind::Leave => {}\n',
+        [FIELDS],
+    ),
+    (
+        "the form's clip cuts the focus ring's sides",
+        '            f.clip(Rect::new(\n'
+        '                form.x - ring,\n'
+        '                form.y,\n'
+        '                form.w + 2.0 * ring,\n'
+        '                form.h,\n'
+        '            ));\n',
+        '            let _ = ring;\n'
+        '            f.clip(form);\n',
+        [FIELDS],
+    ),
+    (
+        'the search box shows a caret under a cover',
+        '        let focused = state.focused;\n'
+        '        let inner = inset(l.search, 10.0);\n',
+        '        let focused = self.focus == Focus::Search;\n'
+        '        let inner = inset(l.search, 10.0);\n',
+        [FIELDS],
+    ),
+    (
+        "a form's box shows a caret under a cover",
+        '                let focused = state.focused;\n'
+        '                let value = self.field_value(field);\n',
+        '                let focused = self.focus == Focus::Field(field);\n'
+        '                let value = self.field_value(field);\n',
+        [FIELDS],
+    ),
+    (
+        "the text boxes take the toolkit's focus width, not the user's",
+        '        self.focus_ring_width = settings.focus_ring_width();\n',
+        '        let _ = settings;\n',
+        [FIELDS],
     ),
 ]
 

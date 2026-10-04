@@ -1945,6 +1945,9 @@ impl DefragUI {
 /// the tick cheap and bounded while still finishing in a plausible time.
 const STEPS_PER_TICK: u64 = 64;
 
+/// How often a running defrag is ticked: sixty times a second.
+const TICK: std::time::Duration = std::time::Duration::from_millis(16);
+
 /// Route one event into [`DefragUI`].
 ///
 /// A free function rather than a method so the tests can drive the same path
@@ -1987,6 +1990,14 @@ impl App for DefragUI {
 
     fn initial_size(&self) -> (u32, u32) {
         (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+    }
+
+    /// A clock only while a defrag is running, at the sixty a second its
+    /// steps are batched for (`STEPS_PER_TICK`). It asked for none -- the
+    /// trait's default -- so no tick came, and a started defrag stood at
+    /// nought per cent for good, its steps waiting on a tick.
+    fn tick_interval(&self) -> Option<std::time::Duration> {
+        (self.defrag_state() == DefragState::Running).then_some(TICK)
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
@@ -4801,6 +4812,39 @@ mod tests {
         assert!(
             moved_after > moved_before,
             "a tick during a running defrag moved no blocks",
+        );
+    }
+
+    /// **A running defrag asks for the clock, and nothing else does.** Its
+    /// steps are taken on the tick, and the app asked for none: in a window a
+    /// started defrag never moved a block.
+    #[test]
+    fn a_running_defrag_asks_for_the_clock_and_nothing_else_does() {
+        let mut ui = scannable_ui();
+        assert_eq!(
+            App::tick_interval(&ui),
+            None,
+            "an idle window wants a clock"
+        );
+        probe::click(&mut ui, Target::Action); // Analyze
+        assert_eq!(
+            App::tick_interval(&ui),
+            None,
+            "an analysed disk wants a clock"
+        );
+        probe::click(&mut ui, Target::Action); // Defragment
+        assert_eq!(ui.defrag_state(), DefragState::Running);
+        assert_eq!(
+            App::tick_interval(&ui),
+            Some(TICK),
+            "a running defrag asks for no clock, so it never moves"
+        );
+        probe::click(&mut ui, Target::Action); // Pause
+        assert_eq!(ui.defrag_state(), DefragState::Paused);
+        assert_eq!(
+            App::tick_interval(&ui),
+            None,
+            "a paused defrag wants a clock"
         );
     }
 

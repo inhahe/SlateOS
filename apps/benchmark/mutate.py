@@ -40,6 +40,35 @@ MUTATIONS = [
         '            && key.modifiers.ctrl',
         ['only_the_windows_own_chords_are_taken_and_altgr_is_not_one'],
     ),
+    # -- the clock, 2026-10-03: none was asked for
+    (
+        'a running suite asks for no clock',
+        '        self.progress.phase.is_running().then_some(TICK)\n',
+        '        None\n',
+        ['a_running_suite_asks_for_the_clock_and_an_idle_one_does_not'],
+    ),
+    (
+        'an idle window asks for the clock',
+        '        self.progress.phase.is_running().then_some(TICK)\n',
+        '        Some(TICK)\n',
+        ['a_running_suite_asks_for_the_clock_and_an_idle_one_does_not'],
+    ),
+    (
+        'a tick with nothing running asks for a repaint',
+        '                    EventResult::Consumed\n'
+        '                } else {\n'
+        '                    EventResult::Ignored\n'
+        '                }\n'
+        '            }\n'
+        '            // Through `resize`',
+        '                    EventResult::Consumed\n'
+        '                } else {\n'
+        '                    EventResult::Consumed\n'
+        '                }\n'
+        '            }\n'
+        '            // Through `resize`',
+        ['a_running_suite_asks_for_the_clock_and_an_idle_one_does_not'],
+    ),
 ]
 
 if __name__ == "__main__":

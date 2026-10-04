@@ -25,9 +25,6 @@ pub struct SegmentInfo {
     pub timestamp_scale: u64,
     /// The duration, in ticks, if the file gives it.
     pub duration: Option<f64>,
-    pub title: Option<Vec<u8>>,
-    pub muxing_app: Option<Vec<u8>>,
-    pub writing_app: Option<Vec<u8>>,
 }
 
 /// One frame of one track.
@@ -179,9 +176,6 @@ impl<R: Read + Seek> Demuxer<R> {
             info: SegmentInfo {
                 timestamp_scale: 1_000_000,
                 duration: None,
-                title: None,
-                muxing_app: None,
-                writing_app: None,
             },
             tracks: Vec::new(),
             declared: Vec::new(),
@@ -341,9 +335,12 @@ impl<R: Read + Seek> Demuxer<R> {
                     match c.id {
                         ids::TIMESTAMP_SCALE => info.timestamp_scale = r.uint(c.size, 1_000_000)?,
                         ids::DURATION => info.duration = Some(r.float(c.size, 0.0)?),
-                        ids::TITLE => info.title = r.string(c.size)?,
-                        ids::MUXING_APP => info.muxing_app = r.string(c.size)?,
-                        ids::WRITING_APP => info.writing_app = r.string(c.size)?,
+                        // Read as FFmpeg reads them, and kept by nothing:
+                        // nothing here shows a file's title or who wrote it
+                        // (design-decisions §856).
+                        ids::TITLE | ids::MUXING_APP | ids::WRITING_APP => {
+                            r.string(c.size)?;
+                        }
                         _ => {}
                     }
                     Ok(())

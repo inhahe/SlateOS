@@ -83,27 +83,23 @@ pub struct Video {
     pub display_height: Option<u64>,
     /// 0 pixels, 1 centimetres, 2 inches, 3 an aspect ratio, 4 unknown.
     pub display_unit: u64,
-    /// 0 undetermined, 1 interlaced, 2 progressive.
-    pub interlaced: u64,
-    pub stereo_mode: u64,
     /// 1 when each block's `BlockAdditional` with ID 1 carries the alpha
     /// channel: WebM's transparency for VP8 and VP9.
     pub alpha_mode: u64,
     pub colour: Option<Colour>,
 }
 
-/// A video track's colour: `Colour`, numbered as ITU-T H.273 numbers it.
+/// A video track's colour: `Colour`, as far as converting its pictures to
+/// RGB needs it, numbered as ITU-T H.273 numbers it. (Its other elements --
+/// the transfer function, chroma siting, bits per channel -- are read and
+/// checked, but no conversion here obeys them, so they are not kept.)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Colour {
+    /// `MatrixCoefficients`: 2, unspecified, unless the file says.
     pub matrix_coefficients: u64,
-    pub bits_per_channel: u64,
-    pub chroma_subsampling_horz: u64,
-    pub chroma_subsampling_vert: u64,
-    pub chroma_siting_horz: u64,
-    pub chroma_siting_vert: u64,
     /// 0 unspecified, 1 limited, 2 full, 3 defined by the others.
     pub range: u64,
-    pub transfer_characteristics: u64,
+    /// `Primaries`: 2, unspecified, unless the file says.
     pub primaries: u64,
 }
 
@@ -470,8 +466,6 @@ fn read_video<R: Read + Seek>(r: &mut Reader<R>, parent: &Header) -> Result<(Vid
         display_width: None,
         display_height: None,
         display_unit: 0,
-        interlaced: 0,
-        stereo_mode: 0,
         alpha_mode: 0,
         colour: None,
     };
@@ -487,8 +481,13 @@ fn read_video<R: Read + Seek>(r: &mut Reader<R>, parent: &Header) -> Result<(Vid
             ids::DISPLAY_WIDTH => v.display_width = Some(r.uint(c.size, 0)?),
             ids::DISPLAY_HEIGHT => v.display_height = Some(r.uint(c.size, 0)?),
             ids::DISPLAY_UNIT => v.display_unit = r.uint(c.size, 0)?,
-            ids::FLAG_INTERLACED => v.interlaced = r.uint(c.size, 0)?,
-            ids::STEREO_MODE => v.stereo_mode = r.uint(c.size, 0)?,
+            // Read as FFmpeg reads them -- so that a malformed one refuses the
+            // track as it does there -- and kept by nothing, because nothing
+            // here acts on them (design-decisions §856): no deinterlacing, no
+            // stereoscopic display.
+            ids::FLAG_INTERLACED | ids::STEREO_MODE => {
+                r.uint(c.size, 0)?;
+            }
             ids::ALPHA_MODE => v.alpha_mode = r.uint(c.size, 0)?,
             ids::COLOUR => v.colour = Some(read_colour(r, c)?),
             FRAME_RATE => frame_rate = r.float(c.size, 0.0)?,
@@ -500,29 +499,29 @@ fn read_video<R: Read + Seek>(r: &mut Reader<R>, parent: &Header) -> Result<(Vid
 }
 
 fn read_colour<R: Read + Seek>(r: &mut Reader<R>, parent: &Header) -> Result<Colour, Error> {
-    // H.273's "unspecified" (2) for the three code points; 0 elsewhere.
+    // H.273's "unspecified" (2) for the two code points; 0 for the range.
     let mut c = Colour {
         matrix_coefficients: 2,
-        bits_per_channel: 0,
-        chroma_subsampling_horz: 0,
-        chroma_subsampling_vert: 0,
-        chroma_siting_horz: 0,
-        chroma_siting_vert: 0,
         range: 0,
-        transfer_characteristics: 2,
         primaries: 2,
     };
     r.children(parent, |r, e| {
         match e.id {
             ids::MATRIX_COEFFICIENTS => c.matrix_coefficients = r.uint(e.size, 2)?,
-            ids::BITS_PER_CHANNEL => c.bits_per_channel = r.uint(e.size, 0)?,
-            ids::CHROMA_SUBSAMPLING_HORZ => c.chroma_subsampling_horz = r.uint(e.size, 0)?,
-            ids::CHROMA_SUBSAMPLING_VERT => c.chroma_subsampling_vert = r.uint(e.size, 0)?,
-            ids::CHROMA_SITING_HORZ => c.chroma_siting_horz = r.uint(e.size, 0)?,
-            ids::CHROMA_SITING_VERT => c.chroma_siting_vert = r.uint(e.size, 0)?,
             ids::RANGE => c.range = r.uint(e.size, 0)?,
-            ids::TRANSFER_CHARACTERISTICS => c.transfer_characteristics = r.uint(e.size, 2)?,
             ids::PRIMARIES => c.primaries = r.uint(e.size, 2)?,
+            // Read as FFmpeg reads them, and kept by nothing: the conversion to
+            // RGB takes no account of chroma siting or of the transfer
+            // function (no colour management, no tone mapping), and the
+            // decoder says the depth and subsampling itself.
+            ids::BITS_PER_CHANNEL
+            | ids::CHROMA_SUBSAMPLING_HORZ
+            | ids::CHROMA_SUBSAMPLING_VERT
+            | ids::CHROMA_SITING_HORZ
+            | ids::CHROMA_SITING_VERT
+            | ids::TRANSFER_CHARACTERISTICS => {
+                r.uint(e.size, 0)?;
+            }
             _ => {}
         }
         Ok(())

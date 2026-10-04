@@ -20,9 +20,9 @@ and Backspace `pop`s it.
 
 **The twenty-nine:** charmap (search), clipmanager (its form), credmanager
 (the entry form, the master password, search), dbviewer (cell editing),
-diagram (a shape's label), dictionary (the query), filesearch (the query),
-lockscreen (the password), mindmap (a node's text and its search),
-passwordgen (its input), undelete (search).
+dictionary (the query), filesearch (the query), lockscreen (the password),
+mindmap (a node's text and its search), passwordgen (its input), undelete
+(search).
 
 Not among them: `terminal`, whose typing goes to the shell's own line
 editor; `typingtutor`, where a line typed straight through is the exercise;
@@ -89,4 +89,5 @@ the search box and the add/edit dialog's fields edit at a caret; Delete in
 the search no longer removes an entry); tmux (2026-10-04: the : prompt edits
 at a caret, never past its colon); contacts (2026-10-04: the search box and
 the form's lines edit at a caret; Delete in a box no longer deletes the
-contact).
+contact); diagram (2026-10-04: a shape's or a line's label edits at a caret,
+pressed where it is drawn).

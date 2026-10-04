@@ -284,18 +284,11 @@ MUTATIONS = [
         "",
         [OPENED],
     ),
-    (
-        "a label refuses what AltGr types",
-        "                if !textline::types_into_field(key) {",
-        "                if !textline::types_into_field(key) || key.modifiers.ctrl {",
-        ["a_label_takes_altgr_letters_and_no_commands_letter"],
-    ),
-    (
-        "a label types a command's letter",
-        "                if !textline::types_into_field(key) {",
-        "                if !key.types_text() {",
-        ["a_label_takes_altgr_letters_and_no_commands_letter"],
-    ),
+    # No rows for "a label refuses what AltGr types" or "types a command's
+    # letter": since 2026-10-04 a label's typing is textline::apply_key's,
+    # which makes both distinctions itself, in its own crate and with its own
+    # tests; a_label_takes_altgr_letters_and_no_commands_letter still holds the
+    # label to them.
     # -- the shortcut card is modal, for the keys and the pointer
     (
         "the card is modal for nothing",
@@ -353,6 +346,8 @@ MUTATIONS = [
 FIELD = "a_label_is_typed_into_the_toolkits_field"
 FIRST = "a_thing_with_no_label_shows_its_first_label_as_it_is_typed"
 CARET = "the_caret_follows_the_typing_and_stays_in_the_box"
+EDITS = "a_label_being_typed_edits_at_a_caret"
+STARTS = "a_label_starts_from_its_word_the_caret_after_it"
 
 MUTATIONS += [
     # A label is typed into the toolkit's field (2026-10-04; lane C,
@@ -396,9 +391,51 @@ MUTATIONS += [
     ),
     (
         "the caret is at the start of the typing",
-        "                cursor: guitk::text::TextCursor::from(buf.len()),",
-        "                cursor: guitk::text::TextCursor::from(0),",
-        [CARET],
+        "                cursor: self.label_caret(buf).0,\n",
+        "                cursor: guitk::text::TextCursor::from(0),\n",
+        [CARET, EDITS],
+    ),
+]
+
+# A label edits at a caret (2026-10-04,
+# known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box): it
+# took typing at its end and Backspace from it, and nothing else.
+MUTATIONS += [
+    (
+        "a label starts from the last label's caret",
+        "        self.label_editor.set_text(&existing);\n",
+        "",
+        [STARTS],
+    ),
+    (
+        "a cut or a copy takes nothing to the clipboard",
+        "                    self.label_clipboard = copied;\n",
+        "                    let _ = copied;\n",
+        [EDITS],
+    ),
+    (
+        "the selection is not drawn",
+        "                selection_anchor: self.label_caret(buf).1,\n",
+        "                selection_anchor: None,\n",
+        [EDITS],
+    ),
+    (
+        "a press puts the caret at the start",
+        "            x - strip.x,\n",
+        "            0.0,\n",
+        [EDITS],
+    ),
+    (
+        "a press in the label goes to the canvas",
+        "            && strip.field().contains(ev.x, ev.y)\n",
+        "            && false\n",
+        [EDITS],
+    ),
+    (
+        "a label is pressed where it lies on the canvas, not the screen",
+        "            x: strip.x + PALETTE_WIDTH + self.pan_x,\n",
+        "            x: strip.x,\n",
+        [EDITS],
     ),
 ]
 

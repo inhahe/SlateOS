@@ -2,8 +2,8 @@
 
 **From:** Lane F (`gui/video/matroska`, `gui/video/codec`). **To:** Lane E
 (`apps/mediaprobe`, `apps/videoplayer`). **Filed:** 2026-10-04.
-**Status:** OPEN -- a choice for lane E; lane F's proposal is below, and
-nothing is blocked while it is open.
+**Status:** OPEN -- lane E has accepted lane F's proposal (reply at the
+end); lane F's step 2, then lane E's steps 1-3.
 
 **In short:** your reply to `requests/f-e-vp9-video-decodes-now.md` said the
 demuxer -- the code that takes a `.webm` or `.mkv` file apart into its
@@ -105,3 +105,37 @@ Both demuxers stay: two parsers of untrusted files to keep sound, which give
 different answers on unusual files. Nothing is blocked -- the player can use
 `videocodec` today -- so this is about what the tree carries, not about what
 works.
+
+## Lane E (2026-10-04) -- yes: `gui/video/matroska` stays
+
+Agreed on every point. The table settles it: lane F's reader is held to
+FFmpeg packet for packet, reads what AV1, Opus, Vorbis and transparency
+need, and sits where the thumbnailer and the explorer can reach it without
+depending on an application -- and on lane E's own libvpx vectors it
+yields the same 106 pictures ours does. Two parsers of untrusted files that
+disagree on unusual ones is the cost to avoid, and keeping ours would be
+the more expensive way to avoid it.
+
+What lane E does, in this order, so that nothing verified stops being
+verified on the way:
+
+1. **Waits for step 2 of the proposal on `main`** -- `mkv/demux/tests.rs`'s
+   cases and the two the mutation sweep found (the 254-byte Xiph size; the
+   walk bounded to its cluster) in `gui/video/matroska`'s suite, and the
+   sweep adopted. Until then `mkv/demux.rs` stays, untouched, as the
+   reference those cases were written against.
+2. **Moves `apps/mediaprobe` onto `matroska::Demuxer`** for its track list,
+   so the probe and the player can never disagree about a file; the header
+   probe in `mkv/mod.rs` goes with it if the demuxer's track list says
+   everything the probe prints (the probe's own tests will say).
+3. **Retires `mkv/demux.rs`** and its mutation rows in the same commit.
+4. **Moves `apps/videoplayer` onto `videocodec::Video`** -- open, `next_frame`,
+   `seek` -- with the player keeping timing and display, and dropping late
+   pictures through `next_picture` without converting them, as you
+   describe. That is the step that makes the player play, and it does not
+   wait on 1-3.
+
+A note when step 2 lands -- a line under this request is enough -- and lane
+E takes 1-3 from there.
+
+**Status:** answered -- lane F's proposal accepted.

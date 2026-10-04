@@ -43,6 +43,9 @@ use guitk::fold;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow, content_bottom};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::text::TextCursor;
+use guitk::textedit;
+use guitk::textinput::TextInput;
 use guitk::{scroll_window, wheel};
 use oswindow::app::Response;
 use pathtext::ShowPath;
@@ -106,6 +109,14 @@ const DEFAULT_WIDTH: f32 = 1100.0;
 const DEFAULT_HEIGHT: f32 = 720.0;
 /// Height of search bar.
 const SEARCH_BAR_HEIGHT: f32 = 30.0;
+/// The size the search box's text is drawn at, which the caret keys and a
+/// press measure against as well.
+const SEARCH_TEXT_SIZE: f32 = 11.0;
+/// How far the search box's text sits inside each side of the box.
+const SEARCH_TEXT_INSET: f32 = 8.0;
+/// The most the search box holds, in characters: a device's name is a few
+/// words, and a paste of a page would be searched for at every key.
+const SEARCH_CAPACITY: usize = 256;
 /// Height of each event history row.
 const EVENT_ROW_HEIGHT: f32 = 20.0;
 /// Maximum number of event history entries retained.
@@ -829,6 +840,11 @@ pub struct DeviceManagerState {
     pub show_help: bool,
     /// Whether the search bar is focused.
     pub search_focused: bool,
+    /// The search box's editor -- its caret and selection over
+    /// `search_query` -- reloaded when the query changed under it.
+    search_editor: TextInput,
+    /// What the search box's Ctrl+C and Ctrl+X took, for its Ctrl+V.
+    search_clipboard: String,
     /// Event history log.
     pub event_history: Vec<DeviceEvent>,
     /// Resource view (computed from devices).
@@ -912,6 +928,8 @@ impl DeviceManagerState {
             active_tab: PropertiesTab::General,
             search_query: String::new(),
             search_focused: false,
+            search_editor: TextInput::new(),
+            search_clipboard: String::new(),
             show_help: false,
             event_history: Vec::new(),
             resource_view,
@@ -1126,6 +1144,78 @@ impl DeviceManagerState {
                     .any(|d| d.id == dev_id && device_matches_query(d, &q));
             }
         }
+    }
+
+    /// Ctrl+F: the search box takes the keyboard, with what it holds
+    /// selected, so typing starts a new search and an arrow key keeps the old
+    /// one to edit.
+    fn focus_search(&mut self) {
+        self.search_focused = true;
+        self.search_editor.set_text(&self.search_query);
+        self.search_editor.select_all();
+    }
+
+    /// Where the search box's caret is drawn: the editor's while the box has
+    /// the keyboard (the end, if the query changed under the editor), the
+    /// start otherwise, which shows the start of what the box holds. One
+    /// answer for the drawing and for a press.
+    fn search_cursor(&self) -> TextCursor {
+        if !self.search_focused {
+            TextCursor::default()
+        } else if self.search_editor.text() == self.search_query {
+            self.search_editor.cursor()
+        } else {
+            TextCursor::from(self.search_query.len())
+        }
+    }
+
+    /// A key for the search box, which has the keyboard: the caret keys,
+    /// Backspace and Delete at the caret, Ctrl+A, C, X and V, and typing --
+    /// AltGr's among it, and no command's letter. A query that changed
+    /// filters the tree again. Whether the box took the key.
+    ///
+    /// The box took typing at its end and Backspace from it, and nothing
+    /// else.
+    fn search_key(&mut self, key: &KeyEvent) -> bool {
+        if self.search_editor.text() != self.search_query {
+            self.search_editor.set_text(&self.search_query);
+        }
+        let edit = textline::apply_key(
+            &mut self.search_editor,
+            key,
+            SEARCH_CAPACITY,
+            &self.search_clipboard,
+            SEARCH_TEXT_SIZE,
+        );
+        if let Some(copied) = edit.copied {
+            self.search_clipboard = copied;
+        }
+        if self.search_editor.text() != self.search_query {
+            self.search_query = self.search_editor.text().to_owned();
+            self.apply_search_filter();
+        }
+        edit.handled
+    }
+
+    /// A press in the search box at `x`: it takes the keyboard, with the
+    /// caret under the pointer, measured against the box as it was drawn.
+    fn press_search(&mut self, x: f32) {
+        let rect = search_box();
+        let drawn = self.search_cursor();
+        self.search_focused = true;
+        if self.search_editor.text() != self.search_query {
+            self.search_editor.set_text(&self.search_query);
+        }
+        let cursor = textedit::cursor_at_click(
+            &self.search_query,
+            drawn,
+            (rect.w - 2.0 * SEARCH_TEXT_INSET).max(0.0),
+            SEARCH_TEXT_SIZE,
+            FontWeightHint::Regular,
+            x - rect.x - SEARCH_TEXT_INSET,
+        );
+        self.search_editor.set_selection_anchor(None);
+        self.search_editor.set_cursor(cursor);
     }
 
     /// Enable or disable a device by ID.
@@ -2051,27 +2141,68 @@ fn render_search_bar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) 
         state.focus_ring_width,
     );
 
-    let display_text = if state.search_query.is_empty() {
-        "Search devices...".to_string()
+    // The query, with the caret and the selection where they are while the
+    // box has the keyboard, drawn by the toolkit's editor and clipped to the
+    // box. It was one line of text, cut with an ellipsis, with no caret: the
+    // end was the only place the keys could type.
+    let line = guitk::text::line_height(SEARCH_TEXT_SIZE, FontWeightHint::Regular);
+    let (x, y, width) = (
+        input_x + SEARCH_TEXT_INSET,
+        input_y + (input.h - line) / 2.0,
+        (input_w - 2.0 * SEARCH_TEXT_INSET).max(0.0),
+    );
+    let focused = search_box_state(state).focused;
+    let mut tree = RenderTree::new();
+    if state.search_query.is_empty() {
+        tree.push(RenderCommand::Text {
+            x,
+            y,
+            text: "Search devices...".to_string(),
+            font_size: SEARCH_TEXT_SIZE,
+            color: state.palette.overlay0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
+        });
+        if focused {
+            textedit::push_caret(
+                &mut tree,
+                x,
+                y,
+                line,
+                state.palette.text,
+                textedit::CARET_WIDTH,
+            );
+        }
     } else {
-        state.search_query.clone()
-    };
-    let text_color = if state.search_query.is_empty() {
-        state.palette.overlay0
-    } else {
-        state.palette.text
-    };
-
-    cmds.push(RenderCommand::Text {
-        x: input_x + 8.0,
-        y: input_y + 4.0,
-        text: display_text,
-        font_size: 11.0,
-        color: text_color,
-        font_weight: FontWeightHint::Regular,
-        max_width: Some(input_w - 16.0),
-        overflow: TextOverflow::Ellipsis,
-    });
+        // The editor's selection only while it is the box's: a query
+        // changed under it has not been reloaded into it yet.
+        let editing = state.search_focused && state.search_editor.text() == state.search_query;
+        textedit::draw(
+            &mut tree,
+            &textedit::SingleLine {
+                text: &state.search_query,
+                cursor: state.search_cursor(),
+                selection_anchor: if editing {
+                    state.search_editor.selection_anchor()
+                } else {
+                    None
+                },
+                focused,
+                x,
+                y,
+                width,
+                line_height: line,
+                font_size: SEARCH_TEXT_SIZE,
+                weight: FontWeightHint::Regular,
+                color: state.palette.text,
+                selection_bg: state.palette.accent,
+                selection_fg: state.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+    }
+    cmds.extend(tree.commands);
 }
 
 /// Distance from the top of a scroll window down to the `slot`-th drawn row.
@@ -3349,32 +3480,23 @@ fn handle_key_event(state: &mut DeviceManagerState, key: &KeyEvent) -> EventResu
         return EventResult::Consumed;
     }
 
-    // Search bar text input: what a key typed, AltGr's among it, and not a
-    // command's letter, which a chord carries -- Alt+X typed an `x`.
+    // The search box, while it has the keyboard. Escape and Enter, plain,
+    // give the keyboard back to the tree; every other key is the box's
+    // editor's (`search_key`), but for a Ctrl chord the box does not answer,
+    // which is the window's: Ctrl+E exports and Ctrl+R scans with the box
+    // in use. A plain key the box does not answer -- an arrow up or down,
+    // F5 -- does nothing, rather than reach the tree behind the box.
     if state.search_focused {
-        if textline::types_into_field(key) {
-            state.search_query.extend(key.typed());
-            state.apply_search_filter();
+        if plain && matches!(key.key, Key::Escape | Key::Enter) {
+            state.search_focused = false;
             return EventResult::Consumed;
         }
-        match key.key {
-            _ if !plain => {}
-            Key::Escape => {
-                state.search_focused = false;
-                return EventResult::Consumed;
-            }
-            Key::Backspace => {
-                state.search_query.pop();
-                state.apply_search_filter();
-                return EventResult::Consumed;
-            }
-            Key::Enter => {
-                state.search_focused = false;
-                return EventResult::Consumed;
-            }
-            _ => {}
+        if state.search_key(key) {
+            return EventResult::Consumed;
         }
-        return EventResult::Consumed;
+        if !textline::is_ctrl_chord(key.modifiers) {
+            return EventResult::Consumed;
+        }
     }
 
     // Global shortcuts, as Ctrl chords: AltGr arrives as Ctrl+Alt and types,
@@ -3382,7 +3504,7 @@ fn handle_key_event(state: &mut DeviceManagerState, key: &KeyEvent) -> EventResu
     if textline::is_ctrl_chord(key.modifiers) {
         match key.key {
             Key::F => {
-                state.search_focused = true;
+                state.focus_search();
                 return EventResult::Consumed;
             }
             Key::E => {
@@ -3553,10 +3675,11 @@ fn handle_mouse_event(
                 }
             }
 
-            // Check search bar
-            let search_y = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT;
-            if mx < SIDEBAR_WIDTH && my >= search_y && my < search_y + SEARCH_BAR_HEIGHT {
-                state.search_focused = true;
+            // The search box, as drawn: it takes the keyboard, with the caret
+            // under the pointer. The band round it took the press too, which
+            // the box's light under the pointer did not say.
+            if search_box().contains(mx, my) {
+                state.press_search(mx);
                 return EventResult::Consumed;
             }
 
@@ -6622,6 +6745,208 @@ desktop: 3840x1200 at (-1920,0)
             DeviceManagerState::with_sample_devices()
                 .tick_interval()
                 .is_none()
+        );
+    }
+
+    // -- The search box edits at a caret ----------------------------------------
+
+    fn chord(k: Key, text: &str, modifiers: Modifiers) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        })
+    }
+
+    fn type_into(state: &mut DeviceManagerState, text: &str) {
+        handle_event(state, &chord(Key::A, text, Modifiers::NONE));
+    }
+
+    /// The x of every caret drawn in the search box.
+    fn search_carets(state: &DeviceManagerState) -> Vec<f32> {
+        let rect = search_box();
+        render(state)
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Line { x1, x2, y1, .. }
+                    if (x1 - x2).abs() < f32::EPSILON && rect.contains(*x1, *y1 + 1.0) =>
+                {
+                    Some(*x1)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **The search box edits at a caret**: the arrows, Home and End move it,
+    /// typing goes where it is, Delete deletes at it, Ctrl+A, C, X and V
+    /// select, copy, cut and paste, a press puts it where it lands -- and it
+    /// and the selection are drawn there, and the tree is filtered by every
+    /// edit. The box took typing at its end and Backspace from it, and
+    /// nothing else.
+    #[test]
+    fn the_search_box_edits_at_a_caret() {
+        let mut state = DeviceManagerState::with_sample_devices();
+        let all = state.visible_tree_indices().len();
+        handle_event(&mut state, &chord(Key::F, "", Modifiers::ctrl()));
+        assert!(state.search_focused);
+        assert_eq!(
+            search_carets(&state).len(),
+            1,
+            "the empty box with the keyboard draws no caret"
+        );
+        type_into(&mut state, "ub");
+        handle_event(&mut state, &chord(Key::Left, "", Modifiers::NONE));
+        type_into(&mut state, "s");
+        assert_eq!(state.search_query, "usb", "the caret did not move");
+        assert!(
+            state.visible_tree_indices().len() < all,
+            "the tree is not filtered by the edit"
+        );
+        let rect = search_box();
+        let at = rect.x
+            + SEARCH_TEXT_INSET
+            + guitk::text::measure("us", SEARCH_TEXT_SIZE, FontWeightHint::Regular);
+        let carets = search_carets(&state);
+        assert_eq!(carets.len(), 1, "one caret in the box");
+        assert!(
+            carets.iter().all(|x| (x - at).abs() < 0.5),
+            "the caret is drawn at {carets:?}, not after the `us` it follows at {at}"
+        );
+
+        handle_event(&mut state, &chord(Key::Home, "", Modifiers::NONE));
+        handle_event(&mut state, &chord(Key::Delete, "", Modifiers::NONE));
+        assert_eq!(state.search_query, "sb", "Delete at the caret");
+        handle_event(&mut state, &chord(Key::End, "", Modifiers::NONE));
+        handle_event(&mut state, &chord(Key::Home, "", Modifiers::shift()));
+        let line = guitk::text::line_height(SEARCH_TEXT_SIZE, FontWeightHint::Regular);
+        let (sel_x, sel_w) = (
+            rect.x + SEARCH_TEXT_INSET,
+            guitk::text::measure("sb", SEARCH_TEXT_SIZE, FontWeightHint::Regular),
+        );
+        assert!(
+            render(&state).iter().any(|c| matches!(c,
+                RenderCommand::FillRect { x, width, height, .. }
+                    if (x - sel_x).abs() < 0.5
+                        && (width - sel_w).abs() < 0.5
+                        && (height - line).abs() < 0.5)),
+            "the selection is not drawn over what it selects"
+        );
+        handle_event(&mut state, &chord(Key::C, "", Modifiers::ctrl()));
+        type_into(&mut state, "u");
+        assert_eq!(state.search_query, "u", "Shift+Home did not select");
+        handle_event(&mut state, &chord(Key::V, "", Modifiers::ctrl()));
+        assert_eq!(state.search_query, "usb", "Ctrl+C or Ctrl+V");
+        handle_event(&mut state, &chord(Key::A, "", Modifiers::ctrl()));
+        handle_event(&mut state, &chord(Key::X, "", Modifiers::ctrl()));
+        assert_eq!(state.search_query, "", "Ctrl+A and Ctrl+X");
+        assert_eq!(
+            state.visible_tree_indices().len(),
+            all,
+            "the cut did not filter"
+        );
+        handle_event(&mut state, &chord(Key::V, "", Modifiers::ctrl()));
+        assert_eq!(state.search_query, "usb", "Ctrl+X took nothing");
+
+        // A press at the start of the text puts the caret there, and one past
+        // its end at its end.
+        let mid = rect.y + rect.h / 2.0;
+        handle_event(&mut state, &click_at(rect.x + SEARCH_TEXT_INSET + 0.5, mid));
+        type_into(&mut state, "<");
+        assert_eq!(
+            state.search_query, "<usb",
+            "the press did not put the caret there"
+        );
+        handle_event(&mut state, &click_at(rect.right() - 2.0, mid));
+        type_into(&mut state, ">");
+        assert_eq!(state.search_query, "<usb>");
+    }
+
+    /// **The tree's keys stay out of the box, and the window's chords stay
+    /// the window's**: Delete in the box deletes in the box -- in the tree it
+    /// asks to uninstall the selected device -- and Down does nothing there;
+    /// Ctrl+E exports with the box in use. The box swallowed every chord.
+    #[test]
+    fn the_trees_keys_stay_out_of_the_search_box() {
+        let mut state = DeviceManagerState::with_sample_devices();
+        state.select_tree_node(1);
+        let selected = state.selected_tree_index;
+        handle_event(&mut state, &chord(Key::F, "", Modifiers::ctrl()));
+        type_into(&mut state, "pci");
+        handle_event(&mut state, &chord(Key::Home, "", Modifiers::NONE));
+        handle_event(&mut state, &chord(Key::Delete, "", Modifiers::NONE));
+        assert_eq!(state.search_query, "ci");
+        assert!(
+            state.notice.is_none(),
+            "Delete in the box asked to uninstall"
+        );
+        assert_eq!(
+            handle_event(&mut state, &chord(Key::Down, "", Modifiers::NONE)),
+            EventResult::Consumed
+        );
+        assert_eq!(state.selected_tree_index, selected, "Down moved the tree");
+        handle_event(&mut state, &chord(Key::E, "", Modifiers::ctrl()));
+        assert!(
+            state.picker.is_open(),
+            "Ctrl+E did nothing with the box in use"
+        );
+    }
+
+    /// **A press takes the box where the box is drawn**: in the band round
+    /// it, it is a press on nothing, which takes the keyboard from the box.
+    /// The whole band took the press, which the box's light under the
+    /// pointer did not say.
+    #[test]
+    fn a_press_takes_the_search_box_where_it_is_drawn() {
+        let mut state = DeviceManagerState::with_sample_devices();
+        let rect = search_box();
+        handle_event(&mut state, &click_at(rect.x + 1.0, rect.y + rect.h / 2.0));
+        assert!(state.search_focused, "control: a press in the box");
+        handle_event(&mut state, &click_at(rect.x - 3.0, rect.y + rect.h / 2.0));
+        assert!(
+            !state.search_focused,
+            "the band round the box took the press"
+        );
+    }
+
+    /// **The box edits the search it shows**, however the search came to be
+    /// in it: its editor is loaded from the query whenever a press or a key
+    /// finds the two apart, so a press lands in what is shown and a key
+    /// types after it.
+    #[test]
+    fn the_box_edits_the_search_it_shows() {
+        let mut state = DeviceManagerState::with_sample_devices();
+        state.search_query = String::from("usb");
+        let rect = search_box();
+        handle_event(
+            &mut state,
+            &click_at(rect.x + SEARCH_TEXT_INSET + 0.5, rect.y + rect.h / 2.0),
+        );
+        type_into(&mut state, "<");
+        assert_eq!(
+            state.search_query, "<usb",
+            "the press missed the shown text"
+        );
+        state.search_query = String::from("pci");
+        type_into(&mut state, "?");
+        assert_eq!(state.search_query, "pci?", "the key edited another search");
+    }
+
+    /// **Ctrl+F selects what the box holds**, so typing starts a new search
+    /// and an arrow keeps the old one to edit.
+    #[test]
+    fn ctrl_f_selects_what_the_search_box_holds() {
+        let mut state = DeviceManagerState::with_sample_devices();
+        handle_event(&mut state, &chord(Key::F, "", Modifiers::ctrl()));
+        type_into(&mut state, "usb");
+        handle_event(&mut state, &chord(Key::Enter, "", Modifiers::NONE));
+        assert!(!state.search_focused);
+        handle_event(&mut state, &chord(Key::F, "", Modifiers::ctrl()));
+        type_into(&mut state, "pci");
+        assert_eq!(
+            state.search_query, "pci",
+            "Ctrl+F did not select the search"
         );
     }
 }

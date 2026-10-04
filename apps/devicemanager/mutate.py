@@ -315,16 +315,15 @@ MAIN = [
         '    if key.key == Key::F1 {',
         ['a_chord_is_neither_a_key_of_the_window_nor_typing'],
     ),
-    (
-        "a command's letter is typed into the search",
-        '        if textline::types_into_field(key) {',
-        '        if key.types_text() {',
-        ['a_chord_is_neither_a_key_of_the_window_nor_typing'],
-    ),
+    # No row for "a command's letter is typed into the search": since
+    # 2026-10-04 the search box's typing is textline::apply_key's, which tells
+    # a command from AltGr itself, in its own crate and with its own tests;
+    # a_chord_is_neither_a_key_of_the_window_nor_typing still holds the box
+    # to it.
     (
         'a chord works the search box',
-        '            _ if !plain => {}\n',
-        '',
+        '        if plain && matches!(key.key, Key::Escape | Key::Enter) {\n',
+        '        if matches!(key.key, Key::Escape | Key::Enter) {\n',
         ['a_chord_is_neither_a_key_of_the_window_nor_typing'],
     ),
     (
@@ -411,6 +410,97 @@ MAIN += [
         '        self.focus_ring_width = settings.focus_ring_width();\n',
         '        let _ = settings;\n',
         [SEARCH],
+    ),
+]
+
+# The search box edits at a caret (2026-10-04,
+# known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box): it
+# took typing at its end and Backspace from it, and nothing else, and
+# swallowed every chord.
+EDITS = "the_search_box_edits_at_a_caret"
+TREE_KEYS = "the_trees_keys_stay_out_of_the_search_box"
+WHERE = "a_press_takes_the_search_box_where_it_is_drawn"
+SHOWN = "the_box_edits_the_search_it_shows"
+CTRL_F = "ctrl_f_selects_what_the_search_box_holds"
+
+MAIN += [
+    (
+        "a plain key the box does not answer reaches the tree",
+        "        if !textline::is_ctrl_chord(key.modifiers) {\n            return EventResult::Consumed;\n        }\n    }\n",
+        "    }\n",
+        [TREE_KEYS],
+    ),
+    (
+        "a window chord is lost to the search box",
+        "        if !textline::is_ctrl_chord(key.modifiers) {\n            return EventResult::Consumed;\n        }\n    }\n",
+        "        return EventResult::Consumed;\n    }\n",
+        [TREE_KEYS],
+    ),
+    (
+        "Ctrl+F does not select what the box holds",
+        "        self.search_editor.select_all();\n",
+        "",
+        [CTRL_F],
+    ),
+    (
+        "a cut or a copy takes nothing to the clipboard",
+        "            self.search_clipboard = copied;\n",
+        "            let _ = copied;\n",
+        [EDITS],
+    ),
+    (
+        "an edit does not filter the tree",
+        "            self.search_query = self.search_editor.text().to_owned();\n            self.apply_search_filter();\n",
+        "            self.search_query = self.search_editor.text().to_owned();\n",
+        [EDITS],
+    ),
+    (
+        "a key finds the editor holding another search",
+        "    fn search_key(&mut self, key: &KeyEvent) -> bool {\n        if self.search_editor.text() != self.search_query {\n",
+        "    fn search_key(&mut self, key: &KeyEvent) -> bool {\n        if false {\n",
+        [SHOWN],
+    ),
+    (
+        "a press finds the editor holding another search",
+        "        self.search_focused = true;\n        if self.search_editor.text() != self.search_query {\n",
+        "        self.search_focused = true;\n        if false {\n",
+        [SHOWN],
+    ),
+    (
+        "a press puts the caret at the start",
+        "            x - rect.x - SEARCH_TEXT_INSET,\n",
+        "            0.0,\n",
+        [EDITS],
+    ),
+    (
+        "a press in the box does not give it the keyboard",
+        "                state.press_search(mx);\n",
+        "",
+        [EDITS, WHERE],
+    ),
+    (
+        "the band round the box takes the press",
+        "            if search_box().contains(mx, my) {\n",
+        "            if mx < SIDEBAR_WIDTH\n                && my >= TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT\n                && my < TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT + SEARCH_BAR_HEIGHT\n            {\n",
+        [WHERE],
+    ),
+    (
+        "the caret is drawn at the start",
+        "                cursor: state.search_cursor(),\n",
+        "                cursor: TextCursor::default(),\n",
+        [EDITS],
+    ),
+    (
+        "the selection is not drawn",
+        "                selection_anchor: if editing {\n",
+        "                selection_anchor: if false {\n",
+        [EDITS],
+    ),
+    (
+        "an empty box with the keyboard has no caret",
+        "        if focused {\n            textedit::push_caret(",
+        "        if false {\n            textedit::push_caret(",
+        [EDITS],
     ),
 ]
 

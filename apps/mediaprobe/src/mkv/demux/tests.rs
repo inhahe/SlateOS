@@ -142,6 +142,10 @@ fn all(d: &mut Demuxer<Cursor<&[u8]>>) -> Vec<Packet> {
 
 const MS: i64 = 1_000_000;
 
+/// `CodecPrivate`'s id: written into the test files, which carry one as a
+/// muxer's would, though the demuxer has nothing yet that reads it.
+const CODEC_PRIVATE: u64 = 0x63A2;
+
 // --- The tests -------------------------------------------------------------
 
 #[test]
@@ -169,7 +173,6 @@ fn simple_blocks_come_out_in_order_with_their_times() {
         (1, Codec::Vp9)
     );
     assert_eq!(streams[0].default_duration_ns, Some(40_000_000));
-    assert_eq!(streams[1].codec_private, b"OpusHead");
     let got: Vec<(u64, i64, bool, Vec<u8>)> = all(&mut d)
         .into_iter()
         .map(|p| (p.track, p.timestamp_ns, p.keyframe, p.data))
@@ -389,6 +392,104 @@ fn three_seconds(cued: bool) -> Vec<u8> {
     }
     let header = el(EBML_HEADER, &el(0x4282, b"webm"));
     cat(&[header, el(SEGMENT, &body)])
+}
+
+/// RFC 9559's `CodecDelay` "MUST be subtracted from each frame timestamp in
+/// order to get the timestamp that will be actually played": of its track's
+/// frames alone, and to before zero at the start.
+#[test]
+fn a_codec_delay_is_taken_off_its_tracks_timestamps() {
+    let tracks = el(
+        TRACKS,
+        &cat(&[
+            track(VIDEO, 1, "V_VP9", &[]),
+            track(AUDIO, 2, "A_OPUS", &[uint_el(CODEC_DELAY, 6_500_000)]),
+        ]),
+    );
+    let bytes = file(
+        &tracks,
+        &[cluster(
+            0,
+            &[
+                simple(AUDIO, 0, true, b"first"),
+                simple(VIDEO, 0, true, b"picture"),
+                simple(AUDIO, 20, true, b"second"),
+            ],
+        )],
+    );
+    let mut d = open(&bytes);
+    assert_eq!(d.streams()[1].codec_delay_ns, 6_500_000);
+    let got: Vec<(u64, i64)> = all(&mut d)
+        .into_iter()
+        .map(|p| (p.track, p.timestamp_ns))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (AUDIO, -6_500_000),
+            (VIDEO, 0),
+            (AUDIO, 20 * MS - 6_500_000),
+        ]
+    );
+}
+
+/// Clusters a second apart of one Opus track whose decoder needs `pre_roll`
+/// nanoseconds before what it gives back is right, and whose frames are
+/// played `delay` nanoseconds before their blocks' times.
+fn rolled(pre_roll: u64, delay: u64) -> Vec<u8> {
+    let tracks = el(
+        TRACKS,
+        &track(
+            AUDIO,
+            2,
+            "A_OPUS",
+            &[
+                uint_el(SEEK_PRE_ROLL, pre_roll),
+                uint_el(CODEC_DELAY, delay),
+            ],
+        ),
+    );
+    let clusters: Vec<Vec<u8>> = (0..3)
+        .map(|s| {
+            cluster(
+                s * 1000,
+                &[simple(AUDIO, 0, true, format!("a{s}").as_bytes())],
+            )
+        })
+        .collect();
+    file(&tracks, &clusters)
+}
+
+/// A seek starts decoding a track's `SeekPreRoll` before the time sought,
+/// so the decoder has had what it needs by then -- and finds the time in
+/// block time, which is the played time plus the codec's delay.
+#[test]
+fn a_seek_starts_a_pre_roll_before_the_time_sought() {
+    let first = |bytes: &[u8], at_ms: u64| {
+        let mut d = open(bytes);
+        d.seek(at_ms * 1_000_000, AUDIO).unwrap();
+        let p = d.next_packet().unwrap().unwrap();
+        String::from_utf8(p.data).unwrap()
+    };
+    let none = rolled(0, 0);
+    assert_eq!(first(&none, 1050), "a1", "control: no pre-roll");
+    let opus = rolled(80_000_000, 0);
+    assert_eq!(
+        first(&opus, 1050),
+        "a0",
+        "the pre-roll was not decoded first"
+    );
+    assert_eq!(first(&opus, 1100), "a1");
+    // With a 960 ms delay, 30 ms played is 990 ms of block time -- still the
+    // first cluster -- but 100 ms played is 1060: the second, where reading
+    // the played time as block time would stay in the first.
+    let delayed = rolled(0, 960_000_000);
+    assert_eq!(first(&delayed, 30), "a0");
+    assert_eq!(
+        first(&delayed, 100),
+        "a1",
+        "the codec delay was not added back"
+    );
 }
 
 #[test]

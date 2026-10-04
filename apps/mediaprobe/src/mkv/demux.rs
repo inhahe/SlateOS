@@ -52,7 +52,6 @@ const CUE_TRACK_POSITIONS: u64 = 0xB7;
 const CUE_TRACK: u64 = 0xF7;
 const CUE_CLUSTER_POSITION: u64 = 0xF1;
 const TRACK_NUMBER: u64 = 0xD7;
-const CODEC_PRIVATE: u64 = 0x63A2;
 const CODEC_DELAY: u64 = 0x56AA;
 const SEEK_PRE_ROLL: u64 = 0x56BB;
 const CONTENT_ENCODINGS: u64 = 0x6D80;
@@ -114,14 +113,16 @@ pub struct Stream {
     pub number: u64,
     /// What the probe says of it: kind, codec, picture size, rate, language.
     pub info: crate::Track,
-    /// `CodecPrivate`: the setup a decoder needs before the first frame
-    /// (an Opus head, a Vorbis codebook); empty for VP8 and VP9.
-    pub codec_private: Vec<u8>,
     /// `DefaultDuration`, nanoseconds a frame.
     pub default_duration_ns: Option<u64>,
-    /// `CodecDelay`: nanoseconds of decoded output to drop at the start.
+    /// `CodecDelay`: nanoseconds of output the decoder drops at the start,
+    /// which every frame's timestamp is moved back by (RFC 9559: it "MUST be
+    /// subtracted from each frame timestamp in order to get the timestamp
+    /// that will be actually played").
     pub codec_delay_ns: u64,
-    /// `SeekPreRoll`: how far before a seek target to start decoding.
+    /// `SeekPreRoll`: how much the decoder must decode after a seek before
+    /// its output is right -- Opus's 80 ms -- which [`Demuxer::seek`]
+    /// starts that much earlier for.
     pub seek_pre_roll_ns: u64,
     /// Whether its frames can be given back: false for a track compressed
     /// other than by header stripping, or encrypted. Its frames are passed
@@ -451,6 +452,8 @@ impl<R: Read + Seek> Demuxer<R> {
             .saturating_add(i128::from(block.relative))
             .saturating_mul(scale);
         let default_ns = stream.default_duration_ns;
+        // When it is played: the block's time less the codec's delay.
+        let delay = i128::from(stream.codec_delay_ns);
         let duration_ns = duration
             .map(|ticks| u64::try_from(i128::from(ticks).saturating_mul(scale)).unwrap_or(u64::MAX))
             .or(default_ns);
@@ -465,7 +468,8 @@ impl<R: Read + Seek> Demuxer<R> {
             data.extend_from_slice(frame);
             self.queue.push_back(Packet {
                 track: block.track,
-                timestamp_ns: i64::try_from(start.saturating_add(offset)).unwrap_or(i64::MAX),
+                timestamp_ns: i64::try_from(start.saturating_add(offset).saturating_sub(delay))
+                    .unwrap_or(i64::MAX),
                 duration_ns: if block.frames.len() > 1 {
                     default_ns
                 } else {
@@ -513,7 +517,16 @@ impl<R: Read + Seek> Demuxer<R> {
     pub fn seek(&mut self, time_ns: u64, track: u64) -> io::Result<()> {
         self.queue.clear();
         self.cluster = None;
-        let ticks = time_ns.checked_div(self.scale).unwrap_or(0);
+        // `time_ns` is when a frame is played, which is its block's time less
+        // the track's codec delay; and the decoder must be fed the track's
+        // pre-roll before that time for what it gives back there to be right.
+        let (delay, pre_roll) = self
+            .streams
+            .iter()
+            .find(|s| s.number == track)
+            .map_or((0, 0), |s| (s.codec_delay_ns, s.seek_pre_roll_ns));
+        let block_ns = time_ns.saturating_add(delay).saturating_sub(pre_roll);
+        let ticks = block_ns.checked_div(self.scale).unwrap_or(0);
         let target = if self.cues.is_empty() {
             self.walk_to(ticks)?
         } else {
@@ -586,7 +599,6 @@ fn read_stream(entry: &[u8]) -> Option<Stream> {
     let mut stream = Stream {
         number: 0,
         info,
-        codec_private: Vec::new(),
         default_duration_ns: None,
         codec_delay_ns: 0,
         seek_pre_roll_ns: 0,
@@ -596,7 +608,6 @@ fn read_stream(entry: &[u8]) -> Option<Stream> {
     for (id, value) in elements(entry) {
         match id {
             TRACK_NUMBER => stream.number = uint(value).unwrap_or(0),
-            CODEC_PRIVATE => stream.codec_private = value.to_vec(),
             DEFAULT_DURATION => stream.default_duration_ns = uint(value).filter(|&n| n > 0),
             CODEC_DELAY => stream.codec_delay_ns = uint(value).unwrap_or(0),
             SEEK_PRE_ROLL => stream.seek_pre_roll_ns = uint(value).unwrap_or(0),

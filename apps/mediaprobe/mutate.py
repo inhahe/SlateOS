@@ -36,6 +36,8 @@ ENCODING = "header_stripping_is_undone_and_other_compression_passed_over"
 RESYNC = "bad_bytes_are_searched_past_for_the_next_cluster"
 VECTORS = "every_frame_demuxed_decodes_to_libvpx_pictures"
 KEY = "a_seek_lands_on_a_frame_decoding_can_start_at"
+DELAY = "a_codec_delay_is_taken_off_its_tracks_timestamps"
+PRE_ROLL = "a_seek_starts_a_pre_roll_before_the_time_sought"
 
 DEMUX = [
     (
@@ -139,6 +141,24 @@ DEMUX = [
         "    let (track, n) = vint(b, 0, false)?;",
         "    let (track, n) = vint(b, 0, true)?;",
         [ORDER, VECTORS],
+    ),
+    (
+        "a codec delay is not taken off the timestamps",
+        "i64::try_from(start.saturating_add(offset).saturating_sub(delay))",
+        "i64::try_from(start.saturating_add(offset))",
+        [DELAY],
+    ),
+    (
+        "a seek starts no pre-roll early",
+        "        let block_ns = time_ns.saturating_add(delay).saturating_sub(pre_roll);",
+        "        let block_ns = time_ns.saturating_add(delay);",
+        [PRE_ROLL],
+    ),
+    (
+        "a seek reads the played time as block time",
+        "        let block_ns = time_ns.saturating_add(delay).saturating_sub(pre_roll);",
+        "        let block_ns = time_ns.saturating_sub(pre_roll);",
+        [PRE_ROLL],
     ),
 ]
 

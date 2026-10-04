@@ -49,6 +49,8 @@ use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::textedit;
+use guitk::textinput::TextInput;
 use oswindow::app::{self, App, Response};
 
 use std::collections::VecDeque;
@@ -88,6 +90,14 @@ const LETTER_DIVIDER_HEIGHT: f32 = 28.0;
 const DETAIL_PADDING: f32 = 24.0;
 const AVATAR_SIZE: f32 = 72.0;
 const FIELD_HEIGHT: f32 = 36.0;
+/// The most a box holds, in characters: a line of an address book, and a
+/// paste of a page is not one.
+const BOX_CAPACITY: usize = 4096;
+/// The size a box's text is drawn at, which the caret keys and a press
+/// measure against as well.
+const BOX_TEXT_SIZE: f32 = 13.0;
+/// How far a box's text sits inside each side of the box.
+const BOX_TEXT_INSET: f32 = 10.0;
 const SEARCH_BAR_HEIGHT: f32 = 40.0;
 const GROUP_CHIP_HEIGHT: f32 = 28.0;
 const MAX_RECENT: usize = 10;
@@ -2670,6 +2680,14 @@ pub struct ContactsApp {
     pub store: ContactStore,
     pub view: DetailView,
     pub search_query: String,
+    /// The editor of the box with the keyboard -- the search, or a line of
+    /// the form: its caret and selection, loaded whenever the keyboard
+    /// moves to another box or the box's text changed under it.
+    editor: TextInput,
+    /// Which box `editor` holds.
+    editor_for: Option<Focus>,
+    /// What the boxes' Ctrl+C and Ctrl+X took, for their Ctrl+V.
+    clipboard: String,
     pub sort_order: SortOrder,
     pub filter: ContactFilter,
     pub scroll_offset: f32,
@@ -2757,6 +2775,9 @@ impl ContactsApp {
             store: ContactStore::new(),
             view: DetailView::Empty,
             search_query: String::new(),
+            editor: TextInput::new(),
+            editor_for: None,
+            clipboard: String::new(),
             sort_order: SortOrder::Name,
             filter: ContactFilter::All,
             scroll_offset: 0.0,
@@ -3088,38 +3109,8 @@ impl ContactsApp {
         // c-e-a-theme-can-shape-the-controls).
         let state = self.field_state(Target::Search, Focus::Search);
         guitk::field::draw(f, &self.palette, l.search, state, self.focus_ring_width);
-        let focused = state.focused;
-        let inner = inset(l.search, 10.0);
-        let placeholder = self.search_query.is_empty() && !focused;
-        let shown = if placeholder {
-            "Search contacts..."
-        } else {
-            &self.search_query
-        };
-        put_text(
-            f,
-            inner,
-            shown,
-            13.0,
-            if placeholder {
-                self.palette.overlay0
-            } else {
-                self.palette.text
-            },
-            FontWeightHint::Regular,
-        );
-        if focused {
-            // A caret rather than a character appended to the text: a box
-            // whose contents change when it is focused cannot be searched for
-            // by the words it shows.
-            let used = text::measure(&self.search_query, 13.0, FontWeightHint::Regular);
-            let caret_x = (inner.x + used).min(inner.right() - 2.0);
-            f.push(fill(
-                Rect::new(caret_x, inner.y + 4.0, 2.0, (inner.h - 8.0).max(0.0)),
-                self.palette.blue,
-                0.0,
-            ));
-        }
+        let inner = inset(l.search, BOX_TEXT_INSET);
+        self.draw_box_text(f, inner, Focus::Search, "Search contacts...", state.focused);
         f.hit(Target::Search, l.search);
     }
 
@@ -3841,38 +3832,9 @@ impl ContactsApp {
                 let box_r = Rect::new(form.x, fy, form.w, h);
                 let state = self.field_state(Target::Field(field), Focus::Field(field));
                 guitk::field::draw(f, &self.palette, box_r, state, self.focus_ring_width);
-                let focused = state.focused;
-                let value = self.field_value(field);
-                let inner = inset(box_r, 10.0);
+                let inner = inset(box_r, BOX_TEXT_INSET);
                 let inner = Rect::new(inner.x, inner.y, inner.w, 20.0_f32.min(inner.h));
-                if value.is_empty() {
-                    put_text(
-                        f,
-                        inner,
-                        field.label(),
-                        13.0,
-                        self.palette.overlay0,
-                        FontWeightHint::Regular,
-                    );
-                } else {
-                    put_text(
-                        f,
-                        inner,
-                        value,
-                        13.0,
-                        self.palette.text,
-                        FontWeightHint::Regular,
-                    );
-                }
-                if focused {
-                    let used = text::measure(value, 13.0, FontWeightHint::Regular);
-                    let caret_x = (inner.x + used).min(inner.right() - 2.0);
-                    f.push(fill(
-                        Rect::new(caret_x, inner.y + 2.0, 2.0, (inner.h - 4.0).max(0.0)),
-                        self.palette.blue,
-                        0.0,
-                    ));
-                }
+                self.draw_box_text(f, inner, Focus::Field(field), field.label(), state.focused);
                 f.hit(Target::Field(field), box_r);
                 fy += h + 6.0;
             }
@@ -4450,6 +4412,16 @@ impl ContactsApp {
             return;
         };
         self.activate(target);
+        // A box: the caret under the pointer, measured against the box as
+        // drawn.
+        let focus = match target {
+            Target::Search => Focus::Search,
+            Target::Field(field) => Focus::Field(field),
+            _ => return,
+        };
+        if let Some(rect) = frame.rect_of(|t| *t == target) {
+            self.press_box(focus, rect, event.x);
+        }
     }
 
     /// Do what pressing `target` means.
@@ -4888,6 +4860,154 @@ impl ContactsApp {
 
     /// A keystroke: text into whatever has the keyboard, otherwise a
     /// shortcut.
+    /// What the box `focus` names holds.
+    fn box_text(&self, focus: Focus) -> &str {
+        match focus {
+            Focus::Field(field) => self.field_value(field),
+            _ => &self.search_query,
+        }
+    }
+
+    /// Load the box `focus` names into the editor, unless it already holds
+    /// it as it is -- the caret after the text.
+    fn load_editor(&mut self, focus: Focus) {
+        if self.editor_for != Some(focus) || self.editor.text() != self.box_text(focus) {
+            let held = self.box_text(focus).to_owned();
+            self.editor.set_text(&held);
+            self.editor_for = Some(focus);
+        }
+    }
+
+    /// A key for the box `focus` names, which has the keyboard: `None` for
+    /// one it does not answer, else whether its text changed.
+    fn box_key(&mut self, focus: Focus, event: &KeyEvent) -> Option<bool> {
+        self.load_editor(focus);
+        let edit = textline::apply_key(
+            &mut self.editor,
+            event,
+            BOX_CAPACITY,
+            &self.clipboard,
+            BOX_TEXT_SIZE,
+        );
+        if let Some(copied) = edit.copied {
+            self.clipboard = copied;
+        }
+        let changed = self.editor.text() != self.box_text(focus);
+        if changed {
+            let typed = self.editor.text().to_owned();
+            match focus {
+                Focus::Field(field) => *self.field_mut(field) = typed,
+                _ => self.search_query = typed,
+            }
+        }
+        edit.handled.then_some(changed)
+    }
+
+    /// Where the caret and the selection anchor of the box `focus` names
+    /// are, while the editor holds it as it is; the end, and none,
+    /// otherwise. One answer for the drawing and for a press.
+    fn box_caret(&self, focus: Focus) -> (text::TextCursor, Option<usize>) {
+        let held = self.box_text(focus);
+        if self.editor_for == Some(focus) && self.editor.text() == held {
+            (self.editor.cursor(), self.editor.selection_anchor())
+        } else {
+            (text::TextCursor::from(held.len()), None)
+        }
+    }
+
+    /// A press in the box `focus` names, drawn at `rect`, at `x`: the
+    /// keyboard, and the caret under the pointer, measured against the box
+    /// as it was drawn.
+    fn press_box(&mut self, focus: Focus, rect: Rect, x: f32) {
+        let (drawn, _) = self.box_caret(focus);
+        self.load_editor(focus);
+        let inner = inset(rect, BOX_TEXT_INSET);
+        let cursor = textedit::cursor_at_click(
+            self.box_text(focus),
+            drawn,
+            inner.w,
+            BOX_TEXT_SIZE,
+            FontWeightHint::Regular,
+            x - inner.x,
+        );
+        self.editor.set_selection_anchor(None);
+        self.editor.set_cursor(cursor);
+    }
+
+    /// A box's text in `inner`: what it holds -- with its caret and
+    /// selection where they are while it has the keyboard, scrolled so the
+    /// caret stays in view -- or, empty, `placeholder`, with the caret before
+    /// it while it has the keyboard. Refused, as `put_text` refuses a run,
+    /// where the clip in force cannot show it. The boxes drew their text cut
+    /// with an ellipsis and a caret after its end -- the only place the keys
+    /// could type -- or at the box's edge, past it.
+    fn draw_box_text(
+        &self,
+        f: &mut Frame<Target>,
+        inner: Rect,
+        focus: Focus,
+        placeholder: &str,
+        focused: bool,
+    ) {
+        if !f.is_visible(inner) {
+            return;
+        }
+        let held = self.box_text(focus);
+        let line = text::line_height(BOX_TEXT_SIZE, FontWeightHint::Regular);
+        let y = inner.y + ((inner.h - line) / 2.0).max(0.0);
+        let mut tree = RenderTree::new();
+        if held.is_empty() {
+            tree.push(RenderCommand::Text {
+                x: inner.x,
+                y,
+                text: placeholder.to_string(),
+                color: self.palette.overlay0,
+                font_size: BOX_TEXT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(inner.w),
+                overflow: TextOverflow::Ellipsis,
+            });
+            if focused {
+                textedit::push_caret(
+                    &mut tree,
+                    inner.x,
+                    y,
+                    line,
+                    self.palette.text,
+                    textedit::CARET_WIDTH,
+                );
+            }
+        } else {
+            let (cursor, anchor) = if focused {
+                self.box_caret(focus)
+            } else {
+                (text::TextCursor::default(), None)
+            };
+            textedit::draw(
+                &mut tree,
+                &textedit::SingleLine {
+                    text: held,
+                    cursor,
+                    selection_anchor: anchor,
+                    focused,
+                    x: inner.x,
+                    y,
+                    width: inner.w,
+                    line_height: line,
+                    font_size: BOX_TEXT_SIZE,
+                    weight: FontWeightHint::Regular,
+                    color: self.palette.text,
+                    selection_bg: self.palette.accent,
+                    selection_fg: self.palette.crust,
+                    caret_width: textedit::CARET_WIDTH,
+                },
+            );
+        }
+        for command in tree.commands {
+            f.push(command);
+        }
+    }
+
     fn handle_key(&mut self, event: &KeyEvent) {
         if !event.pressed {
             return;
@@ -4936,19 +5056,6 @@ impl ContactsApp {
                 };
                 return;
             }
-            Key::Backspace => {
-                match self.focus {
-                    Focus::Search => {
-                        self.search_query.pop();
-                        self.scroll_offset = 0.0;
-                    }
-                    Focus::Field(field) => {
-                        self.field_mut(field).pop();
-                    }
-                    Focus::None => {}
-                }
-                return;
-            }
             Key::Enter => {
                 match self.focus {
                     Focus::Field(_) => self.save_form(),
@@ -4959,26 +5066,27 @@ impl ContactsApp {
             _ => {}
         }
 
-        // Printable text. `KeyEvent::text` is what the platform's keyboard
-        // layout produced, shift and dead keys included; deriving a character
-        // from the key code instead is what made a `+` impossible to type on
-        // any layout but the one the table was written for. Typed, not a
-        // command's letter -- a chord carries its letter as text, and Ctrl+S
-        // in a field typed an `s` instead of keeping the book -- and AltGr's
-        // characters among it.
-        if textline::types_into_field(event) {
-            let typed = event.text.clone();
-            match self.focus {
-                Focus::Search => {
-                    self.search_query.push_str(&typed);
+        // A box with the keyboard -- the search, or a line of the form --
+        // has every other key it answers: the caret keys, Backspace and
+        // Delete at the caret, Ctrl+A, C, X and V, and typing, what the
+        // keyboard layout produced (a `+` on any layout, dead keys composed)
+        // and AltGr's characters among it, and no command's letter -- Ctrl+S
+        // in a field typed an `s` instead of keeping the book. A plain key it
+        // does not answer stops here: the letters below are shortcuts only
+        // with nothing to type into, and Delete under a box with the keyboard
+        // deleted the selected contact. A Ctrl chord goes on: Ctrl+S keeps
+        // the book from a field. The boxes took typing at their end and
+        // Backspace from it, and nothing else.
+        if self.focus != Focus::None {
+            let focus = self.focus;
+            if let Some(changed) = self.box_key(focus, event) {
+                if changed && focus == Focus::Search {
                     self.scroll_offset = 0.0;
-                    return;
                 }
-                Focus::Field(field) => {
-                    self.field_mut(field).push_str(&typed);
-                    return;
-                }
-                Focus::None => {}
+                return;
+            }
+            if !textline::is_ctrl_chord(event.modifiers) {
+                return;
             }
         }
 
@@ -5620,8 +5728,8 @@ mod tests {
             app.frame(size.0, size.1).commands().iter().any(|c| {
                 matches!(
                     c,
-                    RenderCommand::FillRect { x, y, width, .. }
-                        if (*width - 2.0).abs() < f32::EPSILON && rect.contains(*x, *y)
+                    RenderCommand::Line { x1, x2, y1, .. }
+                        if (x1 - x2).abs() < f32::EPSILON && rect.contains(*x1, *y1 + 1.0)
                 )
             })
         };
@@ -10597,5 +10705,191 @@ mod tests {
         // Export moved to Ctrl+E.
         app.handle_event(&key_event(Key::E, true, ""), SIZE);
         assert!(app.picker.is_open() && app.picker.is_saving());
+    }
+
+    // -- The boxes edit at a caret ------------------------------------------------
+
+    use guitk::probe;
+
+    fn chord_in(app: &mut ContactsApp, key: Key, modifiers: guitk::event::Modifiers) {
+        app.handle_event(
+            &Event::Key(KeyEvent {
+                key,
+                pressed: true,
+                modifiers,
+                text: String::new(),
+            }),
+            SIZE,
+        );
+    }
+
+    /// The x of every caret drawn in `rect`.
+    fn carets_in(app: &ContactsApp, rect: Rect) -> Vec<f32> {
+        app.frame(SIZE.0, SIZE.1)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Line { x1, x2, y1, .. }
+                    if (x1 - x2).abs() < f32::EPSILON && rect.contains(*x1, *y1 + 1.0) =>
+                {
+                    Some(*x1)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **A form's line edits at a caret, and Delete there deletes there**:
+    /// the arrows, Home and End move it, typing goes where it is, Ctrl+A, C,
+    /// X and V select, copy, cut and paste, a press puts it where it lands,
+    /// and it is drawn where it is. Delete with a box holding the keyboard
+    /// deleted the selected contact -- it fell through to the window's keys.
+    /// The boxes took typing at their end and Backspace from it, and nothing
+    /// else.
+    #[test]
+    fn a_forms_line_edits_at_a_caret_and_delete_stays_in_it() {
+        use guitk::event::Modifiers;
+        let mut app = ContactsApp::new();
+        let id = app.store.add_contact(Contact::new(0, "Ada", "Lovelace"));
+        app.select_contact(id);
+        app.start_editing();
+        assert_eq!(app.focus, Focus::Field(FormField::FirstName));
+        assert_eq!(app.edit_first_name, "Ada");
+        chord_in(&mut app, Key::Home, Modifiers::NONE);
+        chord_in(&mut app, Key::Delete, Modifiers::NONE);
+        assert_eq!(app.edit_first_name, "da", "Delete at the caret");
+        assert_eq!(
+            app.store.contact_count(),
+            1,
+            "Delete in a box deleted the contact"
+        );
+        // Nor is a letter that typed nothing -- a dead key's first press --
+        // a shortcut under a box: N started a new contact over this one.
+        chord_in(&mut app, Key::N, Modifiers::NONE);
+        assert_eq!(
+            (app.focus, app.edit_first_name.as_str()),
+            (Focus::Field(FormField::FirstName), "da"),
+            "a letter that typed nothing reached the shortcuts"
+        );
+        typed_in(&mut app, "A");
+        chord_in(&mut app, Key::End, Modifiers::NONE);
+        chord_in(&mut app, Key::Left, Modifiers::NONE);
+        typed_in(&mut app, "!");
+        assert_eq!(app.edit_first_name, "Ad!a", "the caret did not move");
+        let rect = probe::rect_of(&app, Target::Field(FormField::FirstName)).expect("the box");
+        let inner = inset(rect, BOX_TEXT_INSET);
+        let at = inner.x
+            + text::caret_x(
+                "Ad!a",
+                text::TextCursor::from(3),
+                BOX_TEXT_SIZE,
+                FontWeightHint::Regular,
+            );
+        let carets = carets_in(&app, rect);
+        assert_eq!(carets.len(), 1, "one caret in the box");
+        assert!(
+            carets.iter().all(|x| (x - at).abs() < 0.5),
+            "the caret is drawn at {carets:?}, not after the `Ad!` it follows at {at}"
+        );
+
+        chord_in(&mut app, Key::A, Modifiers::ctrl());
+        chord_in(&mut app, Key::X, Modifiers::ctrl());
+        assert_eq!(app.edit_first_name, "", "Ctrl+A and Ctrl+X");
+        chord_in(&mut app, Key::Tab, Modifiers::NONE);
+        assert_eq!(app.focus, Focus::Field(FormField::LastName));
+        chord_in(&mut app, Key::V, Modifiers::ctrl());
+        assert_eq!(app.edit_last_name, "LovelaceAd!a", "Ctrl+V");
+
+        // A press at the start of the last name, whose caret the paste left
+        // at its end, puts it there.
+        let size = SIZE;
+        let last = probe::rect_of(&app, Target::Field(FormField::LastName)).expect("the box");
+        app.click_at(
+            last.x + BOX_TEXT_INSET + 0.5,
+            last.y + last.h / 2.0,
+            MouseButton::Left,
+            size,
+        );
+        typed_in(&mut app, "<");
+        assert_eq!(
+            app.edit_last_name, "<LovelaceAd!a",
+            "the press did not put the caret at the start"
+        );
+
+        // A press at the start of the first name puts the keyboard and the
+        // caret there.
+        app.click_at(
+            rect.x + BOX_TEXT_INSET + 0.5,
+            rect.y + rect.h / 2.0,
+            MouseButton::Left,
+            size,
+        );
+        assert_eq!(app.focus, Focus::Field(FormField::FirstName));
+        typed_in(&mut app, "Ada");
+        chord_in(&mut app, Key::Home, Modifiers::NONE);
+        typed_in(&mut app, "<");
+        assert_eq!(app.edit_first_name, "<Ada");
+    }
+
+    /// **The search box edits at a caret**, and every edit searches.
+    #[test]
+    fn the_search_box_edits_at_a_caret() {
+        use guitk::event::Modifiers;
+        let mut app = ContactsApp::new();
+        app.store.add_contact(Contact::new(0, "Ada", "Lovelace"));
+        app.store.add_contact(Contact::new(0, "Alan", "Turing"));
+        probe::click(&mut app, Target::Search);
+        typed_in(&mut app, "Tring");
+        for _ in 0..4 {
+            chord_in(&mut app, Key::Left, Modifiers::NONE);
+        }
+        typed_in(&mut app, "u");
+        assert_eq!(app.search_query, "Turing", "the caret did not move");
+        assert_eq!(
+            app.store
+                .filtered_sorted(&app.filter, app.sort_order, &app.search_query)
+                .len(),
+            1
+        );
+        chord_in(&mut app, Key::End, Modifiers::NONE);
+        chord_in(&mut app, Key::Home, Modifiers::shift());
+        typed_in(&mut app, "Ada");
+        assert_eq!(app.search_query, "Ada", "Shift+Home did not select");
+        // From the start, so a press past the end has somewhere to move it.
+        chord_in(&mut app, Key::Home, Modifiers::NONE);
+        let rect = probe::rect_of(&app, Target::Search).expect("the search box");
+        app.click_at(
+            rect.right() - 2.0,
+            rect.y + rect.h / 2.0,
+            MouseButton::Left,
+            SIZE,
+        );
+        typed_in(&mut app, "!");
+        assert_eq!(
+            app.search_query, "Ada!",
+            "the press did not put the caret at the end"
+        );
+    }
+
+    /// **A box edits the text it shows**, however that text came to be in
+    /// it: its editor is loaded from the box whenever a key finds the two
+    /// apart -- and a box the keyboard moves to types after what it holds.
+    #[test]
+    fn a_box_edits_the_text_it_shows() {
+        use guitk::event::Modifiers;
+        let mut app = ContactsApp::new();
+        app.start_new_contact();
+        typed_in(&mut app, "Ada");
+        chord_in(&mut app, Key::Home, Modifiers::NONE);
+        app.edit_last_name = String::from("Ada");
+        chord_in(&mut app, Key::Tab, Modifiers::NONE);
+        typed_in(&mut app, "!");
+        assert_eq!(
+            app.edit_last_name, "Ada!",
+            "Tab kept the first name's caret"
+        );
+        app.edit_last_name = String::from("Byron");
+        typed_in(&mut app, "?");
+        assert_eq!(app.edit_last_name, "Byron?", "the key edited another text");
     }
 }

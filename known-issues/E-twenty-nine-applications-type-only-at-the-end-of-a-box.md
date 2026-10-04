@@ -18,11 +18,11 @@ and Backspace `pop`s it.
 **Found** 2026-10-04, adding vpnmanager's list of keys
 (`known-issues-resolved/E-thirty-applications-answer-f1-with-nothing.md`).
 
-**The twenty-nine:** charmap (search), clipmanager (its form), contacts
-(search and the form), credmanager (the entry form, the master password,
-search), dbviewer (cell editing), diagram (a shape's label), dictionary (the
-query), filesearch (the query), lockscreen (the password), mindmap (a node's
-text and its search), passwordgen (its input), undelete (search).
+**The twenty-nine:** charmap (search), clipmanager (its form), credmanager
+(the entry form, the master password, search), dbviewer (cell editing),
+diagram (a shape's label), dictionary (the query), filesearch (the query),
+lockscreen (the password), mindmap (a node's text and its search),
+passwordgen (its input), undelete (search).
 
 Not among them: `terminal`, whose typing goes to the shell's own line
 editor; `typingtutor`, where a line typed straight through is the exercise;
@@ -87,4 +87,6 @@ quitting); hexeditor (2026-10-04: the find and go-to boxes edit at a caret;
 Ctrl+V in a box no longer pastes into the file); startupmanager (2026-10-04:
 the search box and the add/edit dialog's fields edit at a caret; Delete in
 the search no longer removes an entry); tmux (2026-10-04: the : prompt edits
-at a caret, never past its colon).
+at a caret, never past its colon); contacts (2026-10-04: the search box and
+the form's lines edit at a caret; Delete in a box no longer deletes the
+contact).

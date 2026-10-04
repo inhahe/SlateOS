@@ -20,7 +20,7 @@ use std::io::Cursor;
 use videocodec::{Frame, SeekMode, Video};
 
 /// Every fixture, each a path the conversion or the file can take.
-const FIXTURES: [&str; 28] = [
+const FIXTURES: [&str; 35] = [
     "vp8_sd.webm",
     "vp8_hd.webm",
     "vp8_odd.webm",
@@ -49,6 +49,13 @@ const FIXTURES: [&str; 28] = [
     "av1_cut.mp4",
     "vp9_colr.mp4",
     "vp9_clap.mp4",
+    "vp9_rotate_90.mp4",
+    "vp9_mirror_rotate.mp4",
+    "vp9_pasp_rotate.mp4",
+    "vp9_rotate_180.mkv",
+    "vp9_rotate_270.mkv",
+    "vp9_mirror.mkv",
+    "vp9_mirror_turn.mkv",
 ];
 
 /// One frame as the answers give it.
@@ -153,11 +160,13 @@ fn every_fixture_plays_as_ffmpeg_and_libavif_show_it() {
 }
 
 /// A picture taken unconverted and converted later is the frame
-/// `next_frame` gives -- crop and all.
+/// `next_frame` gives -- crop, turn and all.
 #[test]
 fn a_picture_converted_later_is_the_same_frame() {
     for name in [
         "vp9_cropped.mkv",
+        "vp9_clap.mp4",
+        "vp9_mirror_turn.mkv",
         "av1_444_10bit.webm",
         "vp9_alpha.webm",
         "vp8_alpha.webm",
@@ -335,6 +344,25 @@ fn a_file_without_the_video_asked_for_is_refused() {
         Video::open_track(file, 2),
         Err(videocodec::Error::NoVideo)
     ));
+}
+
+/// Each file's turn is ffmpeg's for it, as the generator checked ffmpeg's
+/// autorotate against each.
+#[test]
+fn each_turned_file_says_its_turn() {
+    use videocodec::Orientation::{AntiTransposed, Anticlockwise, Clockwise, HalfTurn, Mirrored};
+    for (name, turn) in [
+        ("vp9_rotate_90.mp4", Anticlockwise),
+        ("vp9_mirror_rotate.mp4", AntiTransposed),
+        ("vp9_pasp_rotate.mp4", Clockwise),
+        ("vp9_rotate_180.mkv", HalfTurn),
+        ("vp9_rotate_270.mkv", Clockwise),
+        ("vp9_mirror.mkv", Mirrored),
+        ("vp9_mirror_turn.mkv", AntiTransposed),
+        ("vp9.mp4", videocodec::Orientation::Upright),
+    ] {
+        assert_eq!(open(name).info().orientation, turn, "{name}");
+    }
 }
 
 /// MP4 holds H.264 more often than anything else, which is not decoded here

@@ -263,6 +263,9 @@ mod tests {
         assert_eq!((p, exact), (q(355, 113), false));
         // 1001/30000 within 100: 1/30, nearer than the semiconvergent 3/89.
         assert_eq!(reduce(1001, 30000, 100), (q(1, 30), false));
+        // 53/100 within 10: the semiconvergent 5/9, nearer than the last
+        // convergent, 1/2.
+        assert_eq!(reduce(53, 100, 10), (q(5, 9), false));
     }
 
     #[test]

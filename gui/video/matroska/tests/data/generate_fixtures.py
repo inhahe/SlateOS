@@ -27,6 +27,12 @@ Three kinds of fixture:
   laid them out, from before this crate became the tree's one demuxer
   (`lane_e_layouts`).
 
+And the **projections** (`proj_*.mkv`, answered together in
+`projections.txt`): a video track's `Projection` -- its pose, which turns
+and mirrors the picture, and the spherical kinds -- each answered with the
+display matrix ffprobe shows for it, `none`, or `refused` where FFmpeg will
+not open the file. `tests/projection.rs` holds the crate to them.
+
 The answers were made with the ffmpeg and ffprobe of gyan.dev's full build
 of 2026-03-09 (git 9b7439c31b). Run from this directory:
 
@@ -748,7 +754,102 @@ def seek_answer(name):
     return "\n".join(lines) + "\n"
 
 
+# --- projections ------------------------------------------------------------
+
+
+def double(id_hex, v):
+    return el(id_hex, struct.pack(">d", v))
+
+
+def projection(kind=None, private=None, yaw=None, pitch=None, roll=None):
+    body = b""
+    if kind is not None:
+        body += uint("7671", kind)
+    if private is not None:
+        body += el("7672", private)
+    for id_hex, v in (("7673", yaw), ("7674", pitch), ("7675", roll)):
+        if v is not None:
+            body += double(id_hex, v)
+    return el("7670", body)
+
+
+def projected(proj, kind=1, codec="V_SNOW"):
+    """A file of one track -- video unless `kind` says sound -- whose Video
+    element holds `proj`, and a frame."""
+    video = el("E0", uint("B0", 16) + uint("BA", 16) + proj)
+    track = el("AE", uint("D7", 1) + uint("73C5", 1) + uint("83", kind) + string("86", codec) + video)
+    return EBML_HEADER + el("18538067", INFO + el("1654AE6B", track)
+                            + cluster(0, simple(1, 0, 0x80, frame(1, 16))))
+
+
+def be32(*words):
+    return b"".join(w.to_bytes(4, "big") for w in words)
+
+
+def projections():
+    """name -> bytes, each a pose or a spherical projection."""
+    nan = struct.unpack(">d", bytes.fromhex("7ff8000000000000"))[0]
+    return {
+        # Rectangular, the type said or not: a roll turns, a yaw of 180
+        # mirrors (applied first, as the specification has it).
+        "proj_roll_90.mkv": projected(projection(kind=0, roll=90.0)),
+        "proj_roll_minus_90.mkv": projected(projection(roll=-90.0)),
+        "proj_roll_180.mkv": projected(projection(kind=0, roll=180.0)),
+        "proj_roll_30.mkv": projected(projection(kind=0, roll=30.0)),
+        "proj_mirror.mkv": projected(projection(kind=0, yaw=180.0)),
+        "proj_mirror_roll.mkv": projected(projection(kind=0, yaw=180.0, roll=-90.0)),
+        "proj_mirror_minus_180.mkv": projected(projection(kind=0, yaw=-180.0, roll=90.0)),
+        # Poses FFmpeg does not apply: none at all, a pitch, a yaw but a
+        # mirror's, a roll that is not a number; and spherical metadata of a
+        # version it does not know.
+        "proj_still.mkv": projected(projection(kind=0)),
+        "proj_pitch.mkv": projected(projection(kind=0, pitch=10.0, roll=90.0)),
+        "proj_yaw_90.mkv": projected(projection(kind=0, yaw=90.0)),
+        "proj_roll_nan.mkv": projected(projection(kind=0, roll=nan)),
+        "proj_private_version.mkv": projected(projection(kind=0, private=bytes([1, 0, 0, 0]), roll=90.0)),
+        # Spherical: equirectangular with its 20 bytes or none, and with
+        # bounds that overflow or the wrong size; cubemap with its 12 bytes,
+        # a layout FFmpeg does not know, too few bytes, or the wrong size; a
+        # mesh. And the same faults in a sound track's Video element, which
+        # FFmpeg does not look at.
+        "proj_equirect.mkv": projected(projection(kind=1, private=be32(0, 1, 2, 3, 4))),
+        "proj_equirect_empty.mkv": projected(projection(kind=1)),
+        "proj_equirect_bounds.mkv": projected(projection(kind=1, private=be32(0, 0xFFFFFFF0, 0x20, 0, 0))),
+        "proj_equirect_size.mkv": projected(projection(kind=1, private=bytes(7))),
+        "proj_cubemap.mkv": projected(projection(kind=2, private=be32(0, 0, 8))),
+        "proj_cubemap_layout.mkv": projected(projection(kind=2, private=be32(0, 1, 0))),
+        "proj_cubemap_short.mkv": projected(projection(kind=2, private=bytes(3))),
+        "proj_cubemap_size.mkv": projected(projection(kind=2, private=bytes(8))),
+        "proj_mesh.mkv": projected(projection(kind=3, roll=90.0)),
+        "proj_sound_track.mkv": projected(projection(kind=1, private=bytes(7)), kind=2, codec="A_OPUS"),
+    }
+
+
+def projection_answer(name):
+    """The display matrix ffprobe shows for the file's first stream, nine
+    numbers; `none`; or `refused`."""
+    r = subprocess.run([FFPROBE, "-v", "error", "-show_entries", "stream_side_data=displaymatrix",
+                        "-of", "compact=p=0", name], capture_output=True, text=True, encoding="utf-8")
+    if r.returncode != 0:
+        return "refused"
+    for line in r.stdout.splitlines():
+        if "displaymatrix=" in line:
+            rows = line.split("displaymatrix=", 1)[1].replace("\\n", "\n").split("\n")
+            words = [w for row in rows if ":" in row for w in row.split(":", 1)[1].split()]
+            return ",".join(words)
+    return "none"
+
+
 def main():
+    looks = projections()
+    lines = ["# Each proj_*.mkv: the display matrix ffprobe shows for its projection, `none`, or",
+             "# `refused` where ffprobe will not open it (generate_fixtures.py)."]
+    for name, data in sorted(looks.items()):
+        with open(name, "wb") as f:
+            f.write(data)
+        lines.append(f"{name} {projection_answer(name)}")
+    with open("projections.txt", "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(lines) + "\n")
     files = {**made_by_ffmpeg(), **synthetic()}
     for name, data in sorted(files.items()):
         with open(name, "wb") as f:

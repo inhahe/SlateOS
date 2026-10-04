@@ -11,7 +11,7 @@
 
 use std::io::{Read, Seek, SeekFrom};
 
-use crate::{Codec, ColourHint, ContainerError, time};
+use crate::{Codec, ColourHint, ContainerError, Orientation, time};
 
 /// How much of a file is read to tell what it is: the most FFmpeg reads to
 /// decide (`PROBE_BUF_MAX`), or the whole of a smaller file.
@@ -53,6 +53,8 @@ pub(crate) struct Track {
     pub crop: [u64; 4],
     /// The shape the file asks a frame shown at.
     pub aspect: Aspect,
+    /// Which way up the file asks a frame shown.
+    pub orientation: Orientation,
     /// WebM's alpha channel, in each block's `BlockAdditional` 1.
     pub alpha: bool,
     /// What the file says of the track's colour.
@@ -222,11 +224,14 @@ impl<R: Read + Seek> Container<R> {
 }
 
 impl Track {
-    /// The size to show a frame of the cropped size `width` x `height` at:
-    /// its height, and the width that gives it the shape the file asks --
-    /// rounded to the nearest pixel, a half up. The frame's own size where
-    /// the file asks nothing, or something that cannot be shown.
+    /// The size to show a frame of size `width` x `height` at -- cropped,
+    /// and turned the track's way: its height, and the width that gives it
+    /// the shape the file asks -- turned with it, as ffmpeg's `transpose`
+    /// turns a pixel's shape -- rounded to the nearest pixel, a half up. The
+    /// frame's own size where the file asks nothing, or something that
+    /// cannot be shown.
     pub(crate) fn display_size(&self, width: u32, height: u32) -> (u32, u32) {
+        let turned = self.orientation.swaps_sides();
         // `height * a / b`, or `width * a / b`, rounded half up:
         // (2 * n * a + b) / (2 * b), which a u128 holds for any u32 and u64s.
         let scaled = |n: u32, a: u64, b: u64| {
@@ -244,12 +249,21 @@ impl Track {
                 unit: 0..=3,
                 width: dw,
                 height: dh,
-            } if dw > 0 && dh > 0 && height > 0 => scaled(height, dw, dh),
-            Aspect::Pixel { num, den } if num > 0 && den > 0 && width > 0 => scaled(
-                width,
-                u64::from(num.unsigned_abs()),
-                u64::from(den.unsigned_abs()),
-            ),
+            } if dw > 0 && dh > 0 && height > 0 => {
+                if turned {
+                    scaled(height, dh, dw)
+                } else {
+                    scaled(height, dw, dh)
+                }
+            }
+            Aspect::Pixel { num, den } if num > 0 && den > 0 && width > 0 => {
+                let (num, den) = (u64::from(num.unsigned_abs()), u64::from(den.unsigned_abs()));
+                if turned {
+                    scaled(width, den, num)
+                } else {
+                    scaled(width, num, den)
+                }
+            }
             _ => None,
         };
         match shown {
@@ -284,6 +298,9 @@ fn matroska_track<R: Read + Seek>(
         height: picture.pixel_height,
         crop: picture.crop,
         aspect,
+        orientation: picture
+            .display_matrix()
+            .map_or(Orientation::Upright, |m| Orientation::from_matrix(&m)),
         alpha: picture.alpha_mode == 1,
         hint: ColourHint::matroska(picture.colour.as_ref()),
         frame_duration: t.default_duration,
@@ -346,6 +363,9 @@ fn mp4_track(index: usize, t: &mp4::Track) -> Option<Track> {
         height: u64::from(picture.height),
         crop,
         aspect,
+        orientation: picture
+            .matrix
+            .map_or(Orientation::Upright, |m| Orientation::from_matrix(&m)),
         alpha: false,
         hint: ColourHint::mp4(picture.colour.as_ref()),
         frame_duration: picture
@@ -386,6 +406,7 @@ mod tests {
             height: 576,
             crop: [0; 4],
             aspect,
+            orientation: Orientation::Upright,
             alpha: false,
             hint: ColourHint::default(),
             frame_duration: None,
@@ -433,6 +454,26 @@ mod tests {
         // 3:2 on 175 wide: 262.5, a half up to 263.
         let odd = Aspect::Pixel { num: 3, den: 2 };
         assert_eq!(track(odd).display_size(175, 144), (263, 144));
+    }
+
+    #[test]
+    fn a_turned_frame_turns_its_shape_with_it() {
+        let turned = |aspect| Track {
+            orientation: Orientation::Clockwise,
+            ..track(aspect)
+        };
+        // A 4:3 pixel on a 176 x 144 picture, turned a quarter: the frame is
+        // 144 x 176, its pixel 3:4, shown 108 wide.
+        let wide = Aspect::Pixel { num: 4, den: 3 };
+        assert_eq!(turned(wide).display_size(144, 176), (108, 176));
+        // Matroska's 16:9 on 720 x 576, turned: 9:16 at a height of 720.
+        assert_eq!(turned(display(3, 16, 9)).display_size(576, 720), (405, 720));
+        // Mirrored or turned half round, nothing changes shape.
+        let half = Track {
+            orientation: Orientation::HalfTurn,
+            ..track(wide)
+        };
+        assert_eq!(half.display_size(176, 144), (235, 144));
     }
 
     #[test]

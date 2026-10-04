@@ -1668,8 +1668,8 @@ on `$PATH`, so a script that says `ps` gets `ps`._
 - [ ] OS-level image codec support (all common formats apps can decode/encode via system API):
   - [-] *(Lane F 2026-09-25: PNG, JPEG baseline and progressive, GIF with its animations, WebP -- lossless, lossy, with alpha, and animated -- BMP and ICO decode in `gui/imagecodec`, and TIFF; JPEG, lossless included, exactly as libjpeg-turbo decodes it; the others do not yet.)* JPEG, PNG, GIF (animated), BMP, TIFF, WebP, AVIF, HEIC/HEIF, ICO, SVG
   - [ ] RAW formats (CR2, NEF, ARW, DNG — via libraw or similar)
-- [ ] OS-level video codec support (via FFmpeg/libav):
-  - [ ] H.264, H.265/HEVC, VP8, VP9, AV1, MPEG-4, WMV, MOV container, MKV container, WebM
+- [-] OS-level video codec support (via FFmpeg/libav):
+  - [-] *(Lane F 2026-10-04: VP8, VP9 and AV1 decode, and Matroska, WebM and MP4/MOV demultiplex, in `gui/video` -- `videocodec` plays them, held to ffmpeg frame by frame; H.264, HEVC, MPEG-4 Part 2 and WMV do not decode yet. See `roadmap.md`, "Video files".)* H.264, H.265/HEVC, VP8, VP9, AV1, MPEG-4, WMV, MOV container, MKV container, WebM
   - [ ] Hardware-accelerated decode where GPU supports it (VAAPI/NVDEC)
 - [ ] Thumbnail generation service (used by file explorer, shared across apps)
 

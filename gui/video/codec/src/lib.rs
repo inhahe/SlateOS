@@ -28,7 +28,10 @@
 //! tells them; VP8, and VP9 in every profile (8-, 10- and 12-bit; 4:2:0,
 //! 4:2:2, 4:4:0, 4:4:4; RGB), each with WebM's alpha channel; and AV1. An
 //! MP4 file's edit list is obeyed as FFmpeg obeys it: the frames it leaves
-//! out are decoded, for those after them, and not shown. Not yet: H.264 and
+//! out are decoded, for those after them, and not shown. A picture the file
+//! asks to be turned or mirrored -- MP4's display matrix, Matroska's
+//! projection -- comes out turned, as ffmpeg's autorotate turns it
+//! ([`Orientation`]). Not yet: H.264 and
 //! HEVC, which most MP4 files hold, and sound (`roadmap.md`, "Video
 //! files").
 //!
@@ -64,12 +67,14 @@
 mod colour;
 mod container;
 mod decoder;
+mod orientation;
 mod picture;
 mod time;
 mod video;
 
 pub use colour::Colour;
 pub use decoder::{Decoder, Packet};
+pub use orientation::Orientation;
 pub use picture::Picture;
 pub use video::{SeekMode, Video, VideoInfo};
 

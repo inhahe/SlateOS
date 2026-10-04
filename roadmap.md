@@ -3816,7 +3816,7 @@ lane C's `guitk`.
     (`tests/data/generate_fixtures.py`, `tools/libavif_reformat_reference.c`),
     with seeks, damage and a playback thread. What it leaves to colour
     management: `known-issues/F-video-is-shown-without-colour-management.md`.
-  - `[-]` VP8 video (libvpx's decoder, ported as VP9's was), and MP4
+  - `[x]` VP8 video (libvpx's decoder, ported as VP9's was), and MP4
     (`apps/mediaprobe` reads its headers; the sample tables are like
     AVIF's sequences').
     - `[x]` The decoder, `gui/video/vp8`: libvpx v1.17.0's, every picture
@@ -3832,14 +3832,32 @@ lane C's `guitk`.
     - `[x]` In `videocodec`: WebM's VP8, alpha included, coloured as FFmpeg
       reads VP8 (BT.601 at any size, its clamping bit the range); five
       fixtures held to ffmpeg and libavif frame by frame.
-    - `[-]` MP4.
+    - `[x]` MP4.
       - `[x]` The demuxer, `gui/video/mp4`: FFmpeg's `mov.c` translated --
         edit lists, negative composition offsets, sound's priming,
         fragmented files, damage -- every packet of 31 files and 14 sets of
         seeks held to ffprobe's, and every byte of six files damaged in
-        turn. It carries FFmpeg's licence (LGPL): open-questions F-Q7.
-      - `[ ]` In `videocodec`: a file opened by what it is, MP4 or
-        Matroska, and played the same way.
+        turn; and what a track says of its picture (colour, pixel shape,
+        display matrix, clean aperture), held to ffprobe over 28 files more.
+        It carries FFmpeg's licence (LGPL): open-questions F-Q7.
+      - `[x]` In `videocodec`: a file opened by what it is -- EBML's magic,
+        or FFmpeg's MP4 probe -- and played the same way through one
+        container layer: MP4's edit lists obeyed (frames before a cut
+        decoded and not shown, AV1's by a tag dav1d carries), its colour,
+        pixel shape and clean aperture taken. Eight MP4 fixtures held to
+        ffmpeg and libavif frame by frame, with seeks and damage.
+      - `[x]` Pictures turned and mirrored as the file asks -- MP4's display
+        matrix, Matroska's projection pose (now read by
+        `gui/video/matroska`, its 22 cases held to ffprobe) -- as ffmpeg's
+        autorotate turns them; seven fixtures, each turn checked against
+        ffmpeg's own.
+    - What MP4 still lacks -- above all H.264 and HEVC, which most MP4
+      files hold: `known-issues/F-mp4-plays-only-in-the-codecs-webm-has.md`.
+  - `[ ]` H.264 and HEVC video, which phones, cameras and most of the web
+    write into MP4: `videocodec` refuses them by name today. A decoder for
+    each, held to its reference as VP8's and VP9's are; which code to start
+    from is the first question (FFmpeg's, LGPL; OpenH264, BSD; the
+    specification).
   - `[ ]` Sound needs Opus and Vorbis decoders, which nothing has yet (the
     music player has none either). When it comes, its seek owes Opus a
     pre-roll: start `matroska::Track::seek_pre_roll` (80 ms) before the

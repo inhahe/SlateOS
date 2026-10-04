@@ -22,6 +22,11 @@
 //! converts them, where it fits the frame; a frame it does not fit is shown
 //! whole, as FFmpeg shows it.
 //!
+//! **Orientation.** A picture the file asks to be shown turned or mirrored --
+//! MP4's display matrix, Matroska's projection pose -- is turned after the
+//! crop, as ffmpeg's autorotate turns it ([`crate::Orientation`]); the
+//! sizes [`VideoInfo`] gives are the turned frame's.
+//!
 //! **Edit lists.** An MP4 file's edit list says which stretch of a track
 //! plays: the frames before it that later ones are coded from are decoded
 //! and not shown (`gui/video/mp4` marks them, as FFmpeg's demuxer does), and
@@ -38,7 +43,7 @@ use std::io::{Read, Seek};
 use crate::container::{Container, Sample};
 use crate::decoder::{Decoder, Packet};
 use crate::picture::Picture;
-use crate::{Codec, Error, Frame, Limits, time};
+use crate::{Codec, Error, Frame, Limits, Orientation, time};
 
 /// Where a seek lands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,8 +63,9 @@ pub struct VideoInfo {
     /// track ID.
     pub track: u64,
     pub codec: Codec,
-    /// The size of its frames, as the file declares it (after any crop).
-    /// A stream may change size as it plays; each [`Frame`] has its own.
+    /// The size of its frames, as the file declares it (after any crop, and
+    /// turned the way the file asks). A stream may change size as it plays;
+    /// each [`Frame`] has its own.
     pub width: u32,
     pub height: u32,
     /// The size to show a frame at so it has the shape the file asks for:
@@ -74,6 +80,8 @@ pub struct VideoInfo {
     pub duration: Option<u64>,
     /// Whether the frames carry an alpha channel.
     pub alpha: bool,
+    /// The turn and mirror applied to each frame, as the file asks them.
+    pub orientation: Orientation,
 }
 
 /// A file's video track, decoded frame by frame.
@@ -150,6 +158,11 @@ impl<R: Read + Seek> Video<R> {
         let decoder = Decoder::new(chosen.codec, &chosen.config, chosen.hint, limits)?;
         let width = cropped(chosen.width, chosen.crop[0], chosen.crop[2]);
         let height = cropped(chosen.height, chosen.crop[1], chosen.crop[3]);
+        let (width, height) = if chosen.orientation.swaps_sides() {
+            (height, width)
+        } else {
+            (width, height)
+        };
         let (display_width, display_height) = chosen.display_size(width, height);
         let info = VideoInfo {
             track: chosen.number,
@@ -161,6 +174,7 @@ impl<R: Read + Seek> Video<R> {
             frame_duration: chosen.frame_duration,
             duration: demuxer.duration(),
             alpha: chosen.alpha,
+            orientation: chosen.orientation,
         };
         let (key, time_base, crop) = (chosen.key, chosen.time_base, chosen.crop);
         Ok(Self {
@@ -200,7 +214,7 @@ impl<R: Read + Seek> Video<R> {
             return Ok(None);
         };
         let frame = picture.to_frame()?;
-        Ok(Some(self.cropped_frame(frame)))
+        Ok(Some(self.shaped(frame)))
     }
 
     /// The next picture, not yet converted; `None` at the end. For a player
@@ -257,13 +271,13 @@ impl<R: Read + Seek> Video<R> {
     }
 
     /// `picture` converted as [`Self::next_frame`] converts it: with the
-    /// track's crop.
+    /// track's crop, and turned the track's way.
     ///
     /// # Errors
     ///
     /// [`Error::Colour`] for a picture whose colour cannot be converted.
     pub fn convert(&self, picture: &Picture) -> Result<Frame, Error> {
-        Ok(self.cropped_frame(picture.to_frame()?))
+        Ok(self.shaped(picture.to_frame()?))
     }
 
     /// Go to `time` (nanoseconds on the file's clock): the next frame is
@@ -325,6 +339,12 @@ impl<R: Read + Seek> Video<R> {
     fn damage(&mut self, e: Error) {
         self.damaged = self.damaged.saturating_add(1);
         self.last_damage = Some(e);
+    }
+
+    /// `frame` with the track's crop, where it fits, then turned the track's
+    /// way.
+    fn shaped(&self, frame: Frame) -> Frame {
+        self.info.orientation.apply(self.cropped_frame(frame))
     }
 
     /// `frame` with the track's crop, where it fits.

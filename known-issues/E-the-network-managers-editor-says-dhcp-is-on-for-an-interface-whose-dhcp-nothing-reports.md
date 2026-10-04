@@ -1,0 +1,38 @@
+### [E] The network manager's editor says DHCP is on for an interface whose DHCP nothing reports -- 2026-10-04
+**Status:** OPEN
+
+**In short:** for every interface read from the kernel, the IP
+Configuration tab shows "DHCP: Enabled", and its editor opens with the
+DHCP switch on -- while the Properties tab of the same interface says
+DHCP is "Not reported", which is the truth: `/proc/net` does not say
+whether DHCP gave an address. With the switch on, the address boxes are
+disabled, the DNS list cannot be changed, and Apply refuses, so on a real
+machine nothing can be applied until the user turns off a switch that was
+never really on.
+
+**Where.** `apps/netmanager/src/main.rs`, `interface_of`: it builds the
+editable configuration with `dhcp_enabled: true` and the report with
+`dhcp: None`. The two halves of the window read different fields --
+`render_tab_ip_config` reads `edit_ip_config.dhcp_enabled`, the
+Properties summary reads `dhcp`.
+
+**How to see it.** On SlateOS, open the network manager, pick an
+interface, open IP Configuration: "DHCP: Enabled". Properties: "DHCP: Not
+reported". Press Edit: the boxes are greyed out.
+
+**The proper fix.** The switch needs a third position, "not reported",
+for an interface whose DHCP state is unknown:
+
+- The IP tab reads "DHCP: Not reported", as Properties does, and the
+  switch is drawn in neither position.
+- Edit opens the editor with the switch still unset. Choosing a
+  position is part of the edit: "static" enables the address boxes and
+  the DNS list, and "DHCP" is refused by Apply as today.
+- Apply on an unset switch asks which is meant rather than guessing.
+- `IpConfig::dhcp_enabled` becomes `Option<bool>`, or a three-valued
+  enum, so that an unknown cannot be read as either answer by accident.
+
+Found while converting the address boxes to the toolkit's field
+(2026-10-04): the boxes are now disabled under DHCP, which made the
+default switch position visible as soon as Edit is pressed, where before
+it showed only when Apply refused.

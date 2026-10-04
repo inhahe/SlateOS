@@ -126,28 +126,82 @@ MUTATIONS = [
         ['a_chord_is_neither_a_viewer_key_nor_typing'],
     ),
     (
-        "a command's letter is typed into the print range",
-        '        if textline::types_into_field(event) {\n            self.print_dialog.range_text',
-        '        if event.types_text() {\n            self.print_dialog.range_text',
+        # What the boxes did before the editor: type whatever text a key
+        # carried, a command's letter among it. Both go through `edit_box`.
+        "a command's letter is typed into a box",
+        '    if editor.text() != text.as_str() {\n        editor.set_text(text);\n    }\n',
+        '    if key.types_text() && !textline::types_into_field(key) {\n'
+        '        text.push_str(&key.text);\n'
+        '        return Some(Edited {\n'
+        '            text: true,\n'
+        '            caret: false,\n'
+        '        });\n'
+        '    }\n'
+        '    if editor.text() != text.as_str() {\n        editor.set_text(text);\n    }\n',
         ['a_chord_is_neither_a_viewer_key_nor_typing'],
     ),
     (
         'a chord works the print dialog',
-        '        if !textline::is_plain(event.modifiers) {\n            return false;\n        }\n        match event.key {\n            Key::Escape => {\n                self.print_dialog.open = false;',
-        '        match event.key {\n            Key::Escape => {\n                self.print_dialog.open = false;',
+        '            Key::Enter if plain => self.commit_print(),\n',
+        '            Key::Enter => self.commit_print(),\n',
         ['a_chord_is_neither_a_viewer_key_nor_typing'],
     ),
+]
+
+# The search box and the page range box are the toolkit's field, edited by
+# textline's editor (2026-10-04; lane C, c-e-a-theme-can-shape-the-controls).
+SEARCH = "the_search_box_is_the_toolkits_field"
+SEARCH_EDITS = "the_search_box_edits_like_a_field"
+RANGE = "the_page_range_box_is_the_toolkits_field"
+
+MUTATIONS += [
     (
-        "a command's letter is typed into the search",
-        '        if textline::types_into_field(event) {\n            self.search.query',
-        '        if event.types_text() {\n            self.search.query',
-        ['a_chord_is_neither_a_viewer_key_nor_typing'],
+        "the search box never has the keyboard",
+        '            focused: self.search_focused && !self.show_help && !self.print_dialog.open,\n',
+        '            focused: false,\n',
+        [SEARCH],
     ),
     (
-        'a chord works the search box',
-        '        if !textline::is_plain(event.modifiers) {\n            return false;\n        }\n        match event.key {\n            Key::Enter => {\n                self.search.next_match();',
-        '        match event.key {\n            Key::Enter => {\n                self.search.next_match();',
-        ['a_chord_is_neither_a_viewer_key_nor_typing'],
+        "the search box keeps its mark under Print",
+        '            focused: self.search_focused && !self.show_help && !self.print_dialog.open,\n',
+        '            focused: self.search_focused && !self.show_help,\n',
+        [SEARCH],
+    ),
+    (
+        "a query that finds nothing is not red",
+        '            invalid: !self.search.query.is_empty() && self.search.results.is_empty(),\n',
+        '            invalid: false,\n',
+        [SEARCH],
+    ),
+    (
+        "a press leaves the caret where it was",
+        '                        self.place_caret(target, &frame, drawn, *x);\n',
+        '                        let _ = (&frame, drawn, *x);\n',
+        [SEARCH_EDITS],
+    ),
+    (
+        "the range box never has the keyboard",
+        '            focused: self.print_dialog.open && !self.show_help,\n',
+        '            focused: false,\n',
+        [RANGE],
+    ),
+    (
+        "a range of no pages is not red",
+        '                && self.print_dialog.range() == PageRange::Custom(Vec::new()),\n',
+        '                && false,\n',
+        [RANGE],
+    ),
+    (
+        "typing in the range box chooses no range",
+        '                    if edited.text {\n                        self.print_dialog.choice = RangeChoice::Custom;\n',
+        '                    if false {\n                        self.print_dialog.choice = RangeChoice::Custom;\n',
+        [RANGE],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        '        self.focus_ring_width = settings.focus_ring_width();\n',
+        '        let _ = settings;\n',
+        [SEARCH, RANGE],
     ),
 ]
 

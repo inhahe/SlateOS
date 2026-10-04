@@ -763,8 +763,20 @@ mod tests {
         }
         // The limit counts what `out` held already.
         let mut out = b"kept ".to_vec();
-        assert_eq!(decompress_as_7zip(&a, &mut out, 8), Err(Error::OutputTooLarge));
+        assert_eq!(
+            decompress_as_7zip(&a, &mut out, 8),
+            Err(Error::OutputTooLarge)
+        );
         assert_eq!(out, b"kept fir");
+        // A limit inside a run -- eight a's are four and a count of four --
+        // is filled to, as 7-Zip writes up to its output's size.
+        let run = crate::compress(&[b'a'; 8], crate::Level::FASTEST);
+        let mut out = Vec::new();
+        assert_eq!(
+            decompress_as_7zip(&run, &mut out, 6),
+            Err(Error::OutputTooLarge)
+        );
+        assert_eq!(out, b"aaaaaa");
         // A stream cut short is cut short.
         let mut out = Vec::new();
         assert_eq!(

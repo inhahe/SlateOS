@@ -692,7 +692,10 @@ mod tests {
         assert_eq!(crate::decompress(&cut), Err(crate::Error::InvalidRun));
         assert_eq!(as_7zip(&cut), (Ok(cut.len()), b"xyzAAAA".to_vec()));
         // Four bytes alone, and four after a run that had its count.
-        for (block, want) in [(&b"AAAA"[..], &b"AAAA"[..]), (b"AAAA\x02BBBB", b"AAAAAABBBB")] {
+        for (block, want) in [
+            (&b"AAAA"[..], &b"AAAA"[..]),
+            (b"AAAA\x02BBBB", b"AAAAAABBBB"),
+        ] {
             let cut = raw_stream(block, crc_of(want), 0);
             assert_eq!(crate::decompress(&cut), Err(crate::Error::InvalidRun));
             assert_eq!(as_7zip(&cut), (Ok(cut.len()), want.to_vec()));
@@ -716,7 +719,10 @@ mod tests {
         };
         let packed = shaped_stream(data, crc_of(data), shape);
         assert_eq!(crate::decompress(&packed).unwrap(), data);
-        assert_eq!(as_7zip(&packed), (Err(crate::Error::InvalidTables), Vec::new()));
+        assert_eq!(
+            as_7zip(&packed),
+            (Err(crate::Error::InvalidTables), Vec::new())
+        );
         // The same table as a prefix code is read by both.
         let shape = Shape {
             table_lengths: Some(|_, named, v| (!named).then_some([1, 2, 3, 3][v])),

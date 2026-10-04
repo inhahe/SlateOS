@@ -231,14 +231,14 @@ MUTATIONS = [
     # ---- the history: a tree, walked with Alt+Z (C-Q24) ----
     (
         "a redo does not mark the map",
-        "        self.apply_forward(&action);\n        self.active_map_mut().dirty = true;\n        true",
-        "        self.apply_forward(&action);\n        true",
+        "        self.apply_forward(&action);\n        self.active_map_mut().dirty = true;\n        self.refresh_search();\n        true",
+        "        self.apply_forward(&action);\n        self.refresh_search();\n        true",
         [MARK],
     ),
     (
         "a journey does not mark the map",
-        "        if moved {\n            self.active_map_mut().dirty = true;\n        }\n        moved",
-        "        moved",
+        "        if moved {\n            self.active_map_mut().dirty = true;\n            self.refresh_search();\n        }\n        moved",
+        "        if moved {\n            self.refresh_search();\n        }\n        moved",
         [TREE],
     ),
     (
@@ -486,46 +486,12 @@ MUTATIONS = [
         "const MAX_UNDO: usize = 210;",
         ["test_app_undo_stack_limit"],
     ),
-    (
-        "a node's text refuses what AltGr types",
-        "                if !textline::types_into_field(key) {\n"
-        "                    return EventResult::Ignored;\n                }\n"
-        "                self.edit_buffer.extend(key.typed());",
-        "                if !textline::types_into_field(key) || key.modifiers.ctrl {\n"
-        "                    return EventResult::Ignored;\n                }\n"
-        "                self.edit_buffer.extend(key.typed());",
-        ["a_node_and_the_search_box_take_altgr_letters_and_no_commands_letter"],
-    ),
-    (
-        "a node's text takes a command's letter",
-        "                if !textline::types_into_field(key) {\n"
-        "                    return EventResult::Ignored;\n                }\n"
-        "                self.edit_buffer.extend(key.typed());",
-        "                if !key.types_text() {\n"
-        "                    return EventResult::Ignored;\n                }\n"
-        "                self.edit_buffer.extend(key.typed());",
-        ["a_node_and_the_search_box_take_altgr_letters_and_no_commands_letter"],
-    ),
-    (
-        "the search box refuses what AltGr types",
-        "                if !textline::types_into_field(key) {\n"
-        "                    return EventResult::Ignored;\n                }\n"
-        "                let mut q = self.search_query.clone();",
-        "                if !textline::types_into_field(key) || key.modifiers.ctrl {\n"
-        "                    return EventResult::Ignored;\n                }\n"
-        "                let mut q = self.search_query.clone();",
-        ["a_node_and_the_search_box_take_altgr_letters_and_no_commands_letter"],
-    ),
-    (
-        "the search box takes a command's letter",
-        "                if !textline::types_into_field(key) {\n"
-        "                    return EventResult::Ignored;\n                }\n"
-        "                let mut q = self.search_query.clone();",
-        "                if !key.types_text() {\n"
-        "                    return EventResult::Ignored;\n                }\n"
-        "                let mut q = self.search_query.clone();",
-        ["a_node_and_the_search_box_take_altgr_letters_and_no_commands_letter"],
-    ),
+    # No rows for "a node's text or the search box refuses what AltGr types"
+    # or "takes a command's letter": since 2026-10-04 both boxes' typing is
+    # textline::apply_key's, which makes both distinctions itself, in its own
+    # crate and with its own tests;
+    # a_node_and_the_search_box_take_altgr_letters_and_no_commands_letter
+    # still holds the boxes to them.
     # -- the shortcut card is modal, for the keys and the pointer
     (
         "the card is modal for nothing",
@@ -597,8 +563,8 @@ MUTATIONS += [
     ),
     (
         "the caret is at the start of the name",
-        "                cursor: text::TextCursor::from(self.edit_buffer.len()),\n",
-        "                cursor: text::TextCursor::from(0),\n",
+        "        let (cursor, selection_anchor) = self.box_caret(TypedBox::Name);\n",
+        "        let (cursor, selection_anchor) = (text::TextCursor::from(0), None::<usize>);\n",
         [RENAME],
     ),
     (
@@ -624,6 +590,204 @@ MUTATIONS += [
         "        self.focus_ring_width = settings.focus_ring_width();\n",
         "        let _ = settings;\n",
         [RENAME, FIND],
+    ),
+]
+
+# The boxes edit at a caret, and the search finds what is there (2026-10-04,
+# known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box): a
+# node's text and the query took typing at their end and Backspace from it,
+# and nothing else; the results came in hash order, were kept through changes
+# to the map, and the first Enter skipped the first.
+EDITS = "a_nodes_text_edits_at_a_caret"
+STARTS = "a_nodes_text_starts_with_the_caret_after_it"
+REDRAW = "a_key_that_changes_nothing_in_a_box_is_not_a_redraw"
+QUERY = "the_query_edits_at_a_caret"
+BAR = "a_press_on_the_find_bar_is_the_bars"
+SHOWN = "a_box_edits_the_text_it_shows"
+ORDER = "search_results_come_in_the_order_the_outline_reads"
+AGAIN = "a_change_with_the_find_bar_up_is_searched_again"
+NEXT = "test_app_search_next_prev"
+
+MUTATIONS += [
+    # -- the search
+    (
+        "the outline is searched branch by branch from the last",
+        "            stack.extend(node.children.iter().rev());\n",
+        "            stack.extend(node.children.iter());\n",
+        [ORDER],
+    ),
+    (
+        "the typing goes to no result",
+        "        if let Some(&found) = self.search_results.get(self.search_index) {\n"
+        "            self.selected_node = Some(found);\n"
+        "        }\n",
+        "",
+        [NEXT],
+    ),
+    (
+        "the typing jumps away from a node it still finds",
+        "            .selected_node\n            .and_then(",
+        "            .selected_node\n            .filter(|_| false)\n            .and_then(",
+        [NEXT],
+    ),
+    (
+        "a change is not searched again",
+        "        map.history.record(action);\n        self.refresh_search();\n",
+        "        map.history.record(action);\n",
+        [AGAIN],
+    ),
+    (
+        "an undo is not searched again",
+        "        self.active_map_mut().dirty = true;\n        self.refresh_search();\n        true\n    }\n\n    /// Redo",
+        "        self.active_map_mut().dirty = true;\n        true\n    }\n\n    /// Redo",
+        [AGAIN],
+    ),
+    (
+        "a redo is not searched again",
+        "        self.apply_forward(&action);\n        self.active_map_mut().dirty = true;\n        self.refresh_search();\n",
+        "        self.apply_forward(&action);\n        self.active_map_mut().dirty = true;\n",
+        [AGAIN],
+    ),
+    (
+        "Alt+Z is not searched again",
+        "            self.active_map_mut().dirty = true;\n            self.refresh_search();\n        }\n        moved\n",
+        "            self.active_map_mut().dirty = true;\n        }\n        moved\n",
+        [AGAIN],
+    ),
+    (
+        "a change lets the current result go",
+        "        self.search_index = current\n            .and_then(",
+        "        self.search_index = current\n            .filter(|_| false)\n            .and_then(",
+        [AGAIN],
+    ),
+    # -- the keys
+    (
+        "a Ctrl chord with the bar up is nobody's",
+        "            None if textline::is_ctrl_chord(key.modifiers) => None,\n",
+        "",
+        [AGAIN],
+    ),
+    (
+        "a plain key the query does not answer reaches the map's",
+        "            None => Some(EventResult::Ignored),\n",
+        "            None => None,\n",
+        [QUERY],
+    ),
+    (
+        "Ctrl+F with the bar up puts it away",
+        "            Key::F if textline::is_ctrl_chord(key.modifiers) => {\n",
+        "            Key::F if false => {\n",
+        [QUERY, REDRAW],
+    ),
+    (
+        "Ctrl+F with the bar up does not select the query",
+        "                self.editor.select_all();\n",
+        "",
+        [QUERY, REDRAW],
+    ),
+    (
+        "every key a box answers is a redraw",
+        "        Some(self.editor_state() != before)\n",
+        "        Some(true)\n",
+        [REDRAW],
+    ),
+    (
+        "a cut or a copy takes nothing to the clipboard",
+        "            self.clipboard = copied;\n",
+        "            let _ = copied;\n",
+        [EDITS],
+    ),
+    (
+        "the editor is kept for the box the keyboard moved to",
+        "        if self.editor_for != Some(which) || self.editor.text() != self.box_text(which) {\n",
+        "        if self.editor.text() != self.box_text(which) {\n",
+        [SHOWN],
+    ),
+    (
+        "a key finds the editor holding another text",
+        "        if self.editor_for != Some(which) || self.editor.text() != self.box_text(which) {\n",
+        "        if self.editor_for != Some(which) {\n",
+        [SHOWN],
+    ),
+    (
+        "a node's text starts from the last node's caret",
+        "            self.editor.set_text(&self.edit_buffer);\n"
+        "            self.editor_for = Some(TypedBox::Name);\n",
+        "",
+        [STARTS],
+    ),
+    # -- the pointer
+    (
+        "a press puts the caret at the start",
+        "            x - area.x,\n",
+        "            0.0,\n",
+        [EDITS, QUERY],
+    ),
+    (
+        "a press in the node being renamed goes to the map",
+        "                && field.contains(ev.x, ev.y)\n",
+        "                && false\n",
+        [EDITS],
+    ),
+    (
+        "a press in the query goes past it",
+        "                if self.editing_node.is_none() && search.contains(ev.x, ev.y) {\n",
+        "                if false {\n",
+        [QUERY],
+    ),
+    (
+        "a press on the find bar goes to the map under it",
+        "            if self.show_search && bar.contains(ev.x, ev.y) {\n",
+        "            if false {\n",
+        [BAR, QUERY],
+    ),
+    (
+        "a press on the bar off its box goes to the map",
+        "                    return EventResult::Consumed;\n"
+        "                }\n"
+        "                return EventResult::Ignored;\n"
+        "            }\n",
+        "                    return EventResult::Consumed;\n"
+        "                }\n"
+        "            }\n",
+        [BAR],
+    ),
+    (
+        "a press where the bar would be is the bar's while it is put away",
+        "            if self.show_search && bar.contains(ev.x, ev.y) {\n",
+        "            if bar.contains(ev.x, ev.y) {\n",
+        [BAR],
+    ),
+    # -- the drawing
+    (
+        "the name's caret is drawn at its end and its selection not at all",
+        "        let (cursor, selection_anchor) = self.box_caret(TypedBox::Name);\n",
+        "        let (cursor, selection_anchor) = (text::TextCursor::from(self.edit_buffer.len()), None::<usize>);\n",
+        [EDITS],
+    ),
+    (
+        "the query's caret is drawn at its end",
+        "                cursor: self.box_caret(TypedBox::Query).0,\n",
+        "                cursor: text::TextCursor::from(self.search_query.len()),\n",
+        [QUERY],
+    ),
+    (
+        "the query's selection is not drawn",
+        "                selection_anchor: self.box_caret(TypedBox::Query).1,\n",
+        "                selection_anchor: None,\n",
+        [QUERY],
+    ),
+    (
+        "the root's text is typed at a node's size",
+        "        (ROOT_FONT_SIZE, FontWeightHint::Bold)\n",
+        "        (NODE_FONT_SIZE, FontWeightHint::Bold)\n",
+        [RENAME],
+    ),
+    (
+        "a node's text is typed at the field's edge",
+        "            x: r.x + NAME_TEXT_INSET,\n",
+        "            x: r.x,\n",
+        [RENAME],
     ),
 ]
 

@@ -180,6 +180,55 @@ MUTATIONS = [
     ),
 ]
 
+CHORD = "a_commands_letter_is_not_written_into_the_file_or_a_box"
+
+MUTATIONS += [
+    # A command's letter is not typing (2026-10-04): an unbound chord fell
+    # through to the ASCII pane and wrote its letter into the file.
+    (
+        "a command's letter is written into the file",
+        "            if !textline::types_into_field(key) {\n                return false;\n            }\n            let mut wrote_any = false;\n",
+        "            let mut wrote_any = false;\n",
+        [CHORD],
+    ),
+    (
+        "Windows+A writes a nibble",
+        "                if !textline::is_plain(key.modifiers) {\n",
+        "                if key.modifiers.ctrl || key.modifiers.alt {\n",
+        [CHORD],
+    ),
+    (
+        "a command's letter is typed into the search box",
+        "            if textline::types_into_field(key) {\n                self.search.input_text.extend(key.typed());\n",
+        "            if key.types_text() {\n                self.search.input_text.extend(key.typed());\n",
+        [CHORD],
+    ),
+    (
+        "a command's letter is typed into the go-to box",
+        "            if textline::types_into_field(key) {\n                self.goto_text.extend(key.typed());\n",
+        "            if key.types_text() {\n                self.goto_text.extend(key.typed());\n",
+        [CHORD],
+    ),
+    (
+        "AltGr+I sets whether case matters",
+        "            if key.key == Key::I && textline::is_ctrl_chord(key.modifiers) {\n",
+        "            if key.key == Key::I && key.modifiers.ctrl {\n",
+        [CHORD],
+    ),
+    (
+        "AltGr+W sets whether the search wraps",
+        "            if key.key == Key::W && textline::is_ctrl_chord(key.modifiers) {\n",
+        "            if key.key == Key::W && key.modifiers.ctrl {\n",
+        [CHORD],
+    ),
+    (
+        "a Windows chord is the window's",
+        "        if textline::is_ctrl_chord(key.modifiers) {\n",
+        "        if key.modifiers.ctrl && !key.modifiers.alt {\n",
+        [CHORD],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "hexeditor", timeout=900, only=only))

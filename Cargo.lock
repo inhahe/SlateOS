@@ -1574,6 +1574,7 @@ dependencies = [
  "oswindow",
  "pathtext",
  "safeio",
+ "textline",
  "unsaved",
 ]
 
@@ -1766,6 +1767,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]

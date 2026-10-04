@@ -1957,8 +1957,9 @@ impl HexEditor {
 
         // Global shortcuts (regardless of focus). Ctrl without Alt: Ctrl+Alt
         // is AltGr, which types a letter on several layouts -- one the text
-        // pane writes into the file.
-        if key.modifiers.ctrl && !key.modifiers.alt {
+        // pane writes into the file. Nor with the Windows key, whose chords
+        // are the desktop's.
+        if textline::is_ctrl_chord(key.modifiers) {
             match key.key {
                 Key::O => {
                     self.open_file_dialog();
@@ -2167,7 +2168,7 @@ impl HexEditor {
             // ran was case-sensitive and there was no way to ask for anything
             // else -- in a tool whose whole job is finding a byte sequence
             // somebody half remembers.
-            if key.key == Key::I && key.modifiers.ctrl {
+            if key.key == Key::I && textline::is_ctrl_chord(key.modifiers) {
                 self.search.query.case_sensitive = !self.search.query.case_sensitive;
                 self.perform_search();
                 return EventResult::Consumed;
@@ -2177,12 +2178,13 @@ impl HexEditor {
             // `true` with no writer, so a search could not be asked to stop
             // at the end of the file -- which is the difference between "not
             // below here" and "not in the file".
-            if key.key == Key::W && key.modifiers.ctrl {
+            if key.key == Key::W && textline::is_ctrl_chord(key.modifiers) {
                 self.search.query.wrap_around = !self.search.query.wrap_around;
                 self.perform_search();
                 return EventResult::Consumed;
             }
-            if key.types_text() {
+            // What a key typed, AltGr's among it, and not a command's letter.
+            if textline::types_into_field(key) {
                 self.search.input_text.extend(key.typed());
                 return EventResult::Consumed;
             }
@@ -2192,7 +2194,7 @@ impl HexEditor {
             }
         }
         if self.focused_panel == FocusedPanel::GoToDialog {
-            if key.types_text() {
+            if textline::types_into_field(key) {
                 self.goto_text.extend(key.typed());
                 return EventResult::Consumed;
             }
@@ -2382,7 +2384,9 @@ impl HexEditor {
             };
 
             if let Some(nib) = nibble_val {
-                if key.modifiers.ctrl || key.modifiers.alt {
+                // A digit is the key itself, so nothing held with it but
+                // Shift: Windows+A is the desktop's, not the byte 0xA.
+                if !textline::is_plain(key.modifiers) {
                     return false;
                 }
                 let cur = doc.cursor;
@@ -2431,6 +2435,14 @@ impl HexEditor {
             // Non-ASCII is dropped per character rather than rejecting the run,
             // because the pane edits *bytes*: `é` names no single one, and
             // there is no honest byte to write for it.
+            //
+            // A command is not typing. The compositor hands a chord its letter
+            // -- Ctrl+K arrives carrying `k`, Alt+X carrying `x` -- and a chord
+            // this window does not bind fell through to here and wrote its
+            // letter into the file. AltGr, which arrives as Ctrl+Alt, types.
+            if !textline::types_into_field(key) {
+                return false;
+            }
             let mut wrote_any = false;
             for byte in key.typed().filter(char::is_ascii).map(|ch| ch as u8) {
                 let cur = doc.cursor;
@@ -7320,6 +7332,124 @@ mod tests {
             text: "\u{17c}".to_string(),
         });
         assert_eq!(editor.active_doc().data[0], 0x11, "AltGr+Z undid");
+    }
+
+    /// A key with `modifiers` held that typed `text`.
+    fn chord(key: Key, text: &str, modifiers: Modifiers) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: text.to_string(),
+        }
+    }
+
+    /// **A command's letter is not written into the file, nor typed into the
+    /// search or go-to box.** The compositor hands a chord its letter as
+    /// text -- Ctrl+K arrives carrying `k`, Alt+X carrying `x`, Windows+E
+    /// carrying `e` -- and a chord this window does not bind fell through to
+    /// the ASCII pane, which wrote the letter into the file, and to the two
+    /// boxes, which typed it; Windows+A wrote the nibble 0xA in the hex pane.
+    /// AltGr -- Ctrl+Alt -- types, and still does: German `@` is AltGr+Q.
+    #[test]
+    fn a_commands_letter_is_not_written_into_the_file_or_a_box() {
+        let ctrl = Modifiers {
+            ctrl: true,
+            ..Modifiers::NONE
+        };
+        let alt = Modifiers {
+            alt: true,
+            ..Modifiers::NONE
+        };
+        let win = Modifiers {
+            super_key: true,
+            ..Modifiers::NONE
+        };
+        let altgr = Modifiers {
+            ctrl: true,
+            alt: true,
+            ..Modifiers::NONE
+        };
+        let commands = [(Key::K, "k", ctrl), (Key::X, "x", alt), (Key::E, "e", win)];
+
+        // The ASCII pane, overwriting.
+        let mut editor = make_test_editor(vec![0x00; 4]);
+        editor.active_doc_mut().edit_mode = EditMode::Overwrite;
+        editor.active_doc_mut().cursor_in_hex = false;
+        for (k, t, m) in commands {
+            editor.handle_key(&chord(k, t, m));
+            assert_eq!(
+                editor.active_doc().data,
+                vec![0x00; 4],
+                "{m:?}+{k:?} wrote its letter into the file"
+            );
+        }
+        editor.handle_key(&chord(Key::Q, "@", altgr));
+        assert_eq!(
+            editor.active_doc().data.first().copied(),
+            Some(b'@'),
+            "AltGr+Q did not type its @ into the file"
+        );
+
+        // The hex pane: a digit with the Windows key is the desktop's.
+        let mut editor = make_test_editor(vec![0x00; 4]);
+        editor.active_doc_mut().edit_mode = EditMode::Overwrite;
+        editor.handle_key(&chord(Key::A, "a", win));
+        assert_eq!(
+            editor.active_doc().data,
+            vec![0x00; 4],
+            "Windows+A wrote a nibble"
+        );
+
+        // The search box and the go-to box.
+        for panel in [FocusedPanel::SearchBar, FocusedPanel::GoToDialog] {
+            let mut editor = make_test_editor(vec![0x00; 4]);
+            editor.focused_panel = panel;
+            for (k, t, m) in commands {
+                editor.handle_key(&chord(k, t, m));
+            }
+            editor.handle_key(&chord(Key::Q, "@", altgr));
+            let typed = match panel {
+                FocusedPanel::SearchBar => editor.search.input_text.clone(),
+                _ => editor.goto_text.clone(),
+            };
+            assert_eq!(typed, "@", "{panel:?}: a command's letter was typed");
+        }
+
+        // AltGr+I and AltGr+W type in the search box rather than setting
+        // whether case matters and whether the search wraps: `í` is AltGr+I
+        // on a US-International layout.
+        let mut editor = make_test_editor(vec![0x00; 4]);
+        editor.focused_panel = FocusedPanel::SearchBar;
+        let (case, wrap) = (
+            editor.search.query.case_sensitive,
+            editor.search.query.wrap_around,
+        );
+        editor.handle_key(&chord(Key::I, "\u{ed}", altgr));
+        editor.handle_key(&chord(Key::W, "\u{e5}", altgr));
+        assert_eq!(editor.search.input_text, "\u{ed}\u{e5}");
+        assert_eq!(
+            (
+                editor.search.query.case_sensitive,
+                editor.search.query.wrap_around
+            ),
+            (case, wrap),
+            "AltGr+I or AltGr+W changed the search instead of typing"
+        );
+
+        // A chord with the Windows key is the desktop's, Ctrl or not:
+        // Ctrl+Windows+B is not Ctrl+B's bookmark.
+        let mut editor = make_test_editor(vec![0x00; 4]);
+        let ctrl_win = Modifiers {
+            ctrl: true,
+            super_key: true,
+            ..Modifiers::NONE
+        };
+        editor.handle_key(&chord(Key::B, "b", ctrl_win));
+        assert!(
+            editor.active_doc().bookmarks.is_empty(),
+            "Ctrl+Windows+B set a bookmark"
+        );
     }
 
     /// The shortcut list names the new keys.

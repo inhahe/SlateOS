@@ -3817,9 +3817,16 @@ impl App {
             self.show_help = !self.show_help;
             return true;
         }
-        if key.key == Key::Escape && plain && self.show_help {
-            self.show_help = false;
-            return true;
+        // Modal while it is up: a plain Escape puts the list away and no other
+        // key reaches what it covers. It took only those two, so a letter was
+        // typed into the pattern under it, Tab moved between the fields and
+        // F3 stepped through the matches behind it.
+        if self.show_help {
+            if key.key == Key::Escape && plain {
+                self.show_help = false;
+                return true;
+            }
+            return false;
         }
         if self.save_name.is_some() {
             return self.handle_save_key(key);
@@ -5401,6 +5408,41 @@ mod tests {
             modifiers: guitk::event::Modifiers::NONE,
             text: text.to_string(),
         }))
+    }
+
+    /// **The shortcut list is modal for the keys.** It took only F1 and
+    /// Escape: with it up, a letter was typed into the pattern under it, Tab
+    /// moved between the fields and F3 stepped through the matches. The
+    /// control is the same letter with it down.
+    #[test]
+    fn the_shortcut_list_takes_every_key_while_it_is_up() {
+        let mut app = testing("a", "banana");
+        app.active_field = ActiveField::Pattern;
+        assert!(press(&mut app, Key::F1, ""));
+        assert!(app.show_help);
+        assert!(!press(&mut app, Key::X, "x"), "a letter was taken");
+        press(&mut app, Key::Tab, "");
+        press(&mut app, Key::F3, "");
+        assert!(
+            app.show_help,
+            "a key other than F1 or Escape put the list away"
+        );
+        assert_eq!(app.pattern.text(), "a", "a letter was typed under the list");
+        assert_eq!(
+            app.active_field,
+            ActiveField::Pattern,
+            "Tab moved between the fields under the list"
+        );
+        assert_eq!(
+            app.current_match_index, 0,
+            "F3 stepped through the matches under it"
+        );
+        assert!(press(&mut app, Key::Escape, ""));
+        assert!(!app.show_help, "Escape left the list up");
+
+        // The control.
+        press(&mut app, Key::X, "x");
+        assert_eq!(app.pattern.text(), "ax", "control: a letter types nothing");
     }
 
     /// **Every key the shortcut list advertises is one this program answers.**

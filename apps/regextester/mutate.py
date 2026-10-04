@@ -322,9 +322,26 @@ MUTATIONS = [
     ),
     (
         'Alt+Escape puts the list of keys away',
-        '        if key.key == Key::Escape && plain && self.show_help {',
-        '        if key.key == Key::Escape && self.show_help {',
+        '            if key.key == Key::Escape && plain {\n'
+        '                self.show_help = false;\n',
+        '            if key.key == Key::Escape {\n'
+        '                self.show_help = false;\n',
         ['a_chord_is_neither_a_tester_key_nor_typing'],
+    ),
+    (
+        'a key reaches what the list of keys covers',
+        '        if self.show_help {\n'
+        '            if key.key == Key::Escape && plain {\n'
+        '                self.show_help = false;\n'
+        '                return true;\n'
+        '            }\n'
+        '            return false;\n'
+        '        }\n',
+        '        if key.key == Key::Escape && plain && self.show_help {\n'
+        '            self.show_help = false;\n'
+        '            return true;\n'
+        '        }\n',
+        ['the_shortcut_list_takes_every_key_while_it_is_up'],
     ),
     (
         'a chord on F3 steps through the matches',

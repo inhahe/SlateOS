@@ -2496,15 +2496,7 @@ fn render_tab_overview(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw
         ),
     ];
     for (label, on, target) in toggles {
-        y = render_toggle_row(
-            frame,
-            &app.palette,
-            label,
-            on,
-            px + SECTION_PADDING,
-            y,
-            target,
-        );
+        y = render_toggle_row(frame, app, label, on, px + SECTION_PADDING, y, target);
     }
 
     y += 12.0;
@@ -2795,7 +2787,7 @@ fn render_tab_split_tunnel(frame: &mut Frame, app: &VpnManager, px: f32, py: f32
     // Toggle
     y = render_toggle_row(
         frame,
-        &app.palette,
+        app,
         "Enable Split Tunneling",
         profile.split_tunnel,
         px + SECTION_PADDING,
@@ -2987,7 +2979,7 @@ fn render_tab_protocol(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw
             );
             y = render_toggle_row(
                 frame,
-                &app.palette,
+                app,
                 "Compression",
                 *compression,
                 px + SECTION_PADDING,
@@ -3555,7 +3547,7 @@ fn render_add_dialog(frame: &mut Frame, app: &VpnManager) {
             ),
         ];
         for (label, on, target) in toggles {
-            y = render_toggle_row(frame, &app.palette, label, on, dx + 20.0, y, target);
+            y = render_toggle_row(frame, app, label, on, dx + 20.0, y, target);
         }
 
         let _ = y; // suppress unused
@@ -3767,31 +3759,20 @@ fn render_field_row(
 /// The whole row — label and switch — is the click target, because a 36x18
 /// switch is a small thing to ask a pointer to find and there is nothing else
 /// on the row to hit by accident.
+/// One on/off row: its label, and the toolkit's switch (lane C,
+/// c-e-the-toolkit-has-switches-checkboxes-radio-buttons-and-drop-downs) --
+/// in the theme's form, lit while the pointer is on the row. A press anywhere
+/// on the row flips it, as a press on a check box's words ticks the box.
 fn render_toggle_row(
     frame: &mut Frame,
-    pal: &Palette,
+    app: &VpnManager,
     label: &str,
     enabled: bool,
     x: f32,
     y: f32,
     target: Target,
 ) -> f32 {
-    let bottom = render_toggle_row_ink(frame, pal, label, enabled, x, y);
-    frame.hit(
-        target,
-        Rect::new(x, y, FIELD_LABEL_WIDTH + 36.0, FIELD_HEIGHT),
-    );
-    bottom
-}
-
-fn render_toggle_row_ink(
-    frame: &mut Frame,
-    pal: &Palette,
-    label: &str,
-    enabled: bool,
-    x: f32,
-    y: f32,
-) -> f32 {
+    let pal = &app.palette;
     frame.push(RenderCommand::Text {
         x,
         y: y + 4.0,
@@ -3802,39 +3783,44 @@ fn render_toggle_row_ink(
         max_width: Some(FIELD_LABEL_WIDTH),
         overflow: TextOverflow::Ellipsis,
     });
-
-    // Toggle track
-    let track_x = x + FIELD_LABEL_WIDTH;
-    let track_color = if enabled {
-        Color::rgba(pal.green.r, pal.green.g, pal.green.b, 120)
-    } else {
-        pal.surface1
-    };
-    frame.push(RenderCommand::FillRect {
-        x: track_x,
-        y: y + 4.0,
-        width: 36.0,
-        height: 18.0,
-        color: track_color,
-        corner_radii: CornerRadii::all(9.0),
-    });
-
-    // Toggle knob
-    let knob_x = if enabled {
-        track_x + 20.0
-    } else {
-        track_x + 2.0
-    };
-    frame.push(RenderCommand::FillRect {
-        x: knob_x,
-        y: y + 6.0,
-        width: 14.0,
-        height: 14.0,
-        color: if enabled { pal.green } else { pal.overlay0 },
-        corner_radii: CornerRadii::all(7.0),
-    });
-
+    let rect = toggle_rect(x, y);
+    guitk::switch::draw(
+        frame,
+        pal,
+        rect,
+        enabled,
+        guitk::switch::Look::accent(pal),
+        guitk::switch::State {
+            hovered: app.hover == Some(target),
+            focused: false,
+            disabled: false,
+        },
+        app.focus_ring_width,
+    );
+    frame.hit(target, toggle_row_hit(x, y));
     y + FIELD_HEIGHT
+}
+
+/// Where an on/off row's switch is drawn: the toolkit's size, after the
+/// label, centred down the row.
+fn toggle_rect(x: f32, y: f32) -> Rect {
+    Rect::new(
+        x + FIELD_LABEL_WIDTH,
+        y + (FIELD_HEIGHT - guitk::switch::HEIGHT) / 2.0,
+        guitk::switch::WIDTH,
+        guitk::switch::HEIGHT,
+    )
+}
+
+/// What a press on an on/off row lands on: the label and the switch, and the
+/// switch's grown handle (`guitk::switch::hit`), which reaches past the row.
+fn toggle_row_hit(x: f32, y: f32) -> Rect {
+    let grip = guitk::switch::hit(toggle_rect(x, y));
+    let left = x.min(grip.x);
+    let top = y.min(grip.y);
+    let right = (x + FIELD_LABEL_WIDTH + guitk::switch::WIDTH).max(grip.right());
+    let bottom = (y + FIELD_HEIGHT).max(grip.bottom());
+    Rect::new(left, top, right - left, bottom - top)
 }
 
 fn render_action_button(
@@ -6734,6 +6720,74 @@ mod tests {
     /// [`guitk::probe`] for what each one guarantees. Imported under their
     /// bare names because that is what ninety tests below already say.
     use guitk::probe::{click, control_names, press, rect_of, type_str};
+
+    /// The on/off rows are the toolkit's switches (lane C,
+    /// c-e-the-toolkit-has-switches-checkboxes-radio-buttons-and-drop-downs):
+    /// in the theme's form, the one under the pointer lit, and a press on the
+    /// row flips it.
+    #[test]
+    fn the_on_off_rows_are_the_toolkits_switches() {
+        let mut app = VpnManager::with_sample_profiles();
+        app.set_tab(DetailTab::Overview);
+        app.select_profile(0);
+        let pal = app.palette;
+        let row = rect_of(&app, Target::ToggleKillSwitch).expect("the kill switch row");
+        // The row's box starts at its label, and its switch is drawn after it.
+        let switch = toggle_rect(row.x, row.y);
+        let draws = |app: &VpnManager, on: bool, hovered: bool| {
+            let mut want: Vec<RenderCommand> = Vec::new();
+            guitk::switch::draw(
+                &mut want,
+                &pal,
+                switch,
+                on,
+                guitk::switch::Look::accent(&pal),
+                guitk::switch::State {
+                    hovered,
+                    focused: false,
+                    disabled: false,
+                },
+                app.focus_ring_width,
+            );
+            Probe::draw(app, VpnManager::SIZE)
+                .commands()
+                .windows(want.len())
+                .any(|w| w == want.as_slice())
+        };
+        let before = app.selected().expect("a selection").kill_switch;
+        assert!(
+            draws(&app, before, false),
+            "the kill switch is not the toolkit's"
+        );
+        let (x, y) = row.centre();
+        app.handle_event(
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Move,
+            }),
+            VpnManager::SIZE,
+        );
+        assert!(
+            draws(&app, before, true),
+            "the switch under the pointer is not lit"
+        );
+        // On the label, not the switch: the row is the target.
+        app.handle_event(
+            &Event::Mouse(MouseEvent {
+                x: row.x + 4.0,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+            VpnManager::SIZE,
+        );
+        assert_ne!(
+            app.selected().expect("a selection").kill_switch,
+            before,
+            "a press on the row's label did not flip it"
+        );
+        assert!(draws(&app, !before, true));
+    }
 
     /// The boxes are the toolkit's fields, in the theme's shape (lane C,
     /// c-e-a-theme-can-shape-the-controls): lit under the pointer, out when it

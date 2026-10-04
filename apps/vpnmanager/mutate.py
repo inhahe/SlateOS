@@ -22,6 +22,7 @@ from mutation_harness import sweep  # noqa: E402  (path set above)
 SRC = Path(__file__).parent / "src" / "main.rs"
 
 FIELDS = "the_boxes_are_the_toolkits_fields"
+SWITCHES = "the_on_off_rows_are_the_toolkits_switches"
 
 # (name, old, new, [tests that must fail])
 MUTATIONS = [
@@ -54,6 +55,24 @@ MUTATIONS = [
         "        self.focus_ring_width = settings.focus_ring_width();",
         "        let _ = settings;",
         [FIELDS],
+    ),
+    (
+        "a switch is drawn the same wherever the pointer is",
+        "        guitk::switch::State {\n            hovered: app.hover == Some(target),",
+        "        guitk::switch::State {\n            hovered: false,",
+        [SWITCHES],
+    ),
+    (
+        "a switch is drawn the same on and off",
+        "        rect,\n        enabled,\n        guitk::switch::Look::accent(pal),",
+        "        rect,\n        false,\n        guitk::switch::Look::accent(pal),",
+        [SWITCHES],
+    ),
+    (
+        "only the switch takes a press, not its row",
+        "    frame.hit(target, toggle_row_hit(x, y));",
+        "    frame.hit(target, guitk::switch::hit(rect));",
+        [SWITCHES],
     ),
 ]
 

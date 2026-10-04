@@ -3,6 +3,7 @@
 //!
 //! - `writer`: the bool encoder and the uncompressed header's bit writer.
 //! - `bitstream`: the frame as bits -- headers, partitions, modes, tokens.
+//! - `encodemv`: motion vectors as bits, and their probabilities' updates.
 //! - `cost`: what coding a decision costs, in 1/512 bits.
 //! - `subexp`: whether to update a probability, and how the update is coded.
 //! - `fdct`: the forward transforms.
@@ -23,6 +24,7 @@ pub(crate) mod bitstream;
 pub(crate) mod cost;
 pub(crate) mod cpi;
 pub(crate) mod encodeframe;
+pub(crate) mod encodemv;
 pub(crate) mod encoder;
 pub(crate) mod fdct;
 pub(crate) mod nonrd;

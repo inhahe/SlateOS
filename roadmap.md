@@ -3703,7 +3703,11 @@ lane C's `guitk`.
     `[x]` libvpx's key-frame decisions (variance partitioning, the realtime
     intra mode search): the reference encode's first frame
     (`tests/data/encoder/rt8.ivf`) is byte-identical to `vpxenc`'s.
-    `[ ]` Inter frames with motion search, cyclic refresh's band, threads.
+    `[x]` Inter frames coded from given decisions: references, inter headers,
+    vector prediction and coding, sub-8x8 inter, segment-map prediction --
+    random decisions decode to the encoder's reconstruction, counts agree.
+    `[ ]` libvpx's inter decisions (motion search, the inter mode search,
+    cyclic refresh's band, scene and noise estimates), then threads.
 
 - `[-]` `[F]` **AVIF pictures**, decided 2026-09-27 (§1333): a HEIF container reader
   and a port of rav1d (dav1d in Rust, BSD) in `gui/imagecodec`, so AVIF opens

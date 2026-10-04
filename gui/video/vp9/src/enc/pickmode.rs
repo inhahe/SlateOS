@@ -69,7 +69,7 @@ fn hadamard_col8(src: &[i16], stride: usize, out: &mut [i16; 8]) {
 
 /// libvpx's `vpx_hadamard_8x8_c`: the residual at `src` (rows `stride`
 /// apart) into 64 coefficients, in libvpx's order.
-pub(crate) fn hadamard_8x8(src: &[i16], stride: usize, coeff: &mut [i32]) {
+fn hadamard_8x8(src: &[i16], stride: usize, coeff: &mut [i32]) {
     let mut buffer = [0i16; 64];
     for idx in 0..8 {
         let mut col = [0i16; 8];
@@ -89,7 +89,7 @@ pub(crate) fn hadamard_8x8(src: &[i16], stride: usize, coeff: &mut [i32]) {
 
 /// libvpx's `vpx_hadamard_16x16_c`: four 8x8 transforms, then a butterfly
 /// across them.
-pub(crate) fn hadamard_16x16(src: &[i16], stride: usize, coeff: &mut [i32]) {
+fn hadamard_16x16(src: &[i16], stride: usize, coeff: &mut [i32]) {
     if coeff.len() < 256 {
         return;
     }
@@ -309,6 +309,7 @@ impl FrameEncoder<'_> {
             sub_modes: [DC_PRED; 4],
             uv_mode: DC_PRED,
             tx_size: intra_tx_size,
+            ..BlockModes::default()
         }
     }
 }

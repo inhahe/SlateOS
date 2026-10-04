@@ -108,6 +108,8 @@ pub(crate) struct Common {
     pub intra_only: bool,
     pub show_frame: bool,
     pub current_video_frame: u32,
+    /// Whether an inter frame's vectors may be eighth-pixel.
+    pub allow_high_precision_mv: bool,
     pub quant: Quantization,
     pub seg: Segmentation,
     pub lf: LoopFilterState,
@@ -138,8 +140,21 @@ pub(crate) struct Cpi {
     pub quants: Quants,
     /// Frames per second, as measured from the timestamps.
     pub framerate: f64,
+    /// Which references the frame refreshes, and which slots they are in:
+    /// libvpx's `refresh_*_frame` and `lst_fb_idx`, `gld_fb_idx`,
+    /// `alt_fb_idx` (0, 1 and 2 for a one-pass encode).
+    pub refresh_last_frame: bool,
     pub refresh_golden_frame: bool,
     pub refresh_alt_ref_frame: bool,
+    pub lst_fb_idx: usize,
+    pub gld_fb_idx: usize,
+    pub alt_fb_idx: usize,
+    /// The last frame's size and whether it was shown: whether its vectors
+    /// may predict this frame's (libvpx's `cm->last_width`, `last_height`
+    /// and `last_show_frame`).
+    pub last_width: u32,
+    pub last_height: u32,
+    pub last_show_frame: bool,
     /// Whether the caller forces this frame to be a key frame: libvpx's
     /// `FRAMEFLAGS_KEY` in `frame_flags`.
     pub force_key_frame: bool,
@@ -181,6 +196,7 @@ impl Cpi {
             intra_only: false,
             show_frame: true,
             current_video_frame: 0,
+            allow_high_precision_mv: false,
             quant: Quantization::default(),
             seg: Segmentation::default(),
             lf: LoopFilterState::default(),
@@ -201,8 +217,15 @@ impl Cpi {
             cr: CyclicRefresh::new(),
             quants: Quants::new(Deltas::default(), 0),
             framerate: oxcf.init_framerate,
+            refresh_last_frame: true,
             refresh_golden_frame: false,
             refresh_alt_ref_frame: false,
+            lst_fb_idx: 0,
+            gld_fb_idx: 1,
+            alt_fb_idx: 2,
+            last_width: 0,
+            last_height: 0,
+            last_show_frame: false,
             force_key_frame: false,
             first_time_stamp_ever: i64::MAX,
             last_time_stamp_seen: 0,

@@ -1963,9 +1963,8 @@ impl<'a, P: Pixel> Dec<'a, P> {
                     } else if b_mode == NEWMV && !got_mv_refs_for_new {
                         for (rf, best) in best_ref_mvs.iter_mut().enumerate().take(refs) {
                             let frame = mi.ref_frame[rf];
-                            let (list, _) = self
-                                .mvp()
-                                .find_mv_refs(mi, pos, NEWMV, frame, &search, None);
+                            let (list, _) =
+                                self.mvp().find_mv_refs(pos, NEWMV, frame, &search, None);
                             *best = lower_mv_precision(list[0], allow_hp);
                             got_mv_refs_for_new = true;
                         }
@@ -1999,9 +1998,7 @@ impl<'a, P: Pixel> Dec<'a, P> {
             if mi.mode != ZEROMV {
                 for rf in 0..refs {
                     let frame = mi.ref_frame[rf];
-                    let (list, count) = self
-                        .mvp()
-                        .find_mv_refs(mi, pos, mi.mode, frame, &search, None);
+                    let (list, count) = self.mvp().find_mv_refs(pos, mi.mode, frame, &search, None);
                     best_ref_mvs[rf] =
                         lower_mv_precision(list[count.saturating_sub(1).min(1)], allow_hp);
                 }
@@ -2159,14 +2156,12 @@ impl MvPredictor<'_> {
     /// sub-blocks. Returns the list and how many of it count.
     pub(crate) fn find_mv_refs(
         &self,
-        mi: &ModeInfo,
         pos: &BlockPos,
         mode: PredictionMode,
         ref_frame: RefFrame,
         search: &[[i8; 2]; 8],
         block: Option<usize>,
     ) -> ([Mv; 2], usize) {
-        let _ = mi;
         let sign_bias = self.sign_bias;
         let bias = |f: RefFrame| sign_bias.get(f.max(0) as usize).copied().unwrap_or(false);
         let mut list = [Mv::ZERO; 2];
@@ -2327,14 +2322,14 @@ impl MvPredictor<'_> {
         let bmi = &mi.bmi;
         match block {
             0 => {
-                let (list, count) = self.find_mv_refs(mi, pos, b_mode, frame, search, Some(block));
+                let (list, count) = self.find_mv_refs(pos, b_mode, frame, search, Some(block));
                 list[count.saturating_sub(1).min(1)]
             }
             1 | 2 => {
                 if b_mode == NEARESTMV {
                     bmi[0].mv[rf]
                 } else {
-                    let (list, _) = self.find_mv_refs(mi, pos, b_mode, frame, search, Some(block));
+                    let (list, _) = self.find_mv_refs(pos, b_mode, frame, search, Some(block));
                     list.iter()
                         .copied()
                         .find(|&m| m != bmi[0].mv[rf])
@@ -2349,7 +2344,7 @@ impl MvPredictor<'_> {
                 } else if bmi[2].mv[rf] != bmi[0].mv[rf] {
                     bmi[0].mv[rf]
                 } else {
-                    let (list, _) = self.find_mv_refs(mi, pos, b_mode, frame, search, Some(block));
+                    let (list, _) = self.find_mv_refs(pos, b_mode, frame, search, Some(block));
                     list.iter()
                         .copied()
                         .find(|&m| m != bmi[2].mv[rf])
@@ -2442,7 +2437,7 @@ pub(crate) fn is_mv_valid(mv: Mv) -> bool {
 }
 
 /// libvpx's `read_mv_component`.
-fn read_mv_component(
+pub(crate) fn read_mv_component(
     r: &mut BoolReader<'_>,
     comp: &crate::probs::MvComponentProbs,
     use_hp: bool,

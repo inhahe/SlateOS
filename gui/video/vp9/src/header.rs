@@ -430,6 +430,35 @@ pub struct Segmentation {
 }
 
 impl Segmentation {
+    /// Turn `feature` on for `segment_id` with value `data`: libvpx's
+    /// `vp9_enable_segfeature` and `vp9_set_segdata`. The value is held to
+    /// what the feature's syntax can code.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the cyclic refresh sets its segments' quantisers with it once it codes inter frames; the tests' segmentations use it now"
+        )
+    )]
+    pub(crate) fn set_feature(&mut self, segment_id: u8, feature: usize, data: i32) {
+        let max = i32::try_from(seg_feature_data_max(feature)).unwrap_or(0);
+        let min = if seg_feature_signed(feature) {
+            max.saturating_neg()
+        } else {
+            0
+        };
+        let id = usize::from(segment_id);
+        if let (Some(mask), Some(d)) = (
+            self.feature_mask.get_mut(id),
+            self.feature_data
+                .get_mut(id)
+                .and_then(|f| f.get_mut(feature)),
+        ) {
+            *mask |= 1 << feature;
+            *d = i16::try_from(data.clamp(min, max)).unwrap_or(0);
+        }
+    }
+
     /// Disable every feature: libvpx's `vp9_clearall_segfeatures`.
     pub fn clear_all_features(&mut self) {
         self.feature_data = [[0; SEG_LVL_MAX]; MAX_SEGMENTS];

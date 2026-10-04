@@ -205,6 +205,9 @@ pub struct Decoder {
     fc: FrameContext,
     frame_contexts: [FrameContext; FRAME_CONTEXTS],
     counts: Counts,
+    /// The last frame's blocks, for tests that hold an encoder's to them.
+    #[cfg(test)]
+    last_mi: Option<block::MiGrid>,
     mi_cols: usize,
     mi_rows: usize,
     /// The motion vectors of the last frame decoded (not shown from a slot):
@@ -254,6 +257,12 @@ impl Decoder {
         &self.counts
     }
 
+    /// The last frame's blocks, as decoded.
+    #[cfg(test)]
+    pub(crate) fn last_mi(&self) -> Option<&block::MiGrid> {
+        self.last_mi.as_ref()
+    }
+
     /// A decoder at the start of a stream.
     #[must_use]
     pub fn new() -> Self {
@@ -300,6 +309,8 @@ impl Decoder {
             fc: FrameContext::uninitialized(),
             frame_contexts: core::array::from_fn(|_| FrameContext::uninitialized()),
             counts: Counts::default(),
+            #[cfg(test)]
+            last_mi: None,
             mi_cols: 0,
             mi_rows: 0,
             prev_mvs: Vec::new(),
@@ -527,6 +538,10 @@ impl Decoder {
             &mut self.scratch,
         )?;
 
+        #[cfg(test)]
+        {
+            self.last_mi = Some(decoded.mi.clone());
+        }
         if self.lf.filter_level != 0 {
             loopfilter::filter_frame(
                 frame,

@@ -129,6 +129,22 @@ the encoder says it reconstructed -- at random decisions, at seven sizes from
 decoder counts. Every frame is a key frame so far; inter frames come next,
 and the reference's 29 others are their test.
 
+**2026-10-04: inter frames are coded, with decisions given.** The doing half
+of an inter frame is in: the reference slots and their refresh, the inter
+frame's headers, prediction from the references (the decoder's own
+predictor, over references whose edges are extended past the picture as
+libvpx's encoder extends them, which blocks at the picture's edge predict
+from), the fast quantiser libvpx's realtime path uses on inter blocks,
+motion vector prediction (shared with the decoder, as the contexts are),
+vector coding, sub-8x8 inter blocks, the segment map's temporal prediction,
+and every probability update an inter frame's header can carry. Decisions
+are still a caller's: a test draws every one at random -- references, inter
+modes, vectors near and far and at both precisions, filters, segments with
+every feature, skips -- and each frame of a key-then-inter stream decodes to
+the encoder's reconstruction while the encoder counts what the decoder
+counts, over a thousand streams in a soak. Until libvpx's inter decisions
+are ported, `Encoder::encode` keeps coding every frame as a key frame.
+
 **Alternatives.**
 
 | | For | Against |

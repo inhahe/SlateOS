@@ -35,7 +35,8 @@
 //! is also why the compositor is not constructed until `run` has found a
 //! display: until then nobody knows how big it should be.
 
-use compositor::{Compositor, Server};
+use compositor::{Compositor, Server, ShellGate};
+use guiremote::socket::Listener;
 
 /// The default size of a window a person is expected to look at.
 ///
@@ -79,6 +80,14 @@ struct Options {
     /// way to override a search that picked the wrong head on a machine with
     /// two GPUs and a monitor on each.
     card: Option<u32>,
+    /// Whether only a client holding the display service's key may make the
+    /// shell's requests ([`ShellGate::KeyHolders`]).
+    ///
+    /// A flag rather than the default because the key is the session's to
+    /// hand out: until the program that starts the shell starts it holding
+    /// the key, the gate would refuse the shell itself. The session that
+    /// grants the key passes this in the same place, so the two cannot drift.
+    require_shell_key: bool,
     /// Whether to print usage and stop.
     help: bool,
 }
@@ -86,9 +95,12 @@ struct Options {
 /// What to print for `--help`, and on a usage error.
 const USAGE: &str = "\
 usage: compositor [ADDRESS] [--headless] [--size WxH] [--card N]
+                  [--require-shell-key]
 
-  ADDRESS       host:port to listen on. Defaults to $SLATE_DISPLAY, then to
-                127.0.0.1:7373.
+  ADDRESS       host:port to listen on, or service:NAME to listen only as the
+                SlateOS service NAME. Defaults to $SLATE_DISPLAY, then to the
+                default display: 127.0.0.1:7373 and, on SlateOS, the service
+                org.slateos.Display as well.
   --headless    composite without opening a window. The default off Windows,
                 and correct for a display server whose clients are all remote.
   --size WxH    framebuffer size in pixels. Defaults to 1280x800 windowed,
@@ -96,6 +108,11 @@ usage: compositor [ADDRESS] [--headless] [--size WxH] [--card N]
                 decides the size.
   --card N      drive /dev/dri/cardN. By default every card is tried and the
                 first with a display attached is used. Also $SLATE_DRM_CARD.
+  --require-shell-key
+                only a client holding the display service's key may make the
+                shell's requests (every window's title, other programs'
+                windows, panels, workspaces). For a session that starts its
+                shell holding the key; without it, any client may.
   --            stop reading options; the next argument is the address.";
 
 /// Parse a `WxH` size.
@@ -204,6 +221,7 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Options, String
             "--" => options_over = true,
             "-h" | "--help" => out.help = true,
             "--headless" => out.headless = true,
+            "--require-shell-key" => out.require_shell_key = true,
             "--size" => {
                 let value = args
                     .next()
@@ -234,9 +252,10 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Options, String
 /// Start the display server and serve clients until it is killed, or until the
 /// host window is closed.
 ///
-/// The address comes from the first argument, or from `SLATE_DISPLAY`, or from
-/// `guiremote::socket::DEFAULT_DISPLAY` — in that order, so a second display
-/// can be started on one machine without touching the environment of the first.
+/// The display comes from the first argument, or from `SLATE_DISPLAY`, or is
+/// the default display — `guiremote::socket::DEFAULT_DISPLAY`, and on SlateOS
+/// the display service as well — in that order, so a second display can be
+/// started on one machine without touching the environment of the first.
 ///
 /// What this used to be is worth recording: it created one window, drew a blue
 /// rectangle into it, composited once, and then looped forever composing frames
@@ -259,38 +278,65 @@ fn main() {
         return;
     }
 
-    let addr = match options.addr.clone() {
-        Some(explicit) => explicit,
+    // The display to serve, and how to name it in a message: the argument,
+    // else what the environment says, else the default display.
+    let (listener, place) = match options.addr.as_deref() {
+        Some(explicit) => (Listener::bind_to_display(explicit), explicit.to_owned()),
         None => match guiremote::socket::display_addr() {
-            Ok(a) => a,
+            Ok(place) => (Listener::bind_display(), place),
             Err(e) => {
                 eprintln!("compositor: {e}");
                 std::process::exit(2);
             }
         },
     };
-
-    let mut server = match Server::bind(&addr) {
-        Ok(s) => s,
+    let listener = match listener {
+        Ok(listener) => listener,
         Err(e) => {
             // Overwhelmingly this is "address already in use", which means a
             // compositor is already serving this display. Said plainly, because
             // the raw errno reads like a fault in this program.
-            eprintln!("compositor: cannot listen on {addr}: {e}");
+            eprintln!("compositor: cannot listen on {place}: {e}");
             eprintln!("  If a compositor is already running on that address, either stop it or");
             eprintln!("  start this one elsewhere: `compositor 127.0.0.1:7374`.");
             std::process::exit(1);
         }
     };
+    report_listening(&listener);
 
-    match server.local_addr() {
-        Ok(bound) => eprintln!("compositor: listening on {bound}"),
-        Err(e) => eprintln!("compositor: listening, but cannot name the address: {e}"),
+    let mut server = Server::over(listener);
+    if options.require_shell_key {
+        server.set_shell_gate(ShellGate::KeyHolders);
+        eprintln!(
+            "compositor: only a client holding the display service's key may act as the shell"
+        );
     }
 
     if let Err(e) = run(&mut server, &options) {
         eprintln!("compositor: the listening socket failed: {e}");
         std::process::exit(1);
+    }
+}
+
+/// Say where clients can reach this display, and what that means for which
+/// programs the compositor can tell apart.
+fn report_listening(listener: &Listener) {
+    match listener.local_addr() {
+        Ok(bound) => eprintln!("compositor: listening on {bound}"),
+        // A listener that is only a service has no address; the next line
+        // names it instead.
+        Err(_) if listener.service_name().is_some() => {}
+        Err(e) => eprintln!("compositor: listening, but cannot name the address: {e}"),
+    }
+    if let Some(name) = listener.service_name() {
+        eprintln!("compositor: serving local programs as the service {name}");
+    }
+    if let Some(e) = listener.service_refusal() {
+        eprintln!(
+            "compositor: not serving the display service {} ({e}); local programs reach \
+             this display over TCP, which cannot say which program each one is",
+            guiremote::channel::DISPLAY_SERVICE
+        );
     }
 }
 
@@ -606,6 +652,29 @@ mod tests {
         assert!(parse(&["--headless"]).unwrap().headless);
         assert!(parse(&["--help"]).unwrap().help);
         assert!(parse(&["-h"]).unwrap().help);
+    }
+
+    #[test]
+    fn the_shell_key_is_required_only_when_asked_for() {
+        // Off by default: a session that has not started its shell holding the
+        // key would otherwise refuse its own taskbar.
+        assert!(!parse(&[]).unwrap().require_shell_key);
+        let parsed = parse(&["--require-shell-key", "127.0.0.1:7374"]).unwrap();
+        assert!(parsed.require_shell_key);
+        assert_eq!(parsed.addr.as_deref(), Some("127.0.0.1:7374"));
+    }
+
+    #[test]
+    fn a_service_display_is_an_address_like_any_other() {
+        // Parsed here, interpreted by the listener: the command line takes
+        // the words SLATE_DISPLAY takes.
+        assert_eq!(
+            parse(&["service:org.example.Nested"])
+                .unwrap()
+                .addr
+                .as_deref(),
+            Some("service:org.example.Nested")
+        );
     }
 
     #[test]

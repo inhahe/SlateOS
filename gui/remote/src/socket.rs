@@ -1,9 +1,14 @@
-//! The first transport that crosses a process boundary.
+//! The transport that crosses a process boundary.
 //!
 //! [`loopback`](crate::loopback) proved the codecs against each other inside
 //! one process; it cannot carry a frame between two. This module can. A
-//! [`Socket`] is a connected TCP stream that implements [`Transport`], and a
-//! [`Listener`] is the compositor's end: it accepts them.
+//! [`Socket`] is a connection to the compositor that implements [`Transport`],
+//! and a [`Listener`] is the compositor's end: it accepts them.
+//!
+//! A socket runs over one of two carriers: TCP, everywhere, and on SlateOS a
+//! channel from the kernel's service registry ([`channel`](crate::channel)),
+//! whose peer the kernel names. Nothing above [`Transport`] knows which, and
+//! that is the reason the trait is where it is.
 //!
 //! ## Why TCP, and why that is not a stopgap
 //!
@@ -11,24 +16,31 @@
 //! transport that only worked between two processes on one machine would
 //! contradict the thing the protocol exists for. TCP is also the one carrier
 //! that behaves identically on the hosted development build and on SlateOS
-//! itself once its network stack is running, so the same client code is
-//! exercised in both places rather than one path being tested and the other
-//! merely written.
+//! itself, so the same client code is exercised in both places rather than one
+//! path being tested and the other merely written.
 //!
-//! A local connection pays for that with a loopback round trip instead of a
-//! kernel channel. On loopback that is a memory copy through the network stack,
-//! measured in single-digit microseconds — the same order as the IPC it stands
-//! in for, and far below a frame budget. When SlateOS's own channel IPC becomes
-//! reachable from a userspace application, it becomes a second implementation
-//! of [`Transport`] beside this one; nothing above the trait changes, which is
-//! the reason the trait is where it is.
+//! ## Why a channel as well
+//!
+//! Not for speed. On one machine TCP costs a loopback round trip instead of a
+//! kernel channel, measured in single-digit microseconds and far below a frame
+//! budget. The reason is that a TCP peer cannot be asked what process it is,
+//! and a channel's can: the kernel records who connected
+//! ([`Socket::peer_cred`]) and whether they hold the service's key
+//! ([`Socket::peer_has_key`]). That is what lets the compositor say which
+//! program owns a window, and tell the shell from an application by something
+//! other than what the application claims.
 //!
 //! ## Where the compositor is
 //!
-//! [`display_addr`] answers that, from the `SLATE_DISPLAY` environment variable
-//! or [`DEFAULT_DISPLAY`] when it is unset — the same arrangement as X11's
+//! [`SLATE_DISPLAY`](DISPLAY_VAR) says: a TCP address, or `service:NAME` for a
+//! SlateOS service ([`SERVICE_PREFIX`]) -- the same arrangement as X11's
 //! `DISPLAY`, for the same reason: an application must not have the address of
-//! its display server compiled into it.
+//! its display server compiled into it. Unset, it is the default display: on
+//! SlateOS the display service
+//! ([`DISPLAY_SERVICE`](crate::channel::DISPLAY_SERVICE)), and [`DEFAULT_DISPLAY`]
+//! over TCP for a client only when no compositor serves that; elsewhere
+//! [`DEFAULT_DISPLAY`]. [`Socket::connect_display`] and
+//! [`Listener::bind_display`] apply those rules from the two ends.
 //!
 //! ## Blocking discipline
 //!
@@ -80,7 +92,13 @@ const MAX_READ_PER_CALL: usize = 256 * 1024;
 /// stack.
 const CHUNK: usize = 8 * 1024;
 
-/// The compositor's address, from the environment or the default.
+/// What [`SLATE_DISPLAY`](DISPLAY_VAR) says, or [`DEFAULT_DISPLAY`] when it is
+/// unset.
+///
+/// Only the TCP half of the default: on SlateOS an unset variable means the
+/// display service first ([`Socket::connect_display`],
+/// [`Listener::bind_display`]), which those apply themselves. This is the
+/// thing to name in a message about where a program looked.
 ///
 /// # Errors
 ///
@@ -127,10 +145,25 @@ fn is_hangup(kind: ErrorKind) -> bool {
 /// A connected transport to the compositor.
 ///
 /// Named for what it is to its user — the socket the display protocol runs over
-/// — rather than for the family it currently uses. When a SlateOS channel
-/// transport joins it, applications that say `socket::connect_display()` will
-/// not have named TCP anywhere.
+/// — rather than for the carrier underneath: TCP everywhere, and on SlateOS a
+/// channel from the service registry ([`channel`](crate::channel)), whose peer
+/// the kernel attests. An application that says `socket::connect_display()`
+/// names neither.
 pub struct Socket {
+    carrier: Carrier,
+}
+
+/// What a [`Socket`] runs over.
+enum Carrier {
+    /// A TCP stream: between machines, and on any host.
+    Tcp(Tcp),
+    /// A SlateOS channel: a local connection whose peer the kernel names.
+    #[cfg(all(target_os = "linux", target_vendor = "slateos"))]
+    Channel(crate::channel::ChannelConn),
+}
+
+/// The TCP carrier.
+struct Tcp {
     stream: TcpStream,
     /// Sticky: set once the peer hangs up, so [`Transport::is_open`] keeps
     /// answering `false` without another syscall, and so a hang-up noticed
@@ -158,7 +191,7 @@ struct Wake {
 }
 
 impl Socket {
-    /// Dial `addr`.
+    /// Dial `addr` over TCP.
     ///
     /// # Errors
     ///
@@ -168,14 +201,67 @@ impl Socket {
         Self::adopt(TcpStream::connect(addr)?)
     }
 
-    /// Dial whatever [`display_addr`] names.
+    /// Dial the display [`SLATE_DISPLAY`](DISPLAY_VAR) names: a TCP address,
+    /// or `service:NAME` for a SlateOS service.
+    ///
+    /// Unset, the display is the local compositor's service
+    /// ([`crate::channel::DISPLAY_SERVICE`]) on SlateOS, falling back to
+    /// [`DEFAULT_DISPLAY`] over TCP only when no such service exists -- a
+    /// compositor not registered as one, or a kernel without channel
+    /// descriptors. Elsewhere it is [`DEFAULT_DISPLAY`].
     ///
     /// # Errors
     ///
     /// As [`Self::connect`], plus the environment error [`display_addr`]
-    /// reports.
+    /// reports, and [`ErrorKind::Unsupported`] for a service named on a
+    /// platform without them.
     pub fn connect_display() -> io::Result<Self> {
-        Self::connect(display_addr()?)
+        match std::env::var_os(DISPLAY_VAR) {
+            Some(_) => Self::connect_to_display(&display_addr()?),
+            None => Self::connect_default(),
+        }
+    }
+
+    /// Dial `display`, written as [`SLATE_DISPLAY`](DISPLAY_VAR) is: a TCP
+    /// address, or `service:NAME`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::connect_display`], minus the environment.
+    pub fn connect_to_display(display: &str) -> io::Result<Self> {
+        match display.strip_prefix(SERVICE_PREFIX) {
+            Some(name) => Self::connect_service(name),
+            None => Self::connect(display),
+        }
+    }
+
+    /// The display a program reaches when nothing names one.
+    fn connect_default() -> io::Result<Self> {
+        #[cfg(all(target_os = "linux", target_vendor = "slateos"))]
+        match Self::connect_service(crate::channel::DISPLAY_SERVICE) {
+            Ok(socket) => return Ok(socket),
+            Err(e) if crate::channel::connect_failure_means_absent(&e) => {}
+            Err(e) => return Err(e),
+        }
+        Self::connect(DEFAULT_DISPLAY)
+    }
+
+    /// Connect to the SlateOS service `name`.
+    #[cfg(all(target_os = "linux", target_vendor = "slateos"))]
+    fn connect_service(name: &str) -> io::Result<Self> {
+        Ok(Self {
+            carrier: Carrier::Channel(crate::channel::ChannelConn::connect(name)?),
+        })
+    }
+
+    /// Services are SlateOS's; anywhere else, naming one is a mistake to
+    /// report, not an address to try.
+    #[cfg(not(all(target_os = "linux", target_vendor = "slateos")))]
+    fn connect_service(name: &str) -> io::Result<Self> {
+        Err(io::Error::new(
+            ErrorKind::Unsupported,
+            format!("{DISPLAY_VAR} names the service {name:?}, and only SlateOS has services"),
+        ))
     }
 
     /// Take over an already-connected stream — the listener's side.
@@ -184,6 +270,151 @@ impl Socket {
     ///
     /// If the stream cannot be put into the mode this transport requires.
     pub fn adopt(stream: TcpStream) -> io::Result<Self> {
+        Ok(Self {
+            carrier: Carrier::Tcp(Tcp::adopt(stream)?),
+        })
+    }
+
+    /// The peer's address: a TCP peer's.
+    ///
+    /// # Errors
+    ///
+    /// If the socket has no peer -- it has been shut down -- or is a channel,
+    /// whose peer is named by [`Self::peer_cred`] instead.
+    pub fn peer_addr(&self) -> io::Result<SocketAddr> {
+        match &self.carrier {
+            Carrier::Tcp(tcp) => tcp.stream.peer_addr(),
+            #[cfg(all(target_os = "linux", target_vendor = "slateos"))]
+            Carrier::Channel(_) => Err(io::Error::new(
+                ErrorKind::Unsupported,
+                "a channel's peer is a process, not an address",
+            )),
+        }
+    }
+
+    /// The local address: a TCP socket's.
+    ///
+    /// # Errors
+    ///
+    /// If the socket is not bound, or is a channel.
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        match &self.carrier {
+            Carrier::Tcp(tcp) => tcp.stream.local_addr(),
+            #[cfg(all(target_os = "linux", target_vendor = "slateos"))]
+            Carrier::Channel(_) => Err(io::Error::new(
+                ErrorKind::Unsupported,
+                "a channel has no address",
+            )),
+        }
+    }
+
+    /// Whether this runs over a SlateOS channel rather than TCP.
+    #[must_use]
+    pub const fn is_channel(&self) -> bool {
+        match self.carrier {
+            Carrier::Tcp(_) => false,
+            #[cfg(all(target_os = "linux", target_vendor = "slateos"))]
+            Carrier::Channel(_) => true,
+        }
+    }
+
+    /// Who is at the other end, as the kernel recorded it: a channel's peer
+    /// process. `None` over TCP, whose peer the kernel cannot vouch for, and
+    /// for a channel whose peer it recorded nothing about.
+    #[must_use]
+    pub fn peer_cred(&self) -> Option<crate::channel::PeerCred> {
+        match &self.carrier {
+            Carrier::Tcp(_) => None,
+            #[cfg(all(target_os = "linux", target_vendor = "slateos"))]
+            // An error asking is as good as no answer: the identity is either
+            // attested or not known.
+            Carrier::Channel(conn) => conn.peer_cred().ok().flatten(),
+        }
+    }
+
+    /// Whether the peer holds the key of the service it connected to -- for
+    /// the display service, whether it is the shell. `None` over TCP and when
+    /// the kernel cannot say.
+    #[must_use]
+    pub fn peer_has_key(&self) -> Option<bool> {
+        match &self.carrier {
+            Carrier::Tcp(_) => None,
+            #[cfg(all(target_os = "linux", target_vendor = "slateos"))]
+            Carrier::Channel(conn) => conn.peer_has_key().ok().flatten(),
+        }
+    }
+
+    /// Hang up, so both this side and the peer see the connection end.
+    pub fn close(&mut self) {
+        match &mut self.carrier {
+            Carrier::Tcp(tcp) => tcp.close(),
+            #[cfg(all(target_os = "linux", target_vendor = "slateos"))]
+            Carrier::Channel(conn) => conn.close(),
+        }
+    }
+}
+
+/// Dispatch one [`Transport`] call to the carrier.
+macro_rules! carried {
+    ($self:ident, $carrier:ident => $call:expr) => {
+        match &mut $self.carrier {
+            Carrier::Tcp($carrier) => $call,
+            #[cfg(all(target_os = "linux", target_vendor = "slateos"))]
+            Carrier::Channel($carrier) => $call,
+        }
+    };
+}
+
+impl Transport for Socket {
+    type Error = io::Error;
+
+    fn read(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
+        carried!(self, c => c.read(buf))
+    }
+
+    fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
+        carried!(self, c => c.write(bytes))
+    }
+
+    fn is_open(&self) -> bool {
+        match &self.carrier {
+            Carrier::Tcp(tcp) => tcp.is_open(),
+            #[cfg(all(target_os = "linux", target_vendor = "slateos"))]
+            Carrier::Channel(conn) => conn.is_open(),
+        }
+    }
+
+    fn wait(&mut self) -> io::Result<()> {
+        carried!(self, c => c.wait())
+    }
+
+    fn set_wait_timeout(&mut self, timeout: Option<Duration>) -> io::Result<()> {
+        carried!(self, c => c.set_wait_timeout(timeout))
+    }
+
+    fn waker(&mut self) -> io::Result<Option<Waker>> {
+        carried!(self, c => c.waker())
+    }
+}
+
+impl AsWaitHandle for Socket {
+    /// The carrier underneath, so a server can wait on many of these at once
+    /// ([`WaitSet`]) rather than parking on one with [`Transport::wait`].
+    fn wait_handle(&self) -> WaitHandle {
+        match &self.carrier {
+            Carrier::Tcp(tcp) => tcp.stream.wait_handle(),
+            #[cfg(all(target_os = "linux", target_vendor = "slateos"))]
+            Carrier::Channel(conn) => conn.wait_handle(),
+        }
+    }
+}
+
+/// How [`SLATE_DISPLAY`](DISPLAY_VAR) names a SlateOS service rather than a
+/// TCP address: `service:org.slateos.Display`.
+pub const SERVICE_PREFIX: &str = "service:";
+
+impl Tcp {
+    fn adopt(stream: TcpStream) -> io::Result<Self> {
         // Nagle's algorithm holds a small write back for up to 40 ms hoping to
         // coalesce it with the next one. Every frame here is small and latency
         // is the whole point: a keystroke's echo must not wait for a second
@@ -198,26 +429,8 @@ impl Socket {
         })
     }
 
-    /// The peer's address.
-    ///
-    /// # Errors
-    ///
-    /// If the socket has no peer — it has already been shut down.
-    pub fn peer_addr(&self) -> io::Result<SocketAddr> {
-        self.stream.peer_addr()
-    }
-
-    /// The local address.
-    ///
-    /// # Errors
-    ///
-    /// If the socket is not bound.
-    pub fn local_addr(&self) -> io::Result<SocketAddr> {
-        self.stream.local_addr()
-    }
-
     /// Hang up, so both this side and the peer see the connection end.
-    pub fn close(&mut self) {
+    fn close(&mut self) {
         self.open = false;
         // The peer learns of this from its own read returning zero. A failure
         // here means the socket was already down, which is the state we are
@@ -291,7 +504,7 @@ const fn read_budget(total: usize) -> usize {
     if remaining < CHUNK { remaining } else { CHUNK }
 }
 
-impl Transport for Socket {
+impl Transport for Tcp {
     type Error = io::Error;
 
     fn read(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
@@ -459,7 +672,7 @@ impl Transport for Socket {
 /// and an application blocked on it for ever cannot even report that.
 const WRITE_STALL_TIMEOUT: Duration = Duration::from_secs(30);
 
-impl Socket {
+impl Tcp {
     /// Send the tail of a frame the non-blocking path could not fit.
     ///
     /// Reached only when a frame is larger than the space left in the peer's
@@ -496,7 +709,7 @@ impl Socket {
     }
 }
 
-impl AsWaitHandle for Socket {
+impl AsWaitHandle for Tcp {
     /// The stream underneath, so a server can wait on many of these at once
     /// ([`WaitSet`]) rather than parking on one with
     /// [`Transport::wait`].
@@ -505,16 +718,44 @@ impl AsWaitHandle for Socket {
     }
 }
 
-/// The compositor's end: a listening socket that hands back [`Socket`]s.
+/// Whether `accept` failing with `kind` is about the one connection it was
+/// taking rather than about the listener: a peer that reset or abandoned its
+/// connection while it sat in the queue, which some platforms report from
+/// `accept` itself, or a signal cutting the call short. Ending the compositor
+/// over one would let any program that can connect and hang up quickly take
+/// the desktop down.
+const fn accept_error_is_the_peers(kind: ErrorKind) -> bool {
+    matches!(
+        kind,
+        ErrorKind::ConnectionAborted | ErrorKind::ConnectionReset | ErrorKind::Interrupted
+    )
+}
+
+/// The compositor's end: where clients connect, handed back as [`Socket`]s.
+///
+/// A TCP listener, a SlateOS service, or both. The default display on SlateOS
+/// is both ([`Self::bind_display`]): the service for the machine's own
+/// programs, each of which the kernel names, and TCP for everything else.
 ///
 /// Non-blocking, because a compositor has a frame to composite whether or not
 /// anyone is connecting. [`Self::accept`] returns `None` rather than parking.
 pub struct Listener {
-    inner: TcpListener,
+    /// The TCP listener, unless this one listens only as a service.
+    tcp: Option<TcpListener>,
+    /// The service local clients connect to, and its name.
+    #[cfg(all(target_os = "linux", target_vendor = "slateos"))]
+    service: Option<(String, crate::channel::ChannelListener)>,
+    /// Why the default display is not also served as the display service:
+    /// the kernel's refusal, when [`Self::bind_display`] tried.
+    service_refusal: Option<io::Error>,
+    /// Which carrier [`Self::accept`] asks first. Alternated, so a stream of
+    /// connections on one cannot keep a connection on the other waiting.
+    #[cfg(all(target_os = "linux", target_vendor = "slateos"))]
+    service_first: bool,
 }
 
 impl Listener {
-    /// Listen on `addr`.
+    /// Listen on `addr` over TCP.
     ///
     /// # Errors
     ///
@@ -522,28 +763,171 @@ impl Listener {
     /// holds the port, which for the default address means a compositor is
     /// already running.
     pub fn bind<A: ToSocketAddrs>(addr: A) -> io::Result<Self> {
-        let inner = TcpListener::bind(addr)?;
-        inner.set_nonblocking(true)?;
-        Ok(Self { inner })
+        let tcp = TcpListener::bind(addr)?;
+        tcp.set_nonblocking(true)?;
+        Ok(Self::with_tcp(Some(tcp)))
     }
 
-    /// Listen wherever [`display_addr`] says this display lives.
+    const fn with_tcp(tcp: Option<TcpListener>) -> Self {
+        Self {
+            tcp,
+            #[cfg(all(target_os = "linux", target_vendor = "slateos"))]
+            service: None,
+            service_refusal: None,
+            #[cfg(all(target_os = "linux", target_vendor = "slateos"))]
+            service_first: true,
+        }
+    }
+
+    /// Listen wherever [`SLATE_DISPLAY`](DISPLAY_VAR) says this display lives:
+    /// the mirror of [`Socket::connect_display`], by the same rules.
+    ///
+    /// Unset, that is the default display — [`DEFAULT_DISPLAY`] over TCP and,
+    /// on SlateOS, the display service
+    /// ([`DISPLAY_SERVICE`](crate::channel::DISPLAY_SERVICE)) as well. Failing
+    /// to register the service does not fail this: TCP clients are still
+    /// served, and a client that finds no service falls back to TCP. The
+    /// refusal is kept for the caller to report ([`Self::service_refusal`]).
     ///
     /// # Errors
     ///
-    /// As [`Self::bind`], plus the environment error [`display_addr`] reports.
+    /// As [`Self::bind_to_display`], plus the environment error
+    /// [`display_addr`] reports.
     pub fn bind_display() -> io::Result<Self> {
-        Self::bind(display_addr()?)
+        match std::env::var_os(DISPLAY_VAR) {
+            Some(_) => Self::bind_to_display(&display_addr()?),
+            None => Self::bind_default(),
+        }
     }
 
-    /// The address actually bound — the way to learn the port when `bind` was
-    /// given `:0`.
+    /// Listen at `display`, written as [`SLATE_DISPLAY`](DISPLAY_VAR) is: a
+    /// TCP address, or `service:NAME` to listen only as that SlateOS service.
     ///
     /// # Errors
     ///
-    /// If the socket is not bound.
+    /// As [`Self::bind`] for an address and [`Self::serve`] for a service.
+    pub fn bind_to_display(display: &str) -> io::Result<Self> {
+        match display.strip_prefix(SERVICE_PREFIX) {
+            Some(name) => Self::serve(name),
+            None => Self::bind(display),
+        }
+    }
+
+    /// The default display: see [`Self::bind_display`].
+    fn bind_default() -> io::Result<Self> {
+        let listener = Self::bind(DEFAULT_DISPLAY)?;
+        #[cfg(all(target_os = "linux", target_vendor = "slateos"))]
+        let listener = {
+            let mut listener = listener;
+            if let Err(e) = listener.register_service(crate::channel::DISPLAY_SERVICE) {
+                listener.service_refusal = Some(e);
+            }
+            listener
+        };
+        Ok(listener)
+    }
+
+    /// Listen only as the SlateOS service `name`: local clients, each named
+    /// by the kernel ([`Socket::peer_cred`]), and nothing from the network.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::register_service`].
+    pub fn serve(name: &str) -> io::Result<Self> {
+        let mut listener = Self::with_tcp(None);
+        listener.register_service(name)?;
+        Ok(listener)
+    }
+
+    /// Also listen as the SlateOS service `name`.
+    ///
+    /// # Errors
+    ///
+    /// `EACCES` without the `Service` capability with `WRITE` on it,
+    /// `EADDRINUSE` if something else holds the name — most likely another
+    /// compositor — and the kernel's other errnos;
+    /// [`ErrorKind::AlreadyExists`] if this listener already serves a
+    /// service, and [`ErrorKind::Unsupported`] anywhere but SlateOS.
+    #[cfg(all(target_os = "linux", target_vendor = "slateos"))]
+    pub fn register_service(&mut self, name: &str) -> io::Result<()> {
+        if let Some((held, _)) = &self.service {
+            return Err(io::Error::new(
+                ErrorKind::AlreadyExists,
+                format!("already listening as the service {held:?}"),
+            ));
+        }
+        let service = crate::channel::ChannelListener::register(name)?;
+        self.service = Some((name.to_owned(), service));
+        self.service_refusal = None;
+        Ok(())
+    }
+
+    /// Services are SlateOS's; anywhere else there is nothing to register.
+    ///
+    /// # Errors
+    ///
+    /// Always [`ErrorKind::Unsupported`].
+    #[cfg(not(all(target_os = "linux", target_vendor = "slateos")))]
+    pub fn register_service(&mut self, name: &str) -> io::Result<()> {
+        Err(io::Error::new(
+            ErrorKind::Unsupported,
+            format!("cannot listen as the service {name:?}: only SlateOS has services"),
+        ))
+    }
+
+    /// The SlateOS service this listens as, if any.
+    #[must_use]
+    pub fn service_name(&self) -> Option<&str> {
+        #[cfg(all(target_os = "linux", target_vendor = "slateos"))]
+        {
+            self.service.as_ref().map(|(name, _)| name.as_str())
+        }
+        #[cfg(not(all(target_os = "linux", target_vendor = "slateos")))]
+        {
+            None
+        }
+    }
+
+    /// Why [`Self::bind_display`] is not also serving the display service —
+    /// the kernel's answer, for the caller to report. `None` when it is, or
+    /// when it never tried.
+    #[must_use]
+    pub const fn service_refusal(&self) -> Option<&io::Error> {
+        self.service_refusal.as_ref()
+    }
+
+    /// The TCP address actually bound — the way to learn the port when `bind`
+    /// was given `:0`.
+    ///
+    /// # Errors
+    ///
+    /// If the socket is not bound, and [`ErrorKind::Unsupported`] for a
+    /// listener that listens only as a service, which has no address.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
-        self.inner.local_addr()
+        match &self.tcp {
+            Some(tcp) => tcp.local_addr(),
+            None => Err(io::Error::new(
+                ErrorKind::Unsupported,
+                "listening only as a service, which has no address",
+            )),
+        }
+    }
+
+    /// Add every handle that is readable when a connection is waiting — the
+    /// TCP listener's and the service's — to `set`, and say where they went.
+    ///
+    /// Into a caller's set rather than returned, so that a server rebuilding
+    /// its set before every wait allocates nothing to learn them.
+    pub fn wait_on(&self, set: &mut WaitSet) -> std::ops::Range<usize> {
+        let first = set.len();
+        if let Some(tcp) = &self.tcp {
+            set.add_source(tcp);
+        }
+        #[cfg(all(target_os = "linux", target_vendor = "slateos"))]
+        if let Some((_, service)) = &self.service {
+            set.add_source(service);
+        }
+        first..set.len()
     }
 
     /// Take the next pending connection, or `None` if there is none right now.
@@ -552,20 +936,52 @@ impl Listener {
     ///
     /// Whatever accepting fails with, excluding the "nothing pending" case,
     /// which is `Ok(None)` — an empty accept queue is the ordinary state of a
-    /// running desktop, not a failure.
-    pub fn accept(&self) -> io::Result<Option<Socket>> {
-        match self.inner.accept() {
+    /// running desktop, not a failure — and excluding a connection that ended
+    /// before it could be accepted, which is the peer's business and is also
+    /// `Ok(None)`: the rest of the queue is still there for the next call.
+    pub fn accept(&mut self) -> io::Result<Option<Socket>> {
+        #[cfg(all(target_os = "linux", target_vendor = "slateos"))]
+        {
+            let service_first = self.service_first;
+            self.service_first = !service_first;
+            if service_first {
+                if let Some(socket) = self.accept_service()? {
+                    return Ok(Some(socket));
+                }
+                self.accept_tcp()
+            } else {
+                if let Some(socket) = self.accept_tcp()? {
+                    return Ok(Some(socket));
+                }
+                self.accept_service()
+            }
+        }
+        #[cfg(not(all(target_os = "linux", target_vendor = "slateos")))]
+        {
+            self.accept_tcp()
+        }
+    }
+
+    fn accept_tcp(&self) -> io::Result<Option<Socket>> {
+        let Some(tcp) = &self.tcp else {
+            return Ok(None);
+        };
+        match tcp.accept() {
             Ok((stream, _addr)) => Ok(Some(Socket::adopt(stream)?)),
             Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(None),
+            Err(e) if accept_error_is_the_peers(e.kind()) => Ok(None),
             Err(e) => Err(e),
         }
     }
-}
 
-impl AsWaitHandle for Listener {
-    /// Ready when a connection is waiting to be [`accept`](Listener::accept)ed.
-    fn wait_handle(&self) -> WaitHandle {
-        self.inner.wait_handle()
+    #[cfg(all(target_os = "linux", target_vendor = "slateos"))]
+    fn accept_service(&self) -> io::Result<Option<Socket>> {
+        let Some((_, service)) = &self.service else {
+            return Ok(None);
+        };
+        Ok(service.accept()?.map(|conn| Socket {
+            carrier: Carrier::Channel(conn),
+        }))
     }
 }
 
@@ -596,7 +1012,7 @@ mod tests {
     /// each other and with whatever else is on the machine, and a hard-coded
     /// port makes a test suite that fails depending on what else is running.
     fn connected_pair() -> (Socket, Socket) {
-        let listener = Listener::bind("127.0.0.1:0").expect("bind loopback");
+        let mut listener = Listener::bind("127.0.0.1:0").expect("bind loopback");
         let addr = listener.local_addr().expect("bound address");
         let client = Socket::connect(addr).expect("connect");
         // The listener is non-blocking, so accept until the pending connection
@@ -929,13 +1345,132 @@ mod tests {
 
     #[test]
     fn a_listener_reports_the_port_it_actually_got() {
-        let listener = Listener::bind("127.0.0.1:0").expect("bind");
+        let mut listener = Listener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("local addr");
         assert_ne!(addr.port(), 0, "port zero means the kernel chose one");
         assert!(
             listener.accept().expect("accept").is_none(),
             "nobody dialled"
         );
+    }
+
+    // ---- Services: SlateOS's, and a mistake to report anywhere else ----
+
+    #[test]
+    fn a_service_display_is_refused_off_slateos_rather_than_dialled() {
+        // `service:...` parses as no TCP address at all; reaching the resolver
+        // with it would report a confusing lookup failure instead.
+        let dialled = Socket::connect_to_display("service:org.slateos.Display");
+        assert_eq!(
+            dialled.err().map(|e| e.kind()),
+            Some(ErrorKind::Unsupported)
+        );
+        let listened = Listener::bind_to_display("service:org.slateos.Display");
+        assert_eq!(
+            listened.err().map(|e| e.kind()),
+            Some(ErrorKind::Unsupported)
+        );
+        assert_eq!(
+            Listener::serve("org.slateos.Display")
+                .err()
+                .map(|e| e.kind()),
+            Some(ErrorKind::Unsupported)
+        );
+    }
+
+    #[test]
+    fn a_tcp_listener_can_not_also_become_a_service_off_slateos() {
+        let mut listener = Listener::bind("127.0.0.1:0").expect("bind");
+        let refused = listener.register_service("org.slateos.Display");
+        assert_eq!(refused.map_err(|e| e.kind()), Err(ErrorKind::Unsupported));
+        assert_eq!(listener.service_name(), None);
+        assert!(
+            listener.service_refusal().is_none(),
+            "only bind_display records a refusal; a caller that asked has its own answer"
+        );
+        // And it still listens: the refusal cost it nothing.
+        assert!(listener.local_addr().is_ok());
+    }
+
+    #[test]
+    fn a_tcp_address_display_listens_over_tcp() {
+        let mut listener = Listener::bind_to_display("127.0.0.1:0").expect("bind");
+        let addr = listener
+            .local_addr()
+            .expect("a TCP listener has an address");
+        let _client = Socket::connect(addr).expect("connect");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if listener.accept().expect("accept").is_some() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        panic!("the connection never arrived");
+    }
+
+    #[test]
+    fn a_listener_waits_on_exactly_its_own_handles_and_says_where() {
+        let mut listener = Listener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().unwrap();
+        let mut set = WaitSet::new();
+        let (_a, _b) = connected_pair();
+        // Something already in the set, so the range is not trivially `0..`.
+        let (other, _peer) = connected_pair();
+        set.add_source(&other);
+        let range = listener.wait_on(&mut set);
+        assert_eq!(
+            range,
+            1..2,
+            "one TCP listener, after the one handle before it"
+        );
+        assert_eq!(set.len(), 2);
+
+        // Nobody dialling: the listener's slot is not ready.
+        set.wait(Some(Duration::from_millis(20))).unwrap();
+        assert!(!set.is_ready(range.start));
+
+        let _client = Socket::connect(addr).expect("connect");
+        set.wait(Some(Duration::from_secs(5))).unwrap();
+        assert!(
+            set.is_ready(range.start),
+            "a pending connection makes the listener's handle ready"
+        );
+        assert!(listener.accept().unwrap().is_some());
+    }
+
+    #[test]
+    fn a_tcp_socket_names_an_address_and_no_process() {
+        let (client, server) = connected_pair();
+        assert_eq!(client.peer_addr().unwrap(), server.local_addr().unwrap());
+        assert_eq!(
+            client.peer_cred(),
+            None,
+            "the kernel cannot vouch for a TCP peer, so nothing is claimed"
+        );
+        assert_eq!(server.peer_cred(), None);
+        assert_eq!(server.peer_has_key(), None);
+    }
+
+    #[test]
+    fn a_hung_up_tcp_accept_is_not_a_failure_of_the_listener() {
+        // The kinds `accept` may report for a connection its peer abandoned in
+        // the queue. Each must read as "nothing to accept", or one program
+        // connecting and resetting would end the compositor.
+        for kind in [
+            ErrorKind::ConnectionAborted,
+            ErrorKind::ConnectionReset,
+            ErrorKind::Interrupted,
+        ] {
+            assert!(accept_error_is_the_peers(kind), "{kind:?}");
+        }
+        for kind in [
+            ErrorKind::PermissionDenied,
+            ErrorKind::OutOfMemory,
+            ErrorKind::Other,
+        ] {
+            assert!(!accept_error_is_the_peers(kind), "{kind:?}");
+        }
     }
 
     #[test]

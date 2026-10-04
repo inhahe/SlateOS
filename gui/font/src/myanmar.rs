@@ -53,6 +53,10 @@
 //! [`Placeholder`](crate::indic::Category::Placeholder) rather than values of
 //! their own. `tools/gen_myanmar_machine.py` expands them, so nothing here or
 //! in the generated machine mentions them.
+//!
+//! Portions of this file follow HarfBuzz 14.3.0's
+//! `src/hb-ot-shaper-myanmar.cc`, copyright © 2011, 2012, 2013 Google, Inc.
+//! Used under HarfBuzz's licence: see `gui/font/licenses/harfbuzz-COPYING`.
 
 use alloc::vec::Vec;
 

@@ -1,5 +1,7 @@
 ## TD-ONLY-ONE-KEYBOARD-LAYOUT (lane C, 2026-08-17)
 
+**Status:** FIXED 2026-08-24 (`95439d0fc`, `keylayout`: one table the compositor types with and the shell draws); the layout is the user's `input.yaml` choice, and `compositor`'s tests type through Dvorak and German QWERTZ. On `main` since. Stamped 2026-09-28 by lane F, the compositor's owner since the six-lane split.
+
 **What.** `gui/compositor/src/keymap.rs` holds one hard-coded US-QWERTY
 scan-code-set-1 table, and there is no way to select another. Anyone using a
 non-US keyboard gets the wrong letters — a French AZERTY user pressing the key

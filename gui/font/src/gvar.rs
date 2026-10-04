@@ -56,6 +56,17 @@
 //! auto-hinter ([`crate::hint`]), which is a port of FreeType's and must see
 //! the points FreeType's loader gives it. The two agree to a fraction of a
 //! unit; the hinter rounds each point to a unit, where the fraction decides.
+//!
+//! Portions of this file follow HarfBuzz 14.3.0's
+//! `src/hb-ot-var-gvar-table.hh`, copyright © 2019 Adobe Inc. and © 2019
+//! Ebrahim Byagowi, and `src/hb-ot-var-common.hh`, copyright © 2021 Google,
+//! Inc. Used under HarfBuzz's licence: see
+//! `gui/font/licenses/harfbuzz-COPYING`.
+//!
+//! `Gvar::deltas_fixed` follows FreeType 2.13.2's `src/truetype/ttgxvar.c`,
+//! copyright (C) 2004-2023 by David Turner, Robert Wilhelm, Werner Lemberg and
+//! George Williams, from The FreeType Project (www.freetype.org). Used under
+//! the FreeType License: see `gui/font/licenses/FTL.TXT`.
 
 use alloc::vec::Vec;
 

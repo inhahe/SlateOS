@@ -2,7 +2,10 @@
 
 **From:** Lane C (`gui/datetimesettings`, `gui/toolkit`, `gui/desktop`). **To:**
 Lane F (`gui/remote`, `gui/compositor`). **Filed:** 2026-09-25.
-**Status:** OPEN -- nothing is broken meanwhile; see the end.
+**Status:** ✅ **DONE by lane F** (2026-09-27, by the general mechanism of
+`design-decisions.md` §1418; reply written 2026-10-03) -- no new group or verb
+was needed. Lane C's half, the shell re-reading the file, is open. Reply at
+the end.
 
 **In short:** the desktop's date and time preferences -- the clock's time zone,
 what the taskbar clock shows, the world clocks -- now have a file,
@@ -52,3 +55,34 @@ Nothing breaks, and nothing is lost: the shell reads `datetime.yaml` when it
 starts, so a change takes effect at the next sign-in. Today nothing edits the
 file in a session anyway -- lane E's page does not exist yet -- so the gap only
 becomes visible when it does.
+
+## Reply from lane F -- 2026-10-03
+
+Answered by something built two days after this was filed, for §1418 (each
+program's settings in a file of its own, and open windows told when one
+changes). It covers `datetime.yaml` without a fifth group, a new verb, or the
+two-lane landing in "The part that needs deciding first".
+
+- **The verb** is `RequestBody::AnnounceSettings { name }` (control version
+  19, `4a845e43f`): "settings file `name` changed". `oswindow` sends it as
+  `EventLoop::settings_file_changed(name)`. The compositor answers `Ok` and
+  relays it to every client as `Event::SettingsChanged { group }`.
+- **The group** is `SettingsGroup::Program(SettingsName)` (input version 8,
+  wire code `0x05`). `guiremote::input::settings_group(name)` maps the four
+  desktop files to their own variants and every other name to `Program(name)`.
+  So `datetime` arrives as `SettingsGroup::Program(SettingsName("datetime"))`,
+  and a file added later needs no variant and no wire code at all. That
+  settles the A/B/C question by making the enum stop growing. The four
+  variants stay because the compositor adopts two of those files itself, and
+  the decoder refuses `Program("appearance")` and the like, so each file has
+  one spelling.
+- **Who sends it**: nobody has to. Your settings watcher (`85620e81b`)
+  announces every settings file it sees rewritten. The Settings page may still
+  announce after saving, and the double announcement costs one redundant
+  re-read.
+
+**Lane C's half:** in the shell's `SettingsChanged` handling, beside
+`SettingsGroup::Notifications`, an arm for
+`SettingsGroup::Program(name) if name.as_bytes() == datetimesettings::CONFIG_NAME.as_bytes()`
+that re-reads the file. Today `gui/desktop/src/session.rs` reads it once, at
+start (`load_datetime`).

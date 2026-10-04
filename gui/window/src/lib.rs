@@ -86,7 +86,7 @@ use guiremote::control::{
 pub use guiremote::client::{ClientError as ConnectionError, Transport as ConnectionTransport};
 pub use guiremote::control::{
     BlurKind, BufferFormat as PixelFormat, CursorShape as Cursor, DisplayInfo as Display, Layer,
-    ShellControlAction, WindowSpec as Spec,
+    PickedWindow, ShellControlAction, WindowSpec as Spec,
 };
 /// What a shell learns about the windows it does not own. See
 /// [`EventLoop::watch_desktop`].
@@ -131,10 +131,13 @@ pub type Link = guiremote::socket::Socket;
 
 /// Connect to the compositor named by the environment.
 ///
-/// The address comes from `SLATE_DISPLAY` if it is set and from
-/// [`guiremote::socket::DEFAULT_DISPLAY`] otherwise, so a program started from a
-/// normal session needs no arguments and a second compositor is reachable by
-/// setting one variable.
+/// The display comes from `SLATE_DISPLAY` if it is set -- a TCP address, or
+/// `service:NAME` for a SlateOS service -- and is the default display
+/// otherwise: on SlateOS the compositor's service, whose kernel-attested
+/// connection lets it know which program this is, and
+/// [`guiremote::socket::DEFAULT_DISPLAY`] over TCP when no compositor serves
+/// that. So a program started from a normal session needs no arguments, and a
+/// second compositor is reachable by setting one variable.
 ///
 /// # Errors
 ///
@@ -157,6 +160,20 @@ pub fn connect() -> std::io::Result<Link> {
 /// As [`connect`], minus the environment-variable failure.
 pub fn connect_to<A: std::net::ToSocketAddrs>(addr: A) -> std::io::Result<Link> {
     Link::connect(addr)
+}
+
+/// Connect to a display written as `SLATE_DISPLAY` writes one -- a TCP address
+/// or `service:NAME` -- ignoring the environment.
+///
+/// For a program whose command line names a display: the same words the
+/// variable takes then mean the same thing in both places.
+///
+/// # Errors
+///
+/// As [`connect_to`], and [`std::io::ErrorKind::Unsupported`] for a service
+/// named anywhere but SlateOS.
+pub fn connect_to_display(display: &str) -> std::io::Result<Link> {
+    Link::connect_to_display(display)
 }
 
 /// What can go wrong, for a given transport.
@@ -185,6 +202,34 @@ pub enum EventResponse {
     /// else still closes the window, so an application that never thought
     /// about closing cannot leave the user a title-bar X that does nothing.
     KeepOpen,
+}
+
+/// A request to put the displays to sleep, whose answer is the wake: see
+/// [`EventLoop::sleep_displays`] and [`EventLoop::displays_woke`].
+///
+/// Opaque, because the only thing to do with it is ask whether the wake has
+/// come; the number inside is the request's on the wire.
+#[derive(Debug, PartialEq, Eq)]
+#[must_use = "the wake is reported through it"]
+pub struct DisplaySleep {
+    seq: u32,
+}
+
+/// A window pick in progress: what [`EventLoop::pick_window`] returns, to
+/// hand to [`EventLoop::picked`] as the loop goes round.
+#[derive(Debug)]
+pub struct WindowPick {
+    seq: u32,
+}
+
+/// What a window pick came to ([`EventLoop::picked`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PickOutcome {
+    /// The user clicked this window.
+    Window(PickedWindow),
+    /// The user gave up -- Escape, another mouse button,
+    /// [`EventLoop::cancel_pick`] -- or clicked where there is no window.
+    Nothing,
 }
 
 /// What [`EventLoop::run_batched`] is handing over.
@@ -547,6 +592,37 @@ impl<T: Transport> WindowHandle<'_, T> {
             .confirm(RequestBody::Restore { window: self.id })
     }
 
+    /// Ask for the user's attention: a chat with a new message, a finished
+    /// download, a dialog the user has not seen. The window's taskbar tile
+    /// shows it until the window is next focused.
+    ///
+    /// Asks; does not take. Nothing raises the window or moves the keyboard to
+    /// it, and a window that already has the focus changes nothing by asking,
+    /// since it already has the user.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn request_attention(&mut self) -> Result<(), Error<T>> {
+        self.events.confirm(RequestBody::RequestAttention {
+            window: self.id,
+            wanted: true,
+        })
+    }
+
+    /// Withdraw [`Self::request_attention`], before the user has looked: the
+    /// download was cancelled, the message read on another device.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn cancel_attention(&mut self) -> Result<(), Error<T>> {
+        self.events.confirm(RequestBody::RequestAttention {
+            window: self.id,
+            wanted: false,
+        })
+    }
+
     /// Map or unmap the window.
     ///
     /// # Errors
@@ -884,6 +960,9 @@ pub struct EventLoop<T: Transport> {
     waker: Option<Waker>,
     /// Presses so far, for recognising a double click. See [`Clicks`].
     clicks: Clicks,
+    /// The modifier keys held when the compositor handled the key or pointer
+    /// event last returned. See [`EventLoop::modifiers`].
+    modifiers: Modifiers,
 }
 
 /// Two presses of one button in one window, close together in time and on
@@ -1020,6 +1099,7 @@ impl<T: Transport> EventLoop<T> {
             woken: None,
             waker: None,
             clicks: Clicks::new(),
+            modifiers: Modifiers::NONE,
         }
     }
 
@@ -1060,7 +1140,209 @@ impl<T: Transport> EventLoop<T> {
             ResponseBody::Error { message } => Err(ClientError::Refused(message)),
             ResponseBody::Ok
             | ResponseBody::WindowCreated { .. }
-            | ResponseBody::WorkArea { .. } => Err(ClientError::Mismatched),
+            | ResponseBody::WorkArea { .. }
+            | ResponseBody::Modifiers(_)
+            | ResponseBody::Clipboard(_)
+            | ResponseBody::Picked(_) => Err(ClientError::Mismatched),
+        }
+    }
+
+    /// Ask the compositor which modifier keys are held right now, on any
+    /// keyboard.
+    ///
+    /// For a shell deciding something as it starts -- whether Shift is held to
+    /// stop an automatic sign-in (`design-decisions.md` §1427). Asked rather
+    /// than waited for: a key that was already down when this program
+    /// connected is never sent to it as an event, and a key down before the
+    /// compositor opened the keyboard counts too.
+    ///
+    /// A shell's question: an ordinary application has no business polling
+    /// the keyboard, and a compositor that can tell a shell from other
+    /// programs will refuse it. An application learns the modifiers from the
+    /// key events its own windows are sent.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::round_trip`], plus [`ClientError::Refused`] if the
+    /// compositor declined and [`ClientError::Mismatched`] if the answer is
+    /// not a set of modifiers.
+    pub fn held_modifiers(&mut self) -> Result<Modifiers, Error<T>> {
+        match self.conn.round_trip(RequestBody::GetHeldModifiers)? {
+            ResponseBody::Modifiers(held) => Ok(held),
+            ResponseBody::Error { message } => Err(ClientError::Refused(message)),
+            ResponseBody::Ok
+            | ResponseBody::WindowCreated { .. }
+            | ResponseBody::Display(_)
+            | ResponseBody::WorkArea { .. }
+            | ResponseBody::Clipboard(_)
+            | ResponseBody::Picked(_) => Err(ClientError::Mismatched),
+        }
+    }
+
+    /// Put `text` on the clipboard: what a copy or a cut does.
+    ///
+    /// The clipboard is the compositor's, so text copied here is what a paste
+    /// in any other program gets. Allowed only while one of this program's
+    /// windows has the keyboard focus: a copy is something the user does in
+    /// the window they are working in, and a program in the background that
+    /// could set the clipboard could swap what the user just copied.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::round_trip`], plus [`ClientError::Refused`] if no
+    /// window of this program has the focus, or if `text` is longer than the
+    /// protocol carries ([`guiremote::MAX_STRING_LEN`], 4 MiB). That last one is
+    /// refused here, before anything is sent: a string over the limit would
+    /// fail the compositor's decoder and cost this program its connection.
+    pub fn set_clipboard(&mut self, text: &str) -> Result<(), Error<T>> {
+        if u32::try_from(text.len()).map_or(true, |len| len > guiremote::MAX_STRING_LEN) {
+            return Err(ClientError::Refused(format!(
+                "{} bytes is more than the clipboard carries ({} bytes at most)",
+                text.len(),
+                guiremote::MAX_STRING_LEN
+            )));
+        }
+        self.conn.confirm(RequestBody::SetClipboard {
+            text: text.to_owned(),
+        })
+    }
+
+    /// Put every display to sleep, and get back the request whose answer is
+    /// the wake.
+    ///
+    /// The displays are powered down where the hardware can be, and black
+    /// where it cannot. They wake at the next key press, click, scroll or
+    /// pointer movement, and that input is not delivered -- the key that
+    /// wakes the screen does not also type. [`Self::displays_woke`] answers
+    /// `true` once they have: the moment, for instance, to show the lock
+    /// screen if waking needs a password. A shell's request.
+    ///
+    /// Does not wait: the answer comes when somebody touches the keyboard,
+    /// which may be hours away.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError::Transport`] if the request cannot be sent. A refusal
+    /// comes back through [`Self::displays_woke`].
+    pub fn sleep_displays(&mut self) -> Result<DisplaySleep, Error<T>> {
+        let seq = self.conn.send(RequestBody::SleepDisplays)?;
+        Ok(DisplaySleep { seq })
+    }
+
+    /// Whether the displays have woken from `sleep`: `true` once, at the
+    /// first look after the wake, and `false` before it and after it.
+    ///
+    /// Reads nothing itself: [`Self::poll`] reads the connection, and this
+    /// looks at what it has read, so call it as the loop goes round.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError::Refused`] if the compositor would not put the displays
+    /// to sleep (only a shell may), and [`ClientError::Mismatched`] for an
+    /// answer that is not one.
+    pub fn displays_woke(&mut self, sleep: &DisplaySleep) -> Result<bool, Error<T>> {
+        match self.conn.take_reply(sleep.seq) {
+            None => Ok(false),
+            Some(ResponseBody::Ok) => Ok(true),
+            Some(ResponseBody::Error { message }) => Err(ClientError::Refused(message)),
+            Some(
+                ResponseBody::WindowCreated { .. }
+                | ResponseBody::Display(_)
+                | ResponseBody::WorkArea { .. }
+                | ResponseBody::Modifiers(_)
+                | ResponseBody::Clipboard(_)
+                | ResponseBody::Picked(_),
+            ) => Err(ClientError::Mismatched),
+        }
+    }
+
+    /// Wake the displays if they are asleep -- an alarm, a call -- which
+    /// answers every pending [`Self::sleep_displays`]. A shell's request.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn wake_displays(&mut self) -> Result<(), Error<T>> {
+        self.conn.confirm(RequestBody::WakeDisplays)
+    }
+
+    /// Let the user click a window to name it: the pointer becomes the
+    /// compositor's crosshair, and the next click is taken by the pick
+    /// instead of reaching the window. [`Self::picked`] reports what it came
+    /// to: the window's title, program and process -- nothing of its contents.
+    ///
+    /// Only while one of this program's windows has the keyboard focus, as
+    /// it does when the user has just pressed its "pick" button, and only one
+    /// program's pick at a time.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::send`]. A refusal arrives through [`Self::picked`].
+    pub fn pick_window(&mut self) -> Result<WindowPick, Error<T>> {
+        let seq = self.conn.send(RequestBody::PickWindow)?;
+        Ok(WindowPick { seq })
+    }
+
+    /// What `pick` came to, once: `None` until the user has clicked or given
+    /// up, then the outcome, then `None` again.
+    ///
+    /// Reads nothing itself, as [`Self::displays_woke`] does not.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError::Refused`] if the compositor would not start the pick
+    /// -- no window of this program had the focus, or another program's pick
+    /// was open -- and [`ClientError::Mismatched`] for an answer that is not
+    /// one.
+    pub fn picked(&mut self, pick: &WindowPick) -> Result<Option<PickOutcome>, Error<T>> {
+        match self.conn.take_reply(pick.seq) {
+            None => Ok(None),
+            Some(ResponseBody::Picked(Some(window))) => Ok(Some(PickOutcome::Window(window))),
+            Some(ResponseBody::Picked(None)) => Ok(Some(PickOutcome::Nothing)),
+            Some(ResponseBody::Error { message }) => Err(ClientError::Refused(message)),
+            Some(
+                ResponseBody::Ok
+                | ResponseBody::WindowCreated { .. }
+                | ResponseBody::Display(_)
+                | ResponseBody::WorkArea { .. }
+                | ResponseBody::Modifiers(_)
+                | ResponseBody::Clipboard(_),
+            ) => Err(ClientError::Mismatched),
+        }
+    }
+
+    /// Give up this program's pick, if it has one open; it is then reported
+    /// as [`PickOutcome::Nothing`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn cancel_pick(&mut self) -> Result<(), Error<T>> {
+        self.conn.confirm(RequestBody::CancelPick)
+    }
+
+    /// What is on the clipboard: what a paste inserts. `None` when nothing has
+    /// been copied this session.
+    ///
+    /// Allowed only while one of this program's windows has the keyboard
+    /// focus, for [`Self::set_clipboard`]'s reason the other way round: what
+    /// people copy is often a password.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::round_trip`], plus [`ClientError::Refused`] if no
+    /// window of this program has the focus, and [`ClientError::Mismatched`]
+    /// if the answer is not the clipboard.
+    pub fn clipboard(&mut self) -> Result<Option<String>, Error<T>> {
+        match self.conn.round_trip(RequestBody::GetClipboard)? {
+            ResponseBody::Clipboard(text) => Ok(text),
+            ResponseBody::Error { message } => Err(ClientError::Refused(message)),
+            ResponseBody::Ok
+            | ResponseBody::WindowCreated { .. }
+            | ResponseBody::Display(_)
+            | ResponseBody::WorkArea { .. }
+            | ResponseBody::Modifiers(_)
+            | ResponseBody::Picked(_) => Err(ClientError::Mismatched),
         }
     }
 
@@ -1868,6 +2150,21 @@ impl<T: Transport> EventLoop<T> {
         self.conn.wait()
     }
 
+    /// The modifier keys held when the compositor handled the key or pointer
+    /// event most recently returned by [`Self::poll`] (and so handed to a
+    /// [`Self::run`] handler).
+    ///
+    /// For a click: Ctrl+click adds to a selection, Shift+click extends one.
+    /// Read it while handling the event; the next key or pointer event replaces
+    /// it, and other events leave it as it was. It is the compositor's answer,
+    /// not one assembled from this program's key events, so it is right for a
+    /// click on a window that did not have the keyboard when Ctrl went down --
+    /// the desktop's own surface, nearly always.
+    #[must_use]
+    pub const fn modifiers(&self) -> Modifiers {
+        self.modifiers
+    }
+
     /// Read whatever is available and take the next event, if any.
     ///
     /// Returns `Ok(None)` when nothing is waiting — the ordinary state of an
@@ -1894,6 +2191,12 @@ impl<T: Transport> EventLoop<T> {
             // Folded in before the application sees it, so a handler that asks
             // the window how big it is during a `Resize` gets the new answer.
             window.apply(&ev.event);
+            // Only from the events the compositor stamps: a resize or a tick
+            // carries none, and taking its empty set would make a Ctrl held
+            // across a resize read as let go.
+            if matches!(ev.event, Event::Mouse(_) | Event::Key(_)) {
+                self.modifiers = ev.modifiers;
+            }
             // A press that completes a double click is followed at once by the
             // double click itself, as its own event: consumers are written for
             // both orders (the file dialog's list opens on either), and every
@@ -1922,6 +2225,8 @@ impl<T: Transport> EventLoop<T> {
                         }),
                     );
                     double.time = ev.time;
+                    // The press's own: a Ctrl+double-click is one.
+                    double.modifiers = ev.modifiers;
                     self.pending.push_front(double);
                 }
             }
@@ -2135,7 +2440,7 @@ pub mod testing {
     use guiremote::submit::decode_submit;
     use guiremote::window_list::WindowInfo;
 
-    use crate::{EventLoop, Transport};
+    use crate::{EventLoop, Modifiers, Transport};
 
     /// The compositor's side of the pipe.
     ///
@@ -2152,6 +2457,23 @@ pub mod testing {
         pub submitted: Vec<(u64, usize)>,
         /// When set, every request is refused with this message.
         pub refuse: Option<String>,
+        /// The modifier keys this desktop says are held, when asked
+        /// ([`EventLoop::held_modifiers`]). None by default; a test of a shell
+        /// that starts differently with Shift held sets it.
+        pub held: Modifiers,
+        /// The clipboard this desktop keeps: set by a client's copy, read by
+        /// its paste. Unlike the compositor it does not check focus -- that
+        /// rule is the compositor's, tested there.
+        pub clipboard: Option<String>,
+        /// The sleep requests waiting for the displays to wake, by sequence
+        /// number: answered by a `WakeDisplays`, or by
+        /// [`Self::wake_displays`], which stands in for the user touching a
+        /// key.
+        pub sleeping: Vec<u32>,
+        /// The open pick's request, by sequence number: answered by
+        /// [`Self::answer_pick`], which stands in for the user's click, or as
+        /// given up by a `CancelPick`.
+        pub picking: Option<u32>,
         /// Input to deliver, one batch per turn.
         pub script: VecDeque<Vec<InputEvent>>,
         /// The config-directory turn, held for as long as this desktop exists.
@@ -2195,6 +2517,10 @@ pub mod testing {
                 seen: Vec::new(),
                 submitted: Vec::new(),
                 refuse: None,
+                held: Modifiers::NONE,
+                clipboard: None,
+                sleeping: Vec::new(),
+                picking: None,
                 script: VecDeque::new(),
                 #[cfg(test)]
                 _config_turn: settingsfile::testing::config_turn(),
@@ -2291,6 +2617,44 @@ pub mod testing {
                             refresh_rate: 144,
                             scale_factor: 1.5,
                         }),
+                        RequestBody::GetHeldModifiers => ResponseBody::Modifiers(self.held),
+                        RequestBody::SetClipboard { text } => {
+                            self.clipboard = Some(text.clone());
+                            ResponseBody::Ok
+                        }
+                        RequestBody::GetClipboard => {
+                            ResponseBody::Clipboard(self.clipboard.clone())
+                        }
+                        // Answered at the wake, as the compositor answers it.
+                        RequestBody::SleepDisplays => {
+                            self.sleeping.push(req.seq);
+                            self.seen.push(req);
+                            continue;
+                        }
+                        RequestBody::WakeDisplays => {
+                            replies.extend(
+                                self.sleeping
+                                    .drain(..)
+                                    .map(|seq| Response::new(seq, ResponseBody::Ok)),
+                            );
+                            ResponseBody::Ok
+                        }
+                        // Answered at the click, as the compositor answers it.
+                        // Unlike it, any client may pick: the focus rule is
+                        // the compositor's, tested there.
+                        RequestBody::PickWindow => {
+                            if let Some(earlier) = self.picking.replace(req.seq) {
+                                replies.push(Response::new(earlier, ResponseBody::Picked(None)));
+                            }
+                            self.seen.push(req);
+                            continue;
+                        }
+                        RequestBody::CancelPick => {
+                            if let Some(seq) = self.picking.take() {
+                                replies.push(Response::new(seq, ResponseBody::Picked(None)));
+                            }
+                            ResponseBody::Ok
+                        }
                         _ => ResponseBody::Ok,
                     }
                 };
@@ -2302,6 +2666,37 @@ pub mod testing {
             }
             self.pipe.write(&encode_responses(&replies)).unwrap();
             true
+        }
+
+        /// Answer the open pick as the user's click would: with the window
+        /// clicked, or `None` for giving up. Nothing happens if no pick is
+        /// open.
+        ///
+        /// # Panics
+        ///
+        /// As [`Self::send_input`].
+        pub fn answer_pick(&mut self, window: Option<crate::PickedWindow>) {
+            if let Some(seq) = self.picking.take() {
+                let reply = Response::new(seq, ResponseBody::Picked(window));
+                self.pipe.write(&encode_responses(&[reply])).unwrap();
+            }
+        }
+
+        /// Wake the displays, as a key press would: every waiting sleep
+        /// request is answered.
+        ///
+        /// # Panics
+        ///
+        /// As [`Self::send_input`].
+        pub fn wake_displays(&mut self) {
+            let replies: Vec<Response> = self
+                .sleeping
+                .drain(..)
+                .map(|seq| Response::new(seq, ResponseBody::Ok))
+                .collect();
+            if !replies.is_empty() {
+                self.pipe.write(&encode_responses(&replies)).unwrap();
+            }
         }
 
         /// Deliver input to the client immediately.
@@ -2447,6 +2842,14 @@ pub mod testing {
                 RequestBody::ShellSetSizeLimits { .. } => "ShellSetSizeLimits",
                 RequestBody::ShellSetWindowPolicy { .. } => "ShellSetWindowPolicy",
                 RequestBody::GetDisplayInfo => "GetDisplayInfo",
+                RequestBody::GetHeldModifiers => "GetHeldModifiers",
+                RequestBody::RequestAttention { .. } => "RequestAttention",
+                RequestBody::SetClipboard { .. } => "SetClipboard",
+                RequestBody::GetClipboard => "GetClipboard",
+                RequestBody::SleepDisplays => "SleepDisplays",
+                RequestBody::WakeDisplays => "WakeDisplays",
+                RequestBody::PickWindow => "PickWindow",
+                RequestBody::CancelPick => "CancelPick",
                 RequestBody::SubscribeWindowList { .. } => "SubscribeWindowList",
                 RequestBody::SetTrayIcon { .. } => "SetTrayIcon",
                 RequestBody::RemoveTrayIcon { .. } => "RemoveTrayIcon",
@@ -3256,6 +3659,223 @@ mod tests {
         assert!((info.scale_factor - 1.5).abs() < f32::EPSILON);
     }
 
+    /// The modifiers held are the compositor's answer, asked for and sent
+    /// over the wire, not anything this side remembers from key events --
+    /// a key down before the program connected was never sent to it.
+    #[test]
+    fn the_held_modifiers_come_from_the_compositor() {
+        let (mut events, server) = wired();
+        assert_eq!(events.held_modifiers().unwrap(), Modifiers::NONE);
+
+        server.borrow_mut().held = Modifiers {
+            shift: true,
+            alt: true,
+            ..Modifiers::NONE
+        };
+        assert_eq!(
+            events.held_modifiers().unwrap(),
+            Modifiers {
+                shift: true,
+                alt: true,
+                ..Modifiers::NONE
+            }
+        );
+        assert_eq!(
+            server.borrow_mut().asked(),
+            vec!["GetHeldModifiers", "GetHeldModifiers"]
+        );
+    }
+
+    /// A click's modifiers are the ones the compositor stamped on it, read
+    /// while handling it -- a Ctrl+click on a window that never saw the Ctrl
+    /// go down -- and an event the compositor does not stamp leaves them be.
+    #[test]
+    fn a_click_s_modifiers_are_the_ones_the_compositor_stamped() {
+        let (mut events, server) = wired();
+        let id = open(&mut events, "A");
+        assert_eq!(events.modifiers(), Modifiers::NONE);
+        server.borrow_mut().send_input(&[
+            InputEvent::new(
+                id,
+                Event::Mouse(MouseEvent {
+                    x: 3.0,
+                    y: 4.0,
+                    kind: MouseEventKind::Press(MouseButton::Left),
+                }),
+            )
+            .with_modifiers(Modifiers::ctrl()),
+            InputEvent::new(
+                id,
+                Event::Resize {
+                    width: 300,
+                    height: 200,
+                },
+            ),
+        ]);
+
+        let (_, press) = events.poll().unwrap().expect("the press");
+        assert!(matches!(press, Event::Mouse(_)), "{press:?}");
+        assert_eq!(events.modifiers(), Modifiers::ctrl());
+        let (_, resize) = events.poll().unwrap().expect("the resize");
+        assert!(matches!(resize, Event::Resize { .. }), "{resize:?}");
+        assert_eq!(
+            events.modifiers(),
+            Modifiers::ctrl(),
+            "a resize carries no modifiers, and taking its empty set would read as Ctrl let go"
+        );
+    }
+
+    /// The displays' wake comes back as the answer to the sleep request, and
+    /// is reported once.
+    #[test]
+    fn a_sleep_is_answered_by_the_wake_and_reported_once() {
+        let (mut events, server) = wired();
+        let sleep = events.sleep_displays().unwrap();
+        server.borrow_mut().serve();
+        events.poll().unwrap();
+        assert!(
+            !events.displays_woke(&sleep).unwrap(),
+            "reported awake before anyone touched a key"
+        );
+
+        server.borrow_mut().wake_displays();
+        events.poll().unwrap();
+        assert!(events.displays_woke(&sleep).unwrap());
+        assert!(
+            !events.displays_woke(&sleep).unwrap(),
+            "the wake was reported twice"
+        );
+        assert_eq!(server.borrow_mut().asked(), vec!["SleepDisplays"]);
+    }
+
+    /// A pick is answered when the user clicks, with the window clicked,
+    /// and reported once.
+    #[test]
+    fn a_pick_is_answered_by_the_click_and_reported_once() {
+        let (mut events, server) = wired();
+        let pick = events.pick_window().unwrap();
+        server.borrow_mut().serve();
+        events.poll().unwrap();
+        assert_eq!(
+            events.picked(&pick).unwrap(),
+            None,
+            "picked before the click"
+        );
+
+        let window = PickedWindow {
+            window: 9,
+            title: String::from("notes.txt"),
+            app_id: String::from("org.slateos.Editor"),
+            pid: Some(4321),
+        };
+        server.borrow_mut().answer_pick(Some(window.clone()));
+        events.poll().unwrap();
+        assert_eq!(
+            events.picked(&pick).unwrap(),
+            Some(PickOutcome::Window(window))
+        );
+        assert_eq!(events.picked(&pick).unwrap(), None, "reported twice");
+        assert_eq!(server.borrow_mut().asked(), vec!["PickWindow"]);
+    }
+
+    /// Giving up is an outcome, not silence: a program waiting on a pick
+    /// hears that it is over.
+    #[test]
+    fn a_cancelled_pick_is_reported_as_nothing_picked() {
+        let (mut events, server) = wired();
+        let pick = events.pick_window().unwrap();
+        server.borrow_mut().serve();
+        events.cancel_pick().unwrap();
+        events.poll().unwrap();
+        assert_eq!(events.picked(&pick).unwrap(), Some(PickOutcome::Nothing));
+        assert_eq!(
+            server.borrow_mut().asked(),
+            vec!["PickWindow", "CancelPick"]
+        );
+    }
+
+    /// A copy goes to the compositor and a paste comes back from it, so what
+    /// one program copies is what another pastes.
+    #[test]
+    fn a_copy_reaches_the_compositor_and_a_paste_comes_back_from_it() {
+        let (mut events, server) = wired();
+        let _ = open(&mut events, "Editor");
+        assert_eq!(events.clipboard().unwrap(), None);
+        events.set_clipboard("copied text").unwrap();
+        assert_eq!(
+            server.borrow().clipboard.as_deref(),
+            Some("copied text"),
+            "the copy did not reach the compositor"
+        );
+        // Another program's copy, made while this one was in the background.
+        server.borrow_mut().clipboard = Some("from elsewhere".to_string());
+        assert_eq!(
+            events.clipboard().unwrap().as_deref(),
+            Some("from elsewhere")
+        );
+    }
+
+    /// A copy longer than the protocol carries is refused before anything is
+    /// sent: on the wire it would fail the compositor's decoder and cost the
+    /// program its connection.
+    #[test]
+    fn a_copy_too_long_to_carry_is_refused_before_it_is_sent() {
+        let (mut events, server) = wired();
+        let _ = open(&mut events, "Editor");
+        let huge = "x".repeat(guiremote::MAX_STRING_LEN as usize + 1);
+        assert!(matches!(
+            events.set_clipboard(&huge),
+            Err(ClientError::Refused(_))
+        ));
+        assert!(
+            !server.borrow_mut().asked().contains(&"SetClipboard"),
+            "the oversized copy was sent anyway"
+        );
+    }
+
+    /// Asking for attention and withdrawing it are one request each way, for
+    /// the window the handle names.
+    #[test]
+    fn a_window_asks_for_attention_and_can_take_it_back() {
+        let (mut events, server) = wired();
+        let id = open(&mut events, "Chat");
+        let mut handle = events.window_mut(id).expect("the window just opened");
+        handle.request_attention().unwrap();
+        handle.cancel_attention().unwrap();
+        let asked: Vec<RequestBody> = server
+            .borrow_mut()
+            .seen
+            .iter()
+            .filter(|r| matches!(r.body, RequestBody::RequestAttention { .. }))
+            .map(|r| r.body.clone())
+            .collect();
+        assert_eq!(
+            asked,
+            vec![
+                RequestBody::RequestAttention {
+                    window: id,
+                    wanted: true
+                },
+                RequestBody::RequestAttention {
+                    window: id,
+                    wanted: false
+                },
+            ]
+        );
+    }
+
+    /// A compositor that will not say -- because it can tell this program is
+    /// not the shell -- is an error to the caller, not "nothing held".
+    #[test]
+    fn a_refused_held_modifiers_question_is_an_error_and_not_no_keys() {
+        let (mut events, server) = wired();
+        server.borrow_mut().refuse = Some("not the shell".to_string());
+        let err = events
+            .held_modifiers()
+            .expect_err("a refusal must not read as no key held");
+        assert!(matches!(err, ClientError::Refused(ref why) if why == "not the shell"));
+    }
+
     #[test]
     fn a_refused_request_is_reported_rather_than_swallowed() {
         let (mut events, server) = wired();
@@ -3346,6 +3966,7 @@ mod tests {
             WindowInfo {
                 id: 7,
                 pid: 1234,
+                process: None,
                 layer: Layer::Background,
                 title: "Wallpaper".to_owned(),
                 app_id: "wallpaper".to_owned(),
@@ -3353,6 +3974,7 @@ mod tests {
                 minimized: false,
                 maximized: false,
                 focused: false,
+                demands_attention: true,
                 // Stored and meaningless: a `Background` window is on every
                 // desktop, so nothing should ever compare this against the one
                 // showing. It is here to be carried, not obeyed.
@@ -3368,6 +3990,7 @@ mod tests {
             WindowInfo {
                 id: 9,
                 pid: 5678,
+                process: Some(5678),
                 layer: Layer::Normal,
                 title: "Editor".to_owned(),
                 // Not "editor": the fixture's contract is that no field matches
@@ -3378,6 +4001,7 @@ mod tests {
                 minimized: true,
                 maximized: true,
                 focused: true,
+                demands_attention: false,
                 workspace: 3,
                 x: 64,
                 y: 32,

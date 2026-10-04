@@ -141,6 +141,9 @@ pub use client::{ClientError, Connection, Transport};
 pub mod loopback;
 pub use loopback::{Pipe, pipe};
 
+/// The display protocol over a SlateOS channel: the local transport, whose
+/// peer the kernel attests.
+pub mod channel;
 pub mod socket;
 pub use socket::{DEFAULT_DISPLAY, DISPLAY_VAR, Listener, Socket, display_addr};
 

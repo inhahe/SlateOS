@@ -72,7 +72,7 @@ use inputsettings::InputSettings;
 use appearance::ColorFilter;
 
 use crate::present::{Frame, Headless, Present, earliest};
-use crate::wire::ClientLink;
+use crate::wire::{ClientLink, ShellGate};
 use crate::{Compositor, CursorCache, Display, PointerSprite, PointerState, WindowId};
 
 /// What a shown frame's pixels were made from: the compositor's picture (by
@@ -181,6 +181,31 @@ pub struct ServerStats {
     pub orphans_swept: u64,
 }
 
+/// How a new connection reads in the log: how it arrived and, when the kernel
+/// vouches for the peer, who that is.
+fn describe_peer(socket: &Socket, link: &ClientLink) -> String {
+    if let Some(peer) = link.peer() {
+        let key = match link.peer_holds_key() {
+            Some(true) => ", holding the display service's key",
+            Some(false) | None => "",
+        };
+        return format!(
+            "through the display service: pid {}, uid {}, gid {}{key}",
+            peer.pid, peer.uid, peer.gid
+        );
+    }
+    if socket.is_channel() {
+        // Not expected -- the kernel records every service connection -- and
+        // not a reason to refuse one either: the client is served anonymously.
+        return String::from("through the display service, which named no one");
+    }
+    match socket.peer_addr() {
+        Ok(addr) => format!("over TCP from {addr}"),
+        // Gone again before it could be asked; its first read will say so.
+        Err(e) => format!("over TCP from a peer that cannot be named ({e})"),
+    }
+}
+
 /// One connected client: a socket, and the protocol state for what arrives on
 /// it.
 struct Client {
@@ -241,6 +266,8 @@ pub struct Server {
     /// What the loop waits on between ticks, rebuilt before each wait and kept
     /// so that one wait allocates nothing after the first.
     waits: WaitSet,
+    /// Who may make the shell's requests, given to every link at accept.
+    shell_gate: ShellGate,
     /// Whether the last wait failed, so a failure is reported when it starts
     /// and when it stops rather than sixty times a second in between.
     wait_failing: bool,
@@ -248,6 +275,10 @@ pub struct Server {
     /// if the picture key has not changed: a presenter keeping its own copy
     /// must not be told it already has this one.
     force_new_serial: bool,
+    /// Whether the display has been told to sleep ([`Present::sleep`]):
+    /// what the server last made of `Compositor::displays_asleep`, so a
+    /// change in it is acted on once ([`Self::reconcile_sleep`]).
+    displays_asleep: bool,
     /// Stands in for a process id. A TCP peer cannot be asked what process it
     /// is — there is no `SO_PEERCRED` across a network, and a remote client has
     /// no pid in this machine's namespace at all — so the compositor is given a
@@ -295,8 +326,10 @@ impl Server {
             last_shown: None,
             listener_ready: true,
             waits: WaitSet::new(),
+            shell_gate: ShellGate::Open,
             wait_failing: false,
             force_new_serial: false,
+            displays_asleep: false,
             // Zero is left free as "no client", matching the convention the
             // rest of the compositor uses for ids that may be absent.
             next_client_id: 1,
@@ -313,6 +346,16 @@ impl Server {
     /// If the socket is not bound.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.listener.local_addr()
+    }
+
+    /// Who may make the shell's requests: every connection's rule, from the
+    /// ones already accepted to the ones still to come, so the desktop never
+    /// has two at once.
+    pub fn set_shell_gate(&mut self, gate: ShellGate) {
+        self.shell_gate = gate;
+        for client in &mut self.clients {
+            client.link.set_shell_gate(gate);
+        }
     }
 
     /// How many clients are connected.
@@ -374,9 +417,16 @@ impl Server {
                 0 => 1,
                 n => n,
             };
+            let mut link = ClientLink::new(id);
+            link.attest(socket.peer_cred(), socket.peer_has_key());
+            link.set_shell_gate(self.shell_gate);
+            eprintln!(
+                "compositor: client {id} connected {}",
+                describe_peer(&socket, &link)
+            );
             self.clients.push(Client {
                 socket,
-                link: ClientLink::new(id),
+                link,
                 ending: None,
                 // A new connection may already have sent something; the wait
                 // that found the listener ready knew nothing about this socket.
@@ -456,6 +506,8 @@ impl Server {
             if compositor.route_window_list(&mut client.link) {
                 self.stats.window_lists_sent = self.stats.window_lists_sent.saturating_add(1);
             }
+            // The answers a wake owes to the sleep requests this client made.
+            compositor.route_deferred_replies(&mut client.link);
         }
         // Whatever no live link claimed. Counted rather than left to accumulate:
         // an unbounded queue of events for windows nobody owns would eventually
@@ -533,13 +585,7 @@ impl Server {
 
         compositor.reset_for_recovery();
         present.reset();
-
-        self.filtered = Vec::new();
-        self.filtered_for = None;
-        self.cursors = CursorCache::new();
-        self.shown_pointer = None;
-        self.last_shown = None;
-        self.force_new_serial = true;
+        self.forget_what_was_shown();
 
         for client in &mut self.clients {
             if client.ending.is_none() {
@@ -549,6 +595,48 @@ impl Server {
         }
         self.flush();
         self.stats.recoveries = self.stats.recoveries.saturating_add(1);
+    }
+
+    /// Forget the server's own copies of what is on screen -- the filtered
+    /// frame, the drawn pointer, when the last frame went up -- and give the
+    /// next frame a new serial, so it is drawn whole and shown at once and no
+    /// presenter is told it already has it. Recovery's step 4, and a wake's.
+    fn forget_what_was_shown(&mut self) {
+        self.filtered = Vec::new();
+        self.filtered_for = None;
+        self.cursors = CursorCache::new();
+        self.shown_pointer = None;
+        self.last_shown = None;
+        self.force_new_serial = true;
+    }
+
+    /// Bring the display's power in line with the compositor's: off when the
+    /// displays were put to sleep, on again when they woke
+    /// (`Compositor::sleep_displays`). Acts on a change, once.
+    ///
+    /// A display that cannot power down ([`Present::sleep`] answers `false`)
+    /// is shown one black frame, and then, like one that can, nothing until
+    /// the wake: compositing for a screen nobody can see is work for nothing.
+    /// At the wake the display is told ([`Present::wake`]), and the next frame
+    /// is drawn whole -- the compositor has already marked all of it damaged.
+    fn reconcile_sleep<P: Present>(&mut self, compositor: &Compositor, present: &mut P) {
+        let asleep = compositor.displays_asleep();
+        if asleep == self.displays_asleep {
+            return;
+        }
+        self.displays_asleep = asleep;
+        if asleep {
+            if !present.sleep() {
+                let (width, height) = compositor.frame_size();
+                let len = usize::try_from(u64::from(width).saturating_mul(u64::from(height)))
+                    .unwrap_or(0);
+                let black = vec![0xFF00_0000; len];
+                present.show(&Frame::new(&black, width, height));
+            }
+        } else {
+            present.wake();
+            self.forget_what_was_shown();
+        }
     }
 
     /// Remove the clients that ended, destroying the windows they left behind.
@@ -578,6 +666,14 @@ impl Server {
                 self.stats.protocol_errors = self.stats.protocol_errors.saturating_add(1);
             }
             Self::reclaim(compositor, &windows, &mut self.stats);
+            // Its tray icons go with it, as its windows do: a crash must not
+            // leave an icon in the tray that no process can remove, and that
+            // a click would be sent to nobody for. Its requests still waiting
+            // on an answer -- to be told the displays woke, a window pick --
+            // have nobody left to tell, and its pick must not leave the
+            // pointer a crosshair.
+            compositor.reap_tray_icons(id);
+            compositor.forget_client_requests(id);
             eprintln!("compositor: client {id} disconnected ({reason})");
         }
     }
@@ -913,6 +1009,9 @@ impl Server {
             if compositor.take_recovery_request() {
                 self.recover(compositor, present);
             }
+            // After the tick, which may have served a request to sleep or to
+            // wake, and after the input, which may have woken them.
+            self.reconcile_sleep(compositor, present);
             self.present_if_due(compositor, present, interval);
 
             // Checked again before waiting, not only at the top: a display
@@ -942,6 +1041,10 @@ impl Server {
         present: &mut P,
         interval: Duration,
     ) {
+        // Nothing goes up on a display that is asleep: see `reconcile_sleep`.
+        if self.displays_asleep {
+            return;
+        }
         let now = Instant::now();
         let slot_open = self
             .last_shown
@@ -984,6 +1087,13 @@ impl Server {
         now: Instant,
     ) -> Option<Instant> {
         let mut wake = earliest(display, compositor.wake_at());
+        // A frame owed to a display that is asleep is not owed until it wakes,
+        // and what wakes it is input, which wakes the loop by itself. Without
+        // this a client drawing behind a dark screen would wake the loop at
+        // every frame slot to be told there is nothing to show.
+        if self.displays_asleep {
+            return wake;
+        }
         let damage = compositor.frame_owed();
         if damage || self.pointer_changed(compositor) {
             let mut due = self
@@ -1016,7 +1126,7 @@ impl Server {
         interval: Duration,
     ) {
         self.waits.clear();
-        let listener = self.waits.add_source(&self.listener);
+        let listener = self.listener.wait_on(&mut self.waits);
         let first_client = self.waits.len();
         for client in &self.clients {
             self.waits.add_source(&client.socket);
@@ -1030,7 +1140,7 @@ impl Server {
                     eprintln!("compositor: waiting for work succeeds again");
                     self.wait_failing = false;
                 }
-                self.listener_ready = self.waits.is_ready(listener);
+                self.listener_ready = listener.into_iter().any(|i| self.waits.is_ready(i));
                 for (offset, client) in self.clients.iter_mut().enumerate() {
                     client.readable = self.waits.is_ready(first_client.saturating_add(offset));
                 }
@@ -1208,6 +1318,71 @@ mod tests {
         panic!("the disconnection was never noticed");
     }
 
+    /// A display that cannot power down is shown black while the displays
+    /// sleep, and then nothing until they wake -- and nothing wakes the loop
+    /// to show it either. At the wake it is told, and a frame goes up.
+    #[test]
+    fn a_sleeping_display_shows_black_and_then_nothing_until_it_wakes() {
+        let (mut server, mut compositor, _addr) = server();
+        let mut rec = Recording::new();
+        let _ = compositor.create_window("Busy".to_string(), 50, 50, 1);
+        compositor.sleep_displays(1, 1);
+        server.reconcile_sleep(&compositor, &mut rec);
+        let (_, _, pixels) = rec.last_frame().expect("a black frame");
+        assert!(
+            pixels.iter().all(|&p| p == 0xFF00_0000),
+            "the frame was not black"
+        );
+
+        let shown = rec.shown();
+        server.present_if_due(&mut compositor, &mut rec, Duration::ZERO);
+        assert_eq!(rec.shown(), shown, "a frame went up on a sleeping display");
+        assert_eq!(
+            server.next_wake(&compositor, None, Duration::from_millis(16), Instant::now()),
+            compositor.wake_at(),
+            "a window drawing behind a dark screen woke the loop for a frame"
+        );
+
+        let resets = rec.resets();
+        compositor.wake_displays();
+        server.reconcile_sleep(&compositor, &mut rec);
+        assert_eq!(rec.resets(), resets + 1, "the display was not told it woke");
+        server.present_if_due(&mut compositor, &mut rec, Duration::ZERO);
+        assert_eq!(rec.shown(), shown + 1, "nothing went up after the wake");
+    }
+
+    /// A crashed program's tray icon goes with it, as its windows do: left
+    /// behind it is an icon no process can remove, and a click on it would be
+    /// sent to nobody.
+    #[test]
+    fn a_departed_client_does_not_leave_its_tray_icon_behind() {
+        let (mut server, mut compositor, addr) = server();
+        let mut conn = dial(&mut server, &mut compositor, addr);
+        let seq = conn
+            .send(RequestBody::SetTrayIcon {
+                id: 1,
+                glyph: "B".to_string(),
+                tooltip: "Battery".to_string(),
+            })
+            .expect("send");
+        await_reply(&mut server, &mut compositor, &mut conn, seq);
+        assert_eq!(compositor.tray_list().icons.len(), 1);
+
+        drop(conn);
+        for _ in 0..1000 {
+            server.tick(&mut compositor).expect("tick");
+            if server.client_count() == 0 {
+                assert!(
+                    compositor.tray_list().icons.is_empty(),
+                    "the tray icon outlived its client"
+                );
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panic!("the disconnection was never noticed");
+    }
+
     #[test]
     fn a_client_that_speaks_nonsense_is_dropped_and_the_rest_survive() {
         // One misbehaving application must not be able to stop the desktop.
@@ -1308,6 +1483,53 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         panic!("both connections never arrived");
+    }
+
+    #[test]
+    fn a_tcp_client_is_anonymous_and_under_the_servers_gate() {
+        // TCP cannot say which process is at the other end, so nothing is
+        // claimed for it; and the gate it is under is the server's, set before
+        // or after it connected.
+        let (mut server, mut compositor, addr) = server();
+        let mut conn = dial(&mut server, &mut compositor, addr);
+        let link = &server.clients[0].link;
+        assert_eq!(link.peer(), None);
+        assert_eq!(link.peer_holds_key(), None);
+        assert_eq!(link.shell_gate(), ShellGate::Open);
+
+        let seq = conn
+            .send(RequestBody::SubscribeWindowList { subscribe: true })
+            .expect("send");
+        assert!(matches!(
+            await_reply(&mut server, &mut compositor, &mut conn, seq),
+            ResponseBody::Ok
+        ));
+
+        // Armed after it connected: it applies at once, not from the next
+        // connection on, so the desktop never has two rules.
+        server.set_shell_gate(ShellGate::KeyHolders);
+        let seq = conn
+            .send(RequestBody::SubscribeWindowList { subscribe: false })
+            .expect("send");
+        let reply = await_reply(&mut server, &mut compositor, &mut conn, seq);
+        assert!(
+            matches!(&reply, ResponseBody::Error { message } if message == crate::wire::NOT_THE_SHELL),
+            "{reply:?}"
+        );
+
+        // And a connection made afterwards is under it from the start.
+        let mut later = Connection::new(Socket::connect(addr).expect("connect"));
+        for _ in 0..1000 {
+            server.tick(&mut compositor).expect("tick");
+            if server.client_count() == 2 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(server.clients[1].link.shell_gate(), ShellGate::KeyHolders);
+        let seq = later.send(RequestBody::GetHeldModifiers).expect("send");
+        let reply = await_reply(&mut server, &mut compositor, &mut later, seq);
+        assert!(matches!(reply, ResponseBody::Error { .. }), "{reply:?}");
     }
 
     #[test]

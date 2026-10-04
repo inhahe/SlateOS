@@ -3666,12 +3666,32 @@ lane C's `guitk`.
   `known-issues.md` TD-C-A-4K-DESKTOP-FRAME-IS-OVER-THE-BUDGET and
   `compositor::tests::bench_fill_floor`.
 
-- `[F]` Video-encoded capture fallback (lines ~4623, ~5060): **VP9**,
+- `[-]` `[F]` Video-encoded capture fallback (lines ~4623, ~5060): **VP9**,
   decided 2026-09-27 (design-decisions.md §1332). A port of libvpx for
   encoding and decoding on the CPU, threaded across every core. Hardware VP9
   (Intel's media driver, AMD's through Mesa, both over VA-API) comes once the
   GPU stack exists. The encoder films buffer-backed windows for the
   compositor's capture stream; the decoder serves SlateOS's remote viewer.
+  How it is built: §1339.
+  - `[x]` The decoder, libvpx v1.17.0's, in safe Rust (`gui/video/vp9`):
+    every picture of all 314 of libvpx's conformance vectors hashes to the
+    MD5 libvpx publishes -- profiles 0 to 3, every subsampling, tiles,
+    segmentation, lossless, compound and scaled-reference prediction,
+    intra-only and show-existing frames. 91 small vectors are committed
+    (`tests/data`); the rest are fetched by `tools/fetch_vectors.py` and run
+    with `--ignored`.
+  - `[-]` Threads, one per core (§1332). `[x]` Tile columns, each into a
+    strip of its own and put together in column order, so the pictures are
+    the same on any number of threads (the suite runs at 1 and 4). `[ ]` The
+    loop filter's superblock rows as libvpx's wavefront, which also helps
+    video with one tile column.
+  - `[-]` Speed. `[x]` A committed benchmark against libvpx
+    (`tests/bench.rs`); motion compensation and the loop filter rewritten to
+    vectorise for SSE2, exact in 16-bit lanes; `opt-level = 3` for the crate.
+    One thread on libvpx's 1080p vector: 32 fps, libvpx's C 17, its SIMD 77
+    (an i7-8700K). `[ ]` The loop filter's threads (above), frame-buffer
+    reuse, then the next profile.
+  - `[ ]` The encoder, checked by decoding what it writes.
 
 - `[-]` `[F]` **AVIF pictures**, decided 2026-09-27 (§1333): a HEIF container reader
   and a port of rav1d (dav1d in Rust, BSD) in `gui/imagecodec`, so AVIF opens
@@ -3702,19 +3722,35 @@ lane C's `guitk`.
     `open-questions.md` F-Q4 -- dav1d's assembly, or SIMD in Rust
     (known-issues.md, "[F] AVIF decoding has no committed benchmark").
 
-- `[F]` **A display transport over channel IPC** for local clients, beside
-  the TCP one (`gui/remote/src/socket.rs` planned it "when SlateOS's own
-  channel IPC becomes reachable from a userspace application", which it now
-  is). The point is the peer's identity: the kernel attests a channel's peer
-  (`SYS_CHANNEL_PEER_CRED`), a TCP peer cannot say what process it is, and
-  today's `client_pid` is a per-connection number. Unblocks the process
-  explorer's window picker (`requests/e-adf-what-the-process-explorer-still-cannot-ask.md`,
-  part 3), `open-questions.md` F-Q3's option B, and per-program (rather than
-  per-connection) grouping on the taskbar. **Blocked on lane A**
-  (`requests/f-a-a-channel-handle-can-be-guessed-and-any-process-can-use-it.md`):
-  a Linux-ABI program -- every Rust `std` one, the compositor included --
-  cannot reach channels at all; nothing can wait on channels beside sockets;
-  and until channel handles are unforgeable the peer's pid proves nothing.
+- `[-]` `[F]` **A display transport over channel IPC** for local clients,
+  beside the TCP one. The point is the peer's identity: the kernel attests a
+  channel's peer, a TCP peer cannot say what process it is, and `client_pid`
+  is a per-connection number. Unblocks the process explorer's window picker
+  (`requests/e-adf-what-the-process-explorer-still-cannot-ask.md`, part 3),
+  `open-questions.md` F-Q3's option B, per-program grouping on the taskbar,
+  and the shell gate (`TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE`).
+  design-decisions §1336.
+  - `[x]` The transport (`gui/remote/src/channel.rs`, `socket.rs`): a
+    `Socket` runs over TCP or a channel from the service registry, through
+    lane A's channel descriptors (`slate_service_*`, 1000-1005). The default
+    display on SlateOS is the service `org.slateos.Display`, with TCP only
+    when no compositor serves it; `SLATE_DISPLAY=service:NAME` names one.
+  - `[x]` The compositor serves both, records each local client's
+    kernel-attested pid, uid, gid and whether it holds the display service's
+    key (`ClientLink::peer`), and has the shell gate
+    (`--require-shell-key`).
+  - `[ ]` Live on SlateOS: lane A's descriptors reach `main` with lane A's
+    next green boot; then the session must grant the compositor `(Service,
+    WRITE)` and the shell the display service's key, and pass the flag
+    (`requests/f-bd-the-display-service-needs-two-grants-and-a-flag-from-the-session.md`).
+  - `[x]` The window picker (e-adf part 3, design-decisions §1337):
+    `PickWindow` arms a one-shot pick under a compositor-drawn crosshair, the
+    next click names the window -- title, program, attested pid -- and
+    reaches no window; started only by the focused program; Escape, another
+    button or `CancelPick` gives up. `oswindow::EventLoop::pick_window`.
+  - `[x]` The attested pid in the window list (`WindowInfo::process`,
+    window list version 6), for per-program grouping on the taskbar; `pid`
+    stays the per-connection number.
 
 - `[F]` Port FreeRDP (line ~5058)
 

@@ -1,5 +1,7 @@
 ## TD-FONT-IGNORES-GPOS-SINGLE-AND-CURSIVE-ADJUSTMENTS
 
+**Status:** FIXED 2026-08-14 -- the resolution note in the entry below gives the change; on `main` since. Stamped 2026-09-28 by lane F, `gui/font`'s owner since the six-lane split, so that the heading no longer reads as open.
+
 **What.** Of `GPOS`'s eight lookup types we apply 2 (pair, in `kern.rs`) and
 4/6 (mark-to-base and mark-to-mark, in `mark.rs`). Type 1, single adjustment,
 and type 3, cursive attachment, are parsed past and ignored, as are 5, 7 and

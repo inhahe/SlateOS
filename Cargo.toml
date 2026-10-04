@@ -6,8 +6,10 @@ members = [
     "gui/*",
     # Lane F's video codecs, each its own crate under `gui/video/`, which
     # `gui/*` cannot reach and which is itself excluded below. The first is
-    # rav1d, the AV1 decoder, vendored (`gui/video/rav1d/VENDORED.md`).
+    # rav1d, the AV1 decoder, vendored (`gui/video/rav1d/VENDORED.md`); the
+    # second, vp9, libvpx's VP9 decoder ported (design-decisions.md §1339).
     "gui/video/rav1d",
+    "gui/video/vp9",
     "init/*",
     "net/*",
     "userspace/*",
@@ -709,6 +711,18 @@ opt-level = 3
 codegen-units = 1
 
 [profile.release.package.imagecodec]
+opt-level = 3
+codegen-units = 1
+
+# vp9 (the VP9 decoder, `gui/video/vp9`) is written for the compiler to
+# vectorise -- its filters' widths are constants so that loops unroll into
+# SSE2 -- which `-Os` undoes. Counted with callgrind (exact instruction
+# counts, so other lanes' load does not disturb them) over the first 30
+# frames of libvpx's 1080p test vector: 21.98 G instructions at `-Os` with
+# 16 codegen units, 6.57 G at `-O3` with one. libvpx's own C decoder takes
+# 13.8 G. `gui/video/vp9/tests/bench.rs` is the committed benchmark. Lane F,
+# 2026-10-03.
+[profile.release.package.vp9]
 opt-level = 3
 codegen-units = 1
 

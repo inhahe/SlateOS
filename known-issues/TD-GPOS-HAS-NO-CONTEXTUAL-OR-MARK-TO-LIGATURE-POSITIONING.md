@@ -1,5 +1,7 @@
 ## TD-GPOS-HAS-NO-CONTEXTUAL-OR-MARK-TO-LIGATURE-POSITIONING
 
+**Status:** FIXED 2026-08-16 -- the resolution note in the entry below gives the change; on `main` since. Stamped 2026-09-28 by lane F, `gui/font`'s owner since the six-lane split, so that the heading no longer reads as open.
+
 **What.** `gui/font/src/gpos.rs` dispatches `GPOS` lookup types 1, 2, 3, 4 and
 6. Three types are parsed past and ignored: 5 (mark-to-ligature), 7
 (contextual positioning) and 8 (chained contextual positioning). Device tables

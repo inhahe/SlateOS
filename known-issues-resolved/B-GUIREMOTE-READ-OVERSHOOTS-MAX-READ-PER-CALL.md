@@ -1,5 +1,7 @@
 ## `B-GUIREMOTE-READ-OVERSHOOTS-MAX-READ-PER-CALL` — `Socket::read` can return up to `CHUNK - 1` bytes past its documented cap — 2026-08-21 (lane B, found; lane C owns the fix)
 
+**Status:** FIXED 2026-08-21 by `a2fd6c6aa` (`read_budget` clamps each read to what is left of the cap; `the_read_budget_never_lets_a_chunk_cross_the_cap` checks it for every `total`), on `main` since. Stamped 2026-09-28 by lane F, whose tree `gui/remote` has been since the six-lane split.
+
 **In short:** the remote-display socket promises that one `read` call takes at
 most 256 KiB before returning, and its own test asserts it. The loop that
 implements the promise checks the budget *before* each chunk and then reads a

@@ -4485,6 +4485,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "vp9"
+version = "0.1.0"
+dependencies = [
+ "md5",
+]
+
+[[package]]
 name = "vpnmanager"
 version = "0.1.0"
 dependencies = [

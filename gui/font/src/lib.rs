@@ -40,8 +40,13 @@
 //!
 //! Portions of this software are copyright © 2023 The FreeType Project
 //! (www.freetype.org). All rights reserved. The auto-hinter (`hint`) is a
-//! port of FreeType's, used under the FreeType License; `licenses/README.md`
-//! lists what derives from where, and `licenses/FTL.TXT` is the licence.
+//! port of FreeType's, used under the FreeType License. Parts of the shapers
+//! and of the outline and variation readers follow HarfBuzz's source, used
+//! under HarfBuzz's licence, and the generated tables are made from the
+//! Unicode Character Database, Microsoft's Universal Shaping Engine data and
+//! fontTools' tag registry. `licenses/README.md` lists what derives from
+//! where, the licences are beside it, and `licenses/notices.yaml` carries
+//! them into every image.
 
 extern crate alloc;
 

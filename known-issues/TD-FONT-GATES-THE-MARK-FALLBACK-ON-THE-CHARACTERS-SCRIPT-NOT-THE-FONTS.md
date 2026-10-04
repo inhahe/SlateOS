@@ -1,5 +1,7 @@
 ## TD-FONT-GATES-THE-MARK-FALLBACK-ON-THE-CHARACTERS-SCRIPT-NOT-THE-FONTS
 
+**Status:** FIXED 2026-08-14 -- the resolution note in the entry below gives the change; on `main` since. Stamped 2026-09-28 by lane F, `gui/font`'s owner since the six-lane split, so that the heading no longer reads as open.
+
 **What.** `fallback::positions_marks` decides whether a run may have its marks
 placed by measurement from the OpenType tag the run's *characters* map to. In
 HarfBuzz the same decision is made from the tag the *font* registers its

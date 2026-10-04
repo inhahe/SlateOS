@@ -1,5 +1,7 @@
 ## TD-FONT-IGNORES-GSUB-LOOKUP-FLAGS
 
+**Status:** FIXED 2026-08-14 -- the resolution note in the entry below gives the change; on `main` since. Stamped 2026-09-28 by lane F, `gui/font`'s owner since the six-lane split, so that the heading no longer reads as open.
+
 **What.** Every GSUB lookup carries a `lookupFlag`: `RightToLeft`,
 `IgnoreBaseGlyphs`, `IgnoreLigatures`, `IgnoreMarks`, `UseMarkFilteringSet`
 and a mark-attachment class in the high byte. We parse the field and then

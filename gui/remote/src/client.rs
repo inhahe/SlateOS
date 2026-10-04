@@ -871,9 +871,12 @@ impl<T: Transport> Connection<T> {
         match self.round_trip(RequestBody::CreateWindow(spec))? {
             ResponseBody::WindowCreated { window } => Ok(window),
             ResponseBody::Error { message } => Err(ClientError::Refused(message)),
-            ResponseBody::Ok | ResponseBody::Display(_) | ResponseBody::WorkArea { .. } => {
-                Err(ClientError::Mismatched)
-            }
+            ResponseBody::Ok
+            | ResponseBody::Display(_)
+            | ResponseBody::WorkArea { .. }
+            | ResponseBody::Modifiers(_)
+            | ResponseBody::Clipboard(_)
+            | ResponseBody::Picked(_) => Err(ClientError::Mismatched),
         }
     }
 
@@ -907,9 +910,12 @@ impl<T: Transport> Connection<T> {
                 height,
             } => Ok((x, y, width, height)),
             ResponseBody::Error { message } => Err(ClientError::Refused(message)),
-            ResponseBody::Ok | ResponseBody::WindowCreated { .. } | ResponseBody::Display(_) => {
-                Err(ClientError::Mismatched)
-            }
+            ResponseBody::Ok
+            | ResponseBody::WindowCreated { .. }
+            | ResponseBody::Display(_)
+            | ResponseBody::Modifiers(_)
+            | ResponseBody::Clipboard(_)
+            | ResponseBody::Picked(_) => Err(ClientError::Mismatched),
         }
     }
 
@@ -929,7 +935,10 @@ impl<T: Transport> Connection<T> {
             ResponseBody::Error { message } => Err(ClientError::Refused(message)),
             ResponseBody::WindowCreated { .. }
             | ResponseBody::Display(_)
-            | ResponseBody::WorkArea { .. } => Err(ClientError::Mismatched),
+            | ResponseBody::WorkArea { .. }
+            | ResponseBody::Modifiers(_)
+            | ResponseBody::Clipboard(_)
+            | ResponseBody::Picked(_) => Err(ClientError::Mismatched),
         }
     }
 

@@ -1,7 +1,7 @@
 # C → F — one mapping from the font settings to a `Rendering`
 
 **From:** lane C. **To:** lane F (`gui/compositor`). **Filed:** 2026-09-27.
-**Status:** open — a small tidy-up; nothing is broken.
+**Status:** ✅ **DONE 2026-10-01 by lane F** -- reply at the end.
 
 ## In short
 
@@ -35,3 +35,13 @@ types are the ones you use today.
 Nothing changes: the two mappings agree field for field today
 (`appearance`'s test `the_rendering_is_the_settings_field_for_field` pins
 this one). They can only drift when the settings grow.
+
+## Reply from lane F -- 2026-10-01
+
+Done as asked: `font_rendering` is now `settings.fonts.rendering(..)`, with
+the light or dark colour palette from the theme as before, and its doc says
+why there is one mapping. The compositor's own tests
+(`the_font_settings_choose_how_text_is_rasterized`,
+`a_light_theme_paints_colour_fonts_from_their_light_palette`) still pass
+through `set_appearance`, so the mapping is exercised end to end on this
+side too.

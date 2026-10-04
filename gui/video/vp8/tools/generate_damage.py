@@ -106,8 +106,9 @@ def cases(name, fs, rng):
 def main() -> int:
     wsl_dir = sys.argv[1]
     rng = random.Random(0x5eed_0008)
-    sys.stdout.write("# What libvpx v1.17.0's VP8 decoder does with damaged vectors:\n"
-                     "# written by tools/generate_damage.py; do not edit.\n")
+    out = []
+    out.append("# What libvpx v1.17.0's VP8 decoder does with damaged vectors:\n"
+               "# written by tools/generate_damage.py; do not edit.\n")
     for name in VECTORS:
         path = os.path.join(DATA, name)
         fs = frames(path)
@@ -117,13 +118,16 @@ def main() -> int:
                 ["wsl", "--", f"{wsl_dir}/damage_reference", wsl_path, f"limit:{LIMIT}", *mutation],
                 capture_output=True, text=True, check=True)
             lines = [l for l in r.stdout.splitlines() if l.strip()][:LIMIT]
-            sys.stdout.write(f"case {name} {' '.join(mutation)}\n")
+            out.append(f"case {name} {' '.join(mutation)}\n")
             for line in lines:
                 parts = line.split()
                 if parts[0] == "ok":
                     parts[1] = parts[1][:8]
-                sys.stdout.write(" ".join(parts) + "\n")
-            sys.stdout.write("end\n")
+                out.append(" ".join(parts) + "\n")
+            out.append("end\n")
+    # Bytes, not text: on Windows a text-mode stdout turns every newline into
+    # CRLF.
+    sys.stdout.buffer.write("".join(out).encode("utf-8"))
     return 0
 
 

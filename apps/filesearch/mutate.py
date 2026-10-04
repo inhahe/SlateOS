@@ -324,7 +324,7 @@ MUTATIONS += [
     ),
     (
         'the caret is at the start of the query',
-        '                cursor: guitk::text::TextCursor::from(self.criteria.query.len()),\n',
+        '                cursor: self.query_caret().0,\n',
         '                cursor: guitk::text::TextCursor::from(0),\n',
         [CARET],
     ),
@@ -334,11 +334,101 @@ MUTATIONS += [
         '        let ctrl = key.modifiers.ctrl;\n',
         [ALTGR],
     ),
+    # No row for "a command's letter is typed": since 2026-10-04 the query's
+    # typing is textline::apply_key's, which tells a command from AltGr itself,
+    # in its own crate and with its own tests;
+    # altgr_types_into_the_query_and_a_command_does_not still holds the query
+    # to it.
+]
+
+# The query edits at a caret (2026-10-04,
+# known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box), and
+# the two sorts that shared the clipboard's keys take Shift (design-decisions
+# 1233).
+EDITS = "the_query_edits_at_a_caret"
+SORTS = "the_sorts_that_shared_the_clipboards_keys_take_shift"
+BESIDE = "the_results_keep_their_keys_beside_the_query"
+SHOWN = "the_query_edits_what_it_shows"
+ARROWS = "the_arrows_walk_the_results_and_stop_at_the_ends"
+
+MUTATIONS += [
     (
-        'a command\'s letter is typed',
-        '                if !textline::types_into_field(key) {\n',
-        '                if !key.types_text() {\n',
-        [ALTGR],
+        "Ctrl+Shift+C does not sort by category",
+        "            Key::C if ctrl && key.modifiers.shift => return self.sort_by(SortColumn::Category),\n",
+        "",
+        [SORTS],
+    ),
+    (
+        "Ctrl+Shift+A does not sort by path",
+        "            Key::A if ctrl && key.modifiers.shift => return self.sort_by(SortColumn::Path),\n",
+        "",
+        [SORTS],
+    ),
+    (
+        "Ctrl+End is the query's",
+        "            Key::End if ctrl => return self.select_edge(false),\n",
+        "",
+        [ARROWS],
+    ),
+    (
+        "Ctrl+Home is the query's",
+        "            Key::Home if ctrl => return self.select_edge(true),\n",
+        "",
+        [ARROWS],
+    ),
+    (
+        "the query answers no key",
+        "        if let Some(answered) = self.query_key(key) {\n            return answered;\n        }\n",
+        "",
+        [EDITS, BESIDE],
+    ),
+    (
+        "a cut or a copy takes nothing to the clipboard",
+        "            self.clipboard = copied;\n",
+        "            let _ = copied;\n",
+        [EDITS],
+    ),
+    (
+        "an edit of the query is not searched for",
+        "            self.criteria.query = self.query_editor.text().to_owned();\n"
+        "            self.execute_search();\n",
+        "            self.criteria.query = self.query_editor.text().to_owned();\n",
+        [EDITS],
+    ),
+    (
+        "every key the query answers is a redraw",
+        "        Some(if after == before {\n",
+        "        Some(if false {\n",
+        [BESIDE],
+    ),
+    (
+        "a key finds the editor holding another query",
+        "        if self.query_editor.text() != self.criteria.query {\n"
+        "            self.query_editor.set_text(&self.criteria.query);",
+        "        if false {\n"
+        "            self.query_editor.set_text(&self.criteria.query);",
+        [SHOWN],
+    ),
+    (
+        "the query's selection is not drawn",
+        "                selection_anchor: self.query_caret().1,\n",
+        "                selection_anchor: None,\n",
+        [EDITS],
+    ),
+    (
+        "a press puts the caret at the start",
+        "            x - area.x,\n",
+        "            0.0,\n",
+        [EDITS],
+    ),
+    (
+        "a press in the query's box does not place the caret",
+        "                if target == Target::SearchBox {\n"
+        "                    self.press_query(event.x);\n"
+        "                    return EventResult::Consumed;\n"
+        "                }\n",
+        "",
+        [EDITS],
     ),
 ]
 

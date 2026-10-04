@@ -305,7 +305,7 @@ impl Decide for RtDecisions<'_> {
                     && let Some(last) = k.last_src
                 {
                     // avg_source_sad's count of still frames.
-                    let (sad, _, _) = content::avg_source_sad(
+                    let (sad, _) = content::avg_source_sad(
                         &f.src.planes[0],
                         &last.planes[0],
                         mi_col * 8,
@@ -390,14 +390,13 @@ impl InterDecisions<'_> {
         };
         let sbi = self.state.sb_index(mi_row, mi_col);
         if st.use_source_sad {
-            let (sad, state, zero) = content::avg_source_sad(
+            let (sad, state) = content::avg_source_sad(
                 &f.src.planes[0],
                 &self.last_src.planes[0],
                 mi_col * 8,
                 mi_row * 8,
             );
             self.sb.content_state = state;
-            self.sb.zero_temp_sad_source = zero;
             let fd = &mut self.state.content_state_sb_fd[sbi];
             *fd = if sad < 12_000 {
                 fd.saturating_add(1)

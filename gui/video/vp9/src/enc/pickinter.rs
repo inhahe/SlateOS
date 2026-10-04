@@ -188,10 +188,11 @@ fn force_skip_low_temp_var(
 /// into its blocks' searches.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct SbState {
-    /// The superblock's temporal content (`content_state_sb`).
+    /// The superblock's temporal content (`content_state_sb`). (libvpx also
+    /// notes here whether the superblock's source changed at all,
+    /// `zero_temp_sad_source`, and reads it only for screen content, which
+    /// this encoder does not offer.)
     pub content_state: ContentState,
-    /// Its source did not change at all since the last frame.
-    pub zero_temp_sad_source: bool,
     pub skip_low_source_sad: bool,
     pub lowvar_highsumdiff: bool,
     /// For how many frames the superblock has been static, kept from the

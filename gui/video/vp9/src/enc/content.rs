@@ -35,13 +35,14 @@ use crate::frame::Plane;
 /// A 64x64 block's sum of absolute differences between this picture and the
 /// last, and its content state: libvpx's `avg_source_sad`. `y`, `x` are the
 /// superblock's luma position; both planes repeat their edges out to whole
-/// superblocks. Returns the sum, the state and whether nothing changed.
+/// superblocks. Returns the sum and the state. (libvpx also notes a sum of
+/// zero, `zero_temp_sad_source`, which only its screen-content mode reads.)
 pub(crate) fn avg_source_sad(
     src: &Plane<u8>,
     last: &Plane<u8>,
     x: usize,
     y: usize,
-) -> (u64, ContentState, bool) {
+) -> (u64, ContentState) {
     let s = src.data.get(y * src.stride + x..).unwrap_or(&[]);
     let l = last.data.get(y * last.stride + x..).unwrap_or(&[]);
     let tmp_sad = u64::from(variance::sad(s, src.stride, l, last.stride, 64, 64));
@@ -59,7 +60,7 @@ pub(crate) fn avg_source_sad(
     } else if tmp_sad > 20_000 {
         state = ContentState::VeryHighSad;
     }
-    (tmp_sad, state, tmp_sad == 0)
+    (tmp_sad, state)
 }
 
 /// libvpx's `skin_mean`, `skin_inv_cov` and `skin_threshold`: a fixed-point

@@ -592,12 +592,12 @@ pub(crate) fn fast_dia_search(
 }
 
 /// The sub-pixel search's result: the vector (eighth pixels), its score,
-/// and the variance and sum of squared differences there.
+/// and the sum of squared differences there. (libvpx also returns the
+/// variance there, its `distortion`, which its realtime path ignores.)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Subpel {
     pub mv: Mv,
     pub besterr: u32,
-    pub distortion: u32,
     pub sse: u32,
 }
 
@@ -636,7 +636,6 @@ pub(crate) fn find_best_sub_pixel_tree(
     let mut out = Subpel {
         mv: vector(br, bc),
         besterr: var.wrapping_add(costs.mv_err_cost(vector(br, bc), ref_mv, error_per_bit)),
-        distortion: var,
         sse,
     };
     let in_range = |r: i32, c: i32| {
@@ -656,7 +655,6 @@ pub(crate) fn find_best_sub_pixel_tree(
                 if cost < out.besterr {
                     best_idx = Some(idx);
                     out.besterr = cost;
-                    out.distortion = thismse;
                     out.sse = sse;
                 }
             }
@@ -681,7 +679,6 @@ pub(crate) fn find_best_sub_pixel_tree(
             if cost < out.besterr {
                 best_idx = Some(4);
                 out.besterr = cost;
-                out.distortion = thismse;
                 out.sse = sse;
             }
         }
@@ -1024,7 +1021,8 @@ mod tests {
         let sub =
             find_best_sub_pixel_tree(&s, &limits, mv, Mv::ZERO, false, 1, QUARTER_PEL, &costs);
         assert_eq!(sub.mv, vector(24, -16));
-        assert_eq!(sub.distortion, 0);
+        // Where the block is exactly, nothing differs.
+        assert_eq!(sub.sse, 0);
     }
 
     #[test]

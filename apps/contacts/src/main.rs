@@ -4961,7 +4961,9 @@ impl ContactsApp {
                 x: inner.x,
                 y,
                 text: placeholder.to_string(),
-                color: self.palette.overlay0,
+                // What the box is for, faint but readable: overlay0 is the
+                // disabled grey, 2.30:1 on the base.
+                color: self.palette.subtext0,
                 font_size: BOX_TEXT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(inner.w),
@@ -7802,16 +7804,23 @@ mod tests {
     /// The `(y, text)` of every notes line drawn in the detail panel.
     fn notes_lines_drawn(app: &ContactsApp) -> Vec<(f32, String)> {
         let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        // Not the search box's placeholder, which is drawn at the same size
+        // and in the same colour.
+        let search = probe::rect_of(app, Target::Search);
         app.render()
             .into_iter()
             .filter_map(|c| match c {
                 RenderCommand::Text {
+                    x,
                     y,
                     text,
                     font_size,
                     color,
                     ..
-                } if (font_size - NOTES_FONT_SIZE).abs() < 0.01 && color == pal.subtext0 => {
+                } if (font_size - NOTES_FONT_SIZE).abs() < 0.01
+                    && color == pal.subtext0
+                    && !search.is_some_and(|r| r.contains(x, y)) =>
+                {
                     Some((y, text))
                 }
                 _ => None,

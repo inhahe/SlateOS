@@ -2159,7 +2159,9 @@ fn render_search_bar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) 
             y,
             text: "Search devices...".to_string(),
             font_size: SEARCH_TEXT_SIZE,
-            color: state.palette.overlay0,
+            // What the box is for, faint but readable: overlay0 is the
+            // disabled grey, 2.30:1 on the base.
+            color: state.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,

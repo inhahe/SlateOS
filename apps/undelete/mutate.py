@@ -284,9 +284,7 @@ MUTATIONS += [
     ),
     (
         "Ctrl+C, X and V are nobody's",
-        "                Key::C | Key::X | Key::V if self.screen == UiScreen::Results => {\n"
-        "                    self.search_key(key)\n"
-        "                }\n",
+        "                _ if self.screen == UiScreen::Results => self.search_key(key),\n",
         "",
         [EDITS],
     ),

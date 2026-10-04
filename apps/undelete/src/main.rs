@@ -2425,10 +2425,9 @@ impl UndeleteApp {
                     self.select_file(last);
                     EventResult::Consumed
                 }
-                // Ctrl+C, X and V are the search's. Ctrl+A is the files'.
-                Key::C | Key::X | Key::V if self.screen == UiScreen::Results => {
-                    self.search_key(key)
-                }
+                // Every other Ctrl chord is the search's to answer or not: it
+                // takes Ctrl+C, X and V. Ctrl+A is the files'.
+                _ if self.screen == UiScreen::Results => self.search_key(key),
                 _ => EventResult::Ignored,
             };
         }

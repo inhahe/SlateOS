@@ -30,11 +30,10 @@ use crate::common::{
     TxSize,
 };
 use crate::context;
-use crate::detokenize::scan_for;
 use crate::enc::cost::{PROB_COST_SHIFT, cost_bit};
 use crate::enc::encodeframe::{BlockModes, FrameEncoder, Placement};
 use crate::enc::fdct;
-use crate::enc::quantize::{QuantSet, quantize_fp};
+use crate::enc::quantize::{QuantSet, iscan_for, quantize_fp};
 use crate::enc::rd::{RDDIV_BITS, rdcost};
 use crate::tables;
 
@@ -224,7 +223,7 @@ fn block_yrd(
         }
     }
     let n = step << 4;
-    let scan = scan_for(tx_size, crate::common::DCT_DCT);
+    let iscan = iscan_for(tx_size, crate::common::DCT_DCT);
     let mut skippable = true;
     let mut eob_cost = 0;
     let mut rate = 0i32;
@@ -248,7 +247,7 @@ fn block_yrd(
                         coeff[..16].copy_from_slice(&out);
                     }
                 }
-                let eob = quantize_fp(&coeff, n, qs, &mut qcoeff, &mut dqcoeff, scan.scan, false);
+                let eob = quantize_fp(&coeff, n, qs, &mut qcoeff, &mut dqcoeff, iscan, false);
                 skippable &= eob == 0;
                 eob_cost += 1;
                 if eob == 1 {

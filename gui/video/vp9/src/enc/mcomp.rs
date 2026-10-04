@@ -210,22 +210,23 @@ impl LumaRef {
         let stride = aw + 2 * b;
         let rows = ah + 2 * b;
         let mut data = vec![0u8; stride * rows];
-        for y in 0..rows {
+        for (y, row) in data.chunks_exact_mut(stride).enumerate() {
             let sy = (y as isize - b as isize).clamp(0, h as isize - 1) as usize;
             let src = p.data.get(sy * p.stride..).unwrap_or(&[]);
+            let src = src.get(..w).unwrap_or(src);
             let edge_l = src.first().copied().unwrap_or(0);
             let edge_r = src.get(w - 1).copied().unwrap_or(0);
-            if let Some(row) = data.get_mut(y * stride..(y + 1) * stride) {
-                for (x, d) in row.iter_mut().enumerate() {
-                    *d = if x < b {
-                        edge_l
-                    } else if x - b < w {
-                        src.get(x - b).copied().unwrap_or(0)
-                    } else {
-                        edge_r
-                    };
-                }
+            // The border, the picture's row (0 past the plane's samples) and
+            // the border again: stride is at least w and two borders.
+            let (left, rest) = row.split_at_mut(b.min(stride));
+            let (mid, right) = rest.split_at_mut(w.min(rest.len()));
+            let (picture, short) = mid.split_at_mut(src.len().min(mid.len()));
+            left.fill(edge_l);
+            for (d, &s) in picture.iter_mut().zip(src) {
+                *d = s;
             }
+            short.fill(0);
+            right.fill(edge_r);
         }
         Self {
             data,
@@ -1042,5 +1043,45 @@ mod tests {
         assert_eq!(r.from(-1, 40)[0], 3);
         assert_eq!(r.from(1, 1)[0], 4);
         assert!(r.from(-(INNER_BORDER as i32) - 1, 0).is_empty());
+    }
+
+    /// Every sample of a padded reference, out to the border, is the
+    /// picture's nearest (0 where the plane's samples run out) -- for
+    /// pictures narrower and shorter than their planes, a plane whose last
+    /// picture row is cut short, and a single sample.
+    #[test]
+    fn a_padded_reference_is_its_definition() {
+        let mut seed = 5u32;
+        let mut next = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 24) as u8
+        };
+        // (crop width, crop height, stride, rows allocated, samples missing)
+        for (cw, ch, stride, ah, missing) in [
+            (13, 7, 16, 8, 0),
+            (16, 16, 16, 16, 0),
+            (5, 3, 8, 4, 13),
+            (1, 1, 1, 1, 0),
+        ] {
+            let p = Plane {
+                data: (0..stride * ah - missing).map(|_| next()).collect(),
+                stride,
+                alloc_height: ah,
+                width: cw,
+                height: ch,
+                crop_width: cw,
+                crop_height: ch,
+            };
+            let r = LumaRef::new(&p);
+            let b = INNER_BORDER as i32;
+            for y in -b..ah as i32 + b {
+                for x in -b..stride as i32 + b {
+                    let sx = x.clamp(0, cw as i32 - 1) as usize;
+                    let sy = y.clamp(0, ch as i32 - 1) as usize;
+                    let want = p.data.get(sy * stride + sx).copied().unwrap_or(0);
+                    assert_eq!(r.from(x, y)[0], want, "({x}, {y}) of {cw}x{ch}");
+                }
+            }
+        }
     }
 }

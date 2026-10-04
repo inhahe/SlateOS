@@ -135,42 +135,96 @@ fn fdct8_core(s: [i64; 8]) -> [i64; 8] {
     out
 }
 
+// --- Eight columns at once ---------------------------------------------------------------------
+//
+// The 8x8 DCT is the encoder's commonest transform, so it is also written
+// the way libvpx's SSE2 version is: each pass transforms all eight columns
+// together, a row of the block being eight lanes, and stores each column's
+// coefficients as a row -- the transpose between the passes. A pass is a
+// loop over the columns whose body is one column's transform, which the
+// compiler's loop vectoriser runs four (or eight) columns to an instruction,
+// making the transposing stores shuffles; written as operations on whole
+// rows instead, it stays scalar. The arithmetic is libvpx's 8-bit build's --
+// 32-bit intermediates, which hold every value an 8-bit residual can produce
+// (the largest product is below 2^30) -- so the coefficients are
+// `fdct8_core`'s exactly, which the tests check.
+
+/// One row of eight lanes.
+type Lanes = [i32; 8];
+
+/// `cospi_k_64` in 32 bits.
+#[inline(always)]
+fn c32(k: usize) -> i32 {
+    COSPI[k] as i32
+}
+
+/// `fdct_round_shift` in 32 bits.
+#[inline(always)]
+fn rs32(x: i32) -> i32 {
+    (x + (1 << 13)) >> 14
+}
+
+/// One pass of `vpx_fdct8x8_c` over eight columns, `rows` the block's rows
+/// (lane `i` of each is column `i`), each sum and difference times `scale`:
+/// `fdct8_core` for every column. Returns column `i`'s coefficients as row
+/// `i` -- libvpx's intermediate, whose columns its second pass reads, as
+/// this one reads `rows`'.
+#[inline(always)]
+fn fdct8x8_pass(rows: &[Lanes; 8], scale: i32) -> [Lanes; 8] {
+    let mut out = [[0; 8]; 8];
+    for (i, o) in out.iter_mut().enumerate() {
+        let p = |r: usize| rows[r][i];
+        let s0 = (p(0) + p(7)) * scale;
+        let s1 = (p(1) + p(6)) * scale;
+        let s2 = (p(2) + p(5)) * scale;
+        let s3 = (p(3) + p(4)) * scale;
+        let s4 = (p(3) - p(4)) * scale;
+        let s5 = (p(2) - p(5)) * scale;
+        let s6 = (p(1) - p(6)) * scale;
+        let s7 = (p(0) - p(7)) * scale;
+        let x0 = s0 + s3;
+        let x1 = s1 + s2;
+        let x2 = s1 - s2;
+        let x3 = s0 - s3;
+        let t2 = rs32((s6 - s5) * c32(16));
+        let t3 = rs32((s6 + s5) * c32(16));
+        let y0 = s4 + t2;
+        let y1 = s4 - t2;
+        let y2 = s7 - t3;
+        let y3 = s7 + t3;
+        *o = [
+            rs32((x0 + x1) * c32(16)),
+            rs32(y0 * c32(28) + y3 * c32(4)),
+            rs32(x2 * c32(24) + x3 * c32(8)),
+            rs32(y2 * c32(12) + y1 * -c32(20)),
+            rs32((x0 - x1) * c32(16)),
+            rs32(y1 * c32(12) + y2 * c32(20)),
+            rs32(-x2 * c32(8) + x3 * c32(24)),
+            rs32(y3 * c32(28) + y0 * -c32(4)),
+        ];
+    }
+    out
+}
+
 /// libvpx's `vpx_fdct8x8_c`.
 pub(crate) fn fdct8x8(input: &[i16], stride: usize, output: &mut [i32; 64]) {
-    let mut intermediate = [0i64; 64];
-    for pass in 0..2 {
-        for i in 0..8 {
-            let px = |k: usize| -> i64 {
-                if pass == 0 {
-                    i64::from(input[k * stride + i])
-                } else {
-                    intermediate[k * 8 + i]
-                }
-            };
-            let scale = if pass == 0 { 4 } else { 1 };
-            let s = [
-                (px(0) + px(7)) * scale,
-                (px(1) + px(6)) * scale,
-                (px(2) + px(5)) * scale,
-                (px(3) + px(4)) * scale,
-                (px(3) - px(4)) * scale,
-                (px(2) - px(5)) * scale,
-                (px(1) - px(6)) * scale,
-                (px(0) - px(7)) * scale,
-            ];
-            let out = fdct8_core(s);
-            for (k, &v) in out.iter().enumerate() {
-                if pass == 0 {
-                    intermediate[i * 8 + k] = v;
-                } else {
-                    output[i * 8 + k] = v as i32;
-                }
-            }
+    let mut rows = [[0; 8]; 8];
+    for (k, row) in rows.iter_mut().enumerate() {
+        // Callers pass whole blocks; a row past the slice reads as 0.
+        let src: &[i16; 8] = input
+            .get(k * stride..k * stride + 8)
+            .and_then(|s| s.try_into().ok())
+            .unwrap_or(&[0; 8]);
+        for (v, &s) in row.iter_mut().zip(src) {
+            *v = i32::from(s);
         }
     }
-    // C's division, which truncates toward zero.
-    for v in output.iter_mut() {
-        *v /= 2;
+    let second = fdct8x8_pass(&fdct8x8_pass(&rows, 4), 1);
+    for (out, row) in output.chunks_exact_mut(8).zip(&second) {
+        for (o, &v) in out.iter_mut().zip(row) {
+            // C's division, which truncates toward zero.
+            *o = v / 2;
+        }
     }
 }
 
@@ -996,6 +1050,99 @@ mod tests {
                 h = fnv(&coefs, h);
             }
             assert_eq!(h, want, "transform {t}, type {tx_type}");
+        }
+    }
+
+    /// `vpx_fdct8x8_c` as it is written -- one column at a time, 64-bit --
+    /// for the eight-lane version to be checked against.
+    fn fdct8x8_by_column(input: &[i16], stride: usize) -> [i32; 64] {
+        let mut intermediate = [0i64; 64];
+        let mut output = [0i32; 64];
+        for pass in 0..2 {
+            for i in 0..8 {
+                let px = |k: usize| -> i64 {
+                    if pass == 0 {
+                        i64::from(input[k * stride + i])
+                    } else {
+                        intermediate[k * 8 + i]
+                    }
+                };
+                let scale = if pass == 0 { 4 } else { 1 };
+                let s = [
+                    (px(0) + px(7)) * scale,
+                    (px(1) + px(6)) * scale,
+                    (px(2) + px(5)) * scale,
+                    (px(3) + px(4)) * scale,
+                    (px(3) - px(4)) * scale,
+                    (px(2) - px(5)) * scale,
+                    (px(1) - px(6)) * scale,
+                    (px(0) - px(7)) * scale,
+                ];
+                for (k, &v) in fdct8_core(s).iter().enumerate() {
+                    if pass == 0 {
+                        intermediate[i * 8 + k] = v;
+                    } else {
+                        output[i * 8 + k] = (v / 2) as i32;
+                    }
+                }
+            }
+        }
+        output
+    }
+
+    /// The eight-lane 8x8 DCT is libvpx's column-at-a-time one: on random
+    /// residuals, on every block of the two extremes in each sample's
+    /// sign pattern along a row or a column, and on the blocks that drive
+    /// each coefficient furthest (the residual the sign of its basis).
+    #[test]
+    fn the_eight_lane_dct_is_the_column_dct() {
+        let mut rng = Lcg(0x008a_8e11);
+        let mut block = vec![0i16; 8 * 8];
+        let check = |block: &[i16]| {
+            let mut got = [0i32; 64];
+            fdct8x8(block, 8, &mut got);
+            assert_eq!(got, fdct8x8_by_column(block, 8), "{block:?}");
+        };
+        for _ in 0..20_000 {
+            for v in &mut block {
+                *v = (rng.next() % 511) as i16 - 255;
+            }
+            check(&block);
+        }
+        // Each row (and each column) one of 256 sign patterns of +-255.
+        for pattern in 0..256u32 {
+            for r in 0..8 {
+                for c in 0..8 {
+                    let bit = |i: usize| (pattern >> i) & 1 != 0;
+                    block[r * 8 + c] = if bit(c) ^ (r % 2 == 1) { 255 } else { -255 };
+                }
+            }
+            check(&block);
+            for r in 0..8 {
+                for c in 0..8 {
+                    let bit = |i: usize| (pattern >> i) & 1 != 0;
+                    block[r * 8 + c] = if bit(r) ^ (c % 2 == 1) { 255 } else { -255 };
+                }
+            }
+            check(&block);
+        }
+        // The residual each coefficient's basis function's sign: the most
+        // that coefficient can be.
+        let cos = |n: u32, k: u32| {
+            (f64::from(2 * n + 1) * f64::from(k) * std::f64::consts::PI / 16.0).cos()
+        };
+        for u in 0..8u32 {
+            for v in 0..8u32 {
+                for sign in [255i16, -255] {
+                    for r in 0..8u32 {
+                        for c in 0..8u32 {
+                            let positive = cos(r, u) * cos(c, v) >= 0.0;
+                            block[(r * 8 + c) as usize] = if positive { sign } else { -sign };
+                        }
+                    }
+                    check(&block);
+                }
+            }
         }
     }
 

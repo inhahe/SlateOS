@@ -49,7 +49,7 @@ use crate::context;
 use crate::detokenize::{Scan, scan_for};
 use crate::enc::bitstream::{EncCounts, FrameHeader};
 use crate::enc::fdct;
-use crate::enc::quantize::{Quants, quantize_b, quantize_fp};
+use crate::enc::quantize::{Quants, iscan_for, quantize_b, quantize_fp};
 use crate::enc::tokenize::{TokenExtra, TokenSink, tokenize_b};
 use crate::frame::FrameBuf;
 use crate::header::{self, Segmentation};
@@ -1426,7 +1426,7 @@ impl<'a> FrameEncoder<'a> {
         let n = 4usize << tx_size;
         let mut any = false;
         for (block, row, col) in self.transform_blocks(place, block8, plane, tx_size) {
-            let (mode, tx_type, scan) = self.transform_of(mi, plane, block, tx_size);
+            let (mode, tx_type, _) = self.transform_of(mi, plane, block, tx_size);
             let (x0, y0) = self.predict_intra(place, block8, plane, row, col, tx_size, mode);
             if !residual {
                 continue;
@@ -1447,7 +1447,7 @@ impl<'a> FrameEncoder<'a> {
                 &qs,
                 qcoeff,
                 dqcoeff,
-                scan.scan,
+                iscan_for(tx_size, tx_type),
                 tx_size == TX_32X32,
             );
             if let Some(e) = pc.eobs.get_mut(block) {
@@ -1490,7 +1490,7 @@ impl<'a> FrameEncoder<'a> {
             };
             let qs = self.quants.get(plane, usize::try_from(qindex).unwrap_or(0));
             let n = 4usize << tx_size;
-            let scan = scan_for(tx_size, DCT_DCT);
+            let iscan = iscan_for(tx_size, DCT_DCT);
             let (sx, sy) = self.subsampling(plane);
             for (block, row, col) in self.transform_blocks(place, block8, plane, tx_size) {
                 if plane == 0 && skip_y {
@@ -1517,7 +1517,7 @@ impl<'a> FrameEncoder<'a> {
                     &qs,
                     qcoeff,
                     dqcoeff,
-                    scan.scan,
+                    iscan,
                     tx_size == TX_32X32,
                 );
                 if let Some(e) = pc.eobs.get_mut(block) {

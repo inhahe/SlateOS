@@ -1,4 +1,5 @@
-//! How fast the decoder is, against libvpx on the same machine.
+//! How fast the decoder and the encoder are, against libvpx on the same
+//! machine.
 //!
 //! Not a pass/fail test: a measurement, run explicitly --
 //!
@@ -26,6 +27,11 @@
 //! and on twelve (`-t 12`, this machine's count). They are the table
 //! `LIBVPX` below, with the machine they were measured on; remeasure them
 //! on another before comparing.
+//!
+//! `bench_vp9_encode` does the same for the encoder: each reference encode's
+//! input (`tests/data/encoder/README.md`) encoded at its settings on one
+//! thread, only the encoding timed, against libvpx's `vpxenc` in
+//! `LIBVPX_ENCODE`.
 
 #![allow(
     clippy::indexing_slicing,
@@ -42,7 +48,7 @@ mod common;
 
 use std::time::{Duration, Instant};
 
-use vp9::Decoder;
+use vp9::{Decoder, Encoder, EncoderConfig, PlaneView};
 
 /// libvpx v1.17.0's speed on each vector, in frames per second: (vector,
 /// plain C on one thread, SIMD on one thread, SIMD on twelve). The fastest
@@ -106,5 +112,116 @@ fn bench_vp9_decode() {
         let one = fps(&v.packets, 1);
         let all = fps(&v.packets, cores);
         std::println!("{name:<40} {one:>8.1} {all:>8.1} {c1:>9.1} {simd1:>9.1} {simd12:>11.1}");
+    }
+}
+
+/// libvpx v1.17.0's realtime encoder on each reference input, in frames per
+/// second: (reference, plain C, SIMD), both on one thread. Its `vpxenc` with
+/// the references' settings (`tests/data/encoder/README.md`), raw I420 in,
+/// timed whole -- reading the input is a percent or two of it -- the fastest
+/// of five runs, built as `LIBVPX`'s builds are with the encoder enabled
+/// (its SIMD build makes the C build's bytes), measured 2026-10-04 on the
+/// machine `LIBVPX` names while a boot test shared it -- as did the port's
+/// first numbers: 20.9, 55.5 and 123.1.
+const LIBVPX_ENCODE: [(&str, f64, f64); 3] = [
+    ("rt8 (1280x720)", 28.9, 80.5),
+    ("rt8cut (651x357)", 75.1, 275.3),
+    ("rt8small (350x286)", 154.8, 638.1),
+];
+
+/// The first `count` pictures the full suite's vector `name` shows, as I420.
+fn shown(name: &str, count: usize) -> Option<Vec<common::I420>> {
+    let dir = common::full_suite_dir()?;
+    let v = common::read_vector(&dir.join(name)).ok()?;
+    let mut d = Decoder::new();
+    let mut out = Vec::new();
+    for p in &v.packets {
+        let Some(picture) = d.decode(p).ok()? else {
+            continue;
+        };
+        let planes = [0, 1, 2].map(|i| {
+            let view = picture.plane8(i).unwrap();
+            (0..view.height)
+                .flat_map(|y| &view.data[y * view.stride..][..view.width])
+                .copied()
+                .collect::<Vec<u8>>()
+        });
+        out.push(common::I420 {
+            width: picture.width() as usize,
+            height: picture.height() as usize,
+            planes,
+        });
+        if out.len() == count {
+            return Some(out);
+        }
+    }
+    None
+}
+
+/// Encode every picture once, on a fresh encoder made with `config`.
+fn encode_pass(input: &[common::I420], config: EncoderConfig) {
+    let mut e = Encoder::new(config).unwrap();
+    for p in input {
+        let views = [0, 1, 2].map(|i| {
+            let (width, height) = p.plane_size(i);
+            PlaneView {
+                data: &p.planes[i],
+                stride: width,
+                width,
+                height,
+            }
+        });
+        e.encode(views).unwrap();
+    }
+}
+
+/// Frames per second encoding `input`: passes repeated until they take half
+/// a second, the fastest of three such runs.
+fn encode_fps(input: &[common::I420], config: EncoderConfig) -> f64 {
+    let start = Instant::now();
+    encode_pass(input, config);
+    let once = start.elapsed().max(Duration::from_micros(1));
+    let passes = (Duration::from_millis(500).as_secs_f64() / once.as_secs_f64()).ceil() as usize;
+    let passes = passes.max(1);
+    (0..3)
+        .map(|_| {
+            let start = Instant::now();
+            for _ in 0..passes {
+                encode_pass(input, config);
+            }
+            (input.len() * passes) as f64 / start.elapsed().as_secs_f64()
+        })
+        .fold(0.0, f64::max)
+}
+
+/// How fast the encoder is: each reference input encoded with the
+/// encoder's own decisions, at the reference's settings, on one thread --
+/// against `LIBVPX_ENCODE`.
+#[test]
+#[ignore = "measurement benchmark; run explicitly with --release --ignored --nocapture"]
+fn bench_vp9_encode() {
+    let first = shown("vp90-2-22-svc_1280x720_1.webm", 30)
+        .expect("the full suite is not fetched: python gui/video/vp9/tools/fetch_vectors.py");
+    let cut = common::cut_reference_input(shown).unwrap();
+    let small = common::small_reference_input(shown).unwrap();
+    let size = |w: usize, h: usize| (w as u32, h as u32);
+    let (cw, ch) = size(common::CUT_WIDTH, common::CUT_HEIGHT);
+    let (sw, sh) = size(common::SMALL_WIDTH, common::SMALL_HEIGHT);
+    let runs = [
+        (&first, EncoderConfig::realtime(1280, 720, 1000)),
+        (&cut, EncoderConfig::realtime(cw, ch, 600)),
+        (&small, EncoderConfig::realtime(sw, sh, 200)),
+    ];
+    std::println!(
+        "frames per second, one thread; libvpx's as measured on the machine `LIBVPX` names\n\
+         {:<24} {:>8} {:>9} {:>9}",
+        "reference",
+        "port",
+        "libvpx C",
+        "SIMD"
+    );
+    for ((input, config), (name, c, simd)) in runs.into_iter().zip(LIBVPX_ENCODE) {
+        let port = encode_fps(input, config);
+        std::println!("{name:<24} {port:>8.1} {c:>9.1} {simd:>9.1}");
     }
 }

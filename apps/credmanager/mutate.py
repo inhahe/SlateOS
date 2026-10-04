@@ -24,7 +24,10 @@ Two tables:
   lock due is not taken.  And the text boxes (2026-10-03), the toolkit's
   fields: lit under the pointer as settled after every event, marked where
   typing goes -- which follows from what is showing -- and red where a
-  refusal was about them.
+  refusal was about them.  And the auto-lock slider (2026-10-03), which was
+  a number nothing set and a knob drawn for nothing: the toolkit's slider,
+  showing and setting the vault's own time, keeping a drag only when let go,
+  and dead under a dialog, another panel or the lock screen.
 * **vaultfile.rs** -- the file itself: a header that asks for too much work is
   refused before any is done, and contents are read whole or not at all.
 
@@ -71,6 +74,8 @@ WALL_CLOCK = "a_window_runs_on_the_wall_clock"
 LOCK_BOX = "the_lock_screens_box_is_the_toolkits_field"
 SEARCH_BOXES = "the_search_and_the_forms_boxes_are_the_toolkits_fields"
 FIRST_RUN_BOXES = "the_first_runs_and_the_restores_boxes_are_the_toolkits_fields"
+SLIDER_SETS = "the_auto_lock_slider_shows_and_sets_the_vaults_own_time"
+SLIDER_GUARDED = "the_auto_lock_slider_is_not_used_through_a_dialog_or_by_passing_over_it"
 
 MAIN = [
     (
@@ -500,6 +505,104 @@ MAIN = [
         '        self.focus_ring_width = settings.focus_ring_width();\n',
         '        let _ = settings;\n',
         [LOCK_BOX, SEARCH_BOXES, FIRST_RUN_BOXES],
+    ),
+    # -- the auto-lock slider, 2026-10-03: a number nothing set, a knob for nothing
+    (
+        "the panel shows the slider's own time, not the vault's",
+        '        if !shown.is_dragging() {\n'
+        '            shown.set_value(f64::from(self.vault.auto_lock_minutes));\n'
+        '        }\n',
+        '',
+        [SLIDER_SETS],
+    ),
+    (
+        "a drag's minutes are not shown as it goes",
+        '        if !shown.is_dragging() {\n',
+        '        if true {\n',
+        [SLIDER_SETS],
+    ),
+    (
+        'letting a drag go keeps nothing',
+        '        if let Some(guitk::slider::SliderEvent::Confirmed(minutes)) = response.event() {\n'
+        '            self.set_auto_lock(minutes);\n'
+        '        }\n'
+        '        (response.is_taken()',
+        '        (response.is_taken()',
+        [SLIDER_SETS],
+    ),
+    (
+        'a drag keeps every minute it passes',
+        '        if let Some(guitk::slider::SliderEvent::Confirmed(minutes)) = response.event() {\n'
+        '            self.set_auto_lock(minutes);\n'
+        '        }\n'
+        '        (response.is_taken()',
+        '        if let Some(event) = response.event() {\n'
+        '            self.set_auto_lock(event.value());\n'
+        '        }\n'
+        '        (response.is_taken()',
+        [SLIDER_SETS],
+    ),
+    (
+        "the slider's keys keep nothing",
+        '        if let Some(guitk::slider::SliderEvent::Confirmed(minutes)) = response.event() {\n'
+        '            self.set_auto_lock(minutes);\n'
+        '        }\n'
+        '        response.is_taken().then_some',
+        '        response.is_taken().then_some',
+        [SLIDER_SETS],
+    ),
+    (
+        'the slider takes Up and Down from the entry list',
+        '        if !its_key && !self.auto_lock.is_dragging() {\n'
+        '            return None;\n'
+        '        }\n',
+        '',
+        [SLIDER_SETS],
+    ),
+    (
+        'the slider is moved with another panel up',
+        '            && self.detail_view == DetailView::Settings\n',
+        '',
+        [SLIDER_GUARDED],
+    ),
+    (
+        'the slider is moved through a vault dialog',
+        '            && self.dialog.is_none()\n'
+        '    }\n',
+        '    }\n',
+        [SLIDER_GUARDED],
+    ),
+    (
+        'the slider is moved through the lock screen',
+        '    fn settings_live(&self) -> bool {\n'
+        '        self.vault.is_unlocked()\n'
+        '            && self.detail_view',
+        '    fn settings_live(&self) -> bool {\n'
+        '        self.detail_view',
+        [SLIDER_GUARDED],
+    ),
+    (
+        'a press on the slider is not use of the vault',
+        '        if matches!(\n'
+        '            mouse.kind,\n'
+        '            MouseEventKind::Press(_) | MouseEventKind::Release(_)\n'
+        '        ) {\n'
+        '            state.vault.touch(state.now);\n'
+        '        }\n',
+        '',
+        [SLIDER_GUARDED],
+    ),
+    (
+        'the pointer passing over the slider is use of the vault',
+        '            MouseEventKind::Press(_) | MouseEventKind::Release(_)\n',
+        '            MouseEventKind::Press(_) | MouseEventKind::Release(_) | MouseEventKind::Move\n',
+        [SLIDER_GUARDED],
+    ),
+    (
+        'the slider has no place among the controls',
+        '    frame.hit(Target::AutoLock, placement.hit());\n',
+        '',
+        [SLIDER_SETS],
     ),
     (
         'the event that finds the lock due is taken as well',

@@ -104,6 +104,38 @@ const HEADING_FONT_SIZE: f32 = 18.0;
 const SMALL_FONT_SIZE: f32 = 12.0;
 const CORNER_RADIUS: f32 = 6.0;
 const DEFAULT_AUTO_LOCK_MINUTES: u32 = 15;
+
+/// The auto-lock times the settings slider offers, in minutes: one to an hour.
+const AUTO_LOCK_MINUTES: (u32, u32) = (1, 60);
+
+/// The settings panel's padding.
+const SETTINGS_PAD: f32 = 24.0;
+
+/// Where the settings panel draws the auto-lock slider in a window `width`
+/// wide: below the heading (36 pixels), the SECURITY label (24) and the
+/// auto-lock row (32), across the panel inside its padding.
+///
+/// An auto-lock slider value as the whole minutes it stands for, in the
+/// slider's range.
+fn whole_minutes(value: f64) -> u32 {
+    let (lo, hi) = AUTO_LOCK_MINUTES;
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "rounded and clamped into the slider's own range first"
+    )]
+    let minutes = value.round().clamp(f64::from(lo), f64::from(hi)) as u32;
+    minutes
+}
+
+/// One function, read by the drawing and by the pointer, so a press lands
+/// on the value the thumb is drawn at.
+fn auto_lock_placement(width: f32) -> guitk::slider::Placement {
+    let x = SIDEBAR_WIDTH + ENTRY_LIST_WIDTH + SETTINGS_PAD;
+    let y = TOOLBAR_HEIGHT + SETTINGS_PAD + 36.0 + 24.0 + 32.0;
+    let w = (width - SIDEBAR_WIDTH - ENTRY_LIST_WIDTH - SETTINGS_PAD * 2.0).max(0.0);
+    guitk::slider::Placement::horizontal(Rect::new(x, y, w, 4.0), 12.0)
+}
 const PASSWORD_OLD_DAYS: u64 = 90;
 const WEAK_PASSWORD_LEN: usize = 8;
 
@@ -160,6 +192,10 @@ enum Target {
     RestoreBackup,
     /// Settings: export as plain text.
     ExportCsv,
+    /// Settings: the auto-lock slider. Its press, drag and release go to the
+    /// slider itself ([`AppState::auto_lock_mouse`]), which needs where on it
+    /// they land; this target is its place in the hit boxes.
+    AutoLock,
     /// The export warning: go on.
     ExportAnyway,
     /// The restore dialog's password field.
@@ -3318,8 +3354,16 @@ struct AppState {
     /// could be scrolled into blank space indefinitely.
     width: f32,
     height: f32,
-    /// Settings: auto-lock minutes.
-    settings_auto_lock: u32,
+    /// Settings: the auto-lock slider, the toolkit's, from one minute to an
+    /// hour. Its value is the vault's own `auto_lock_minutes` whenever no
+    /// drag is moving it ([`Self::sync_auto_lock`]); a drag shows its minutes
+    /// as it goes and writes them to the vault only when let go.
+    ///
+    /// It was `settings_auto_lock`, a number set to the default once and
+    /// read by nothing but its own picture: the panel said "15 minutes" of a
+    /// vault restored with five, and the knob drawn under it moved for
+    /// nothing.
+    auto_lock: guitk::slider::Slider,
     /// The credential being written, while [`DetailView::NewEntry`] is up.
     ///
     /// `None` at every other moment rather than a form kept warm between
@@ -3393,7 +3437,12 @@ impl AppState {
             detail_scroll: 0.0,
             width: DEFAULT_WINDOW_WIDTH,
             height: DEFAULT_WINDOW_HEIGHT,
-            settings_auto_lock: DEFAULT_AUTO_LOCK_MINUTES,
+            auto_lock: guitk::slider::Slider::new(
+                f64::from(AUTO_LOCK_MINUTES.0),
+                f64::from(AUTO_LOCK_MINUTES.1),
+                f64::from(DEFAULT_AUTO_LOCK_MINUTES),
+            )
+            .with_step(1.0),
             new_entry: None,
             copy_refused: None,
             pointer: None,
@@ -3447,6 +3496,76 @@ impl AppState {
             disabled: false,
             invalid: wrong,
         }
+    }
+
+    /// Whether the settings panel is drawn and can be used: the vault open,
+    /// the panel chosen, and no vault dialog over it. (The file dialog needs
+    /// no check here: it takes all input before any reaches the window.)
+    fn settings_live(&self) -> bool {
+        self.vault.is_unlocked()
+            && self.detail_view == DetailView::Settings
+            && self.dialog.is_none()
+    }
+
+    /// The auto-lock slider as it is drawn: at the vault's own minutes --
+    /// which opening the vault and a restore set as well -- unless a drag is
+    /// moving it.
+    fn auto_lock_shown(&self) -> guitk::slider::Slider {
+        let mut shown = self.auto_lock.clone();
+        if !shown.is_dragging() {
+            shown.set_value(f64::from(self.vault.auto_lock_minutes));
+        }
+        shown
+    }
+
+    /// Keep a value the slider settled on as the vault's auto-lock time:
+    /// written with the vault, and the time the next lock is counted by.
+    fn set_auto_lock(&mut self, minutes: f64) {
+        self.vault.auto_lock_minutes = whole_minutes(minutes);
+    }
+
+    /// The auto-lock slider's share of a pointer event while the settings
+    /// panel is up, or `None` for an event that is not the slider's.
+    ///
+    /// A drag shows its minutes as it goes and writes them to the vault only
+    /// when it is let go: the vault is sealed and written whenever what it
+    /// holds changes, and once per pixel of a drag is a file rewritten fifty
+    /// times for one decision.
+    fn auto_lock_mouse(&mut self, mouse: &MouseEvent) -> Option<EventResult> {
+        if !self.settings_live() {
+            return None;
+        }
+        self.auto_lock = self.auto_lock_shown();
+        let lit = self.auto_lock.is_hovered();
+        let response = self
+            .auto_lock
+            .handle_mouse(&auto_lock_placement(self.width), mouse);
+        if let Some(guitk::slider::SliderEvent::Confirmed(minutes)) = response.event() {
+            self.set_auto_lock(minutes);
+        }
+        (response.is_taken() || lit != self.auto_lock.is_hovered()).then_some(EventResult::Consumed)
+    }
+
+    /// The auto-lock slider's share of a key while the settings panel is up:
+    /// Left and Right, Home and End, Page Up and Page Down move it, and during
+    /// a drag Escape takes the drag back. Up and Down stay the entry list's.
+    fn auto_lock_key(&mut self, key: &KeyEvent) -> Option<EventResult> {
+        if !self.settings_live() {
+            return None;
+        }
+        let its_key = matches!(
+            key.key,
+            Key::Left | Key::Right | Key::Home | Key::End | Key::PageUp | Key::PageDown
+        );
+        if !its_key && !self.auto_lock.is_dragging() {
+            return None;
+        }
+        self.auto_lock = self.auto_lock_shown();
+        let response = self.auto_lock.handle_key(key);
+        if let Some(guitk::slider::SliderEvent::Confirmed(minutes)) = response.event() {
+            self.set_auto_lock(minutes);
+        }
+        response.is_taken().then_some(EventResult::Consumed)
     }
 
     /// The text box under the pointer in what is drawn now, if any.
@@ -6017,7 +6136,9 @@ fn render_settings_panel(frame: &mut Frame, state: &AppState, width: f32, height
         0.0,
     );
 
-    let pad = 24.0;
+    // The rows down to the auto-lock slider are the ones
+    // `auto_lock_placement` counts; it and this must change together.
+    let pad = SETTINGS_PAD;
     let mut y = y_start + pad;
 
     draw_text(
@@ -6055,7 +6176,13 @@ fn render_settings_panel(frame: &mut Frame, state: &AppState, width: f32, height
         FontWeightHint::Regular,
         None,
     );
-    let timeout_text = format!("{} minutes", state.settings_auto_lock);
+    let slider = state.auto_lock_shown();
+    let minutes = whole_minutes(slider.value());
+    let timeout_text = if minutes == 1 {
+        String::from("1 minute")
+    } else {
+        format!("{minutes} minutes")
+    };
     draw_text(
         frame,
         x_start + pad + 200.0,
@@ -6066,32 +6193,22 @@ fn render_settings_panel(frame: &mut Frame, state: &AppState, width: f32, height
         FontWeightHint::Bold,
         None,
     );
-    y += 32.0;
 
-    // Timeout slider
-    let slider_x = x_start + pad;
-    let slider_w = panel_width - pad * 2.0;
-    draw_rect(
+    // The slider: the toolkit's, at the place the pointer is read against.
+    // No focus ring: Left and Right move it while this panel is up, as they
+    // move the generator's, but what is typed goes to the search box, and
+    // one keyboard drawn in two places would say neither.
+    let placement = auto_lock_placement(width);
+    slider.draw(
         frame,
-        slider_x,
-        y,
-        slider_w,
-        4.0,
-        state.palette.surface1,
-        2.0,
+        &state.palette,
+        &placement,
+        guitk::slider::Look::accent(&state.palette, state.palette.surface1),
+        false,
+        state.focus_ring_width,
     );
-    let frac = (state.settings_auto_lock as f32 - 1.0) / 59.0;
-    let knob_x = slider_x + slider_w * frac.clamp(0.0, 1.0);
-    draw_rect(
-        frame,
-        knob_x - 6.0,
-        y - 4.0,
-        12.0,
-        12.0,
-        state.palette.blue,
-        6.0,
-    );
-    y += 24.0;
+    frame.hit(Target::AutoLock, placement.hit());
+    y = placement.track.bottom() + 20.0;
 
     draw_text(
         frame,
@@ -7469,6 +7586,13 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
         return EventResult::Consumed;
     }
 
+    // The settings panel's auto-lock slider, the same way: its keys while the
+    // panel is up, ahead of the catch-all that types into the search box.
+    if let Some(result) = state.auto_lock_key(key) {
+        state.vault.touch(state.now);
+        return result;
+    }
+
     // Main app key handling. The four shortcuts are Ctrl chords, not Ctrl
     // held: AltGr arrives as Ctrl+Alt, and AltGr+L -- a Polish `ł`, typed
     // into the search -- locked the vault. What a key types goes into the
@@ -7632,6 +7756,18 @@ fn navigate_entry_list(state: &mut AppState, direction: i32) {
 }
 
 fn handle_mouse(state: &mut AppState, mouse: &MouseEvent) -> EventResult {
+    // The auto-lock slider's press, drag and release, and its thumb's light.
+    // The press and the release are use of the vault; the pointer moving is
+    // not.
+    if let Some(result) = state.auto_lock_mouse(mouse) {
+        if matches!(
+            mouse.kind,
+            MouseEventKind::Press(_) | MouseEventKind::Release(_)
+        ) {
+            state.vault.touch(state.now);
+        }
+        return result;
+    }
     let result = match mouse.kind {
         MouseEventKind::Press(MouseButton::Left) => handle_click(state, mouse.x, mouse.y),
         MouseEventKind::Scroll { dy, .. } => handle_scroll(state, mouse.x, mouse.y, dy),
@@ -7691,6 +7827,10 @@ fn act_on(state: &mut AppState, target: Target) -> EventResult {
             state.dialog = Some(VaultDialog::ExportWarning);
             EventResult::Consumed
         }
+        // The slider takes its own presses, where on it they land, before
+        // a press reaches here (`handle_mouse`); a target with no point has
+        // nothing to set it to.
+        Target::AutoLock => EventResult::Ignored,
         Target::ExportAnyway => {
             state.dialog = None;
             state.open_picker(PickFor::Export);
@@ -12435,6 +12575,181 @@ mod tests {
         assert!(
             draws(&state, rig, second, LIT),
             "the form's box does not light under the pointer"
+        );
+    }
+
+    // == The auto-lock slider ==================================================
+
+    /// **The auto-lock setting is the vault's own, and the slider sets it.**
+    /// It was a number set to the default once and a knob drawn for nothing:
+    /// the panel said fifteen minutes of a vault restored with five, and no
+    /// press, drag or key moved it. A drag shows its minutes as it goes and
+    /// keeps them only when let go; a key keeps its at once; Escape takes a
+    /// drag back; and what is kept is the vault's -- the lock is counted by
+    /// it, and it is there when the vault is opened again.
+    #[test]
+    fn the_auto_lock_slider_shows_and_sets_the_vaults_own_time() {
+        use std::time::Duration;
+        let (scratch, mut state) = first_run("auto_lock");
+        make_vault(&mut state, MASTER, MASTER);
+        assert!(state.vault.is_unlocked(), "control: the vault must be made");
+        state.vault.auto_lock_minutes = 7; // as a restore sets it
+        press_on(&mut state, Target::Settings);
+        let shown = drawn(&state);
+        assert!(
+            shown.contains("7 minutes") && !shown.contains("15 minutes"),
+            "the panel does not show the vault's own time: {shown}"
+        );
+        assert!(
+            probe::is_visible(&state, Target::AutoLock),
+            "the slider has no place among the window's controls"
+        );
+
+        let placement = auto_lock_placement(state.width);
+        let at = |minutes: f32| placement.track.x + placement.track.w * (minutes - 1.0) / 59.0;
+        let y = placement.track.y + placement.track.h / 2.0;
+        pointer_at(&mut state, at(30.0), y, MouseEventKind::Move);
+        pointer_at(
+            &mut state,
+            at(30.0),
+            y,
+            MouseEventKind::Press(MouseButton::Left),
+        );
+        assert!(
+            drawn(&state).contains("30 minutes"),
+            "a press on the track did not move the slider there"
+        );
+        assert_eq!(
+            state.vault.auto_lock_minutes, 7,
+            "a drag kept its minutes before it was let go"
+        );
+        pointer_at(&mut state, at(45.0), y, MouseEventKind::Move);
+        assert!(
+            drawn(&state).contains("45 minutes"),
+            "the drag's minutes are not shown as it goes"
+        );
+        pointer_at(
+            &mut state,
+            at(45.0),
+            y,
+            MouseEventKind::Release(MouseButton::Left),
+        );
+        assert_eq!(
+            state.vault.auto_lock_minutes, 45,
+            "letting the drag go kept nothing"
+        );
+        assert_eq!(
+            App::tick_interval(&state),
+            Some(Duration::from_mins(45)),
+            "the lock is not counted by the time set"
+        );
+
+        App::on_event(&mut state, &key(Key::Left));
+        assert_eq!(state.vault.auto_lock_minutes, 44, "Left took no minute off");
+        App::on_event(&mut state, &key(Key::Up));
+        assert_eq!(
+            state.vault.auto_lock_minutes, 44,
+            "Up, the entry list's, moved the slider"
+        );
+        App::on_event(&mut state, &key(Key::End));
+        assert_eq!(
+            state.vault.auto_lock_minutes, 60,
+            "End did not go to the hour"
+        );
+
+        pointer_at(&mut state, at(10.0), y, MouseEventKind::Move);
+        pointer_at(
+            &mut state,
+            at(10.0),
+            y,
+            MouseEventKind::Press(MouseButton::Left),
+        );
+        App::on_event(&mut state, &key(Key::Escape));
+        pointer_at(
+            &mut state,
+            at(10.0),
+            y,
+            MouseEventKind::Release(MouseButton::Left),
+        );
+        assert_eq!(
+            state.vault.auto_lock_minutes, 60,
+            "a drag taken back with Escape kept its minutes"
+        );
+        assert!(drawn(&state).contains("60 minutes"));
+
+        let mut again = reopen(&scratch);
+        assert!(again.vault.unlock(MASTER, 0));
+        assert_eq!(
+            again.vault.auto_lock_minutes, 60,
+            "the time set was not kept with the vault"
+        );
+    }
+
+    /// **The slider is the panel's only while the panel can be used**: under
+    /// a dialog a press on it is the dialog's, and the pointer passing over
+    /// it is no use of the vault -- a press is.
+    #[test]
+    fn the_auto_lock_slider_is_not_used_through_a_dialog_or_by_passing_over_it() {
+        let mut state = unlocked_app();
+        let placement = auto_lock_placement(state.width);
+        let (x, y) = (
+            placement.track.x + 1.0,
+            placement.track.y + placement.track.h / 2.0,
+        );
+        let before = state.vault.auto_lock_minutes;
+
+        // Not the slider's keys or presses with another panel up.
+        App::on_event(&mut state, &key(Key::Home));
+        pointer_at(&mut state, x, y, MouseEventKind::Press(MouseButton::Left));
+        pointer_at(&mut state, x, y, MouseEventKind::Release(MouseButton::Left));
+        assert_eq!(
+            state.vault.auto_lock_minutes, before,
+            "the slider was moved with the settings panel not up"
+        );
+
+        press_on(&mut state, Target::Settings);
+        state.now += 30;
+        let used = state.vault.last_access;
+        pointer_at(&mut state, x, y, MouseEventKind::Move);
+        assert_eq!(
+            state.vault.last_access, used,
+            "the pointer passing over the slider counted as use of the vault"
+        );
+
+        press_on(&mut state, Target::ExportCsv);
+        assert!(state.dialog.is_some(), "control: the dialog must be up");
+        pointer_at(&mut state, x, y, MouseEventKind::Press(MouseButton::Left));
+        pointer_at(&mut state, x, y, MouseEventKind::Release(MouseButton::Left));
+        assert_eq!(
+            state.vault.auto_lock_minutes, before,
+            "a press under a dialog moved the slider"
+        );
+
+        App::on_event(&mut state, &key(Key::Escape));
+        assert!(state.dialog.is_none());
+        state.now += 30;
+        pointer_at(&mut state, x, y, MouseEventKind::Press(MouseButton::Left));
+        pointer_at(&mut state, x, y, MouseEventKind::Release(MouseButton::Left));
+        assert_eq!(
+            state.vault.auto_lock_minutes, 1,
+            "control: with the dialog gone the press moves it"
+        );
+        assert_eq!(
+            state.vault.last_access, state.now,
+            "a press on the slider was not counted as use of the vault"
+        );
+
+        // Nor through the lock screen, which is drawn over the panel.
+        App::on_event(&mut state, &key(Key::End));
+        assert_eq!(state.vault.auto_lock_minutes, 60);
+        state.lock_vault();
+        pointer_at(&mut state, x, y, MouseEventKind::Press(MouseButton::Left));
+        pointer_at(&mut state, x, y, MouseEventKind::Release(MouseButton::Left));
+        // Read while still locked: opening the vault reads its time back
+        // from the sealed file, which would hide a change made in memory.
+        assert_eq!(
+            state.vault.auto_lock_minutes, 60,
+            "a press on the lock screen moved the slider behind it"
         );
     }
 

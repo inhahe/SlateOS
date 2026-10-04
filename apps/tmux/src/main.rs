@@ -55,6 +55,8 @@ use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::textedit;
+use guitk::textinput::TextInput;
 use guitk::wheel;
 use libcall::pty::WinSize;
 use oswindow::app::{self, App, Response};
@@ -84,6 +86,9 @@ const PANE_INSET: f32 = 2.0;
 
 const PADDING: f32 = 4.0;
 const SMALL_TEXT: f32 = 11.0;
+/// The most the `:` prompt holds after its `:`, in characters: a command
+/// is a line, and a paste of a page is not one.
+const PROMPT_CAPACITY: usize = 1024;
 const NORMAL_TEXT: f32 = 13.0;
 const HEADER_TEXT: f32 = 14.0;
 const MIN_PANE_SIZE: f32 = 40.0;
@@ -940,6 +945,12 @@ struct Multiplexer {
     command_mode: bool,
     /// Command input buffer.
     command_input: String,
+    /// The `:` prompt's editor -- its caret and selection over what follows
+    /// the `:` in `command_input`, which the `:` itself is not part of, so
+    /// no key can delete it or put the caret before it.
+    command_editor: TextInput,
+    /// What the prompt's Ctrl+C and Ctrl+X took, for its Ctrl+V.
+    command_clipboard: String,
     /// A close waiting for its yes.
     confirm: Option<Confirm>,
     /// Status message (shown in status bar until it is old).
@@ -1011,6 +1022,8 @@ impl Multiplexer {
             prefix_state: PrefixState::Normal,
             command_mode: false,
             command_input: String::new(),
+            command_editor: TextInput::new(),
+            command_clipboard: String::new(),
             confirm: None,
             status_message: String::new(),
             status_time: 0,
@@ -2058,13 +2071,27 @@ impl Multiplexer {
     fn open_prompt(&mut self, text: &str) {
         self.command_mode = true;
         self.command_input = text.to_string();
+        let rest = self.command_rest().to_owned();
+        self.command_editor.set_text(&rest);
+    }
+
+    /// What the prompt holds after its `:`.
+    fn command_rest(&self) -> &str {
+        self.command_input
+            .strip_prefix(':')
+            .unwrap_or(&self.command_input)
     }
 
     /// Keys while the `:` prompt is open.
     ///
-    /// Its Enter and Escape are plain, and it types what was typed, with
-    /// AltGr+Q's `@` among it: Alt+X put an `x` in the command. Backspace is
-    /// refused only to Alt and the Windows key.
+    /// Its Enter and Escape are plain, and every other key is its editor's:
+    /// the caret keys, Backspace and Delete at the caret, Ctrl+A, C, X and V,
+    /// and typing -- AltGr+Q's `@` among it, and no command's letter (Alt+X
+    /// put an `x` in the command). Never past the `:` itself: the prompt is
+    /// the mode indicator, and a prompt that can be deleted leaves the user
+    /// typing into an empty line with no way to tell what it is -- so the
+    /// editor holds only what follows it. The prompt took typing at its end
+    /// and Backspace from it, and nothing else.
     fn handle_command_key(&mut self, key: &KeyEvent) -> EventResult {
         let plain = textline::is_plain(key.modifiers);
         match key.key {
@@ -2077,23 +2104,25 @@ impl Multiplexer {
                 self.command_mode = false;
                 self.process_command(&cmd);
             }
-            Key::Backspace if !textline::is_alt_or_windows_chord(key.modifiers) => {
-                // Never past the `:` itself: the prompt is the mode indicator,
-                // and a prompt that can be deleted leaves the user typing into
-                // an empty line with no way to tell what it is.
-                if self.command_input.chars().count() > 1 {
-                    self.command_input.pop();
-                }
-            }
             _ => {
-                if !textline::types_into_field(key) {
+                if self.command_editor.text() != self.command_rest() {
+                    let rest = self.command_rest().to_owned();
+                    self.command_editor.set_text(&rest);
+                }
+                let edit = textline::apply_key(
+                    &mut self.command_editor,
+                    key,
+                    PROMPT_CAPACITY,
+                    &self.command_clipboard,
+                    SMALL_TEXT,
+                );
+                if let Some(copied) = edit.copied {
+                    self.command_clipboard = copied;
+                }
+                self.command_input = format!(":{}", self.command_editor.text());
+                if !edit.handled {
                     return EventResult::Ignored;
                 }
-                let typed: String = key.typed().collect();
-                if typed.is_empty() {
-                    return EventResult::Ignored;
-                }
-                self.command_input.push_str(&typed);
             }
         }
         EventResult::Consumed
@@ -2878,18 +2907,47 @@ impl Multiplexer {
         label_at(
             f,
             (PADDING, y + 4.0),
-            &self.command_input,
+            ":",
             (SMALL_TEXT, FontWeightHint::Regular),
             ink,
             room,
         );
-        // Where the next character goes.
-        let caret_x = PADDING + text::width(&self.command_input, SMALL_TEXT).min(room);
-        fill(
-            f,
-            Rect::new(caret_x + 1.0, y + 4.0, 1.5, SMALL_TEXT + 2.0),
-            ink,
+        // What follows the `:`, with its caret and selection where they are,
+        // scrolled so the caret stays in view. The caret was a bar after the
+        // last character, the only place the keys could type.
+        let colon = text::measure(":", SMALL_TEXT, FontWeightHint::Regular);
+        let rest = self.command_rest();
+        let line = text::line_height(SMALL_TEXT, FontWeightHint::Regular);
+        let editing = self.command_editor.text() == rest;
+        let mut tree = RenderTree::new();
+        textedit::draw(
+            &mut tree,
+            &textedit::SingleLine {
+                text: rest,
+                cursor: if editing {
+                    self.command_editor.cursor()
+                } else {
+                    text::TextCursor::from(rest.len())
+                },
+                selection_anchor: if editing {
+                    self.command_editor.selection_anchor()
+                } else {
+                    None
+                },
+                focused: true,
+                x: PADDING + colon,
+                y: y + 4.0,
+                width: (room - colon).max(0.0),
+                line_height: line,
+                font_size: SMALL_TEXT,
+                weight: FontWeightHint::Regular,
+                color: ink,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
         );
+        f.extend(tree.commands);
     }
 
     /// A question in the status bar's place, with its two answers.
@@ -5023,5 +5081,158 @@ mod tests {
         assert_eq!(clock_text(1_758_800_000_000), "11:33 UTC");
         assert_eq!(clock_text(0), "00:00 UTC");
         assert_eq!(clock_text(86_399_999), "23:59 UTC");
+    }
+
+    // -- The `:` prompt edits at a caret ------------------------------------------
+
+    use guitk::event::Modifiers;
+
+    fn held(k: Key, text: &str, modifiers: Modifiers) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        })
+    }
+
+    /// **The `:` prompt edits at a caret, and never past its `:`**: the
+    /// arrows, Home and End move the caret, typing goes where it is, Delete
+    /// deletes at it, Ctrl+A, C, X and V select, copy, cut and paste -- and
+    /// Home goes to just after the `:`, Backspace there deletes nothing, and
+    /// Ctrl+A selects only what follows it, so no key can take the `:` away.
+    /// The prompt took typing at its end and Backspace from it, and nothing
+    /// else.
+    #[test]
+    fn the_prompt_edits_at_a_caret_and_never_past_its_colon() {
+        let mut mux = Multiplexer::new();
+        prefixed(&mut mux, ':');
+        type_str(&mut mux, "nw-window");
+        for _ in 0..8 {
+            mux.handle_event(&press(Key::Left));
+        }
+        type_str(&mut mux, "e");
+        assert_eq!(mux.command_input, ":new-window", "the caret did not move");
+
+        mux.handle_event(&press(Key::Home));
+        mux.handle_event(&press(Key::Backspace));
+        assert_eq!(mux.command_input, ":new-window", "Backspace took the `:`");
+        mux.handle_event(&press(Key::Delete));
+        assert_eq!(mux.command_input, ":ew-window", "Delete at the caret");
+        mux.handle_event(&held(Key::A, "", Modifiers::ctrl()));
+        mux.handle_event(&held(Key::C, "", Modifiers::ctrl()));
+        mux.handle_event(&held(Key::X, "", Modifiers::ctrl()));
+        assert_eq!(mux.command_input, ":", "Ctrl+A selected past the `:`");
+        type_str(&mut mux, "n");
+        mux.handle_event(&held(Key::V, "", Modifiers::ctrl()));
+        assert_eq!(mux.command_input, ":new-window", "Ctrl+C, X or V");
+        mux.handle_event(&press(Key::Enter));
+        assert!(!mux.command_mode, "Enter did not run the command");
+        assert_eq!(mux.command_input, "");
+    }
+
+    /// **A prompt opened with a command already in it is edited from that
+    /// command's end**, whatever the last prompt left.
+    #[test]
+    fn a_prompt_opened_with_a_command_is_edited_from_its_end() {
+        let mut mux = Multiplexer::new();
+        prefixed(&mut mux, ':');
+        type_str(&mut mux, "abc");
+        mux.handle_event(&press(Key::Home));
+        mux.handle_event(&press(Key::Escape));
+        prefixed(&mut mux, ',');
+        type_str(&mut mux, "x");
+        assert_eq!(mux.command_input, ":rename-window x");
+
+        // Even where the last prompt held the same command, with its caret
+        // at the start.
+        mux.handle_event(&press(Key::Escape));
+        prefixed(&mut mux, ',');
+        mux.handle_event(&press(Key::Home));
+        mux.handle_event(&press(Key::Escape));
+        prefixed(&mut mux, ',');
+        type_str(&mut mux, "y");
+        assert_eq!(
+            mux.command_input, ":rename-window y",
+            "the prompt was typed at the last one's caret"
+        );
+
+        // And a command put in the prompt from outside is edited, not what
+        // the editor held before it.
+        mux.command_input = String::from(":new-window");
+        type_str(&mut mux, "!");
+        assert_eq!(
+            mux.command_input, ":new-window!",
+            "the key edited another command"
+        );
+    }
+
+    /// **A drag belongs to the pane it started in, wherever the pointer
+    /// goes**: a selection begun in one pane and carried over the next
+    /// selects in its own pane, to its edge. The move went to the pane under
+    /// the pointer, and the selection stopped where it crossed over.
+    #[test]
+    fn a_drag_carried_into_another_pane_selects_in_its_own() {
+        let (mut mux, shells) = scripted();
+        shell(&shells, 0)
+            .borrow_mut()
+            .pending
+            .extend_from_slice(b"alpha bravo\r\n");
+        tick(&mut mux);
+        let left = mux.active_pane_id().unwrap();
+        prefixed(&mut mux, '%');
+        let right = mux.active_pane_id().unwrap();
+        assert_ne!(left, right, "the split made a second pane");
+        tick(&mut mux);
+        let grid = rect_of(&mux, Target::Pane(left, TermTarget::Grid)).expect("the left grid");
+        let other = rect_of(&mux, Target::Pane(right, TermTarget::Grid)).expect("the right grid");
+        let y = grid.y + 3.0;
+        let at = |x: f32, kind: MouseEventKind| Event::Mouse(MouseEvent { x, y, kind });
+        mux.handle_event(&at(grid.x + 1.0, MouseEventKind::Press(MouseButton::Left)));
+        let over = other.x + other.w / 2.0;
+        mux.handle_event(&at(over, MouseEventKind::Move));
+        mux.handle_event(&at(over, MouseEventKind::Release(MouseButton::Left)));
+        prefixed(&mut mux, 'y');
+        assert_eq!(mux.clipboard, "alpha bravo");
+    }
+
+    /// **The prompt shows its caret where the editor has it**: after the
+    /// character the caret follows, not after the last one -- where the bar
+    /// drawn for it always stood.
+    #[test]
+    fn the_prompt_shows_its_caret_where_the_editor_has_it() {
+        let mut mux = Multiplexer::new();
+        prefixed(&mut mux, ':');
+        type_str(&mut mux, "abc");
+        mux.handle_event(&press(Key::Left));
+        let size = <Multiplexer as Probe>::SIZE;
+        let colon = text::measure(":", SMALL_TEXT, FontWeightHint::Regular);
+        let at = PADDING
+            + colon
+            + text::caret_x(
+                "abc",
+                text::TextCursor::from(2),
+                SMALL_TEXT,
+                FontWeightHint::Regular,
+            );
+        let bar = size.1 - STATUS_BAR_HEIGHT;
+        let carets: Vec<f32> = mux
+            .draw(size)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Line { x1, x2, y1, .. }
+                    if (x1 - x2).abs() < f32::EPSILON && *y1 >= bar =>
+                {
+                    Some(*x1)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(carets.len(), 1, "one caret in the prompt");
+        assert!(
+            carets.iter().all(|x| (x - at).abs() < 0.5),
+            "the caret is drawn at {carets:?}, not after the `ab` it follows at {at}"
+        );
     }
 }

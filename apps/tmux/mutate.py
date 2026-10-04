@@ -243,7 +243,9 @@ MUTATIONS = [
         "a drag is not followed",
         "                    self.drag = Some(id);",
         "",
-        ["what_the_pointer_selected_can_be_copied"],
+        # what_the_pointer_selected_can_be_copied drags within one pane, where
+        # the pane's own view follows the drag without help.
+        ["a_drag_carried_into_another_pane_selects_in_its_own"],
     ),
     (
         "a pane is sent window coordinates",
@@ -379,18 +381,12 @@ MUTATIONS = [
         '            Key::Enter => {\n                let cmd = std::mem::take(&mut self.command_input);',
         ['a_chord_is_neither_a_multiplexer_key_nor_typing'],
     ),
-    (
-        'Alt+Backspace deletes from the prompt',
-        '            Key::Backspace if !textline::is_alt_or_windows_chord(key.modifiers) => {',
-        '            Key::Backspace => {',
-        ['a_chord_is_neither_a_multiplexer_key_nor_typing'],
-    ),
-    (
-        "the prompt types a command's letter",
-        '                if !textline::types_into_field(key) {\n                    return EventResult::Ignored;\n                }\n',
-        '',
-        ['a_chord_is_neither_a_multiplexer_key_nor_typing'],
-    ),
+    # No rows for "Alt+Backspace deletes from the prompt" or "the prompt
+    # types a command's letter": since 2026-10-04 the prompt's keys are
+    # textline::apply_key's, which makes both distinctions itself, in its own
+    # crate and with its own tests;
+    # a_chord_is_neither_a_multiplexer_key_nor_typing still holds the prompt
+    # to them.
     (
         'a chord works the session list',
         '        if !textline::is_plain(key.modifiers) {\n            return EventResult::Consumed;\n        }\n',
@@ -433,6 +429,46 @@ MUTATIONS = [
         "            self.forward_mouse(id, event);\n        }\n        if self.lit_bars() == before {",
         "            self.forward_mouse(id, event);\n        }\n        if self.lit_bars() == before && false {",
         ["a_panes_bar_lights_under_the_pointer_and_goes_out_when_it_leaves"],
+    ),
+]
+
+# The `:` prompt edits at a caret (2026-10-04,
+# known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box): it
+# took typing at its end and Backspace from it, and nothing else. Its editor
+# holds only what follows the `:`, so no key can take the `:` away.
+PROMPT = "the_prompt_edits_at_a_caret_and_never_past_its_colon"
+OPENED = "a_prompt_opened_with_a_command_is_edited_from_its_end"
+
+MUTATIONS += [
+    (
+        "the prompt's editor holds its colon",
+        "        self.command_input\n            .strip_prefix(':')\n            .unwrap_or(&self.command_input)\n",
+        "        &self.command_input\n",
+        [PROMPT],
+    ),
+    (
+        "a cut or a copy takes nothing to the clipboard",
+        "            self.command_clipboard = copied;\n",
+        "            let _ = copied;\n",
+        [PROMPT],
+    ),
+    (
+        "an opened prompt keeps the last prompt's caret",
+        "        let rest = self.command_rest().to_owned();\n        self.command_editor.set_text(&rest);\n    }\n",
+        "    }\n",
+        [OPENED],
+    ),
+    (
+        "a key finds the editor holding another command",
+        "                if self.command_editor.text() != self.command_rest() {\n",
+        "                if false {\n",
+        [OPENED],
+    ),
+    (
+        "the caret is drawn at the end",
+        "                cursor: if editing {\n                    self.command_editor.cursor()\n",
+        "                cursor: if false {\n                    self.command_editor.cursor()\n",
+        ["the_prompt_shows_its_caret_where_the_editor_has_it"],
     ),
 ]
 

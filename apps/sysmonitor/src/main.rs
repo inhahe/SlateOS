@@ -98,6 +98,25 @@ const ALERT_MAX_ROWS: usize = 5;
 /// Why a priority cannot be changed, in the words the status bar uses.
 const CANNOT_RENICE: &str = "this system cannot yet change another program's priority";
 
+/// The keys this window answers, as the F1 list shows them.
+///
+/// The window had no list at all -- the one application in the tree that
+/// answered F1 with nothing -- so Delete, which ends the selected process, was
+/// a key a reader could only find by pressing it.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1 / ?", "This list"),
+    ("1-6", "Overview, Processes, CPU, Memory, Disk or Network"),
+    ("Tab / Shift+Tab", "Next or previous tab"),
+    ("Up / Down", "Move through the processes"),
+    ("PageUp / PageDown", "Move ten processes at a time"),
+    ("Home / End", "First or last process"),
+    ("Delete", "End the selected process"),
+    ("F5", "Refresh now"),
+    ("Ctrl+F", "Jump to the filter box"),
+    ("Ctrl+R", "Change how often it refreshes"),
+    ("Escape", "Close the menu, or clear the filter"),
+];
+
 // ============================================================================
 // Ring buffer for time-series data
 // ============================================================================
@@ -584,6 +603,9 @@ pub struct SysMonitorState {
     pub filter_text: String,
     pub filter_focused: bool,
     pub context_menu: Option<ContextMenu>,
+    /// Whether the list of keys is up. Modal while it is: it takes every key
+    /// and every press.
+    pub show_help: bool,
 
     // -- Alert thresholds --
     pub thresholds: AlertThresholds,
@@ -655,6 +677,7 @@ impl SysMonitorState {
             filter_text: String::new(),
             filter_focused: false,
             context_menu: None,
+            show_help: false,
             thresholds: AlertThresholds::default(),
             active_alerts: Vec::new(),
             refresh_interval: RefreshInterval::TwoSeconds,
@@ -1139,6 +1162,26 @@ impl SysMonitorState {
             return EventResult::Ignored;
         }
 
+        // The list of keys, before the filter box: it is drawn over
+        // everything, and modal while it is up -- a plain F1, `?` or Escape
+        // puts it away and no other key reaches what it covers, where Delete
+        // would end the process under it.
+        let plain = textline::is_plain(key.modifiers);
+        let question = key.key == Key::Slash && key.modifiers.shift;
+        if self.show_help {
+            if plain && (matches!(key.key, Key::F1 | Key::Escape) || question) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
+        // F1 raises it from anywhere, the filter box included, because it is
+        // never typed; `?` is typed there, so it raises the list only from
+        // the window.
+        if plain && (key.key == Key::F1 || question && !self.filter_focused) {
+            self.show_help = true;
+            return EventResult::Consumed;
+        }
+
         if self.filter_focused {
             return self.handle_filter_key(key);
         }
@@ -1289,6 +1332,20 @@ impl SysMonitorState {
     fn handle_mouse(&mut self, mouse: &guitk::event::MouseEvent) -> EventResult {
         let mx = mouse.x;
         let my = mouse.y;
+
+        // The list of keys is modal for the pointer as it is for the keys: a
+        // press with any button puts it away and does nothing else, and the
+        // wheel scrolls nothing it covers. A move or a release passes.
+        if self.show_help {
+            match mouse.kind {
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                    self.show_help = false;
+                    return EventResult::Consumed;
+                }
+                MouseEventKind::Scroll { .. } => return EventResult::Ignored,
+                _ => {}
+            }
+        }
 
         // Context menu handling
         if let Some(menu) = self.context_menu.clone()
@@ -1586,6 +1643,19 @@ impl SysMonitorState {
 
         // Context menu overlay
         self.render_context_menu(&mut tree);
+
+        // The list of keys over everything, the menu included: it is the one
+        // thing on screen a reader asked for explicitly.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut tree,
+                &self.palette,
+                (w, h),
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
+        }
 
         tree
     }
@@ -5222,6 +5292,161 @@ mod tests {
             y: 200.0,
             kind: MouseEventKind::Scroll { dx: 0.0, dy },
         });
+    }
+
+    // -- The list of keys --
+
+    fn key_of(k: Key, modifiers: Modifiers, text: &str) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        }
+    }
+
+    fn drawn_texts(app: &SysMonitorState) -> Vec<String> {
+        app.render_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **Every key the list of keys advertises is answered by this window.**
+    ///
+    /// Pressed with nothing selected, so Delete -- which ends the selected
+    /// process, with a real signal on a Unix host -- has nothing to end.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let mut app = processes_tab(30);
+                app.selected_index = None;
+                assert_eq!(
+                    app.handle_key(&stroke),
+                    EventResult::Consumed,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The list of keys reaches the window**, and goes on F1, `?` or a plain
+    /// Escape -- not on Alt+Escape, which is the desktop's.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = processes_tab(5);
+        assert!(
+            !drawn_texts(&app)
+                .iter()
+                .any(|t| t.contains("F1 or ? closes this")),
+            "the list is up before anybody asked for it"
+        );
+        for chord in [Modifiers::alt(), Modifiers::super_key()] {
+            app.handle_key(&key_of(Key::F1, chord, ""));
+            assert!(
+                !app.show_help,
+                "{chord:?}+F1, the desktop's, raised the list"
+            );
+        }
+        app.handle_key(&key_of(Key::F1, Modifiers::NONE, ""));
+        let missing = guitk::shortcut::missing_rows(&drawn_texts(&app), SHORTCUTS);
+        assert!(missing.is_empty(), "{missing:?}");
+        app.handle_key(&key_of(Key::Escape, Modifiers::alt(), ""));
+        assert!(app.show_help, "Alt+Escape put the list away");
+        app.handle_key(&key_of(Key::Escape, Modifiers::NONE, ""));
+        assert!(!app.show_help, "Escape left the list up");
+        app.handle_key(&key_of(Key::Slash, Modifiers::shift(), "?"));
+        assert!(app.show_help, "? raised nothing");
+        app.handle_key(&key_of(Key::Slash, Modifiers::shift(), "?"));
+        assert!(!app.show_help, "? left the list up");
+        app.handle_key(&key_of(Key::F1, Modifiers::NONE, ""));
+        app.handle_key(&key_of(Key::F1, Modifiers::NONE, ""));
+        assert!(!app.show_help, "F1 left the list up");
+    }
+
+    /// **`?` is typed into the filter box**, where it is a character, and F1
+    /// raises the list from there, where it never is.
+    #[test]
+    fn a_question_mark_is_typed_into_the_filter_and_f1_still_raises_the_list() {
+        let mut app = processes_tab(5);
+        app.handle_key(&key_of(Key::F, Modifiers::ctrl(), ""));
+        assert!(app.filter_focused);
+        app.handle_key(&key_of(Key::Slash, Modifiers::shift(), "?"));
+        assert!(!app.show_help, "? raised the list from the filter box");
+        assert_eq!(app.filter_text, "?", "? was not typed");
+        app.handle_key(&key_of(Key::F1, Modifiers::NONE, ""));
+        assert!(
+            app.show_help,
+            "F1 did not raise the list from the filter box"
+        );
+    }
+
+    /// **The list of keys is modal**: with it up, no key, press or turn of
+    /// the wheel reaches what it covers. F5 and Tab stand in for Delete,
+    /// which would end a process rather than fail an assertion. The controls
+    /// are the same with it down.
+    #[test]
+    fn the_shortcut_list_takes_the_keys_and_a_press() {
+        let mut app = processes_tab(200);
+        let (rows_y, _) = rows_clip(&app);
+        let row = rows_y + ROW_HEIGHT / 2.0;
+        app.status_message = String::from("untouched");
+        let tab = app.active_tab;
+
+        app.handle_key(&key_of(Key::F1, Modifiers::NONE, ""));
+        app.handle_key(&key_of(Key::F5, Modifiers::NONE, ""));
+        app.handle_key(&key_of(Key::Tab, Modifiers::NONE, ""));
+        app.handle_key(&key_of(Key::F, Modifiers::ctrl(), ""));
+        assert!(
+            app.show_help,
+            "a key other than F1, ? or Escape put the list away"
+        );
+        assert_eq!(
+            app.status_message, "untouched",
+            "F5 refreshed under the list"
+        );
+        assert_eq!(app.active_tab, tab, "Tab changed the tab under it");
+        assert!(!app.filter_focused, "Ctrl+F took the filter box under it");
+        wheel(&mut app, -1.0);
+        assert_eq!(
+            app.scroll_offset, 0,
+            "the wheel scrolled the processes under it"
+        );
+        assert!(app.show_help, "the wheel put the list away");
+        press(&mut app, MouseButton::Left, row);
+        assert!(!app.show_help, "the press did not put the list away");
+        assert_eq!(
+            app.selected_index, None,
+            "the press selected a process under it"
+        );
+        app.handle_key(&key_of(Key::F1, Modifiers::NONE, ""));
+        press(&mut app, MouseButton::Right, row);
+        assert!(!app.show_help, "a right-button press left the list up");
+        assert!(
+            app.context_menu.is_none(),
+            "a menu was raised under the list"
+        );
+
+        // The controls.
+        wheel(&mut app, -1.0);
+        assert!(
+            app.scroll_offset > 0,
+            "control: the wheel scrolls nothing at all"
+        );
+        wheel(&mut app, 1.0);
+        press(&mut app, MouseButton::Left, row);
+        assert!(
+            app.selected_index.is_some(),
+            "control: the press selects nothing"
+        );
+        app.handle_key(&key_of(Key::F5, Modifiers::NONE, ""));
+        assert_ne!(app.status_message, "untouched", "control: F5 does nothing");
     }
 
     // -- The row area's edges --

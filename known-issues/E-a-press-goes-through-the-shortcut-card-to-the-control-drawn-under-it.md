@@ -53,12 +53,15 @@ before it was changed. Eighteen were struck off:
   regextester's and rssreader's were fixed (above), the rest were modal.
 - *No press on the window* (2): kanban and passwordgen take a press only in
   their file dialogs, and both cards were already modal for the keys.
-- *No card at all* (1): sysmonitor. The `render_card(` the scan found is
-  its own method, which draws a dashboard panel.
+- *No card at all* (1): sysmonitor. The `render_card(` the scan found was
+  its own method, which draws a dashboard panel. It was given a list of keys
+  the same day -- the one application in the tree that answered F1 with
+  nothing, though Delete ends the selected process -- guarded from the
+  start, so the scan no longer names it.
 
-**The scan** prints those eighteen and nothing else as of 2026-10-04. Run
-it from the tree's root; anything else it prints is a new application with
-the bug:
+**The scan** prints the seventeen others and nothing else as of
+2026-10-04. Run it from the tree's root; anything else it prints is a new
+application with the bug:
 
 ```python
 import pathlib, re, sys

@@ -1523,6 +1523,11 @@ pub struct StartupUI {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// How wide the focus mark is drawn, from the user's appearance settings.
+    focus_ring_width: f32,
+    /// What the pointer is over, so a text box is drawn lit under it (lane C,
+    /// c-e-a-theme-can-shape-the-controls).
+    hover: Option<Target>,
 }
 
 impl StartupUI {
@@ -1544,6 +1549,8 @@ impl StartupUI {
             window_height: WINDOW_HEIGHT,
             search_focused: false,
             status: String::new(),
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
+            hover: Option::None,
         }
     }
 
@@ -1851,6 +1858,60 @@ impl StartupUI {
 
     /// Handle a UI event (keyboard or mouse).
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // Which text box the pointer is over, followed whatever is up: a box
+        // is drawn lit only while nothing covers it, but which one is under
+        // the pointer is known all the same, so the light is right the moment
+        // the cover goes. A change is a redraw.
+        let relit = self.track_pointer(event);
+        let answered = self.answer_event(event);
+        if relit {
+            EventResult::Consumed
+        } else {
+            answered
+        }
+    }
+
+    /// Follow the pointer over the text boxes. Answers whether the box under
+    /// it changed.
+    fn track_pointer(&mut self, event: &Event) -> bool {
+        let Event::Mouse(mouse) = event else {
+            return false;
+        };
+        let over = match mouse.kind {
+            MouseEventKind::Move => self
+                .target_at(mouse.x, mouse.y)
+                .filter(|t| matches!(t, Target::Search | Target::DialogField(_))),
+            MouseEventKind::Leave => Option::None,
+            _ => return false,
+        };
+        let changed = over != self.hover;
+        self.hover = over;
+        changed
+    }
+
+    /// How a text box is drawn now: lit under the pointer, and marked while
+    /// the keys type into it -- neither while something is drawn over it.
+    ///
+    /// The search box is covered by a dialog as well as by the list of keys;
+    /// a dialog's own boxes only by the list.
+    fn field_state(&self, target: Target) -> guitk::field::State {
+        let (open, typing) = match (target, &self.dialog) {
+            (Target::Search, DialogState::Closed) => (true, self.search_focused),
+            (Target::DialogField(i), DialogState::AddEdit(dlg)) => (true, dlg.focused_field == i),
+            _ => (false, false),
+        };
+        let open = open && !self.show_help;
+        guitk::field::State {
+            hovered: open && self.hover == Some(target),
+            focused: open && typing,
+            disabled: false,
+            invalid: false,
+        }
+    }
+
+    /// What an event does to the window, as distinct from the light the
+    /// pointer moves.
+    fn answer_event(&mut self, event: &Event) -> EventResult {
         match event {
             Event::Key(key) if key.pressed => self.handle_key(key),
             Event::Resize { width, height } => {
@@ -2380,26 +2441,15 @@ impl StartupUI {
         if l.search.is_empty() {
             return;
         }
-        self.palette.push_surface(
+        // The toolkit's field, in the theme's shape (lane C,
+        // c-e-a-theme-can-shape-the-controls).
+        guitk::field::draw(
             frame,
-            l.search.x,
-            l.search.y,
-            l.search.w,
-            l.search.h,
-            4.0,
-            Surface::Card,
+            &self.palette,
+            l.search,
+            self.field_state(Target::Search),
+            self.focus_ring_width,
         );
-        if self.search_focused {
-            frame.push(RenderCommand::StrokeRect {
-                x: l.search.x,
-                y: l.search.y,
-                width: l.search.w,
-                height: l.search.h,
-                color: self.palette.blue,
-                line_width: 1.0,
-                corner_radii: CornerRadii::all(4.0),
-            });
-        }
 
         let empty = self.search_query.is_empty();
         let display = if empty {
@@ -2910,9 +2960,9 @@ impl StartupUI {
                 Target::DialogField(i),
                 l.dialog_field(i),
                 l.dialog_field_top(i),
-                label,
-                value,
-                dlg.focused_field == i,
+                (label, value),
+                self.field_state(Target::DialogField(i)),
+                self.focus_ring_width,
             );
         }
 
@@ -2961,16 +3011,21 @@ impl StartupUI {
     }
 
     /// A labelled text input. `label_y` is where the caption goes; `input` is
-    /// the box, which is also the hit box.
+    /// the box, which is also the hit box, drawn as the toolkit's field in
+    /// `state`.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one call site, and each argument is a different fact about one box"
+    )]
     fn draw_form_field(
         frame: &mut Frame,
         pal: &Palette,
         target: Target,
         input: Rect,
         label_y: f32,
-        label: &str,
-        value: &str,
-        focused: bool,
+        (label, value): (&str, &str),
+        state: guitk::field::State,
+        focus_ring_width: f32,
     ) {
         if input.is_empty() {
             return;
@@ -2985,23 +3040,7 @@ impl StartupUI {
             max_width: Some(input.w),
             overflow: TextOverflow::Ellipsis,
         });
-        frame.push(RenderCommand::FillRect {
-            x: input.x,
-            y: input.y,
-            width: input.w,
-            height: input.h,
-            color: pal.base,
-            corner_radii: CornerRadii::all(4.0),
-        });
-        frame.push(RenderCommand::StrokeRect {
-            x: input.x,
-            y: input.y,
-            width: input.w,
-            height: input.h,
-            color: if focused { pal.blue } else { pal.surface1 },
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        guitk::field::draw(frame, pal, input, state, focus_ring_width);
 
         let empty = value.is_empty();
         frame.push(RenderCommand::Text {
@@ -3122,6 +3161,11 @@ impl Default for StartupUI {
 impl App for StartupUI {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    /// The focus mark is drawn at the width the user asked for.
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -5474,6 +5518,115 @@ mod tests {
             probe::rect_of_sized(&ui, Target::Row(id), SHORT).is_none(),
             "the row is off screen but still drawn"
         );
+    }
+
+    /// **The search box and the dialog's boxes are the toolkit's fields**
+    /// (lane C, c-e-a-theme-can-shape-the-controls): lit under the pointer
+    /// and out when it goes, marked at the user's focus width while the keys
+    /// type into them -- the search box neither under a dialog nor under the
+    /// list of keys.
+    #[test]
+    fn the_text_boxes_are_the_toolkits_fields() {
+        use guitk::field::State;
+        let size = <StartupUI as Probe>::SIZE;
+        let mut ui = StartupUI::with_sample_entries();
+        let mut palette = ui.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut ui, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        App::appearance_changed(&mut ui, &settings);
+        let seq = |rect: Rect, s: State| {
+            let mut want: Vec<RenderCommand> = Vec::new();
+            guitk::field::draw(&mut want, &palette, rect, s, width);
+            want
+        };
+        let draws = |ui: &StartupUI, rect: Rect, s: State| {
+            let frame = ui.frame(size.0, size.1);
+            let cmds = frame.commands();
+            let has = |want: &[RenderCommand]| {
+                !want.is_empty() && cmds.windows(want.len()).any(|w| w == want)
+            };
+            has(&seq(rect, s)) && (s.focused || !has(&seq(rect, State { focused: true, ..s })))
+        };
+        let pointer = |ui: &mut StartupUI, rect: Rect, kind: MouseEventKind| {
+            let (x, y) = rect.centre();
+            ui.handle_event(&Event::Mouse(MouseEvent { x, y, kind }));
+        };
+        let idle = State::default();
+        let lit = State {
+            hovered: true,
+            ..idle
+        };
+        let keyed = State {
+            focused: true,
+            ..idle
+        };
+        let both = State {
+            hovered: true,
+            ..keyed
+        };
+
+        // The search box.
+        let search = probe::rect_of(&ui, Target::Search).expect("the search box is drawn");
+        assert!(
+            draws(&ui, search, idle),
+            "the search box is not the toolkit's field"
+        );
+        pointer(&mut ui, search, MouseEventKind::Move);
+        assert!(
+            draws(&ui, search, lit),
+            "the search box does not light under the pointer"
+        );
+        pointer(&mut ui, search, MouseEventKind::Press(MouseButton::Left));
+        assert!(
+            draws(&ui, search, both),
+            "the search box is not marked with the keys"
+        );
+        probe::key(&mut ui, &probe::press(Key::F1));
+        assert!(
+            draws(&ui, search, idle),
+            "the search box shows through the list of keys"
+        );
+        probe::key(&mut ui, &probe::press(Key::Escape));
+        pointer(&mut ui, search, MouseEventKind::Leave);
+        assert!(
+            draws(&ui, search, keyed),
+            "the light stayed after the pointer left"
+        );
+
+        // The add dialog's boxes, over the search box.
+        probe::key(&mut ui, &probe::ctrl(Key::N));
+        assert!(matches!(ui.dialog, DialogState::AddEdit(_)));
+        assert!(
+            draws(&ui, search, idle),
+            "the search box shows through the dialog"
+        );
+        let first = probe::rect_of(&ui, Target::DialogField(0)).expect("the first box");
+        let second = probe::rect_of(&ui, Target::DialogField(1)).expect("the second box");
+        assert!(
+            draws(&ui, first, keyed),
+            "the dialog's first box is not marked with the keys"
+        );
+        assert!(
+            draws(&ui, second, idle),
+            "the second box is marked without the keys"
+        );
+        pointer(&mut ui, second, MouseEventKind::Move);
+        assert!(
+            draws(&ui, second, lit),
+            "the second box does not light under the pointer"
+        );
+        pointer(&mut ui, second, MouseEventKind::Press(MouseButton::Left));
+        assert!(
+            draws(&ui, second, both),
+            "a press did not give the second box the keys"
+        );
+        assert!(draws(&ui, first, idle), "the first box kept its mark");
     }
 
     #[test]

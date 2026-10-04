@@ -1,6 +1,9 @@
 """Mutation test for startupmanager.
 
-The keys: which are plain, which are Ctrl chords, and which are typing.
+The keys: which are plain, which are Ctrl chords, and which are typing.  And,
+since 2026-10-04, the list of keys' hold on the pointer: a press with it up
+puts it away and reaches nothing under it, and the wheel scrolls nothing it
+covers.
 
 Breaks one piece of production code at a time and checks that the test which
 claims to cover it is the one that fails.  A test that passes against a broken
@@ -110,6 +113,51 @@ MUTATIONS = [
         '            && textline::is_ctrl_chord(key.modifiers)\n        {',
         '            && key.modifiers.ctrl\n        {',
         ['a_chord_is_neither_a_manager_key_nor_typing_and_altgr_types'],
+    ),
+]
+
+CARD = 'the_shortcut_card_takes_a_press_rather_than_passing_it_on'
+
+MUTATIONS += [
+    # The list of keys takes the pointer (2026-10-04; known-issues
+    # E-a-press-goes-through-the-shortcut-card-to-the-control-drawn-under-it).
+    (
+        'a press goes through the list of keys',
+        '            Event::Mouse(mouse) if self.show_help => match mouse.kind {\n'
+        '                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n'
+        '                    self.show_help = false;\n'
+        '                    EventResult::Consumed\n'
+        '                }\n'
+        '                _ => EventResult::Ignored,\n'
+        '            },\n',
+        '',
+        [CARD],
+    ),
+    (
+        'only the left button puts the list of keys away',
+        '                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n'
+        '                    self.show_help = false;\n',
+        '                MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_) => {\n'
+        '                    self.show_help = false;\n',
+        [CARD],
+    ),
+    (
+        'a press under the list of keys leaves it up',
+        '                    self.show_help = false;\n'
+        '                    EventResult::Consumed\n',
+        '                    EventResult::Consumed\n',
+        [CARD],
+    ),
+    (
+        'the wheel scrolls what the list of keys covers',
+        '                _ => EventResult::Ignored,\n'
+        '            },\n'
+        '            Event::Mouse(mouse) => {\n',
+        '                MouseEventKind::Scroll { dy, .. } => self.handle_scroll(mouse.x, mouse.y, dy),\n'
+        '                _ => EventResult::Ignored,\n'
+        '            },\n'
+        '            Event::Mouse(mouse) => {\n',
+        [CARD],
     ),
 ]
 

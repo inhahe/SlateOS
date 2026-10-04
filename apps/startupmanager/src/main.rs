@@ -1852,6 +1852,19 @@ impl StartupUI {
                 self.resize(*width as f32, *height as f32);
                 EventResult::Consumed
             }
+            // The list of keys is modal for the pointer as it is for the keys,
+            // and drawn over everything, the dialogs included: a press with
+            // any button puts it away and does nothing else -- it used to
+            // reach the button under it, "Remove" in the question about
+            // removing an entry among them -- and the wheel scrolls nothing
+            // it covers.
+            Event::Mouse(mouse) if self.show_help => match mouse.kind {
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                    self.show_help = false;
+                    EventResult::Consumed
+                }
+                _ => EventResult::Ignored,
+            },
             Event::Mouse(mouse) => {
                 let (x, y) = (mouse.x, mouse.y);
                 match mouse.kind {
@@ -5185,6 +5198,71 @@ mod tests {
         assert_eq!(ui.manager.entry_count(), before - 1);
         assert!(ui.manager.get_entry(id).is_none());
         assert!(ui.selected_id.is_none(), "the selection outlived its entry");
+    }
+
+    /// **A press with the list of keys up puts it away and does nothing
+    /// else, and the wheel scrolls nothing under it.** A press reached the
+    /// button drawn under the list -- "Remove", in the question about
+    /// removing an entry, among them. The controls are the same turn and
+    /// press with the list down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let mut ui = StartupUI::with_sample_entries();
+        let before = ui.manager.entry_count();
+        let f1 = |ui: &mut StartupUI| probe::key(ui, &probe::press(Key::F1));
+
+        // A press, on the question's Remove.
+        let id = select_first_row(&mut ui);
+        probe::key(&mut ui, &probe::press(Key::Delete));
+        assert_eq!(ui.dialog, DialogState::ConfirmDelete(id));
+        f1(&mut ui);
+        assert!(ui.show_help);
+        assert_eq!(
+            probe::click(&mut ui, Target::DeleteConfirm),
+            EventResult::Consumed
+        );
+        assert!(!ui.show_help, "the press did not put the list away");
+        assert_eq!(
+            ui.manager.entry_count(),
+            before,
+            "the press removed the entry under the list"
+        );
+        assert_eq!(ui.dialog, DialogState::ConfirmDelete(id));
+        f1(&mut ui);
+        probe::click_with(&mut ui, Target::DeleteConfirm, MouseButton::Right);
+        assert!(!ui.show_help, "a right-button press left the list up");
+        probe::click(&mut ui, Target::DeleteConfirm);
+        assert_eq!(
+            ui.manager.entry_count(),
+            before - 1,
+            "control: the press removes nothing even with the list down"
+        );
+
+        // The wheel, in a window short enough for the table to scroll.
+        let mut ui = StartupUI::with_sample_entries();
+        ui.resize(SHORT.0, SHORT.1);
+        let (x, y) = probe::rect_of_sized(&ui, Target::Table, SHORT)
+            .unwrap()
+            .centre();
+        let wheel = Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -1.0 },
+        });
+        ui.key_at(&probe::press(Key::F1), SHORT);
+        assert!(ui.show_help);
+        ui.handle_event(&wheel);
+        assert_eq!(
+            ui.scroll_offset, 0,
+            "the wheel scrolled the table under the list"
+        );
+        assert!(ui.show_help, "the wheel put the list away");
+        ui.key_at(&probe::press(Key::Escape), SHORT);
+        ui.handle_event(&wheel);
+        assert_eq!(
+            ui.scroll_offset, 3,
+            "control: the wheel scrolls nothing at all"
+        );
     }
 
     #[test]

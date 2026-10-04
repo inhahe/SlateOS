@@ -1942,6 +1942,9 @@ struct App {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// The user's focus width, which the text boxes draw their focus mark
+    /// at (`appearance_changed`).
+    focus_ring_width: f32,
 }
 
 impl App {
@@ -1949,6 +1952,7 @@ impl App {
         Self {
             show_help: false,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             window_width: WINDOW_WIDTH,
             window_height: WINDOW_HEIGHT,
             pattern: TextInput::new(),
@@ -2697,6 +2701,9 @@ impl App {
             l.pattern,
             &self.pattern,
             ActiveField::Pattern,
+            // A pattern that does not compile: red, as the error under it
+            // says -- while it is being typed, which is when it is fixed.
+            self.compile_error.is_some(),
             Target::PatternField,
         );
 
@@ -2731,6 +2738,7 @@ impl App {
                 replace,
                 &self.replace,
                 ActiveField::Replace,
+                false,
                 Target::ReplaceField,
             );
             // The replacement itself. `apply_replacement` has produced this on
@@ -2751,7 +2759,9 @@ impl App {
     }
 
     /// A labelled one-line field, drawn with the toolkit's single-line editor
-    /// so its caret, selection and sideways scroll are every other field's.
+    /// so its caret, selection and sideways scroll are every other field's,
+    /// in the toolkit's box -- red when what is in it is `invalid`.
+    #[allow(clippy::too_many_arguments)] // one field's whole description
     fn draw_field(
         &self,
         f: &mut Frame<Target>,
@@ -2759,6 +2769,7 @@ impl App {
         rect: Rect,
         input: &TextInput,
         field: ActiveField,
+        invalid: bool,
         target: Target,
     ) {
         let focused = self.active_tab == ActiveTab::Tester
@@ -2774,21 +2785,7 @@ impl App {
             max_width: Some(70.0),
             overflow: TextOverflow::Ellipsis,
         });
-        self.palette
-            .push_surface(f, rect.x, rect.y, rect.w, rect.h, 4.0, Surface::Card);
-        f.push(RenderCommand::StrokeRect {
-            x: rect.x,
-            y: rect.y,
-            width: rect.w,
-            height: rect.h,
-            color: if focused {
-                self.palette.blue
-            } else {
-                self.palette.surface1
-            },
-            line_width: if focused { 2.0 } else { 1.0 },
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.draw_box(f, rect, focused, invalid, target);
         let mut tree = RenderTree::new();
         textedit::draw(
             &mut tree,
@@ -2819,6 +2816,32 @@ impl App {
         );
         f.extend(tree.commands);
         f.hit(target, rect);
+    }
+
+    /// A box text is typed into: the toolkit's field, in the theme's shape
+    /// (lane C, c-e-a-theme-can-shape-the-controls) -- the well, its edge,
+    /// red for a value that is wrong, lit under the pointer, and the focus
+    /// mark at the user's width while it has the keyboard.
+    fn draw_box(
+        &self,
+        f: &mut Frame<Target>,
+        rect: Rect,
+        focused: bool,
+        invalid: bool,
+        target: Target,
+    ) {
+        guitk::field::draw(
+            f,
+            &self.palette,
+            rect,
+            guitk::field::State {
+                hovered: self.hover == Some(target),
+                focused,
+                disabled: false,
+                invalid,
+            },
+            self.focus_ring_width,
+        );
     }
 
     /// The header every text box here has: a strip with its label, and a
@@ -2871,34 +2894,9 @@ impl App {
             "Test Input:",
             &format!("{} lines", self.input.line_count()),
         );
+        // The box the text is typed into, under the header that labels it.
         let body = l.input_body();
-        self.palette.push_surface_radii(
-            f,
-            body.x,
-            body.y,
-            body.w,
-            body.h,
-            CornerRadii {
-                top_left: 0.0,
-                top_right: 0.0,
-                bottom_left: 4.0,
-                bottom_right: 4.0,
-            },
-            Surface::Card,
-        );
-        f.push(RenderCommand::StrokeRect {
-            x: l.input.x,
-            y: l.input.y,
-            width: l.input.w,
-            height: l.input.h,
-            color: if focused {
-                self.palette.blue
-            } else {
-                self.palette.surface1
-            },
-            line_width: if focused { 2.0 } else { 1.0 },
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.draw_box(f, body, focused, false, Target::InputArea);
         f.hit(Target::InputArea, body);
 
         let area = l.input_text();
@@ -3726,17 +3724,9 @@ impl App {
             overflow: TextOverflow::Ellipsis,
         });
         let field = Rect::new(card.x + 16.0, card.y + 44.0, (card.w - 32.0).max(0.0), 32.0);
-        self.palette
-            .push_surface(f, field.x, field.y, field.w, field.h, 4.0, Surface::Card);
-        f.push(RenderCommand::StrokeRect {
-            x: field.x,
-            y: field.y,
-            width: field.w,
-            height: field.h,
-            color: self.palette.blue,
-            line_width: 2.0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        // It has the keyboard while the dialog is up; red while the name in
+        // it is one the library refused, as the line under it says.
+        self.draw_box(f, field, true, self.save_error.is_some(), Target::SaveName);
         let mut tree = RenderTree::new();
         textedit::draw(
             &mut tree,
@@ -4496,6 +4486,10 @@ const TIPS: &[&str] = &[
 impl oswindow::app::App for App {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -6058,6 +6052,81 @@ mod tests {
 
     fn mouse(x: f32, y: f32, kind: MouseEventKind) -> Event {
         Event::Mouse(MouseEvent { x, y, kind })
+    }
+
+    /// The text boxes are the toolkit's fields, in the theme's shape (lane
+    /// C, c-e-a-theme-can-shape-the-controls): a pattern that does not
+    /// compile is red while it is typed, the box under the pointer is lit,
+    /// the save dialog's name is red while the library refuses it, and the
+    /// focus mark is the user's width.
+    #[test]
+    fn the_text_boxes_are_the_toolkits_fields() {
+        let mut app = testing("(", "abc");
+        let mut palette = app.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        oswindow::app::App::theme_changed(&mut app, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        oswindow::app::App::appearance_changed(&mut app, &settings);
+        let draws = |app: &App, rect: Rect, state: guitk::field::State| {
+            let seq = |s: guitk::field::State| {
+                let mut want: Vec<RenderCommand> = Vec::new();
+                guitk::field::draw(&mut want, &palette, rect, s, width);
+                want
+            };
+            let cmds = Probe::draw(app, App::SIZE).commands().to_vec();
+            let has = |want: &[RenderCommand]| {
+                !want.is_empty() && cmds.windows(want.len()).any(|w| w == want)
+            };
+            // Not focused means no focus mark either: an unfocused box's commands
+            // begin a focused one's under a ring or an underline, so finding them
+            // alone says nothing about the mark.
+            has(&seq(state))
+                && (state.focused
+                    || !has(&seq(guitk::field::State {
+                        focused: true,
+                        ..state
+                    })))
+        };
+        let idle = guitk::field::State::default();
+
+        assert!(app.compile_error.is_some(), "( compiled");
+        let pattern = probe::rect_of(&app, Target::PatternField).expect("the pattern");
+        let wrong = guitk::field::State {
+            focused: true,
+            invalid: true,
+            ..idle
+        };
+        assert!(
+            draws(&app, pattern, wrong),
+            "a pattern that does not compile is not red, at the user's width"
+        );
+
+        let input = probe::rect_of(&app, Target::InputArea).expect("the test input");
+        let (x, y) = input.centre();
+        app.handle_event(&mouse(x, y, MouseEventKind::Move));
+        let lit = guitk::field::State {
+            hovered: true,
+            ..idle
+        };
+        assert!(
+            draws(&app, input, lit),
+            "the box under the pointer is not lit"
+        );
+
+        app.set_pattern("a+");
+        assert!(app.ask_to_save());
+        assert!(app.confirm_save(), "an empty name was not answered");
+        assert!(app.save_error.is_some());
+        let name = probe::rect_of(&app, Target::SaveName).expect("the name box");
+        assert!(
+            draws(&app, name, wrong),
+            "a name the library refused is not red"
+        );
     }
 
     /// A tester with `pattern` run over `input`.

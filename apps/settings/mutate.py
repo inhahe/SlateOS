@@ -585,6 +585,55 @@ MUTATIONS = [
         '            let _ = copied;\n',
         ['a_chord_is_neither_a_settings_key_nor_typing'],
     ),
+    # -- the search box and the text field, the toolkit's (c-e-a-theme-can-shape-the-controls)
+    (
+        'the search box is drawn the same wherever the pointer is',
+        '                hovered: self.search_hovered,',
+        '                hovered: false,',
+        ['the_search_box_and_the_text_field_are_the_toolkits'],
+    ),
+    (
+        'the pointer over the search box is not noticed',
+        '        let search = sidebar && Self::search_rect().contains(mx, my);',
+        '        let search = false;',
+        ['the_search_box_and_the_text_field_are_the_toolkits'],
+    ),
+    (
+        'the pointer over a page control is not noticed',
+        '            self.row_at(mx, my)\n',
+        '            None\n',
+        ['the_search_box_and_the_text_field_are_the_toolkits'],
+    ),
+    (
+        'the text field is drawn the same wherever the pointer is',
+        '                self.page_hovered == Some(RowHit::Focus(FieldId::ExclusionDraft)),',
+        '                false,',
+        ['the_search_box_and_the_text_field_are_the_toolkits'],
+    ),
+    (
+        'the search box takes the toolkit\'s focus width, not the user\'s',
+        '            },\n            self.appearance.settings.focus_ring_width(),\n',
+        '            },\n            guitk::style::FOCUS_RING_WIDTH,\n',
+        ['the_search_box_and_the_text_field_are_the_toolkits'],
+    ),
+    (
+        'the text field takes the toolkit\'s focus width, not the user\'s',
+        '                self.page_hovered == Some(RowHit::Focus(FieldId::ExclusionDraft)),\n                self.appearance.settings.focus_ring_width(),',
+        '                self.page_hovered == Some(RowHit::Focus(FieldId::ExclusionDraft)),\n                guitk::style::FOCUS_RING_WIDTH,',
+        ['the_search_box_and_the_text_field_are_the_toolkits'],
+    ),
+    (
+        'leaving a control lit is not a change',
+        '        let changed = category != self.sidebar_hovered\n',
+        '        let changed = category.is_some() && category != self.sidebar_hovered\n',
+        ['leaving_a_category_for_the_page_puts_its_light_out'],
+    ),
+    (
+        'the pointer leaving the window leaves the search box lit',
+        '                let search = std::mem::take(&mut self.search_hovered);',
+        '                let search = false;',
+        ['the_search_box_and_the_text_field_are_the_toolkits'],
+    ),
 ]
 
 if __name__ == "__main__":

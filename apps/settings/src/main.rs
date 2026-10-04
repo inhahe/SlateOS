@@ -548,9 +548,15 @@ pub struct SettingsState {
     /// box drew no caret, because there was no caret to draw.
     pub search_query: TextInput,
     pub search_focused: bool,
+    /// Whether the pointer is over the search box: its edge is warmed
+    /// towards the accent then, as every field's is.
+    pub search_hovered: bool,
     /// Whether the shortcut card is up.
     pub show_help: bool,
     pub sidebar_hovered: Option<usize>,
+    /// The page control under the pointer, which is drawn lit -- a text
+    /// field's edge, as the toolkit's fields are.
+    page_hovered: Option<RowHit>,
 
     // Window dimensions
     pub window_width: f32,
@@ -1806,6 +1812,8 @@ impl SettingsState {
             search_focused: false,
             show_help: false,
             sidebar_hovered: None,
+            search_hovered: false,
+            page_hovered: None,
 
             window_width: 1200.0,
             window_height: 800.0,
@@ -3336,6 +3344,7 @@ trait PageSink {
     /// same column — so it reads as one of them rather than as a form dropped
     /// into the page. The caret is drawn only when focused, because a caret in
     /// an unfocused field promises that typing will land there.
+    #[allow(clippy::too_many_arguments)] // one field's whole description
     fn text_field_row(
         &mut self,
         label: &str,
@@ -3343,6 +3352,8 @@ trait PageSink {
         field: &TextInput,
         placeholder: &str,
         focused: bool,
+        hovered: bool,
+        focus_width: f32,
     ) {
         let pal = &self.palette();
         self.draw(|tree, x, y| {
@@ -3365,22 +3376,22 @@ trait PageSink {
         self.draw(move |tree, x, y| {
             let fx = x + CONTROL_COLUMN_DX;
             let fy = y + BUTTON_ROW_INSET_Y;
-            fill_rounded(tree, fx, fy, FIELD_WIDTH, BUTTON_HEIGHT, pal.surface0, 6.0);
-            if focused {
-                // An underline rather than a different fill, so the text reads
-                // identically whether or not the field has the keyboard: a
-                // field that changes colour when focused makes the *text* look
-                // like it changed.
-                fill_rounded(
-                    tree,
-                    fx,
-                    fy + BUTTON_HEIGHT - 2.0,
-                    FIELD_WIDTH,
-                    2.0,
-                    pal.accent,
-                    1.0,
-                );
-            }
+            // The toolkit's field, in the theme's shape (lane C,
+            // c-e-a-theme-can-shape-the-controls): the well keeps one colour
+            // whether or not the field has the keyboard, so the text reads
+            // the same either way, and the focus mark is the theme's.
+            guitk::field::draw(
+                tree,
+                pal,
+                guitk::frame::Rect::new(fx, fy, FIELD_WIDTH, BUTTON_HEIGHT),
+                guitk::field::State {
+                    hovered,
+                    focused,
+                    disabled: false,
+                    invalid: false,
+                },
+                focus_width,
+            );
             if text.is_empty() && !focused {
                 text_clipped(
                     tree,
@@ -3630,6 +3641,16 @@ impl SettingsState {
     // exactly the rows clickable, down to the gap between them.
 
     /// Y of the top of the search box, which sits directly under the title.
+    /// The search box, at the top of the sidebar.
+    fn search_rect() -> guitk::frame::Rect {
+        guitk::frame::Rect::new(
+            12.0,
+            Self::search_top(),
+            SIDEBAR_WIDTH - 24.0,
+            SEARCH_BAR_HEIGHT,
+        )
+    }
+
     const fn search_top() -> f32 {
         HEADER_HEIGHT
     }
@@ -3699,16 +3720,20 @@ impl SettingsState {
         // App title
         text_bold(tree, 20.0, 18.0, "Settings", pal.text, 20.0);
 
-        // Search bar
+        // Search bar: the toolkit's field, in the theme's shape (lane C,
+        // c-e-a-theme-can-shape-the-controls).
         let search_y = Self::search_top();
-        fill_rounded(
+        guitk::field::draw(
             tree,
-            12.0,
-            search_y,
-            SIDEBAR_WIDTH - 24.0,
-            SEARCH_BAR_HEIGHT,
-            pal.surface0,
-            8.0,
+            pal,
+            Self::search_rect(),
+            guitk::field::State {
+                hovered: self.search_hovered,
+                focused: self.search_focused,
+                disabled: false,
+                invalid: false,
+            },
+            self.appearance.settings.focus_ring_width(),
         );
         if self.search_query.text().is_empty() && !self.search_focused {
             tree.text(
@@ -4319,6 +4344,8 @@ impl SettingsState {
                 &self.exclusion_draft,
                 "*.gif",
                 self.focused_field == Some(FieldId::ExclusionDraft),
+                self.page_hovered == Some(RowHit::Focus(FieldId::ExclusionDraft)),
+                self.appearance.settings.focus_ring_width(),
             );
             // Offered only with something to add: a button that does nothing
             // for an empty field is one a user reads as broken.
@@ -6785,6 +6812,17 @@ impl SettingsState {
         match &evt.kind {
             MouseEventKind::Press(MouseButton::Left) => self.handle_click(evt.x, evt.y),
             MouseEventKind::Move => self.handle_hover(evt.x, evt.y),
+            // Nothing is under a pointer that has left.
+            MouseEventKind::Leave => {
+                let category = self.sidebar_hovered.take().is_some();
+                let search = std::mem::take(&mut self.search_hovered);
+                let page = self.page_hovered.take().is_some();
+                if category || search || page {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
             // A drag ends wherever the button comes up, on the control or not.
             // Releasing outside is the ordinary way to finish a slider gesture,
             // so this must not be conditional on the pointer still being over
@@ -7223,14 +7261,33 @@ impl SettingsState {
             return EventResult::Consumed;
         }
 
-        // Sidebar hover
-        if mx < SIDEBAR_WIDTH {
-            self.sidebar_hovered = self.category_at(mx, my);
-            return EventResult::Consumed;
+        // What is under the pointer is drawn lit: a category, the search
+        // box, a page control. Leaving one is a change as much as coming to
+        // another -- a category left lit as the pointer crossed onto the
+        // page stayed lit until something else redrew the window.
+        let sidebar = mx < SIDEBAR_WIDTH;
+        let category = if sidebar {
+            self.category_at(mx, my)
+        } else {
+            None
+        };
+        let search = sidebar && Self::search_rect().contains(mx, my);
+        let page = if sidebar || self.open_dropdown.is_some() {
+            None
+        } else {
+            self.row_at(mx, my)
+        };
+        let changed = category != self.sidebar_hovered
+            || search != self.search_hovered
+            || page != self.page_hovered;
+        self.sidebar_hovered = category;
+        self.search_hovered = search;
+        self.page_hovered = page;
+        if changed {
+            EventResult::Consumed
+        } else {
+            EventResult::Ignored
         }
-
-        self.sidebar_hovered = None;
-        EventResult::Ignored
     }
 
     /// Opens `id`'s dropdown, scrolled so the current choice is on screen.
@@ -9974,6 +10031,41 @@ mod tests {
         assert_eq!(state.sidebar_hovered, Some(0));
     }
 
+    /// A category lit under the pointer goes out when the pointer crosses
+    /// onto the page -- with a redraw, since the light going out is as much a
+    /// change as one coming on. It used to stay lit until something else
+    /// redrew the window.
+    #[test]
+    fn leaving_a_category_for_the_page_puts_its_light_out() {
+        let mut state = SettingsState::new();
+        let row =
+            SettingsState::category_row_top(0) + SettingsState::CATEGORY_ROW_PAINTED_HEIGHT / 2.0;
+        let at = |x: f32, y: f32| {
+            Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Move,
+            })
+        };
+        assert_eq!(
+            state.handle_event(&at(SIDEBAR_WIDTH / 2.0, row)),
+            EventResult::Consumed
+        );
+        assert_eq!(state.sidebar_hovered, Some(0));
+        // Onto the page, clear of every control on it.
+        let bare = (SIDEBAR_WIDTH + 2.0, 2.0);
+        assert!(
+            state.row_at(bare.0, bare.1).is_none(),
+            "the point is on a control"
+        );
+        assert_eq!(
+            state.handle_event(&at(bare.0, bare.1)),
+            EventResult::Consumed,
+            "the category's light went out without a redraw"
+        );
+        assert_eq!(state.sidebar_hovered, None);
+    }
+
     /// **The Wallpaper page is a page now, not a placeholder.**
     /// The rotation rows appear only once there is a folder for them.
     ///
@@ -10180,6 +10272,120 @@ mod tests {
                 text: ch.to_string(),
             }));
         }
+    }
+
+    /// The search box and the page's text field are the toolkit's fields, in
+    /// the theme's shape (lane C, c-e-a-theme-can-shape-the-controls): lit
+    /// under the pointer, out when it leaves, and marked at the user's focus
+    /// width while they have the keyboard.
+    #[test]
+    fn the_search_box_and_the_text_field_are_the_toolkits() {
+        let mut state = rotation_page();
+        state.appearance.settings.focus_ring_scale = 2.5;
+        let width = state.appearance.settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        let palette = state.palette();
+        let draws = |state: &SettingsState, rect: guitk::frame::Rect, s: guitk::field::State| {
+            let seq = |s2: guitk::field::State| {
+                let mut want: Vec<RenderCommand> = Vec::new();
+                guitk::field::draw(&mut want, &palette, rect, s2, width);
+                want
+            };
+            let cmds = state.render_tree().commands;
+            let has = |want: &[RenderCommand]| {
+                !want.is_empty() && cmds.windows(want.len()).any(|w| w == want)
+            };
+            // Not focused means no focus mark either: an unfocused box's commands
+            // begin a focused one's under a ring or an underline, so finding them
+            // alone says nothing about the mark.
+            has(&seq(s)) && (s.focused || !has(&seq(guitk::field::State { focused: true, ..s })))
+        };
+        let idle = guitk::field::State::default();
+        let lit = guitk::field::State {
+            hovered: true,
+            ..idle
+        };
+        let keyed = guitk::field::State {
+            focused: true,
+            ..idle
+        };
+        let pointer = |state: &mut SettingsState, x: f32, y: f32, kind: MouseEventKind| {
+            state.handle_event(&Event::Mouse(MouseEvent { x, y, kind }))
+        };
+
+        let search = SettingsState::search_rect();
+        assert!(
+            draws(&state, search, idle),
+            "the search box is not the toolkit's"
+        );
+        let (sx, sy) = (search.x + search.w / 2.0, search.y + search.h / 2.0);
+        assert_eq!(
+            pointer(&mut state, sx, sy, MouseEventKind::Move),
+            EventResult::Consumed
+        );
+        assert!(
+            draws(&state, search, lit),
+            "the search box is not lit under the pointer"
+        );
+        assert_eq!(
+            pointer(&mut state, -1.0, -1.0, MouseEventKind::Leave),
+            EventResult::Consumed
+        );
+        assert!(
+            draws(&state, search, idle),
+            "the search box stayed lit after the pointer left the window"
+        );
+        pointer(&mut state, sx, sy, MouseEventKind::Move);
+
+        let (fx, fy) = center_of(&state, RowHit::Focus(FieldId::ExclusionDraft)).expect("field");
+        let field = hit_bands(&state)
+            .into_iter()
+            .find(|(w, _)| *w == RowHit::Focus(FieldId::ExclusionDraft))
+            .map(|(_, (x, y, w, h))| guitk::frame::Rect::new(x, y, w, h))
+            .expect("field");
+        assert_eq!(
+            pointer(&mut state, fx, fy, MouseEventKind::Move),
+            EventResult::Consumed
+        );
+        assert!(
+            draws(&state, search, idle),
+            "the search box stayed lit as the pointer left it"
+        );
+        assert!(
+            draws(&state, field, lit),
+            "the field is not lit under the pointer"
+        );
+        assert_eq!(
+            pointer(&mut state, fx + 1.0, fy, MouseEventKind::Move),
+            EventResult::Ignored,
+            "a move along the field redrew the window"
+        );
+        pointer(&mut state, -1.0, -1.0, MouseEventKind::Leave);
+        assert!(
+            draws(&state, field, idle),
+            "the field stayed lit after the pointer left"
+        );
+
+        pointer(&mut state, fx, fy, MouseEventKind::Press(MouseButton::Left));
+        let both = guitk::field::State {
+            hovered: true,
+            focused: true,
+            ..idle
+        };
+        assert!(
+            draws(&state, field, both),
+            "the field with the keyboard is not marked at the user's width"
+        );
+        pointer(&mut state, sx, sy, MouseEventKind::Press(MouseButton::Left));
+        assert!(state.search_focused);
+        let search_keyed = guitk::field::State {
+            hovered: true,
+            ..keyed
+        };
+        assert!(
+            draws(&state, search, search_keyed),
+            "the search box with the keyboard is not marked at the user's width"
+        );
     }
 
     /// **A pattern typed into the field reaches the setting the shell reads.**

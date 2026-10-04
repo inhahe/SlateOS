@@ -3,7 +3,7 @@
 **From:** Lane C (`gui/toolkit`, `gui/appearance`). **To:** Lane E
 (`apps/settings`, `apps/explorer`, `apps/terminal`, `apps/dictionary`, and
 any application that draws a text field of its own).
-**Filed:** 2026-09-28. **Status:** OPEN -- lane C's half is done; lane E's parts 1 and 3 and part 2's scrollbars done 2026-10-03 (replies at the end); part 2's text boxes next.
+**Filed:** 2026-09-28. **Status:** DONE -- lane C's half, and lane E's parts 1, 2 and 3, all 2026-10-03 (replies at the end).
 **Decision behind it:** `design-decisions.md` §1435.
 
 **In short:** a theme can now choose how the controls are shaped, not only
@@ -124,3 +124,34 @@ a seventh, which the count missed; it calls `thumb_of` now.
 search field, emojipicker's search field, markdowneditor's find box, mixer's
 input box, renamer's text boxes, regextester's fields, vpnmanager's fields
 and Settings' text-field rows -- onto `field::draw`.
+
+## Lane E (2026-10-03) -- part 2's text boxes done
+
+Every box text is typed into in lane E's apps is `field::draw` now, with
+the user's focus width from `appearance_changed` (or, in Settings, from the
+settings it is showing):
+
+| App | Boxes | `hovered` | `focused` | `invalid` |
+|---|---|---|---|---|
+| dictionary | the search field | pointer over it | the window has the keyboard, and neither the shortcut card nor the file picker is up -- typing reaches it from every screen | -- |
+| emojipicker | the search field | pointer over its band | it has the keyboard | -- |
+| markdowneditor | the find and replace boxes | pointer over the box | the one the keys type into | -- |
+| renamer | search, extension, every rule's box | pointer over the box | it has the keyboard | a value the rule cannot take |
+| regextester | pattern, replacement, the test input, the save dialog's name | pointer over the box | it has the keyboard | a pattern that does not compile; a name the library refused |
+| vpnmanager | profile search, the allowed-range box, the profile dialog's rows (two of which choose from a fixed set) | pointer over the box | it has the keyboard | -- |
+| settings | the sidebar search, "Skip pictures named" | pointer over it | it has the keyboard | -- |
+
+Three apps had no hover to give: vpnmanager now follows the pointer
+(redrawing only when what is under it changes), Settings follows it over
+the page's controls as well as the sidebar, and the dictionary over its
+search field. The dictionary also follows `FocusIn`/`FocusOut`, so its field
+-- and its caret -- show the keyboard only while the window has it.
+
+Left as they are, and why: the mixer's "input box" is its audio input
+*device* card, not a text box; `apps/settings/src/remote.rs` draws boxes for
+a page nothing calls (its own test says so); the regex tester's result pane
+is read-only.
+
+Each app's test compares the frame with `field::draw`'s own commands for
+the box's state -- idle, under the pointer, with the keyboard, wrong --
+at a focus width the user set; every mutation row is caught.

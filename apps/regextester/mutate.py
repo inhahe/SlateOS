@@ -374,6 +374,31 @@ MUTATIONS = [
         '            Key::Enter => self.confirm_save(),',
         ['a_chord_is_neither_a_tester_key_nor_typing'],
     ),
+    # -- the text boxes, the toolkit's fields (c-e-a-theme-can-shape-the-controls)
+    (
+        'a pattern that does not compile is not drawn red',
+        '            self.compile_error.is_some(),\n',
+        '            false,\n',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        'a text box is drawn the same wherever the pointer is',
+        '                hovered: self.hover == Some(target),',
+        '                hovered: false,',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        'a name the library refused is not drawn red',
+        '        self.draw_box(f, field, true, self.save_error.is_some(), Target::SaveName);',
+        '        self.draw_box(f, field, true, false, Target::SaveName);',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        "the text boxes take the toolkit's focus width, not the user's",
+        '        self.focus_ring_width = settings.focus_ring_width();',
+        '        let _ = settings;',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
 ]
 
 if __name__ == "__main__":

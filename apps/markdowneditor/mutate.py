@@ -381,6 +381,25 @@ MUTATIONS = [
         '                if self.reread_settings() {\n                    Response::Idle',
         ['auto_save_switched_in_one_window_reaches_the_others'],
     ),
+    # -- the find panel's boxes, the toolkit's fields (c-e-a-theme-can-shape-the-controls)
+    (
+        'the find box under the pointer is not lit',
+        '        hover == Some(Target::FindReplacement),\n',
+        '        false,\n',
+        ['the_find_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        'the find boxes take the toolkit\'s focus width, not the user\'s',
+        '        self.focus_ring_width = settings.focus_ring_width();',
+        '        let _ = settings;',
+        ['the_find_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        'the find box the keys type into is not marked',
+        '        &state.query,\n        !state.focus_replacement,\n',
+        '        &state.query,\n        false,\n',
+        ['the_find_boxes_are_the_toolkits_fields'],
+    ),
 ]
 
 if __name__ == "__main__":

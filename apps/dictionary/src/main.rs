@@ -1428,6 +1428,16 @@ pub struct Dictionary {
     /// is held. The thumb follows that point rather than the pointer, so it
     /// does not jump under the pointer on the first move.
     thumb_grab: Option<f32>,
+    /// Whether the pointer is over the search field: its edge is warmed
+    /// towards the accent then, as every field's is.
+    search_hovered: bool,
+    /// Whether the window has the keyboard (`FocusIn` / `FocusOut`). The
+    /// search field takes every key typed, so it has the keyboard exactly
+    /// when the window does -- and nothing modal is up.
+    window_focused: bool,
+    /// The user's focus width, which the search field's focus mark is
+    /// drawn at (`App::appearance_changed`).
+    focus_ring_width: f32,
     status: String,
     size: (f32, f32),
     /// The user's colours, replaced whenever the theme changes.
@@ -1501,6 +1511,10 @@ impl Dictionary {
             wheel: guitk::wheel::Accumulator::default(),
             bar_hovered: false,
             thumb_grab: None,
+            search_hovered: false,
+            // A window opens with the keyboard; `FocusOut` says otherwise.
+            window_focused: true,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             status: "Type a word, or part of one".to_string(),
             size: (WINDOW_WIDTH, WINDOW_HEIGHT),
             lookup: online::look_up,
@@ -2143,6 +2157,13 @@ impl Dictionary {
             .min(total.saturating_sub(visible.max(1)))
     }
 
+    /// Whether typing reaches the search field now: the window has the
+    /// keyboard, and neither the shortcut card nor the file picker, which
+    /// are modal, is up.
+    fn search_has_keyboard(&self) -> bool {
+        self.window_focused && !self.show_help && !self.picker.is_open()
+    }
+
     /// The scrollbar on screen now, at the size last drawn: the one beside
     /// the list or the entry, when it does not fit.
     fn current_bar(&self) -> Option<Bar> {
@@ -2729,7 +2750,22 @@ impl Dictionary {
     fn draw_search(&self, f: &mut Frame, l: &Layout) {
         let field = l.search_box();
         if field.h > 0.0 {
-            fill(f, field, self.palette.surface0, (field.h * 0.22).min(8.0));
+            // The toolkit's field, in the theme's shape (lane C,
+            // c-e-a-theme-can-shape-the-controls): its well, its edge, and
+            // the focus mark at the user's width while the keys come here.
+            let keyboard = self.search_has_keyboard();
+            guitk::field::draw(
+                f,
+                &self.palette,
+                field,
+                guitk::field::State {
+                    hovered: self.search_hovered,
+                    focused: keyboard,
+                    disabled: false,
+                    invalid: false,
+                },
+                self.focus_ring_width,
+            );
             f.hit(Target::SearchBox, field);
             let inner = l.pad;
             let clear_w = (l.small * 4.0).min(field.w * 0.25);
@@ -2741,12 +2777,18 @@ impl Dictionary {
             if has_query {
                 // The caret is drawn as part of the string rather than as a
                 // separate rectangle: there is no cursor to move in this field,
-                // so a caret anywhere but the end would be a lie.
+                // so a caret anywhere but the end would be a lie -- and so
+                // would a caret while the keys go somewhere else.
+                let shown = if keyboard {
+                    format!("{}\u{2502}", self.query)
+                } else {
+                    self.query.clone()
+                };
                 label(
                     f,
                     field.x + inner,
                     baseline,
-                    &format!("{}\u{2502}", self.query),
+                    &shown,
                     l.font,
                     self.palette.text,
                     FontWeightHint::Regular,
@@ -3472,7 +3514,9 @@ impl Dictionary {
                 };
             }
             MouseEventKind::Leave => {
-                return if std::mem::take(&mut self.bar_hovered) {
+                let bar = std::mem::take(&mut self.bar_hovered);
+                let field = std::mem::take(&mut self.search_hovered);
+                return if bar || field {
                     EventResult::Consumed
                 } else {
                     EventResult::Ignored
@@ -3551,6 +3595,12 @@ impl Dictionary {
             .is_some_and(|bar| bar.track.contains(ev.x, ev.y));
         if over != self.bar_hovered {
             self.bar_hovered = over;
+            changed = true;
+        }
+        let on_field =
+            self.screen == Screen::Search && self.layout().search_box().contains(ev.x, ev.y);
+        if on_field != self.search_hovered {
+            self.search_hovered = on_field;
             changed = true;
         }
         if changed {
@@ -3776,6 +3826,14 @@ pub fn handle_event(app: &mut Dictionary, event: &Event) -> EventResult {
             app.resize(*width as f32, *height as f32);
             EventResult::Consumed
         }
+        Event::FocusIn => {
+            app.window_focused = true;
+            EventResult::Consumed
+        }
+        Event::FocusOut => {
+            app.window_focused = false;
+            EventResult::Consumed
+        }
         _ => EventResult::Ignored,
     }
 }
@@ -3783,6 +3841,10 @@ pub fn handle_event(app: &mut Dictionary, event: &Event) -> EventResult {
 impl App for Dictionary {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     /// A lookup's thread wakes the window when its answer is in.
@@ -5942,6 +6004,97 @@ mod tests {
         assert!(
             thumb_ink(&d, SHORT, track, thumb).0 > scrollbar::IDLE_WIDTH,
             "a held thumb went back to a line"
+        );
+    }
+
+    /// The search field is the toolkit's, in the theme's shape (lane C,
+    /// c-e-a-theme-can-shape-the-controls): lit under the pointer, and marked
+    /// at the user's focus width -- with its caret -- exactly while typing
+    /// reaches it: not when the window has lost the keyboard, nor under the
+    /// shortcut card.
+    #[test]
+    fn the_search_field_is_the_toolkits_and_marked_while_the_keys_come_to_it() {
+        let mut d = app();
+        search_for(&mut d, "ker");
+        let mut palette = d.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut d, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        App::appearance_changed(&mut d, &settings);
+        let field = d.layout().search_box();
+        let draws = |d: &Dictionary, state: guitk::field::State| {
+            let seq = |s: guitk::field::State| {
+                let mut want: Vec<RenderCommand> = Vec::new();
+                guitk::field::draw(&mut want, &palette, field, s, width);
+                want
+            };
+            let cmds = d.frame(WINDOW_WIDTH, WINDOW_HEIGHT).commands().to_vec();
+            let has = |want: &[RenderCommand]| {
+                !want.is_empty() && cmds.windows(want.len()).any(|w| w == want)
+            };
+            // Not focused means no focus mark either: an unfocused box's commands
+            // begin a focused one's under a ring or an underline, so finding them
+            // alone says nothing about the mark.
+            has(&seq(state))
+                && (state.focused
+                    || !has(&seq(guitk::field::State {
+                        focused: true,
+                        ..state
+                    })))
+        };
+        let idle = guitk::field::State::default();
+        let keyed = guitk::field::State {
+            focused: true,
+            ..idle
+        };
+        assert!(draws(&d, keyed), "the field the keys go to is not marked");
+        assert!(shows(&d, Dictionary::SIZE, "ker\u{2502}"), "no caret");
+
+        handle_event(&mut d, &Event::FocusOut);
+        assert!(
+            draws(&d, idle),
+            "the field is marked with the window in the background"
+        );
+        assert!(
+            !shows(&d, Dictionary::SIZE, "\u{2502}"),
+            "a caret with the window in the background"
+        );
+        handle_event(&mut d, &Event::FocusIn);
+        assert!(draws(&d, keyed));
+
+        let (x, y) = field.centre();
+        let at = |kind| Event::Mouse(MouseEvent { x, y, kind });
+        assert_eq!(
+            handle_event(&mut d, &at(MouseEventKind::Move)),
+            EventResult::Consumed
+        );
+        let lit = guitk::field::State {
+            hovered: true,
+            ..keyed
+        };
+        assert!(draws(&d, lit), "the field under the pointer is not lit");
+        handle_event(
+            &mut d,
+            &Event::Mouse(MouseEvent {
+                x: -1.0,
+                y: -1.0,
+                kind: MouseEventKind::Leave,
+            }),
+        );
+        assert!(
+            draws(&d, keyed),
+            "the field stayed lit after the pointer left"
+        );
+
+        probe::key(&mut d, &probe::press(Key::F1));
+        assert!(
+            draws(&d, idle),
+            "the field is marked under the shortcut card"
         );
     }
 

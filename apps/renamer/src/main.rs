@@ -1197,6 +1197,9 @@ struct RenamerApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// The user's focus width, which the text boxes draw their focus mark
+    /// at (`appearance_changed`).
+    focus_ring_width: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1210,6 +1213,7 @@ impl RenamerApp {
     fn new() -> Self {
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             folder: None,
             picker: FilePicker::default(),
             last_width: WINDOW_WIDTH_PX as f32,
@@ -1545,7 +1549,7 @@ impl RenamerApp {
                     failures.push(format!(
                         "{} -> {}: a file named {} is already there",
                         step.from, step.to, step.to
-                    ))
+                    ));
                 }
                 Err(err) => failures.push(format!("{} -> {}: {err}", step.from, step.to)),
             }
@@ -3583,22 +3587,22 @@ impl RenamerApp {
         invalid: bool,
         target: Target,
     ) {
-        self.palette
-            .push_surface(f, rect.x, rect.y, rect.w, rect.h, 4.0, Surface::Card);
-        if focused || invalid {
-            f.push(RenderCommand::FillRect {
-                x: rect.x,
-                y: rect.bottom() - 2.0,
-                width: rect.w,
-                height: 2.0,
-                color: if invalid {
-                    self.palette.red
-                } else {
-                    self.palette.blue
-                },
-                corner_radii: CornerRadii::ZERO,
-            });
-        }
+        // The toolkit's field, in the theme's shape (lane C,
+        // c-e-a-theme-can-shape-the-controls): the well, its edge -- red for a
+        // value the rule cannot take, while it is being typed as at any other
+        // time -- and the focus mark at the user's width.
+        guitk::field::draw(
+            f,
+            &self.palette,
+            rect,
+            guitk::field::State {
+                hovered: self.hover == Some(target),
+                focused,
+                disabled: false,
+                invalid,
+            },
+            self.focus_ring_width,
+        );
         let mut tree = RenderTree::new();
         let (cursor, anchor) = if focused {
             (self.draft.cursor(), self.draft.selection_anchor())
@@ -4416,6 +4420,10 @@ fn format_size(bytes: u64) -> String {
 impl App for RenamerApp {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -7037,6 +7045,82 @@ mod tests {
         assert_eq!(app.operations.len(), 1);
         probe::key(&mut app, &probe::press(Key::Escape));
         assert_eq!(app.focus, Focus::List);
+    }
+
+    /// The text boxes are the toolkit's fields, in the theme's shape (lane C,
+    /// c-e-a-theme-can-shape-the-controls): lit under the pointer, marked at
+    /// the user's focus width while they have the keyboard, and red for a
+    /// value the rule cannot take -- while it is being typed, which is when
+    /// it is being fixed.
+    #[test]
+    fn the_text_boxes_are_the_toolkits_fields() {
+        let mut app = app_listing(&["abcdef.txt"]);
+        let mut palette = app.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut app, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        App::appearance_changed(&mut app, &settings);
+        let draws = |app: &RenamerApp, rect: Rect, state: guitk::field::State| {
+            let seq = |s: guitk::field::State| {
+                let mut want: Vec<RenderCommand> = Vec::new();
+                guitk::field::draw(&mut want, &palette, rect, s, width);
+                want
+            };
+            let cmds = Probe::draw(app, RenamerApp::SIZE).commands().to_vec();
+            let has = |want: &[RenderCommand]| {
+                !want.is_empty() && cmds.windows(want.len()).any(|w| w == want)
+            };
+            // Not focused means no focus mark either: an unfocused box's commands
+            // begin a focused one's under a ring or an underline, so finding them
+            // alone says nothing about the mark.
+            has(&seq(state))
+                && (state.focused
+                    || !has(&seq(guitk::field::State {
+                        focused: true,
+                        ..state
+                    })))
+        };
+        let idle = guitk::field::State::default();
+
+        let search = probe::rect_of(&app, Target::SearchBox).expect("the search box");
+        assert!(
+            draws(&app, search, idle),
+            "the search box is not the toolkit's"
+        );
+        let (x, y) = search.centre();
+        app.on_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Move,
+        }));
+        let lit = guitk::field::State {
+            hovered: true,
+            ..idle
+        };
+        assert!(
+            draws(&app, search, lit),
+            "the box under the pointer is not lit"
+        );
+
+        add_from_menu(&mut app, "Remove Characters");
+        probe::type_str(&mut app, "1");
+        probe::key(&mut app, &probe::press(Key::Tab));
+        probe::type_str(&mut app, "x");
+        let count = probe::rect_of(&app, Target::Field(Slot::B)).expect("the count box");
+        let wrong = guitk::field::State {
+            focused: true,
+            invalid: true,
+            ..idle
+        };
+        assert!(
+            draws(&app, count, wrong),
+            "the count box is not marked red at the user's width while an x is in it"
+        );
     }
 
     /// A counting box refuses what is not a number, keeps the rule's last good

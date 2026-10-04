@@ -290,8 +290,8 @@ MAIN = [
     ),
     (
         "the bar stays lit after the pointer leaves the window",
-        "                return if std::mem::take(&mut self.bar_hovered) {",
-        "                return if self.bar_hovered {",
+        "                let bar = std::mem::take(&mut self.bar_hovered);",
+        "                let bar = self.bar_hovered;",
         ["the_bar_follows_the_themes_style_and_lights_under_the_pointer"],
     ),
     (
@@ -311,6 +311,55 @@ MAIN = [
         "            self.set_sel(screen, 0);\n",
         "",
         ["lists_read_from_a_file_start_at_their_top"],
+    ),
+    # -- the search field, the toolkit's (c-e-a-theme-can-shape-the-controls)
+    (
+        "the search field is marked though the window lacks the keyboard",
+        "        self.window_focused && !self.show_help && !self.picker.is_open()",
+        "        !self.show_help && !self.picker.is_open()",
+        ["the_search_field_is_the_toolkits_and_marked_while_the_keys_come_to_it"],
+    ),
+    (
+        "the search field is marked under the shortcut card",
+        "        self.window_focused && !self.show_help && !self.picker.is_open()",
+        "        self.window_focused && !self.picker.is_open()",
+        ["the_search_field_is_the_toolkits_and_marked_while_the_keys_come_to_it"],
+    ),
+    (
+        "the window losing the keyboard is not noticed",
+        "            app.window_focused = false;\n",
+        "",
+        ["the_search_field_is_the_toolkits_and_marked_while_the_keys_come_to_it"],
+    ),
+    (
+        "the caret shows wherever the keys go",
+        "                let shown = if keyboard {",
+        "                let shown = if true {",
+        ["the_search_field_is_the_toolkits_and_marked_while_the_keys_come_to_it"],
+    ),
+    (
+        "the search field is drawn the same wherever the pointer is",
+        "                    hovered: self.search_hovered,",
+        "                    hovered: false,",
+        ["the_search_field_is_the_toolkits_and_marked_while_the_keys_come_to_it"],
+    ),
+    (
+        "the pointer over the search field is not noticed",
+        "            self.screen == Screen::Search && self.layout().search_box().contains(ev.x, ev.y);",
+        "            false;",
+        ["the_search_field_is_the_toolkits_and_marked_while_the_keys_come_to_it"],
+    ),
+    (
+        "the search field stays lit after the pointer leaves the window",
+        "                let field = std::mem::take(&mut self.search_hovered);",
+        "                let field = false;",
+        ["the_search_field_is_the_toolkits_and_marked_while_the_keys_come_to_it"],
+    ),
+    (
+        "the search field takes the toolkit's focus width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();",
+        "        let _ = settings;",
+        ["the_search_field_is_the_toolkits_and_marked_while_the_keys_come_to_it"],
     ),
 ]
 

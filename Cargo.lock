@@ -2362,6 +2362,10 @@ dependencies = [
 [[package]]
 name = "mediaprobe"
 version = "0.1.0"
+dependencies = [
+ "md5",
+ "vp9",
+]
 
 [[package]]
 name = "memchr"

@@ -175,6 +175,43 @@ MUTATIONS = [
     ),
 ]
 
+FIELD = "the_search_box_is_the_toolkits_field"
+
+MUTATIONS += [
+    # The search box is the toolkit's field (2026-10-04; lane C,
+    # c-e-a-theme-can-shape-the-controls).
+    (
+        "the search box never has the keyboard",
+        "            focused: true,\n            disabled: false,\n            invalid: !self.query.trim().is_empty() && self.results.is_empty(),\n",
+        "            focused: false,\n            disabled: false,\n            invalid: !self.query.trim().is_empty() && self.results.is_empty(),\n",
+        [FIELD, "the_caret_sits_where_the_query_text_ends"],
+    ),
+    (
+        "a query that finds nothing is not red",
+        "            invalid: !self.query.trim().is_empty() && self.results.is_empty(),\n",
+        "            invalid: false,\n",
+        [FIELD],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [FIELD],
+    ),
+    (
+        "the caret is the toolkit's width, not the user's",
+        "                caret_width: self.caret_width,\n",
+        "                caret_width: textedit::CARET_WIDTH,\n",
+        ["a_wider_caret_setting_draws_a_wider_caret"],
+    ),
+    (
+        "the caret is at the start of the query",
+        "        let cursor = if self.query.is_char_boundary(self.cursor) {\n            self.cursor\n",
+        "        let cursor = if self.query.is_char_boundary(self.cursor) {\n            0\n",
+        ["the_caret_sits_where_the_query_text_ends"],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "launcher", timeout=900, only=only))

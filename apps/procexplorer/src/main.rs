@@ -1521,6 +1521,23 @@ impl ProcessExplorerState {
         let mx = mouse.x;
         let my = mouse.y;
 
+        // The list of keys is modal for the pointer as it is for the keys, and
+        // drawn over everything, the New Task box and the context menu
+        // included: a press with any button puts it away and does nothing
+        // else, and the wheel scrolls nothing it covers. A right press used
+        // to raise the context menu -- Kill is on it -- over a process the
+        // reader could not see for the list.
+        if self.show_help {
+            match mouse.kind {
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                    self.show_help = false;
+                    return EventResult::Consumed;
+                }
+                MouseEventKind::Scroll { .. } => return EventResult::Ignored,
+                _ => {}
+            }
+        }
+
         if self.run_box.is_some() {
             return match mouse.kind {
                 MouseEventKind::Press(MouseButton::Left) => self.run_box_press(mx, my),
@@ -4391,6 +4408,70 @@ mod tests {
             y: 300.0,
             kind: MouseEventKind::Scroll { dx: 0.0, dy },
         });
+    }
+
+    /// **A press with the list of keys up puts it away and does nothing
+    /// else, and the wheel scrolls nothing under it.** A left press selected
+    /// the process drawn under the list, and a right press raised the context
+    /// menu -- Kill is on it -- over a process the reader could not see. The
+    /// controls are the same press and turn with the list down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let mut app = app_with_processes(500);
+        let row_zero = ProcessExplorerState::rows_top() + ROW_HEIGHT / 2.0;
+        let mouse = |kind| {
+            Event::Mouse(MouseEvent {
+                x: 100.0,
+                y: row_zero,
+                kind,
+            })
+        };
+        app.selected_index = None;
+
+        app.handle_event(&Event::Key(key_of(Key::F1, Modifiers::NONE)));
+        assert!(app.show_help);
+        assert_eq!(
+            app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Left))),
+            EventResult::Consumed
+        );
+        assert!(!app.show_help, "the press did not put the list away");
+        assert_eq!(
+            app.selected_index, None,
+            "the press selected a process under the list"
+        );
+
+        app.handle_event(&Event::Key(key_of(Key::F1, Modifiers::NONE)));
+        app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Right)));
+        assert!(!app.show_help, "a right-button press left the list up");
+        assert!(
+            app.context_menu.is_none(),
+            "a menu was raised under the list"
+        );
+
+        app.handle_event(&Event::Key(key_of(Key::F1, Modifiers::NONE)));
+        app.handle_event(&mouse(MouseEventKind::Scroll { dx: 0.0, dy: -1.0 }));
+        assert_eq!(app.scroll_offset, 0, "the wheel scrolled the list under it");
+        assert!(app.show_help, "the wheel put the list away");
+        app.handle_event(&Event::Key(key_of(Key::Escape, Modifiers::NONE)));
+
+        // The controls.
+        app.handle_event(&mouse(MouseEventKind::Scroll { dx: 0.0, dy: -1.0 }));
+        assert!(
+            app.scroll_offset > 0,
+            "control: the wheel scrolls nothing at all"
+        );
+        app.handle_event(&mouse(MouseEventKind::Scroll { dx: 0.0, dy: 1.0 }));
+        app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Left)));
+        assert_eq!(
+            app.selected_index,
+            Some(0),
+            "control: the press selects nothing"
+        );
+        app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Right)));
+        assert!(
+            app.context_menu.is_some(),
+            "control: the right button raises no menu"
+        );
     }
 
     /// One detent is three rows, in the direction the delta reports.

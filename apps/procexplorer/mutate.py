@@ -13,7 +13,9 @@ hands the program's path to the file manager.
 
 And, from 2026-09-27, the machine's totals: `read_system`'s doc said a figure
 `/proc/meminfo` does not carry keeps the value last read, and the code zeroed
-it.
+it.  And, from 2026-10-04, the list of keys' hold on the pointer: a press with
+it up puts it away and reaches nothing under it, and the wheel scrolls nothing
+it covers.
 
 What is deliberately not here: where the box and its buttons are drawn.  The
 pointer tests click the middle of the rectangles `run_box_layout` returns, so
@@ -45,8 +47,39 @@ MENU = "the_context_menus_open_file_location_looks_for_the_program"
 HAND_OFF = "show_in_folder_hands_the_path_to_the_file_manager"
 READ_SYSTEM = "the_system_figures_are_read_and_not_invented"
 KEEP = "a_figure_the_file_stops_carrying_keeps_its_last_value"
+CARD = "the_shortcut_card_takes_a_press_rather_than_passing_it_on"
 
 MUTATIONS = [
+    # --- The list of keys takes the pointer (known-issues
+    # E-a-press-goes-through-the-shortcut-card-to-the-control-drawn-under-it) ---
+    (
+        "a press goes through the list of keys",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n"
+        "                    self.show_help = false;\n"
+        "                    return EventResult::Consumed;\n"
+        "                }\n",
+        "",
+        [CARD],
+    ),
+    (
+        "only the left button puts the list of keys away",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n",
+        "                MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_) => {\n",
+        [CARD],
+    ),
+    (
+        "a press under the list of keys leaves it up",
+        "                    self.show_help = false;\n"
+        "                    return EventResult::Consumed;\n",
+        "                    return EventResult::Consumed;\n",
+        [CARD],
+    ),
+    (
+        "the wheel scrolls what the list of keys covers",
+        "                MouseEventKind::Scroll { .. } => return EventResult::Ignored,\n",
+        "",
+        [CARD],
+    ),
     # --- Splitting a command line ---
     (
         "white space does not end a word",

@@ -2233,6 +2233,10 @@ pub struct UndeleteApp {
     pub sort_direction: SortDirection,
     pub selected_file_idx: Option<usize>,
     pub scroll_offset: usize,
+    /// The wheel's unspent fraction of a result row. `scroll_offset` is a
+    /// whole row, so a touchpad's small turns are added up here rather than
+    /// each truncated to nothing.
+    results_wheel: guitk::wheel::Accumulator,
     pub recovery_target: String,
     pub recovery_results: Vec<RecoveryResult>,
     pub show_filter_panel: bool,
@@ -2271,6 +2275,7 @@ impl UndeleteApp {
             sort_direction: SortDirection::Ascending,
             selected_file_idx: None,
             scroll_offset: 0,
+            results_wheel: guitk::wheel::Accumulator::default(),
             recovery_target: String::from("/home/user/recovered"),
             recovery_results: Vec::new(),
             show_filter_panel: false,
@@ -2293,7 +2298,7 @@ impl UndeleteApp {
         self.engine.begin_scan(&partition, self.scan_mode);
         self.screen = UiScreen::Scanning;
         self.selected_file_idx = None;
-        self.scroll_offset = 0;
+        self.restart_results();
         self.clear_filters();
     }
 
@@ -2345,7 +2350,7 @@ impl UndeleteApp {
         if !self.engine.scan_step(&partition) {
             self.screen = UiScreen::Results;
             self.selected_file_idx = None;
-            self.scroll_offset = 0;
+            self.restart_results();
         }
         EventResult::Consumed
     }
@@ -2577,11 +2582,19 @@ impl UndeleteApp {
                 if self.screen != UiScreen::Results {
                     return EventResult::Ignored;
                 }
-                let rows = guitk::wheel::rows_f(dy);
-                let delta = rows as isize;
-                self.scroll_offset = self.scroll_offset.saturating_add_signed(delta);
+                // Through an accumulator, not `rows_f(dy) as isize`: that
+                // truncated a touchpad's fifth of a notch -- 0.6 of a row --
+                // to nothing, every time, so the results could not be
+                // scrolled from a touchpad at all.
+                let rows = self.results_wheel.rows(dy);
+                let before = self.scroll_offset;
+                self.scroll_offset = self.scroll_offset.saturating_add_signed(rows);
                 self.clamp_scroll();
-                EventResult::Consumed
+                if self.scroll_offset == before {
+                    EventResult::Ignored
+                } else {
+                    EventResult::Consumed
+                }
             }
             _ => EventResult::Ignored,
         }
@@ -2869,7 +2882,15 @@ impl UndeleteApp {
         self.active_category_filter = idx;
         self.filter.category = idx.and_then(|i| FileCategory::ALL.get(i).copied());
         self.selected_file_idx = None;
+        self.restart_results();
+    }
+
+    /// Back to the top of a results list that has just been replaced -- by a
+    /// scan, or another category -- forgetting with the old position any
+    /// fraction of a notch the wheel had banked over the old list.
+    fn restart_results(&mut self) {
         self.scroll_offset = 0;
+        self.results_wheel.reset();
     }
 
     /// Navigate to a file in the results.
@@ -5158,6 +5179,59 @@ mod tests {
         assert!(
             app.scroll_offset > 0,
             "control: the wheel scrolls nothing at all"
+        );
+    }
+
+    /// The results in a window short enough to scroll, and a turn of the
+    /// wheel over them.
+    fn short_results() -> (UndeleteApp, impl Fn(f32) -> Event) {
+        let mut app = scanned();
+        app.handle_event(&Event::Resize {
+            width: 900,
+            height: 200,
+        });
+        let turn = |dy| {
+            Event::Mouse(MouseEvent {
+                x: 300.0,
+                y: 100.0,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy },
+            })
+        };
+        (app, turn)
+    }
+
+    /// **A touchpad's small turns add up to rows of the results.** Each was
+    /// truncated to a whole row on its own -- a quarter notch is three
+    /// quarters of a row, and `0.75 as isize` is nothing -- so the results
+    /// could not be scrolled from a touchpad at all.
+    #[test]
+    fn a_touchpads_small_turns_add_up_to_rows() {
+        let (mut app, turn) = short_results();
+        assert_eq!(
+            app.handle_event(&turn(-0.25)),
+            EventResult::Ignored,
+            "three quarters of a row moved a whole one"
+        );
+        assert_eq!(app.scroll_offset, 0);
+        app.handle_event(&turn(-0.25));
+        assert_eq!(
+            app.scroll_offset, 1,
+            "two quarter notches are a row and a half"
+        );
+    }
+
+    /// **A fraction of a notch belongs to the list it was turned over.** A
+    /// quarter notch, another category -- which replaces the list -- and a
+    /// quarter notch again: the second is not added to the first.
+    #[test]
+    fn a_fraction_of_a_notch_does_not_outlive_the_list() {
+        let (mut app, turn) = short_results();
+        app.handle_event(&turn(-0.25));
+        app.set_category_filter(None);
+        app.handle_event(&turn(-0.25));
+        assert_eq!(
+            app.scroll_offset, 0,
+            "a fraction turned over the old list moved the new one"
         );
     }
 

@@ -322,6 +322,37 @@ MUTATIONS = [
         "            }\n            Target::AlarmSnooze(id) => self.snooze_alarm(id),",
         ["deleting_the_content_under_a_scrolled_pane_pulls_it_back"],
     ),
+    # -- the text boxes, the toolkit's fields (c-e-a-theme-can-shape-the-controls)
+    (
+        "the label field is drawn the same wherever the pointer is",
+        "                hovered: self.hover == Some(Target::EditLabel),",
+        "                hovered: false,",
+        ["the_text_boxes_are_the_toolkits_fields"],
+    ),
+    (
+        "a timer field is drawn the same wherever the pointer is",
+        "                    hovered: self.hover == Some(Target::CustomField(hms)),",
+        "                    hovered: false,",
+        ["the_text_boxes_are_the_toolkits_fields"],
+    ),
+    (
+        "the pointer is not followed",
+        "                    let over = self.frame(size.0, size.1).hit_test(mouse.x, mouse.y);",
+        "                    let over = None::<Target>;",
+        ["the_text_boxes_are_the_toolkits_fields"],
+    ),
+    (
+        "the pointer leaving the window leaves its control lit",
+        "                    if self.hover.take().is_some() {",
+        "                    if self.hover.is_some() {",
+        ["the_text_boxes_are_the_toolkits_fields"],
+    ),
+    (
+        "the text boxes take the toolkit's focus width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();",
+        "        let _ = settings;",
+        ["the_text_boxes_are_the_toolkits_fields"],
+    ),
 ]
 
 if __name__ == "__main__":

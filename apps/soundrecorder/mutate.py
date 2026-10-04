@@ -286,6 +286,25 @@ MUTATIONS = [
         '            Key::Left | Key::Right => {\n                let forward = key.key == Key::Right;\n                self.with_open(|o| o.nudge(if forward { 0.1 } else { -0.1 }));',
         ['the_cursor_moves_by_the_keys', 'a_chord_is_not_a_recorder_key_and_altgr_is_not_ctrl'],
     ),
+    # -- the marker-name field, the toolkit's (c-e-a-theme-can-shape-the-controls)
+    (
+        "the name field is drawn the same wherever the pointer is",
+        "                    self.render_field(f, input, name, self.hover == Some(Target::MarkerRow(i)))",
+        "                    self.render_field(f, input, name, false)",
+        ['the_marker_name_field_is_the_toolkits'],
+    ),
+    (
+        "the name field is not marked while a name is written",
+        "                hovered,\n                focused: true,",
+        "                hovered,\n                focused: false,",
+        ['the_marker_name_field_is_the_toolkits'],
+    ),
+    (
+        "the name field takes the toolkit's focus width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();",
+        "        let _ = settings;",
+        ['the_marker_name_field_is_the_toolkits'],
+    ),
 ]
 
 if __name__ == "__main__":

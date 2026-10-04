@@ -1799,6 +1799,9 @@ pub struct QrApp {
     color_dialog: Option<(Swatch, ColorPickerDialog)>,
     /// What the pointer is over, so it can be drawn lit.
     hover: Option<Target>,
+    /// The user's focus width, which the input boxes draw their focus mark
+    /// at (`appearance_changed`).
+    focus_ring_width: f32,
     /// Every box the last paint recorded, for hover and the wheel.
     last_hits: Vec<(Target, Rect)>,
     /// The wheel's remainder.
@@ -1847,6 +1850,7 @@ impl QrApp {
             picker: FilePicker::default(),
             color_dialog: None,
             hover: None,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             last_hits: Vec::new(),
             wheel: wheel::Accumulator::default(),
         }
@@ -3191,20 +3195,19 @@ impl QrApp {
             max_width: Some(rect.w),
             overflow: TextOverflow::Ellipsis,
         });
-        let mut paint = self.palette.surface_paint(Surface::Card);
-        paint.border = Some(if focused {
-            self.palette.blue
-        } else {
-            paint.border.unwrap_or(self.palette.surface2)
-        });
-        self.palette.push_paint_radii(
+        // The toolkit's field, in the theme's shape (lane C,
+        // c-e-a-theme-can-shape-the-controls).
+        guitk::field::draw(
             f,
-            rect.x,
-            rect.y,
-            rect.w,
-            rect.h,
-            CornerRadii::all(CORNER_RADIUS),
-            paint,
+            &self.palette,
+            rect,
+            guitk::field::State {
+                hovered: self.hover == Some(Target::Field(field)),
+                focused,
+                disabled: false,
+                invalid: false,
+            },
+            self.focus_ring_width,
         );
         let value = if focused && self.editor.text() == self.field_text(field) {
             self.editor.text()
@@ -3611,6 +3614,10 @@ impl QrApp {
 impl App for QrApp {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -5007,6 +5014,74 @@ mod tests {
     // ------------------------------------------------------------------
 
     use guitk::probe::{self, Probe};
+
+    /// The input boxes are the toolkit's fields (lane C,
+    /// c-e-a-theme-can-shape-the-controls): the one the keys type into marked
+    /// at the user's focus width, the one under the pointer lit.
+    #[test]
+    fn the_input_boxes_are_the_toolkits_fields() {
+        let mut app = QrApp::new();
+        let mut palette = app.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut app, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        App::appearance_changed(&mut app, &settings);
+        probe::click(&mut app, Target::Mode(InputMode::Wifi));
+        let draws = |app: &QrApp, rect: Rect, state: guitk::field::State| {
+            let seq = |s: guitk::field::State| {
+                let mut want: Vec<RenderCommand> = Vec::new();
+                guitk::field::draw(&mut want, &palette, rect, s, width);
+                want
+            };
+            let frame = app.frame(app.window_width, app.window_height);
+            let cmds = frame.commands();
+            let has = |want: &[RenderCommand]| {
+                !want.is_empty() && cmds.windows(want.len()).any(|w| w == want)
+            };
+            // Not focused means no focus mark either: an unfocused box's
+            // commands begin a focused one's.
+            has(&seq(state))
+                && (state.focused
+                    || !has(&seq(guitk::field::State {
+                        focused: true,
+                        ..state
+                    })))
+        };
+        let ssid = probe::rect_of(&app, Target::Field(Field::Ssid)).expect("the network name");
+        let password = probe::rect_of(&app, Target::Field(Field::Password)).expect("the password");
+        assert_eq!(app.focused_field(), Field::Ssid);
+        let keyed = guitk::field::State {
+            focused: true,
+            ..guitk::field::State::default()
+        };
+        assert!(
+            draws(&app, ssid, keyed),
+            "the box the keys type into is not marked at the user's width"
+        );
+        let (x, y) = password.centre();
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Move,
+        }));
+        let lit = guitk::field::State {
+            hovered: true,
+            ..guitk::field::State::default()
+        };
+        assert!(
+            draws(&app, password, lit),
+            "the box under the pointer is not lit"
+        );
+        assert!(
+            draws(&app, ssid, keyed),
+            "the box the pointer left is still lit"
+        );
+    }
 
     impl Probe for QrApp {
         type Target = Target;

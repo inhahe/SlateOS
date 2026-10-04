@@ -2636,6 +2636,9 @@ pub struct TorrentApp {
     clipboard: String,
     /// What the pointer is over, so it can be drawn lit.
     hover: Option<Target>,
+    /// The user's focus width, which the text boxes draw their focus mark
+    /// at (`appearance_changed`).
+    focus_ring_width: f32,
     /// Every box the last paint recorded, for hover and the wheel.
     last_hits: Vec<(Target, Rect)>,
     /// The wheel's remainder.
@@ -2833,6 +2836,7 @@ impl TorrentApp {
             transfer_scroll: 0,
             clipboard: String::new(),
             hover: None,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             last_hits: Vec::new(),
             wheel: wheel::Accumulator::default(),
             status_message: "Ready".to_string(),
@@ -3610,26 +3614,20 @@ impl TorrentApp {
         let keys = Rect::new(width - 12.0 - 84.0, 8.0, 84.0, 32.0);
         self.button(f, keys, "Keys (F1)", Target::Help, true);
         let search = Rect::new((keys.x - 8.0 - 220.0).max(bx), 8.0, 220.0, 32.0);
-        self.palette.push_surface(
+        // The toolkit's field, in the theme's shape (lane C,
+        // c-e-a-theme-can-shape-the-controls).
+        guitk::field::draw(
             f,
-            search.x,
-            search.y,
-            search.w,
-            search.h,
-            6.0,
-            Surface::Card,
+            &self.palette,
+            search,
+            guitk::field::State {
+                hovered: self.hover == Some(Target::Search),
+                focused: self.search_active,
+                disabled: false,
+                invalid: false,
+            },
+            self.focus_ring_width,
         );
-        if self.search_active {
-            f.push(RenderCommand::StrokeRect {
-                x: search.x,
-                y: search.y,
-                width: search.w,
-                height: search.h,
-                color: self.palette.blue,
-                line_width: 2.0,
-                corner_radii: CornerRadii::all(6.0),
-            });
-        }
         let placeholder = self.search_query.is_empty() && !self.search_active;
         f.push(RenderCommand::Text {
             x: search.x + 10.0,
@@ -4675,17 +4673,23 @@ impl TorrentApp {
             overflow: TextOverflow::Ellipsis,
         });
         let field = Rect::new(card.x + 20.0, card.y + 50.0, (card.w - 40.0).max(0.0), 32.0);
-        self.palette
-            .push_surface(f, field.x, field.y, field.w, field.h, 4.0, Surface::Card);
-        f.push(RenderCommand::StrokeRect {
-            x: field.x,
-            y: field.y,
-            width: field.w,
-            height: field.h,
-            color: self.palette.blue,
-            line_width: 2.0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        // It has the keyboard while the dialog is up, and is red while the
+        // link in it is one this client cannot read -- as the line under it
+        // says, while it is being fixed.
+        // The toolkit's field, in the theme's shape (lane C,
+        // c-e-a-theme-can-shape-the-controls).
+        guitk::field::draw(
+            f,
+            &self.palette,
+            field,
+            guitk::field::State {
+                hovered: self.hover == Some(Target::MagnetField),
+                focused: true,
+                disabled: false,
+                invalid: self.magnet_error.is_some(),
+            },
+            self.focus_ring_width,
+        );
         if self.magnet_input.text().is_empty() {
             f.push(RenderCommand::Text {
                 x: field.x + 8.0,
@@ -5116,6 +5120,10 @@ pub fn format_duration(seconds: u64) -> String {
 impl App for TorrentApp {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -7311,6 +7319,100 @@ about anything -- it drew {} text command(s)",
         probe::key(&mut app, &probe::press(Key::Escape));
         assert!(!app.show_add_dialog);
         assert_eq!(app.torrents.len(), 1, "Escape added the link");
+    }
+
+    /// The search box and the magnet-link field are the toolkit's (lane C,
+    /// c-e-a-theme-can-shape-the-controls): lit under the pointer, marked at
+    /// the user's focus width with the keyboard, and the link field red while
+    /// what is in it is not a link this client reads.
+    #[test]
+    fn the_text_boxes_are_the_toolkits_fields() {
+        let mut app = seeded();
+        let mut palette = app.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut app, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        App::appearance_changed(&mut app, &settings);
+        let draws = |app: &TorrentApp, rect: Rect, state: guitk::field::State| {
+            let seq = |s: guitk::field::State| {
+                let mut want: Vec<RenderCommand> = Vec::new();
+                guitk::field::draw(&mut want, &palette, rect, s, width);
+                want
+            };
+            let frame = app.frame(app.win_width, app.win_height);
+            let cmds = frame.commands();
+            let has = |want: &[RenderCommand]| {
+                !want.is_empty() && cmds.windows(want.len()).any(|w| w == want)
+            };
+            // Not focused means no focus mark either: an unfocused box's
+            // commands begin a focused one's.
+            has(&seq(state))
+                && (state.focused
+                    || !has(&seq(guitk::field::State {
+                        focused: true,
+                        ..state
+                    })))
+        };
+        let idle = guitk::field::State::default();
+        let search = probe::rect_of(&app, Target::Search).expect("the search box");
+        assert!(
+            draws(&app, search, idle),
+            "the search box is not the toolkit's"
+        );
+        let (x, y) = search.centre();
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Move,
+        }));
+        let lit = guitk::field::State {
+            hovered: true,
+            ..idle
+        };
+        assert!(
+            draws(&app, search, lit),
+            "the box under the pointer is not lit"
+        );
+        probe::click(&mut app, Target::Search);
+        assert!(
+            draws(
+                &app,
+                search,
+                guitk::field::State {
+                    focused: true,
+                    ..lit
+                }
+            ),
+            "the search box with the keyboard is not marked at the user's width"
+        );
+        probe::key(&mut app, &probe::press(Key::Escape));
+
+        probe::click(&mut app, Target::AddMagnet);
+        let link = probe::rect_of(&app, Target::MagnetField).expect("the link field");
+        let keyed = guitk::field::State {
+            focused: true,
+            ..idle
+        };
+        assert!(draws(&app, link, keyed), "the link field is not marked");
+        probe::type_str(&mut app, "not a link");
+        probe::key(&mut app, &probe::press(Key::Enter));
+        assert!(app.magnet_error.is_some(), "the junk was taken");
+        assert!(
+            draws(
+                &app,
+                link,
+                guitk::field::State {
+                    invalid: true,
+                    ..keyed
+                }
+            ),
+            "a link this client cannot read is not marked red"
+        );
     }
 
     #[test]

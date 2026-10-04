@@ -301,6 +301,25 @@ MUTATIONS = [
         "            color: Color::BLACK,",
         ["the_barcode_label_is_in_the_codes_ink"],
     ),
+    # -- the input boxes, the toolkit's fields (c-e-a-theme-can-shape-the-controls)
+    (
+        "an input box is drawn the same wherever the pointer is",
+        "                hovered: self.hover == Some(Target::Field(field)),",
+        "                hovered: false,",
+        ["the_input_boxes_are_the_toolkits_fields"],
+    ),
+    (
+        "the box the keys type into is not marked",
+        "                hovered: self.hover == Some(Target::Field(field)),\n                focused,",
+        "                hovered: self.hover == Some(Target::Field(field)),\n                focused: false,",
+        ["the_input_boxes_are_the_toolkits_fields"],
+    ),
+    (
+        "the input boxes take the toolkit's focus width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();",
+        "        let _ = settings;",
+        ["the_input_boxes_are_the_toolkits_fields"],
+    ),
 ]
 
 if __name__ == "__main__":

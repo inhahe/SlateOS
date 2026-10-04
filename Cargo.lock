@@ -2750,6 +2750,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "opus"
+version = "0.1.0"
+
+[[package]]
 name = "osfont"
 version = "0.1.0"
 dependencies = [
@@ -4513,6 +4517,7 @@ dependencies = [
  "matroska",
  "md5",
  "mp4",
+ "opus",
  "rav1d",
  "vp8",
  "vp9",

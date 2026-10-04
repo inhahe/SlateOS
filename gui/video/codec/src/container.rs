@@ -1,7 +1,7 @@
 //! The file's container -- Matroska (WebM among them) or MP4 -- told apart by
 //! its first bytes as FFmpeg tells them, and read through one face: its video
-//! tracks described alike ([`Track`]), its packets given alike ([`Sample`]),
-//! and a seek.
+//! tracks described alike ([`Track`]), its sound tracks ([`SoundTrack`]), its
+//! packets given alike ([`Sample`]), and a seek.
 //!
 //! **Telling them apart.** A Matroska file begins with EBML's magic, and
 //! FFmpeg's Matroska probe asks for it at the very start; anything else is
@@ -11,7 +11,7 @@
 
 use std::io::{Read, Seek, SeekFrom};
 
-use crate::{Codec, ColourHint, ContainerError, Orientation, time};
+use crate::{Codec, ColourHint, ContainerError, Orientation, SoundCodec, time};
 
 /// How much of a file is read to tell what it is: the most FFmpeg reads to
 /// decide (`PROBE_BUF_MAX`), or the whole of a smaller file.
@@ -97,6 +97,35 @@ pub(crate) struct Sample {
     /// The codec setup this packet and those after it decode with, where it
     /// changes (an MP4 track of several sample entries).
     pub new_config: Option<Vec<u8>>,
+    /// Sound to discard, in nanoseconds: from the end of the packet's if
+    /// positive, its start if negative (Matroska's `DiscardPadding`; 0 in
+    /// MP4).
+    pub discard_padding: i64,
+    /// Where the packet's bytes begin in the file: what tells one packet
+    /// from another.
+    pub position: u64,
+}
+
+/// A sound track.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SoundTrack {
+    /// Matroska's track number: what a caller names it by.
+    pub number: u64,
+    /// What the container's packets and seeks name it by.
+    pub key: u64,
+    pub codec: SoundCodec,
+    /// The codec's setup: Opus's `OpusHead`.
+    pub config: Vec<u8>,
+    pub enabled: bool,
+    pub default: bool,
+    /// The track's tick: `num / den` seconds.
+    pub time_base: (u64, u64),
+    /// The codec's delay, in nanoseconds (Opus's pre-skip): the packets'
+    /// times have it taken off already, as FFmpeg takes it.
+    pub codec_delay: u64,
+    /// How much sound a decoder needs after a jump before its output is
+    /// right, in nanoseconds (Opus: 80 ms).
+    pub seek_pre_roll: u64,
 }
 
 impl<R: Read + Seek> Container<R> {
@@ -142,6 +171,38 @@ impl<R: Read + Seek> Container<R> {
         }
     }
 
+    /// The file's sound tracks that can be read, in the file's order:
+    /// Matroska's. (MP4's are not read yet: they are AAC above all, which
+    /// nothing here decodes.)
+    pub(crate) fn sounds(&self) -> Vec<SoundTrack> {
+        match self {
+            Self::Matroska(d) => d
+                .tracks()
+                .iter()
+                .filter(|t| t.kind == matroska::TrackKind::Audio && t.readable())
+                .filter_map(|t| {
+                    Some(SoundTrack {
+                        number: t.number,
+                        key: t.number,
+                        codec: match t.codec {
+                            matroska::Codec::Opus => SoundCodec::Opus,
+                            matroska::Codec::Vorbis => SoundCodec::Vorbis,
+                            _ if t.codec_id.starts_with(b"A_AAC") => SoundCodec::Aac,
+                            _ => SoundCodec::Other,
+                        },
+                        config: t.codec_private.clone(),
+                        enabled: t.enabled,
+                        default: t.default,
+                        time_base: d.time_base(t.number)?,
+                        codec_delay: t.codec_delay,
+                        seek_pre_roll: t.seek_pre_roll,
+                    })
+                })
+                .collect(),
+            Self::Mp4(_) => Vec::new(),
+        }
+    }
+
     /// How long the file plays, in nanoseconds, if it says: Matroska's
     /// segment duration; for MP4, its longest track's (FFmpeg's duration of
     /// each, from `mdhd`, cut by its edit list or grown by its fragments).
@@ -181,6 +242,8 @@ impl<R: Read + Seek> Container<R> {
                     data: p.data,
                     alpha,
                     new_config: None,
+                    discard_padding: p.discard_padding,
+                    position: p.position,
                 }
             })),
             Self::Mp4(d) => {
@@ -196,6 +259,8 @@ impl<R: Read + Seek> Container<R> {
                     data: p.data,
                     alpha: None,
                     new_config: p.new_config,
+                    discard_padding: 0,
+                    position: p.position,
                 }))
             }
         }

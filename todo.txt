@@ -4539,6 +4539,16 @@
 
 ## Judgment Calls
 
+### 2026-10-04 (lane F) — a damaged Opus packet in a video is concealed,
+### not dropped as FFmpeg drops it
+
+`videocodec::Sound` follows FFmpeg in what it trims from a file's sound and
+how it times it, but where a packet does not decode it fills the packet's
+length with libopus's concealment instead of dropping it (FFmpeg's choice),
+so that the sound has no hole for a player's clock to fall into. Reverse in
+`gui/video/codec/src/sound.rs`, `Sound::decode`'s error arm, if matching
+FFmpeg matters more. Design-decisions §1351.
+
 ### 2026-10-01 (lane B) — a refused power change is not forced, and the
 ### service manager's method names were chosen by its clients
 

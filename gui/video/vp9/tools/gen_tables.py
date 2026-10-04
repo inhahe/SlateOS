@@ -56,6 +56,11 @@ TABLES = [
      "a chroma plane's transform size, by block size, luma transform size and [x][y] subsampling"),
     ("vp9/common/vp9_common_data.c", "partition_context_lookup", "PARTITION_CONTEXT_LOOKUP",
      "u8", [13, 2], "the partition context a block size leaves: [above, left]"),
+    ("vp9/common/vp9_common_data.c", "b_width_log2_lookup", "B_WIDTH_LOG2", "u8", [13],
+     "log2 of a block size's width in 4x4 units"),
+    ("vp9/common/vp9_common_data.c", "partition_lookup", "PARTITION_LOOKUP", "u8", [5, 13],
+     "the partition that cuts a square of each size (4x4 to 64x64) into a block size"
+     " (4 = none can)"),
 
     ("vp9/common/vp9_entropy.c", "vp9_coefband_trans_8x8plus", "COEFBAND_TRANS_8X8PLUS", "u8",
      [1024], "the coefficient band of each scan position, 8x8 transforms and larger"),
@@ -167,6 +172,14 @@ TABLES = [
      [514], ""),
     ("vp9/common/vp9_scan.c", "default_scan_32x32_neighbors", "DEFAULT_SCAN_32X32_NEIGHBORS",
      "i16", [2050], ""),
+
+    # The encoder's.
+    ("vp9/encoder/vp9_cost.c", "vp9_prob_cost", "PROB_COST", "u16", [256],
+     "the cost of coding a 0 at each probability, in 1/512 bits (0 is a placeholder)"),
+    ("vp9/encoder/vp9_subexp.c", "update_bits", "UPDATE_BITS", "u8", [255],
+     "how many bits a probability update's remapped delta takes"),
+    ("vp9/encoder/vp9_subexp.c", "map_table", "MAP_TABLE", "u8", [254],
+     "a recentred probability delta's code: the inverse of the decoder's `inv_map_table`"),
 ]
 
 

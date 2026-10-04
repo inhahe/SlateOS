@@ -89,6 +89,38 @@ decode on threads, as libvpx's do. Two things from it:
   operator as `open-questions/F-Q5.md` once threads had given what they
   could, rather than changed quietly.
 
+**The encoder, begun 2026-10-03.** The port is of libvpx's realtime path,
+the one `vpxenc --rt --cpu-used=8` with CBR rate control runs, since filming
+a screen is a realtime job. Its test goes beyond "it decodes": libvpx's
+encoder is deterministic too, so the port's frames are to be byte-identical
+to `vpxenc`'s on the same input and settings (a reference encode is kept
+outside the tree for that comparison). How it is built:
+
+- **The deciding is apart from the doing.** `enc/encodeframe.rs` carries out
+  decisions -- partitions, modes, transform sizes -- exactly as libvpx's
+  `encode_superblock` does: predict, subtract, transform, quantise,
+  reconstruct, tokenize, count. What to decide is asked of a `Decide`
+  implementation. libvpx's realtime choices (variance-based partitioning,
+  `vp9_pick_intra_mode`, `vp9_pick_inter_mode`) are ported as one; a test's
+  random choice is another, which reaches every partition, mode and
+  transform size the stream can say.
+- **One set of contexts.** The contexts each decision is coded with
+  (`vp9_pred_common.c`) moved out of the decoder into `context.rs`, which
+  the decoder reads with and the encoder writes with. A context computed
+  two ways is a stream that decodes to garbage.
+- **Each piece against libvpx's C first.** The forward transforms and both
+  quantisers are checked bit-exact against libvpx's C on seeded blocks
+  (`tools/fdct_reference.c`, `tools/quantize_reference.c`); the probability
+  updates against the decoder's reader for every pair of probabilities.
+
+So far every frame is a key frame at a quantiser the caller fixes, with
+fixed decisions (16x16 blocks, DC prediction). Every frame decodes to what
+the encoder says it reconstructed -- at random decisions, at seven sizes from
+1x1 up, at five quantisers, with transform sizes fixed and chosen per block
+-- and what the encoder counts equals what the decoder counts on the same
+frame. Quantiser 0 reproduces the source exactly. Rate control, libvpx's
+decisions and inter frames come next, in that order of dependence.
+
 **Alternatives.**
 
 | | For | Against |

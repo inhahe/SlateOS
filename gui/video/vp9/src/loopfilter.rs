@@ -329,7 +329,7 @@ pub(crate) fn filter_frame(
     }
 }
 
-fn filter_frame_t<P: Pixel>(
+pub(crate) fn filter_frame_t<P: Pixel>(
     frame: &mut FrameBuf<P>,
     mi: &MiGrid,
     levels: &LevelTable,

@@ -1,4 +1,4 @@
-//! A VP9 video decoder: libvpx's, ported to Rust.
+//! A VP9 video decoder and encoder: libvpx's, ported to Rust.
 //!
 //! VP9 is the video format of most WebM files and of much of the web's video.
 //! This crate turns its compressed frames back into pictures exactly as
@@ -42,6 +42,18 @@
 //! - `inter`: motion-compensated prediction from reference frames.
 //! - `loopfilter`: smoothing across block edges.
 //! - `frame`: the planes frames are decoded into.
+//! - `context`: which probabilities each decision is coded with, from the
+//!   blocks around it -- read by the decoder and written by the encoder.
+//!
+//! # The encoder
+//!
+//! [`Encoder`] is libvpx's realtime encoder being ported the same way, its
+//! output to be byte-identical to `vpxenc`'s (`design-decisions.md` §1339).
+//! It codes key frames at a fixed quantiser so far; every frame it writes
+//! decodes to exactly [`Encoder::reconstruction`]. Its parts are under `enc`:
+//! the bool and bit writers, forward transforms, quantisers, tokenizer,
+//! probability updates, the bitstream writer, block coding, and the frame
+//! loop.
 //!
 //! # Speed
 //!
@@ -54,9 +66,10 @@
 //! 16-bit lanes where every value provably fits. There is no hand-written
 //! SIMD and no `unsafe`; `tests/bench.rs` measures it against libvpx.
 //!
-//! Not yet here: threads within a tile column (libvpx's loop filter rows in
-//! parallel, and its row-based multithreading), and reuse of frame buffers
-//! between frames.
+//! The loop filter's superblock rows run on threads too, as libvpx's
+//! wavefront, and frames and the threads' buffers are reused from frame to
+//! frame. Not yet here: libvpx's row-based multithreading within one tile
+//! column.
 //!
 //! # What a hostile stream can do
 //!
@@ -77,8 +90,10 @@ mod bits;
 mod block;
 mod boolread;
 mod common;
+mod context;
 mod decoder;
 mod detokenize;
+mod enc;
 mod frame;
 mod header;
 mod idct;
@@ -91,6 +106,7 @@ mod probs;
 mod tables;
 
 pub use decoder::{DEFAULT_MAX_PIXELS, Decoder, Picture, PlaneView};
+pub use enc::{Encoder, EncoderConfig};
 pub use header::{StreamInfo, parse_superframe_index, peek_stream_info};
 
 /// Why a frame could not be decoded.

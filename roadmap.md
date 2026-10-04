@@ -3674,7 +3674,16 @@ lane C's `guitk`.
     (an i7-8700K). `[x]` The loop filter's threads (above) and frame-buffer
     reuse. The rest of the gap to libvpx's SIMD on one core needs SSSE3/AVX2
     chosen at run time, so `unsafe`: `open-questions/F-Q5.md`.
-  - `[ ]` The encoder, checked by decoding what it writes.
+  - `[-]` The encoder: libvpx's realtime path (`vpxenc --rt --cpu-used=8`,
+    CBR), to be byte-identical to `vpxenc` (§1339). `[x]` The forward
+    transforms and quantisers, bit-exact against libvpx's C; the bitstream
+    writer, tokenizer and probability updates; block coding and
+    reconstruction (`vp9::Encoder`). Key frames at a fixed quantiser with
+    fixed decisions decode to exactly the encoder's reconstruction, at random
+    partitions, modes and transform sizes too, and the encoder counts what
+    the decoder counts. `[ ]` Rate control (one-pass CBR), libvpx's
+    partition and mode decisions, inter frames with motion search, cyclic
+    refresh, threads.
 
 - `[-]` `[F]` **AVIF pictures**, decided 2026-09-27 (§1333): a HEIF container reader
   and a port of rav1d (dav1d in Rust, BSD) in `gui/imagecodec`, so AVIF opens

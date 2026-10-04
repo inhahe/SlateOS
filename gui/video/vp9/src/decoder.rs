@@ -72,6 +72,11 @@ pub struct PlaneView<'a, P> {
 }
 
 impl Picture {
+    /// A picture of `frame`, which nothing will write again.
+    pub(crate) fn from_frame(frame: Arc<AnyFrame>) -> Self {
+        Self { frame }
+    }
+
     /// The picture's width in luma samples.
     #[must_use]
     pub fn width(&self) -> u32 {
@@ -241,6 +246,14 @@ enum Header {
 }
 
 impl Decoder {
+    /// What the last frame decoded counted, if it counted (it was neither
+    /// error resilient nor frame-parallel): for tests that hold an encoder's
+    /// counts to the decoder's.
+    #[cfg(test)]
+    pub(crate) fn last_counts(&self) -> &Counts {
+        &self.counts
+    }
+
     /// A decoder at the start of a stream.
     #[must_use]
     pub fn new() -> Self {

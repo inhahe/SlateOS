@@ -392,6 +392,23 @@ const SEG_FEATURE_DATA_SIGNED: [bool; SEG_LVL_MAX] = [true, true, false, false];
 /// The largest value of each segment feature.
 const SEG_FEATURE_DATA_MAX: [i32; SEG_LVL_MAX] = [MAXQ, MAX_LOOP_FILTER, 3, 0];
 
+/// Whether a segment feature's value carries a sign: libvpx's
+/// `vp9_is_segfeature_signed`.
+pub(crate) fn seg_feature_signed(feature: usize) -> bool {
+    SEG_FEATURE_DATA_SIGNED
+        .get(feature)
+        .copied()
+        .unwrap_or(false)
+}
+
+/// A segment feature's largest magnitude: libvpx's
+/// `vp9_seg_feature_data_max`.
+pub(crate) fn seg_feature_data_max(feature: usize) -> u32 {
+    SEG_FEATURE_DATA_MAX
+        .get(feature)
+        .map_or(0, |&m| m.unsigned_abs())
+}
+
 /// A frame's segmentation: libvpx's `struct segmentation`. It persists from
 /// frame to frame; each header says what it changes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

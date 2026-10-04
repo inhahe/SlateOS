@@ -633,6 +633,90 @@ MAIN = [
     ),
 ]
 
+# The list of keys, and the Lock button (2026-10-04): F1 did nothing, and
+# the Lock button locked the vault without lock_vault's last save.
+REACHES = "the_shortcut_list_reaches_the_window"
+MODAL = "the_shortcut_list_takes_the_keys_and_a_press"
+LOCKS = "locking_puts_the_list_away"
+BUTTON = "the_lock_button_saves_what_could_not_be_saved_as_ctrl_l_does"
+
+MAIN += [
+    (
+        "the list of keys never comes up",
+        "    if key.key == Key::F1 && textline::is_plain(key.modifiers) {\n        state.show_help = true;\n",
+        "    if key.key == Key::F1 && textline::is_plain(key.modifiers) {\n",
+        # Not the every-key test: F1 is still answered, with nothing.
+        [REACHES],
+    ),
+    (
+        "Alt+F1 raises the list",
+        "    if key.key == Key::F1 && textline::is_plain(key.modifiers) {\n",
+        "    if key.key == Key::F1 {\n",
+        [REACHES],
+    ),
+    (
+        "the list is not modal",
+        "        if let Some(response) = self.help_event(event) {\n            return response;\n        }\n",
+        "",
+        [MODAL],
+    ),
+    (
+        "Escape leaves the list up",
+        "                    && matches!(key.key, Key::F1 | Key::Escape)\n",
+        "                    && matches!(key.key, Key::F1)\n",
+        [REACHES],
+    ),
+    (
+        "Alt+Escape puts the list away",
+        "                if key.pressed\n                    && textline::is_plain(key.modifiers)\n",
+        "                if key.pressed\n",
+        [REACHES],
+    ),
+    (
+        "a press leaves the list up",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n"
+        "                    self.show_help = false;\n"
+        "                    Some(Response::Redraw)\n",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n"
+        "                    Some(Response::Redraw)\n",
+        [MODAL],
+    ),
+    (
+        "a press reaches what the list covers",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n"
+        "                    self.show_help = false;\n"
+        "                    Some(Response::Redraw)\n",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n"
+        "                    self.show_help = false;\n"
+        "                    None\n",
+        [MODAL],
+    ),
+    (
+        "the wheel scrolls what the list covers",
+        "                MouseEventKind::Scroll { .. } => Some(Response::Idle),\n",
+        "",
+        [MODAL],
+    ),
+    (
+        "the list of keys is not drawn",
+        "        if self.show_help {\n            frame.discard_hits();\n",
+        "        if false {\n            frame.discard_hits();\n",
+        [REACHES],
+    ),
+    (
+        "the list outlives a lock",
+        "        self.vault.lock();\n        self.show_help = false;\n",
+        "        self.vault.lock();\n",
+        [LOCKS],
+    ),
+    (
+        "the Lock button skips the last save",
+        "        Target::LockVault => {\n            state.lock_vault();\n",
+        "        Target::LockVault => {\n            state.vault.lock();\n",
+        [BUTTON],
+    ),
+]
+
 VAULTFILE = [
     (
         "a file asking any amount of memory is opened",

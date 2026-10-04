@@ -3288,6 +3288,28 @@ enum Clock {
 }
 
 /// Top-level application state.
+/// The keys the open vault answers, as the F1 list shows them.
+///
+/// It had no list: F1 did nothing, and of all of these only Ctrl+E was
+/// written anywhere, on its button -- Ctrl+L, which locks the vault, Ctrl+G,
+/// which makes a password, and Delete, which asks to delete an entry, could
+/// be found only by pressing them. F1 alone raises it: what a key types goes
+/// into the search, `?` among it.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1", "This list"),
+    ("Up / Down", "Choose an entry"),
+    ("Ctrl+E", "Edit the entry"),
+    ("Delete", "Delete the entry (it asks first)"),
+    ("Ctrl+G", "Make a password"),
+    ("Ctrl+M", "Generator: the next kind of password"),
+    ("Ctrl+1-4", "Generator: a set of characters"),
+    ("Left / Right", "Generator: shorter or longer"),
+    ("Ctrl+F", "Clear the search"),
+    ("Escape", "Clear the search, close the panel"),
+    ("Ctrl+L", "Lock the vault"),
+    ("Ctrl+Q", "Close the window"),
+];
+
 struct AppState {
     vault: Vault,
     /// Where the vault is kept. `None` when there is no home folder: the vault
@@ -3383,6 +3405,9 @@ struct AppState {
     /// The user's focus width, which the text boxes draw their focus mark
     /// at (`appearance_changed`).
     focus_ring_width: f32,
+    /// Whether the list of keys is up. Only over the open vault: locking
+    /// puts it away (`lock_vault`).
+    show_help: bool,
     /// The user's colours, replaced whenever the theme changes.
     ///
     /// Seeded from the defaults so the field is never absent; the framework
@@ -3448,6 +3473,7 @@ impl AppState {
             pointer: None,
             hover: None,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
+            show_help: false,
         };
         state.refresh_filter();
         state
@@ -3651,6 +3677,7 @@ impl AppState {
     fn lock_vault(&mut self) {
         self.keep_if_changed();
         self.vault.lock();
+        self.show_help = false;
         self.saved = None;
         self.dialog = None;
         self.picker.close();
@@ -7222,6 +7249,19 @@ impl AppState {
                 frame.push(command);
             }
         }
+        // The list of keys over all of it: it is the one thing on screen a
+        // reader asked for explicitly. Nothing under it takes a press.
+        if self.show_help {
+            frame.discard_hits();
+            guitk::shortcut::render_card(
+                &mut frame,
+                &self.palette,
+                (w, h),
+                0.0,
+                SHORTCUTS,
+                "F1 or Escape closes this",
+            );
+        }
 
         debug_assert!(frame.is_balanced(), "a clip was pushed and not popped");
         frame
@@ -7567,6 +7607,14 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
             }
             _ => return EventResult::Ignored,
         }
+        return EventResult::Consumed;
+    }
+
+    // F1 raises the list of keys over the open vault, from a dialog, the
+    // form or a panel too: none of them types it. F1 alone -- what a key types
+    // goes into the search, `?` among it.
+    if key.key == Key::F1 && textline::is_plain(key.modifiers) {
+        state.show_help = true;
         return EventResult::Consumed;
     }
 
@@ -7936,8 +7984,10 @@ fn act_on(state: &mut AppState, target: Target) -> EventResult {
             }
             EventResult::Consumed
         }
+        // As Ctrl+L locks, through `lock_vault`: it locked the vault alone,
+        // so a change whose save had failed was not tried again, and gone.
         Target::LockVault => {
-            state.vault.lock();
+            state.lock_vault();
             EventResult::Consumed
         }
         Target::Settings => {
@@ -8132,9 +8182,45 @@ fn create_vault(state: &mut AppState) {
 // =============================================================================
 
 impl AppState {
+    /// An event while the list of keys is up, which is modal: a plain F1 or
+    /// Escape puts it away and no other key reaches what it covers -- Ctrl+Q
+    /// does not close the window under it, Delete does not ask to delete an
+    /// entry; a press with any button puts it away and does nothing else; the
+    /// wheel scrolls nothing it covers. `None` while it is down, and for what
+    /// is no key or press: a tick may still lock the vault, which puts the
+    /// list away.
+    fn help_event(&mut self, event: &Event) -> Option<Response> {
+        if !self.show_help {
+            return None;
+        }
+        match event {
+            Event::Key(key) => {
+                if key.pressed
+                    && textline::is_plain(key.modifiers)
+                    && matches!(key.key, Key::F1 | Key::Escape)
+                {
+                    self.show_help = false;
+                }
+                Some(Response::Redraw)
+            }
+            Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                    self.show_help = false;
+                    Some(Response::Redraw)
+                }
+                MouseEventKind::Scroll { .. } => Some(Response::Idle),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// What the window does with `event`, before the pointer's light is
     /// settled (`App::on_event`).
     fn respond(&mut self, event: &Event) -> Response {
+        if let Some(response) = self.help_event(event) {
+            return response;
+        }
         // Ctrl+Q closes the window. Ctrl+L is *not* a close -- it locks the
         // vault, which is the point of having it. A Ctrl chord, not Ctrl
         // held: AltGr+Q -- Ctrl+Alt -- is a German `@`, typed into a user
@@ -12847,5 +12933,219 @@ mod tests {
             draws(&state, rig, restore, red(KEYED)),
             "a backup password refused is not shown red"
         );
+    }
+
+    // --- The list of keys, and the Lock button ---
+
+    fn chord_of(k: Key, modifiers: guitk::event::Modifiers, text: &str) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        })
+    }
+
+    fn drawn_strings(state: &AppState) -> Vec<String> {
+        state
+            .frame(state.width, state.height)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **Every key the list of keys advertises is answered by this window**,
+    /// over an open vault with an entry chosen -- the generator's with the
+    /// generator up. Ctrl+Q closes the window.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let mut state = unlocked_with_entries(4);
+                state.on_event(&key(Key::Down));
+                assert!(
+                    state.selected_entry_id.is_some(),
+                    "the test needs an entry chosen"
+                );
+                if what.starts_with("Generator") {
+                    state.detail_view = DetailView::PasswordGenerator;
+                    regenerate_password(&mut state);
+                }
+                assert_ne!(
+                    state.on_event(&Event::Key(stroke.clone())),
+                    Response::Idle,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The list of keys reaches the window** over the open vault, and goes
+    /// on F1 or a plain Escape -- not on Alt+Escape, which is the desktop's.
+    /// `?` is typed into the search, as every character is here; and on the
+    /// lock screen, whose keys these are not, F1 raises nothing.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        use guitk::event::Modifiers;
+        let mut state = unlocked_with_entries(3);
+        assert!(
+            !drawn_strings(&state)
+                .iter()
+                .any(|t| t.contains("F1 or Escape closes this")),
+            "the list is up before anybody asked for it"
+        );
+        for chord in [Modifiers::alt(), Modifiers::super_key()] {
+            state.on_event(&chord_of(Key::F1, chord, ""));
+            assert!(
+                !state.show_help,
+                "{chord:?}+F1, the desktop's, raised the list"
+            );
+        }
+        state.on_event(&chord_of(Key::Slash, Modifiers::shift(), "?"));
+        assert!(!state.show_help, "? raised the list");
+        assert_eq!(state.search_query, "?", "? was not typed into the search");
+
+        state.on_event(&key(Key::F1));
+        let missing = guitk::shortcut::missing_rows(&drawn_strings(&state), SHORTCUTS);
+        assert!(missing.is_empty(), "{missing:?}");
+        state.on_event(&chord_of(Key::Escape, Modifiers::alt(), ""));
+        assert!(state.show_help, "Alt+Escape put the list away");
+        state.on_event(&key(Key::Escape));
+        assert!(!state.show_help, "Escape left the list up");
+        assert_eq!(
+            state.search_query, "?",
+            "Escape under the list cleared the search under it"
+        );
+        state.on_event(&key(Key::F1));
+        state.on_event(&key(Key::F1));
+        assert!(!state.show_help, "F1 left the list up");
+
+        state.on_event(&chord_of(Key::L, Modifiers::ctrl(), "l"));
+        assert!(!state.vault.is_unlocked());
+        state.on_event(&key(Key::F1));
+        assert!(
+            !state.show_help,
+            "F1 raised the vault's keys over the lock screen"
+        );
+    }
+
+    /// **The list of keys is modal**: with it up, no key, press or turn of the
+    /// wheel reaches what it covers -- Ctrl+Q does not close the window,
+    /// Delete does not ask to delete the entry, Ctrl+L does not lock. The
+    /// window is the same with it down.
+    #[test]
+    fn the_shortcut_list_takes_the_keys_and_a_press() {
+        use guitk::event::Modifiers;
+        let mut state = unlocked_with_entries(40);
+        state.on_event(&key(Key::Down));
+        let chosen = state.selected_entry_id;
+        let row = probe::rect_of(&state, Target::EntryRow(3)).expect("a fourth row");
+        let (rx, ry) = (row.x + row.w / 2.0, row.y + row.h / 2.0);
+        let mouse = |kind| Event::Mouse(guitk::event::MouseEvent { x: rx, y: ry, kind });
+
+        state.on_event(&key(Key::F1));
+        assert_eq!(
+            state.on_event(&chord_of(Key::Q, Modifiers::ctrl(), "q")),
+            Response::Redraw,
+            "Ctrl+Q closed the window under the list"
+        );
+        for (k, m, t) in [
+            (Key::Delete, Modifiers::NONE, ""),
+            (Key::Down, Modifiers::NONE, ""),
+            (Key::L, Modifiers::ctrl(), "l"),
+            (Key::G, Modifiers::ctrl(), "g"),
+            (Key::A, Modifiers::NONE, "a"),
+        ] {
+            state.on_event(&chord_of(k, m, t));
+        }
+        assert!(
+            state.show_help,
+            "a key other than F1 or Escape put the list away"
+        );
+        assert!(
+            state.dialog.is_none(),
+            "Delete asked to delete under the list"
+        );
+        assert_eq!(state.selected_entry_id, chosen, "Down moved under the list");
+        assert!(
+            state.vault.is_unlocked(),
+            "Ctrl+L locked the vault under the list"
+        );
+        assert_eq!(
+            state.detail_view,
+            DetailView::EntryDetail,
+            "Ctrl+G under the list"
+        );
+        assert_eq!(state.search_query, "", "a key was typed under the list");
+        assert_eq!(
+            state.on_event(&mouse(MouseEventKind::Scroll { dx: 0.0, dy: -3.0 })),
+            Response::Idle
+        );
+        assert!(
+            state.list_scroll.abs() < f32::EPSILON,
+            "the wheel scrolled the entries under it"
+        );
+        state.on_event(&mouse(MouseEventKind::Press(MouseButton::Left)));
+        assert!(!state.show_help, "the press did not put the list away");
+        assert_eq!(
+            state.selected_entry_id, chosen,
+            "the press chose an entry under it"
+        );
+        state.on_event(&key(Key::F1));
+        state.on_event(&mouse(MouseEventKind::Press(MouseButton::Right)));
+        assert!(!state.show_help, "a right-button press left the list up");
+
+        // The window.
+        state.on_event(&key(Key::Down));
+        assert_ne!(state.selected_entry_id, chosen);
+    }
+
+    /// **Locking puts the list away**, by the clock as by Ctrl+L: it is the
+    /// open vault's list, and it would come back over the next unlock.
+    #[test]
+    fn locking_puts_the_list_away() {
+        let mut state = unlocked_with_entries(2);
+        state.on_event(&key(Key::F1));
+        assert!(state.show_help);
+        state.on_event(&Event::Tick {
+            elapsed_ms: 24 * 60 * 60 * 1000,
+        });
+        assert!(
+            !state.vault.is_unlocked(),
+            "the clock did not lock the vault"
+        );
+        assert!(!state.show_help, "the list outlived the lock");
+    }
+
+    /// **The Lock button locks as Ctrl+L does**: it saves first what could not
+    /// be saved before. It locked the vault alone, so a change whose save had
+    /// failed was gone with the lock.
+    #[test]
+    fn the_lock_button_saves_what_could_not_be_saved_as_ctrl_l_does() {
+        let (scratch, mut state) = first_run("lockbutton");
+        make_vault(&mut state, MASTER, MASTER);
+        state.entropy = no_entropy;
+        add_login(&mut state, "bank.example", "hunter2-secret");
+        assert!(
+            state.save_error.is_some(),
+            "the test needs a save that failed"
+        );
+        let unsaved = std::fs::read(vault_file(&scratch)).unwrap();
+        state.entropy = test_entropy;
+        probe::click(&mut state, Target::LockVault);
+        assert!(!state.vault.is_unlocked(), "the Lock button did not lock");
+        assert_ne!(
+            std::fs::read(vault_file(&scratch)).unwrap(),
+            unsaved,
+            "the Lock button threw away the change that could not be saved"
+        );
+        let mut again = reopen(&scratch);
+        assert!(again.vault.unlock(MASTER, again.now));
+        assert_eq!(again.vault.entries.len(), 1, "the login was not kept");
     }
 }

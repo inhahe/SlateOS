@@ -19,13 +19,13 @@ and Backspace `pop`s it.
 (`known-issues-resolved/E-thirty-applications-answer-f1-with-nothing.md`).
 
 **The twenty-nine:** alarmclock (an alarm's label), charmap (search),
-clipmanager (its form), colorpicker (the hex value), contacts (search and
-the form), credmanager (the entry form, the master password, search),
-dbviewer (cell editing), diagram (a shape's label), dictionary (the query),
-editor (the find bar), filesearch (the query), hexeditor (search and Go To),
-kanban (its input), lockscreen (the password), mindmap (a node's text and
-its search), passwordgen (its input), startupmanager (the dialog and
-search), tmux (its command prompt), undelete (search).
+clipmanager (its form), contacts (search and the form), credmanager (the
+entry form, the master password, search), dbviewer (cell editing), diagram
+(a shape's label), dictionary (the query), editor (the find bar), filesearch
+(the query), hexeditor (search and Go To), kanban (its input), lockscreen
+(the password), mindmap (a node's text and its search), passwordgen (its
+input), startupmanager (the dialog and search), tmux (its command prompt),
+undelete (search).
 
 Not among them: `terminal`, whose typing goes to the shell's own line
 editor; `typingtutor`, where a line typed straight through is the exercise;
@@ -81,4 +81,5 @@ musicplayer (2026-10-04: the search box, which Enter now leaves on screen
 with the search it filters by); devicemanager (2026-10-04: the search box);
 filediff (2026-10-04: the find bar); ircclient (2026-10-04: the message
 line); logviewer (2026-10-04: the search box); diskanalyzer (2026-10-04: the
-path field); defrag (2026-10-04: the exclusion box).
+path field); defrag (2026-10-04: the exclusion box); colorpicker
+(2026-10-04: the value box, its typing hex alone).

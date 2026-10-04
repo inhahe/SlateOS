@@ -10,6 +10,9 @@ guitk = { path = "../../gui/toolkit" }
 # sliders, the tabs, the palette and the eyedropper existed only for the
 # tests to call, and nothing in the program could be clicked.
 oswindow = { path = "../../gui/window" }
+# The value box's keys, and what is a chord: a caret, a selection, and
+# typing that is not a command's letter.
+textline = { path = "../textline" }
 
 [lints]
 workspace = true

@@ -4049,9 +4049,14 @@ impl Probe for StickyNotesApp {
 
     /// A click is a press *and* a release, so a click on a title bar does not
     /// leave a move running that the next mouse motion would act on.
+    // Through `handle_event`, the window's own way in: a probe that called
+    // the press handler directly went round whatever the event routing
+    // does first -- the shortcut card's hold on the pointer among it -- and
+    // a test of what a press does passed against a path no window takes.
     fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Action {
-        let pressed = self.handle_click(x, y, button, size);
-        let released = self.release(size);
+        let at = |kind| Event::Mouse(guitk::event::MouseEvent { x, y, kind });
+        let pressed = self.handle_event(&at(MouseEventKind::Press(button)), size);
+        let released = self.handle_event(&at(MouseEventKind::Release(button)), size);
         if pressed == Action::None {
             released
         } else {
@@ -4060,7 +4065,7 @@ impl Probe for StickyNotesApp {
     }
 
     fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Action {
-        self.handle_key(key, size)
+        self.handle_event(&Event::Key(key.clone()), size)
     }
 }
 

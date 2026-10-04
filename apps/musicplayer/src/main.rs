@@ -2372,6 +2372,21 @@ fn handle_mouse(state: &mut PlayerState, mouse_event: &MouseEvent) -> bool {
     let x = mouse_event.x;
     let y = mouse_event.y;
 
+    // The card is modal for the pointer as it is for the keys: a press, with
+    // any button, puts it away rather than reaching the tab or track drawn
+    // under it -- a track pressed would have started playing -- and the wheel
+    // scrolls nothing it covers.
+    if state.show_help {
+        match mouse_event.kind {
+            MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                state.show_help = false;
+                return true;
+            }
+            MouseEventKind::Scroll { .. } => return false,
+            _ => {}
+        }
+    }
+
     match &mouse_event.kind {
         MouseEventKind::Press(MouseButton::Left) => {
             // Tab bar clicks
@@ -3203,6 +3218,60 @@ mod tests {
                 kind: MouseEventKind::Scroll { dx: 0.0, dy },
             },
         )
+    }
+
+    /// **A press while the card is up puts it away and does nothing else,
+    /// and the wheel scrolls nothing under it.** A press used to go straight
+    /// through the card to the tab or track drawn under it. The controls at
+    /// the end are the same press and turn with the card down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let mut state = player_with_library(400);
+        // The Now Playing tab, where the tab bar measures it.
+        let tab = |button| MouseEvent {
+            x: 16.0 + 60.0,
+            y: TAB_BAR_HEIGHT / 2.0,
+            kind: MouseEventKind::Press(button),
+        };
+        let f1 = Event::Key(KeyEvent {
+            key: Key::F1,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        });
+
+        handle_event(&mut state, &f1);
+        assert!(state.show_help);
+        wheel(&mut state, -1.0);
+        assert_eq!(
+            state.scroll_offset, 0.0,
+            "the wheel scrolled the tracks under the card"
+        );
+        assert!(handle_mouse(&mut state, &tab(MouseButton::Left)));
+        assert!(!state.show_help, "the press did not put the card away");
+        assert_eq!(
+            state.active_tab,
+            Tab::Library,
+            "the press went through the card to a tab"
+        );
+
+        // Any button: the right one does nothing to a tab, but it is still a
+        // press on the card.
+        handle_event(&mut state, &f1);
+        handle_mouse(&mut state, &tab(MouseButton::Right));
+        assert!(!state.show_help, "a right-button press left the card up");
+
+        wheel(&mut state, -1.0);
+        assert!(
+            state.scroll_offset > 0.0,
+            "control: the wheel scrolls nothing at all"
+        );
+        handle_mouse(&mut state, &tab(MouseButton::Left));
+        assert_eq!(
+            state.active_tab,
+            Tab::NowPlaying,
+            "control: the press does nothing even with the card down"
+        );
     }
 
     #[test]

@@ -1396,6 +1396,21 @@ impl ScreenshotApp {
 
     /// Handle mouse events.
     fn handle_mouse(&mut self, event: &MouseEvent) -> bool {
+        // The list of keys is modal for the pointer as it is for the keys, and
+        // drawn over everything but the Save dialog (which has the event
+        // first): a press with any button puts it away and does nothing else
+        // -- it used to start a capture, begin a region, or draw on the
+        // picture under it. A move or a release is not a press, and passes,
+        // so a drag begun before the list came up still ends.
+        if self.show_help
+            && matches!(
+                event.kind,
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_)
+            )
+        {
+            self.show_help = false;
+            return true;
+        }
         match self.view {
             AppView::Menu => self.handle_mouse_menu(event),
             AppView::RegionSelect => self.handle_mouse_region(event),
@@ -3018,6 +3033,74 @@ mod tests {
             y,
             kind: MouseEventKind::Press(MouseButton::Left),
         })
+    }
+
+    /// **A press with the list of keys up puts it away and does nothing
+    /// else.** On the menu it started the capture under the list; on a
+    /// picture it began an annotation there. The controls are the same presses
+    /// with the list down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let f1 = Event::Key(KeyEvent {
+            key: Key::F1,
+            pressed: true,
+            modifiers: Modifiers::default(),
+            text: String::new(),
+        });
+        let right = |x: f32, y: f32| {
+            Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Right),
+            })
+        };
+
+        // The menu's Region button.
+        let mut app = ScreenshotApp::new(800.0, 600.0);
+        let i = menu_modes()
+            .iter()
+            .position(|m| *m == CaptureMode::Region)
+            .expect("a Region button");
+        #[allow(clippy::cast_precision_loss)]
+        let (x, y) = (
+            20.0 + i as f32 * (BUTTON_WIDTH + BUTTON_SPACING) + BUTTON_WIDTH / 2.0,
+            TOOLBAR_HEIGHT + 40.0 + BUTTON_HEIGHT / 2.0,
+        );
+        assert_eq!(app.button_hit_test(x, y), Some(i));
+        app.handle_event(&f1);
+        assert!(app.show_help);
+        assert!(app.handle_event(&click(x, y)));
+        assert!(!app.show_help, "the press did not put the list away");
+        assert_eq!(
+            app.view,
+            AppView::Menu,
+            "the press started a capture under the list"
+        );
+        app.handle_event(&f1);
+        app.handle_event(&right(x, y));
+        assert!(!app.show_help, "a right-button press left the list up");
+        app.handle_event(&click(x, y));
+        assert_eq!(
+            app.view,
+            AppView::RegionSelect,
+            "control: the press starts nothing even with the list down"
+        );
+
+        // The picture.
+        let mut app = app_in_preview();
+        let below = TOOLBAR_HEIGHT + ANNOTATION_TOOLBAR_HEIGHT + 40.0;
+        app.handle_event(&f1);
+        app.handle_event(&click(40.0, below));
+        assert!(!app.show_help, "the press did not put the list away");
+        assert!(
+            app.pending_annotation.is_none(),
+            "the press began an annotation under the list"
+        );
+        app.handle_event(&click(40.0, below));
+        assert!(
+            app.pending_annotation.is_some(),
+            "control: the press begins nothing even with the list down"
+        );
     }
 
     /// An app sitting in the preview view with a plain blue capture loaded.

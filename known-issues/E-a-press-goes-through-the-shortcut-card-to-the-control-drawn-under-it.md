@@ -20,7 +20,8 @@ clipmanager, defrag, devicemanager, diagram, diskanalyzer, diskcleanup,
 diskimager, ebook, explorer, fileassoc, filediff, fontmanager, hexeditor,
 imageviewer, ircclient, jsonviewer, reminders, mindmap, musicplayer, notes,
 paint, partmanager, pdfviewer, photomanager, podcast, pomodoro,
-procexplorer, radio, remotedesktop and screenrecorder (2026-10-04).
+procexplorer, radio, remotedesktop, screenrecorder and screenshot
+(2026-10-04).
 Calendar's, diagram's, diskimager's, explorer's, filediff's, hexeditor's,
 imageviewer's, ircclient's, jsonviewer's, reminders', mindmap's,
 pdfviewer's and remotedesktop's cards were modal for
@@ -35,7 +36,7 @@ each application's card is checked for both. (Reminders takes no press at all; i
 production code draws `guitk::shortcut::render_card` and has no function
 handling a mouse event that reads the card's flag. Those not yet fixed:
 
-screenshot, settings, spreadsheet, startupmanager, stopwatch, sudoku,
+settings, spreadsheet, startupmanager, stopwatch, sudoku,
 sysinfo, sysmonitor, systemrestore, undelete, whiteboard, wordle,
 worldclock.
 

@@ -1,6 +1,14 @@
 ### [F] The VP9 encoder's edge extension is libvpx's, but no reference encode tests it -- 2026-10-04
 
-**Status:** OPEN — lane F's; a gap in a test, not a known bug.
+**Status:** OPEN — answered on lane-f 2026-10-04, and moves to
+`known-issues-resolved/` once that has had a boot test on `main`. The
+second reference encode, `tests/data/encoder/rt8cut.ivf`, is 651x357: its
+last superblock row and column hang over the picture, and its last 8x8
+cells are partly outside it. All 150 of its frames come out byte-identical
+both from the encoder's own decisions (`tests/encoder.rs`,
+`frames_match_vpxenc_through_cuts_noise_and_edges`) and from libvpx's
+replayed (`enc/replay.rs`,
+`libvpxs_decisions_give_libvpxs_frames_through_cuts_noise_and_edges`).
 
 **In short:** the encoder is checked byte for byte against libvpx's own
 encode of a 1280x720 clip. One thing it does to match libvpx -- after each

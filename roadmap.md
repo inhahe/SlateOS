@@ -3719,10 +3719,13 @@ lane C's `guitk`.
     cyclic refresh's band and segment updates, source SAD, scene, noise and
     skin detection. All 30 frames of the reference encode are byte-identical
     to `vpxenc`'s from the encoder's own decisions, and a trace of every
-    decision matches libvpx's line for line. `[ ]` A second reference encode
-    for the paths that clip never reaches -- scene cuts, a rising noise
-    level, the golden refresh, blocks over the picture's edge
-    (`known-issues/F-the-vp9-encoders-edge-extension-is-libvpxs-but-no-reference-encode-tests-it.md`).
+    decision matches libvpx's line for line. `[x]` A second reference encode
+    for the paths that clip never reaches (`tests/data/encoder/rt8cut.ivf`,
+    150 pictures of 651x357): two scene cuts coded at the overshoot
+    quantiser, the noise estimate rising to Medium, three golden refreshes,
+    a fade, blocks over the picture's right and bottom edges. All 150 frames
+    are byte-identical from the encoder's own decisions and from libvpx's
+    replayed; the decision traces agree on all 867,893 lines.
     `[ ]` The learned partitioning libvpx uses at 352x288 and below
     (`known-issues/F-the-vp9-encoder-is-libvpxs-only-above-352x288.md`).
     `[ ]` Threads.

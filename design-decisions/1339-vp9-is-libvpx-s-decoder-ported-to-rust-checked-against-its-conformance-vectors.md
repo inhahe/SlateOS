@@ -172,11 +172,18 @@ encoder's own decisions. Two things it took:
   them would make different frames from `vpxenc`'s, which is the one test
   the encoder has.
 
-Paths the reference clip never reaches -- a scene cut, a rising noise
-level, the golden refresh at frame 40, a block over the picture's edge --
-are ported but not yet proved; a second reference encode is next. At
-352x288 and below libvpx partitions inter frames by a learned search the
-port does not have yet
+A second reference encode reaches what that clip never does
+(`tests/data/encoder/rt8cut.ivf`): 150 pictures of 651x357 cut from two
+conformance vectors -- two scene cuts, a still picture with fresh noise on
+each frame, a fade to black -- so that libvpx codes its cuts at the
+overshoot quantiser, raises its noise estimate to Medium, refreshes golden
+three times, sees a change of light that is not motion, and partitions
+blocks hanging over the picture's edges. Its trace found one difference,
+at the first cut: the port capped an intra block's transform at 16x16 when
+the frame coded no segments, where libvpx asks only whether the encode runs
+cyclic refresh at all. With that fixed, all 150 frames are `vpxenc`'s and
+the traces agree on all 867,893 lines. At 352x288 and below libvpx
+partitions inter frames by a learned search the port does not have yet
 (`known-issues/F-the-vp9-encoder-is-libvpxs-only-above-352x288.md`). How
 the encoder keeps time is §1340.
 

@@ -4475,6 +4475,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "videocodec"
+version = "0.1.0"
+dependencies = [
+ "matroska",
+ "md5",
+ "rav1d",
+ "vp9",
+ "yuv",
+]
+
+[[package]]
 name = "videoplayer"
 version = "0.1.0"
 dependencies = [

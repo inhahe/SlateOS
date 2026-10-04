@@ -8,8 +8,11 @@ members = [
     # `gui/*` cannot reach and which is itself excluded below. The first is
     # rav1d, the AV1 decoder, vendored (`gui/video/rav1d/VENDORED.md`); the
     # second, vp9, libvpx's VP9 decoder ported (design-decisions.md §1339);
-    # matroska, the Matroska and WebM demuxer their packets come from; and
-    # yuv, libyuv's conversions and scaling their pictures are drawn with.
+    # matroska, the Matroska and WebM demuxer their packets come from; yuv,
+    # libyuv's and libavif's conversions and scaling their pictures are drawn
+    # with; and codec (videocodec), the one a program calls for a file's
+    # frames.
+    "gui/video/codec",
     "gui/video/matroska",
     "gui/video/rav1d",
     "gui/video/vp9",
@@ -718,6 +721,14 @@ codegen-units = 1
 opt-level = 3
 codegen-units = 1
 
+# yuv (`gui/video/yuv`) is where those conversions to pixels went when video
+# frames came to share them (2026-10-04): libyuv's rows and libavif's paths,
+# a loop over every pixel of every frame, which `-Os` would not unroll or
+# vectorise. It keeps the optimisation it had inside imagecodec.
+[profile.release.package.yuv]
+opt-level = 3
+codegen-units = 1
+
 # vp9 (the VP9 decoder, `gui/video/vp9`) is written for the compiler to
 # vectorise -- its filters' widths are constants so that loops unroll into
 # SSE2 -- which `-Os` undoes. Counted with callgrind (exact instruction
@@ -735,6 +746,12 @@ codegen-units = 1
 # decode a 37x19 picture, which makes `imagecodec`'s tests that decode
 # thousands of damaged files take minutes.
 [profile.dev.package.rav1d]
+opt-level = 3
+
+# The same for vp9, for the same reason: `videocodec`'s test plays thousands
+# of damaged copies of its fixtures, and unoptimised VP9 decoding made it take
+# minutes (over 400 s, 2026-10-04). Debug assertions stay on.
+[profile.dev.package.vp9]
 opt-level = 3
 
 # The same for `xz`, whose tests hold its encoder to XZ Utils' output byte

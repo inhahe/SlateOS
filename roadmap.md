@@ -3797,9 +3797,21 @@ lane C's `guitk`.
     thirty seeks held to `ffprobe`'s, and every frame of VP9, VP9 with
     alpha and AV1 played through it held to ffmpeg's decoders. What it
     leaves out: `known-issues/F-the-matroska-demuxer-leaves-out-what-no-webm-file-needs.md`.
-  - `[ ]` A frame-level API for a player: a file's pictures in order, with
-    their times, converted to RGB by each stream's own colour (its matrix
-    and range, not only BT.601), so that the player calls one thing.
+  - `[x]` A frame-level API for a player (`gui/video/codec`, crate
+    `videocodec`, design-decisions §1346): `Video::open(file)`, then
+    `next_frame()` -- each picture in order with its time, duration and
+    key-frame flag, as `0xAARRGGBB` pixels (imagecodec's form) -- and
+    `seek(time, Exact | KeyFrame)`; `next_picture()` for a player that drops
+    late pictures before paying for their conversion; `Decoder` beneath it
+    for packets from elsewhere. VP9 (every profile, WebM's alpha), AV1.
+    Colour by the stream's own matrix and range -- the bitstream's word, then
+    the file's, then mpv's guess from the size -- through the same libavif
+    conversion as AVIF stills (`gui/video/yuv`); crop and display aspect
+    from the file. Fifteen fixtures, every frame's pixels held to libavif
+    1.3.0 converting ffmpeg's decoded planes and every time to ffprobe
+    (`tests/data/generate_fixtures.py`, `tools/libavif_reformat_reference.c`),
+    with seeks, damage and a playback thread. What it leaves to colour
+    management: `known-issues/F-video-is-shown-without-colour-management.md`.
   - `[ ]` VP8 video (libvpx's decoder, ported as VP9's was), and MP4
     (`apps/mediaprobe` reads its headers; the sample tables are like
     AVIF's sequences').

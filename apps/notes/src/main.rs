@@ -205,9 +205,13 @@ pub enum ToolbarControl {
     Search,
     /// A press makes a note from this template.
     Template(NoteTemplate),
+    /// A press raises a menu of every template.
+    MoreTemplates,
 }
 
-/// The templates the toolbar offers, in order.
+/// The templates the toolbar has a button for, in order: four of the eight,
+/// which is what its width holds. The others are in the menu behind "More..."
+/// (`ToolbarControl::MoreTemplates`), which offers every one.
 const TOOLBAR_TEMPLATES: [NoteTemplate; 4] = [
     NoteTemplate::Blank,
     NoteTemplate::MeetingNotes,
@@ -227,6 +231,9 @@ fn template_button_label(template: NoteTemplate) -> &'static str {
 
 /// Where the template buttons' "New:" label starts.
 const TEMPLATES_X: f32 = 530.0;
+
+/// The label of the button that raises the menu of every template.
+const MORE_TEMPLATES_LABEL: &str = "More...";
 
 /// The search box's left edge and width.
 const SEARCH_X: f32 = 310.0;
@@ -253,6 +260,9 @@ pub enum MenuTarget {
     Note(NoteId),
     /// A notebook in the sidebar.
     Notebook(NotebookId),
+    /// The toolbar's "More..." button: each row is a template, by its index
+    /// in `NoteTemplate::all()`.
+    Templates,
 }
 
 /// The notebook menu's id for "Rename notebook...".
@@ -2256,6 +2266,17 @@ impl NotesApp {
     pub fn choose_from_note_menu(&mut self, chosen: u64) -> bool {
         match self.menu_target {
             Some(MenuTarget::Notebook(id)) => return self.choose_for_notebook(chosen, id),
+            Some(MenuTarget::Templates) => {
+                let Some(template) = usize::try_from(chosen)
+                    .ok()
+                    .and_then(|i| NoteTemplate::all().get(i))
+                    .copied()
+                else {
+                    return false;
+                };
+                self.new_note_from_template(template);
+                return true;
+            }
             Some(MenuTarget::Note(_)) | None => {}
         }
         let Some(MenuTarget::Note(id)) = self.menu_target else {
@@ -3865,6 +3886,8 @@ impl NotesApp {
             controls.push((ToolbarControl::Template(template), (x, 6.0, w, 24.0)));
             x += w + 4.0;
         }
+        let w = text::padded_width(MORE_TEMPLATES_LABEL, 8.0, 11.0, FontWeightHint::Regular);
+        controls.push((ToolbarControl::MoreTemplates, (x, 6.0, w, 24.0)));
         controls
     }
 
@@ -3885,17 +3908,58 @@ impl NotesApp {
                 self.reanchor_selection();
             }
             ToolbarControl::Search => self.press_search(x),
-            // A blank note is asked a title first, as Ctrl+N asks: a note
-            // titled "Blank" is no help finding it again.
-            ToolbarControl::Template(NoteTemplate::Blank) => self.ask(Asking::NewNote, ""),
-            ToolbarControl::Template(template) => {
-                let notebook = self.notebook_for_new_note();
-                let id = self.create_note_from_template(template, notebook);
-                self.selected_note = Some(id);
-                self.active_panel = ActivePanel::Editor;
+            ToolbarControl::Template(template) => self.new_note_from_template(template),
+            ToolbarControl::MoreTemplates => {
+                // Below the button, as a menu drops from what raised it.
+                let below = self
+                    .toolbar_controls()
+                    .into_iter()
+                    .find(|(c, _)| *c == ToolbarControl::MoreTemplates)
+                    .map_or((x, TOOLBAR_HEIGHT), |(_, (bx, by, _, bh))| (bx, by + bh));
+                self.open_template_menu(below.0, below.1);
             }
         }
         EventResult::Consumed
+    }
+
+    /// Make a note from `template`, select it and write in it. A blank note
+    /// is asked a title first, as Ctrl+N asks: a note titled "Blank" is no
+    /// help finding it again.
+    fn new_note_from_template(&mut self, template: NoteTemplate) {
+        if template == NoteTemplate::Blank {
+            self.ask(Asking::NewNote, "");
+            return;
+        }
+        let notebook = self.notebook_for_new_note();
+        let id = self.create_note_from_template(template, notebook);
+        self.selected_note = Some(id);
+        self.active_panel = ActivePanel::Editor;
+    }
+
+    /// Raise the menu of every template at `(x, y)`. Four have a button of
+    /// their own; this is where the others are -- before it, Code Snippet,
+    /// Project Plan, Bug Report and Weekly Review could not be made.
+    fn open_template_menu(&mut self, x: f32, y: f32) {
+        let items = NoteTemplate::all()
+            .iter()
+            .enumerate()
+            .map(|(i, template)| MenuItem::Action {
+                id: i as u64,
+                label: if *template == NoteTemplate::Blank {
+                    "Blank...".to_owned()
+                } else {
+                    template.label().to_owned()
+                },
+                shortcut: None,
+                icon: None,
+                enabled: true,
+                checked: None,
+            })
+            .collect();
+        let mut menu = ContextMenu::new(items);
+        menu.show(x, y, (self.window_width, self.window_height));
+        self.note_menu = Some(menu);
+        self.menu_target = Some(MenuTarget::Templates);
     }
 
     /// Give the search box the keyboard, its caret at the end of the query.
@@ -4104,6 +4168,20 @@ impl NotesApp {
                     });
                 }
                 ToolbarControl::Search => self.render_search_box(cmds, (x, y, w, h)),
+                ToolbarControl::MoreTemplates => {
+                    self.palette
+                        .push_surface(cmds, x, y, w, h, CORNER_RADIUS, Surface::Card);
+                    cmds.push(RenderCommand::Text {
+                        x: x + 8.0,
+                        y: y + 6.0,
+                        text: MORE_TEMPLATES_LABEL.to_owned(),
+                        color: self.palette.subtext0,
+                        font_size: 11.0,
+                        font_weight: FontWeightHint::Regular,
+                        max_width: Some(w - 12.0),
+                        overflow: TextOverflow::Ellipsis,
+                    });
+                }
                 ToolbarControl::Template(template) => {
                     self.palette
                         .push_surface(cmds, x, y, w, h, CORNER_RADIUS, Surface::Card);
@@ -7075,6 +7153,60 @@ mod tests {
         assert!(
             matches!(app.asking, Some((Asking::NewNote, _))),
             "Blank asked for no title"
+        );
+    }
+
+    /// **"More..." offers every template, and a choice makes it.** The
+    /// toolbar has buttons for four; Code Snippet, Project Plan, Bug Report
+    /// and Weekly Review could not be made at all.
+    #[test]
+    fn more_offers_every_template_and_a_choice_makes_it() {
+        let mut app = NotesApp::new();
+        let (x, y) = toolbar_centre(&app, ToolbarControl::MoreTemplates);
+        assert_eq!(app.handle_event(&click_at(x, y)), EventResult::Consumed);
+        let menu = app.note_menu.as_ref().expect("More... raised no menu");
+        let offered: Vec<String> = menu
+            .render(&app.palette)
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        for template in NoteTemplate::all() {
+            let label = if *template == NoteTemplate::Blank {
+                "Blank..."
+            } else {
+                template.label()
+            };
+            assert!(
+                offered.iter().any(|t| t == label),
+                "{template:?} is not offered: {offered:?}"
+            );
+        }
+        for (i, template) in NoteTemplate::all().iter().enumerate() {
+            if *template == NoteTemplate::Blank {
+                continue;
+            }
+            app.menu_target = Some(MenuTarget::Templates);
+            assert!(
+                app.choose_from_note_menu(i as u64),
+                "{template:?} was refused"
+            );
+            let id = app.selected_note.expect("the new note is selected");
+            let note = app.find_note(id).expect("the note");
+            assert_eq!(
+                note.title,
+                template.label(),
+                "{template:?} made the wrong note"
+            );
+            assert_eq!(note.kind, template.kind());
+        }
+        app.menu_target = Some(MenuTarget::Templates);
+        assert!(app.choose_from_note_menu(0), "Blank was refused");
+        assert!(
+            matches!(app.asking, Some((Asking::NewNote, _))),
+            "Blank from the menu asked for no title"
         );
     }
 

@@ -3411,6 +3411,23 @@ impl RssReaderApp {
 
     /// Handle a key press.
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        // The list of keys before anything else, because it is drawn over
+        // everything else, and modal: a plain F1, `?` or Escape puts it away
+        // and no other key reaches what it covers. It took only Escape, and
+        // only with nothing else holding the keys, so with it up `r` marked
+        // the article under it read, `D` asked to remove a feed behind it, and
+        // Ctrl+F opened a search that the next letters were typed into.
+        if self.show_help {
+            let plain = textline::is_plain(key.modifiers);
+            if plain
+                && (matches!(key.key, Key::F1 | Key::Escape)
+                    || key.key == Key::Slash && key.modifiers.shift)
+            {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
+
         // The search box takes every key while it is open, or typing a query
         // containing `r` would mark an article read behind it.
         if self.search_active {
@@ -3630,9 +3647,6 @@ impl RssReaderApp {
                     self.search_query.clear();
                     self.search_results.clear();
                     EventResult::Consumed
-                } else if self.show_help {
-                    self.show_help = false;
-                    EventResult::Consumed
                 } else if self.show_feed_health {
                     self.show_feed_health = false;
                     EventResult::Consumed
@@ -3659,12 +3673,14 @@ impl RssReaderApp {
             // be able to type into a cell -- so somebody who has learned one
             // key is never stuck. `?` as well, here, where nothing is obliged
             // to type one.
+            // Each only ever raises it: with the list up, the keys never get
+            // here.
             Key::F1 => {
-                self.show_help = !self.show_help;
+                self.show_help = true;
                 EventResult::Consumed
             }
             Key::Slash if key.modifiers.shift => {
-                self.show_help = !self.show_help;
+                self.show_help = true;
                 EventResult::Consumed
             }
             // The other half of the overlay's "Ctrl+F / /".
@@ -7517,6 +7533,45 @@ mod tests {
 
         assert!(a.search_active, "/ did not open the search box");
         assert!(!a.show_help, "/ opened the help overlay instead");
+    }
+
+    /// **The list of keys is modal for the keys.** It took only Escape, and
+    /// only with nothing else holding the keys: with it up, Tab changed the
+    /// pane under it, a digit changed the filter, and Ctrl+F opened a search
+    /// that the next letter was typed into. The controls are the same keys
+    /// with it down.
+    #[test]
+    fn the_list_of_keys_takes_every_key_while_it_is_up() {
+        let mut a = app();
+        let (pane, filter) = (a.active_pane, a.filter_mode);
+        a.handle_event(&press(Key::F1));
+        assert!(a.show_help);
+        a.handle_event(&press(Key::Tab));
+        a.handle_event(&press(Key::Num3));
+        a.handle_event(&key_ev(Key::F, true, false));
+        a.handle_event(&types('x'));
+        assert!(
+            a.show_help,
+            "a key other than F1, ? or Escape put the list away"
+        );
+        assert_eq!(a.active_pane, pane, "Tab changed the pane under the list");
+        assert_eq!(a.filter_mode, filter, "a digit changed the filter under it");
+        assert!(!a.search_active, "Ctrl+F opened a search under the list");
+        assert!(a.search_query.is_empty(), "a letter was typed under it");
+        a.handle_event(&key_ev(Key::Slash, false, true));
+        assert!(!a.show_help, "? left the list up");
+        a.handle_event(&press(Key::F1));
+        a.handle_event(&press(Key::Escape));
+        assert!(!a.show_help, "Escape left the list up");
+        a.handle_event(&press(Key::F1));
+        a.handle_event(&press(Key::F1));
+        assert!(!a.show_help, "F1 left the list up");
+
+        // The controls.
+        a.handle_event(&press(Key::Num3));
+        assert_ne!(a.filter_mode, filter, "control: a digit changes nothing");
+        a.handle_event(&press(Key::Tab));
+        assert_ne!(a.active_pane, pane, "control: Tab changes nothing");
     }
 
     /// `?` still opens help, rather than being taken by the new `/`.

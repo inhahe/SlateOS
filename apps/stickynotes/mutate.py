@@ -302,20 +302,17 @@ MUTATIONS = [
         "            self.refill_body();",
         ["leaving_a_title_after_undoing_its_typing_keeps_the_redo"],
     ),
+    # No row for "a title types a command's letter": the AltGr branch hands a
+    # typed key to the line's editor, and the editor itself refuses Alt's and
+    # the Windows key's chords (textline::apply_key). The branch used to ask
+    # the same question first, so a row that dropped it was an equivalent
+    # mutant (2026-10-04) -- and the question went instead.
     (
         "a title and the search refuse what AltGr types",
         "        if let Some(focus @ (Focus::Title(_) | Focus::Search)) = self.focus\n"
-        "            && textline::types_into_field(event)",
+        "            && event.types_text()",
         "        if let Some(focus @ (Focus::Title(_) | Focus::Search)) = self.focus\n"
         "            && false",
-        ["a_title_and_the_search_take_altgr_letters_and_no_commands_letter"],
-    ),
-    (
-        "a title and the search type a command's letter",
-        "        if let Some(focus @ (Focus::Title(_) | Focus::Search)) = self.focus\n"
-        "            && textline::types_into_field(event)",
-        "        if let Some(focus @ (Focus::Title(_) | Focus::Search)) = self.focus\n"
-        "            && event.types_text()",
         ["a_title_and_the_search_take_altgr_letters_and_no_commands_letter"],
     ),
     (
@@ -323,6 +320,109 @@ MUTATIONS = [
         "        if textline::is_ctrl_chord(m) {",
         "        if m.ctrl && !m.alt {",
         ["ctrl_with_the_windows_key_is_no_chord"],
+    ),
+]
+
+# The search box is the toolkit's field; it and the titles are edited by
+# textline's editor (2026-10-04; lane C, c-e-a-theme-can-shape-the-controls).
+SEARCH = "the_search_box_is_the_toolkits_field_and_edits_like_one"
+TITLE = "a_title_edits_like_a_field"
+LINE_KIND = "the_toolbar_names_the_kind_of_the_line_the_caret_is_on"
+
+MUTATIONS += [
+    (
+        "the search box never has the keyboard's mark",
+        "                focused: searching,\n                disabled: false,\n",
+        "                focused: false,\n                disabled: false,\n",
+        [SEARCH],
+    ),
+    (
+        "a query that finds nothing is not red",
+        "                invalid: !query.is_empty() && self.store.search_results().is_empty(),\n",
+        "                invalid: false,\n",
+        [SEARCH],
+    ),
+    (
+        "an empty search box with the keyboard has no caret",
+        "                textedit::push_caret(&mut tree, tx, ty, line, self.palette.text, self.caret_width);\n",
+        "                let _ = (tx, ty, line);\n",
+        [SEARCH],
+    ),
+    (
+        "the search's caret is drawn at its start",
+        "                        TextCursor::from(self.line_cursor())\n"
+        "                    } else {\n"
+        "                        TextCursor::default()\n"
+        "                    },\n"
+        "                    selection_anchor: if searching {",
+        "                        TextCursor::default()\n"
+        "                    } else {\n"
+        "                        TextCursor::default()\n"
+        "                    },\n"
+        "                    selection_anchor: if searching {",
+        [SEARCH],
+    ),
+    (
+        "a press on the search box puts the caret at the end",
+        "                    x - rect.x - SEARCH_TEXT_INSET,\n"
+        "                )\n"
+        "                .byte;\n",
+        "                    f32::MAX,\n"
+        "                )\n"
+        "                .byte;\n",
+        [SEARCH],
+    ),
+    (
+        "a line's editor is not reloaded from the line",
+        "        if let Some(text) = self.line_text()\n"
+        "            && self.line_editor.text() != text\n"
+        "        {\n"
+        "            self.line_editor.set_text(&text);\n"
+        "        }\n",
+        "        let _ = self.line_text();\n",
+        ["a_tag_chosen_while_typing_a_search_is_what_the_next_key_edits"],
+    ),
+    (
+        "a cut or a copy takes nothing to the clipboard",
+        "            self.line_clipboard = copied;\n",
+        "            let _ = copied;\n",
+        [SEARCH, TITLE],
+    ),
+    (
+        "the search is not written back",
+        "        if let Some(query) = changed {\n            self.store.set_search(&query);\n",
+        "        if let Some(query) = changed {\n            let _ = query;\n",
+        [SEARCH],
+    ),
+    (
+        "a title is not written back",
+        "            if let Some(note) = self.store.get_note_mut(id) {\n                note.title = title;\n            }\n",
+        "            let _ = title;\n",
+        [TITLE],
+    ),
+    (
+        "a title's Ctrl+A, C, X and V are the board's",
+        "                Key::A | Key::C | Key::X | Key::V => match self.focus {\n",
+        "                Key::Unknown(0) => match self.focus {\n",
+        [SEARCH, TITLE],
+    ),
+    (
+        "a title's selection is not drawn",
+        "        if let Some(anchor) = anchor\n            && anchor != col\n        {\n",
+        "        if let Some(anchor) = anchor\n            && false\n            && anchor != col\n        {\n",
+        [TITLE],
+    ),
+    (
+        "the toolbar names the first line's kind",
+        "            Some(Focus::Body(at)) if at == id => {\n",
+        "            Some(Focus::Body(at)) if at == id && false => {\n",
+        [LINE_KIND],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [SEARCH],
     ),
 ]
 

@@ -212,6 +212,83 @@ MUTATIONS += [
     ),
 ]
 
+# The list of keys (2026-10-04): F1 did nothing, and Ctrl+1 to 8 and Tab
+# could be found only by pressing them.
+EVERY = "every_advertised_key_does_something"
+REACHES = "the_shortcut_list_reaches_the_window"
+MODAL = "the_shortcut_list_takes_the_keys_and_a_press"
+
+MUTATIONS += [
+    (
+        "the list of keys never comes up",
+        "            self.show_help = true;\n            return LauncherAction::None;\n",
+        "            return LauncherAction::None;\n",
+        [EVERY, REACHES],
+    ),
+    (
+        "Alt+F1 raises the list",
+        "        if plain && event.key == Key::F1 {\n",
+        "        if event.key == Key::F1 {\n",
+        [REACHES],
+    ),
+    (
+        "the list is not modal for the keys",
+        "                self.show_help = false;\n"
+        "            }\n"
+        "            return LauncherAction::None;\n"
+        "        }\n"
+        "        if plain && event.key == Key::F1 {\n",
+        "                self.show_help = false;\n"
+        "            }\n"
+        "        }\n"
+        "        if plain && event.key == Key::F1 {\n",
+        [MODAL],
+    ),
+    (
+        "Escape leaves the list up",
+        "            if plain && matches!(event.key, Key::F1 | Key::Escape) {\n",
+        "            if plain && matches!(event.key, Key::F1) {\n",
+        [REACHES],
+    ),
+    (
+        "Alt+Escape puts the list away",
+        "            if plain && matches!(event.key, Key::F1 | Key::Escape) {\n",
+        "            if matches!(event.key, Key::F1 | Key::Escape) {\n",
+        [REACHES],
+    ),
+    (
+        "the list of keys is not drawn",
+        "        if self.show_help {\n            guitk::shortcut::render_card(\n",
+        "        if false {\n            guitk::shortcut::render_card(\n",
+        [REACHES],
+    ),
+    (
+        "the list is not modal for the pointer",
+        "                self.show_help = false;\n"
+        "            }\n"
+        "            return LauncherAction::None;\n"
+        "        }\n"
+        "        let layout = Layout::of(self);\n",
+        "                self.show_help = false;\n"
+        "            }\n"
+        "        }\n"
+        "        let layout = Layout::of(self);\n",
+        [MODAL],
+    ),
+    (
+        "a press leaves the list up",
+        "            ) {\n                self.show_help = false;\n            }\n",
+        "            ) {\n            }\n",
+        [MODAL],
+    ),
+    (
+        "opening and closing the list draws nothing new",
+        "            help: self.show_help,\n",
+        "            help: false,\n",
+        [EVERY],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "launcher", timeout=900, only=only))

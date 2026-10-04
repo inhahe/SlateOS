@@ -7384,10 +7384,19 @@ impl ExplorerState {
             return false;
         };
 
+        // A command is not passed to a name box. It arrives carrying its
+        // letter as text, and the toolkit's input dialog types the text of
+        // every key -- Ctrl+S put an `s` in a folder's name
+        // (`requests/e-cf-a-toolkit-field-types-the-letter-of-a-shortcut-it-does-not-know.md`).
+        // AltGr, which arrives as Ctrl+Alt, types.
+        let command = matches!(event, Event::Key(key) if textline::is_command(key.modifiers));
         let consumed = match modal {
             Modal::Confirm { dialog, .. }
             | Modal::Notice { dialog }
             | Modal::ConfirmBin { dialog, .. } => dialog.handle_event(event),
+            Modal::Rename { .. } | Modal::NewFolder { .. } | Modal::Search { .. } if command => {
+                EventResult::Consumed
+            }
             Modal::Rename { dialog, .. }
             | Modal::NewFolder { dialog }
             | Modal::Search { dialog } => dialog.handle_event(event),
@@ -11360,6 +11369,41 @@ mod tests {
         let asked = state.modal.take();
         state.apply_modal_answer(asked, DialogResult::Text("Photos".to_string()));
         assert!(root.join("Photos").is_dir(), "the folder was not created");
+    }
+
+    /// **A command is not typed into a name box.** It arrives carrying its
+    /// letter as text, and the toolkit's input dialog types the text of
+    /// every key: Ctrl+S put an `s` in the folder's name. AltGr, which
+    /// arrives as Ctrl+Alt, types -- Polish `ś` is AltGr+S.
+    #[test]
+    fn a_command_is_not_typed_into_a_name_box() {
+        let scratch = temp_dir("toolbar_mkdir_chord");
+        let root = scratch.dir().to_path_buf();
+        let mut state = state_at(&root);
+        press_toolbar(&mut state, ToolbarButton::NewFolder);
+        let held = |key: Key, text: &str, ctrl: bool, alt: bool| {
+            Event::Key(KeyEvent {
+                key,
+                pressed: true,
+                modifiers: guitk::event::Modifiers {
+                    ctrl,
+                    alt,
+                    ..guitk::event::Modifiers::NONE
+                },
+                text: text.to_owned(),
+            })
+        };
+        let typed = |state: &ExplorerState| match &state.modal {
+            Some(Modal::NewFolder { dialog }) => dialog.input_text().to_owned(),
+            other => panic!("the name box went away: {}", other.is_some()),
+        };
+        // Each is the dialog's, typed or not: nothing under it sees a key.
+        assert!(state.handle_event(&held(Key::S, "s", true, false)));
+        assert!(state.handle_event(&held(Key::X, "x", false, true)));
+        assert_eq!(typed(&state), "", "a command typed its letter");
+        assert!(state.handle_event(&held(Key::P, "P", false, false)));
+        assert!(state.handle_event(&held(Key::S, "\u{15b}", true, true)));
+        assert_eq!(typed(&state), "P\u{15b}", "typing or AltGr did not type");
     }
 
     /// An empty name is a dismissal, not a filesystem error.

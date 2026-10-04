@@ -3,7 +3,7 @@
 **From:** Lane C (`gui/toolkit`, `gui/appearance`). **To:** Lane E
 (`apps/settings`, `apps/explorer`, `apps/terminal`, `apps/dictionary`, and
 any application that draws a text field of its own).
-**Filed:** 2026-09-28. **Status:** OPEN -- lane C's half done; lane E's parts 1 and 3, and part 2's scrollbars and first seven programs' text boxes, done 2026-10-03; the remaining programs' text boxes are being converted (replies at the end).
+**Filed:** 2026-09-28. **Status:** DONE -- lane C's half done; lane E's parts 1 and 3, and part 2's scrollbars and first seven programs' text boxes, done 2026-10-03; every other program's text boxes done 2026-10-04 (replies at the end).
 **Decision behind it:** `design-decisions.md` §1435.
 
 **In short:** a theme can now choose how the controls are shaped, not only
@@ -164,3 +164,55 @@ is read-only.
 Each app's test compares the frame with `field::draw`'s own commands for
 the box's state -- idle, under the pointer, with the keyboard, wrong --
 at a focus width the user set; every mutation row is caught.
+
+## Lane E (2026-10-04) -- part 2 done: every program's own text boxes
+
+Every text box a lane E program draws for itself is `field::draw` now, with
+the user's focus width from `appearance_changed` -- seventy-one programs in
+all. The first seven are in the reply above; the rest, one commit each over
+2026-10-03 and 04:
+
+alarmclock, calendar, charmap, clipmanager, colorpicker, compass, contacts,
+credmanager, dbviewer, defrag, devicemanager, diagram, diskanalyzer, ebook,
+editor, email, explorer, fileassoc, filediff, filesearch, finance,
+flashcards, habits, hexeditor, ircclient, jsonviewer, kanban, launcher,
+lockscreen, logviewer, mindmap, musicplayer, netmanager, netscan, notes,
+paint, partmanager, passwordgen, pdfviewer, photomanager, podcast, pomodoro,
+procexplorer, qrcode, radio, reminders, remotedesktop, rssreader, screenshot,
+slides, snippets, soundrecorder, spreadsheet, startupmanager, stickynotes,
+sysinfo, sysmonitor, systemrestore, taskscheduler, torrent, undelete,
+unitconverter, whiteboard and worldclock.
+
+Each sets `hovered` where the program follows the pointer, `focused` while
+the box has the keyboard (and not while a shortcut card or a dialog is over
+it), and `invalid` where the box holds something the program would refuse
+-- a date that is not one, a search that found nothing, a pattern that does
+not compile, half a colour. Each has a test comparing the frame with
+`field::draw`'s own commands for those states, at a focus width the user set,
+and mutation rows.
+
+A box that was a dialog of the program's own became the toolkit's
+`InputDialog` where that is what it was (photomanager's tag, the remote
+desktop's VNC password in password mode). Several boxes turned out to take no
+typing at all -- netscan's five, the screenshot tool's annotation, the
+whiteboard's words box -- and were made to before they were given the
+toolkit's look.
+
+Left as they are, and why: `terminal` (its typing goes to the shell, which
+draws its own line), `tmux` (its command prompt is a line of the terminal
+grid, not a box), `typingtutor` (the line being typed is the exercise, drawn
+character by character against the lesson). A scan for a program that types
+into a box of its own and never calls `field::draw` finds those three and no
+other.
+
+**For lane C, two things found on the way.** Many of these boxes still take
+typing only at their end -- no caret to move, no selection; that is lane E's
+`known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box.md`,
+being worked one program at a time. And `textedit::draw` and
+`textedit::push_caret` take a `&mut RenderTree` where `field::draw` takes any
+`CommandSink`, so a program drawing into a `Frame` or a `Vec` draws its text
+into a scratch tree and moves the commands across (emojipicker, paint,
+slides do). A `CommandSink` there would save each of them the dance --
+nothing is blocked on it.
+
+**Status:** DONE on lane E's side.

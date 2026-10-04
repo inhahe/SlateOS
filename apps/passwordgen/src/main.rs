@@ -26,10 +26,12 @@ use appearance::Surface;
 use guitk::Color;
 use guitk::dialog::{DialogAction, FileDialog};
 use guitk::event::{Event, EventResult, Key, KeyEvent};
+use guitk::field;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::rng::{RandomSource, SecretSource, SeededRng, SystemRandom};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::textedit;
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
 use std::process::ExitCode;
@@ -1493,6 +1495,9 @@ const RULE_LINE_HEIGHT: f32 = 16.0;
 /// What the analyser draws for each character it is not showing.
 const MASK: &str = "\u{2022}";
 
+/// The size the password box's text is drawn at.
+const PASSWORD_TEXT_SIZE: f32 = 13.0;
+
 // ============================================================================
 // Main application
 // ============================================================================
@@ -1631,6 +1636,10 @@ pub struct PasswordApp {
     /// program was written and was called by nothing but its own test: the
     /// string had nowhere to go. This is the somewhere.
     pub dialog: Option<FileDialog>,
+    /// How wide the mark is round the password box while it has the
+    /// keyboard: the user's focus width (`App::appearance_changed`), the
+    /// toolkit's until it is known.
+    pub focus_ring_width: f32,
     /// What the last export did, shown in the status bar until the next one.
     ///
     /// Writing a file is the one thing this program does that the window does
@@ -1706,6 +1715,7 @@ impl PasswordApp {
             window_width: 1100.0,
             window_height: 700.0,
             dialog: None,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             status: None,
             last_error: None,
             rng,
@@ -3097,6 +3107,85 @@ impl PasswordApp {
     /// Until 2026-09-27 this tab drew the generator here, so what was typed
     /// was never on screen at all: the meter measured a password nobody
     /// could see, and a typo in it could not be found.
+    /// How the password box is drawn: with the keyboard -- every printable
+    /// key on this tab is the password -- unless the list of keys or the
+    /// export dialog is over it. Never lit under the pointer: it has no
+    /// press of its own. Never red: what is in it is being measured, not
+    /// judged; the rules say what they make of it, below it.
+    fn password_box_state(&self) -> field::State {
+        field::State {
+            hovered: false,
+            focused: self.active_tab == ActiveTab::Analyzer
+                && !self.show_help
+                && self.dialog.is_none(),
+            disabled: false,
+            invalid: false,
+        }
+    }
+
+    /// The password box at `rect`, holding `typed` characters: the toolkit's
+    /// field, with the password -- a dot a character until Ctrl+R shows it --
+    /// and the caret after it, scrolled so the end being typed stays in
+    /// view; a grey hint while it is empty. It was a card holding the text,
+    /// elided at its start, with no caret at all.
+    fn render_password_box(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        rect: guitk::frame::Rect,
+        typed: usize,
+    ) {
+        let state = self.password_box_state();
+        field::draw(cmds, &self.palette, rect, state, self.focus_ring_width);
+        let (size, weight) = (PASSWORD_TEXT_SIZE, FontWeightHint::Bold);
+        let line = text::line_height(size, weight);
+        let (tx, ty, tw) = (
+            rect.x + 8.0,
+            rect.y + (rect.h - line) / 2.0,
+            (rect.w - 16.0).max(0.0),
+        );
+        if typed == 0 && !state.focused {
+            cmds.push(RenderCommand::Text {
+                x: tx,
+                y: ty,
+                text: "Type a password to measure it".to_owned(),
+                color: self.palette.subtext0,
+                font_size: size,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(tw),
+                overflow: TextOverflow::Ellipsis,
+            });
+            return;
+        }
+        let shown = if self.analyzer_revealed {
+            self.analyzer_input.clone()
+        } else {
+            MASK.repeat(typed)
+        };
+        let mut tree = RenderTree::new();
+        textedit::draw(
+            &mut tree,
+            &textedit::SingleLine {
+                text: &shown,
+                // Typed and erased at its end, so the end is where the caret
+                // is -- and what the scroll keeps in view.
+                cursor: text::TextCursor::from(shown.len()),
+                selection_anchor: None,
+                focused: state.focused,
+                x: tx,
+                y: ty,
+                width: tw,
+                line_height: line,
+                font_size: size,
+                weight,
+                color: self.palette.text,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+        cmds.extend(tree.commands);
+    }
+
     fn render_analyzer_input(&self, cmds: &mut Vec<RenderCommand>, y: f32, height: f32) {
         let lx = 12.0;
         let max_w = LEFT_PANEL_WIDTH - 24.0;
@@ -3109,39 +3198,8 @@ impl PasswordApp {
 
         cmds.push(heading(&self.palette, "PASSWORD TO MEASURE", lx, cy, max_w));
         cy += 18.0;
-        self.palette
-            .push_surface(cmds, lx, cy, max_w, 32.0, CORNER_RADIUS, Surface::Card);
         let typed = self.analyzer_input.chars().count();
-        let (shown, color, weight) = if typed == 0 {
-            (
-                "Type a password to measure it".to_owned(),
-                self.palette.subtext0,
-                FontWeightHint::Regular,
-            )
-        } else {
-            let whole = if self.analyzer_revealed {
-                self.analyzer_input.clone()
-            } else {
-                MASK.repeat(typed)
-            };
-            // The end is where the typing is, so a long one loses its start,
-            // and says so.
-            (
-                text::elide_start(&whole, max_w - 16.0, "…", 13.0, FontWeightHint::Bold),
-                self.palette.text,
-                FontWeightHint::Bold,
-            )
-        };
-        cmds.push(RenderCommand::Text {
-            x: lx + 8.0,
-            y: cy + 9.0,
-            text: shown,
-            color,
-            font_size: 13.0,
-            font_weight: weight,
-            max_width: Some(max_w - 16.0),
-            overflow: TextOverflow::Clip,
-        });
+        self.render_password_box(cmds, guitk::frame::Rect::new(lx, cy, max_w, 32.0), typed);
         cy += 44.0;
 
         let about = [
@@ -3319,6 +3377,10 @@ impl App for PasswordApp {
         self.palette = *palette;
     }
 
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
+    }
+
     fn title(&self) -> String {
         "Password Generator".to_owned()
     }
@@ -3430,7 +3492,11 @@ mod tests {
         app.render_commands(1100.0, 760.0)
             .iter()
             .filter_map(|c| match c {
-                RenderCommand::Text { text, .. } => Some(text.clone()),
+                // The password box's text is the toolkit's field's, drawn as
+                // rich text.
+                RenderCommand::Text { text, .. } | RenderCommand::RichText { text, .. } => {
+                    Some(text.clone())
+                }
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -5277,6 +5343,81 @@ rejects: {:?}",
             "Ctrl+R did not show it"
         );
         assert_eq!(app.analyzer_input, "hunter2", "Ctrl+R was typed");
+    }
+
+    /// **The password box is the toolkit's field**, with the keyboard in the
+    /// theme's mark at the user's width while the Analyzer tab is up -- every
+    /// printable key there is the password -- and not under the list of
+    /// keys; the password drawn with a caret after it. It was a card holding
+    /// the text, with no caret at all.
+    #[test]
+    fn the_password_box_is_the_toolkits_field() {
+        let mut app = seeded_app();
+        let mut p = app.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        app.theme_changed(&p);
+        app.appearance_changed(&appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..appearance::AppearanceSettings::default()
+        });
+        assert!(
+            app.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        app.handle_event(&press(Key::Num2));
+        for c in "hunter2".chars() {
+            app.handle_event(&typed(c));
+        }
+        let (w, h) = (1100.0, 760.0);
+        let cmds = app.render_commands(w, h);
+        // The box is where the field is drawn: the first field the window
+        // draws, found by its well -- then checked to be the toolkit's.
+        let has = |cmds: &[RenderCommand], want: &[RenderCommand]| {
+            cmds.windows(want.len()).any(|win| win == want)
+        };
+        let shown = MASK.repeat(7);
+        let at = cmds
+            .iter()
+            .position(|c| matches!(c, RenderCommand::RichText { text, .. } if *text == shown))
+            .expect("the password is not drawn in a field");
+        let (tx, ty) = match cmds.get(at) {
+            Some(RenderCommand::RichText { x, y, .. }) => (*x, *y),
+            _ => unreachable!("just matched"),
+        };
+        // The box the text sits in, as `render_analyzer_input` places it.
+        let line = text::line_height(PASSWORD_TEXT_SIZE, FontWeightHint::Bold);
+        let rect = guitk::frame::Rect::new(
+            tx - 8.0,
+            ty - (32.0 - line) / 2.0,
+            LEFT_PANEL_WIDTH - 24.0,
+            32.0,
+        );
+        let seq = |s: field::State| {
+            let mut v: Vec<RenderCommand> = Vec::new();
+            field::draw(&mut v, &p, rect, s, app.focus_ring_width);
+            v
+        };
+        let focused = field::State {
+            focused: true,
+            ..field::State::default()
+        };
+        assert!(has(&cmds, &seq(focused)), "the box has no keyboard mark");
+        let caret = match cmds.get(at + 1) {
+            Some(RenderCommand::Line { x1, x2, .. }) if (x1 - x2).abs() < 0.01 => *x1,
+            other => panic!("no caret after the password: {other:?}"),
+        };
+        let end = tx + text::measure(&shown, PASSWORD_TEXT_SIZE, FontWeightHint::Bold);
+        assert!(
+            (caret - end).abs() < 0.5,
+            "the caret is at {caret}, not after the password at {end}"
+        );
+
+        app.show_help = true;
+        let cmds = app.render_commands(w, h);
+        assert!(
+            has(&cmds, &seq(field::State::default())) && !has(&cmds, &seq(focused)),
+            "the box keeps its mark under the list of keys"
+        );
     }
 
     #[test]

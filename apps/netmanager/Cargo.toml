@@ -19,6 +19,8 @@ oswindow = { path = "../../gui/window" }
 # The keys that edit an address box, and which keys are commands rather than
 # typing.
 textline = { path = "../textline" }
+# The question asked before an edit Apply has not sent is lost.
+unsaved = { path = "../unsaved" }
 
 [dev-dependencies]
 # Its fixture-tree provider, for the tests that fake /proc.

@@ -632,20 +632,34 @@ MUTATIONS = [
     # -- The search box ------------------------------------------------
     (
         "slash does not reach the search box",
-        "            Key::Slash => {\n                self.search_focus = true;",
-        "            Key::Slash => {\n                self.search_focus = false;",
+        "            Key::Slash => {\n                self.focus_search();\n",
+        "            Key::Slash => {\n",
         ["slash_and_ctrl_f_both_reach_the_search_box"],
     ),
     (
         "ctrl-F does not reach the search box",
-        "            if ev.key == Key::F {\n                self.search_focus = true;",
-        "            if ev.key == Key::F {\n                self.search_focus = false;",
+        "            if ev.key == Key::F {\n                self.focus_search();\n",
+        "            if ev.key == Key::F {\n",
         ["slash_and_ctrl_f_both_reach_the_search_box"],
     ),
+    # The box's typing is textline's editor's since 2026-10-04 -- what a key
+    # typed, with no control character, a character at a time: the rules are
+    # textline's, and its own table covers them. What this program can still
+    # get wrong is going round the editor, which is what these two do.
     (
         "the box takes whatever text arrives, control characters and all",
-        "                self.search_query.extend(ev.typed());",
-        "                self.search_query.push_str(&ev.text);",
+        "                if self.search_editor.text() != self.search_query {\n"
+        "                    self.search_editor.set_text(&self.search_query);\n"
+        "                }\n"
+        "                let before = (\n",
+        "                if !ev.text.is_empty() {\n"
+        "                    self.search_query.push_str(&ev.text);\n"
+        "                    return EventResult::Consumed;\n"
+        "                }\n"
+        "                if self.search_editor.text() != self.search_query {\n"
+        "                    self.search_editor.set_text(&self.search_query);\n"
+        "                }\n"
+        "                let before = (\n",
         # Not `the_key_that_opens_the_search_box_is_not_also_typed_into_it`:
         # that one presses `/` with the box shut, so nothing is appended by
         # either spelling.  The two differ only on a keystroke whose text is
@@ -653,18 +667,10 @@ MUTATIONS = [
         ["the_search_box_takes_the_text_a_key_types_and_not_the_rest"],
     ),
     (
-        "a keystroke that types nothing still types",
-        "                if !textline::types_into_field(ev) {\n                    return EventResult::Ignored;\n                }",
-        "                if false {\n                    return EventResult::Ignored;\n                }",
-        # Not `enter_and_escape_both_leave_the_search_box`: Enter and Escape
-        # are matched by an arm above this one and never reach it.
-        ["the_search_box_takes_the_text_a_key_types_and_not_the_rest"],
-    ),
-    (
-        "backspace takes a byte rather than a character",
-        "                if self.search_query.pop().is_none() {\n                    return EventResult::Ignored;\n                }",
-        "                if self.search_query.is_empty() {\n                    return EventResult::Ignored;\n                }\n                let cut = self.search_query.len().saturating_sub(1);\n                self.search_query = self.search_query.chars().collect::<String>()[..0].to_string()\n                    + &self.search_query.chars().take(cut).collect::<String>();",
-        ["backspace_takes_back_a_character_not_a_byte"],
+        "a key that does nothing to the box says it did",
+        "                if typed || moved || copied {\n",
+        "                if true {\n",
+        ["backspace_on_an_empty_query_is_ignored_rather_than_pretending"],
     ),
     (
         "escape does not leave the search box",
@@ -674,8 +680,10 @@ MUTATIONS = [
     ),
     (
         "the arrows stop working while the box has the keyboard",
-        "            Key::Up if plain => self.move_selection(-1),\n            Key::Down if plain => self.move_selection(1),\n            _ => {",
-        "            _ => {",
+        "            Key::Up if plain => self.move_selection(-1),\n"
+        "            Key::Down if plain => self.move_selection(1),\n"
+        "            // Every other key is the box's editor's",
+        "            // Every other key is the box's editor's",
         ["the_arrows_still_walk_the_list_while_the_search_box_has_the_keyboard"],
     ),
     (
@@ -686,8 +694,9 @@ MUTATIONS = [
     ),
     (
         "typing leaves the list where the old query had scrolled it",
-        "                self.search_query.extend(ev.typed());\n                self.list_scroll = 0;",
-        "                self.search_query.extend(ev.typed());",
+        "                    self.search_query = self.search_editor.text().to_owned();\n"
+        "                    self.list_scroll = 0;\n",
+        "                    self.search_query = self.search_editor.text().to_owned();\n",
         ["a_narrowed_query_puts_the_list_back_at_the_top"],
     ),
     # -- The wheel -----------------------------------------------------
@@ -1120,17 +1129,76 @@ MUTATIONS = [
         '            Key::Escape | Key::Enter => {\n                self.search_focus = false;',
         ['a_chord_is_neither_a_library_key_nor_typing'],
     ),
+    # The search's other keys are textline's editor's since 2026-10-04, which
+    # refuses Alt's and the Windows key's chords and types only what a key
+    # typed: the rule is textline's. What is this program's is handing the
+    # editor the key as it came -- chord and all.
     (
-        'Alt+Backspace deletes from the search',
-        '            Key::Backspace if !textline::is_alt_or_windows_chord(ev.modifiers) => {',
-        '            Key::Backspace => {',
+        "the search's editor is given the key without its chord",
+        '                    &mut self.search_editor,\n                    ev,\n',
+        '                    &mut self.search_editor,\n'
+        '                    &KeyEvent {\n'
+        '                        modifiers: guitk::event::Modifiers::NONE,\n'
+        '                        ..ev.clone()\n'
+        '                    },\n',
         ['a_chord_is_neither_a_library_key_nor_typing'],
     ),
+]
+
+# The search box and the editor's line boxes are the toolkit's field; the
+# search is edited by textline's editor (2026-10-04; lane C,
+# c-e-a-theme-can-shape-the-controls).
+SEARCH_FIELD = "the_search_box_is_the_toolkits_field_and_edits_like_one"
+EDITOR_BOXES = "the_editors_boxes_are_the_toolkits_field"
+
+MUTATIONS += [
     (
-        "the search types a command's letter",
-        '                if !textline::types_into_field(ev) {',
-        '                if !ev.types_text() {',
-        ['a_chord_is_neither_a_library_key_nor_typing'],
+        "the search box never has the keyboard's mark",
+        "                focused: self.search_focus,\n",
+        "                focused: false,\n",
+        [SEARCH_FIELD],
+    ),
+    (
+        "a query that finds nothing is not red",
+        "                invalid: !self.search_query.is_empty() && self.filtered_snippets().is_empty(),\n",
+        "                invalid: false,\n",
+        [SEARCH_FIELD],
+    ),
+    (
+        "a press on the search box leaves the caret where it was",
+        "        self.search_editor.set_cursor(cursor);\n",
+        "        let _ = cursor;\n",
+        [SEARCH_FIELD],
+    ),
+    (
+        "a press on the search box does not reach it",
+        "                    self.press_search(outer, ev.x);\n",
+        "                    let _ = (outer, ev.x);\n",
+        [SEARCH_FIELD],
+    ),
+    (
+        "the search's caret is drawn at its start",
+        "                    cursor: self.search_cursor(),\n",
+        "                    cursor: text::TextCursor::default(),\n",
+        [SEARCH_FIELD],
+    ),
+    (
+        "Ctrl+F leaves the editor with the last query",
+        "        self.search_focus = true;\n        self.search_editor.set_text(&self.search_query);\n",
+        "        self.search_focus = true;\n",
+        [SEARCH_FIELD],
+    ),
+    (
+        "the editor's box with the keys has no mark",
+        "                    focused,\n                    disabled: false,\n                    invalid: false,\n",
+        "                    focused: false,\n                    disabled: false,\n                    invalid: false,\n",
+        [EDITOR_BOXES],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [SEARCH_FIELD, EDITOR_BOXES],
     ),
 ]
 

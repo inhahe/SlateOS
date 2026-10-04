@@ -73,6 +73,7 @@ use appearance::Surface;
 #[allow(unused_imports)]
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::field;
 use guitk::frame::Rect;
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -80,6 +81,8 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 use guitk::text;
+use guitk::text::TextCursor;
+use guitk::textedit;
 use guitk::widget::CheckState;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
@@ -140,6 +143,12 @@ const DETECTION_METHOD_ROW_HEIGHT: f32 = 24.0;
 const META_VALUE_FRACTION: f32 = 0.6;
 const SMALL_RADIUS: f32 = 4.0;
 const FONT_SIZE: f32 = 13.0;
+/// The results' search box's width.
+const SEARCH_WIDTH: f32 = 260.0;
+/// The results' search box's height.
+const SEARCH_HEIGHT: f32 = 28.0;
+/// How far the search box's text sits in from its left and right edges.
+const SEARCH_TEXT_INSET: f32 = 8.0;
 const FONT_SIZE_SMALL: f32 = 11.0;
 const FONT_SIZE_HEADING: f32 = 16.0;
 const FONT_SIZE_TITLE: f32 = 20.0;
@@ -2045,8 +2054,11 @@ impl ScanFilter {
         self
     }
 
+    /// Search file names for `term`, in letters of either case. Kept as it
+    /// was typed: it is drawn in the search box, and lowercasing it there
+    /// would show the user a word they did not type.
     pub fn with_search(mut self, term: &str) -> Self {
-        self.filename_search = term.to_lowercase();
+        self.filename_search = term.to_owned();
         self
     }
 
@@ -2083,7 +2095,10 @@ impl ScanFilter {
             return false;
         }
         if !self.filename_search.is_empty()
-            && !file.filename.to_lowercase().contains(&self.filename_search)
+            && !file
+                .filename
+                .to_lowercase()
+                .contains(&self.filename_search.to_lowercase())
         {
             return false;
         }
@@ -2798,6 +2813,95 @@ impl UndeleteApp {
         out
     }
 
+    /// Where the results' search box is drawn: at the right of the header,
+    /// while the results are showing.
+    pub fn search_box_rect(&self) -> Option<Rect> {
+        (self.screen == UiScreen::Results).then(|| {
+            Rect::new(
+                self.width - SEARCH_WIDTH - PADDING,
+                (HEADER_HEIGHT - SEARCH_HEIGHT) / 2.0,
+                SEARCH_WIDTH,
+                SEARCH_HEIGHT,
+            )
+        })
+    }
+
+    /// How the search box is drawn: with the keyboard whenever the results
+    /// show -- what is typed goes to it -- unless the list of keys is over
+    /// it, and red while what is in it matches no file. Never lit under the
+    /// pointer: a press on it does nothing, the keys being its already.
+    fn search_box_state(&self) -> field::State {
+        field::State {
+            hovered: false,
+            focused: self.screen == UiScreen::Results && !self.show_help,
+            disabled: false,
+            invalid: !self.filter.filename_search.is_empty() && self.visible_files().is_empty(),
+        }
+    }
+
+    /// Draw the search box: the toolkit's field, holding the search -- or
+    /// what it is for, faint, while it is empty -- with the caret after it,
+    /// where what is typed goes. The search was typed blind: no box showed
+    /// it anywhere, and the list only got shorter.
+    fn render_search_box(&self, cmds: &mut Vec<RenderCommand>) {
+        let Some(rect) = self.search_box_rect() else {
+            return;
+        };
+        let state = self.search_box_state();
+        field::draw(cmds, &self.palette, rect, state, self.focus_ring_width);
+        let line = text::line_height(FONT_SIZE, FontWeightHint::Regular);
+        let (x, y, width) = (
+            rect.x + SEARCH_TEXT_INSET,
+            rect.y + (rect.h - line) / 2.0,
+            (rect.w - 2.0 * SEARCH_TEXT_INSET).max(0.0),
+        );
+        let query = &self.filter.filename_search;
+        let mut tree = RenderTree::new();
+        if query.is_empty() {
+            tree.push(RenderCommand::Text {
+                x,
+                y,
+                text: "Search file names...".to_owned(),
+                color: self.palette.subtext0,
+                font_size: FONT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(width),
+                overflow: TextOverflow::Ellipsis,
+            });
+            if state.focused {
+                textedit::push_caret(
+                    &mut tree,
+                    x,
+                    y,
+                    line,
+                    self.palette.text,
+                    textedit::CARET_WIDTH,
+                );
+            }
+        } else {
+            textedit::draw(
+                &mut tree,
+                &textedit::SingleLine {
+                    text: query,
+                    cursor: TextCursor::from(query.len()),
+                    selection_anchor: None,
+                    focused: state.focused,
+                    x,
+                    y,
+                    width,
+                    line_height: line,
+                    font_size: FONT_SIZE,
+                    weight: FontWeightHint::Regular,
+                    color: self.palette.text,
+                    selection_bg: self.palette.accent,
+                    selection_fg: self.palette.crust,
+                    caret_width: textedit::CARET_WIDTH,
+                },
+            );
+        }
+        cmds.extend(tree.commands);
+    }
+
     /// Set the filename search, and keep the selection on something visible.
     ///
     /// Through `ScanFilter::with_search`, which is the builder this file
@@ -3313,6 +3417,7 @@ impl UndeleteApp {
 
     fn render_results(&self, cmds: &mut Vec<RenderCommand>) {
         self.render_header(cmds, "Recovery Results");
+        self.render_search_box(cmds);
 
         let content_y = HEADER_HEIGHT;
         let content_h = self.height - HEADER_HEIGHT - FOOTER_HEIGHT - STATUS_BAR_HEIGHT;
@@ -5277,6 +5382,153 @@ mod tests {
         assert_eq!(app.engine.selected_count(), 1, "space should tick the row");
         app.handle_event(&press(Key::Space));
         assert_eq!(app.engine.selected_count(), 0, "and untick it");
+    }
+
+    /// **The search is drawn, in the toolkit's field**: on the results, with
+    /// the keyboard's mark at the user's width -- not under the list of keys
+    /// -- what is typed in the case it was typed, the caret after it, and red
+    /// while it matches no file; letters of either case match. It was typed
+    /// blind -- no box showed it -- and stored in lower case.
+    #[test]
+    fn the_search_is_drawn_in_the_toolkits_field() {
+        let mut app = scanned();
+        let mut p = app.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        oswindow::app::App::theme_changed(&mut app, &p);
+        oswindow::app::App::appearance_changed(
+            &mut app,
+            &appearance::AppearanceSettings {
+                focus_ring_scale: 2.5,
+                ..appearance::AppearanceSettings::default()
+            },
+        );
+        assert!(
+            app.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        let rect = app
+            .search_box_rect()
+            .expect("the results show no search box");
+        let draws = |app: &UndeleteApp, state: field::State| {
+            let seq = |s: field::State| {
+                let mut v: Vec<RenderCommand> = Vec::new();
+                field::draw(&mut v, &p, rect, s, app.focus_ring_width);
+                v
+            };
+            let cmds = app.render_commands();
+            let has = |want: &[RenderCommand]| cmds.windows(want.len()).any(|w| w == want);
+            has(&seq(state))
+                && (state.focused
+                    || !has(&seq(field::State {
+                        focused: true,
+                        ..state
+                    })))
+        };
+        let texts_in = |app: &UndeleteApp| -> Vec<String> {
+            app.render_commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, x, y, .. }
+                    | RenderCommand::RichText { text, x, y, .. }
+                        if rect.contains(*x, *y) =>
+                    {
+                        Some(text.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let carets = |app: &UndeleteApp| -> Vec<f32> {
+            app.render_commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Line { x1, y1, x2, y2, .. }
+                        if (x1 - x2).abs() < f32::EPSILON
+                            && rect.contains(*x1, *y1)
+                            && rect.contains(*x2, *y2) =>
+                    {
+                        Some(*x1)
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let idle = field::State::default();
+        let focused = field::State {
+            focused: true,
+            ..idle
+        };
+        let start = rect.x + SEARCH_TEXT_INSET;
+        assert!(draws(&app, focused), "the search box has no keyboard mark");
+        assert_eq!(texts_in(&app), vec![String::from("Search file names...")]);
+        assert_eq!(
+            carets(&app),
+            vec![start],
+            "the empty box has no caret at its start"
+        );
+
+        // A file's name in capitals finds it, and is shown as typed.
+        let name = app
+            .visible_files()
+            .first()
+            .map(|f| f.filename.clone())
+            .expect("the scan found something");
+        let needle: String = name.chars().take(3).collect::<String>().to_uppercase();
+        for c in needle.chars() {
+            app.handle_event(&types(c));
+        }
+        assert_eq!(
+            app.filter.filename_search, needle,
+            "the search lost its case"
+        );
+        assert!(
+            app.visible_files().iter().any(|f| f.filename == name),
+            "a name in other letters' case is not found"
+        );
+        assert!(
+            texts_in(&app).contains(&needle),
+            "what is typed is not drawn in the box: {:?}",
+            texts_in(&app)
+        );
+        let end = start + text::measure(&needle, FONT_SIZE, FontWeightHint::Regular);
+        assert!(
+            matches!(carets(&app).as_slice(), [at] if (at - end).abs() < 0.5),
+            "the caret is not after what was typed: {:?}, not {end}",
+            carets(&app)
+        );
+
+        for c in "zzq".chars() {
+            app.handle_event(&types(c));
+        }
+        assert!(
+            app.visible_files().is_empty(),
+            "control: the search matches nothing"
+        );
+        let red = field::State {
+            invalid: true,
+            ..focused
+        };
+        assert!(draws(&app, red), "a search that matches nothing is not red");
+
+        app.handle_event(&press(Key::F1));
+        assert!(
+            draws(
+                &app,
+                field::State {
+                    invalid: true,
+                    ..idle
+                }
+            ),
+            "the search box keeps its mark under the list of keys"
+        );
+        app.handle_event(&press(Key::F1));
+
+        app.screen = UiScreen::ScanSetup;
+        assert_eq!(
+            app.search_box_rect(),
+            None,
+            "a search box away from the results"
+        );
     }
 
     /// Typing filters by filename, through `ScanFilter::with_search` -- one of

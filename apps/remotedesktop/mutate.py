@@ -43,6 +43,7 @@ IDLE_CLOCK = "an_idle_window_asks_for_no_clock"
 RECONNECT_ASKS = "reconnect_asks_for_the_password_again"
 HANDSHAKE = "a_session_shakes_hands_and_shows_the_screen"
 PASSWORD = "a_password_is_proven_by_the_challenge"
+DIALOG = "the_password_is_asked_in_the_toolkits_dialog"
 OUTSIDE = "a_rectangle_outside_the_desktop_is_refused"
 OTHERS = "every_other_message_arrives"
 RFB_KEYS = "keys_and_the_pointer_are_sent_as_rfb_says"
@@ -167,9 +168,9 @@ MAIN = [
     ),
     (
         "Enter in the password prompt does not connect",
-        "                    let _id = self.connect_vnc(prompt.profile_index, &prompt.text);",
-        "                    let _ = prompt;",
-        [ASKS],
+        "                let _id = self.connect_vnc(profile_index, &password);\n",
+        "                let _ = (profile_index, password);\n",
+        [ASKS, DIALOG],
     ),
     (
         "a session is put back on the clock",
@@ -297,28 +298,19 @@ MAIN = [
         "            profile.display.refresh_rate = rate;\n            profile.display.scaling = ScalingMode::AutoFit;",
         [Z_SCALE],
     ),
+    # The password is asked in the toolkit's input dialog since 2026-10-04,
+    # whose own keys are its own; what is this program's is keeping a
+    # command's chord out of it -- Alt+Escape, Alt+Backspace, Windows+Enter,
+    # Alt+X's `x` -- and AltGr in.
     (
-        'a chorded Escape abandons the password',
-        '            Key::Escape if plain => {\n                self.password_prompt = None;',
-        '            Key::Escape => {\n                self.password_prompt = None;',
-        ['a_chord_is_neither_a_remote_desktop_key_nor_typing'],
-    ),
-    (
-        'Alt+Backspace deletes from the password',
-        '            Key::Backspace if !textline::is_alt_or_windows_chord(key.modifiers) => {\n                prompt.text.pop();',
-        '            Key::Backspace => {\n                prompt.text.pop();',
-        ['a_chord_is_neither_a_remote_desktop_key_nor_typing'],
-    ),
-    (
-        'a chorded Enter connects',
-        '            Key::Enter if plain => {\n                let prompt = self.password_prompt.take();',
-        '            Key::Enter => {\n                let prompt = self.password_prompt.take();',
-        ['a_chord_is_neither_a_remote_desktop_key_nor_typing'],
-    ),
-    (
-        "the password takes any key's text",
-        '                if textline::types_into_field(key) {\n                    prompt.text.extend(key.typed());',
-        '                if !key.text.is_empty() {\n                    prompt.text.push_str(&key.text);',
+        "a command reaches the password dialog",
+        "        if let Event::Key(key) = event\n"
+        "            && textline::is_command(key.modifiers)\n"
+        "        {\n"
+        "            return EventResult::Consumed;\n"
+        "        }\n"
+        "        let Some(prompt) = self.password_prompt.as_mut() else {\n",
+        "        let Some(prompt) = self.password_prompt.as_mut() else {\n",
         ['a_chord_is_neither_a_remote_desktop_key_nor_typing'],
     ),
     (
@@ -338,6 +330,47 @@ MAIN = [
         '        if !plain {\n            return EventResult::Ignored;\n        }\n',
         '',
         ['a_chord_is_neither_a_remote_desktop_key_nor_typing'],
+    ),
+]
+
+# The password is asked in the toolkit's input dialog, modal for the pointer
+# too (2026-10-04; lane C, c-e-a-theme-can-shape-the-controls).
+MAIN += [
+    (
+        "a press goes through the password dialog",
+        "            Event::Key(_) | Event::Mouse(_) if self.password_prompt.is_some() => {\n",
+        "            Event::Key(_) if self.password_prompt.is_some() => {\n",
+        [DIALOG],
+    ),
+    (
+        "the password dialog is not drawn",
+        "            prompt.dialog.render(&palette, width, height, &mut tree);\n",
+        "            let _ = (&palette, &prompt);\n",
+        [DIALOG],
+    ),
+    (
+        "the password is drawn as it is typed",
+        "        .with_password_mode(true)\n",
+        "        .with_password_mode(false)\n",
+        [DIALOG],
+    ),
+    (
+        "the dialog's ring is the toolkit's width",
+        "        .with_focus_ring_width(self.focus_ring_width);\n",
+        "        .with_focus_ring_width(guitk::style::FOCUS_RING_WIDTH);\n",
+        [DIALOG],
+    ),
+    (
+        "the focus width is the toolkit's, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [DIALOG],
+    ),
+    (
+        "a password given up says nothing",
+        '            _ => self.status_message = Some(String::from("Not connected")),\n',
+        "            _ => {}\n",
+        [ASKS],
     ),
 ]
 

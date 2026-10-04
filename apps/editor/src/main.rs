@@ -1680,6 +1680,8 @@ pub struct EditorState {
     pub gutter_width: f32,
     /// Font size.
     pub font_size: f32,
+    /// Whether the list of keys is up (F1).
+    pub show_help: bool,
     /// Line-to-line spacing of the text area.
     ///
     /// There is deliberately no matching `char_width`: horizontal positions
@@ -1814,6 +1816,7 @@ impl EditorState {
             window_height: 600,
             gutter_width: 50.0,
             font_size,
+            show_help: false,
             line_height: font_size * 1.5,
             external_prompt: None,
             status: None,
@@ -2208,6 +2211,19 @@ impl EditorState {
         // External-change prompt / merge review (modal overlay)
         if let Some(prompt) = self.external_prompt.as_ref() {
             self.render_external_prompt(&mut tree, prompt);
+        }
+
+        // The list of keys over everything: it is the one thing on screen a
+        // reader asked for explicitly.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut tree,
+                &self.palette,
+                (w, h),
+                0.0,
+                &input::shortcut_rows(),
+                "F1 or Escape closes this",
+            );
         }
 
         tree

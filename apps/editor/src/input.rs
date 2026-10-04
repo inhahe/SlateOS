@@ -203,7 +203,7 @@ impl Command {
             Self::SaveAs => "Ctrl+Shift+S",
             Self::CloseTab => "Ctrl+W / Ctrl+F4",
             Self::Undo => "Ctrl+Z",
-            Self::Redo => "Ctrl+Y",
+            Self::Redo => "Ctrl+Y / Ctrl+Shift+Z",
             Self::Earlier => "Alt+Z",
             Self::Later => "Alt+Shift+Z",
             Self::Cut => "Ctrl+X",
@@ -216,6 +216,41 @@ impl Command {
             Self::Replace => "Ctrl+H",
         }
     }
+}
+
+/// The keys no command row carries, for the F1 list.
+///
+/// The commands' own rows -- the menus' -- are not repeated here: the list is
+/// built from them ([`shortcut_rows`]), so a command's key is written once.
+/// Twenty-seven rows in all with those, which is what the window's opening
+/// size has room for; Ctrl+Home, End, Left and Right share a row to keep it so.
+const MORE_KEYS: &[(&str, &str)] = &[
+    (
+        "Ctrl+Home / Ctrl+End / Ctrl+Left / Ctrl+Right",
+        "The file's start or end; a word back or on",
+    ),
+    ("Ctrl+Tab / Ctrl+PageDown", "The next tab"),
+    ("Ctrl+Shift+Tab / Ctrl+PageUp", "The last tab"),
+    ("Shift+Arrows", "Select as the caret moves"),
+    ("Escape", "Let go of the selection, or close Find"),
+    ("Enter / Shift+Enter", "In Find: the next or the last match"),
+    ("Ctrl+R / Ctrl+Shift+R", "In Find: replace this one, or all"),
+    ("Ctrl+I", "In Find: match case, or not"),
+    ("Alt+F / Alt+E / Alt+S", "The File, Edit or Search menu"),
+];
+
+/// The keys the editor answers, as the F1 list shows them: F1, every command's
+/// own row, then the keys no command carries.
+///
+/// F1 did nothing. The menus printed their rows' keys, and nothing else did:
+/// Tabs or Spaces (Ctrl+T) and the two version keys (Alt+Z, Alt+Shift+Z) are
+/// in no menu, nor are the find bar's keys or the moves by word and by file.
+#[must_use]
+pub fn shortcut_rows() -> Vec<(&'static str, &'static str)> {
+    let mut rows = vec![("F1", "This list")];
+    rows.extend(Command::ALL.iter().map(|c| (c.shortcut(), c.label())));
+    rows.extend_from_slice(MORE_KEYS);
+    rows
 }
 
 /// Which of the find bar's two text fields the keyboard is typing into.
@@ -339,11 +374,27 @@ impl EditorState {
     }
 
     fn dispatch_key(&mut self, key: &KeyEvent) -> Response {
+        // The list of keys first: it is drawn over everything, and modal while
+        // it is up -- a plain F1 or Escape puts it away, and no other key
+        // reaches what it covers.
+        let plain = !key.modifiers.ctrl && !key.modifiers.alt && !key.modifiers.super_key;
+        if self.show_help {
+            if plain && matches!(key.key, Key::F1 | Key::Escape) {
+                self.show_help = false;
+            }
+            return Response::Redraw;
+        }
         if self.external_prompt.is_some() {
             return self.prompt_key(key);
         }
         if self.question.is_some() {
             return self.question_event(&Event::Key(key.clone()));
+        }
+        // F1 raises it from the text, the find bar or a menu: it is never
+        // typed. F1 alone -- `?` is a character here like any other.
+        if plain && key.key == Key::F1 {
+            self.show_help = true;
+            return Response::Redraw;
         }
         // The bar sees the key after the modal prompt, which is asking a
         // question that has to be answered first, and before the typing tables,
@@ -1149,6 +1200,20 @@ impl EditorState {
     }
 
     fn handle_mouse(&mut self, mouse: &MouseEvent) -> Response {
+        // The list of keys is modal for the pointer as it is for the keys: a
+        // press with any button puts it away and does nothing else, and
+        // nothing under it follows the pointer or the wheel. A release passes,
+        // so a drag begun before it was raised still ends.
+        if self.show_help {
+            match mouse.kind {
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                    self.show_help = false;
+                    return Response::Redraw;
+                }
+                MouseEventKind::Release(_) => {}
+                _ => return Response::Idle,
+            }
+        }
         // The bar gets first refusal -- except during a drag that began in the
         // text, which owns the pointer until it is released: a selection being
         // extended past the top of the window must not be taken over by a menu
@@ -2938,5 +3003,160 @@ mod tests {
         editor.handle_event(&keystroke("Alt+Shift+Z"));
         assert_eq!(editor.status.as_deref(), Some("This is the newest version"));
         assert_eq!(editor.active_document().lines[0], "cab");
+    }
+
+    // ---- the list of keys ---------------------------------------------------
+
+    fn drawn_strings(editor: &mut EditorState) -> Vec<String> {
+        editor
+            .render_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                guitk::render::RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **Every key the list names beyond the commands' own is answered** --
+    /// each from a state where it has something to do: the find bar's with
+    /// the bar open on a word that is there, Escape with a selection to let
+    /// go of. The commands' rows are
+    /// `every_shortcut_a_menu_advertises_is_really_bound`'s.
+    #[test]
+    fn every_key_the_list_adds_does_something() {
+        let added = std::iter::once(&("F1", "This list")).chain(MORE_KEYS.iter());
+        for (label, what) in added {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let mut editor = editor_with("alpha beta\ngamma delta\nepsilon");
+                if what.starts_with("In Find") {
+                    editor.handle_event(&ctrl(Key::F));
+                    editor.handle_event(&typed('a'));
+                }
+                if *label == "Escape" {
+                    editor.handle_event(&shift(Key::Right));
+                }
+                assert_ne!(
+                    editor.handle_event(&Event::Key(stroke.clone())),
+                    Response::Idle,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The list of keys reaches the window** -- all of it, at the size the
+    /// window opens at -- and goes on F1 or a plain Escape, not on
+    /// Alt+Escape, which is the desktop's. `?` is typed, as every character
+    /// is in a document.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut editor = editor_with("ab");
+        assert!(
+            !drawn_strings(&mut editor)
+                .iter()
+                .any(|t| t.contains("F1 or Escape closes this")),
+            "the list is up before anybody asked for it"
+        );
+        for chord in [Modifiers::alt(), Modifiers::super_key()] {
+            editor.handle_event(&press(Key::F1, chord));
+            assert!(
+                !editor.show_help,
+                "{chord:?}+F1, the desktop's, raised the list"
+            );
+        }
+        editor.handle_event(&typed('?'));
+        assert!(!editor.show_help, "? raised the list");
+        assert_eq!(editor.active_document().lines[0], "?ab", "? was not typed");
+
+        editor.handle_event(&plain(Key::F1));
+        let rows = shortcut_rows();
+        let missing = guitk::shortcut::missing_rows(&drawn_strings(&mut editor), &rows);
+        assert!(missing.is_empty(), "{missing:?}");
+        editor.handle_event(&press(Key::Escape, Modifiers::alt()));
+        assert!(editor.show_help, "Alt+Escape put the list away");
+        editor.handle_event(&plain(Key::Escape));
+        assert!(!editor.show_help, "Escape left the list up");
+        editor.handle_event(&plain(Key::F1));
+        editor.handle_event(&plain(Key::F1));
+        assert!(!editor.show_help, "F1 left the list up");
+    }
+
+    /// **The list of keys is modal**: with it up, nothing typed reaches the
+    /// document, no chord runs a command, no menu opens, and a press puts the
+    /// list away and moves no caret. The document is the same with it down.
+    #[test]
+    fn the_shortcut_list_takes_the_keys_and_a_press() {
+        let mut editor = editor_with("alpha\nbeta\ngamma");
+        editor.handle_event(&plain(Key::F1));
+        for event in [
+            typed('x'),
+            plain(Key::Delete),
+            plain(Key::Down),
+            ctrl(Key::S),
+            ctrl(Key::N),
+            press(Key::F, Modifiers::alt()),
+        ] {
+            assert_eq!(editor.handle_event(&event), Response::Redraw);
+        }
+        assert!(
+            editor.show_help,
+            "a key other than F1 or Escape put the list away"
+        );
+        assert_eq!(
+            editor.active_document().lines[0],
+            "alpha",
+            "a key edited under the list"
+        );
+        assert_eq!(
+            editor.active_document().cursor_line,
+            0,
+            "Down moved the caret under it"
+        );
+        assert!(
+            editor.dialog.is_none(),
+            "Ctrl+S asked where to save under the list"
+        );
+        assert_eq!(editor.tabs.count(), 1, "Ctrl+N opened a tab under the list");
+        assert!(
+            !editor.menu_bar.is_open(),
+            "Alt+F opened a menu under the list"
+        );
+
+        let (x, y) = (200.0, 120.0);
+        let wheel = Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+        });
+        assert_eq!(editor.handle_event(&wheel), Response::Idle);
+        assert!(editor.show_help, "the wheel put the list away");
+        editor.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        assert!(!editor.show_help, "the press did not put the list away");
+        assert_eq!(
+            (
+                editor.active_document().cursor_line,
+                editor.active_document().cursor_col
+            ),
+            (0, 0),
+            "the press moved the caret under the list"
+        );
+        editor.handle_event(&plain(Key::F1));
+        editor.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Right),
+        }));
+        assert!(!editor.show_help, "a right-button press left the list up");
+
+        // The document.
+        editor.handle_event(&typed('x'));
+        assert_eq!(editor.active_document().lines[0], "xalpha");
     }
 }

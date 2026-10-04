@@ -363,6 +363,31 @@ MUTATIONS = [
     ),
 ]
 
+# F1 (2026-10-04): it did nothing, though the whole table was a tab away.
+F1 = "f1_shows_the_keys_and_goes_back"
+
+MUTATIONS += [
+    (
+        "F1 shows nothing",
+        "                    self.tab_before_keys = Some(self.active_tab);\n"
+        "                    self.active_tab = PlayerTab::Shortcuts;\n",
+        "                    self.tab_before_keys = Some(self.active_tab);\n",
+        [F1],
+    ),
+    (
+        "F1 does not go back where it came from",
+        "                    self.active_tab = self.tab_before_keys.take().unwrap_or(PlayerTab::Player);\n",
+        "                    self.active_tab = PlayerTab::Player;\n",
+        [F1],
+    ),
+    (
+        "? shows nothing",
+        "                Press::Shift(Key::Slash),\n",
+        "                Press::Shift(Key::F12),\n",
+        [F1],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "videoplayer", timeout=900, only=only))

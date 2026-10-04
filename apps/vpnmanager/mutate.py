@@ -76,6 +76,230 @@ MUTATIONS = [
     ),
 ]
 
+# The list of keys, and the keyboard's way to the boxes (2026-10-04). F1 did
+# nothing; the search box and the split-tunnel range box could be reached only
+# by a press; and Alt+Left switched the tab under a window being dragged.
+EVERY = "every_advertised_key_does_something"
+REACHES = "the_shortcut_list_reaches_the_window"
+QUESTION = "a_question_mark_is_typed_into_the_search_and_f1_still_raises_the_list"
+MODAL = "the_shortcut_list_takes_the_keys_and_a_press"
+BOXES = "tab_and_ctrl_f_reach_the_boxes"
+CHORD = "a_chord_is_not_one_of_this_windows_keys"
+RING = "tab_walks_the_dialog_fields_in_a_ring"
+
+HELP_ANCHOR = "        if plain && (key.key == Key::F1 || question && self.focus.is_none()) {\n"
+CLOSE_ANCHOR = "            if plain && (matches!(key.key, Key::F1 | Key::Escape) || question) {\n"
+CTRL_F = (
+    "        if key.key == Key::F && textline::is_ctrl_chord(key.modifiers) && !self.show_add_dialog {\n"
+)
+
+MUTATIONS += [
+    (
+        "the list of keys never comes up",
+        "            self.show_help = true;\n            return Action::Redraw;\n",
+        "            return Action::Redraw;\n",
+        [REACHES],
+    ),
+    (
+        "F1 raises nothing from a box",
+        HELP_ANCHOR,
+        "        if plain && self.focus.is_none() && (key.key == Key::F1 || question) {\n",
+        [QUESTION],
+    ),
+    (
+        "? raises the list from a box",
+        HELP_ANCHOR,
+        "        if plain && (key.key == Key::F1 || question) {\n",
+        [QUESTION],
+    ),
+    (
+        "Alt+F1 raises the list",
+        HELP_ANCHOR,
+        "        if key.key == Key::F1 || plain && question && self.focus.is_none() {\n",
+        [REACHES],
+    ),
+    (
+        "the list is not modal for the keys",
+        "                self.show_help = false;\n"
+        "            }\n"
+        "            return Action::Redraw;\n"
+        "        }\n",
+        "                self.show_help = false;\n"
+        "            }\n"
+        "        }\n",
+        [MODAL],
+    ),
+    (
+        "Escape leaves the list up",
+        CLOSE_ANCHOR,
+        "            if plain && (matches!(key.key, Key::F1) || question) {\n",
+        [REACHES],
+    ),
+    (
+        "Alt+Escape puts the list away",
+        CLOSE_ANCHOR,
+        "            if matches!(key.key, Key::F1 | Key::Escape) || question {\n",
+        [REACHES],
+    ),
+    (
+        "the list of keys is not drawn",
+        "    if app.show_help {\n        frame.discard_hits();\n",
+        "    if false {\n        frame.discard_hits();\n",
+        [REACHES],
+    ),
+    (
+        "a press reaches what the list covers",
+        "            Event::Mouse(mouse) if self.show_help => match mouse.kind {\n",
+        "            Event::Mouse(mouse) if self.show_help && !matches!(mouse.kind, MouseEventKind::Press(_)) => match mouse.kind {\n",
+        [MODAL],
+    ),
+    (
+        "the wheel scrolls what the list covers",
+        "            Event::Mouse(mouse) if self.show_help => match mouse.kind {\n",
+        "            Event::Mouse(mouse) if self.show_help && !matches!(mouse.kind, MouseEventKind::Scroll { .. }) => match mouse.kind {\n",
+        [MODAL],
+    ),
+    (
+        "Ctrl+F does not reach the search",
+        CTRL_F,
+        "        if false {\n",
+        [EVERY, BOXES],
+    ),
+    (
+        "AltGr+F is Ctrl+F",
+        CTRL_F,
+        "        if key.key == Key::F && key.modifiers.ctrl && !self.show_add_dialog {\n",
+        [BOXES],
+    ),
+    (
+        "a chord reaches the window's keys",
+        "        if !plain {\n            return Action::None;\n        }\n",
+        "",
+        [CHORD],
+    ),
+    (
+        "Tab does not reach the search",
+        "            Key::Tab => self.focus_field(Field::Search),\n",
+        "",
+        [EVERY, BOXES],
+    ),
+    (
+        "Tab from the search never reaches the range box",
+        "            Field::Search if ranges_drawn => Field::AllowedIp,\n",
+        "",
+        [BOXES],
+    ),
+    (
+        "Tab from the range box stays there",
+        "            Field::Search | Field::AllowedIp => Field::Search,\n",
+        "            Field::Search => Field::Search,\n            Field::AllowedIp => Field::AllowedIp,\n",
+        [BOXES],
+    ),
+    (
+        "the range box is reached with no profile chosen",
+        "            self.current_tab == DetailTab::SplitTunnel && self.selected_profile.is_some();\n",
+        "            self.current_tab == DetailTab::SplitTunnel;\n",
+        [BOXES],
+    ),
+    (
+        "the dialog's ring is broken",
+        "            Field::Port => Field::Mtu,\n",
+        "            Field::Port => Field::Name,\n",
+        [RING],
+    ),
+]
+
+# The boxes edit at a caret (2026-10-04,
+# known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box): they
+# took typing at their end and Backspace from it, with a `|` for a caret.
+CARET = "a_box_edits_at_a_caret"
+NUMBER = "a_number_box_edits_its_digits_and_refuses_the_rest"
+MOVES_TO = "a_box_the_keyboard_moves_to_types_after_what_it_holds"
+DIGITS = "the_port_box_takes_digits_and_ignores_everything_else"
+SATURATES = "the_port_box_saturates_rather_than_wrapping_back_to_a_working_port"
+QUESTION_MARK = "a_question_mark_is_typed_into_the_search_and_f1_still_raises_the_list"
+
+MUTATIONS += [
+    (
+        "what a box's editor holds is never written back",
+        "            self.set_field_text(field, &typed);\n",
+        "            let _ = &typed;\n",
+        [CARET, NUMBER],
+    ),
+    (
+        "a number box takes a letter",
+        "            && !self.editor.text().chars().all(|c| c.is_ascii_digit())\n",
+        "            && false\n",
+        [DIGITS, NUMBER],
+    ),
+    (
+        "a refused edit stays in the editor",
+        "            self.editor = kept;\n",
+        "            let _ = kept;\n",
+        [NUMBER],
+    ),
+    (
+        "a number too big for its box wraps",
+        "                text.parse().unwrap_or(u16::MAX)\n",
+        "                text.parse().unwrap_or(0)\n",
+        [SATURATES],
+    ),
+    (
+        "an emptied number box shows a 0",
+        "        let digits = |n: u16| if n == 0 { String::new() } else { n.to_string() };\n",
+        "        let digits = |n: u16| n.to_string();\n",
+        [NUMBER],
+    ),
+    (
+        "a cut takes nothing to the clipboard",
+        "            self.clipboard = copied;\n",
+        "            let _ = copied;\n",
+        [CARET],
+    ),
+    (
+        "a press puts the caret at the start",
+        "            x - rect.x - FIELD_TEXT_INSET,\n",
+        "            0.0,\n",
+        [CARET],
+    ),
+    (
+        "a press on a box does not place the caret",
+        "        if let Target::Focus(field) = target {\n            return self.press_field(field, x, size);\n        }\n",
+        "",
+        [CARET],
+    ),
+    (
+        "the caret is drawn at the start",
+        "                cursor: app.field_cursor(field, &text),\n",
+        "                cursor: TextCursor::default(),\n",
+        [CARET],
+    ),
+    (
+        "an empty box with the keyboard has no caret",
+        "        if focused {\n            textedit::push_caret(\n",
+        "        if false {\n            textedit::push_caret(\n",
+        [CARET],
+    ),
+    (
+        "the caret is drawn under the list of keys",
+        "    let focused = app.focus == Some(field) && !app.show_help;\n",
+        "    let focused = app.focus == Some(field);\n",
+        [QUESTION_MARK],
+    ),
+    (
+        "Tab leaves the last box's caret",
+        "                self.load_editor(next);\n",
+        "",
+        [MOVES_TO],
+    ),
+    (
+        "a box given the keyboard keeps the last box's caret",
+        "        self.focus = Some(field);\n        self.load_editor(field);\n",
+        "        self.focus = Some(field);\n",
+        [MOVES_TO],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "vpnmanager", timeout=600, only=only))

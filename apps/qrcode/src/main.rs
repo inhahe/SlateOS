@@ -3232,10 +3232,17 @@ impl QrApp {
                 &mut tree,
                 &textedit::SingleLine {
                     text: value,
+                    // An idle box shows the start of its text, as
+                    // `place_caret` measures a press on one: drawn with the
+                    // caret at the end, a long text was scrolled to its end,
+                    // and a press landed as many characters from what was
+                    // under it as the scroll had hidden.
                     cursor: if editing {
                         self.editor.cursor()
-                    } else {
+                    } else if focused {
                         TextCursor::from(value.len())
+                    } else {
+                        TextCursor::default()
                     },
                     selection_anchor: if editing {
                         self.editor.selection_anchor()
@@ -5370,6 +5377,50 @@ mod tests {
         app.handle_key(&ctrl_key(Key::A));
         app.handle_key(&ctrl_key(Key::X));
         assert!(app.vcard_info.first_name.is_empty(), "cut left the text");
+    }
+
+    /// **A press in an idle box lands on the character drawn under it**,
+    /// however long the text. The idle box was drawn with its caret at the
+    /// end, so a text longer than the box showed its end -- and a press was
+    /// measured as if it showed its start, putting the caret as many
+    /// characters off as the scroll had hidden.
+    #[test]
+    fn a_press_in_an_idle_box_lands_on_the_character_drawn_under_it() {
+        let mut app = QrApp::new();
+        probe::click(&mut app, Target::Mode(InputMode::VCard));
+        let long = "a-name-far-longer-than-its-box-will-ever-show-at-once";
+        app.vcard_info.email = String::from(long);
+        let rect = probe::rect_of(&app, Target::Field(Field::Email)).expect("the email box");
+        let frame = probe::Probe::draw(&app, <QrApp as probe::Probe>::SIZE);
+        let origin = frame
+            .commands()
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::RichText { text, x, .. } if text == long => Some(*x),
+                _ => None,
+            })
+            .expect("the email is drawn");
+        assert!(
+            (origin - (rect.x + 8.0)).abs() < 0.5,
+            "the idle box is drawn scrolled: its text starts at {origin}, the box at {}",
+            rect.x + 8.0
+        );
+
+        // A press just inside the box's left edge: before the first
+        // character drawn there, which is the text's first.
+        let left = MouseEvent {
+            x: rect.x + 9.0,
+            y: rect.centre().1,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        };
+        app.handle_event(&Event::Mouse(left));
+        assert_eq!(app.focused_field(), Field::Email);
+        probe::type_str(&mut app, "X");
+        assert!(
+            app.vcard_info.email.starts_with("Xa-name"),
+            "the caret went somewhere else: {}",
+            app.vcard_info.email
+        );
     }
 
     #[test]

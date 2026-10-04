@@ -996,6 +996,14 @@ MAIN = [
         '',
         [CARD_MODAL],
     ),
+    (
+        # 2026-10-04: the toolkit's input dialog types the text of every
+        # key, a command's letter among it.
+        "a command is typed into a name box",
+        "        let command = matches!(event, Event::Key(key) if textline::is_command(key.modifiers));\n",
+        "        let command = false;\n",
+        ["a_command_is_not_typed_into_a_name_box"],
+    ),
 ]
 
 COLUMNS = [

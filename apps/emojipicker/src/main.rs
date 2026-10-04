@@ -24,6 +24,9 @@ use guitk::frame::Rect;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::text::{self, TextCursor};
+use guitk::textedit;
+use guitk::textinput::TextInput;
 use guitk::{grid, wheel};
 use oswindow::app::{self, App, Response};
 
@@ -85,6 +88,30 @@ const LABEL_FONT_SIZE: f32 = 13.0;
 const TAB_ICON_SIZE: f32 = 16.0;
 /// Inner padding of the grid area.
 const GRID_PADDING: f32 = 8.0;
+/// Where the search box's text starts, in from the box's left edge: past the
+/// magnifying glass drawn there.
+const SEARCH_TEXT_INSET: f32 = 28.0;
+/// Room the search box's text leaves at the box's right edge.
+const SEARCH_TEXT_RIGHT: f32 = 8.0;
+/// The most the search box holds, in characters. A search for an emoji is a
+/// word or two.
+const SEARCH_CAPACITY: usize = 128;
+
+/// The keys this window answers, as the F1 list shows them.
+///
+/// It had no list -- and no keys to put in one beyond Escape: the grid could
+/// be used only with the pointer, so an emoji could not be chosen from the
+/// keyboard at all.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1 / ?", "This list"),
+    ("Arrows", "Move through the emoji"),
+    ("PageUp / PageDown", "A page at a time"),
+    ("Home / End", "The first or the last"),
+    ("Enter / Space", "Pick the lit emoji"),
+    ("Ctrl+Tab / Ctrl+Shift+Tab", "The next or the last tab"),
+    ("Ctrl+F / Tab", "To the search, or back to the emoji"),
+    ("Escape", "Close the picker"),
+];
 
 // ============================================================================
 // Emoji category
@@ -1181,7 +1208,15 @@ pub struct EmojiPickerState {
     pub selected_category: EmojiCategory,
     /// Current search query text.
     pub search_query: String,
-    /// Index of the emoji currently hovered in the visible grid, if any.
+    /// The search box's editor -- its caret and selection over
+    /// `search_query` -- reloaded when the query changed under it.
+    search_editor: TextInput,
+    /// What the search box's Ctrl+C and Ctrl+X took, for its Ctrl+V.
+    search_clipboard: String,
+    /// Index of the emoji lit in the visible grid, if any: the one the
+    /// pointer is over, or the one the arrow keys moved to -- the same light,
+    /// so the preview names whichever the reader last pointed at, and Enter
+    /// picks it.
     pub hovered_emoji: Option<usize>,
     /// Vertical scroll offset of the grid (in pixels).
     pub scroll_offset: f32,
@@ -1201,6 +1236,8 @@ pub struct EmojiPickerState {
     /// The user's focus width, which the search field's focus mark is
     /// drawn at (`App::appearance_changed`).
     focus_ring_width: f32,
+    /// Whether the list of keys is up.
+    pub show_help: bool,
     /// Width of the window being drawn into.
     pub width: f32,
     /// Height of the window being drawn into.
@@ -1221,6 +1258,8 @@ impl EmojiPickerState {
             active_tab: Tab::Category(EmojiCategory::SmileysAndPeople),
             selected_category: EmojiCategory::SmileysAndPeople,
             search_query: String::new(),
+            search_editor: TextInput::new(),
+            search_clipboard: String::new(),
             hovered_emoji: Option::None,
             scroll_offset: 0.0,
             skin_tone: SkinToneModifier::None,
@@ -1230,6 +1269,7 @@ impl EmojiPickerState {
             search_focused: false,
             search_hovered: false,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
+            show_help: false,
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
         }
@@ -1303,16 +1343,173 @@ impl EmojiPickerState {
     }
 
     /// Switch to tab `index` of the bar.
+    ///
+    /// The light goes out: it was an index into the tab being left.
     fn select_tab(&mut self, index: usize) {
         let Some(&tab) = tabs().get(index) else {
             return;
         };
         self.active_tab = tab;
         self.scroll_offset = 0.0;
+        self.hovered_emoji = Option::None;
         if let Tab::Category(cat) = tab {
             self.selected_category = cat;
         }
         self.search_focused = tab == Tab::Search;
+        if self.search_focused {
+            self.search_editor.set_text(&self.search_query);
+        }
+    }
+
+    /// Ctrl+Tab: the next tab of the bar, after the last the first; with
+    /// Shift, the one before.
+    fn step_tab(&mut self, forward: bool) {
+        let all = tabs();
+        let here = all.iter().position(|t| *t == self.active_tab).unwrap_or(0);
+        // Back one is on one short of a lap, which keeps the wrap unsigned.
+        let step = if forward {
+            1
+        } else {
+            all.len().saturating_sub(1)
+        };
+        if let Some(next) = here.saturating_add(step).checked_rem(all.len()) {
+            self.select_tab(next);
+        }
+    }
+
+    /// Light the emoji at `index` -- the last, past the end -- and scroll it
+    /// into view. With nothing shown, nothing is lit.
+    fn light(&mut self, index: usize) {
+        let Some(last) = self.visible_emoji().len().checked_sub(1) else {
+            self.hovered_emoji = Option::None;
+            return;
+        };
+        let at = index.min(last);
+        self.hovered_emoji = Some(at);
+        self.reveal(at);
+    }
+
+    /// The keyboard's move through the grid: `delta` emoji on, a row being as
+    /// many as the grid is wide, stopping at either end. From nothing lit,
+    /// the first.
+    ///
+    /// The grid answered only the pointer: no key lit an emoji or picked one.
+    fn move_highlight(&mut self, delta: isize) {
+        let next = match self.hovered_emoji {
+            Option::None => 0,
+            Some(at) if delta < 0 => at.saturating_sub(delta.unsigned_abs()),
+            Some(at) => at.saturating_add(delta.unsigned_abs()),
+        };
+        self.light(next);
+    }
+
+    /// Scroll the grid just far enough that the cell at `index` is wholly in
+    /// view, with the grid's padding around it -- so the first row scrolls to
+    /// the very top and the last to the very bottom, as the wheel leaves them.
+    fn reveal(&mut self, index: usize) {
+        let layout = self.layout();
+        let cell = layout.cell(index);
+        let (top, bottom) = (cell.y - GRID_PADDING, cell.bottom() + GRID_PADDING);
+        if top - self.scroll_offset < layout.grid.y {
+            self.scroll_offset = top - layout.grid.y;
+        } else if bottom - self.scroll_offset > layout.grid.bottom() {
+            self.scroll_offset = bottom - layout.grid.bottom();
+        }
+        self.clamp_scroll();
+    }
+
+    /// How many emoji one page is: the whole rows in view, and at least one.
+    fn page_cells(&self) -> isize {
+        let layout = self.layout();
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a count of rows on a screen, floored and at least one"
+        )]
+        let rows = (layout.grid.h / CELL_SIZE).floor().max(1.0) as isize;
+        rows.saturating_mul(isize::try_from(layout.columns.get()).unwrap_or(1))
+    }
+
+    /// Enter: pick the lit emoji -- or, with none lit, the first one shown, so
+    /// a word typed and Enter picks the best match.
+    fn pick_lit(&mut self) {
+        self.pick(self.hovered_emoji.unwrap_or(0));
+    }
+
+    /// Give the search box the keyboard, its caret after the query.
+    fn focus_search(&mut self) {
+        self.search_focused = true;
+        self.search_editor.set_text(&self.search_query);
+    }
+
+    /// Where the search box's caret is drawn: the editor's while the box has
+    /// the keyboard (the end, if the query changed under the editor), the
+    /// start otherwise. One answer for the drawing and for a press.
+    fn search_cursor(&self) -> TextCursor {
+        if !self.search_focused {
+            TextCursor::default()
+        } else if self.search_editor.text() == self.search_query {
+            self.search_editor.cursor()
+        } else {
+            TextCursor::from(self.search_query.len())
+        }
+    }
+
+    /// A key for the search box, which has the keyboard: the caret keys,
+    /// Backspace and Delete at the caret, Ctrl+A, C, X and V, and typing --
+    /// AltGr's among it, and no command's letter. A query that changed shows
+    /// the search tab from its top, with nothing lit.
+    ///
+    /// The box took typing at its end and Backspace from it, and nothing else.
+    fn search_key(&mut self, key: &KeyEvent) -> EventResult {
+        if self.search_editor.text() != self.search_query {
+            self.search_editor.set_text(&self.search_query);
+        }
+        let edit = textline::apply_key(
+            &mut self.search_editor,
+            key,
+            SEARCH_CAPACITY,
+            &self.search_clipboard,
+            LABEL_FONT_SIZE,
+        );
+        if let Some(copied) = edit.copied {
+            self.search_clipboard = copied;
+        }
+        if self.search_editor.text() != self.search_query {
+            self.search_query = self.search_editor.text().to_owned();
+            if !self.search_query.is_empty() {
+                self.active_tab = Tab::Search;
+            }
+            self.scroll_offset = 0.0;
+            self.hovered_emoji = Option::None;
+        }
+        if edit.handled {
+            EventResult::Consumed
+        } else {
+            EventResult::Ignored
+        }
+    }
+
+    /// A press in the search box at `x`: it takes the keyboard, with the caret
+    /// under the pointer, measured against the box as it was drawn.
+    fn press_search(&mut self, x: f32) {
+        let Some(field) = self.layout().search_field() else {
+            return;
+        };
+        let drawn = self.search_cursor();
+        self.search_focused = true;
+        if self.search_editor.text() != self.search_query {
+            self.search_editor.set_text(&self.search_query);
+        }
+        let cursor = textedit::cursor_at_click(
+            &self.search_query,
+            drawn,
+            (field.w - SEARCH_TEXT_INSET - SEARCH_TEXT_RIGHT).max(0.0),
+            LABEL_FONT_SIZE,
+            FontWeightHint::Regular,
+            x - field.x - SEARCH_TEXT_INSET,
+        );
+        self.search_editor.set_selection_anchor(Option::None);
+        self.search_editor.set_cursor(cursor);
     }
 
     /// The control under `(x, y)`, or `None` for bare background.
@@ -1337,6 +1534,18 @@ impl EmojiPickerState {
         self.draw_grid(&mut frame, &layout);
         self.draw_skin_tone_bar(&mut frame, &layout);
         self.draw_preview(&mut frame, &layout);
+        // The list of keys over everything: it is the one thing on screen a
+        // reader asked for explicitly.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut frame,
+                &self.palette,
+                (width, height),
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
+        }
         frame
     }
 
@@ -1405,7 +1614,7 @@ impl EmojiPickerState {
             field,
             guitk::field::State {
                 hovered: self.search_hovered,
-                focused: self.search_focused,
+                focused: self.search_focused && !self.show_help,
                 disabled: false,
                 invalid: false,
             },
@@ -1424,22 +1633,73 @@ impl EmojiPickerState {
             Option::None,
         );
 
-        let avail = (field.w - 36.0).max(0.0);
-        let (text, color) = if self.search_query.is_empty() {
-            ("Search emoji...", self.palette.overlay0)
-        } else {
-            (self.search_query.as_str(), self.palette.text)
-        };
-        label(
-            frame,
-            field.x + 28.0,
-            text_y,
-            text,
-            LABEL_FONT_SIZE,
-            color,
-            FontWeightHint::Regular,
-            Some(avail),
+        // The query, or what the box is for, faint, while it is empty -- and,
+        // with the keyboard, the caret and the selection where they are. An
+        // empty box with the keyboard draws its caret before what it is for,
+        // as the toolkit's own input dialog does. It drew neither: the caret
+        // was nowhere, because there was no caret to move.
+        let line = text::line_height(LABEL_FONT_SIZE, FontWeightHint::Regular);
+        let (x, y, avail) = (
+            field.x + SEARCH_TEXT_INSET,
+            field.y + (field.h - line) / 2.0,
+            (field.w - SEARCH_TEXT_INSET - SEARCH_TEXT_RIGHT).max(0.0),
         );
+        let focused = self.search_focused && !self.show_help;
+        if self.search_query.is_empty() {
+            label(
+                frame,
+                x,
+                y,
+                "Search emoji...",
+                LABEL_FONT_SIZE,
+                self.palette.subtext0,
+                FontWeightHint::Regular,
+                Some(avail),
+            );
+            if focused {
+                let mut tree = RenderTree::new();
+                textedit::push_caret(
+                    &mut tree,
+                    x,
+                    y,
+                    line,
+                    self.palette.text,
+                    textedit::CARET_WIDTH,
+                );
+                for cmd in tree.commands {
+                    frame.push(cmd);
+                }
+            }
+        } else {
+            let editing = self.search_focused && self.search_editor.text() == self.search_query;
+            let mut tree = RenderTree::new();
+            textedit::draw(
+                &mut tree,
+                &textedit::SingleLine {
+                    text: &self.search_query,
+                    cursor: self.search_cursor(),
+                    selection_anchor: if editing {
+                        self.search_editor.selection_anchor()
+                    } else {
+                        Option::None
+                    },
+                    focused,
+                    x,
+                    y,
+                    width: avail,
+                    line_height: line,
+                    font_size: LABEL_FONT_SIZE,
+                    weight: FontWeightHint::Regular,
+                    color: self.palette.text,
+                    selection_bg: self.palette.accent,
+                    selection_fg: self.palette.crust,
+                    caret_width: textedit::CARET_WIDTH,
+                },
+            );
+            for cmd in tree.commands {
+                frame.push(cmd);
+            }
+        }
 
         // The whole band, not the rounded box drawn inside it: the eight pixels
         // of margin around the field look like part of it, and a click there
@@ -1591,7 +1851,9 @@ impl EmojiPickerState {
                     frame,
                     preview.x + 12.0,
                     preview.y + (preview.h - LABEL_FONT_SIZE) / 2.0,
-                    "Hover over an emoji to preview",
+                    // The arrows light one too, now: the hint said only the
+                    // pointer could.
+                    "Point at an emoji, or move to one with the arrows",
                     LABEL_FONT_SIZE,
                     self.palette.overlay0,
                     FontWeightHint::Regular,
@@ -1701,42 +1963,122 @@ pub fn handle_event(state: &mut EmojiPickerState, event: &Event) -> EventResult 
 }
 
 /// Process a keyboard event.
+///
+/// The grid answered only the pointer: no key lit an emoji or picked one, so
+/// an emoji could not be chosen from the keyboard at all. The arrows, the page
+/// keys, Home and End light one now; Enter or Space picks it.
 fn handle_key(state: &mut EmojiPickerState, key: &KeyEvent) -> EventResult {
-    match key.key {
-        Key::Escape => {
-            state.is_open = false;
-            EventResult::Consumed
+    // The list of keys first: it is drawn over everything, and modal while it
+    // is up -- a plain F1, `?` or Escape puts it away, and no other key
+    // reaches what it covers, where Escape would close the picker.
+    let plain = textline::is_plain(key.modifiers);
+    let question = key.key == Key::Slash && key.modifiers.shift;
+    if state.show_help {
+        if plain && (matches!(key.key, Key::F1 | Key::Escape) || question) {
+            state.show_help = false;
         }
-        Key::Backspace if state.search_focused => {
-            state.search_query.pop();
-            state.scroll_offset = 0.0;
-            if !state.search_query.is_empty() {
-                state.active_tab = Tab::Search;
-            }
-            EventResult::Consumed
-        }
-        _ if state.search_focused => {
-            if key.types_text() {
-                state.search_query.extend(key.typed());
-                state.active_tab = Tab::Search;
-                state.scroll_offset = 0.0;
+        return EventResult::Consumed;
+    }
+    // F1 raises it from anywhere, the search box included, because it is
+    // never typed; `?` is typed in the box, so it raises the list only from
+    // outside it.
+    if plain && (key.key == Key::F1 || question && !state.search_focused) {
+        state.show_help = true;
+        return EventResult::Consumed;
+    }
+
+    // The picker's own chords, from the box or the grid. Ctrl chords, not
+    // Ctrl held: AltGr arrives as Ctrl+Alt, and types.
+    let ctrl = textline::is_ctrl_chord(key.modifiers);
+    if ctrl && key.key == Key::Tab {
+        state.step_tab(!key.modifiers.shift);
+        return EventResult::Consumed;
+    }
+    if ctrl && key.key == Key::F {
+        state.focus_search();
+        return EventResult::Consumed;
+    }
+
+    // The keys that mean the same from the box and from the grid: a word
+    // typed, then Down and Enter, picks from what it found.
+    if plain {
+        let columns = isize::try_from(state.layout().columns.get()).unwrap_or(1);
+        let delta = match key.key {
+            Key::Escape => {
+                state.is_open = false;
                 return EventResult::Consumed;
             }
-            EventResult::Ignored
+            Key::Enter => {
+                state.pick_lit();
+                return EventResult::Consumed;
+            }
+            // Between the box and the grid, which it lights if nothing is.
+            Key::Tab => {
+                if state.search_focused {
+                    state.search_focused = false;
+                    if state.hovered_emoji.is_none() {
+                        state.light(0);
+                    }
+                } else {
+                    state.focus_search();
+                }
+                return EventResult::Consumed;
+            }
+            Key::Up => Some(columns.saturating_neg()),
+            Key::Down => Some(columns),
+            Key::PageUp => Some(state.page_cells().saturating_neg()),
+            Key::PageDown => Some(state.page_cells()),
+            _ => Option::None,
+        };
+        if let Some(delta) = delta {
+            state.move_highlight(delta);
+            return EventResult::Consumed;
         }
-        _ => EventResult::Ignored,
     }
+
+    // Every other key is the box's while it has the keyboard.
+    if state.search_focused {
+        return state.search_key(key);
+    }
+    // The grid's own keys, taken plain: a chord with Alt or the Windows key is
+    // the window manager's or the desktop's.
+    if !plain {
+        return EventResult::Ignored;
+    }
+    match key.key {
+        Key::Left => state.move_highlight(-1),
+        Key::Right => state.move_highlight(1),
+        Key::Home => state.light(0),
+        Key::End => state.light(usize::MAX),
+        Key::Space => state.pick_lit(),
+        _ => return EventResult::Ignored,
+    }
+    EventResult::Consumed
 }
 
 /// Process a mouse event.
 fn handle_mouse(state: &mut EmojiPickerState, mouse: &MouseEvent) -> EventResult {
     let (x, y) = (mouse.x, mouse.y);
 
+    // The list of keys is modal for the pointer as it is for the keys: a press
+    // with any button puts it away and does nothing else -- it picks no emoji
+    // under it -- and the wheel scrolls nothing it covers.
+    if state.show_help {
+        match mouse.kind {
+            MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                state.show_help = false;
+                return EventResult::Consumed;
+            }
+            MouseEventKind::Scroll { .. } => return EventResult::Ignored,
+            _ => {}
+        }
+    }
+
     match &mouse.kind {
         MouseEventKind::Press(MouseButton::Left) => {
             match state.target_at(x, y) {
                 Some(Target::Tab(i)) => state.select_tab(i),
-                Some(Target::SearchField) => state.search_focused = true,
+                Some(Target::SearchField) => state.press_search(x),
                 Some(Target::Cell(i)) => {
                     state.search_focused = false;
                     state.pick(i);
@@ -2495,9 +2837,16 @@ mod tests {
         let mut state = EmojiPickerState::new();
         state.search_query = "test query".to_string();
         let tree = render(&state);
-        // The tree should contain a text command with the query.
+        // The tree should contain a text command with the query -- rich text,
+        // as the toolkit's editor draws it, so the selection can be coloured
+        // glyph by glyph.
         let has_query = tree.commands.iter().any(|cmd| {
-            matches!(cmd, guitk::render::RenderCommand::Text { text, .. } if text == "test query")
+            matches!(
+                cmd,
+                guitk::render::RenderCommand::Text { text, .. }
+                    | guitk::render::RenderCommand::RichText { text, .. }
+                    if text == "test query"
+            )
         });
         assert!(has_query, "render should include the search query text");
     }
@@ -3565,5 +3914,494 @@ mod tests {
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    // --- The keyboard: the grid, the search box, and the list of keys ---
+
+    fn key_of(k: Key, modifiers: guitk::event::Modifiers, text: &str) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        }
+    }
+
+    fn hit(
+        state: &mut EmojiPickerState,
+        k: Key,
+        modifiers: guitk::event::Modifiers,
+    ) -> EventResult {
+        handle_event(state, &Event::Key(key_of(k, modifiers, "")))
+    }
+
+    fn plain(state: &mut EmojiPickerState, k: Key) -> EventResult {
+        hit(state, k, guitk::event::Modifiers::NONE)
+    }
+
+    fn type_in(state: &mut EmojiPickerState, text: &str) {
+        for c in text.chars() {
+            handle_event(
+                state,
+                &Event::Key(key_of(
+                    Key::A,
+                    guitk::event::Modifiers::NONE,
+                    &c.to_string(),
+                )),
+            );
+        }
+    }
+
+    fn drawn_strings(state: &EmojiPickerState) -> Vec<String> {
+        render(state)
+            .commands
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } | RenderCommand::RichText { text, .. } => {
+                    Some(text)
+                }
+                _ => Option::None,
+            })
+            .collect()
+    }
+
+    /// The emoji at `index` of what the grid shows.
+    fn shown(state: &EmojiPickerState, index: usize) -> String {
+        state.visible_emoji()[index].emoji.clone()
+    }
+
+    /// **The arrows light an emoji, and Enter picks it.** The grid answered
+    /// only the pointer: no key lit an emoji or picked one.
+    #[test]
+    fn the_arrows_light_an_emoji_and_enter_picks_it() {
+        let mut state = scrollable_picker();
+        let columns = state.layout().columns.get();
+        let count = state.visible_emoji().len();
+        assert!(
+            count > columns * 2 && state.max_scroll() > CELL_SIZE,
+            "the test needs a grid longer than the window"
+        );
+
+        plain(&mut state, Key::Right);
+        assert_eq!(
+            state.hovered_emoji,
+            Some(0),
+            "an arrow from nothing lit lit nothing"
+        );
+        plain(&mut state, Key::Right);
+        assert_eq!(state.hovered_emoji, Some(1));
+        plain(&mut state, Key::Down);
+        assert_eq!(state.hovered_emoji, Some(1 + columns), "Down is a row on");
+        plain(&mut state, Key::Up);
+        assert_eq!(state.hovered_emoji, Some(1), "Up is a row back");
+        for _ in 0..3 {
+            plain(&mut state, Key::Left);
+        }
+        assert_eq!(state.hovered_emoji, Some(0), "Left went past the first");
+
+        plain(&mut state, Key::End);
+        assert_eq!(state.hovered_emoji, Some(count - 1), "End");
+        assert!(
+            state.scroll_offset > 0.0,
+            "the last emoji was lit out of sight"
+        );
+        let layout = state.layout();
+        let cell = layout.cell(count - 1);
+        assert!(
+            cell.bottom() - state.scroll_offset <= layout.grid.bottom() + 0.5,
+            "the lit emoji is below the grid"
+        );
+        plain(&mut state, Key::Down);
+        assert_eq!(
+            state.hovered_emoji,
+            Some(count - 1),
+            "Down went past the last"
+        );
+        plain(&mut state, Key::Home);
+        assert_eq!(state.hovered_emoji, Some(0), "Home");
+        assert!(
+            state.scroll_offset.abs() < 0.5,
+            "the first emoji was lit out of sight"
+        );
+        plain(&mut state, Key::PageDown);
+        let page = state.hovered_emoji.expect("lit");
+        assert!(
+            page >= columns && page.is_multiple_of(columns),
+            "PageDown went {page}"
+        );
+        plain(&mut state, Key::PageUp);
+        assert_eq!(state.hovered_emoji, Some(0), "PageUp");
+
+        plain(&mut state, Key::Right);
+        let lit = shown(&state, 1);
+        assert!(
+            drawn_strings(&state).contains(&state.visible_emoji()[1].name),
+            "the preview does not name the lit emoji"
+        );
+        plain(&mut state, Key::Enter);
+        assert_eq!(state.last_selected.as_deref(), Some(lit.as_str()), "Enter");
+        plain(&mut state, Key::Right);
+        let next = shown(&state, 2);
+        plain(&mut state, Key::Space);
+        assert_eq!(state.last_selected.as_deref(), Some(next.as_str()), "Space");
+    }
+
+    /// **A word typed and Enter picks the best match**; Down goes from the box
+    /// to what it found.
+    #[test]
+    fn a_word_typed_and_enter_picks_the_best_match() {
+        let mut state = EmojiPickerState::new();
+        for _ in 0..3 {
+            plain(&mut state, Key::Right);
+        }
+        hit(&mut state, Key::F, guitk::event::Modifiers::ctrl());
+        assert!(state.search_focused, "Ctrl+F did not reach the search box");
+        type_in(&mut state, "heart");
+        assert_eq!(state.active_tab, Tab::Search);
+        assert_eq!(
+            state.hovered_emoji,
+            Option::None,
+            "the light lit before the search stayed on, on a different emoji"
+        );
+        assert!(
+            state.visible_emoji().len() > 1,
+            "the test needs several hearts"
+        );
+        let first = shown(&state, 0);
+        plain(&mut state, Key::Enter);
+        assert_eq!(state.last_selected.as_deref(), Some(first.as_str()));
+
+        plain(&mut state, Key::Down);
+        assert_eq!(
+            state.hovered_emoji,
+            Some(0),
+            "Down from the box lit nothing"
+        );
+        assert!(state.search_focused, "Down took the keyboard from the box");
+        plain(&mut state, Key::Tab);
+        assert!(!state.search_focused, "Tab left the keyboard in the box");
+        plain(&mut state, Key::Right);
+        let second = shown(&state, 1);
+        plain(&mut state, Key::Enter);
+        assert_eq!(state.last_selected.as_deref(), Some(second.as_str()));
+        plain(&mut state, Key::Tab);
+        assert!(
+            state.search_focused,
+            "Tab from the grid did not reach the box"
+        );
+    }
+
+    /// **The search box edits at a caret**: it took typing at its end and
+    /// Backspace from it, and nothing else.
+    #[test]
+    fn the_search_box_edits_at_a_caret() {
+        let mut state = EmojiPickerState::new();
+        assert!(
+            drawn_strings(&state).iter().any(|t| t == "Search emoji..."),
+            "the empty box does not say what it is for"
+        );
+        let (x, y) = {
+            let field = state.layout().search_field().expect("a search box");
+            (field.x + field.w / 2.0, field.y + field.h / 2.0)
+        };
+        handle_event(
+            &mut state,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+        );
+        assert!(state.search_focused);
+        let field = state.layout().search_field().expect("a search box");
+        let carets = |state: &EmojiPickerState| {
+            render(state)
+                .commands
+                .iter()
+                .filter(|c| {
+                    matches!(
+                        c,
+                        RenderCommand::Line { x1, x2, .. }
+                            if (x1 - x2).abs() < f32::EPSILON && field.contains(*x1, y)
+                    )
+                })
+                .count()
+        };
+        assert_eq!(
+            carets(&state),
+            1,
+            "the empty box with the keyboard draws no caret"
+        );
+        type_in(&mut state, "dgo");
+        plain(&mut state, Key::Left);
+        plain(&mut state, Key::Left);
+        type_in(&mut state, "o");
+        plain(&mut state, Key::End);
+        plain(&mut state, Key::Backspace);
+        assert_eq!(state.search_query, "dog", "the caret did not move");
+        hit(&mut state, Key::A, guitk::event::Modifiers::ctrl());
+        hit(&mut state, Key::X, guitk::event::Modifiers::ctrl());
+        assert_eq!(state.search_query, "", "Ctrl+X");
+        hit(&mut state, Key::V, guitk::event::Modifiers::ctrl());
+        hit(&mut state, Key::V, guitk::event::Modifiers::ctrl());
+        assert_eq!(state.search_query, "dogdog", "Ctrl+V");
+        plain(&mut state, Key::Home);
+        plain(&mut state, Key::Delete);
+        assert_eq!(state.search_query, "ogdog", "Delete at the caret");
+
+        // A press past the text's end puts the caret at its end, and one at
+        // the text's start puts it there.
+        handle_event(
+            &mut state,
+            &Event::Mouse(MouseEvent {
+                x: field.right() - 2.0,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+        );
+        type_in(&mut state, "s");
+        assert_eq!(
+            state.search_query, "ogdogs",
+            "a press past the text did not put the caret at its end"
+        );
+        handle_event(
+            &mut state,
+            &Event::Mouse(MouseEvent {
+                x: field.x + SEARCH_TEXT_INSET,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+        );
+        type_in(&mut state, "d");
+        assert_eq!(
+            state.search_query, "dogdogs",
+            "a press at the text's start did not put the caret there"
+        );
+        assert_eq!(carets(&state), 1, "no caret is drawn in the box");
+        hit(&mut state, Key::Escape, guitk::event::Modifiers::NONE);
+    }
+
+    /// **Ctrl+Tab walks the tabs**, wrapping, and Ctrl+Shift+Tab back; AltGr+Tab
+    /// is not Ctrl+Tab.
+    #[test]
+    fn ctrl_tab_walks_the_tabs() {
+        let mut state = EmojiPickerState::new();
+        let all = tabs();
+        let start = all
+            .iter()
+            .position(|t| *t == state.active_tab)
+            .expect("a tab");
+        plain(&mut state, Key::Right);
+        assert!(state.hovered_emoji.is_some());
+        hit(&mut state, Key::Tab, guitk::event::Modifiers::ctrl());
+        assert_eq!(state.active_tab, all[(start + 1) % all.len()]);
+        assert_eq!(
+            state.hovered_emoji,
+            Option::None,
+            "the light stayed on, on an emoji of the tab it was not lit on"
+        );
+        let back = guitk::event::Modifiers {
+            ctrl: true,
+            shift: true,
+            ..guitk::event::Modifiers::NONE
+        };
+        hit(&mut state, Key::Tab, back);
+        hit(&mut state, Key::Tab, back);
+        assert_eq!(state.active_tab, all[(start + all.len() - 1) % all.len()]);
+        let altgr = guitk::event::Modifiers {
+            ctrl: true,
+            alt: true,
+            ..guitk::event::Modifiers::NONE
+        };
+        let was = state.active_tab;
+        hit(&mut state, Key::Tab, altgr);
+        assert_eq!(state.active_tab, was, "AltGr+Tab was taken for Ctrl+Tab");
+        // On a tab with emoji to light: Recently Used, where this has ended
+        // up, is empty in a picker nobody has used.
+        hit(&mut state, Key::Tab, guitk::event::Modifiers::ctrl());
+        assert!(
+            !state.visible_emoji().is_empty(),
+            "the test needs emoji to light"
+        );
+        hit(&mut state, Key::Right, guitk::event::Modifiers::alt());
+        assert_eq!(state.hovered_emoji, Option::None, "Alt+Right lit an emoji");
+    }
+
+    /// **Every key the list of keys advertises is answered by this window.**
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let mut state = EmojiPickerState::new();
+                assert_eq!(
+                    handle_event(&mut state, &Event::Key(stroke.clone())),
+                    EventResult::Consumed,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The list of keys reaches the window**, and goes on F1, `?` or a plain
+    /// Escape -- not on Alt+Escape, which is the desktop's.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        use guitk::event::Modifiers;
+        let mut state = EmojiPickerState::new();
+        assert!(
+            !drawn_strings(&state)
+                .iter()
+                .any(|t| t.contains("F1 or ? closes this")),
+            "the list is up before anybody asked for it"
+        );
+        for chord in [Modifiers::alt(), Modifiers::super_key()] {
+            hit(&mut state, Key::F1, chord);
+            assert!(
+                !state.show_help,
+                "{chord:?}+F1, the desktop's, raised the list"
+            );
+        }
+        plain(&mut state, Key::F1);
+        let missing = guitk::shortcut::missing_rows(&drawn_strings(&state), SHORTCUTS);
+        assert!(missing.is_empty(), "{missing:?}");
+        hit(&mut state, Key::Escape, Modifiers::alt());
+        assert!(state.show_help, "Alt+Escape put the list away");
+        plain(&mut state, Key::Escape);
+        assert!(!state.show_help, "Escape left the list up");
+        assert!(state.is_open, "Escape under the list closed the picker");
+        handle_event(
+            &mut state,
+            &Event::Key(key_of(Key::Slash, Modifiers::shift(), "?")),
+        );
+        assert!(state.show_help, "? raised nothing");
+        handle_event(
+            &mut state,
+            &Event::Key(key_of(Key::Slash, Modifiers::shift(), "?")),
+        );
+        assert!(!state.show_help, "? left the list up");
+        plain(&mut state, Key::F1);
+        plain(&mut state, Key::F1);
+        assert!(!state.show_help, "F1 left the list up");
+    }
+
+    /// **`?` is typed into the search box**, where it is a character, and F1
+    /// raises the list from there, where it never is.
+    #[test]
+    fn a_question_mark_is_typed_into_the_search_and_f1_still_raises_the_list() {
+        use guitk::event::Modifiers;
+        let mut state = EmojiPickerState::new();
+        hit(&mut state, Key::F, Modifiers::ctrl());
+        handle_event(
+            &mut state,
+            &Event::Key(key_of(Key::Slash, Modifiers::shift(), "?")),
+        );
+        assert!(!state.show_help, "? raised the list from the search box");
+        assert_eq!(state.search_query, "?", "? was not typed");
+        plain(&mut state, Key::F1);
+        assert!(
+            state.show_help,
+            "F1 did not raise the list from the search box"
+        );
+        let field = state.layout().search_field().expect("a search box");
+        let drawn = render(&state).commands;
+        let mark = |focused: bool| {
+            let mut v: Vec<RenderCommand> = Vec::new();
+            guitk::field::draw(
+                &mut v,
+                &state.palette,
+                field,
+                guitk::field::State {
+                    hovered: false,
+                    focused,
+                    disabled: false,
+                    invalid: false,
+                },
+                state.focus_ring_width,
+            );
+            drawn.windows(v.len()).any(|w| w == v.as_slice())
+        };
+        assert!(
+            mark(false) && !mark(true),
+            "the box's keyboard mark is drawn under the list"
+        );
+        assert!(
+            !drawn.iter().any(|c| matches!(
+                c,
+                RenderCommand::Line { x1, x2, y1, .. }
+                    if (x1 - x2).abs() < f32::EPSILON && field.contains(*x1, *y1 + 1.0)
+            )),
+            "the box's caret is drawn under the list"
+        );
+    }
+
+    /// **The list of keys is modal**: with it up, no key, press or turn of the
+    /// wheel reaches what it covers -- Enter picks nothing, Escape closes the
+    /// list and not the picker. The grid is the same with it down.
+    #[test]
+    fn the_shortcut_list_takes_the_keys_and_a_press() {
+        let mut state = scrollable_picker();
+        let cell = {
+            let layout = state.layout();
+            let c = layout.cell(3);
+            (c.x + c.w / 2.0, c.y + c.h / 2.0)
+        };
+        plain(&mut state, Key::F1);
+        for k in [Key::Right, Key::Enter, Key::Space, Key::Tab, Key::Down] {
+            assert_eq!(
+                plain(&mut state, k),
+                EventResult::Consumed,
+                "{k:?} was not taken"
+            );
+        }
+        assert!(
+            state.show_help,
+            "a key other than F1, ? or Escape put the list away"
+        );
+        assert_eq!(
+            state.hovered_emoji,
+            Option::None,
+            "an arrow lit an emoji under it"
+        );
+        assert_eq!(
+            state.last_selected,
+            Option::None,
+            "Enter picked an emoji under it"
+        );
+        assert!(!state.search_focused, "Tab took the search box under it");
+        let wheel = wheel_over_grid(&state, -1.0);
+        assert_eq!(handle_event(&mut state, &wheel), EventResult::Ignored);
+        assert!(
+            state.scroll_offset.abs() < 0.5,
+            "the wheel scrolled the grid under it"
+        );
+        handle_event(
+            &mut state,
+            &Event::Mouse(MouseEvent {
+                x: cell.0,
+                y: cell.1,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+        );
+        assert!(!state.show_help, "the press did not put the list away");
+        assert_eq!(
+            state.last_selected,
+            Option::None,
+            "the press picked an emoji under it"
+        );
+        plain(&mut state, Key::F1);
+        handle_event(
+            &mut state,
+            &Event::Mouse(MouseEvent {
+                x: cell.0,
+                y: cell.1,
+                kind: MouseEventKind::Press(MouseButton::Right),
+            }),
+        );
+        assert!(!state.show_help, "a right-button press left the list up");
+
+        // The grid.
+        plain(&mut state, Key::Right);
+        assert_eq!(state.hovered_emoji, Some(0));
     }
 }

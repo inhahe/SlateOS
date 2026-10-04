@@ -2900,17 +2900,16 @@ word; text inside them that says "lane C" is history.
     (3ae172794): `settings --page about`, each notice's attribution on a
     line of its own and its texts read when opened; lane C may delete
     `gui/desktop/src/about.rs`;
-  - the controls' shapes: a picker in Settings, the programs' own text
+  - ~~the controls' shapes: a picker in Settings, the programs' own text
     fields and scrollbars, the user's focus width
-    (`c-e-a-theme-can-shape-the-controls.md`) -- **mostly done 2026-10-03**:
-    the Controls and Motion pickers; every hand-drawn scrollbar (explorer,
+    (`c-e-a-theme-can-shape-the-controls.md`)~~ **done 2026-10-04**: the
+    Controls and Motion pickers; every hand-drawn scrollbar (explorer,
     terminal and tmux's panes, the dictionary's -- now pressable); the
     explorer's address bar and dialogs at the user's focus width; the text
-    boxes of seven programs. **Remaining:** the hand-drawn text boxes of some
-    forty more programs (every program that calls
-    `textline::types_into_field` draws its own box), one program at a time.
-    Nothing of lane E's animates a transition of its own, so the motion
-    request's second part had nothing to convert
+    boxes of every program that draws its own, seventy-one of them
+    (terminal, tmux and typingtutor left, the reasons in the request's last
+    reply). Nothing of lane E's animates a transition of its own, so the
+    motion request's second part had nothing to convert
     (`c-e-a-theme-can-set-the-motion.md`, done);
   - ~~day and night wallpapers on Settings' Wallpaper page
     (`c-e-day-and-night-wallpapers-need-a-place-in-settings.md`)~~ **done
@@ -2937,6 +2936,24 @@ word; text inside them that says "lane C" is history.
   Done 2026-09-28: `safeio`'s rename on Windows while a scanner holds the
   file (f661f4c01); the three modules lane C's palette refusal waited on
   (16d1a710a).
+
+- `[ ]` `[E]` **The video player plays** -- lane F's `videocodec` turns a
+  file into frames, and lane F's Matroska reader stays as the tree's one
+  (`requests/f-e-two-matroska-demuxers-which-stays.md`, answered
+  2026-10-04):
+  - `[ ]` `apps/videoplayer` plays through `videocodec::Video` -- open,
+    `next_frame`, `seek`, late pictures dropped through `next_picture`
+    without their conversion -- keeping timing and display its own;
+  - `[ ]` `apps/mediaprobe` reads its track list from `matroska::Demuxer`,
+    and `mkv/demux.rs` is retired with its mutation rows -- once lane F's
+    port of its test cases and its mutation sweep is on `main`.
+
+- `[-]` `[E]` **Text boxes with a caret** --
+  `known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box.md`:
+  twenty-nine programs' boxes take typing only at their end, with no caret,
+  selection or clipboard. One program at a time onto `textline::apply_key`
+  over a `TextInput`, as netscan's and sysmonitor's; emojipicker done
+  2026-10-04.
 
 - `[x]` `[E]` **`apps/terminal` runs the user's shell on a kernel
   pseudo-terminal** — 2026-09-24, the "interactive terminal" joint task

@@ -471,6 +471,51 @@ MUTATIONS = [
     ),
 ]
 
+# The colour dialog's hex box is the toolkit's field (2026-10-04; lane C,
+# c-e-a-theme-can-shape-the-controls). It was a slider's track with the text
+# on it.
+HEX = "the_hex_box_is_the_toolkits_field_with_the_keyboard"
+INVALID = "                invalid: !typed.is_empty() && typed.len() != 6,\n"
+
+MUTATIONS += [
+    (
+        "the hex box never has the keyboard's mark",
+        "                hovered: false,\n                focused: true,\n                disabled: false,\n",
+        "                hovered: false,\n                focused: false,\n                disabled: false,\n",
+        [HEX],
+    ),
+    (
+        "a colour half typed is not red",
+        INVALID,
+        "                invalid: false,\n",
+        [HEX],
+    ),
+    (
+        "a whole colour is red",
+        INVALID,
+        "                invalid: !typed.is_empty(),\n",
+        [HEX],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [HEX],
+    ),
+    (
+        "the caret is drawn before the hash's digits",
+        "                        .saturating_add(1),\n",
+        "                        .saturating_add(0),\n",
+        [HEX],
+    ),
+    (
+        "the caret is not drawn",
+        "                selection_anchor: None,\n                focused: true,\n",
+        "                selection_anchor: None,\n                focused: false,\n",
+        [HEX],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "paint", timeout=900, only=only))

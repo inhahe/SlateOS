@@ -137,7 +137,7 @@ MUTATIONS = [
     ),
     (
         "AltGr is taken for Ctrl",
-        "        if key.modifiers.ctrl && !key.modifiers.alt {",
+        "        if textline::is_ctrl_chord(key.modifiers) {",
         "        if key.modifiers.ctrl {",
         ["altgr_z_does_not_undo"],
     ),

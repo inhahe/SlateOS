@@ -20,6 +20,9 @@ safeio = { path = "../safeio" }
 # Whether a key types into a box or is a command: AltGr arrives as Ctrl+Alt,
 # and a command carries its letter as text.
 textline = { path = "../textline" }
+# The words typed into a box, a list, the notes or the deck's name: their
+# caret and selection, and the keys that edit them.
+textarea = { path = "../textarea" }
 # "Unsaved changes -- save them?", asked the way every editor here asks it.
 unsaved = { path = "../unsaved" }
 # The undo history: the toolkit's tree, kept of whole decks (C-Q24).

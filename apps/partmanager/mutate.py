@@ -56,6 +56,75 @@ MUTATIONS = [
     ),
 ]
 
+# A key bound to itself is taken plain, a Ctrl chord is not AltGr, and the
+# label box is the toolkit's field (2026-10-04; lane C,
+# c-e-a-theme-can-shape-the-controls).
+CHORDS = "a_chord_is_none_of_the_partition_managers_keys"
+LABEL = "the_label_box_is_the_toolkits_field_and_takes_no_command"
+
+MUTATIONS += [
+    (
+        "a chord raises the list of keys",
+        "    if key_ev.key == Key::F1 && plain {\n",
+        "    if key_ev.key == Key::F1 {\n",
+        [CHORDS],
+    ),
+    (
+        "Alt+Delete queues a removal",
+        "        Key::Delete if plain => {\n",
+        "        Key::Delete => {\n",
+        [CHORDS],
+    ),
+    (
+        "AltGr+N opens New Partition",
+        "        Key::N if ctrl => {\n",
+        "        Key::N if key_ev.modifiers.ctrl => {\n",
+        [CHORDS],
+    ),
+    (
+        "AltGr+Enter applies the queue",
+        "        Key::Enter if ctrl && app.has_pending_operations() => {\n",
+        "        Key::Enter if key_ev.modifiers.ctrl && app.has_pending_operations() => {\n",
+        [CHORDS],
+    ),
+    (
+        "AltGr+Z undoes",
+        "        Key::Z if ctrl => {\n",
+        "        Key::Z if key_ev.modifiers.ctrl => {\n",
+        [CHORDS],
+    ),
+    (
+        "a command types its letter into the label",
+        "            _ if textline::types_into_field(key_ev) => {\n",
+        "            _ if key_ev.types_text() => {\n",
+        [LABEL],
+    ),
+    (
+        "the label box never has the keyboard",
+        "        focused: matches!(app.dialog, ActiveDialog::CreatePartition(_)) && !app.show_help,\n",
+        "        focused: false,\n",
+        [LABEL],
+    ),
+    (
+        "the label box keeps its mark under the list of keys",
+        "        focused: matches!(app.dialog, ActiveDialog::CreatePartition(_)) && !app.show_help,\n",
+        "        focused: matches!(app.dialog, ActiveDialog::CreatePartition(_)),\n",
+        [LABEL],
+    ),
+    (
+        "the caret is at the start of the label",
+        "                cursor: text::TextCursor::from(dialog.label.len()),\n",
+        "                cursor: text::TextCursor::from(0),\n",
+        [LABEL],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [LABEL],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "partmanager", timeout=900, only=only))

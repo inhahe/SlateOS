@@ -23,13 +23,18 @@
 use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
+use guitk::checkbox::{self, CheckState};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::field;
 use guitk::frame::Rect;
 use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::text::TextCursor;
+use guitk::textedit;
+use guitk::textinput::TextInput;
 use oswindow::app::{self, App, Response};
 
 use std::collections::BTreeMap;
@@ -114,7 +119,17 @@ const TREE_INDENT: f32 = 24.0;
 const TREE_ROW_HEIGHT: f32 = 36.0;
 const TIMELINE_ENTRY_HEIGHT: f32 = 48.0;
 const TIMELINE_DOT_RADIUS: f32 = 6.0;
-const CHECKBOX_SIZE: f32 = 16.0;
+/// How far below the top of the Create Snapshot dialog its component
+/// checkboxes begin: under the title, the two boxes and the heading.
+const COMPONENTS_TOP: f32 = 174.0;
+/// The height of one component checkbox's row.
+const COMPONENT_ROW_HEIGHT: f32 = 22.0;
+/// How far a box's text sits in from its left and right edges.
+const BOX_TEXT_INSET: f32 = 8.0;
+/// The most characters the form's name or description holds: a name is a
+/// line in a list, and a description two lines under it
+/// (`DESCRIPTION_MAX_LINES`), so more than this is never seen.
+const FORM_CAPACITY: usize = 256;
 const PROGRESS_BAR_HEIGHT: f32 = 20.0;
 
 // ============================================================================
@@ -1883,7 +1898,7 @@ pub enum ScheduleControl {
     Faster,
 }
 
-/// Which text field of the new-snapshot form has the keyboard.
+/// One of the new-snapshot form's two text boxes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum FormField {
     /// The snapshot's name.
@@ -1891,6 +1906,16 @@ pub enum FormField {
     Name,
     /// Its description.
     Description,
+}
+
+/// What in the new-snapshot form has the keyboard: one of its text boxes,
+/// or one of its component checkboxes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FormFocus {
+    /// A text box.
+    Text(FormField),
+    /// Component checkbox `i`, by index into `SnapshotComponent::all()`.
+    Component(usize),
 }
 
 /// A button along the bottom of a dialog.
@@ -1986,8 +2011,18 @@ pub struct SystemRestoreUI {
     /// The clock, in seconds since the epoch: what ages, countdowns and the
     /// schedule are measured against. Set by the tick, from the wall clock.
     pub current_timestamp: u64,
-    /// Which form field the keyboard is typing into.
-    pub form_field: FormField,
+    /// What in the form has the keyboard.
+    pub form_focus: FormFocus,
+    /// The form's caret and selection, laid over the field the keyboard is
+    /// typing into (`form_text_mut`), whose string stays the truth:
+    /// reloaded whenever the field changes or its text changes under it.
+    form_editor: TextInput,
+    /// What Ctrl+C or Ctrl+X last took from the form, for Ctrl+V.
+    form_clipboard: String,
+    /// How wide the mark is round a box that has the keyboard: the user's
+    /// focus width (`App::appearance_changed`), the toolkit's until it is
+    /// known.
+    pub focus_ring_width: f32,
     /// Where restore points are taken from and kept.
     locations: Locations,
     /// The work running now, and what its reports are for.
@@ -2072,7 +2107,10 @@ impl SystemRestoreUI {
             form_components,
             form_type: SnapshotType::Manual,
             current_timestamp: 0,
-            form_field: FormField::Name,
+            form_focus: FormFocus::Text(FormField::Name),
+            form_editor: TextInput::new(),
+            form_clipboard: String::new(),
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             locations,
             work: None,
             load_error,
@@ -2287,9 +2325,10 @@ impl SystemRestoreUI {
         if self.search_query.is_empty() {
             return true;
         }
-        let q = self.search_query.to_ascii_lowercase();
-        snap.name.to_ascii_lowercase().contains(&q)
-            || snap.description.to_ascii_lowercase().contains(&q)
+        // Every letter folded, not only ASCII's: `to_ascii_lowercase` left
+        // `SÃO` and `são` different words.
+        let q = self.search_query.to_lowercase();
+        snap.name.to_lowercase().contains(&q) || snap.description.to_lowercase().contains(&q)
     }
 
     /// The top of the content area, below the header and the toolbar.
@@ -3022,29 +3061,51 @@ impl SystemRestoreUI {
                 EventResult::Consumed
             }
             Key::Tab if plain && self.dialog == DialogKind::CreateSnapshot => {
-                self.form_field = match self.form_field {
-                    FormField::Name => FormField::Description,
-                    FormField::Description => FormField::Name,
-                };
+                self.step_form_focus(key.modifiers.shift);
                 EventResult::Consumed
             }
-            Key::Backspace
-                if self.dialog == DialogKind::CreateSnapshot
-                    && !textline::is_alt_or_windows_chord(key.modifiers) =>
-            {
-                self.form_text_mut().pop();
-                EventResult::Consumed
-            }
-            _ if self.dialog == DialogKind::CreateSnapshot && textline::types_into_field(key) => {
-                let typed: String = key.typed().collect();
-                if typed.is_empty() {
-                    return EventResult::Ignored;
-                }
-                self.form_text_mut().push_str(&typed);
-                EventResult::Consumed
-            }
+            _ if self.dialog == DialogKind::CreateSnapshot => self.edit_form(key),
             _ => EventResult::Ignored,
         }
+    }
+
+    /// `key` in the form's box that has the keyboard: a field's keys
+    /// (`textline::apply_key` -- the caret, the selection, the clipboard,
+    /// typing), the box's text written back when the key changed it.
+    fn edit_form(&mut self, key: &KeyEvent) -> EventResult {
+        let field = match self.form_focus {
+            FormFocus::Text(field) => field,
+            // A checkbox with the keyboard answers Space, as everywhere.
+            FormFocus::Component(i) => {
+                if !checkbox::toggles(key) {
+                    return EventResult::Ignored;
+                }
+                self.toggle_component(i);
+                return EventResult::Consumed;
+            }
+        };
+        let text = self.form_text(field).to_owned();
+        if self.form_editor.text() != text {
+            self.form_editor.set_text(&text);
+        }
+        let edit = textline::apply_key(
+            &mut self.form_editor,
+            key,
+            FORM_CAPACITY,
+            &self.form_clipboard,
+            FONT_SIZE,
+        );
+        if let Some(copied) = edit.copied {
+            self.form_clipboard = copied;
+        }
+        if !edit.handled {
+            return EventResult::Ignored;
+        }
+        if self.form_editor.text() != text {
+            let edited = self.form_editor.text().to_owned();
+            *self.form_text_mut(field) = edited;
+        }
+        EventResult::Consumed
     }
 
     /// Handle a mouse event.
@@ -3091,6 +3152,19 @@ impl SystemRestoreUI {
 
         if let Some(frame) = self.dialog_frame() {
             if frame.contains(x, y) {
+                if let Some((field, rect)) = self
+                    .form_boxes()
+                    .into_iter()
+                    .flatten()
+                    .find(|(_, rect)| rect.contains(x, y))
+                {
+                    self.press_form_field(field, rect, x);
+                    return EventResult::Consumed;
+                }
+                if let Some(i) = self.component_at(x, y) {
+                    self.press_component(i);
+                    return EventResult::Consumed;
+                }
                 if let Some(button) = self
                     .dialog_buttons()
                     .into_iter()
@@ -3281,8 +3355,11 @@ impl SystemRestoreUI {
         if self.work.is_some() {
             return self.refuse(title, BUSY);
         }
-        let components: Vec<SnapshotComponent> = self
-            .form_selected_components()
+        let chosen = self.form_selected_components();
+        if chosen.is_empty() {
+            return self.refuse(title, "Choose at least one component to keep");
+        }
+        let components: Vec<SnapshotComponent> = chosen
             .into_iter()
             .filter(|c| c.source(&self.locations).is_ok())
             .collect();
@@ -3293,10 +3370,7 @@ impl SystemRestoreUI {
             );
         }
         let name = if self.form_name.trim().is_empty() {
-            format!(
-                "Restore point {}",
-                self.manager.tree.count().saturating_add(1)
-            )
+            self.default_point_name()
         } else {
             self.form_name.trim().to_string()
         };
@@ -3428,9 +3502,15 @@ impl SystemRestoreUI {
     /// simulation -- files cannot be taken as they were in another point.
     fn open_create_dialog(&mut self) {
         self.dialog = DialogKind::CreateSnapshot;
-        self.form_field = FormField::Name;
         self.form_name.clear();
         self.form_description.clear();
+        // Every component this system can keep, as at the start: what was
+        // left unticked the last time the form was put away is not a choice
+        // made for this point.
+        self.form_components = (0..SnapshotComponent::all().len())
+            .map(|i| self.keepable(i))
+            .collect();
+        self.focus_form_field(FormField::Name);
     }
 
     /// Move through the views. `delta` is in tabs, and it wraps.
@@ -3538,11 +3618,232 @@ impl SystemRestoreUI {
         self.scroll_offset = self.scroll_offset.clamp(0.0, max);
     }
 
-    /// The form field the keyboard is typing into.
-    fn form_text_mut(&mut self) -> &mut String {
-        match self.form_field {
+    /// What a restore point taken from the form with no name is called --
+    /// and what the empty name box says it will be called.
+    fn default_point_name(&self) -> String {
+        format!(
+            "Restore point {}",
+            self.manager.tree.count().saturating_add(1)
+        )
+    }
+
+    /// The text of form box `field`, to change.
+    fn form_text_mut(&mut self, field: FormField) -> &mut String {
+        match field {
             FormField::Name => &mut self.form_name,
             FormField::Description => &mut self.form_description,
+        }
+    }
+
+    /// Whether this system can keep component `i` (an index into
+    /// `SnapshotComponent::all()`) in a restore point.
+    fn keepable(&self, i: usize) -> bool {
+        SnapshotComponent::all()
+            .get(i)
+            .is_some_and(|c| c.source(&self.locations).is_ok())
+    }
+
+    /// Every stop the keyboard makes in the form, in Tab's order: the name,
+    /// the description, and each component this system can keep -- a
+    /// checkbox that cannot be changed is passed over, as everywhere.
+    fn form_stops(&self) -> Vec<FormFocus> {
+        let mut stops = vec![
+            FormFocus::Text(FormField::Name),
+            FormFocus::Text(FormField::Description),
+        ];
+        stops.extend(
+            (0..SnapshotComponent::all().len())
+                .filter(|i| self.keepable(*i))
+                .map(FormFocus::Component),
+        );
+        stops
+    }
+
+    /// Move the keyboard to the form's next stop -- the previous one with
+    /// `back` -- round from the last to the first.
+    fn step_form_focus(&mut self, back: bool) {
+        let stops = self.form_stops();
+        let at = stops
+            .iter()
+            .position(|s| *s == self.form_focus)
+            .unwrap_or(0);
+        let next = if back {
+            at.checked_sub(1).unwrap_or(stops.len().saturating_sub(1))
+        } else {
+            at.saturating_add(1).checked_rem(stops.len()).unwrap_or(0)
+        };
+        match stops.get(next).copied() {
+            Some(FormFocus::Text(field)) => self.focus_form_field(field),
+            Some(focus) => self.form_focus = focus,
+            None => {}
+        }
+    }
+
+    /// Choose component `i` for the point, or stop choosing it. Only a
+    /// component this system can keep is ever chosen: a press on any other
+    /// does nothing (`press_component`), and Tab passes it over
+    /// (`form_stops`), so it never has the keyboard.
+    fn toggle_component(&mut self, i: usize) {
+        if let Some(chosen) = self.form_components.get_mut(i) {
+            *chosen = !*chosen;
+        }
+    }
+
+    /// The form's component checkboxes, in two columns: which component, by
+    /// index into `SnapshotComponent::all()`, and where its row of
+    /// `COMPONENT_ROW_HEIGHT` begins -- none with the form closed. One answer
+    /// for the drawing and for a press.
+    fn component_rows(&self) -> Vec<(usize, (f32, f32))> {
+        if self.dialog != DialogKind::CreateSnapshot {
+            return Vec::new();
+        }
+        let Some(frame) = self.dialog_frame() else {
+            return Vec::new();
+        };
+        let cols = 2;
+        let col_width = (frame.w - 2.0 * PADDING) / cols as f32;
+        (0..SnapshotComponent::all().len())
+            .map(|i| {
+                let (col, row) = (i % cols, i / cols);
+                (
+                    i,
+                    (
+                        frame.x + PADDING + col as f32 * col_width,
+                        frame.y + COMPONENTS_TOP + row as f32 * COMPONENT_ROW_HEIGHT,
+                    ),
+                )
+            })
+            .collect()
+    }
+
+    /// Which component checkbox a press at `(x, y)` takes hold of: its box,
+    /// grown as the toolkit grows one, or its label.
+    fn component_at(&self, x: f32, y: f32) -> Option<usize> {
+        self.component_rows()
+            .into_iter()
+            .find(|(i, (cx, cy))| {
+                let label = SnapshotComponent::all().get(*i).map_or("", |c| c.label());
+                checkbox::hit(*cx, *cy, COMPONENT_ROW_HEIGHT, label).contains(x, y)
+            })
+            .map(|(i, _)| i)
+    }
+
+    /// A press on component checkbox `i`: it takes the keyboard and flips --
+    /// unless this system cannot keep the component, when it is disabled and
+    /// the press does nothing.
+    fn press_component(&mut self, i: usize) {
+        if !self.keepable(i) {
+            return;
+        }
+        self.form_focus = FormFocus::Component(i);
+        self.toggle_component(i);
+    }
+
+    /// The text of form field `field`.
+    fn form_text(&self, field: FormField) -> &str {
+        match field {
+            FormField::Name => &self.form_name,
+            FormField::Description => &self.form_description,
+        }
+    }
+
+    /// The Create Snapshot dialog's two boxes, the name's and the
+    /// description's, as they are drawn and pressed -- or `None` with the
+    /// dialog closed.
+    fn form_boxes(&self) -> Option<[(FormField, Rect); 2]> {
+        if self.dialog != DialogKind::CreateSnapshot {
+            return None;
+        }
+        let frame = self.dialog_frame()?;
+        let (x, w) = (frame.x + PADDING, frame.w - 2.0 * PADDING);
+        Some([
+            (FormField::Name, Rect::new(x, frame.y + 62.0, w, 28.0)),
+            (
+                FormField::Description,
+                Rect::new(x, frame.y + 116.0, w, 28.0),
+            ),
+        ])
+    }
+
+    /// Where `field`'s caret is drawn: the editor's while the field has the
+    /// keyboard (its end, if its text changed under the editor), the start
+    /// of the text otherwise. One answer for the drawing and for a press.
+    fn form_cursor(&self, field: FormField) -> TextCursor {
+        let text = self.form_text(field);
+        if self.form_focus != FormFocus::Text(field) {
+            TextCursor::default()
+        } else if self.form_editor.text() == text {
+            self.form_editor.cursor()
+        } else {
+            TextCursor::from(text.len())
+        }
+    }
+
+    /// Give `field` the keyboard, its caret at the end of its text.
+    fn focus_form_field(&mut self, field: FormField) {
+        self.form_focus = FormFocus::Text(field);
+        let text = self.form_text(field).to_owned();
+        self.form_editor.set_text(&text);
+    }
+
+    /// A press in form field `field`, drawn at `rect`, at `x`: it takes the
+    /// keyboard, with the caret under the pointer.
+    fn press_form_field(&mut self, field: FormField, rect: Rect, x: f32) {
+        let drawn = self.form_cursor(field);
+        if self.form_focus == FormFocus::Text(field) {
+            let text = self.form_text(field).to_owned();
+            if self.form_editor.text() != text {
+                self.form_editor.set_text(&text);
+            }
+        } else {
+            self.focus_form_field(field);
+        }
+        let cursor = textedit::cursor_at_click(
+            self.form_text(field),
+            drawn,
+            (rect.w - 2.0 * BOX_TEXT_INSET).max(0.0),
+            FONT_SIZE,
+            FontWeightHint::Regular,
+            x - rect.x - BOX_TEXT_INSET,
+        );
+        self.form_editor.set_selection_anchor(None);
+        self.form_editor.set_cursor(cursor);
+    }
+
+    /// How form field `field` is drawn: with the keyboard's mark while it
+    /// has the keyboard, unless the list of keys is over it. Never lit under
+    /// the pointer: nothing in this window is. Never red: any name will do,
+    /// an empty one standing for the date.
+    fn form_box_state(&self, field: FormField) -> field::State {
+        field::State {
+            hovered: false,
+            focused: self.form_focus == FormFocus::Text(field) && !self.show_help,
+            disabled: false,
+            invalid: false,
+        }
+    }
+
+    /// Where the search box is drawn, in the header's right end.
+    pub fn search_box_rect(&self) -> Rect {
+        Rect::new(
+            self.window_width - 260.0,
+            HEADER_HEIGHT / 2.0 - 14.0,
+            240.0,
+            28.0,
+        )
+    }
+
+    /// How the search box is drawn: with the keyboard while what is typed
+    /// goes to it -- whenever no dialog, list of keys or work in progress is
+    /// over the window -- and red while what is in it finds no restore
+    /// point. Never lit under the pointer: a press on it does nothing, the
+    /// keys being its already.
+    fn search_box_state(&self) -> field::State {
+        field::State {
+            hovered: false,
+            focused: self.dialog == DialogKind::None && self.progress.is_none() && !self.show_help,
+            disabled: false,
+            invalid: !self.search_query.is_empty() && self.visible_rows().is_empty(),
         }
     }
 
@@ -3629,37 +3930,22 @@ impl SystemRestoreUI {
             overflow: TextOverflow::Ellipsis,
         });
 
-        // Search box.
-        let search_x = self.window_width - 260.0;
-        self.palette.push_surface(
+        // Search box: what is typed is appended to it, so its caret is at
+        // the end.
+        let rect = self.search_box_rect();
+        let state = self.search_box_state();
+        field::draw(rt, &self.palette, rect, state, self.focus_ring_width);
+        self.render_box_text(
             rt,
-            search_x,
-            HEADER_HEIGHT / 2.0 - 14.0,
-            240.0,
-            28.0,
-            4.0,
-            Surface::Card,
+            rect,
+            (
+                &self.search_query,
+                TextCursor::from(self.search_query.len()),
+                None,
+            ),
+            state.focused,
+            "Search snapshots...",
         );
-        let search_display = if self.search_query.is_empty() {
-            "Search snapshots...".to_string()
-        } else {
-            self.search_query.clone()
-        };
-        let search_color = if self.search_query.is_empty() {
-            self.palette.overlay0
-        } else {
-            self.palette.text
-        };
-        rt.push(RenderCommand::Text {
-            x: search_x + 8.0,
-            y: HEADER_HEIGHT / 2.0 - FONT_SIZE / 2.0,
-            text: search_display,
-            color: search_color,
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(220.0),
-            overflow: TextOverflow::Ellipsis,
-        });
 
         // Header bottom border.
         rt.push(RenderCommand::Line {
@@ -4914,6 +5200,90 @@ impl SystemRestoreUI {
         }
     }
 
+    /// Draw form box `field` at `rect`: the toolkit's field, and its text,
+    /// or `placeholder` while it is empty.
+    fn render_form_box(
+        &self,
+        rt: &mut RenderTree,
+        field: FormField,
+        rect: Rect,
+        placeholder: &str,
+    ) {
+        let state = self.form_box_state(field);
+        field::draw(rt, &self.palette, rect, state, self.focus_ring_width);
+        let anchor = if self.form_focus == FormFocus::Text(field)
+            && self.form_editor.text() == self.form_text(field)
+        {
+            self.form_editor.selection_anchor()
+        } else {
+            None
+        };
+        self.render_box_text(
+            rt,
+            rect,
+            (self.form_text(field), self.form_cursor(field), anchor),
+            state.focused,
+            placeholder,
+        );
+    }
+
+    /// The text of a box drawn at `rect` -- `text`, or `placeholder`, faint,
+    /// while it is empty -- and, while the box has the keyboard, the caret
+    /// at `cursor` and the selection from `anchor`. An empty box with the
+    /// keyboard draws the caret before its placeholder, where the first
+    /// character typed will appear, as the toolkit's own input dialog does:
+    /// a box with the keyboard and no caret does not look ready.
+    fn render_box_text(
+        &self,
+        rt: &mut RenderTree,
+        rect: Rect,
+        (text, cursor, anchor): (&str, TextCursor, Option<usize>),
+        focused: bool,
+        placeholder: &str,
+    ) {
+        let line = text::line_height(FONT_SIZE, FontWeightHint::Regular);
+        let (x, y, width) = (
+            rect.x + BOX_TEXT_INSET,
+            rect.y + (rect.h - line) / 2.0,
+            (rect.w - 2.0 * BOX_TEXT_INSET).max(0.0),
+        );
+        if text.is_empty() {
+            rt.push(RenderCommand::Text {
+                x,
+                y,
+                text: placeholder.to_string(),
+                color: self.palette.subtext0,
+                font_size: FONT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(width),
+                overflow: TextOverflow::Ellipsis,
+            });
+            if focused {
+                textedit::push_caret(rt, x, y, line, self.palette.text, textedit::CARET_WIDTH);
+            }
+            return;
+        }
+        textedit::draw(
+            rt,
+            &textedit::SingleLine {
+                text,
+                cursor,
+                selection_anchor: anchor,
+                focused,
+                x,
+                y,
+                width,
+                line_height: line,
+                font_size: FONT_SIZE,
+                weight: FontWeightHint::Regular,
+                color: self.palette.text,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+    }
+
     /// Render the create snapshot dialog.
     fn render_create_dialog(&self, rt: &mut RenderTree) {
         let dialog_w = 500.0;
@@ -4980,35 +5350,10 @@ impl SystemRestoreUI {
             max_width: Some(60.0),
             overflow: TextOverflow::Ellipsis,
         });
-        self.palette.push_surface(
-            rt,
-            dx + PADDING,
-            field_y + 18.0,
-            dialog_w - 2.0 * PADDING,
-            28.0,
-            4.0,
-            Surface::Panel,
-        );
-        let name_display = if self.form_name.is_empty() {
-            "Enter snapshot name..."
-        } else {
-            &self.form_name
-        };
-        let name_color = if self.form_name.is_empty() {
-            self.palette.overlay0
-        } else {
-            self.palette.text
-        };
-        rt.push(RenderCommand::Text {
-            x: dx + PADDING + 8.0,
-            y: field_y + 24.0,
-            text: name_display.to_string(),
-            color: name_color,
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(dialog_w - 2.0 * PADDING - 16.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        let boxes = self.form_boxes();
+        if let Some((field, rect)) = boxes.and_then(|b| b.first().copied()) {
+            self.render_form_box(rt, field, rect, &self.default_point_name());
+        }
 
         // Description field.
         field_y += 54.0;
@@ -5022,15 +5367,9 @@ impl SystemRestoreUI {
             max_width: Some(100.0),
             overflow: TextOverflow::Ellipsis,
         });
-        self.palette.push_surface(
-            rt,
-            dx + PADDING,
-            field_y + 18.0,
-            dialog_w - 2.0 * PADDING,
-            28.0,
-            4.0,
-            Surface::Panel,
-        );
+        if let Some((field, rect)) = boxes.and_then(|b| b.get(1).copied()) {
+            self.render_form_box(rt, field, rect, "Optional");
+        }
 
         // Components checkboxes.
         field_y += 56.0;
@@ -5044,67 +5383,45 @@ impl SystemRestoreUI {
             max_width: Some(100.0),
             overflow: TextOverflow::Ellipsis,
         });
-        field_y += 20.0;
 
-        let all_components = SnapshotComponent::all();
-        let cols = 2;
-        let col_width = (dialog_w - 2.0 * PADDING) / cols as f32;
-        for (i, comp) in all_components.iter().enumerate() {
-            let col = i % cols;
-            let row = i / cols;
-            let cx = dx + PADDING + col as f32 * col_width;
-            let cy = field_y + row as f32 * 22.0;
-            let checked = self.form_components.get(i).copied().unwrap_or(false);
-
-            // Checkbox.
-            rt.push(RenderCommand::FillRect {
-                x: cx,
-                y: cy,
-                width: CHECKBOX_SIZE,
-                height: CHECKBOX_SIZE,
-                color: if checked {
-                    self.palette.blue
+        // The toolkit's checkboxes. A component this system cannot keep is a
+        // disabled one, never ticked: it is listed so what a restore point
+        // does not hold is in plain view. They were drawn as checkboxes and
+        // nothing changed them, and "faint" meant "not ticked", so the one
+        // a user could have unticked would have looked unavailable.
+        for (i, (cx, cy)) in self.component_rows() {
+            let Some(component) = SnapshotComponent::all().get(i) else {
+                continue;
+            };
+            let keepable = self.keepable(i);
+            // Never chosen unless it is keepable: see `toggle_component`.
+            let chosen = self.form_components.get(i).copied().unwrap_or(false);
+            checkbox::draw(
+                rt,
+                &self.palette,
+                (cx, cy, COMPONENT_ROW_HEIGHT),
+                component.label(),
+                if chosen {
+                    CheckState::Checked
                 } else {
-                    self.palette.surface0
+                    CheckState::Unchecked
                 },
-                corner_radii: CornerRadii::all(3.0),
-            });
-            if checked {
-                rt.push(RenderCommand::Text {
-                    x: cx + 3.0,
-                    y: cy + 1.0,
-                    text: "v".to_string(),
-                    color: self.palette.base,
-                    font_size: FONT_SIZE_SMALL,
-                    font_weight: FontWeightHint::Bold,
-                    max_width: Some(CHECKBOX_SIZE),
-                    overflow: TextOverflow::Ellipsis,
-                });
-            }
-            // A component this system cannot keep is drawn faint: it is
-            // listed so what a restore point does not hold is in plain view.
-            let unavailable = !checked;
-            rt.push(RenderCommand::Text {
-                x: cx + CHECKBOX_SIZE + 4.0,
-                y: cy + 1.0,
-                text: comp.label().to_string(),
-                color: if unavailable {
-                    self.palette.overlay0
-                } else {
-                    self.palette.text
+                checkbox::State {
+                    hovered: false,
+                    focused: self.form_focus == FormFocus::Component(i) && !self.show_help,
+                    disabled: !keepable,
                 },
-                font_size: FONT_SIZE_SMALL,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(col_width - CHECKBOX_SIZE - 8.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+                self.focus_ring_width,
+            );
         }
 
         // What it will hold. The estimate here was a figure per component
         // for an invented machine; the size is measured when it is taken.
         let est_y = dy + dialog_h - 70.0;
         let sources = self.form_sources();
-        let holds = if sources.is_empty() {
+        let holds = if self.form_selected_components().is_empty() {
+            "Nothing is chosen to keep".to_string()
+        } else if sources.is_empty() {
             "None of these can be kept on this system".to_string()
         } else {
             format!(
@@ -5964,6 +6281,10 @@ impl App for SystemRestoreUI {
         self.palette = *palette;
     }
 
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
+    }
+
     fn title(&self) -> String {
         // Which snapshot is selected, because that is what every action in the
         // toolbar acts on and the one thing a user switching windows needs to
@@ -6621,17 +6942,19 @@ working filter from a broken one"
         assert_eq!(ui.dialog, DialogKind::CreateSnapshot, "control: Ctrl+N");
         // A letter in the name, so a Backspace would have something to take.
         ui.handle_event(&types('k'));
-        let typed_before = (ui.form_name.clone(), ui.form_field);
+        let typed_before = (ui.form_name.clone(), ui.form_focus);
         assert_eq!(typed_before.0, "k", "control: the form types");
+        // After each key, not after the three: an `x` the first typed, the
+        // third would delete, and the pair would cancel out.
         for m in [Modifiers::alt(), Modifiers::super_key()] {
-            ui.handle_event(&chord(Key::X, "x", m));
-            ui.handle_event(&chord(Key::Tab, "", m));
-            ui.handle_event(&chord(Key::Backspace, "", m));
-            assert_eq!(
-                (ui.form_name.clone(), ui.form_field),
-                typed_before,
-                "{m:?} typed, moved or deleted"
-            );
+            for (k, text) in [(Key::X, "x"), (Key::Tab, ""), (Key::Backspace, "")] {
+                ui.handle_event(&chord(k, text, m));
+                assert_eq!(
+                    (ui.form_name.clone(), ui.form_focus),
+                    typed_before,
+                    "{m:?} {k:?} typed, moved or deleted"
+                );
+            }
         }
         ui.handle_event(&chord(Key::L, "ł", altgr));
         assert_eq!(
@@ -6640,6 +6963,552 @@ working filter from a broken one"
             "AltGr's ł was not typed"
         );
         assert_eq!(ui.dialog, DialogKind::CreateSnapshot, "a chord closed it");
+    }
+
+    // -- the form's boxes and the search box: the toolkit's field --
+    //
+    // All three were a panel with text on it: no caret, no selection, no
+    // mark for the box with the keyboard, and keys that appended and popped.
+    // The description's text was never drawn at all -- what was typed into
+    // it went nowhere the user could see until the point was taken.
+
+    /// Make the theme's keyboard mark a ring and the user's focus width wider
+    /// than the toolkit's, so that a box drawn with no mark, or with the
+    /// toolkit's width, is told from one drawn as asked. The palette drawn
+    /// with.
+    fn ringed(ui: &mut SystemRestoreUI) -> Palette {
+        let mut p = ui.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        oswindow::app::App::theme_changed(ui, &p);
+        oswindow::app::App::appearance_changed(
+            ui,
+            &appearance::AppearanceSettings {
+                focus_ring_scale: 2.5,
+                ..appearance::AppearanceSettings::default()
+            },
+        );
+        assert!(
+            ui.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        p
+    }
+
+    /// Whether the window draws the toolkit's field at `rect` in `state` --
+    /// and, unless `state` has the keyboard, without the keyboard's mark.
+    fn draws_box(ui: &SystemRestoreUI, p: &Palette, rect: Rect, state: field::State) -> bool {
+        let seq = |s: field::State| {
+            let mut v: Vec<RenderCommand> = Vec::new();
+            field::draw(&mut v, p, rect, s, ui.focus_ring_width);
+            v
+        };
+        let cmds = ui.render_tree().commands;
+        let has = |want: &[RenderCommand]| cmds.windows(want.len()).any(|w| w == want);
+        has(&seq(state))
+            && (state.focused
+                || !has(&seq(field::State {
+                    focused: true,
+                    ..state
+                })))
+    }
+
+    /// The strings the window draws inside `rect`, with where each starts.
+    fn texts_in(ui: &SystemRestoreUI, rect: Rect) -> Vec<(String, f32)> {
+        ui.render_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, x, y, .. }
+                | RenderCommand::RichText { text, x, y, .. }
+                    if rect.contains(*x, *y) =>
+                {
+                    Some((text.clone(), *x))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Where the carets drawn inside `rect` are: upright lines.
+    fn carets_in(ui: &SystemRestoreUI, rect: Rect) -> Vec<f32> {
+        ui.render_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Line { x1, y1, x2, y2, .. }
+                    if x1 == x2 && rect.contains(*x1, *y1) && rect.contains(*x2, *y2) =>
+                {
+                    Some(*x1)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `text`, typed a character at a time.
+    fn type_text(ui: &mut SystemRestoreUI, text: &str) {
+        for c in text.chars() {
+            ui.handle_event(&types(c));
+        }
+    }
+
+    /// **The form's boxes are the toolkit's field**: the box with the
+    /// keyboard carries the theme's mark at the user's width -- not under the
+    /// list of keys -- and the other none; Tab moves the mark; the empty name
+    /// says what a point with no name is called, with the caret before it;
+    /// and what is typed into the description is drawn, which it never was.
+    #[test]
+    fn the_form_boxes_are_the_toolkits_field() {
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
+        let p = ringed(&mut ui);
+        ui.handle_event(&ctrl(Key::N));
+        let [(first, name), (second, description)] =
+            ui.form_boxes().expect("Ctrl+N put up no form");
+        assert_eq!((first, second), (FormField::Name, FormField::Description));
+        let idle = field::State::default();
+        let focused = field::State {
+            focused: true,
+            ..idle
+        };
+        assert!(
+            draws_box(&ui, &p, name, focused),
+            "the name box, which has the keyboard, has no mark"
+        );
+        assert!(
+            draws_box(&ui, &p, description, idle),
+            "the description box is not the toolkit's field, or has a mark"
+        );
+
+        // The empty name says what the point will be called -- the name
+        // `begin_create` gives a point with none -- and the caret is where
+        // the first letter will go.
+        let start = name.x + BOX_TEXT_INSET;
+        let expected = format!("Restore point {}", ui.manager.tree.count() + 1);
+        assert_eq!(
+            texts_in(&ui, name),
+            vec![(expected, start)],
+            "the empty name box does not say what the point will be called"
+        );
+        assert_eq!(
+            carets_in(&ui, name),
+            vec![start],
+            "the empty name box with the keyboard has no caret at its start"
+        );
+        assert!(
+            carets_in(&ui, description).is_empty(),
+            "the box without the keyboard has a caret"
+        );
+
+        ui.handle_event(&press(Key::Tab));
+        assert!(
+            draws_box(&ui, &p, description, focused) && draws_box(&ui, &p, name, idle),
+            "Tab did not move the keyboard's mark to the description"
+        );
+        type_text(&mut ui, "before the update");
+        assert!(
+            texts_in(&ui, description).iter().any(
+                |(text, x)| text == "before the update" && *x == description.x + BOX_TEXT_INSET
+            ),
+            "what was typed into the description is not drawn in it: {:?}",
+            texts_in(&ui, description)
+        );
+
+        // The list of keys is over the form: no box has the keyboard.
+        ui.handle_event(&press(Key::F1));
+        assert!(ui.show_help, "control: F1");
+        assert!(
+            draws_box(&ui, &p, description, idle),
+            "the description keeps its mark under the list of keys"
+        );
+    }
+
+    /// **The form's boxes edit like a field**: the caret keys, Backspace and
+    /// Delete at the caret, Ctrl+A, C, X and V -- from one box to the other
+    /// -- a press that puts the caret under the pointer and moves the
+    /// keyboard to the box pressed, and a limit on how much a box holds.
+    #[test]
+    fn the_form_boxes_edit_like_a_field() {
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
+        ui.handle_event(&ctrl(Key::N));
+        type_text(&mut ui, "hello");
+        ui.handle_event(&press(Key::Left));
+        ui.handle_event(&press(Key::Left));
+        type_text(&mut ui, "X");
+        assert_eq!(
+            ui.form_name, "helXlo",
+            "the caret keys do not move the caret"
+        );
+        ui.handle_event(&press(Key::Backspace));
+        assert_eq!(
+            ui.form_name, "hello",
+            "Backspace did not delete before the caret"
+        );
+        ui.handle_event(&press(Key::Delete));
+        assert_eq!(
+            ui.form_name, "helo",
+            "Delete did not delete after the caret"
+        );
+
+        ui.handle_event(&ctrl(Key::A));
+        ui.handle_event(&ctrl(Key::C));
+        assert_eq!(ui.form_name, "helo", "Ctrl+C changed what it copied");
+        ui.handle_event(&press(Key::Tab));
+        ui.handle_event(&ctrl(Key::V));
+        assert_eq!(
+            ui.form_description, "helo",
+            "the name copied did not paste into the description"
+        );
+        ui.handle_event(&ctrl(Key::A));
+        ui.handle_event(&ctrl(Key::X));
+        assert_eq!(ui.form_description, "", "Ctrl+X did not cut");
+        // Back to the name: on from the description is the components.
+        ui.handle_event(&Event::Key(KeyEvent {
+            key: Key::Tab,
+            pressed: true,
+            modifiers: guitk::event::Modifiers {
+                shift: true,
+                ..guitk::event::Modifiers::NONE
+            },
+            text: String::new(),
+        }));
+        ui.handle_event(&press(Key::End));
+        ui.handle_event(&ctrl(Key::V));
+        assert_eq!(
+            ui.form_name, "helohelo",
+            "what was cut is not on the clipboard"
+        );
+
+        // A key that is not a field's is the window's to refuse.
+        assert_eq!(
+            ui.handle_event(&press(Key::F5)),
+            EventResult::Ignored,
+            "a key the box does not answer was taken"
+        );
+
+        // A press in the description, which does not have the keyboard,
+        // gives it the keyboard with the caret under the pointer -- here at
+        // the start of what it holds.
+        ui.form_description = "abc".to_owned();
+        let [(_, name), (_, description)] = ui.form_boxes().unwrap();
+        let y = description.y + description.h / 2.0;
+        ui.handle_event(&click(description.x + BOX_TEXT_INSET + 1.0, y));
+        assert_eq!(
+            ui.form_focus,
+            FormFocus::Text(FormField::Description),
+            "the press did not move the keyboard"
+        );
+        type_text(&mut ui, "X");
+        assert_eq!(
+            ui.form_description, "Xabc",
+            "the caret is not where the press was"
+        );
+
+        // And in the name, between `helo` and `helo`.
+        let between =
+            name.x + BOX_TEXT_INSET + text::measure("helo", FONT_SIZE, FontWeightHint::Regular);
+        ui.handle_event(&click(between, name.y + name.h / 2.0));
+        assert_eq!(
+            ui.form_focus,
+            FormFocus::Text(FormField::Name),
+            "the press did not move the keyboard back"
+        );
+        type_text(&mut ui, "-");
+        assert_eq!(
+            ui.form_name, "helo-helo",
+            "the caret is not where the press was"
+        );
+
+        // A box whose text changed under its editor is edited as it now reads.
+        ui.form_name = "changed".to_owned();
+        type_text(&mut ui, "!");
+        assert_eq!(
+            ui.form_name, "changed!",
+            "the box was edited as it used to read"
+        );
+
+        // A paste stops at what a box holds.
+        ui.form_clipboard = "x".repeat(FORM_CAPACITY + 10);
+        ui.handle_event(&ctrl(Key::A));
+        ui.handle_event(&ctrl(Key::V));
+        assert_eq!(
+            ui.form_name.chars().count(),
+            FORM_CAPACITY,
+            "a box holds more than its limit"
+        );
+    }
+
+    /// **The search box is the toolkit's field**: with the keyboard while
+    /// what is typed goes to it -- not under a dialog, the list of keys or
+    /// the work in progress -- the caret after what it holds, and red while
+    /// that finds no restore point.
+    #[test]
+    fn the_search_box_is_the_toolkits_field() {
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
+        let p = ringed(&mut ui);
+        let rect = ui.search_box_rect();
+        let idle = field::State::default();
+        let focused = field::State {
+            focused: true,
+            ..idle
+        };
+        assert!(
+            draws_box(&ui, &p, rect, focused),
+            "the search box, which what is typed goes to, has no mark"
+        );
+        let start = rect.x + BOX_TEXT_INSET;
+        assert_eq!(
+            carets_in(&ui, rect),
+            vec![start],
+            "the empty search box has no caret at its start"
+        );
+
+        type_text(&mut ui, "zz");
+        assert!(
+            draws_box(
+                &ui,
+                &p,
+                rect,
+                field::State {
+                    invalid: true,
+                    ..focused
+                }
+            ),
+            "a search that finds nothing is not red"
+        );
+        let end = start + text::measure("zz", FONT_SIZE, FontWeightHint::Regular);
+        let carets = carets_in(&ui, rect);
+        assert!(
+            carets.len() == 1 && (carets[0] - end).abs() < 0.5,
+            "the caret is not after what was typed: {carets:?}, not {end}"
+        );
+
+        ui.handle_event(&ctrl(Key::N));
+        assert!(
+            draws_box(
+                &ui,
+                &p,
+                rect,
+                field::State {
+                    invalid: true,
+                    ..idle
+                }
+            ),
+            "the search box keeps its mark under a dialog"
+        );
+        ui.handle_event(&press(Key::Escape));
+        ui.handle_event(&press(Key::F1));
+        assert!(ui.show_help, "control: F1");
+        assert!(
+            draws_box(
+                &ui,
+                &p,
+                rect,
+                field::State {
+                    invalid: true,
+                    ..idle
+                }
+            ),
+            "the search box keeps its mark under the list of keys"
+        );
+        ui.handle_event(&press(Key::F1));
+        ui.progress = Some(OperationProgress::new("Restoring"));
+        assert!(
+            draws_box(
+                &ui,
+                &p,
+                rect,
+                field::State {
+                    invalid: true,
+                    ..idle
+                }
+            ),
+            "the search box keeps its mark under the work in progress"
+        );
+    }
+
+    /// **The search folds every letter, not only ASCII's**: `SÃO` finds a
+    /// point named `são`. `to_ascii_lowercase` left them two words.
+    #[test]
+    fn the_search_finds_a_name_whatever_the_case_of_its_letters() {
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
+        let id = *ui.visible_ids().first().expect("no sample restore points");
+        ui.manager
+            .tree
+            .get_snapshot_mut(id)
+            .expect("the first row is no restore point")
+            .name = "Antes de são joão".to_owned();
+        type_text(&mut ui, "SÃO JOÃO");
+        assert_eq!(
+            ui.visible_ids(),
+            vec![id],
+            "a name with the query's letters in another case is not found"
+        );
+    }
+
+    /// **The components are the toolkit's checkboxes, and the ones this
+    /// system can keep can be changed.** They were drawn as checkboxes that
+    /// nothing changed, "faint" meaning "not ticked". Now a component this
+    /// system cannot keep is a disabled checkbox; one it can is ticked to
+    /// begin with, and a press -- on the box or its label -- or Space with
+    /// the keyboard on it flips it. Tab stops at it, after the two boxes, and
+    /// passes the disabled ones over. A point of nothing is refused, and the
+    /// form says so before it is.
+    #[test]
+    fn the_components_are_checkboxes_that_change() {
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
+        let p = ringed(&mut ui);
+        let index = |wanted: SnapshotComponent| {
+            SnapshotComponent::all()
+                .iter()
+                .position(|c| *c == wanted)
+                .unwrap()
+        };
+        let (settings, system) = (
+            index(SnapshotComponent::UserSettings),
+            index(SnapshotComponent::SystemFiles),
+        );
+        assert!(
+            ui.keepable(settings) && !ui.keepable(system),
+            "the fixture keeps something else now"
+        );
+        ui.handle_event(&ctrl(Key::N));
+        let rows = ui.component_rows();
+        assert_eq!(rows.len(), SnapshotComponent::all().len());
+        let draws = |ui: &SystemRestoreUI, i: usize, check: CheckState, state: checkbox::State| {
+            let (cx, cy) = rows[i].1;
+            let mut want: Vec<RenderCommand> = Vec::new();
+            checkbox::draw(
+                &mut want,
+                &p,
+                (cx, cy, COMPONENT_ROW_HEIGHT),
+                SnapshotComponent::all()[i].label(),
+                check,
+                state,
+                ui.focus_ring_width,
+            );
+            let cmds = ui.render_tree().commands;
+            cmds.windows(want.len()).any(|w| w == want.as_slice())
+        };
+        let enabled = checkbox::State::default();
+        let disabled = checkbox::State {
+            disabled: true,
+            ..enabled
+        };
+        let focused = checkbox::State {
+            focused: true,
+            ..enabled
+        };
+        assert!(
+            draws(&ui, settings, CheckState::Checked, enabled),
+            "a component this system keeps is not a ticked checkbox"
+        );
+        assert!(
+            draws(&ui, system, CheckState::Unchecked, disabled),
+            "a component it cannot keep is not a disabled checkbox"
+        );
+
+        // A press on the label unticks it and gives it the keyboard.
+        let (cx, cy) = rows[settings].1;
+        let middle = cy + COMPONENT_ROW_HEIGHT / 2.0;
+        ui.handle_event(&click(
+            cx + checkbox::SIZE + checkbox::LABEL_GAP + 4.0,
+            middle,
+        ));
+        assert!(
+            draws(&ui, settings, CheckState::Unchecked, focused),
+            "a press on the label did not untick it and give it the keyboard"
+        );
+        assert!(
+            card_text(&ui).contains("Nothing is chosen to keep"),
+            "the form does not say nothing is chosen"
+        );
+
+        // A press on one this system cannot keep does nothing.
+        let (sx, sy) = rows[system].1;
+        ui.handle_event(&click(sx + 2.0, sy + COMPONENT_ROW_HEIGHT / 2.0));
+        assert!(
+            draws(&ui, system, CheckState::Unchecked, disabled),
+            "a disabled checkbox was changed"
+        );
+        assert_eq!(
+            ui.form_focus,
+            FormFocus::Component(settings),
+            "a disabled checkbox took the keyboard"
+        );
+
+        // Space flips the one with the keyboard; typing does not.
+        ui.handle_event(&press(Key::Space));
+        assert!(
+            draws(&ui, settings, CheckState::Checked, focused),
+            "Space did not tick it"
+        );
+        ui.handle_event(&types('q'));
+        assert!(
+            draws(&ui, settings, CheckState::Checked, focused),
+            "a letter flipped the checkbox"
+        );
+        assert_eq!(
+            ui.form_name, "",
+            "a letter typed into a box without the keyboard"
+        );
+
+        // Under the list of keys, no ring.
+        ui.handle_event(&press(Key::F1));
+        assert!(
+            draws(&ui, settings, CheckState::Checked, enabled),
+            "the checkbox keeps its ring under the list of keys"
+        );
+        ui.handle_event(&press(Key::F1));
+
+        // Tab: round from the checkbox to the name, the description, and
+        // the checkbox -- not the disabled one before it. Shift+Tab: back.
+        for want in [
+            FormFocus::Text(FormField::Name),
+            FormFocus::Text(FormField::Description),
+            FormFocus::Component(settings),
+        ] {
+            ui.handle_event(&press(Key::Tab));
+            assert_eq!(ui.form_focus, want, "Tab went elsewhere");
+        }
+        ui.handle_event(&Event::Key(KeyEvent {
+            key: Key::Tab,
+            pressed: true,
+            modifiers: guitk::event::Modifiers {
+                shift: true,
+                ..guitk::event::Modifiers::NONE
+            },
+            text: String::new(),
+        }));
+        assert_eq!(
+            ui.form_focus,
+            FormFocus::Text(FormField::Description),
+            "Shift+Tab did not go back"
+        );
+
+        // Put away unticked, the form opens on every component it can keep.
+        ui.press_component(settings);
+        assert!(card_text(&ui).contains("Nothing is chosen to keep"));
+        ui.handle_event(&press(Key::Escape));
+        ui.handle_event(&ctrl(Key::N));
+        assert!(
+            draws(&ui, settings, CheckState::Checked, enabled),
+            "the form opened on the last one's choice"
+        );
+
+        // And a point of nothing is refused, saying why.
+        let before = ui.manager.tree.count();
+        ui.handle_event(&click(cx + 2.0, middle));
+        ui.handle_event(&press(Key::Enter));
+        assert_eq!(
+            ui.progress.as_ref().and_then(|p| p.error.as_deref()),
+            Some("Choose at least one component to keep"),
+            "a point of nothing was not refused, or not said why"
+        );
+        assert_eq!(
+            ui.manager.tree.count(),
+            before,
+            "a point of nothing was taken"
+        );
     }
 
     #[test]

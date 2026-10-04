@@ -29,6 +29,9 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::scroll_window;
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::text::TextCursor;
+use guitk::textedit;
+use guitk::textinput::TextInput;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
@@ -656,7 +659,37 @@ pub struct VpnManager {
     /// The user's focus width, which the boxes draw their focus mark at
     /// (`appearance_changed`).
     focus_ring_width: f32,
+    /// Whether the list of keys is up.
+    show_help: bool,
+    /// The editor of the box with the keyboard: its caret and selection over
+    /// the box's text, loaded whenever the keyboard moves to another box.
+    editor: TextInput,
+    /// What the boxes' Ctrl+C and Ctrl+X took, for their Ctrl+V.
+    clipboard: String,
 }
+
+/// The size the boxes draw their text at.
+const FIELD_TEXT_SIZE: f32 = 12.0;
+/// How far a box's text sits in from its left and right edges.
+const FIELD_TEXT_INSET: f32 = 8.0;
+/// The most a box holds, in characters: a server's name, a range, a search.
+const FIELD_CAPACITY: usize = 256;
+
+/// The keys this window answers, as the F1 list shows them.
+///
+/// It had no list: F1 did nothing, and every key here could be found only by
+/// pressing it -- Escape among them, which closes the window.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1 / ?", "This list"),
+    ("Up / Down", "Choose a profile"),
+    ("Left / Right", "Previous or next tab"),
+    ("PageUp / PageDown", "Scroll the profiles"),
+    ("Home", "Back to the first profile"),
+    ("Ctrl+F", "Search the profiles"),
+    ("Tab", "To the search, or the next box"),
+    ("Enter", "Save, add the range, or end the search"),
+    ("Escape", "Leave the box, cancel, or close the window"),
+];
 
 impl VpnManager {
     /// Create a new VPN manager, holding nothing.
@@ -695,6 +728,9 @@ impl VpnManager {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             hover: None,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
+            show_help: false,
+            editor: TextInput::new(),
+            clipboard: String::new(),
             profiles,
             connections,
             log,
@@ -1660,22 +1696,6 @@ pub enum Field {
 }
 
 impl Field {
-    /// The field after this one in tab order.
-    ///
-    /// The dialog's four fields form one cycle and the two loose boxes are
-    /// each their own, because Tab out of the search box has nowhere on the
-    /// sidebar to go.
-    fn next(self) -> Self {
-        match self {
-            Self::Search => Self::Search,
-            Self::AllowedIp => Self::AllowedIp,
-            Self::Name => Self::Server,
-            Self::Server => Self::Port,
-            Self::Port => Self::Mtu,
-            Self::Mtu => Self::Name,
-        }
-    }
-
     /// Whether this field belongs to the add/edit dialog.
     ///
     /// A dialog field cannot hold the keyboard while the dialog is closed: its
@@ -1686,16 +1706,78 @@ impl Field {
     }
 }
 
-/// The text to draw in a box that may hold the caret.
+/// Draw the text of `field`'s box, drawn at `rect`: what it holds, or what
+/// it is for, faint, while it is empty -- and, with the keyboard, the caret
+/// and the selection where they are. An empty box with the keyboard draws
+/// its caret before what it is for, as the toolkit's own input dialog does.
 ///
-/// One place, so a focused empty box and a focused full one cannot end up
-/// disagreeing about whether the caret is drawn.
-fn caret_text(value: &str, focused: bool, placeholder: &str) -> String {
-    match (value.is_empty(), focused) {
-        (true, false) => placeholder.to_string(),
-        (true, true) => String::from("|"),
-        (false, true) => format!("{value}|"),
-        (false, false) => value.to_string(),
+/// The caret was a `|` appended to the text, so it stood at the end whatever
+/// the keys did -- which was nothing, as the boxes typed only there.
+fn render_box_text(
+    frame: &mut Frame,
+    app: &VpnManager,
+    field: Field,
+    rect: Rect,
+    placeholder: &str,
+) {
+    let focused = app.focus == Some(field) && !app.show_help;
+    let text = app.field_text(field).unwrap_or_default();
+    let line = text::line_height(FIELD_TEXT_SIZE, FontWeightHint::Regular);
+    let (x, y, width) = (
+        rect.x + FIELD_TEXT_INSET,
+        rect.y + (rect.h - line) / 2.0,
+        (rect.w - 2.0 * FIELD_TEXT_INSET).max(0.0),
+    );
+    let mut tree = RenderTree::new();
+    if text.is_empty() {
+        frame.push(RenderCommand::Text {
+            x,
+            y,
+            text: placeholder.to_string(),
+            font_size: FIELD_TEXT_SIZE,
+            color: app.palette.subtext0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
+        });
+        if focused {
+            textedit::push_caret(
+                &mut tree,
+                x,
+                y,
+                line,
+                app.palette.text,
+                textedit::CARET_WIDTH,
+            );
+        }
+    } else {
+        let editing = app.focus == Some(field) && app.editor.text() == text;
+        textedit::draw(
+            &mut tree,
+            &textedit::SingleLine {
+                text: &text,
+                cursor: app.field_cursor(field, &text),
+                selection_anchor: if editing {
+                    app.editor.selection_anchor()
+                } else {
+                    None
+                },
+                focused,
+                x,
+                y,
+                width,
+                line_height: line,
+                font_size: FIELD_TEXT_SIZE,
+                weight: FontWeightHint::Regular,
+                color: app.palette.text,
+                selection_bg: app.palette.accent,
+                selection_fg: app.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+    }
+    for command in tree.commands {
+        frame.push(command);
     }
 }
 
@@ -1817,6 +1899,21 @@ pub fn render_frame(app: &VpnManager, width: f32, height: f32) -> Frame {
         {
             frame.push(cmd);
         }
+    }
+
+    // The list of keys over all of it: it is the one thing on screen a reader
+    // asked for explicitly. The hits under it go, as under the dialog.
+    if app.show_help {
+        frame.discard_hits();
+        let window = (frame.width, frame.height);
+        guitk::shortcut::render_card(
+            &mut frame,
+            &app.palette,
+            window,
+            0.0,
+            SHORTCUTS,
+            "F1 or ? closes this",
+        );
     }
 
     frame
@@ -2075,23 +2172,7 @@ fn render_sidebar(frame: &mut Frame, app: &VpnManager, content_y: f32, content_h
         },
         app.focus_ring_width,
     );
-    let empty = app.search_query.is_empty();
-    frame.push(RenderCommand::Text {
-        x: 16.0,
-        y: search_y + 7.0,
-        // A focused empty box shows a caret rather than the placeholder, so
-        // there is somewhere visible for the next keystroke to appear.
-        text: caret_text(&app.search_query, focused, "Search profiles..."),
-        font_size: 12.0,
-        color: if empty && !focused {
-            app.palette.subtext0
-        } else {
-            app.palette.text
-        },
-        font_weight: FontWeightHint::Regular,
-        max_width: Some(SIDEBAR_WIDTH - 32.0),
-        overflow: TextOverflow::Ellipsis,
-    });
+    render_box_text(frame, app, Field::Search, search_rect, "Search profiles...");
     frame.hit(Target::Focus(Field::Search), search_rect);
 
     // Profile list
@@ -2910,20 +2991,7 @@ fn render_tab_split_tunnel(frame: &mut Frame, app: &VpnManager, px: f32, py: f32
         },
         app.focus_ring_width,
     );
-    frame.push(RenderCommand::Text {
-        x: input.x + 8.0,
-        y: input.y + 6.0,
-        text: caret_text(&app.allowed_ip_input, focused, "10.0.0.0/8"),
-        font_size: 12.0,
-        color: if app.allowed_ip_input.is_empty() && !focused {
-            app.palette.subtext0
-        } else {
-            app.palette.text
-        },
-        font_weight: FontWeightHint::Regular,
-        max_width: Some(input.w - 16.0),
-        overflow: TextOverflow::Ellipsis,
-    });
+    render_box_text(frame, app, Field::AllowedIp, input, "10.0.0.0/8");
     frame.hit(Target::Focus(Field::AllowedIp), input);
 
     render_action_button(
@@ -3907,20 +3975,20 @@ fn render_dialog_field(
         },
         app.focus_ring_width,
     );
-    frame.push(RenderCommand::Text {
-        x: x + 108.0,
-        y: y + 6.0,
-        text: caret_text(value, focused, "..."),
-        font_size: 12.0,
-        color: if value.is_empty() && !focused {
-            pal.subtext0
-        } else {
-            pal.text
-        },
-        font_weight: FontWeightHint::Regular,
-        max_width: Some(fw - 120.0),
-        overflow: TextOverflow::Ellipsis,
-    });
+    if let Target::Focus(field) = target {
+        render_box_text(frame, app, field, box_rect, "...");
+    } else {
+        frame.push(RenderCommand::Text {
+            x: x + 108.0,
+            y: y + 6.0,
+            text: value.to_string(),
+            font_size: 12.0,
+            color: pal.text,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(fw - 120.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+    }
     frame.hit(target, box_rect);
 
     y + FIELD_HEIGHT + 6.0
@@ -4075,6 +4143,23 @@ impl VpnManager {
         Action::Redraw
     }
 
+    /// The box Tab moves to from `field`: round the dialog's four, and
+    /// between the search and the split-tunnel tab's range box while that box
+    /// is drawn -- the tab is open on a profile. With no range box, Tab stays
+    /// in the search: there is nowhere else on the sidebar to go.
+    fn next_box(&self, field: Field) -> Field {
+        let ranges_drawn =
+            self.current_tab == DetailTab::SplitTunnel && self.selected_profile.is_some();
+        match field {
+            Field::Search if ranges_drawn => Field::AllowedIp,
+            Field::Search | Field::AllowedIp => Field::Search,
+            Field::Name => Field::Server,
+            Field::Server => Field::Port,
+            Field::Port => Field::Mtu,
+            Field::Mtu => Field::Name,
+        }
+    }
+
     /// Give a text box the keyboard.
     fn focus_field(&mut self, field: Field) -> Action {
         // A dialog box only takes focus while the dialog is up, and the two
@@ -4087,6 +4172,158 @@ impl VpnManager {
             return Action::None;
         }
         self.focus = Some(field);
+        self.load_editor(field);
+        Action::Redraw
+    }
+
+    /// What `field`'s box shows: its text, or a number's digits -- nothing
+    /// for 0, which no port or MTU is, so that deleting every digit leaves
+    /// the box empty rather than holding a 0 typed after. `None` for a
+    /// dialog row with no profile being edited.
+    fn field_text(&self, field: Field) -> Option<String> {
+        let digits = |n: u16| if n == 0 { String::new() } else { n.to_string() };
+        match field {
+            Field::Search => Some(self.search_query.clone()),
+            Field::AllowedIp => Some(self.allowed_ip_input.clone()),
+            Field::Name => self.editing_profile.as_ref().map(|p| p.name.clone()),
+            Field::Server => self
+                .editing_profile
+                .as_ref()
+                .map(|p| p.server_address.clone()),
+            Field::Port => self.editing_profile.as_ref().map(|p| digits(p.port)),
+            Field::Mtu => self.editing_profile.as_ref().map(|p| digits(p.mtu)),
+        }
+    }
+
+    /// Write `text` back to `field`. A number box's digits are parsed, and
+    /// a number too big for the box ends at 65535: holding a digit key must
+    /// not wrap round to a port that works. An empty number box is 0.
+    fn set_field_text(&mut self, field: Field, text: &str) {
+        if let Some(slot) = self.number_field_mut(field) {
+            *slot = if text.is_empty() {
+                0
+            } else {
+                text.parse().unwrap_or(u16::MAX)
+            };
+        } else if let Some(slot) = self.text_field_mut(field) {
+            text.clone_into(slot);
+        }
+    }
+
+    /// Load `field`'s text into the editor, its caret after it.
+    fn load_editor(&mut self, field: Field) {
+        if let Some(text) = self.field_text(field) {
+            self.editor.set_text(&text);
+        }
+    }
+
+    /// Where `field`'s caret is drawn, over `text`, what the box holds: the
+    /// editor's while the box has the keyboard and the editor holds its
+    /// text, its end if the text changed under the editor, its start without
+    /// the keyboard. One answer for the drawing and for a press.
+    fn field_cursor(&self, field: Field, text: &str) -> TextCursor {
+        if self.focus != Some(field) {
+            TextCursor::default()
+        } else if self.editor.text() == text {
+            self.editor.cursor()
+        } else {
+            TextCursor::from(text.len())
+        }
+    }
+
+    /// A key for `field`, which has the keyboard: the caret keys, Backspace
+    /// and Delete at the caret, Ctrl+A, C, X and V, and typing -- AltGr's
+    /// among it, and no command's letter. The boxes took typing at their end
+    /// and Backspace from it, and nothing else.
+    ///
+    /// A number box takes digits only: an edit that would leave anything but
+    /// digits in it -- a letter typed, a paste -- is refused whole, as a
+    /// letter in a port box always was, rather than shown and failing the
+    /// save with a number nobody typed.
+    fn edit_field(&mut self, field: Field, key: &KeyEvent) -> Action {
+        let Some(before) = self.field_text(field) else {
+            return Action::None;
+        };
+        if self.editor.text() != before {
+            self.editor.set_text(&before);
+        }
+        let kept = self.editor.clone();
+        let edit = textline::apply_key(
+            &mut self.editor,
+            key,
+            FIELD_CAPACITY,
+            &self.clipboard,
+            FIELD_TEXT_SIZE,
+        );
+        if self.number_field_mut(field).is_some()
+            && !self.editor.text().chars().all(|c| c.is_ascii_digit())
+        {
+            self.editor = kept;
+            return Action::None;
+        }
+        if let Some(copied) = edit.copied {
+            self.clipboard = copied;
+        }
+        let typed = self.editor.text().to_owned();
+        if typed != before {
+            // Editing a dialog field is the user answering the complaint, so
+            // the complaint goes away rather than sitting under the corrected
+            // value still saying the field is blank.
+            if field.is_dialog() {
+                self.dialog_error.clear();
+            }
+            self.set_field_text(field, &typed);
+            // A number too big for its box shows where it stopped.
+            if let Some(shown) = self.field_text(field)
+                && shown != typed
+            {
+                self.editor.set_text(&shown);
+            }
+            if field == Field::Search {
+                // The list just shrank under the selection. Selection is by
+                // index, and a search that filters the chosen profile out
+                // leaves that index pointing at a row the user cannot see,
+                // so scroll back to the top rather than leave the view
+                // somewhere off the new list.
+                self.scroll_offset = 0.0;
+            }
+        }
+        if edit.handled {
+            Action::Redraw
+        } else {
+            Action::None
+        }
+    }
+
+    /// A press in `field`'s box at `x`: it takes the keyboard -- where it may
+    /// -- with the caret under the pointer, measured against the box as it
+    /// was drawn.
+    fn press_field(&mut self, field: Field, x: f32, size: (f32, f32)) -> Action {
+        let rect = render_frame(self, size.0, size.1).rect_of(|t| *t == Target::Focus(field));
+        let Some(text) = self.field_text(field) else {
+            return Action::None;
+        };
+        let drawn = self.field_cursor(field, &text);
+        let action = self.focus_field(field);
+        if self.focus != Some(field) {
+            return action;
+        }
+        let Some(rect) = rect else {
+            return Action::Redraw;
+        };
+        if self.editor.text() != text {
+            self.editor.set_text(&text);
+        }
+        let cursor = textedit::cursor_at_click(
+            &text,
+            drawn,
+            (rect.w - 2.0 * FIELD_TEXT_INSET).max(0.0),
+            FIELD_TEXT_SIZE,
+            FontWeightHint::Regular,
+            x - rect.x - FIELD_TEXT_INSET,
+        );
+        self.editor.set_selection_anchor(None);
+        self.editor.set_cursor(cursor);
         Action::Redraw
     }
 
@@ -4115,73 +4352,6 @@ impl VpnManager {
             Field::Server => Some(&mut self.editing_profile.as_mut()?.server_address),
             Field::Port | Field::Mtu => None,
         }
-    }
-
-    /// Append typed text to whichever box holds the keyboard.
-    fn type_into(&mut self, field: Field, typed: &str) -> Action {
-        // Editing a dialog field is the user answering the complaint, so the
-        // complaint goes away rather than sitting under the corrected value
-        // still saying the field is blank.
-        if field.is_dialog() {
-            self.dialog_error.clear();
-        }
-        if let Some(slot) = self.number_field_mut(field) {
-            let mut changed = false;
-            for c in typed.chars() {
-                let Some(digit) = c.to_digit(10) else {
-                    // Letters in a port box are not an edit. Dropping them
-                    // silently beats accepting them and failing validation
-                    // later with a number the user never typed.
-                    continue;
-                };
-                // Saturating, not wrapping: holding a digit key should end at
-                // 65535, not roll back through zero to a port that works.
-                *slot = slot.saturating_mul(10).saturating_add(digit as u16);
-                changed = true;
-            }
-            return if changed {
-                Action::Redraw
-            } else {
-                Action::None
-            };
-        }
-        let Some(slot) = self.text_field_mut(field) else {
-            return Action::None;
-        };
-        slot.push_str(typed);
-        if field == Field::Search {
-            // The list just shrank under the selection. Selection is by index,
-            // and a search that filters the chosen profile out leaves that
-            // index pointing at a row the user cannot see, so scroll back to
-            // the top rather than leave the view somewhere off the new list.
-            self.scroll_offset = 0.0;
-        }
-        Action::Redraw
-    }
-
-    /// Remove the last character from whichever box holds the keyboard.
-    fn backspace(&mut self, field: Field) -> Action {
-        if field.is_dialog() {
-            self.dialog_error.clear();
-        }
-        if let Some(slot) = self.number_field_mut(field) {
-            let next = *slot / 10;
-            if next == *slot {
-                return Action::None;
-            }
-            *slot = next;
-            return Action::Redraw;
-        }
-        let Some(slot) = self.text_field_mut(field) else {
-            return Action::None;
-        };
-        if slot.pop().is_none() {
-            return Action::None;
-        }
-        if field == Field::Search {
-            self.scroll_offset = 0.0;
-        }
-        Action::Redraw
     }
 
     /// Commit the split-tunnel tab's new-range box.
@@ -4637,6 +4807,9 @@ impl VpnManager {
             }
             return Action::None;
         };
+        if let Target::Focus(field) = target {
+            return self.press_field(field, x, size);
+        }
         self.activate(target)
     }
 
@@ -4651,8 +4824,38 @@ impl VpnManager {
         if let Some(action) = self.dispatch_key_to_picker(key) {
             return action;
         }
+        // The list of keys next: it is drawn over everything but the chooser,
+        // and modal while it is up -- a plain F1, `?` or Escape puts it away,
+        // and no other key reaches what it covers, where Escape closes the
+        // window.
+        let plain = textline::is_plain(key.modifiers);
+        let question = key.key == Key::Slash && key.modifiers.shift;
+        if self.show_help {
+            if plain && (matches!(key.key, Key::F1 | Key::Escape) || question) {
+                self.show_help = false;
+            }
+            return Action::Redraw;
+        }
+        // F1 raises it from anywhere, a box included, because it is never
+        // typed; `?` is typed in a box, so it raises the list only from
+        // outside one.
+        if plain && (key.key == Key::F1 || question && self.focus.is_none()) {
+            self.show_help = true;
+            return Action::Redraw;
+        }
+        // Ctrl+F: the search, from the window or its range box. A Ctrl chord,
+        // not Ctrl held -- AltGr arrives as Ctrl+Alt, and types.
+        if key.key == Key::F && textline::is_ctrl_chord(key.modifiers) && !self.show_add_dialog {
+            return self.focus_field(Field::Search);
+        }
         if let Some(field) = self.focus {
             return self.handle_key_in_field(key, field);
+        }
+        // Every other key is taken plain: a chord with Alt or the Windows key
+        // is the window manager's or the desktop's -- Alt+Left switched the
+        // tab under a window being dragged.
+        if !plain {
+            return Action::None;
         }
         // With the dialog up, the keys below would move a selection and switch
         // tabs behind it. Escape closes it; nothing else reaches past it.
@@ -4666,6 +4869,8 @@ impl VpnManager {
         }
         match key.key {
             Key::Escape => Action::Quit,
+            // The keyboard's way into the boxes: the search first.
+            Key::Tab => self.focus_field(Field::Search),
             Key::Down => self.move_selection(1),
             Key::Up => self.move_selection(-1),
             Key::Right => self.move_tab(1),
@@ -4694,7 +4899,9 @@ impl VpnManager {
                 Action::Redraw
             }
             Key::Tab => {
-                self.focus = Some(field.next());
+                let next = self.next_box(field);
+                self.focus = Some(next);
+                self.load_editor(next);
                 Action::Redraw
             }
             Key::Enter => match field {
@@ -4705,17 +4912,7 @@ impl VpnManager {
                 }
                 _ => self.activate(Target::DialogSave),
             },
-            Key::Backspace => self.backspace(field),
-            _ => {
-                // `typed()` already drops the control characters Enter, Tab,
-                // Escape and Backspace produce on most layouts, so an unmatched
-                // key cannot smuggle a `\r` into a server address.
-                let typed: String = key.typed().collect();
-                if typed.is_empty() {
-                    return Action::None;
-                }
-                self.type_into(field, &typed)
-            }
+            _ => self.edit_field(field, key),
         }
     }
 
@@ -4832,6 +5029,16 @@ impl VpnManager {
             Event::Mouse(mouse) if self.picker.is_some() => self
                 .dispatch_mouse_to_picker(mouse)
                 .unwrap_or(Action::Redraw),
+            // The list of keys is modal for the pointer as it is for the keys:
+            // a press with any button puts it away and does nothing else, and
+            // the wheel scrolls nothing it covers.
+            Event::Mouse(mouse) if self.show_help => match mouse.kind {
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                    self.show_help = false;
+                    Action::Redraw
+                }
+                _ => Action::None,
+            },
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::Press(button) => self.handle_click(mouse.x, mouse.y, button, size),
                 // What is under the pointer is drawn lit; only a change in it
@@ -8621,6 +8828,495 @@ mod tests {
             dark,
             fills(&mut app),
             "high contrast reached every other surface but not this window"
+        );
+    }
+
+    // --- The list of keys, and the keyboard's way to the boxes ---
+
+    fn key_of(k: Key, modifiers: guitk::event::Modifiers, text: &str) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        }
+    }
+
+    fn hit(app: &mut VpnManager, k: Key, modifiers: guitk::event::Modifiers) -> Action {
+        app.handle_key(&key_of(k, modifiers, ""))
+    }
+
+    fn drawn_strings(app: &VpnManager) -> Vec<String> {
+        render_frame(app, WINDOW_WIDTH, WINDOW_HEIGHT)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **Every key the list of keys advertises is answered by this window**,
+    /// over a list of profiles with one chosen in the middle -- Enter from the
+    /// search box, the one place outside the dialog it is a key. Escape, from
+    /// the window, closes it.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let mut app = crowded();
+                app.select_profile(5);
+                if *label == "Enter" {
+                    app.focus_field(Field::Search);
+                }
+                assert_ne!(
+                    app.handle_key(&stroke),
+                    Action::None,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The list of keys reaches the window**, and goes on F1, `?` or a plain
+    /// Escape -- not on Alt+Escape, which is the desktop's.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        use guitk::event::Modifiers;
+        let mut app = VpnManager::with_sample_profiles();
+        assert!(
+            !drawn_strings(&app)
+                .iter()
+                .any(|t| t.contains("F1 or ? closes this")),
+            "the list is up before anybody asked for it"
+        );
+        for chord in [Modifiers::alt(), Modifiers::super_key()] {
+            hit(&mut app, Key::F1, chord);
+            assert!(
+                !app.show_help,
+                "{chord:?}+F1, the desktop's, raised the list"
+            );
+        }
+        hit(&mut app, Key::F1, Modifiers::NONE);
+        let missing = guitk::shortcut::missing_rows(&drawn_strings(&app), SHORTCUTS);
+        assert!(missing.is_empty(), "{missing:?}");
+        hit(&mut app, Key::Escape, Modifiers::alt());
+        assert!(app.show_help, "Alt+Escape put the list away");
+        assert_eq!(
+            hit(&mut app, Key::Escape, Modifiers::NONE),
+            Action::Redraw,
+            "Escape under the list closed the window"
+        );
+        assert!(!app.show_help, "Escape left the list up");
+        app.handle_key(&key_of(Key::Slash, Modifiers::shift(), "?"));
+        assert!(app.show_help, "? raised nothing");
+        app.handle_key(&key_of(Key::Slash, Modifiers::shift(), "?"));
+        assert!(!app.show_help, "? left the list up");
+        hit(&mut app, Key::F1, Modifiers::NONE);
+        hit(&mut app, Key::F1, Modifiers::NONE);
+        assert!(!app.show_help, "F1 left the list up");
+    }
+
+    /// **`?` is typed into the search**, where it is a character, and F1
+    /// raises the list from there, where it never is.
+    #[test]
+    fn a_question_mark_is_typed_into_the_search_and_f1_still_raises_the_list() {
+        use guitk::event::Modifiers;
+        let mut app = VpnManager::with_sample_profiles();
+        click(&mut app, Target::Focus(Field::Search));
+        app.handle_key(&key_of(Key::Slash, Modifiers::shift(), "?"));
+        assert!(!app.show_help, "? raised the list from the search box");
+        assert_eq!(app.search_query, "?", "? was not typed");
+        hit(&mut app, Key::F1, Modifiers::NONE);
+        assert!(
+            app.show_help,
+            "F1 did not raise the list from the search box"
+        );
+        let search = rect_of(
+            &VpnManager::with_sample_profiles(),
+            Target::Focus(Field::Search),
+        )
+        .expect("the search box");
+        assert_eq!(
+            carets_in(&app, search),
+            0,
+            "the box's caret is drawn under the list"
+        );
+    }
+
+    /// **The list of keys is modal**: with it up, no key, press or turn of the
+    /// wheel reaches what it covers. The controls are the same with it down.
+    #[test]
+    fn the_shortcut_list_takes_the_keys_and_a_press() {
+        use guitk::event::Modifiers;
+        let mut app = crowded();
+        app.select_profile(0);
+        let row = rect_of(&app, Target::Profile(id_at(&app, 3))).expect("a fourth row");
+        let (rx, ry) = (row.x + row.w / 2.0, row.y + row.h / 2.0);
+        let size = (WINDOW_WIDTH, WINDOW_HEIGHT);
+        let press_at = |app: &mut VpnManager, button: MouseButton| {
+            app.handle_event(
+                &Event::Mouse(MouseEvent {
+                    x: rx,
+                    y: ry,
+                    kind: MouseEventKind::Press(button),
+                }),
+                size,
+            )
+        };
+
+        hit(&mut app, Key::F1, Modifiers::NONE);
+        hit(&mut app, Key::Down, Modifiers::NONE);
+        hit(&mut app, Key::Right, Modifiers::NONE);
+        hit(&mut app, Key::Tab, Modifiers::NONE);
+        hit(&mut app, Key::F, Modifiers::ctrl());
+        assert!(
+            app.show_help,
+            "a key other than F1, ? or Escape put the list away"
+        );
+        assert_eq!(
+            app.selected_profile,
+            Some(0),
+            "Down moved the selection under it"
+        );
+        assert_eq!(
+            app.current_tab,
+            DetailTab::Overview,
+            "Right moved the tab under it"
+        );
+        assert_eq!(app.focus, None, "a key gave a box the keyboard under it");
+        app.handle_event(
+            &Event::Mouse(MouseEvent {
+                x: rx,
+                y: ry,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+            }),
+            size,
+        );
+        assert!(
+            app.scroll_offset.abs() < f32::EPSILON,
+            "the wheel scrolled the profiles under it"
+        );
+        assert!(app.show_help, "the wheel put the list away");
+        press_at(&mut app, MouseButton::Left);
+        assert!(!app.show_help, "the press did not put the list away");
+        assert_eq!(
+            app.selected_profile,
+            Some(0),
+            "the press chose a profile under it"
+        );
+        hit(&mut app, Key::F1, Modifiers::NONE);
+        press_at(&mut app, MouseButton::Right);
+        assert!(!app.show_help, "a right-button press left the list up");
+
+        // The controls.
+        hit(&mut app, Key::Down, Modifiers::NONE);
+        assert_eq!(app.selected_profile, Some(1));
+        press_at(&mut app, MouseButton::Left);
+        assert_eq!(app.selected_profile, Some(3));
+    }
+
+    /// **Tab and Ctrl+F reach the search from the keyboard**, which only a
+    /// press did; Tab goes on to the split-tunnel range box while that tab is
+    /// open on a profile, and back.
+    #[test]
+    fn tab_and_ctrl_f_reach_the_boxes() {
+        use guitk::event::Modifiers;
+        let mut app = VpnManager::with_sample_profiles();
+        hit(&mut app, Key::Tab, Modifiers::NONE);
+        assert_eq!(
+            app.focus,
+            Some(Field::Search),
+            "Tab did not reach the search"
+        );
+        hit(&mut app, Key::Tab, Modifiers::NONE);
+        assert_eq!(
+            app.focus,
+            Some(Field::Search),
+            "Tab left the search with nowhere to go"
+        );
+        hit(&mut app, Key::Escape, Modifiers::NONE);
+        assert_eq!(app.focus, None);
+        hit(&mut app, Key::F, Modifiers::ctrl());
+        assert_eq!(
+            app.focus,
+            Some(Field::Search),
+            "Ctrl+F did not reach the search"
+        );
+
+        // The split-tunnel tab with no profile chosen draws no range box, and
+        // Tab has nowhere to take the keyboard from the search.
+        hit(&mut app, Key::Escape, Modifiers::NONE);
+        app.selected_profile = None;
+        app.set_tab(DetailTab::SplitTunnel);
+        hit(&mut app, Key::Tab, Modifiers::NONE);
+        hit(&mut app, Key::Tab, Modifiers::NONE);
+        assert_eq!(
+            app.focus,
+            Some(Field::Search),
+            "Tab went to a range box that is not drawn"
+        );
+
+        hit(&mut app, Key::Escape, Modifiers::NONE);
+        app.select_profile(0);
+        app.set_tab(DetailTab::SplitTunnel);
+        hit(&mut app, Key::Tab, Modifiers::NONE);
+        hit(&mut app, Key::Tab, Modifiers::NONE);
+        assert_eq!(
+            app.focus,
+            Some(Field::AllowedIp),
+            "Tab from the search did not reach the range box"
+        );
+        hit(&mut app, Key::Tab, Modifiers::NONE);
+        assert_eq!(app.focus, Some(Field::Search), "Tab from the range box");
+        hit(&mut app, Key::Tab, Modifiers::NONE);
+        hit(&mut app, Key::F, Modifiers::ctrl());
+        assert_eq!(
+            app.focus,
+            Some(Field::Search),
+            "Ctrl+F from the range box did not reach the search"
+        );
+
+        // AltGr+F types, and is no Ctrl+F.
+        hit(&mut app, Key::Escape, Modifiers::NONE);
+        let altgr = Modifiers {
+            ctrl: true,
+            alt: true,
+            ..Modifiers::NONE
+        };
+        hit(&mut app, Key::F, altgr);
+        assert_eq!(app.focus, None, "AltGr+F was taken for Ctrl+F");
+    }
+
+    /// **A chord is not one of this window's keys**: Alt+Left switched the tab
+    /// and Alt+Down the profile, and both are the window manager's.
+    #[test]
+    fn a_chord_is_not_one_of_this_windows_keys() {
+        use guitk::event::Modifiers;
+        let mut app = crowded();
+        app.select_profile(0);
+        assert_eq!(hit(&mut app, Key::Right, Modifiers::alt()), Action::None);
+        assert_eq!(hit(&mut app, Key::Down, Modifiers::alt()), Action::None);
+        assert_eq!(
+            hit(&mut app, Key::Escape, Modifiers::super_key()),
+            Action::None
+        );
+        assert_eq!(app.current_tab, DetailTab::Overview);
+        assert_eq!(app.selected_profile, Some(0));
+    }
+
+    // --- The boxes edit at a caret ---
+
+    fn with_mods(k: Key, modifiers: guitk::event::Modifiers) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        }
+    }
+
+    /// The caret lines drawn inside `rect`: the toolkit draws a caret as a
+    /// vertical line.
+    fn carets_in(app: &VpnManager, rect: Rect) -> usize {
+        render_frame(app, WINDOW_WIDTH, WINDOW_HEIGHT)
+            .commands()
+            .iter()
+            .filter(|c| {
+                matches!(c, RenderCommand::Line { x1, x2, y1, .. }
+                    if (x1 - x2).abs() < f32::EPSILON && rect.contains(*x1, *y1 + 1.0))
+            })
+            .count()
+    }
+
+    /// **A box edits at a caret**: the arrows, Home and End move it, typing
+    /// goes where it is, Backspace and Delete delete at it, Ctrl+A, C, X and V
+    /// select, copy, cut and paste -- and the caret is drawn there. The boxes
+    /// took typing at their end and Backspace from it, and nothing else, with
+    /// a `|` appended for a caret.
+    #[test]
+    fn a_box_edits_at_a_caret() {
+        use guitk::event::Modifiers;
+        let mut app = VpnManager::with_sample_profiles();
+        let search = rect_of(&app, Target::Focus(Field::Search)).expect("the search box");
+        assert_eq!(carets_in(&app, search), 0, "a caret without the keyboard");
+        click(&mut app, Target::Focus(Field::Search));
+        assert_eq!(
+            carets_in(&app, search),
+            1,
+            "the empty box with the keyboard has no caret"
+        );
+        type_str(&mut app, "gmng");
+        app.handle_key(&press(Key::Home));
+        app.handle_key(&press(Key::Right));
+        type_str(&mut app, "a");
+        app.handle_key(&press(Key::Right));
+        type_str(&mut app, "i");
+        assert_eq!(app.search_query, "gaming", "the caret did not move");
+        assert_eq!(carets_in(&app, search), 1, "no caret is drawn in the box");
+        let caret = render_frame(&app, WINDOW_WIDTH, WINDOW_HEIGHT)
+            .commands()
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Line { x1, x2, y1, .. }
+                    if (x1 - x2).abs() < f32::EPSILON && search.contains(*x1, *y1 + 1.0) =>
+                {
+                    Some(*x1)
+                }
+                _ => None,
+            })
+            .expect("a caret");
+        let after = search.x
+            + FIELD_TEXT_INSET
+            + text::measure("gami", FIELD_TEXT_SIZE, FontWeightHint::Regular);
+        assert!(
+            (caret - after).abs() < 1.0,
+            "the caret is drawn at {caret}, not after `gami` at {after}"
+        );
+        let shown: Vec<&str> = app
+            .filtered_profiles()
+            .iter()
+            .map(|i| app.profiles[*i].name.as_str())
+            .collect();
+        assert_eq!(shown, vec!["Gaming VPN"]);
+        app.handle_key(&press(Key::Home));
+        app.handle_key(&press(Key::Delete));
+        assert_eq!(app.search_query, "aming", "Delete at the caret");
+        app.handle_key(&with_mods(Key::A, Modifiers::ctrl()));
+        app.handle_key(&with_mods(Key::X, Modifiers::ctrl()));
+        assert_eq!(app.search_query, "", "Ctrl+X");
+        app.handle_key(&with_mods(Key::V, Modifiers::ctrl()));
+        assert_eq!(app.search_query, "aming", "Ctrl+V");
+
+        // A press past the text's end puts the caret at its end, and one at
+        // its start puts it there.
+        let press_at = |app: &mut VpnManager, x: f32| {
+            let at = Event::Mouse(MouseEvent {
+                x,
+                y: search.y + search.h / 2.0,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            });
+            app.handle_event(&at, (WINDOW_WIDTH, WINDOW_HEIGHT));
+        };
+        app.handle_key(&press(Key::Home));
+        press_at(&mut app, search.right() - 2.0);
+        type_str(&mut app, "!");
+        assert_eq!(
+            app.search_query, "aming!",
+            "a press past the text did not put the caret at its end"
+        );
+        press_at(&mut app, search.x + FIELD_TEXT_INSET);
+        type_str(&mut app, "g");
+        assert_eq!(
+            app.search_query, "gaming!",
+            "a press at the text's start did not put the caret there"
+        );
+    }
+
+    /// **A box the keyboard moves to types after what it holds**, wherever
+    /// the caret stood in the box it came from -- by Tab, or by Ctrl+F --
+    /// even when the two hold the same text, which is when an editor left
+    /// as it was would go on typing at the old box's caret.
+    #[test]
+    fn a_box_the_keyboard_moves_to_types_after_what_it_holds() {
+        use guitk::event::Modifiers;
+        let mut app = VpnManager::with_sample_profiles();
+        click(&mut app, Target::AddProfile);
+        assert_eq!(app.focus, Some(Field::Name));
+        type_str(&mut app, "ab");
+        app.editing_profile
+            .as_mut()
+            .expect("editing")
+            .server_address = String::from("ab");
+        app.handle_key(&press(Key::Home));
+        app.handle_key(&press(Key::Tab));
+        assert_eq!(app.focus, Some(Field::Server));
+        type_str(&mut app, "c");
+        assert_eq!(
+            app.editing_profile
+                .as_ref()
+                .expect("editing")
+                .server_address,
+            "abc",
+            "Tab left the caret where the last box had it"
+        );
+        click(&mut app, Target::DialogCancel);
+
+        app.select_profile(0);
+        app.set_tab(DetailTab::SplitTunnel);
+        app.search_query = String::from("ab");
+        click(&mut app, Target::Focus(Field::AllowedIp));
+        type_str(&mut app, "ab");
+        app.handle_key(&press(Key::Home));
+        hit(&mut app, Key::F, Modifiers::ctrl());
+        assert_eq!(app.focus, Some(Field::Search));
+        type_str(&mut app, "c");
+        assert_eq!(
+            app.search_query, "abc",
+            "Ctrl+F left the caret where the last box had it"
+        );
+    }
+
+    /// **A number box edits its digits at a caret, and takes nothing else**:
+    /// a letter typed is refused, and so is a paste with a letter in it --
+    /// whole, rather than half-taken. Deleting every digit leaves the box
+    /// empty, showing what it is for.
+    #[test]
+    fn a_number_box_edits_its_digits_and_refuses_the_rest() {
+        use guitk::event::Modifiers;
+        let mut app = VpnManager::with_sample_profiles();
+        click(&mut app, Target::AddProfile);
+        assert_eq!(app.focus, Some(Field::Name));
+        type_str(&mut app, "80a");
+        app.handle_key(&with_mods(Key::A, Modifiers::ctrl()));
+        app.handle_key(&with_mods(Key::C, Modifiers::ctrl()));
+        click(&mut app, Target::Focus(Field::Port));
+        let port = |app: &VpnManager| app.editing_profile.as_ref().expect("editing").port;
+        let was = port(&app);
+        assert!(was > 999, "the test needs a port of four digits or more");
+        app.handle_key(&press(Key::Home));
+        app.handle_key(&press(Key::Delete));
+        let rest: u16 = was.to_string()[1..].parse().unwrap();
+        assert_eq!(port(&app), rest, "Delete at the caret");
+        type_str(&mut app, "x");
+        assert_eq!(port(&app), rest, "a letter in a port box was an edit");
+        app.handle_key(&with_mods(Key::V, Modifiers::ctrl()));
+        assert_eq!(port(&app), rest, "a paste with a letter in it was taken");
+        type_str(&mut app, "4");
+        assert_eq!(
+            port(&app).to_string(),
+            format!("4{rest}"),
+            "a digit was not typed at the caret"
+        );
+        app.handle_key(&with_mods(Key::A, Modifiers::ctrl()));
+        app.handle_key(&press(Key::Backspace));
+        assert_eq!(port(&app), 0);
+        // What is drawn inside the port box itself: other boxes say "..." too.
+        let port_box = rect_of(&app, Target::Focus(Field::Port)).expect("the port box");
+        let in_box: Vec<String> = render_frame(&app, WINDOW_WIDTH, WINDOW_HEIGHT)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, x, y, .. }
+                | RenderCommand::RichText { text, x, y, .. }
+                    if port_box.contains(*x, *y + 1.0) =>
+                {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        // (The panel behind the dialog draws there too, which is why this asks
+        // for what is and is not among it rather than for all of it.)
+        assert!(
+            in_box.iter().any(|t| t == "..."),
+            "the emptied port box does not say what it is for: {in_box:?}"
+        );
+        assert!(
+            !in_box.iter().any(|t| t == "0"),
+            "the emptied port box shows a 0 nobody typed: {in_box:?}"
         );
     }
 }

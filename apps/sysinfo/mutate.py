@@ -161,6 +161,81 @@ MUTATIONS += [
     ),
 ]
 
+# The keys are plain and a Ctrl chord is not AltGr; the search box is the
+# toolkit's field, edited by textline's editor (2026-10-04; lane C,
+# c-e-a-theme-can-shape-the-controls).
+CHORDS = "a_chord_is_no_key_here_and_types_nothing"
+FIELD = "the_search_box_is_the_toolkits_field"
+
+MUTATIONS += [
+    (
+        "a chord raises the list of keys",
+        "        if key.key == Key::F1 && plain {\n",
+        "        if key.key == Key::F1 {\n",
+        [CHORDS],
+    ),
+    (
+        "AltGr+E opens the export dialog",
+        "            Key::E if ctrl => {\n",
+        "            Key::E if key.modifiers.ctrl => {\n",
+        [CHORDS],
+    ),
+    (
+        "a chord works the window's keys",
+        "            _ if !plain => return EventResult::Ignored,\n",
+        "",
+        [CHORDS],
+    ),
+    (
+        "a chorded Escape leaves the search",
+        "            Key::Escape if plain => {\n                self.search_focused = false;\n",
+        "            Key::Escape => {\n                self.search_focused = false;\n",
+        [CHORDS],
+    ),
+    (
+        "the search box is never lit",
+        "            hovered: self.search_hovered && !covered,\n",
+        "            hovered: false,\n",
+        [FIELD],
+    ),
+    (
+        "the pointer over the search box is not noted",
+        "                self.search_hovered = Self::toolbar_layout().search.contains(mouse.x, mouse.y);\n",
+        "",
+        [FIELD],
+    ),
+    (
+        "the search box never has the keyboard's mark",
+        "            focused: self.search_focused && !covered,\n",
+        "            focused: false,\n",
+        [FIELD],
+    ),
+    (
+        "the search box keeps its mark under the list of keys",
+        "            focused: self.search_focused && !covered,\n",
+        "            focused: self.search_focused,\n",
+        [FIELD],
+    ),
+    (
+        "a search that finds nothing is not red",
+        "            invalid: !self.search_text.is_empty() && self.search_all(&self.search_text).is_empty(),\n",
+        "            invalid: false,\n",
+        [FIELD],
+    ),
+    (
+        "a press leaves the caret where it was",
+        "        self.search_editor.set_cursor(cursor);\n",
+        "        let _ = cursor;\n",
+        [FIELD],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [FIELD],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "sysinfo-app", timeout=600, only=only))

@@ -87,14 +87,6 @@ terminal	F12	ditto
 # time is invisible to it and perfectly visible to a reader. This is the one
 # gap in this instrument that cannot be closed by parsing harder, since the
 # text does not exist until the program runs.
-launcher	Num1	drawn on each result row as a Ctrl+N hint; asserted by a_row_says_which_key_launches_it
-launcher	Num2	ditto
-launcher	Num3	ditto
-launcher	Num4	ditto
-launcher	Num5	ditto
-launcher	Num6	ditto
-launcher	Num7	ditto
-launcher	Num8	ditto
 rssreader	Num4	the move-to-folder prompt numbers its own rows, one per folder that exists
 rssreader	Num5	ditto
 rssreader	Num6	ditto

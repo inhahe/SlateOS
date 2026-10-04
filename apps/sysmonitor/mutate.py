@@ -64,21 +64,114 @@ MUTATIONS = [
     ),
     (
         'a chorded Escape or Enter leaves the filter',
-        '            Key::Escape | Key::Enter if textline::is_plain(key.modifiers) => {',
-        '            Key::Escape | Key::Enter => {',
+        '        if matches!(key.key, Key::Escape | Key::Enter) && textline::is_plain(key.modifiers) {\n',
+        '        if matches!(key.key, Key::Escape | Key::Enter) {\n',
         ['a_chord_is_neither_a_monitor_key_nor_typing'],
     ),
+    # The filter's other keys are textline's editor's since 2026-10-04, which
+    # refuses Alt's and the Windows key's chords and types only what a key
+    # typed: the rule is textline's, and its own table covers it. What is this
+    # program's is handing the editor the key as it came -- chord and all.
     (
-        'Alt+Backspace deletes from the filter',
-        '            Key::Backspace if !textline::is_alt_or_windows_chord(key.modifiers) => {',
-        '            Key::Backspace => {',
+        "the filter's editor is given the key without its chord",
+        '            &mut self.filter_editor,\n            key,\n',
+        '            &mut self.filter_editor,\n'
+        '            &KeyEvent {\n'
+        '                modifiers: Modifiers::NONE,\n'
+        '                ..key.clone()\n'
+        '            },\n',
         ['a_chord_is_neither_a_monitor_key_nor_typing'],
     ),
+]
+
+# The filter box is the toolkit's field, edited by textline's editor, and it
+# takes any letter (2026-10-04; lane C, c-e-a-theme-can-shape-the-controls).
+FIELD = "the_filter_box_is_the_toolkits_field"
+EDITS = "the_filter_edits_like_a_field_and_takes_any_letter"
+CARET = "the_filter_caret_follows_the_glyphs"
+
+MUTATIONS += [
     (
-        "the filter types a command's letter",
-        '            _ if !textline::types_into_field(key) => EventResult::Consumed,\n',
-        '',
-        ['a_chord_is_neither_a_monitor_key_nor_typing'],
+        "the filter box never has the keyboard's mark",
+        "            focused: self.filter_focused && !self.show_help,\n",
+        "            focused: false,\n",
+        [FIELD],
+    ),
+    (
+        "the filter box keeps its mark under the list of keys",
+        "            focused: self.filter_focused && !self.show_help,\n",
+        "            focused: self.filter_focused,\n",
+        [FIELD],
+    ),
+    (
+        "a filter that matches nothing is not red",
+        "            invalid: !self.filter_text.is_empty() && self.visible_indices.is_empty(),\n",
+        "            invalid: false,\n",
+        [FIELD],
+    ),
+    (
+        "a press on the filter box does nothing",
+        "                    self.press_filter(mx);\n",
+        "                    let _ = mx;\n",
+        [FIELD],
+    ),
+    (
+        "a press elsewhere leaves the filter the keyboard",
+        "                self.filter_focused = false;\n\n                // Tab bar click",
+        "\n                // Tab bar click",
+        [FIELD],
+    ),
+    (
+        "a press leaves the caret where it was",
+        "        self.filter_editor.set_cursor(cursor);\n",
+        "        let _ = cursor;\n",
+        [FIELD],
+    ),
+    (
+        "the filter's caret is at its start",
+        "                cursor: self.filter_cursor(),\n",
+        "                cursor: TextCursor::default(),\n",
+        [CARET],
+    ),
+    (
+        "the filter's editor is not reloaded",
+        "        if self.filter_editor.text() != self.filter_text {\n"
+        "            self.filter_editor.set_text(&self.filter_text);\n"
+        "        }\n"
+        "        let edit = textline::apply_key(\n",
+        "        let edit = textline::apply_key(\n",
+        [EDITS],
+    ),
+    (
+        "the filter holds any length",
+        "            FILTER_CAPACITY,\n            &self.filter_clipboard,\n",
+        "            usize::MAX,\n            &self.filter_clipboard,\n",
+        [EDITS],
+    ),
+    (
+        "a cut takes nothing to the clipboard",
+        "            self.filter_clipboard = copied;\n",
+        "            let _ = copied;\n",
+        [EDITS],
+    ),
+    (
+        "an edit does not filter again",
+        "            self.filter_text = self.filter_editor.text().to_owned();\n"
+        "            self.rebuild_visible_list();\n",
+        "            self.filter_text = self.filter_editor.text().to_owned();\n",
+        [FIELD],
+    ),
+    (
+        "Ctrl+F leaves the editor with the last text",
+        "        self.filter_focused = true;\n        self.filter_editor.set_text(&self.filter_text);\n",
+        "        self.filter_focused = true;\n",
+        [EDITS],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [FIELD],
     ),
 ]
 

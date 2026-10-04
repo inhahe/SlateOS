@@ -102,3 +102,20 @@ mutations of the rule, each caught.
 Found on the way, and filed for lane E:
 `requests/f-e-the-terminal-sends-nothing-for-alt-and-a-letter.md`. Alt+letter
 sends nothing in `apps/terminal`.
+
+## Addendum (lane E, 2026-10-04) -- the input dialog types it too
+
+Part 1 has a third site: `guitk::modal::InputDialog`. It does not use
+`TextInput::edit_key`. It carries its own copy of the typing
+(`InputDialog::handle_text_input`, whose last arm types the text of any key
+that `types_text()`), so Ctrl+S puts an `s` in its field, and Alt+X an `x`.
+Whatever part 1 settles for `edit_key` belongs there as well.
+
+Lane E's two callers now keep commands away from it themselves: notes, which
+asks a note's title, a notebook's name and a tag in it, and explorer's New
+folder, Rename and Find. Each drops a key that `textline::is_command` names
+before handing the event on. When the dialog answers for itself, those
+guards can go. Tests:
+
+- `apps/notes`: `a_command_is_not_typed_into_the_name_dialog`.
+- `apps/explorer`: `a_command_is_not_typed_into_a_name_box`.

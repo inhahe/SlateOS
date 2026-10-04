@@ -584,7 +584,24 @@ pub struct LauncherState {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// Whether the list of keys is up.
+    show_help: bool,
 }
+
+/// The keys this window answers, as the F1 list shows them.
+///
+/// It had no list: F1 did nothing, and Ctrl+1 to 8 -- which open a program
+/// straight from the list -- and Tab, which completes a name, could be found
+/// only by pressing them. F1 alone raises it: everything typed goes into the
+/// search, `?` among it.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1", "This list"),
+    ("Up / Down", "Choose a program"),
+    ("Enter", "Open it"),
+    ("Ctrl+1-8", "Open the first to the eighth"),
+    ("Tab", "Complete its name"),
+    ("Escape", "Close the launcher"),
+];
 
 impl LauncherState {
     /// Create a new launcher with the programs installed here
@@ -631,6 +648,7 @@ impl LauncherState {
             viewport_width,
             viewport_height,
             error: None,
+            show_help: false,
         };
         // Initially show all apps sorted by frecency
         state.update_results();
@@ -734,6 +752,19 @@ impl LauncherState {
         if !self.visible {
             return LauncherAction::None;
         }
+        // The list of keys is modal for the pointer as it is for the keys: a
+        // press with any button puts it away and does nothing else -- it opens
+        // no program and closes no launcher -- and the pointer moving under it
+        // does not move the selection the keyboard made.
+        if self.show_help {
+            if matches!(
+                mouse.kind,
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_)
+            ) {
+                self.show_help = false;
+            }
+            return LauncherAction::None;
+        }
         let layout = Layout::of(self);
         match mouse.kind {
             MouseEventKind::Press(MouseButton::Left) => {
@@ -777,6 +808,7 @@ impl LauncherState {
     fn display_revision(&self) -> DisplayRevision {
         DisplayRevision {
             visible: self.visible,
+            help: self.show_help,
             selected: self.selected_index,
             results: self.results.len(),
             query: self.query.clone(),
@@ -794,6 +826,22 @@ impl LauncherState {
     /// Handle a key event. Returns what action the shell should take.
     pub fn handle_key(&mut self, event: &KeyEvent) -> LauncherAction {
         if !event.pressed {
+            return LauncherAction::None;
+        }
+
+        // The list of keys first: it is drawn over the dialog, and modal while
+        // it is up -- a plain F1 or Escape puts it away, and no other key
+        // reaches the dialog under it, where Escape would close the launcher
+        // and Enter open a program. F1 alone raises it, as it is never typed.
+        let plain = textline::is_plain(event.modifiers);
+        if self.show_help {
+            if plain && matches!(event.key, Key::F1 | Key::Escape) {
+                self.show_help = false;
+            }
+            return LauncherAction::None;
+        }
+        if plain && event.key == Key::F1 {
+            self.show_help = true;
             return LauncherAction::None;
         }
 
@@ -1351,6 +1399,19 @@ impl LauncherState {
         cmds.push(RenderCommand::PopTranslate);
         cmds.push(RenderCommand::PopClip);
 
+        // The list of keys over the dialog: it is the one thing on screen a
+        // reader asked for explicitly.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (self.viewport_width, self.viewport_height),
+                0.0,
+                SHORTCUTS,
+                "F1 or Escape closes this",
+            );
+        }
+
         cmds
     }
 }
@@ -1522,6 +1583,7 @@ fn commands() -> Vec<AppEntry> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DisplayRevision {
     visible: bool,
+    help: bool,
     selected: usize,
     results: usize,
     query: String,
@@ -3317,5 +3379,159 @@ mod tests {
             caret > 0.0 && caret < width,
             "the caret of a long query is at {caret}, outside the box 0..{width}"
         );
+    }
+
+    // ── The list of keys ──────────────────────────────────────────────────
+
+    fn key_of(k: Key, modifiers: Modifiers, text: &str) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        }
+    }
+
+    fn drawn_strings(state: &LauncherState) -> Vec<String> {
+        state
+            .render()
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn mouse_at(
+        state: &mut LauncherState,
+        (x, y): (f32, f32),
+        kind: MouseEventKind,
+    ) -> LauncherAction {
+        state.handle_event(&Event::Mouse(MouseEvent { x, y, kind }))
+    }
+
+    /// **Every key the list of keys advertises is answered by this window**,
+    /// with every program listed and the selection in the middle of them: it
+    /// acts, or it changes what is drawn.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let mut launcher = shown(1920.0, 1080.0);
+                assert!(launcher.results.len() >= 8, "the test needs eight programs");
+                launcher.selected_index = 2;
+                let before = launcher.display_revision();
+                let action = launcher.handle_key(&stroke);
+                assert!(
+                    action != LauncherAction::None || launcher.display_revision() != before,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The list of keys reaches the window**, and goes on F1 or a plain
+    /// Escape -- not on Alt+Escape, which is the desktop's, and Escape under
+    /// it closes the list rather than the launcher. `?` is typed, as every
+    /// character is here.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut launcher = shown(1920.0, 1080.0);
+        assert!(
+            !drawn_strings(&launcher)
+                .iter()
+                .any(|t| t.contains("F1 or Escape closes this")),
+            "the list is up before anybody asked for it"
+        );
+        for chord in [Modifiers::alt(), Modifiers::super_key()] {
+            launcher.handle_key(&key_of(Key::F1, chord, ""));
+            assert!(
+                !launcher.show_help,
+                "{chord:?}+F1, the desktop's, raised the list"
+            );
+        }
+        launcher.handle_key(&key_of(Key::Slash, Modifiers::shift(), "?"));
+        assert!(!launcher.show_help, "? raised the list");
+        assert_eq!(launcher.query, "?", "? was not typed");
+
+        launcher.handle_key(&key_of(Key::F1, Modifiers::NONE, ""));
+        let missing = guitk::shortcut::missing_rows(&drawn_strings(&launcher), SHORTCUTS);
+        assert!(missing.is_empty(), "{missing:?}");
+        launcher.handle_key(&key_of(Key::Escape, Modifiers::alt(), ""));
+        assert!(launcher.show_help, "Alt+Escape put the list away");
+        assert_eq!(
+            launcher.handle_key(&key_of(Key::Escape, Modifiers::NONE, "")),
+            LauncherAction::None,
+            "Escape under the list closed the launcher"
+        );
+        assert!(!launcher.show_help, "Escape left the list up");
+        assert!(launcher.visible);
+        launcher.handle_key(&key_of(Key::F1, Modifiers::NONE, ""));
+        launcher.handle_key(&key_of(Key::F1, Modifiers::NONE, ""));
+        assert!(!launcher.show_help, "F1 left the list up");
+    }
+
+    /// **The list of keys is modal**: with it up, no key or press reaches the
+    /// dialog under it -- Enter opens no program, a press on a row neither
+    /// opens it nor closes the launcher, and the pointer moving over the rows
+    /// does not move the selection the keyboard made. The dialog is the same
+    /// with it down.
+    #[test]
+    fn the_shortcut_list_takes_the_keys_and_a_press() {
+        let mut launcher = shown(1920.0, 1080.0);
+        let row = drawn_row_centre(&launcher, 3);
+        launcher.handle_key(&key_of(Key::F1, Modifiers::NONE, ""));
+        for (k, m, t) in [
+            (Key::Enter, Modifiers::NONE, ""),
+            (Key::Down, Modifiers::NONE, ""),
+            (Key::Num1, Modifiers::ctrl(), "1"),
+            (Key::A, Modifiers::NONE, "a"),
+            (Key::Tab, Modifiers::NONE, ""),
+        ] {
+            assert_eq!(
+                launcher.handle_key(&key_of(k, m, t)),
+                LauncherAction::None,
+                "{k:?} reached the dialog under the list"
+            );
+        }
+        assert!(
+            launcher.show_help,
+            "a key other than F1 or Escape put the list away"
+        );
+        assert_eq!(
+            launcher.selected_index, 0,
+            "a key moved the selection under it"
+        );
+        assert_eq!(launcher.query, "", "a key was typed under it");
+        mouse_at(&mut launcher, row, MouseEventKind::Move);
+        assert_eq!(
+            launcher.selected_index, 0,
+            "the pointer moved the selection under the list"
+        );
+        assert_eq!(
+            mouse_at(&mut launcher, row, MouseEventKind::Press(MouseButton::Left)),
+            LauncherAction::None,
+            "the press opened the program under the list"
+        );
+        assert!(!launcher.show_help, "the press did not put the list away");
+        assert!(launcher.visible);
+        launcher.handle_key(&key_of(Key::F1, Modifiers::NONE, ""));
+        assert_eq!(
+            mouse_at(
+                &mut launcher,
+                (5.0, 5.0),
+                MouseEventKind::Press(MouseButton::Right)
+            ),
+            LauncherAction::None,
+            "a press away from the dialog closed the launcher under the list"
+        );
+        assert!(!launcher.show_help, "a right-button press left the list up");
+        assert!(launcher.visible);
+
+        // The dialog.
+        mouse_at(&mut launcher, row, MouseEventKind::Move);
+        assert_eq!(launcher.selected_index, 3);
     }
 }

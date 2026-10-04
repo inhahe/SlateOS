@@ -90,15 +90,71 @@ MUTATIONS = [
     ),
     (
         "the task name refuses what AltGr types",
-        "                if !textline::types_into_field(key) {",
-        "                if !textline::types_into_field(key) || key.modifiers.ctrl {",
+        "            _ => {\n                if self.task_editor.text() != self.current_task {\n",
+        "            _ => {\n"
+        "                if key.modifiers.ctrl {\n"
+        "                    return EventResult::Ignored;\n"
+        "                }\n"
+        "                if self.task_editor.text() != self.current_task {\n",
         ["the_task_name_takes_altgr_letters_and_no_commands_letter"],
     ),
     (
+        # What the box did before the editor: type whatever text a key
+        # carried, a command's letter among it.
         "the task name types a command's letter",
-        "                if !textline::types_into_field(key) {",
-        "                if !key.types_text() {",
+        "            _ => {\n                if self.task_editor.text() != self.current_task {\n",
+        "            _ => {\n"
+        "                if key.types_text() && !textline::types_into_field(key) {\n"
+        "                    self.current_task.push_str(&key.text);\n"
+        "                    return EventResult::Consumed;\n"
+        "                }\n"
+        "                if self.task_editor.text() != self.current_task {\n",
         ["the_task_name_takes_altgr_letters_and_no_commands_letter"],
+    ),
+    # The task box is the toolkit's field, edited by textline's editor; it
+    # opens on the label there is, and Escape puts it back (2026-10-04; lane
+    # C, c-e-a-theme-can-shape-the-controls).
+    (
+        "the task box opens empty",
+        "        self.task_before.clone_from(&self.current_task);\n",
+        "        self.task_before.clone_from(&self.current_task);\n        self.current_task.clear();\n",
+        ["the_task_box_opens_on_the_label_and_escape_puts_it_back"],
+    ),
+    (
+        "the label opens unselected",
+        "        self.task_editor.select_all();\n",
+        "",
+        ["the_task_box_opens_on_the_label_and_escape_puts_it_back"],
+    ),
+    (
+        "Escape keeps what was typed",
+        "                self.current_task = std::mem::take(&mut self.task_before);\n",
+        "",
+        ["the_task_box_opens_on_the_label_and_escape_puts_it_back"],
+    ),
+    (
+        "the task box never has the keyboard",
+        "            focused: self.task_input_active && !self.show_help,\n",
+        "            focused: false,\n",
+        ["the_task_box_is_the_toolkits_field"],
+    ),
+    (
+        "the task box keeps its mark under the list of keys",
+        "            focused: self.task_input_active && !self.show_help,\n",
+        "            focused: self.task_input_active,\n",
+        ["the_task_box_is_the_toolkits_field"],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        ["the_task_box_is_the_toolkits_field"],
+    ),
+    (
+        "the caret is drawn at the start of the label",
+        "                    self.task_editor.cursor()\n",
+        "                    guitk::text::TextCursor::default()\n",
+        ["the_task_box_is_the_toolkits_field"],
     ),
     (
         "a key held with Ctrl, Alt or the Windows key is a bare key",

@@ -151,7 +151,7 @@ MUTATIONS = [
     # --- The box and the keys ---
     (
         "N alone is New Task",
-        "        if key.key == Key::N && key.modifiers.ctrl {",
+        "        if key.key == Key::N && ctrl {",
         "        if key.key == Key::N {",
         [PLAIN_N],
     ),
@@ -169,8 +169,8 @@ MUTATIONS = [
     ),
     (
         "the toolbar's New Task does nothing",
-        "        } else if mx < 170.0 {\n            self.open_run_box();",
-        "        } else if mx < 170.0 {\n            self.status_message.clear();",
+        "                ToolbarAction::NewTask => self.open_run_box(),\n",
+        "                ToolbarAction::NewTask => self.status_message.clear(),\n",
         [POINTER],
     ),
     (
@@ -354,14 +354,14 @@ MUTATIONS += [
     ),
     (
         "Escape does not give the pick up",
-        "        if key.key == Key::Escape && self.window_picker.active {\n            self.cancel_window_pick();\n            return EventResult::Consumed;\n        }\n",
+        "        if key.key == Key::Escape && plain && self.window_picker.active {\n            self.cancel_window_pick();\n            return EventResult::Consumed;\n        }\n",
         "",
         [ASK],
     ),
     (
         "AltGr+I picks",
-        "        if key.key == Key::I && key.modifiers.ctrl && !key.modifiers.alt && !key.modifiers.super_key\n",
-        "        if key.key == Key::I && key.modifiers.ctrl && !key.modifiers.super_key\n",
+        "        if key.key == Key::I && ctrl {\n",
+        "        if key.key == Key::I && key.modifiers.ctrl && !key.modifiers.super_key {\n",
         [ASK],
     ),
     (
@@ -393,6 +393,105 @@ MUTATIONS += [
         "        .find(|(r, _)| r.contains(x, y))\n",
         "        .find(|(r, _)| x < r.right() + 6.0 && y >= r.y && y < r.bottom())\n",
         [BUTTONS],
+    ),
+]
+
+# The filter box is the toolkit's field, edited by textline's editor; the
+# keys bound to themselves are plain, and a Ctrl chord is not AltGr
+# (2026-10-04; lane C, c-e-a-theme-can-shape-the-controls).
+FILTER = "the_filter_box_is_the_toolkits_field"
+EDITS = "the_filter_box_edits_like_a_field_and_types_no_chord"
+FILTER_PRESS = "a_press_in_the_filter_puts_the_caret_under_the_pointer"
+PLAIN = "a_chord_is_none_of_the_process_explorers_keys"
+CARET = "the_filter_caret_follows_the_glyphs"
+
+MUTATIONS += [
+    (
+        "a chord raises the list of keys",
+        "        if key.key == Key::F1 && plain {\n",
+        "        if key.key == Key::F1 {\n",
+        [PLAIN],
+    ),
+    (
+        "a chord works the explorer's keys",
+        "        if !plain {\n            return EventResult::Ignored;\n        }\n        match key.key {\n",
+        "        match key.key {\n",
+        [PLAIN],
+    ),
+    (
+        "AltGr+N opens New Task",
+        "        if key.key == Key::N && ctrl {",
+        "        if key.key == Key::N && key.modifiers.ctrl {",
+        [EDITS],
+    ),
+    (
+        "AltGr+F focuses the filter",
+        "        if key.key == Key::F && ctrl {\n",
+        "        if key.key == Key::F && key.modifiers.ctrl {\n",
+        [PLAIN],
+    ),
+    (
+        # What the box did before the editor: type whatever text a key
+        # carried, a chord's letter among it.
+        "the filter types a chord's letter",
+        "                self.sync_filter_editor();\n"
+        "                let before = self.filter_editor.text().to_owned();\n",
+        "                if key.types_text() && !textline::types_into_field(key) {\n"
+        "                    self.filter_text.push_str(&key.text);\n"
+        "                    self.rebuild_visible_list();\n"
+        "                    return EventResult::Consumed;\n"
+        "                }\n"
+        "                self.sync_filter_editor();\n"
+        "                let before = self.filter_editor.text().to_owned();\n",
+        [EDITS],
+    ),
+    (
+        "the filter box is never lit",
+        "            hovered: self.filter_hovered && !covered,\n",
+        "            hovered: false,\n",
+        [FILTER],
+    ),
+    (
+        "the pointer leaving leaves the filter lit",
+        "                self.hovered_index = None;\n                self.filter_hovered = false;\n",
+        "                self.hovered_index = None;\n",
+        [FILTER],
+    ),
+    (
+        "the filter keeps its mark under the list of keys",
+        "            focused: self.filter_focused && !covered,\n",
+        "            focused: self.filter_focused,\n",
+        [FILTER],
+    ),
+    (
+        "the filter keeps its mark under New Task",
+        "        let covered = self.show_help || self.run_box.is_some();\n",
+        "        let covered = self.show_help;\n",
+        [FILTER],
+    ),
+    (
+        "a filter that matches nothing is not red",
+        "            invalid: !self.filter_text.is_empty() && self.visible_indices.is_empty(),\n",
+        "            invalid: false,\n",
+        [FILTER],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [FILTER],
+    ),
+    (
+        "a press leaves the caret at the end",
+        "        self.filter_editor.set_selection_anchor(None);\n        self.filter_editor.set_cursor(cursor);\n",
+        "        self.filter_editor.set_selection_anchor(None);\n",
+        [FILTER_PRESS],
+    ),
+    (
+        "the filter is drawn with no caret",
+        "                focused: state.focused,\n                x: tx,\n",
+        "                focused: false,\n                x: tx,\n",
+        [CARET],
     ),
 ]
 

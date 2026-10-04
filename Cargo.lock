@@ -399,6 +399,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]
@@ -1127,6 +1128,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]
@@ -2545,6 +2547,7 @@ dependencies = [
  "oswindow",
  "scratchdir",
  "textline",
+ "unsaved",
 ]
 
 [[package]]
@@ -2567,6 +2570,7 @@ dependencies = [
  "hwquery",
  "oswindow",
  "scratchdir",
+ "textline",
 ]
 
 [[package]]
@@ -2817,6 +2821,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]
@@ -2910,6 +2915,7 @@ dependencies = [
  "safeio",
  "scratchdir",
  "settingsfile",
+ "textline",
  "thumbs",
 ]
 
@@ -3145,6 +3151,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]
@@ -3600,6 +3607,7 @@ dependencies = [
  "pathtext",
  "safeio",
  "statehistory",
+ "textarea",
  "textline",
  "unsaved",
  "yamldoc",
@@ -4017,6 +4025,7 @@ dependencies = [
  "pathtext",
  "procinfo",
  "safeio",
+ "textline",
 ]
 
 [[package]]
@@ -4555,6 +4564,7 @@ dependencies = [
  "pathtext",
  "safeio",
  "scratchdir",
+ "textline",
 ]
 
 [[package]]

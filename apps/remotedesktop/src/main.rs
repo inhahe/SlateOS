@@ -2281,6 +2281,28 @@ impl RemoteDesktopApp {
     // ========================================================================
 
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The list of keys is drawn over everything -- a remote screen and
+        // the password prompt included -- and is modal: while it is up, no key
+        // and no press reaches the remote machine, the prompt or the window
+        // under it, and the wheel scrolls nothing. A press with any button
+        // puts the list away. A list raised before a session's screen came up
+        // used to forward every key to the remote machine under it -- Escape
+        // and F1 too, so no key could put it away. A release and a move still
+        // go the usual way, so nothing held down is left stuck.
+        if self.show_help {
+            match event {
+                Event::Key(key) if key.pressed => return self.handle_key(key),
+                Event::Mouse(mouse) => match mouse.kind {
+                    MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                        self.show_help = false;
+                        return EventResult::Consumed;
+                    }
+                    MouseEventKind::Scroll { .. } => return EventResult::Ignored,
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
         match event {
             Event::Key(key) if self.password_prompt.is_some() => self.handle_prompt_key(key),
             Event::Key(key) => self
@@ -7297,6 +7319,94 @@ mod tests {
         assert!(
             heard.recv_timeout(Duration::from_millis(300)).is_err(),
             "the escape hotkey went to the remote machine"
+        );
+    }
+
+    /// **Nothing reaches the remote machine through the list of keys.** A
+    /// list raised before the session's screen came up forwarded every key to
+    /// the remote machine under it -- Escape and F1 too, so no key could put
+    /// it away -- and a press on the screen went through it. Now a key is the
+    /// list's, a press with either button puts it away and sends nothing, and
+    /// the wheel turns nothing. The controls are the same key and press with
+    /// the list down, which the remote machine hears.
+    #[test]
+    fn the_shortcut_card_keeps_keys_and_presses_from_the_remote_machine() {
+        let mut script = handshake_none();
+        script.push(Step::Hear(8));
+        script.push(Step::Hear(6));
+        // Listening still, so anything sent while the list was up is heard
+        // rather than swallowed after the script ends.
+        script.push(Step::Hear(8));
+        let (port, heard) = server(script);
+        let mut app = vnc_app(port);
+        let f1 = KeyEvent {
+            key: Key::F1,
+            pressed: true,
+            modifiers: Modifiers::default(),
+            text: String::new(),
+        };
+        app.handle_event(&Event::Key(f1));
+        assert!(app.show_help, "F1 raised no list before the session");
+        app.connect_vnc(0, "").expect("a session");
+        pump_until(&mut app, |a| a.sessions[0].state == SessionState::Connected);
+        for _ in 0..6 {
+            let _ = heard.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        let (x, y, w, h) = app.screen_view().expect("the screen is shown").placed;
+        let on_screen = |kind| {
+            Event::Mouse(guitk::event::MouseEvent {
+                x: x + w - 0.5,
+                y: y + h - 0.5,
+                kind,
+            })
+        };
+        let key = |k: Key, text: &str| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers: Modifiers::default(),
+                text: text.to_owned(),
+            })
+        };
+        let nothing_sent = |what: &str| {
+            assert!(
+                heard.recv_timeout(Duration::from_millis(300)).is_err(),
+                "{what} reached the remote machine through the list"
+            );
+        };
+
+        app.handle_event(&key(Key::A, "a"));
+        nothing_sent("a key");
+        app.handle_event(&on_screen(MouseEventKind::Scroll { dx: 0.0, dy: 1.0 }));
+        nothing_sent("the wheel");
+        assert!(app.show_help, "a key or the wheel put the list away");
+        app.handle_event(&key(Key::Escape, ""));
+        nothing_sent("Escape");
+        assert!(!app.show_help, "Escape left the list up");
+
+        // F1 is the remote machine's while its screen is shown, so the list
+        // is put back up as a reader would have left it.
+        app.show_help = true;
+        app.handle_event(&on_screen(MouseEventKind::Press(MouseButton::Left)));
+        nothing_sent("a press");
+        assert!(!app.show_help, "the press did not put the list away");
+        app.show_help = true;
+        app.handle_event(&on_screen(MouseEventKind::Press(MouseButton::Right)));
+        nothing_sent("a right-button press");
+        assert!(!app.show_help, "a right-button press left the list up");
+
+        // The controls.
+        app.handle_event(&key(Key::A, "a"));
+        assert_eq!(
+            heard.recv_timeout(Duration::from_secs(5)).unwrap(),
+            [4, 1, 0, 0, 0, 0, 0, 0x61],
+            "control: a key reaches nothing even with the list down"
+        );
+        app.handle_event(&on_screen(MouseEventKind::Press(MouseButton::Left)));
+        assert_eq!(
+            heard.recv_timeout(Duration::from_secs(5)).unwrap(),
+            [5, 1, 0, 3, 0, 1],
+            "control: a press reaches nothing even with the list down"
         );
     }
 

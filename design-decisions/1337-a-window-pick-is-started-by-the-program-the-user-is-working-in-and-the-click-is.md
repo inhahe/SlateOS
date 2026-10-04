@@ -51,3 +51,24 @@ a choice.
 **Not decided here:** reading a window's *pixels*, which is
 `open-questions.md` F-Q3 and stays the operator's question. A pick returns
 nothing of a window's contents.
+
+**2026-10-04: the route through `oswindow::app`** (lane E's
+`requests/e-f-the-window-picker-has-no-route-through-oswindow-app.md`).
+Nearly every application runs under `app::drive` and never holds the
+`EventLoop`, so a pick is asked for through `App::take_pick` (drained after
+every event, as `take_reloads` is) and answered through
+`App::window_picked`, a refusal as its own case (`PickRefused`) rather than
+folded into "nothing picked". Two things it settled:
+
+- **An answer wakes the loop.** The click that ends a pick lands on another
+  program's window and is not delivered, so the answer arrives with no event
+  at all, and a loop parked on input would not read it until the user next
+  touched the program. `EventLoop::run_batched` now hands over
+  `Dispatch::Answered` when a reply the program is waiting on arrives -- a
+  pick's or a display sleep's wake, the two requests answered by the user
+  rather than the compositor -- once per answer.
+- **One pick per program, held by the loop.** A second `Start` while one is
+  open is ignored rather than sent: the compositor would replace the first,
+  answering it as given up, and the application would hear two answers for
+  one press. A pick still open when the loop ends is given up, so the
+  crosshair does not outlive the program's interest in it.

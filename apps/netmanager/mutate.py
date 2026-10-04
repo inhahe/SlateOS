@@ -189,8 +189,8 @@ MAIN = [
     ),
     (
         "DHCP is sent as a static configuration",
-        "        if config.dhcp_enabled {\n            return Err(format!(",
-        "        if false {\n            return Err(format!(",
+        "        if config.dhcp_enabled {\n            // Two refusals",
+        "        if false {\n            // Two refusals",
         [NO_DHCP],
     ),
     (
@@ -402,8 +402,8 @@ MAIN += [
     ),
     (
         "an address box under DHCP takes the keyboard",
-        "        field == Field::DnsInput || (self.editing_ip && !self.edit_ip_config.dhcp_enabled)\n",
-        "        field == Field::DnsInput || self.editing_ip\n",
+        "                self.editing_ip && !self.edit_ip_config.dhcp_enabled\n",
+        "                self.editing_ip\n",
         [DHCP],
     ),
     (
@@ -451,6 +451,107 @@ MAIN += [
         "            Event::Mouse(mouse) if self.show_help => match mouse.kind {\n",
         "            Event::Mouse(mouse) if self.show_help && !matches!(mouse.kind, MouseEventKind::Scroll { .. }) => match mouse.kind {\n",
         [CARD],
+    ),
+]
+
+# A change to the DNS list is an edit: it opens the editor, whose Apply and
+# Cancel are on the DNS tab too; under DHCP the list cannot be changed; a
+# re-read keeps an open edit (2026-10-04).
+DNS_LOCKED = "under_dhcp_the_dns_list_cannot_be_changed_and_says_why"
+DNS_EDIT = "a_dns_change_opens_the_editor_and_the_dns_tab_can_apply_it"
+REREAD = "a_reread_keeps_an_open_edit_while_its_interface_is_listed"
+REFUSAL = "the_dhcp_refusal_says_whether_the_switch_was_moved"
+
+MAIN += [
+    (
+        "an added server leaves the editor closed",
+        "        self.begin_edit();\n        self.edit_ip_config.dns_servers.push(server.to_string());\n",
+        "        self.edit_ip_config.dns_servers.push(server.to_string());\n",
+        [DNS_EDIT],
+    ),
+    (
+        "a removal leaves the editor closed",
+        "        self.begin_edit();\n        self.edit_ip_config.dns_servers.remove(index);\n",
+        "        self.edit_ip_config.dns_servers.remove(index);\n",
+        [DNS_EDIT],
+    ),
+    (
+        "a move up leaves the editor closed",
+        "        self.begin_edit();\n        // `index` is known non-zero above",
+        "        // `index` is known non-zero above",
+        [DNS_EDIT],
+    ),
+    (
+        "a move down leaves the editor closed",
+        "        self.begin_edit();\n        self.edit_ip_config.dns_servers.swap(index, below);\n",
+        "        self.edit_ip_config.dns_servers.swap(index, below);\n",
+        [DNS_EDIT],
+    ),
+    (
+        "the DNS tab has no Apply",
+        "    if app.editing_ip {\n        render_apply_cancel(frame, app, lx, y + FIELD_HEIGHT + 16.0);\n    }\n",
+        "",
+        [DNS_EDIT],
+    ),
+    (
+        "an added server reads as done",
+        'self.status_message = format!("Added DNS server {typed}: Apply sends it");',
+        'self.status_message = format!("Added DNS server {typed}");',
+        [DNS_EDIT],
+    ),
+    (
+        "the DNS list changes under DHCP",
+        "        if self.dns_editable() {\n            Ok(())\n",
+        "        if true {\n            Ok(())\n",
+        [DNS_LOCKED],
+    ),
+    (
+        "the DNS rows have buttons under DHCP",
+        "            if !app.dns_editable() {\n"
+        "                y += DNS_ROW_HEIGHT + 2.0;\n"
+        "                continue;\n"
+        "            }\n",
+        "",
+        [DNS_LOCKED],
+    ),
+    (
+        "the DNS box is offered under DHCP, and nothing says why not",
+        "    if !app.dns_editable() {\n        // Said rather than left to be discovered",
+        "    if false {\n        // Said rather than left to be discovered",
+        [DNS_LOCKED],
+    ),
+    (
+        "the selection stays at its index across a re-read",
+        "        self.selected_interface = found\n            .unwrap_or(self.selected_interface)\n",
+        "        self.selected_interface = None\n            .unwrap_or(self.selected_interface)\n",
+        [REREAD],
+    ),
+    (
+        "a re-read throws an open edit away",
+        "            (true, Some(_)) => {\n"
+        "                self.finish_reading();\n"
+        "                return;\n"
+        "            }\n",
+        "            (true, Some(_)) => None,\n",
+        [REREAD],
+    ),
+    (
+        "an edit outlives its interface",
+        "        };\n        self.editing_ip = false;\n        if self.focus.is_some_and(",
+        "        };\n        self.editing_ip = self.editing_ip && dropped.is_some();\n        if self.focus.is_some_and(",
+        [REREAD],
+    ),
+    (
+        "nothing says an edit went with its interface",
+        "        if let Some(name) = dropped {\n",
+        "        if let Some(name) = None::<String> {\n",
+        [REREAD],
+    ),
+    (
+        "a switch nobody moved is refused as a switch to DHCP",
+        "            return Err(if iface.ip_config.dhcp_enabled {\n",
+        "            return Err(if false {\n",
+        [REFUSAL],
     ),
 ]
 

@@ -1065,7 +1065,18 @@ impl NetManagerApp {
     /// A failed read empties the list rather than keeping the last one: rows
     /// that stay after a read that could not see them would be shown as
     /// current when nothing says they are.
+    ///
+    /// The selection follows its interface by name, as the Wi-Fi selection
+    /// follows its SSID: a re-read can reorder the list or drop rows, and an
+    /// index kept across one points at whichever interface now sits there.
+    ///
+    /// An open editor keeps what has been typed into it while its interface
+    /// is still listed: Refresh, and the re-read after Enable or Disable,
+    /// reloaded the configuration from the interface and threw the edit away
+    /// with the editor still open. If the interface has gone, so has the
+    /// edit, and the status says so.
     pub fn read_interfaces_from(&mut self, provider: &dyn hwquery::HardwareProvider) {
+        let selected = self.selected_iface().map(|iface| iface.name.clone());
         match provider.query_network() {
             Ok(adapters) => {
                 self.interfaces = adapters
@@ -1080,14 +1091,42 @@ impl NetManagerApp {
                 self.listing = Listing::Unreadable(why.to_string());
             }
         }
-        self.selected_interface = self
-            .selected_interface
+        let found = selected
+            .as_deref()
+            .and_then(|name| self.interfaces.iter().position(|iface| iface.name == name));
+        self.selected_interface = found
+            .unwrap_or(self.selected_interface)
             .min(self.interfaces.len().saturating_sub(1));
+        let dropped = match (self.editing_ip, found) {
+            // Still there: the edit stands.
+            (true, Some(_)) => {
+                self.finish_reading();
+                return;
+            }
+            (true, None) => selected,
+            (false, _) => None,
+        };
+        self.editing_ip = false;
+        if self.focus.is_some_and(|field| !self.field_enabled(field)) {
+            self.focus = None;
+        }
         self.edit_ip_config = self
             .interfaces
             .get(self.selected_interface)
             .map(|iface| iface.ip_config.clone())
             .unwrap_or_default();
+        self.finish_reading();
+        if let Some(name) = dropped {
+            self.status_message = format!(
+                "{name} is no longer listed, and its unapplied changes went with it. {}",
+                self.status_message
+            );
+        }
+    }
+
+    /// The status line after a read: the selected interface's summary, or
+    /// why there is none.
+    fn finish_reading(&mut self) {
         self.status_message = self.interfaces.get(self.selected_interface).map_or_else(
             || match &self.listing {
                 Listing::Unreadable(why) => format!("Could not read the interfaces: {why}"),
@@ -1238,9 +1277,17 @@ impl NetManagerApp {
         let name = iface.name.clone();
         let config = &self.edit_ip_config;
         if config.dhcp_enabled {
-            return Err(format!(
-                "Cannot switch {name} to DHCP from here: the dhcpcd command does that, run as an administrator"
-            ));
+            // Two refusals, because "cannot switch to DHCP" is untrue when
+            // the switch was on from the start and nobody moved it.
+            return Err(if iface.ip_config.dhcp_enabled {
+                String::from(
+                    "DHCP is switched on, and Apply sends nothing under DHCP: switch it off to set a static configuration (the dhcpcd command manages DHCP, run as an administrator)",
+                )
+            } else {
+                format!(
+                    "Cannot switch {name} to DHCP from here: the dhcpcd command does that, run as an administrator"
+                )
+            });
         }
         let field = |label: &str, text: &str| {
             octets(text).ok_or_else(|| format!("Not an address: {label} {text}"))
@@ -1297,8 +1344,42 @@ impl NetManagerApp {
         }
     }
 
-    /// Add a DNS server to the edited IP config.
+    /// Whether the DNS servers can be changed here: not while the
+    /// configuration being edited has DHCP switched on, since Apply sends
+    /// nothing under DHCP -- a list edited then is a change nothing can
+    /// make.
+    pub fn dns_editable(&self) -> bool {
+        !self.edit_ip_config.dhcp_enabled
+    }
+
+    /// Open the editor on the selected interface, if it is not open: a
+    /// change to the configuration is an edit, which only the editor's Apply
+    /// sends and only its Cancel takes back.
+    ///
+    /// A DNS server added on the DNS tab used to change the configuration
+    /// with the editor closed. Nothing could send it -- there was no Apply on
+    /// that tab -- and Edit, on the IP tab, reloaded the configuration from
+    /// the interface and threw it away.
+    fn begin_edit(&mut self) {
+        if !self.editing_ip {
+            self.start_editing_ip();
+        }
+    }
+
+    /// Why the DNS servers cannot be changed now, if they cannot.
+    fn dns_locked(&self) -> Result<(), String> {
+        if self.dns_editable() {
+            Ok(())
+        } else {
+            Err(String::from(
+                "DHCP is switched on, and Apply sends nothing under DHCP: switch it off on the IP Configuration tab to set the DNS servers",
+            ))
+        }
+    }
+
+    /// Add a DNS server to the edited IP config, opening the editor.
     pub fn add_dns_server(&mut self, server: &str) -> Result<(), String> {
+        self.dns_locked()?;
         if server.is_empty() {
             return Err("DNS server address is empty".into());
         }
@@ -1312,27 +1393,34 @@ impl NetManagerApp {
         {
             return Err("DNS server already in list".into());
         }
+        self.begin_edit();
         self.edit_ip_config.dns_servers.push(server.to_string());
         Ok(())
     }
 
-    /// Remove a DNS server by index from the edited IP config.
+    /// Remove a DNS server by index from the edited IP config, opening the
+    /// editor.
     pub fn remove_dns_server(&mut self, index: usize) -> Result<(), String> {
+        self.dns_locked()?;
         if index >= self.edit_ip_config.dns_servers.len() {
             return Err("DNS server index out of range".into());
         }
+        self.begin_edit();
         self.edit_ip_config.dns_servers.remove(index);
         Ok(())
     }
 
-    /// Move a DNS server up in priority (lower index = higher priority).
+    /// Move a DNS server up in priority (lower index = higher priority),
+    /// opening the editor.
     pub fn move_dns_up(&mut self, index: usize) -> Result<(), String> {
+        self.dns_locked()?;
         if index == 0 {
             return Err("Already at top".into());
         }
         if index >= self.edit_ip_config.dns_servers.len() {
             return Err("Index out of range".into());
         }
+        self.begin_edit();
         // `index` is known non-zero above, so the saturation never fires; it is
         // written this way so the subtraction cannot underflow even if the
         // guard above is ever changed.
@@ -1342,8 +1430,9 @@ impl NetManagerApp {
         Ok(())
     }
 
-    /// Move a DNS server down in priority.
+    /// Move a DNS server down in priority, opening the editor.
     pub fn move_dns_down(&mut self, index: usize) -> Result<(), String> {
+        self.dns_locked()?;
         // A row at `usize::MAX` cannot have one below it, so an overflow here
         // is the same answer as "already at bottom" rather than a panic.
         let below = index
@@ -1352,6 +1441,7 @@ impl NetManagerApp {
         if below >= self.edit_ip_config.dns_servers.len() {
             return Err("Already at bottom".into());
         }
+        self.begin_edit();
         self.edit_ip_config.dns_servers.swap(index, below);
         Ok(())
     }
@@ -2323,28 +2413,7 @@ fn render_tab_ip_config(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32
     // Buttons
     y += 12.0;
     if app.editing_ip {
-        let apply = render_button(
-            frame,
-            &app.palette,
-            "Apply",
-            lx,
-            y,
-            BUTTON_WIDTH,
-            BUTTON_HEIGHT,
-            app.palette.green,
-        );
-        frame.hit(Target::ApplyIp, apply);
-        let cancel = render_button(
-            frame,
-            &app.palette,
-            "Cancel",
-            lx + BUTTON_WIDTH + 12.0,
-            y,
-            BUTTON_WIDTH,
-            BUTTON_HEIGHT,
-            app.palette.red,
-        );
-        frame.hit(Target::CancelIp, cancel);
+        render_apply_cancel(frame, app, lx, y);
     } else {
         let edit = render_button(
             frame,
@@ -2358,6 +2427,34 @@ fn render_tab_ip_config(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32
         );
         frame.hit(Target::EditIp, edit);
     }
+}
+
+/// The editor's Apply and Cancel, side by side from `lx`, `y`: on the IP tab
+/// and on the DNS tab, since both edit the one configuration that Apply
+/// sends whole.
+fn render_apply_cancel(frame: &mut Frame, app: &NetManagerApp, lx: f32, y: f32) {
+    let apply = render_button(
+        frame,
+        &app.palette,
+        "Apply",
+        lx,
+        y,
+        BUTTON_WIDTH,
+        BUTTON_HEIGHT,
+        app.palette.green,
+    );
+    frame.hit(Target::ApplyIp, apply);
+    let cancel = render_button(
+        frame,
+        &app.palette,
+        "Cancel",
+        lx + BUTTON_WIDTH + 12.0,
+        y,
+        BUTTON_WIDTH,
+        BUTTON_HEIGHT,
+        app.palette.red,
+    );
+    frame.hit(Target::CancelIp, cancel);
 }
 
 /// Render the DNS tab content.
@@ -2427,7 +2524,12 @@ fn render_tab_dns(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, pw: 
                 overflow: TextOverflow::Clip,
             });
 
-            // Up/Down/Remove buttons (small)
+            // Up/Down/Remove buttons (small) -- none under DHCP, which sets
+            // the list.
+            if !app.dns_editable() {
+                y += DNS_ROW_HEIGHT + 2.0;
+                continue;
+            }
             let btn_y = y + 3.0;
             let btn_x = lx + pw - SECTION_PADDING * 2.0 - 100.0;
 
@@ -2461,8 +2563,26 @@ fn render_tab_dns(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, pw: 
         }
     }
 
-    // Add DNS input
     y += 12.0;
+    if !app.dns_editable() {
+        // Said rather than left to be discovered: the list has no buttons,
+        // and the reason is on another tab.
+        frame.push(RenderCommand::Text {
+            x: lx,
+            y,
+            text: String::from(
+                "DHCP is switched on, and Apply sends nothing under it. Switch it off on the IP Configuration tab to set these.",
+            ),
+            color: app.palette.subtext0,
+            font_size: 12.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((pw - SECTION_PADDING * 2.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+        return;
+    }
+
+    // Add DNS input
     y = render_section_title(frame, &app.palette, "Add DNS Server", lx, y);
 
     // The box the address is typed into.
@@ -2482,6 +2602,12 @@ fn render_tab_dns(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, pw: 
         app.palette.green,
     );
     frame.hit(Target::DnsAdd, add);
+
+    // A change to the list opens the editor; its Apply and Cancel are here
+    // as well as on the IP tab, beside the change they send or take back.
+    if app.editing_ip {
+        render_apply_cancel(frame, app, lx, y + FIELD_HEIGHT + 16.0);
+    }
 }
 
 /// Render the WiFi tab content.
@@ -3517,14 +3643,19 @@ impl NetManagerApp {
 
     /// Whether `field` can take the keyboard now.
     ///
-    /// The DNS box always can. The three address boxes only while the
-    /// editor is open on a static configuration: outside the editor their
-    /// boxes are not drawn, and a caret in an invisible box is a keystroke
-    /// going somewhere the user cannot see; under DHCP they are drawn
-    /// disabled, since the addresses are the DHCP server's to give and Apply
-    /// would send none of them.
+    /// Nothing can while DHCP is switched on: Apply sends nothing under
+    /// DHCP, so the boxes are drawn disabled. Otherwise the DNS box always
+    /// can -- a server added opens the editor -- and the three address boxes
+    /// only while the editor is open: outside it their boxes are not drawn,
+    /// and a caret in an invisible box is a keystroke going somewhere the
+    /// user cannot see.
     fn field_enabled(&self, field: Field) -> bool {
-        field == Field::DnsInput || (self.editing_ip && !self.edit_ip_config.dhcp_enabled)
+        match field {
+            Field::DnsInput => self.dns_editable(),
+            Field::Ip | Field::Mask | Field::Gateway => {
+                self.editing_ip && !self.edit_ip_config.dhcp_enabled
+            }
+        }
     }
 
     /// Give a field the keyboard, its caret at the end of its text.
@@ -3800,7 +3931,9 @@ impl NetManagerApp {
         match self.add_dns_server(&typed) {
             Ok(()) => {
                 self.dns_input.clear();
-                self.status_message = format!("Added DNS server {typed}");
+                // Added to the edit, not yet to the interface: "Added" on its
+                // own read as done.
+                self.status_message = format!("Added DNS server {typed}: Apply sends it");
             }
             Err(why) => self.status_message = why,
         }
@@ -4987,7 +5120,7 @@ mod tests {
 
     #[test]
     fn test_add_dns_server_valid() {
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         let before = app.edit_ip_config.dns_servers.len();
         // Use an address NOT already in the default config (which seeds 8.8.8.8,
         // 8.8.4.4 and 1.1.1.1); add_dns_server correctly rejects duplicates.
@@ -4997,26 +5130,26 @@ mod tests {
 
     #[test]
     fn test_add_dns_server_empty() {
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         assert!(app.add_dns_server("").is_err());
     }
 
     #[test]
     fn test_add_dns_server_invalid() {
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         assert!(app.add_dns_server("not.valid.ip.addr").is_err());
     }
 
     #[test]
     fn test_add_dns_server_duplicate() {
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         // 8.8.8.8 is already in the default list
         assert!(app.add_dns_server("8.8.8.8").is_err());
     }
 
     #[test]
     fn test_remove_dns_server() {
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         let before = app.edit_ip_config.dns_servers.len();
         assert!(app.remove_dns_server(0).is_ok());
         assert_eq!(app.edit_ip_config.dns_servers.len(), before - 1);
@@ -5024,13 +5157,13 @@ mod tests {
 
     #[test]
     fn test_remove_dns_server_out_of_bounds() {
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         assert!(app.remove_dns_server(999).is_err());
     }
 
     #[test]
     fn test_move_dns_up() {
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         let second = app.edit_ip_config.dns_servers[1].clone();
         assert!(app.move_dns_up(1).is_ok());
         assert_eq!(app.edit_ip_config.dns_servers[0], second);
@@ -5038,13 +5171,13 @@ mod tests {
 
     #[test]
     fn test_move_dns_up_at_top() {
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         assert!(app.move_dns_up(0).is_err());
     }
 
     #[test]
     fn test_move_dns_down() {
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         let first = app.edit_ip_config.dns_servers[0].clone();
         assert!(app.move_dns_down(0).is_ok());
         assert_eq!(app.edit_ip_config.dns_servers[1], first);
@@ -5052,7 +5185,7 @@ mod tests {
 
     #[test]
     fn test_move_dns_down_at_bottom() {
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         let last = app.edit_ip_config.dns_servers.len() - 1;
         assert!(app.move_dns_down(last).is_err());
     }
@@ -6437,6 +6570,28 @@ mod tests {
         assert!(asked().is_empty(), "something was sent for DHCP");
     }
 
+    /// **The DHCP refusal says what happened**: "cannot switch to DHCP"
+    /// when the switch was moved to DHCP, and "DHCP is switched on" when it
+    /// was on from the start -- "cannot switch" is untrue of a switch nobody
+    /// moved.
+    #[test]
+    fn the_dhcp_refusal_says_whether_the_switch_was_moved() {
+        let mut app = NetManagerApp::with_sample_data();
+        assert!(
+            app.edit_ip_config.dhcp_enabled,
+            "the first interface is DHCP's"
+        );
+        app.start_editing_ip();
+        let why = app.apply_ip_config().expect_err("DHCP is refused");
+        assert!(why.starts_with("DHCP is switched on"), "{why}");
+
+        let mut app = configured_by_hand();
+        app.start_editing_ip();
+        app.edit_ip_config.dhcp_enabled = true;
+        let why = app.apply_ip_config().expect_err("DHCP is refused");
+        assert!(why.starts_with("Cannot switch Ethernet 1 to DHCP"), "{why}");
+    }
+
     /// **Enable and Disable reach the kernel**: an interface that is up is
     /// taken down, one that is down brought up, and the switch shows what
     /// the kernel says after the change.
@@ -6683,6 +6838,167 @@ mod tests {
         assert_eq!(app.focus, None);
     }
 
+    /// The sample window with its first interface -- Ethernet 1, and its
+    /// three DNS servers -- configured by hand rather than by DHCP. The DNS
+    /// list can be changed only under a static configuration, since Apply
+    /// sends nothing under DHCP.
+    fn configured_by_hand() -> NetManagerApp {
+        let mut app = NetManagerApp::with_sample_data();
+        app.interfaces[0].ip_config.dhcp_enabled = false;
+        app.select_interface(0);
+        assert_eq!(app.edit_ip_config.dns_servers.len(), 3);
+        app
+    }
+
+    /// **While DHCP is switched on the DNS list cannot be changed, and says
+    /// why**: no buttons on its rows, no box to type a server into, a line
+    /// saying where the switch is -- and a change asked for anyway is
+    /// refused with the reason, the editor still closed. A list changed then
+    /// was a change Apply would never send.
+    #[test]
+    fn under_dhcp_the_dns_list_cannot_be_changed_and_says_why() {
+        let mut app = NetManagerApp::with_sample_data();
+        assert!(
+            app.edit_ip_config.dhcp_enabled,
+            "the first interface is DHCP's"
+        );
+        app.set_tab(DetailTab::Dns);
+        assert!(!app.edit_ip_config.dns_servers.is_empty());
+        for target in [
+            Target::DnsRemove(0),
+            Target::DnsDown(0),
+            Target::Focus(Field::DnsInput),
+            Target::DnsAdd,
+        ] {
+            assert!(
+                rect_of(&app, target).is_none(),
+                "{target:?} is offered under DHCP"
+            );
+        }
+        let says = render_frame(&app, SIZE.0, SIZE.1)
+            .commands()
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Switch it off on the IP Configuration tab")));
+        assert!(says, "the list does not say why it cannot be changed");
+
+        let before = app.edit_ip_config.dns_servers.clone();
+        let refused = app.add_dns_server("9.9.9.9").expect_err("added under DHCP");
+        assert!(refused.contains("DHCP is switched on"), "{refused}");
+        assert!(app.remove_dns_server(0).is_err());
+        assert!(app.move_dns_down(0).is_err());
+        assert_eq!(app.edit_ip_config.dns_servers, before);
+        assert!(!app.editing_ip, "a refused change opened the editor");
+    }
+
+    /// **A change to the DNS list opens the editor, whose Apply is on the DNS
+    /// tab as well.** The list was changed with the editor closed: there was
+    /// no Apply on the DNS tab to send it, the status said "Added" as if it
+    /// were done, and Edit on the IP tab reloaded the configuration from the
+    /// interface and threw the change away.
+    #[test]
+    fn a_dns_change_opens_the_editor_and_the_dns_tab_can_apply_it() {
+        let mut app = configured_by_hand();
+        app.set_tab(DetailTab::Dns);
+        assert!(!app.editing_ip);
+        assert!(
+            rect_of(&app, Target::ApplyIp).is_none(),
+            "Apply before any change"
+        );
+
+        click(&mut app, Target::Focus(Field::DnsInput));
+        type_str(&mut app, "9.9.9.9");
+        click(&mut app, Target::DnsAdd);
+        assert!(app.editing_ip, "the change left the editor closed");
+        assert!(
+            app.status_message.contains("Apply sends it"),
+            "the status reads as done: {}",
+            app.status_message
+        );
+        assert!(
+            rect_of(&app, Target::ApplyIp).is_some(),
+            "no Apply on the DNS tab"
+        );
+        assert!(
+            rect_of(&app, Target::CancelIp).is_some(),
+            "no Cancel on the DNS tab"
+        );
+
+        // The IP tab offers the open edit's Apply, not an Edit that reloads.
+        app.set_tab(DetailTab::IpConfig);
+        assert!(
+            rect_of(&app, Target::EditIp).is_none(),
+            "Edit is offered over the change"
+        );
+        assert!(rect_of(&app, Target::ApplyIp).is_some());
+        assert!(
+            app.edit_ip_config
+                .dns_servers
+                .iter()
+                .any(|s| s == "9.9.9.9")
+        );
+
+        // Cancel, from the DNS tab, takes it back.
+        app.set_tab(DetailTab::Dns);
+        click(&mut app, Target::CancelIp);
+        assert!(!app.editing_ip);
+        assert!(
+            !app.edit_ip_config
+                .dns_servers
+                .iter()
+                .any(|s| s == "9.9.9.9"),
+            "Cancel kept the change"
+        );
+
+        // Removing and reordering open it too.
+        click(&mut app, Target::DnsDown(0));
+        assert!(app.editing_ip, "a move down left the editor closed");
+        click(&mut app, Target::CancelIp);
+        click(&mut app, Target::DnsUp(1));
+        assert!(app.editing_ip, "a move up left the editor closed");
+        click(&mut app, Target::CancelIp);
+        click(&mut app, Target::DnsRemove(0));
+        assert!(app.editing_ip, "a removal left the editor closed");
+    }
+
+    /// **A re-read keeps an open edit**, and the selection follows its
+    /// interface by name. Refresh, and the re-read after Enable or Disable,
+    /// reloaded the configuration from the interface and threw the edit
+    /// away with the editor still open. An edit whose interface has gone
+    /// goes with it, and the status says so.
+    #[test]
+    fn a_reread_keeps_an_open_edit_while_its_interface_is_listed() {
+        let wlan0 = "Interface: wlan0  (UP)\n  MAC:     52:54:00:00:00:01\n  IPv4:    10.0.3.15\n  Netmask: 255.255.255.0\n  Gateway: 10.0.3.2\n  DNS:     10.0.3.3\n";
+        let (dir, mut app) = app_on(&format!("{ETH0_UP}{wlan0}"));
+        assert_eq!(app.interfaces.len(), 2);
+        app.select_interface(1);
+        app.start_editing_ip();
+        app.edit_ip_config.dhcp_enabled = false;
+        app.edit_ip_config.ip_address = String::from("10.0.3.99");
+
+        // wlan0 is listed first now: the selection follows it, and the edit
+        // stands.
+        the_kernel_now_says(&dir, &format!("{wlan0}{ETH0_UP}"));
+        app.read_interfaces();
+        assert_eq!(app.selected_iface().map(|i| i.name.as_str()), Some("wlan0"));
+        assert!(app.editing_ip, "the re-read closed the editor");
+        assert_eq!(
+            app.edit_ip_config.ip_address, "10.0.3.99",
+            "the re-read threw the edit away"
+        );
+
+        // wlan0 is gone: so is its edit, and the status says so.
+        the_kernel_now_says(&dir, ETH0_UP);
+        app.read_interfaces();
+        assert!(!app.editing_ip, "an edit outlived its interface");
+        assert_eq!(app.selected_iface().map(|i| i.name.as_str()), Some("eth0"));
+        assert_eq!(app.edit_ip_config.ip_address, "10.0.2.15");
+        assert!(
+            app.status_message.contains("wlan0 is no longer listed"),
+            "{}",
+            app.status_message
+        );
+    }
+
     /// A window on the IP tab of br0, an interface configured by hand, whose
     /// address boxes take the keyboard once the editor is open. (The first
     /// interface is DHCP's, whose boxes are disabled.)
@@ -6867,6 +7183,8 @@ mod tests {
     #[test]
     fn the_dns_box_is_the_toolkits_field() {
         let mut app = ringed();
+        app.interfaces[0].ip_config.dhcp_enabled = false;
+        app.select_interface(0);
         app.set_tab(DetailTab::Dns);
         let rect = rect_of(&app, Target::Focus(Field::DnsInput)).expect("the DNS box");
         let idle = field::State::default();
@@ -6948,7 +7266,7 @@ mod tests {
     /// the only edit there was.
     #[test]
     fn a_chord_is_not_typed_into_a_box_and_the_caret_keys_edit_it() {
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         app.set_tab(DetailTab::Dns);
         click(&mut app, Target::Focus(Field::DnsInput));
         type_str(&mut app, "8.8.4.4");
@@ -7030,7 +7348,7 @@ mod tests {
     /// end: at the start of the text, a press before its first character.
     #[test]
     fn a_press_in_a_box_puts_the_caret_under_the_pointer() {
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         app.set_tab(DetailTab::Dns);
         app.dns_input = String::from("8.8.4.4");
         let rect = rect_of(&app, Target::Focus(Field::DnsInput)).expect("the DNS box");
@@ -7058,7 +7376,7 @@ mod tests {
     /// is, so what was typed next went somewhere nobody could see.
     #[test]
     fn tab_in_the_dns_box_keeps_the_keyboard_on_its_tab() {
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         app.set_tab(DetailTab::Dns);
         click(&mut app, Target::Focus(Field::DnsInput));
         assert_eq!(app.handle_key(&press(Key::Tab)), Action::None);
@@ -7201,7 +7519,7 @@ mod tests {
         // Enter, Tab, Escape and Backspace all produce text on most layouts
         // (`\r`, `\t`, `\x1b`, `\x08`). A field that appends whatever arrives
         // fills with unprintable bytes the first time someone presses Escape.
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         app.set_tab(DetailTab::Dns);
         click(&mut app, Target::Focus(Field::DnsInput));
 
@@ -7221,7 +7539,7 @@ mod tests {
 
     #[test]
     fn a_key_release_types_nothing() {
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         app.set_tab(DetailTab::Dns);
         click(&mut app, Target::Focus(Field::DnsInput));
 
@@ -7233,7 +7551,7 @@ mod tests {
 
     #[test]
     fn the_dns_box_takes_typing_and_add_moves_it_into_the_list() {
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         app.set_tab(DetailTab::Dns);
         let before = app.edit_ip_config.dns_servers.len();
 
@@ -7259,7 +7577,7 @@ mod tests {
 
     #[test]
     fn enter_in_the_dns_box_adds_without_reaching_for_the_button() {
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         app.set_tab(DetailTab::Dns);
         let before = app.edit_ip_config.dns_servers.len();
 
@@ -7272,7 +7590,7 @@ mod tests {
 
     #[test]
     fn a_rejected_dns_address_stays_in_the_box_with_the_reason_on_screen() {
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         app.set_tab(DetailTab::Dns);
         let before = app.edit_ip_config.dns_servers.clone();
 
@@ -7294,7 +7612,7 @@ mod tests {
 
     #[test]
     fn backspace_removes_the_last_character_typed() {
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         app.set_tab(DetailTab::Dns);
         click(&mut app, Target::Focus(Field::DnsInput));
         type_str(&mut app, "8.8");
@@ -7310,8 +7628,11 @@ mod tests {
 
     #[test]
     fn the_dns_reorder_buttons_move_the_row_they_sit_on() {
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         app.set_tab(DetailTab::Dns);
+        // An edit under way: with the editor closed, the list is the
+        // interface's, and the first change reloads it from there.
+        app.start_editing_ip();
         app.edit_ip_config.dns_servers = vec!["1.1.1.1".into(), "2.2.2.2".into(), "3.3.3.3".into()];
 
         click(&mut app, Target::DnsDown(0));
@@ -7329,7 +7650,7 @@ mod tests {
     fn the_first_row_has_no_up_button_and_the_last_has_no_down_button() {
         // A button drawn where the operation cannot succeed is a button that
         // answers a click with an error message.
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         app.set_tab(DetailTab::Dns);
         app.edit_ip_config.dns_servers = vec!["1.1.1.1".into(), "2.2.2.2".into()];
 
@@ -7533,7 +7854,7 @@ mod tests {
 
     #[test]
     fn a_click_on_bare_background_puts_the_caret_away() {
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         app.set_tab(DetailTab::Dns);
         click(&mut app, Target::Focus(Field::DnsInput));
         assert_eq!(app.focus, Some(Field::DnsInput));

@@ -1460,6 +1460,20 @@ fn handle_setup_key(state: &mut StopwatchApp, event: &KeyEvent) -> EventResult {
 }
 
 fn handle_mouse(state: &mut StopwatchApp, mouse: &MouseEvent) -> EventResult {
+    // The list of keys is modal for the pointer as it is for the keys, and
+    // drawn over everything: a press with any button puts it away and does
+    // nothing else -- it used to reach the button under it and start, lap or
+    // reset a run the reader could not see -- and the wheel scrolls nothing
+    // it covers.
+    if state.show_help {
+        return match mouse.kind {
+            MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                state.show_help = false;
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        };
+    }
     match mouse.kind {
         MouseEventKind::Press(MouseButton::Left) => match state.target_at(mouse.x, mouse.y) {
             Some(target) => state.activate(target),
@@ -2751,6 +2765,54 @@ mod tests {
             y: DEFAULT_HEIGHT * 0.75,
             kind: MouseEventKind::Scroll { dx: 0.0, dy },
         })
+    }
+
+    /// **A press with the list of keys up puts it away and does nothing
+    /// else, and the wheel scrolls nothing under it.** A press reached the
+    /// button drawn under the list, and started, lapped or reset a run the
+    /// reader could not see. The controls are the same press and turn with
+    /// the list down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let mut app = sample();
+        app.start();
+        for i in 1..=60 {
+            app.elapsed_ms = i * 1000;
+            app.lap();
+        }
+        app.lap_scroll = 0;
+        let laps = app.laps.len();
+        let f1 = probe::press(Key::F1);
+
+        probe::key(&mut app, &f1);
+        assert!(app.show_help);
+        assert_eq!(probe::click(&mut app, Target::Lap), EventResult::Consumed);
+        assert!(!app.show_help, "the press did not put the list away");
+        assert_eq!(app.laps.len(), laps, "the press took a lap under the list");
+        probe::key(&mut app, &f1);
+        probe::click_with(&mut app, Target::Lap, MouseButton::Right);
+        assert!(!app.show_help, "a right-button press left the list up");
+        probe::key(&mut app, &f1);
+        handle_event(&mut app, &scroll(-1.0));
+        assert_eq!(
+            app.lap_scroll, 0,
+            "the wheel scrolled the laps under the list"
+        );
+        assert!(app.show_help, "the wheel put the list away");
+        probe::key(&mut app, &probe::press(Key::Escape));
+
+        // The controls.
+        handle_event(&mut app, &scroll(-1.0));
+        assert!(
+            app.lap_scroll > 0,
+            "control: the wheel scrolls nothing at all"
+        );
+        probe::click(&mut app, Target::Lap);
+        assert_eq!(
+            app.laps.len(),
+            laps + 1,
+            "control: the press takes no lap even with the list down"
+        );
     }
 
     /// The wheel scrolls the lap table, and stops at both ends.

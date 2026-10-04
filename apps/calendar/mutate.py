@@ -43,6 +43,7 @@ NOTICE = "the_warning_lines_are_not_painted_over"
 EMPTY = "a_fresh_calendar_holds_no_events_and_says_how_to_add_one"
 BUTTON = "the_new_event_button_gives_way_to_the_view_tabs"
 FOREIGN = "an_ics_from_another_calendar_is_read_as_it_was_written"
+CARD = "the_shortcut_card_takes_every_key_and_press_while_it_is_up"
 SAID = "the_import_says_what_it_could_not_keep"
 EXPORTED = "an_exported_calendar_reads_back_as_itself"
 RULES = "durations_and_repeats_are_read_as_the_standard_writes_them"
@@ -600,6 +601,58 @@ MUTATIONS = [
         '        self.focus_ring_width = settings.focus_ring_width();',
         '        let _ = settings;',
         ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    # ---- the shortcut card is modal, for the keys and the pointer ----
+    (
+        "the card is modal for nothing",
+        '    if state.show_help {\n        match event {\n',
+        '    if false && state.show_help {\n        match event {\n',
+        [CARD],
+    ),
+    (
+        "a key that is not the card's acts behind it",
+        '                if closes {\n'
+        '                    state.show_help = false;\n'
+        '                }\n'
+        '                return EventResult::Consumed;\n',
+        '                if closes {\n'
+        '                    state.show_help = false;\n'
+        '                    return EventResult::Consumed;\n'
+        '                }\n',
+        [CARD],
+    ),
+    (
+        "? does not put the card away",
+        '                    Key::Slash => plain && key.modifiers.shift,\n',
+        '                    Key::Slash => false,\n',
+        [CARD],
+    ),
+    (
+        "Escape does not put the card away",
+        '                    Key::F1 | Key::Escape => plain,\n',
+        '                    Key::F1 => plain,\n',
+        [CARD],
+    ),
+    (
+        "a press goes through the card",
+        '                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n'
+        '                    state.show_help = false;\n'
+        '                    return EventResult::Consumed;\n'
+        '                }\n',
+        '',
+        [CARD],
+    ),
+    (
+        "only the left button puts the card away",
+        '                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n',
+        '                MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_) => {\n',
+        [CARD],
+    ),
+    (
+        "the wheel turns what the card covers",
+        '                MouseEventKind::Scroll { .. } => return EventResult::Ignored,\n',
+        '',
+        [CARD],
     ),
 ]
 

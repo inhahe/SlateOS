@@ -27,8 +27,8 @@ editor (the find bar), filediff (search), filesearch (the query),
 hexeditor (search and Go To), ircclient (the message line), kanban (its
 input), lockscreen (the password), logviewer (search), mindmap
 (a node's text and its search), musicplayer (search), passwordgen (its
-input), startupmanager (the dialog and search), taskscheduler (the task
-dialog), tmux (its command prompt), undelete (search).
+input), startupmanager (the dialog and search), tmux (its command prompt),
+undelete (search).
 
 Not among them: `terminal`, whose typing goes to the shell's own line
 editor; `typingtutor`, where a line typed straight through is the exercise;
@@ -78,4 +78,5 @@ look for a box that was missed.
 
 **Done:** emojipicker (2026-10-04, with its list of keys and the grid's
 keyboard); vpnmanager (2026-10-04: the profile form, its port and MTU as
-digits, the search and the split-tunnel range).
+digits, the search and the split-tunnel range); taskscheduler (2026-10-04:
+the task dialog's boxes, the day of the month and the interval as digits).

@@ -417,17 +417,10 @@ MUTATIONS = [
         "        // nothing is neither.",
         CONTAINMENT,
     ),
-    (
-        "the caret follows the unelided value off the field's right edge",
-        "            let caret_x = (x + text::measure(value, FONT_SIZE, FontWeightHint::Regular))\n"
-        "                .min(rect.right() - 3.0);",
-        "            let caret_x = x + text::measure(value, FONT_SIZE, FontWeightHint::Regular);",
-        # The clamp that replaced two that could not be reached.  `text::measure`
-        # sizes the value before eliding, so a value wider than the field puts
-        # the caret past its right edge -- which is what the sweep's "a value far
-        # wider than the field" state is for.
-        CONTAINMENT,
-    ),
+    # No row for the caret's clamp to the box's right edge: since 2026-10-04
+    # the box's text and caret are drawn by guitk::textedit::draw, which
+    # scrolls the text to keep the caret in the box and clips to it; the
+    # containment sweep's "a value far wider than the field" still holds it.
     (
         "a button's label is centred whether or not the button is wide enough",
         "        if let (Some(y), Some((x, w))) = (centre_line(rect, FONT_SIZE), span(rect, text_x, rect.w))\n"
@@ -437,18 +430,11 @@ MUTATIONS = [
         "        {",
         CONTAINMENT,
     ),
-    (
-        "the form refuses what AltGr types",
-        "                if !textline::types_into_field(key) {",
-        "                if !textline::types_into_field(key) || key.modifiers.ctrl {",
-        ["the_form_takes_altgr_letters_and_no_commands_letter"],
-    ),
-    (
-        "the form types a command's letter",
-        "                if !textline::types_into_field(key) {",
-        "                if !key.types_text() {",
-        ["the_form_takes_altgr_letters_and_no_commands_letter"],
-    ),
+    # No rows for "the form refuses what AltGr types" or "types a command's
+    # letter": since 2026-10-04 the form's typing is textline::apply_key's,
+    # which makes both distinctions itself, in its own crate and with its own
+    # tests; the_form_takes_altgr_letters_and_no_commands_letter still holds
+    # the form to them.
     (
         "a key held with Alt or the Windows key is the main window's",
         "        if key.modifiers.alt || key.modifiers.super_key {\n            return false;\n        }\n        if let Some(movement) = ListKey::of(key) {",
@@ -656,6 +642,82 @@ MUTATIONS += [
         PRESS_ANCHOR,
         "        Event::Mouse(m) if ui.show_help && !matches!(m.kind, MouseEventKind::Scroll { .. }) => match m.kind {\n",
         [MODAL],
+    ),
+]
+
+# The boxes edit at a caret (2026-10-04,
+# known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box): they
+# took typing at their end and Backspace from it, and nothing else.
+CARET = "a_box_edits_at_a_caret"
+NUMBER = "a_number_box_edits_its_digits_and_refuses_the_rest"
+MOVES_TO = "a_box_the_keyboard_moves_to_types_after_what_it_holds"
+
+MUTATIONS += [
+    (
+        "a number box takes a letter",
+        "            if !text.chars().all(|c| c.is_ascii_digit()) {\n",
+        "            if false {\n",
+        [NUMBER],
+    ),
+    (
+        "a number past what the box holds is taken",
+        "            text.parse::<u32>().ok().filter(|n| *n <= max)\n",
+        "            text.parse::<u32>().ok()\n",
+        [NUMBER],
+    ),
+    (
+        "a refused edit stays in the editor",
+        "            self.editor = kept;\n",
+        "            let _ = kept;\n",
+        [NUMBER],
+    ),
+    (
+        "an edit the box refuses is kept anyway",
+        "        if typed != before && !self.set_field_text(field, &typed) {\n",
+        "        if typed != before && !self.set_field_text(field, &typed) && false {\n",
+        [NUMBER],
+    ),
+    (
+        "an emptied number box shows a 0",
+        "                3 => digits(u32::from(self.form.monthly_day)),\n",
+        "                3 => self.form.monthly_day.to_string(),\n",
+        [NUMBER],
+    ),
+    (
+        "the editor is kept for the box the keyboard moved to",
+        "        if self.editor_for != Some(field) || self.editor.text() != text {\n",
+        "        if self.editor.text() != text {\n",
+        [MOVES_TO],
+    ),
+    (
+        "a cut takes nothing to the clipboard",
+        "            self.clipboard = copied;\n",
+        "            let _ = copied;\n",
+        [CARET],
+    ),
+    (
+        "a press puts the caret at the start",
+        "            x - rect.x - FIELD_TEXT_INSET,\n",
+        "            0.0,\n",
+        [CARET],
+    ),
+    (
+        "a press does not place the caret",
+        "            Target::Field(field) => self.press_field(field, x),\n",
+        "            Target::Field(field) => {\n                self.focus_field(field);\n                true\n            }\n",
+        [CARET],
+    ),
+    (
+        "the caret is drawn at the start",
+        "                    cursor: self.field_cursor(field, text),\n",
+        "                    cursor: TextCursor::default(),\n",
+        [CARET],
+    ),
+    (
+        "an empty box with the keyboard has no caret",
+        "        if text.is_empty() {\n            if focused {\n",
+        "        if text.is_empty() {\n            if false {\n",
+        [CARET, NUMBER],
     ),
 ]
 

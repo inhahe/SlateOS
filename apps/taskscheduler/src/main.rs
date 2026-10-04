@@ -42,6 +42,9 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::scroll_window;
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::text::TextCursor;
+use guitk::textedit;
+use guitk::textinput::TextInput;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 
@@ -1836,7 +1839,23 @@ pub struct SchedulerUI {
     hover: Option<Target>,
     /// Whether the list of keys is up.
     pub show_help: bool,
+    /// The editor of the box with the keyboard: its caret and selection over
+    /// the box's text.
+    editor: TextInput,
+    /// Which box the editor was loaded for. A box the keyboard moves to is
+    /// loaded afresh even when it holds the same text as the last one, so
+    /// its caret starts after what it holds and not where the last box's
+    /// stood.
+    editor_for: Option<FormField>,
+    /// What the boxes' Ctrl+C and Ctrl+X took, for their Ctrl+V.
+    clipboard: String,
 }
+
+/// The most a box holds, in characters: a task's name or command, a cron
+/// expression.
+const FIELD_CAPACITY: usize = 1024;
+/// How far a box's text sits in from its left and right edges.
+const FIELD_TEXT_INSET: f32 = 6.0;
 
 /// The keys this window answers, as the F1 list shows them.
 ///
@@ -1863,6 +1882,9 @@ impl SchedulerUI {
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             hover: None,
             show_help: false,
+            editor: TextInput::new(),
+            editor_for: None,
+            clipboard: String::new(),
             tab: UiTab::Tasks,
             dialog: UiDialog::None,
             scheduler: TaskScheduler::new(),
@@ -2128,91 +2150,156 @@ impl SchedulerUI {
         });
     }
 
-    /// Append `ch` to the focused field.
-    ///
-    /// The numeric fields take digits only and are parsed rather than stored
-    /// as text, so the form can never hold a "day of month" that is not a
-    /// number. A digit that would push the value past what the field can hold
-    /// is dropped rather than wrapping the value round to something small --
-    /// silently rescheduling a monthly job from the 31st to the 3rd is the
-    /// kind of edit a user would not notice until it had already run.
-    pub fn type_char(&mut self, ch: char) -> bool {
-        let Some(field) = self.focus else {
-            return false;
+    /// What `field`'s box shows: its text, or a number's digits -- nothing
+    /// for 0, which no day of the month or interval is, so that deleting
+    /// every digit empties the box rather than leaving a 0 typed after.
+    fn field_text(&self, field: FormField) -> String {
+        let digits = |n: u32| {
+            if n == 0 { String::new() } else { n.to_string() }
         };
         match field {
-            FormField::Name => {
-                self.form.name.push(ch);
-                true
-            }
-            FormField::Command => {
-                self.form.command.push(ch);
-                true
-            }
+            FormField::Name => self.form.name.clone(),
+            FormField::Command => self.form.command.clone(),
             FormField::Param => match self.form.frequency_index {
-                3 => {
-                    let mut value = u32::from(self.form.monthly_day);
-                    let changed = Self::push_digit(&mut value, ch, 31);
-                    self.form.monthly_day = u8::try_from(value).unwrap_or(self.form.monthly_day);
-                    changed
-                }
-                5 => {
-                    let mut value = self.form.interval_minutes;
-                    // A minute count past a year is not a schedule anybody
-                    // means; the cap is there to stop the multiply below from
-                    // having to think about overflow, not to be a policy.
-                    let changed = Self::push_digit(&mut value, ch, MAX_INTERVAL_MINUTES);
-                    self.form.interval_minutes = value;
-                    changed
-                }
-                6 => {
-                    self.form.cron_expr.push(ch);
-                    true
-                }
-                _ => false,
+                3 => digits(u32::from(self.form.monthly_day)),
+                5 => digits(self.form.interval_minutes),
+                6 => self.form.cron_expr.clone(),
+                _ => String::new(),
             },
         }
     }
 
-    /// Append `ch` to a numeric field, refusing anything that is not a digit
-    /// or that would take the value past `max`.
-    fn push_digit(value: &mut u32, ch: char, max: u32) -> bool {
-        let Some(digit) = ch.to_digit(10) else {
-            return false;
+    /// Write `text` to `field`, if the field can hold it, and say whether it
+    /// did. The numeric fields take digits only and are parsed rather than
+    /// stored as text, so the form can never hold a "day of month" that is
+    /// not a number; and an edit that would push the value past what the
+    /// field can hold is refused whole rather than wrapping the value round
+    /// to something small -- silently rescheduling a monthly job from the
+    /// 31st to the 3rd is the kind of edit a user would not notice until it
+    /// had already run. An empty number box is 0.
+    fn set_field_text(&mut self, field: FormField, text: &str) -> bool {
+        let number = |max: u32| -> Option<u32> {
+            if !text.chars().all(|c| c.is_ascii_digit()) {
+                return None;
+            }
+            if text.is_empty() {
+                return Some(0);
+            }
+            text.parse::<u32>().ok().filter(|n| *n <= max)
         };
-        let Some(next) = value.checked_mul(10).and_then(|v| v.checked_add(digit)) else {
-            return false;
-        };
-        if next > max {
-            return false;
+        match field {
+            FormField::Name => text.clone_into(&mut self.form.name),
+            FormField::Command => text.clone_into(&mut self.form.command),
+            FormField::Param => match self.form.frequency_index {
+                3 => {
+                    let Some(day) = number(31).and_then(|n| u8::try_from(n).ok()) else {
+                        return false;
+                    };
+                    self.form.monthly_day = day;
+                }
+                5 => {
+                    // A minute count past a year is not a schedule anybody
+                    // means; the cap is there to stop arithmetic downstream
+                    // from having to think about overflow, not to be a
+                    // policy.
+                    let Some(minutes) = number(MAX_INTERVAL_MINUTES) else {
+                        return false;
+                    };
+                    self.form.interval_minutes = minutes;
+                }
+                6 => text.clone_into(&mut self.form.cron_expr),
+                _ => return false,
+            },
         }
-        *value = next;
         true
     }
 
-    /// Delete the last character of the focused field.
-    pub fn backspace(&mut self) -> bool {
+    /// Load `field`'s text into the editor if the editor holds another box's,
+    /// or this box's text changed under it -- the caret after the text.
+    fn sync_editor(&mut self, field: FormField) {
+        let text = self.field_text(field);
+        if self.editor_for != Some(field) || self.editor.text() != text {
+            self.editor.set_text(&text);
+            self.editor_for = Some(field);
+        }
+    }
+
+    /// Where `field`'s caret is drawn, over `text`, what the box holds: the
+    /// editor's while the box has the keyboard and the editor holds its
+    /// text, after the text if not, at its start without the keyboard. One
+    /// answer for the drawing and for a press.
+    fn field_cursor(&self, field: FormField, text: &str) -> TextCursor {
+        if self.focus != Some(field) {
+            TextCursor::default()
+        } else if self.editor_for == Some(field) && self.editor.text() == text {
+            self.editor.cursor()
+        } else {
+            TextCursor::from(text.len())
+        }
+    }
+
+    /// A key for the box with the keyboard: the caret keys, Backspace and
+    /// Delete at the caret, Ctrl+A, C, X and V, and typing -- AltGr's among
+    /// it, and no command's letter: Ctrl-N while filling in the Name field
+    /// must not put an `n` in it. An edit the box cannot hold is refused
+    /// whole (`set_field_text`). Whether anything changed.
+    ///
+    /// The boxes took typing at their end and Backspace from it, and nothing
+    /// else.
+    fn edit_field(&mut self, key: &KeyEvent) -> bool {
         let Some(field) = self.focus else {
             return false;
         };
-        match field {
-            FormField::Name => self.form.name.pop().is_some(),
-            FormField::Command => self.form.command.pop().is_some(),
-            FormField::Param => match self.form.frequency_index {
-                3 => {
-                    let was = self.form.monthly_day;
-                    self.form.monthly_day = was / 10;
-                    was != self.form.monthly_day
-                }
-                5 => {
-                    let was = self.form.interval_minutes;
-                    self.form.interval_minutes = was / 10;
-                    was != self.form.interval_minutes
-                }
-                6 => self.form.cron_expr.pop().is_some(),
-                _ => false,
-            },
+        self.sync_editor(field);
+        let before = self.field_text(field);
+        let kept = self.editor.clone();
+        let edit = textline::apply_key(
+            &mut self.editor,
+            key,
+            FIELD_CAPACITY,
+            &self.clipboard,
+            FONT_SIZE,
+        );
+        let typed = self.editor.text().to_owned();
+        if typed != before && !self.set_field_text(field, &typed) {
+            self.editor = kept;
+            return false;
         }
+        if let Some(copied) = edit.copied {
+            self.clipboard = copied;
+        }
+        edit.handled
+    }
+
+    /// A press on `field`'s box at `x`: it takes the keyboard, if it is on
+    /// screen, with the caret under the pointer, measured against the box as
+    /// it was drawn.
+    fn press_field(&mut self, field: FormField, x: f32) -> bool {
+        let text = self.field_text(field);
+        let drawn = self.field_cursor(field, &text);
+        let was = (self.focus, self.editor.cursor());
+        self.focus_field(field);
+        if self.focus != Some(field) {
+            return false;
+        }
+        let Some(rect) = self
+            .frame(self.window_width, self.window_height)
+            .rect_of(|t| *t == Target::Field(field))
+        else {
+            return was.0 != self.focus;
+        };
+        self.sync_editor(field);
+        let cursor = textedit::cursor_at_click(
+            &text,
+            drawn,
+            (rect.w - 2.0 * FIELD_TEXT_INSET).max(0.0),
+            FONT_SIZE,
+            FontWeightHint::Regular,
+            x - rect.x - FIELD_TEXT_INSET,
+        );
+        self.editor.set_selection_anchor(None);
+        self.editor.set_cursor(cursor);
+        true
     }
 
     // -- rendering ------------------------------------------------------------
@@ -3187,20 +3274,10 @@ impl SchedulerUI {
         };
 
         let rect = label(frame, "Name:");
-        self.render_text_field(
-            frame,
-            Target::Field(FormField::Name),
-            cut(rect),
-            &self.form.name,
-        );
+        self.render_text_field(frame, FormField::Name, cut(rect));
 
         let rect = label(frame, "Command:");
-        self.render_text_field(
-            frame,
-            Target::Field(FormField::Command),
-            cut(rect),
-            &self.form.command,
-        );
+        self.render_text_field(frame, FormField::Command, cut(rect));
 
         // The frequency is picked, not typed, so it takes no caret: the field
         // it is drawn as is a button that happens to look like one.
@@ -3222,33 +3299,16 @@ impl SchedulerUI {
                 self.render_picker(frame, Target::ParamCycle, cut(rect), day);
             }
             3 => {
-                let day_text = self.form.monthly_day.to_string();
                 let rect = label(frame, "Day of month:");
-                self.render_text_field(
-                    frame,
-                    Target::Field(FormField::Param),
-                    cut(rect),
-                    &day_text,
-                );
+                self.render_text_field(frame, FormField::Param, cut(rect));
             }
             5 => {
-                let min_text = self.form.interval_minutes.to_string();
                 let rect = label(frame, "Minutes:");
-                self.render_text_field(
-                    frame,
-                    Target::Field(FormField::Param),
-                    cut(rect),
-                    &min_text,
-                );
+                self.render_text_field(frame, FormField::Param, cut(rect));
             }
             6 => {
                 let rect = label(frame, "Cron:");
-                self.render_text_field(
-                    frame,
-                    Target::Field(FormField::Param),
-                    cut(rect),
-                    &self.form.cron_expr,
-                );
+                self.render_text_field(frame, FormField::Param, cut(rect));
             }
             _ => {}
         }
@@ -3440,7 +3500,14 @@ impl SchedulerUI {
     /// insertion point is: this form appends and backspaces rather than
     /// offering a movable cursor, so a caret anywhere else would promise an
     /// edit the field cannot make.
-    fn render_text_field(&self, frame: &mut Frame, target: Target, rect: Rect, value: &str) {
+    fn render_text_field(&self, frame: &mut Frame, field: FormField, rect: Rect) {
+        let text = self.field_text(field);
+        self.render_text_field_with(frame, field, rect, &text);
+    }
+
+    /// [`render_text_field`](Self::render_text_field) with the text given --
+    /// for the containment sweep, which needs a text wider than the box.
+    fn render_text_field_with(&self, frame: &mut Frame, field: FormField, rect: Rect, text: &str) {
         // A control with no area draws nothing and answers nothing. Returning
         // here rather than pushing zero-sized commands is the difference
         // between a field that has been squeezed out of the dialog and one
@@ -3448,7 +3515,8 @@ impl SchedulerUI {
         if rect.is_empty() {
             return;
         }
-        let focused = matches!(target, Target::Field(f) if self.focus == Some(f));
+        let target = Target::Field(field);
+        let focused = self.focus == Some(field) && !self.show_help;
 
         // The toolkit's field, in the theme's shape (lane C,
         // c-e-a-theme-can-shape-the-controls): lit under the pointer, marked
@@ -3466,46 +3534,58 @@ impl SchedulerUI {
             self.focus_ring_width,
         );
 
-        let text_y = centre_line(rect, FONT_SIZE);
-        let text_span = span(rect, rect.x + 6.0, rect.w - 12.0);
-        if let (Some(y), Some((x, w))) = (text_y, text_span) {
-            frame.push(RenderCommand::Text {
-                x,
-                y,
-                text: value.to_string(),
-                color: self.palette.text,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(w),
-                overflow: TextOverflow::Ellipsis,
-            });
+        // The text, and with the keyboard the caret and the selection where
+        // they are, drawn by the toolkit's editor and clipped to the box. The
+        // caret was a bar drawn at the end of the measured text, because the
+        // end was the only place it could be.
+        let line = text::line_height(FONT_SIZE, FontWeightHint::Regular);
+        let (x, y, width) = (
+            rect.x + FIELD_TEXT_INSET,
+            rect.y + (rect.h - line) / 2.0,
+            (rect.w - 2.0 * FIELD_TEXT_INSET).max(0.0),
+        );
+        let mut tree = RenderTree::new();
+        if text.is_empty() {
+            if focused {
+                textedit::push_caret(
+                    &mut tree,
+                    x,
+                    y,
+                    line,
+                    self.palette.text,
+                    textedit::CARET_WIDTH,
+                );
+            }
+        } else {
+            let editing = self.focus == Some(field)
+                && self.editor_for == Some(field)
+                && self.editor.text() == text;
+            textedit::draw(
+                &mut tree,
+                &textedit::SingleLine {
+                    text,
+                    cursor: self.field_cursor(field, text),
+                    selection_anchor: if editing {
+                        self.editor.selection_anchor()
+                    } else {
+                        None
+                    },
+                    focused,
+                    x,
+                    y,
+                    width,
+                    line_height: line,
+                    font_size: FONT_SIZE,
+                    weight: FontWeightHint::Regular,
+                    color: self.palette.text,
+                    selection_bg: self.palette.accent,
+                    selection_fg: self.palette.crust,
+                    caret_width: textedit::CARET_WIDTH,
+                },
+            );
         }
-
-        if focused && let (Some(y), Some((x, _))) = (text_y, text_span) {
-            // Measured, not counted: a caret placed at `len * average_width`
-            // drifts off the end of the text on anything but a monospace
-            // font. `.min` keeps it inside the field's own right edge, which a
-            // measured position does not do by itself -- `text::measure` sizes
-            // the *unelided* value, so a value wider than the field puts the
-            // caret past its right edge.
-            //
-            // The size is a literal on purpose, and the mutation sweep is why:
-            // clamping it as well read like prudence but could not be reached.
-            // The caret is drawn only where `text_y` and `text_span` both
-            // answered, and those two say the field is at least FONT_SIZE tall
-            // and more than six points wide, while the `.min` above leaves
-            // three points to the caret's right. A clamp that no input can
-            // make bind is not a guard, it is a claim the tests cannot check.
-            let caret_x = (x + text::measure(value, FONT_SIZE, FontWeightHint::Regular))
-                .min(rect.right() - 3.0);
-            frame.push(RenderCommand::FillRect {
-                x: caret_x,
-                y,
-                width: 1.5,
-                height: FONT_SIZE,
-                color: self.palette.text,
-                corner_radii: CornerRadii::ZERO,
-            });
+        for command in tree.commands {
+            frame.push(command);
         }
 
         frame.hit(target, rect);
@@ -3707,11 +3787,7 @@ impl SchedulerUI {
                 }
                 true
             }
-            Target::Field(field) => {
-                let changed = self.focus != Some(field);
-                self.focus_field(field);
-                changed
-            }
+            Target::Field(field) => self.press_field(field, x),
             Target::FrequencyCycle => {
                 self.cycle_frequency();
                 true
@@ -3890,31 +3966,11 @@ impl SchedulerUI {
                 self.focus_next();
                 true
             }
-            Key::Backspace => self.backspace(),
             Key::Enter => match self.dialog {
                 UiDialog::ConfirmDelete(id) => self.confirm_delete_task(id),
                 _ => self.save_dialog(),
             },
-            _ => {
-                // A command is a shortcut, not text, though it carries its
-                // letter as text: Ctrl-N while filling in the Name field must
-                // not put an `n` in it, and nor may a key held with Alt or the
-                // Windows key. AltGr, which arrives as Ctrl+Alt, types -- `ł`
-                // is AltGr+L on a Polish keyboard
-                // (`textline::types_into_field`). What is typed goes through
-                // `KeyEvent::typed`, which is the layout's own answer to what
-                // was typed -- Enter, Tab and Escape all *produce* text on most
-                // layouts, and a field that appended `key.text` raw would fill
-                // with control bytes.
-                if !textline::types_into_field(key) {
-                    return false;
-                }
-                let mut typed = false;
-                for ch in key.typed() {
-                    typed |= self.type_char(ch);
-                }
-                typed
-            }
+            _ => self.edit_field(key),
         }
     }
 
@@ -6468,15 +6524,15 @@ mod tests {
             type Control = fn(&SchedulerUI, &mut Frame, Rect);
             let controls: [(&'static str, Control); 6] = [
                 ("text field", |u, f, r| {
-                    u.render_text_field(
+                    u.render_text_field_with(
                         f,
-                        Target::Field(FormField::Name),
+                        FormField::Name,
                         r,
                         "a value far wider than the field",
                     );
                 }),
                 ("empty text field", |u, f, r| {
-                    u.render_text_field(f, Target::Field(FormField::Name), r, "");
+                    u.render_text_field_with(f, FormField::Name, r, "");
                 }),
                 ("picker", |u, f, r| {
                     u.render_picker(f, Target::FrequencyCycle, r, "Every N minutes");
@@ -6814,6 +6870,168 @@ mod tests {
             ui.scheduler.list_tasks()[3].enabled,
             was,
             "Space does not turn a task off at all"
+        );
+    }
+
+    // -- The boxes edit at a caret ----------------------------------------------
+
+    fn type_text(ui: &mut SchedulerUI, text: &str) {
+        for c in text.chars() {
+            handle_event(
+                ui,
+                &Event::Key(key_of(Key::A, Modifiers::NONE, &c.to_string())),
+            );
+        }
+    }
+
+    /// The x of every caret drawn in `rect`.
+    fn caret_xs_in(ui: &SchedulerUI, rect: Rect) -> Vec<f32> {
+        commands(ui)
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Line { x1, x2, y1, .. }
+                    if (x1 - x2).abs() < f32::EPSILON && rect.contains(*x1, *y1 + 1.0) =>
+                {
+                    Some(*x1)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn carets_in(ui: &SchedulerUI, rect: Rect) -> usize {
+        caret_xs_in(ui, rect).len()
+    }
+
+    /// **A box edits at a caret**: the arrows, Home and End move it, typing
+    /// goes where it is, Delete deletes at it, Ctrl+A, C, X and V select, copy,
+    /// cut and paste, a press puts it where it lands -- and it is drawn there.
+    /// The boxes took typing at their end and Backspace from it, and nothing
+    /// else.
+    #[test]
+    fn a_box_edits_at_a_caret() {
+        let mut ui = SchedulerUI::new();
+        ui.open_add_dialog();
+        let name = probe::rect_of(&ui, Target::Field(FormField::Name)).expect("the name box");
+        assert_eq!(
+            carets_in(&ui, name),
+            1,
+            "the empty box with the keyboard draws no caret"
+        );
+        type_text(&mut ui, "Bakup");
+        for _ in 0..3 {
+            hit(&mut ui, Key::Left, Modifiers::NONE);
+        }
+        type_text(&mut ui, "c");
+        assert_eq!(ui.form.name, "Backup", "the caret did not move");
+        let at =
+            name.x + FIELD_TEXT_INSET + text::measure("Bac", FONT_SIZE, FontWeightHint::Regular);
+        let carets = caret_xs_in(&ui, name);
+        assert_eq!(carets.len(), 1, "no caret is drawn in the box");
+        assert!(
+            carets.iter().all(|x| (x - at).abs() < 0.5),
+            "the caret is drawn at {carets:?}, not after the `Bac` it follows at {at}"
+        );
+        hit(&mut ui, Key::Home, Modifiers::NONE);
+        hit(&mut ui, Key::Delete, Modifiers::NONE);
+        assert_eq!(ui.form.name, "ackup", "Delete at the caret");
+        hit(&mut ui, Key::A, Modifiers::ctrl());
+        hit(&mut ui, Key::C, Modifiers::ctrl());
+        hit(&mut ui, Key::Tab, Modifiers::NONE);
+        assert_eq!(ui.focus, Some(FormField::Command));
+        hit(&mut ui, Key::V, Modifiers::ctrl());
+        assert_eq!(ui.form.command, "ackup", "Ctrl+V");
+        hit(&mut ui, Key::A, Modifiers::ctrl());
+        hit(&mut ui, Key::X, Modifiers::ctrl());
+        assert_eq!(ui.form.command, "", "Ctrl+X");
+
+        // A press past the name's end puts the caret at its end, and one at
+        // its start puts it there.
+        let mid = name.y + name.h / 2.0;
+        mouse(
+            &mut ui,
+            name.right() - 2.0,
+            mid,
+            MouseEventKind::Press(MouseButton::Left),
+        );
+        type_text(&mut ui, "!");
+        assert_eq!(ui.form.name, "ackup!");
+        mouse(
+            &mut ui,
+            name.x + FIELD_TEXT_INSET,
+            mid,
+            MouseEventKind::Press(MouseButton::Left),
+        );
+        type_text(&mut ui, "B");
+        assert_eq!(
+            ui.form.name, "Backup!",
+            "the press did not put the caret there"
+        );
+    }
+
+    /// **A number box edits its digits at a caret, and refuses the rest
+    /// whole**: a letter, and a digit that would take the day of the month
+    /// past 31. Deleting every digit empties the box.
+    #[test]
+    fn a_number_box_edits_its_digits_and_refuses_the_rest() {
+        let mut ui = SchedulerUI::new();
+        ui.open_add_dialog();
+        ui.form.frequency_index = 3;
+        ui.focus_field(FormField::Param);
+        assert_eq!(ui.focus, Some(FormField::Param));
+        hit(&mut ui, Key::A, Modifiers::ctrl());
+        type_text(&mut ui, "3");
+        assert_eq!(ui.form.monthly_day, 3);
+        type_text(&mut ui, "2");
+        assert_eq!(
+            ui.form.monthly_day, 3,
+            "a day of the month past 31 was taken"
+        );
+        type_text(&mut ui, "1");
+        assert_eq!(ui.form.monthly_day, 31);
+        hit(&mut ui, Key::Home, Modifiers::NONE);
+        type_text(&mut ui, "x");
+        assert_eq!(ui.form.monthly_day, 31, "a letter was taken");
+        // `+31` parses as 31, and `+` is no digit: refused, which leaves the
+        // caret at the start for the Delete below. Taken, it would stand in
+        // the editor in front of a 31 the box does not show.
+        type_text(&mut ui, "+");
+        hit(&mut ui, Key::Delete, Modifiers::NONE);
+        assert_eq!(
+            ui.form.monthly_day, 1,
+            "Delete at the caret, or a + was taken"
+        );
+        hit(&mut ui, Key::Backspace, Modifiers::NONE);
+        assert_eq!(ui.form.monthly_day, 1, "Backspace at the start deleted");
+        hit(&mut ui, Key::Delete, Modifiers::NONE);
+        assert_eq!(ui.form.monthly_day, 0);
+        let param = probe::rect_of(&ui, Target::Field(FormField::Param)).expect("the day box");
+        assert!(
+            !commands(&ui).iter().any(|c| matches!(c,
+                RenderCommand::Text { text, .. } | RenderCommand::RichText { text, .. }
+                    if text == "0")),
+            "the emptied box shows a 0 nobody typed"
+        );
+        assert_eq!(carets_in(&ui, param), 1);
+    }
+
+    /// **A box the keyboard moves to types after what it holds**, wherever
+    /// the caret stood in the box it came from -- even when the two hold the
+    /// same text, which is when an editor left as it was would type at the
+    /// old box's caret.
+    #[test]
+    fn a_box_the_keyboard_moves_to_types_after_what_it_holds() {
+        let mut ui = SchedulerUI::new();
+        ui.open_add_dialog();
+        type_text(&mut ui, "ab");
+        ui.form.command = String::from("ab");
+        hit(&mut ui, Key::Home, Modifiers::NONE);
+        hit(&mut ui, Key::Tab, Modifiers::NONE);
+        assert_eq!(ui.focus, Some(FormField::Command));
+        type_text(&mut ui, "c");
+        assert_eq!(
+            ui.form.command, "abc",
+            "Tab left the caret where the last box had it"
         );
     }
 }

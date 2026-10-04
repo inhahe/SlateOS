@@ -72,8 +72,6 @@ pub(crate) struct Description {
     pub colour: Option<Colour>,
     pub channels: u32,
     pub sample_rate: u32,
-    pub bits_per_coded_sample: u32,
-    pub audio_cid: i16,
     pub stsd_version: u8,
     /// AAC's MPEG-4 object type from `esds`, which may make it MP3.
     pub object_type: Option<u8>,
@@ -970,13 +968,12 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         let width = self.r.u16()?;
         let height = self.r.u16()?;
         // resolution (8), data size (4), frames per sample (2), the codec's
-        // name (32).
-        self.r.skip(46)?;
-        let depth = self.r.u16()?;
+        // name (32), and the depth, which matters only to the palette below
+        // and is read again there.
+        self.r.skip(48)?;
         if let Some((_, d)) = self.last() {
             d.width = u32::from(width);
             d.height = u32::from(height);
-            d.bits_per_coded_sample = u32::from(depth);
         }
         // FFmpeg rereads the entry for a palette: from its start, 82 bytes on,
         // the depth again and the colour table's ID.
@@ -1004,8 +1001,11 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         self.r.skip(6)?;
         let channels = u32::from(self.r.u16()?);
         let bits = u32::from(self.r.u16()?);
-        let audio_cid = self.r.u16()?.cast_signed();
-        self.r.u16()?;
+        // The compression ID, by which FFmpeg decides whether MP2 and MP3
+        // packets need its parser -- and packets are never parsed here, as
+        // ffprobe's `-fflags +noparse` does not parse them -- and the packet
+        // size.
+        self.r.skip(4)?;
         let rate = self.r.u32()? >> 16;
         let stsd_version = self.descriptions.last().map_or(0, |d| d.stsd_version);
         let (mut channels, mut bits, mut rate) = (channels, bits, rate);
@@ -1038,8 +1038,6 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         if let Some((sc, d)) = self.last() {
             d.channels = channels;
             d.sample_rate = rate;
-            d.bits_per_coded_sample = bits;
-            d.audio_cid = audio_cid;
             sc.samples_per_frame = samples_per_frame;
             sc.bytes_per_frame = bytes_per_frame;
             // Uncompressed sound: the size of a sample, every channel's.
@@ -1274,16 +1272,13 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         let Some(sc) = self.streams.get_mut(i) else {
             return Ok(());
         };
-        let mut dts = match fs {
-            Some(FragStream {
-                next_trun_dts: Some(next),
-                ..
-            }) => next.wrapping_sub(sc.time_offset),
-            Some(FragStream {
-                tfdt_dts: Some(t), ..
-            }) => t.wrapping_sub(sc.time_offset),
-            _ => sc.track_end.wrapping_sub(sc.time_offset),
-        };
+        // Where the run starts: where the last run of this fragment ended,
+        // else the fragment's `tfdt`, else where the track has reached.
+        let start = fs
+            .and_then(|f| f.next_trun_dts)
+            .or_else(|| fs.and_then(|f| f.tfdt_dts))
+            .unwrap_or(sc.track_end);
+        let mut dts = start.wrapping_sub(sc.time_offset);
         // FFmpeg's unsigned sum, which wraps.
         let mut offset = frag
             .base_data_offset

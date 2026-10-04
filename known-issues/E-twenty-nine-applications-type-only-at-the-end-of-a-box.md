@@ -22,8 +22,8 @@ and Backspace `pop`s it.
 (search and the form), credmanager (the entry form, the master password,
 search), dbviewer (cell editing), diagram (a shape's label), dictionary (the
 query), filesearch (the query), lockscreen (the password), mindmap (a node's
-text and its search), passwordgen (its input), startupmanager (the dialog
-and search), tmux (its command prompt), undelete (search).
+text and its search), passwordgen (its input), tmux (its command prompt),
+undelete (search).
 
 Not among them: `terminal`, whose typing goes to the shell's own line
 editor; `typingtutor`, where a line typed straight through is the exercise;
@@ -85,4 +85,6 @@ find bar's two fields); kanban (2026-10-04: the input dialog's box edits at
 a caret, and a command's letter no longer types into it); alarmclock
 (2026-10-04: the label box edits at a caret; AltGr+Q types an @ rather than
 quitting); hexeditor (2026-10-04: the find and go-to boxes edit at a caret;
-Ctrl+V in a box no longer pastes into the file).
+Ctrl+V in a box no longer pastes into the file); startupmanager (2026-10-04:
+the search box and the add/edit dialog's fields edit at a caret; Delete in
+the search no longer removes an entry).

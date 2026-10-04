@@ -72,34 +72,16 @@ MUTATIONS = [
         '            Key::Up => dlg.focus_prev(),',
         ['a_chord_is_neither_a_manager_key_nor_typing_and_altgr_types'],
     ),
-    (
-        "the Windows key's Backspace deletes in the dialog",
-        '            Key::Backspace if !textline::is_alt_or_windows_chord(key.modifiers) => {\n                dlg.focused_text_mut().pop();',
-        '            Key::Backspace => {\n                dlg.focused_text_mut().pop();',
-        ['a_chord_is_neither_a_manager_key_nor_typing_and_altgr_types'],
-    ),
-    (
-        "the dialog types a command's letter",
-        '                if textline::types_into_field(key) {\n                    dlg.focused_text_mut().extend(key.typed());',
-        '                if key.types_text() {\n                    dlg.focused_text_mut().extend(key.typed());',
-        ['a_chord_is_neither_a_manager_key_nor_typing_and_altgr_types'],
-    ),
+    # No rows for "the Windows key's Backspace deletes in the dialog" or
+    # "the dialog types a command's letter", nor for the search's two below:
+    # since 2026-10-04 the boxes' keys are textline::apply_key's, which makes
+    # those distinctions itself, in its own crate and with its own tests;
+    # a_chord_is_neither_a_manager_key_nor_typing_and_altgr_types still holds
+    # both boxes to them.
     (
         'AltGr is taken for Ctrl in the list',
         '        if textline::is_ctrl_chord(key.modifiers) {\n            return match key.key {',
         '        if key.modifiers.ctrl {\n            return match key.key {',
-        ['a_chord_is_neither_a_manager_key_nor_typing_and_altgr_types'],
-    ),
-    (
-        "the search types a command's letter",
-        '        if self.search_focused && textline::types_into_field(key) {',
-        '        if self.search_focused && key.types_text() {',
-        ['a_chord_is_neither_a_manager_key_nor_typing_and_altgr_types'],
-    ),
-    (
-        'Alt+Backspace deletes from the search',
-        '            && !textline::is_alt_or_windows_chord(key.modifiers)\n        {',
-        '        {',
         ['a_chord_is_neither_a_manager_key_nor_typing_and_altgr_types'],
     ),
     (
@@ -132,8 +114,8 @@ MUTATIONS += [
     ),
     (
         "the dialog's boxes are drawn in no state",
-        '                self.field_state(Target::DialogField(i)),\n',
-        '                guitk::field::State::default(),\n',
+        '            let state = self.field_state(Target::DialogField(i));\n',
+        '            let state = guitk::field::State::default();\n',
         [FIELDS],
     ),
     (
@@ -236,6 +218,71 @@ MUTATIONS += [
         '            },\n'
         '            Event::Mouse(mouse) => {\n',
         [CARD],
+    ),
+]
+
+# The boxes edit at a caret (2026-10-04,
+# known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box): they
+# took typing at their end and Backspace from it, and nothing else; and Home,
+# End and Delete went to the table under the search box -- Delete removed the
+# selected entry while a search was being typed.
+SEARCH_EDITS = "the_search_box_edits_at_a_caret"
+FIELD_EDITS = "the_dialog_fields_edit_at_a_caret"
+
+MUTATIONS += [
+    (
+        "the table's keys come before the search box's",
+        "        if self.search_focused\n            && let Some(changed) = self.box_key(Target::Search, key)\n        {\n",
+        "        if false\n            && let Some(changed) = self.box_key(Target::Search, key)\n        {\n",
+        [SEARCH_EDITS],
+    ),
+    (
+        "an edit of the search leaves the table scrolled",
+        "            if changed {\n                self.restart_table();\n            }\n",
+        "",
+        ["an_edit_of_the_search_shows_its_rows_from_the_top"],
+    ),
+    (
+        "a cut or a copy takes nothing to the clipboard",
+        "            self.clipboard = copied;\n",
+        "            let _ = copied;\n",
+        [SEARCH_EDITS],
+    ),
+    (
+        "the editor is kept for the box the keyboard moved to",
+        "        if self.editor_for != Some(target) || self.editor.text() != self.box_text(target) {\n",
+        "        if self.editor.text() != self.box_text(target) {\n",
+        ["a_dialog_field_moved_to_is_edited_from_its_end"],
+    ),
+    (
+        "a press puts the caret at the start",
+        "            x - rect.x - inset,\n",
+        "            0.0,\n",
+        [SEARCH_EDITS, FIELD_EDITS],
+    ),
+    (
+        "a press in a dialog field does not place the caret",
+        "                    self.press_box(field, rect, FIELD_TEXT_INSET, x);\n",
+        "                    let _ = (field, rect);\n",
+        [FIELD_EDITS],
+    ),
+    (
+        "Ctrl+F does not select what the search box holds",
+        "        self.editor.select_all();\n",
+        "",
+        [SEARCH_EDITS],
+    ),
+    (
+        "the caret is drawn at the end",
+        "            (self.editor.cursor(), self.editor.selection_anchor())\n",
+        "            (text::TextCursor::from(held.len()), self.editor.selection_anchor())\n",
+        [SEARCH_EDITS],
+    ),
+    (
+        "a field with the keyboard draws no caret",
+        "                state\n                    .focused\n                    .then(|| self.box_caret(Target::DialogField(i))),\n",
+        "                None,\n",
+        [FIELD_EDITS],
     ),
 ]
 

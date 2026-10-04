@@ -561,8 +561,10 @@ MUTATIONS = [
     ),
     (
         "a chord works the form's own keys",
-        '    let plain = textline::is_plain(key.modifiers);',
-        '    let plain = true;',
+        # With the line after it: the shortcut card's guard holds the same
+        # words, further in.
+        '    let plain = textline::is_plain(key.modifiers);\n    match key.key {\n        Key::Tab if plain => {',
+        '    let plain = true;\n    match key.key {\n        Key::Tab if plain => {',
         ['a_key_held_with_a_modifier_is_not_the_calendars'],
     ),
     # -- the text boxes, the toolkit's fields (c-e-a-theme-can-shape-the-controls)

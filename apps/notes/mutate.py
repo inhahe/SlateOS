@@ -506,15 +506,18 @@ MUTATIONS += [
     ),
     (
         "Blank makes a note called Blank",
-        '            ToolbarControl::Template(NoteTemplate::Blank) => self.ask(Asking::NewNote, ""),\n',
+        "        if template == NoteTemplate::Blank {\n"
+        '            self.ask(Asking::NewNote, "");\n'
+        "            return;\n"
+        "        }\n",
         "",
         [TOOLBAR],
     ),
     (
         "a template makes no note",
-        "                let id = self.create_note_from_template(template, notebook);\n"
-        "                self.selected_note = Some(id);\n",
-        "                let _ = (template, notebook);\n",
+        "        let id = self.create_note_from_template(template, notebook);\n"
+        "        self.selected_note = Some(id);\n",
+        "        let _ = (template, notebook);\n",
         [TOOLBAR],
     ),
     (

@@ -24,6 +24,10 @@
     reason = "a test: a failure should be loud"
 )]
 
+// rustfmt formats the shared readers where they live, beside the integration
+// tests, and must not follow this path: a mirror of only the changed files
+// (the push gate's) does not hold them.
+#[rustfmt::skip]
 #[path = "../../tests/common/mod.rs"]
 mod common;
 

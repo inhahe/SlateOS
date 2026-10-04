@@ -21,7 +21,10 @@ Two tables:
   which never fired in a window: no clock was asked for, so no tick came.
   It is asked for at the deadline now; a window runs on the wall clock, a
   test on ticks whose part seconds are carried; and the event that finds the
-  lock due is not taken.
+  lock due is not taken.  And the text boxes (2026-10-03), the toolkit's
+  fields: lit under the pointer as settled after every event, marked where
+  typing goes -- which follows from what is showing -- and red where a
+  refusal was about them.
 * **vaultfile.rs** -- the file itself: a header that asks for too much work is
   refused before any is done, and contents are read whole or not at all.
 
@@ -65,6 +68,9 @@ BUTTONS_ON_ENTRY = "edit_and_delete_can_be_pressed_on_an_entry"
 LOCKS_ITSELF = "left_alone_the_vault_locks_itself_on_time"
 LOCK_DUE = "the_event_that_finds_the_lock_due_is_not_taken"
 WALL_CLOCK = "a_window_runs_on_the_wall_clock"
+LOCK_BOX = "the_lock_screens_box_is_the_toolkits_field"
+SEARCH_BOXES = "the_search_and_the_forms_boxes_are_the_toolkits_fields"
+FIRST_RUN_BOXES = "the_first_runs_and_the_restores_boxes_are_the_toolkits_fields"
 
 MAIN = [
     (
@@ -352,6 +358,148 @@ MAIN = [
         '            self.lock_vault();\n'
         '            return true;\n',
         [LOCK_DUE],
+    ),
+    # -- the text boxes, the toolkit's fields (c-e-a-theme-can-shape-the-controls)
+    (
+        'a text box is drawn the same wherever the pointer is',
+        '            hovered: self.hover == Some(target),\n',
+        '            hovered: false,\n',
+        [LOCK_BOX, SEARCH_BOXES],
+    ),
+    (
+        'no text box is marked where typing goes',
+        '            focused: self.typing_into() == Some(target),\n',
+        '            focused: false,\n',
+        [LOCK_BOX, SEARCH_BOXES, FIRST_RUN_BOXES],
+    ),
+    (
+        'a wrong text box is not red',
+        '            invalid: wrong,\n',
+        '            invalid: false,\n',
+        [LOCK_BOX, FIRST_RUN_BOXES],
+    ),
+    (
+        'the search box is marked under the file dialog',
+        '        if self.picker.is_open() {\n'
+        '            return None;\n'
+        '        }\n'
+        '        if !self.vault.is_unlocked() {\n',
+        '        if !self.vault.is_unlocked() {\n',
+        [SEARCH_BOXES],
+    ),
+    (
+        'the lock screen box is not marked',
+        '                Gate::Unlock => Some(Target::MasterInput),\n',
+        '                Gate::Unlock => None,\n',
+        [LOCK_BOX],
+    ),
+    (
+        "the first run's keyboard is always in the first box",
+        '                Gate::Create(form) if form.confirming => Some(Target::ConfirmPassword),\n',
+        '',
+        [FIRST_RUN_BOXES],
+    ),
+    (
+        "the restore dialog's box is not marked",
+        '            Some(VaultDialog::RestorePassword { .. }) => return Some(Target::RestoreInput),\n',
+        '',
+        [FIRST_RUN_BOXES],
+    ),
+    (
+        'the search box is marked under a vault dialog',
+        '            Some(_) => return None,\n',
+        '            Some(_) => {}\n',
+        [SEARCH_BOXES],
+    ),
+    (
+        'the search box keeps the keyboard from the new-entry form',
+        '            return Some(Target::NewField(form.focused));\n',
+        '            let _ = form;\n',
+        [SEARCH_BOXES],
+    ),
+    (
+        'the pointer is not followed',
+        '                MouseEventKind::Move => self.pointer = Some((mouse.x, mouse.y)),\n',
+        '                MouseEventKind::Move => {}\n',
+        [LOCK_BOX, SEARCH_BOXES],
+    ),
+    (
+        'leaving the window leaves a box lit',
+        '                MouseEventKind::Leave => self.pointer = None,\n',
+        '                MouseEventKind::Leave => {}\n',
+        [LOCK_BOX],
+    ),
+    (
+        'a change of light asks for no repaint',
+        '        match response {\n'
+        '            Response::Idle if self.hover != lit => Response::Redraw,\n'
+        '            other => other,\n'
+        '        }\n',
+        '        let _ = lit;\n'
+        '        response\n',
+        [LOCK_BOX],
+    ),
+    (
+        'the light is settled only when the pointer moves',
+        '        self.hover = self.text_box_under_pointer();\n',
+        '        if matches!(event, Event::Mouse(_)) {\n'
+        '            self.hover = self.text_box_under_pointer();\n'
+        '        }\n',
+        [SEARCH_BOXES],
+    ),
+    (
+        'a button under the pointer counts as a box',
+        '        self.target_at(x, y).filter(|t| t.is_text_box())\n',
+        '        self.target_at(x, y)\n',
+        [LOCK_BOX],
+    ),
+    (
+        'a short master password is not the box made red',
+        '        form.wrong = Some(Target::NewPassword);\n',
+        '',
+        [FIRST_RUN_BOXES],
+    ),
+    (
+        'a second password that does not match is not the box made red',
+        '        form.wrong = Some(Target::ConfirmPassword);\n',
+        '',
+        [FIRST_RUN_BOXES],
+    ),
+    (
+        'typing leaves the box red',
+        '                field.extend(key.typed());\n'
+        '                form.error = None;\n'
+        '                form.wrong = None;\n',
+        '                field.extend(key.typed());\n'
+        '                form.error = None;\n',
+        [FIRST_RUN_BOXES],
+    ),
+    (
+        'a Backspace leaves the box red',
+        '                    field.pop();\n'
+        '                    form.error = None;\n'
+        '                    form.wrong = None;\n',
+        '                    field.pop();\n'
+        '                    form.error = None;\n',
+        [FIRST_RUN_BOXES],
+    ),
+    (
+        'a refused master password is not shown red',
+        '        state.field_state(Target::MasterInput, state.unlock_failed),\n',
+        '        state.field_state(Target::MasterInput, false),\n',
+        [LOCK_BOX],
+    ),
+    (
+        "a refused backup password is not shown red",
+        '            error.is_some(),\n',
+        '            false,\n',
+        [FIRST_RUN_BOXES],
+    ),
+    (
+        "the text boxes take the toolkit's focus width, not the user's",
+        '        self.focus_ring_width = settings.focus_ring_width();\n',
+        '        let _ = settings;\n',
+        [LOCK_BOX, SEARCH_BOXES, FIRST_RUN_BOXES],
     ),
     (
         'the event that finds the lock due is taken as well',

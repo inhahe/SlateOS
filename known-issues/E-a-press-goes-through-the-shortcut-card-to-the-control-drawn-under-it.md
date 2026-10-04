@@ -19,7 +19,7 @@ alarmclock, archivemanager, benchmark, calendar, camera, charmap,
 clipmanager, defrag, devicemanager, diagram, diskanalyzer, diskcleanup,
 diskimager, ebook, explorer, fileassoc, filediff, fontmanager, hexeditor,
 imageviewer, ircclient, jsonviewer, reminders, mindmap, musicplayer, notes,
-paint, partmanager and pdfviewer (2026-10-04).
+paint, partmanager, pdfviewer and photomanager (2026-10-04).
 Calendar's, diagram's, diskimager's, explorer's, filediff's, hexeditor's,
 imageviewer's, ircclient's, jsonviewer's, reminders', mindmap's and
 pdfviewer's cards were modal for
@@ -33,7 +33,7 @@ it -- so each application's card is checked for both. (Reminders takes no press 
 production code draws `guitk::shortcut::render_card` and has no function
 handling a mouse event that reads the card's flag. Those not yet fixed:
 
-photomanager, podcast, pomodoro, procexplorer, radio, remotedesktop, screenrecorder,
+podcast, pomodoro, procexplorer, radio, remotedesktop, screenrecorder,
 screenshot, settings, spreadsheet, startupmanager, stopwatch, sudoku,
 sysinfo, sysmonitor, systemrestore, undelete, whiteboard, wordle,
 worldclock.

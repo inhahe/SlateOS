@@ -8,7 +8,9 @@ The table covers what changed on 2026-09-26: the selected photograph was
 decoded inside `render`, freezing the window for as long as that took; it is
 decoded on `offloop`'s worker now, and put up when the worker wakes the
 window.  `offloop`'s own rule -- only the newest request is answered -- is
-swept by `apps/offloop/mutate.py`.
+swept by `apps/offloop/mutate.py`.  The first rows, added 2026-10-04, cover
+the list of keys' hold on the pointer: a press with it up puts it away and
+reaches nothing under it.
 
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
@@ -28,8 +30,41 @@ GONE = "a_photograph_deselected_while_decoding_is_not_put_up"
 FAILS = "a_photograph_that_fails_off_the_window_says_why"
 NOT_A_PICTURE = "a_file_that_is_not_a_picture_says_why_instead_of_staying_blank"
 THUMBS = "the_grids_thumbnails_are_made_off_the_window"
+CARD = "the_shortcut_card_takes_a_press_rather_than_passing_it_on"
 
 MUTATIONS = [
+    # The list of keys takes a press rather than letting it reach the
+    # photograph under it (known-issues
+    # E-a-press-goes-through-the-shortcut-card-to-the-control-drawn-under-it).
+    (
+        "a press goes through the list of keys",
+        "        if self.show_help\n"
+        "            && let Event::Mouse(MouseEvent {\n"
+        "                kind: MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_),\n"
+        "                ..\n"
+        "            }) = event\n"
+        "        {\n"
+        "            self.show_help = false;\n"
+        "            return true;\n"
+        "        }\n",
+        "",
+        [CARD],
+    ),
+    (
+        "only the left button puts the list of keys away",
+        "                kind: MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_),\n",
+        "                kind: MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_),\n",
+        [CARD],
+    ),
+    (
+        "a press under the list of keys leaves it up",
+        "            }) = event\n"
+        "        {\n"
+        "            self.show_help = false;\n",
+        "            }) = event\n"
+        "        {\n",
+        [CARD],
+    ),
     (
         "the photograph is decoded on the window even with a loader",
         "            Some(loader) => loader.ask((pid, path)),",

@@ -2653,6 +2653,22 @@ impl PhotoApp {
 
     /// Handle one input event. Returns whether anything changed.
     pub fn handle_event(&mut self, event: &Event) -> bool {
+        // The list of keys is drawn over everything, the picker and an open
+        // menu included, so it has the pointer first: a press with any button
+        // puts it away and does nothing else. It used to reach the photograph
+        // drawn under the list -- the left button selected it, and the right
+        // raised its menu behind the list. A move or a release is not a press,
+        // and passes; the list's keys are in `handle_key`.
+        if self.show_help
+            && let Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_),
+                ..
+            }) = event
+        {
+            self.show_help = false;
+            return true;
+        }
+
         // The picker takes input first while it is up, or a click meant for a
         // filename lands on whatever is drawn beneath it.
         //
@@ -6673,6 +6689,58 @@ mod tests {
         assert_eq!(app.photo_at(x, y), Some(visible[5]));
         assert!(app.handle_event(&click(x, y)));
         assert_eq!(app.selected_photo, Some(visible[5]));
+    }
+
+    /// **A press with the list of keys up puts it away and does nothing
+    /// else.** It reached the photograph drawn under the list: the left button
+    /// selected it, and the right raised its menu behind the list. The
+    /// controls are the same presses with the list down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let mut app = library(20);
+        let visible = app.visible_photos();
+        let rect = app.thumb_rect(5).expect("a sixth thumbnail");
+        let (x, y) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+        let before = app.selected_photo;
+        assert_ne!(
+            before,
+            Some(visible[5]),
+            "the fixture has it selected already"
+        );
+
+        app.handle_event(&key(Key::F1));
+        assert!(app.show_help);
+        assert!(app.handle_event(&click(x, y)));
+        assert!(!app.show_help, "the press did not put the list away");
+        assert_eq!(
+            app.selected_photo, before,
+            "the press went through the list"
+        );
+
+        app.handle_event(&key(Key::F1));
+        app.handle_event(&right_click(x, y));
+        assert!(!app.show_help, "a right-button press left the list up");
+        assert!(
+            app.photo_menu.is_none(),
+            "a menu was raised behind the list"
+        );
+        assert_eq!(
+            app.selected_photo, before,
+            "the right button went through the list"
+        );
+
+        // The controls.
+        app.handle_event(&click(x, y));
+        assert_eq!(
+            app.selected_photo,
+            Some(visible[5]),
+            "control: the press selects nothing"
+        );
+        app.handle_event(&right_click(x, y));
+        assert!(
+            app.photo_menu.is_some(),
+            "control: the right button raises no menu"
+        );
     }
 
     #[test]

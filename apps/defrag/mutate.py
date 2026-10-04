@@ -35,16 +35,15 @@ MUTATIONS = [
         '',
         ['a_chord_is_neither_a_key_of_the_window_nor_typing'],
     ),
-    (
-        "a command's letter is typed into a pattern",
-        '            if textline::types_into_field(key) {',
-        '            if key.types_text() {',
-        ['a_chord_is_neither_a_key_of_the_window_nor_typing'],
-    ),
+    # No row for "a command's letter is typed into a pattern": since
+    # 2026-10-04 the box's typing is textline::apply_key's, which tells a
+    # command from AltGr itself, in its own crate and with its own tests;
+    # a_chord_is_neither_a_key_of_the_window_nor_typing still holds the box
+    # to it.
     (
         'a chord works the pattern field',
-        '                _ if !plain => {}\n',
-        '',
+        '                Key::Escape if plain => {\n',
+        '                Key::Escape => {\n',
         ['a_chord_is_neither_a_key_of_the_window_nor_typing'],
     ),
     (
@@ -136,6 +135,64 @@ MUTATIONS += [
         '        self.focus_ring_width = settings.focus_ring_width();\n',
         '        let _ = settings;\n',
         [FIELD],
+    ),
+]
+
+# The pattern box edits at a caret (2026-10-04,
+# known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box): it
+# took typing at its end and Backspace from it, and nothing else, and its
+# caret was a `|` typed onto the pattern's end.
+EDITS = "the_pattern_box_edits_at_a_caret"
+SHOWN = "the_pattern_box_edits_the_pattern_it_shows"
+
+MUTATIONS += [
+    (
+        "a cut or a copy takes nothing to the clipboard",
+        "            self.exclude_clipboard = copied;\n",
+        "            let _ = copied;\n",
+        [EDITS],
+    ),
+    (
+        "a key finds the editor holding another pattern",
+        "    fn exclude_key(&mut self, key: &KeyEvent) {\n        if self.exclude_editor.text() != self.exclude_input {\n",
+        "    fn exclude_key(&mut self, key: &KeyEvent) {\n        if false {\n",
+        [SHOWN],
+    ),
+    (
+        "a press finds the editor holding another pattern",
+        "        let drawn = self.exclude_cursor();\n        if self.exclude_editor.text() != self.exclude_input {\n",
+        "        let drawn = self.exclude_cursor();\n        if false {\n",
+        [SHOWN],
+    ),
+    (
+        "a press puts the caret at the start",
+        "            x - rect.x - EXCLUDE_TEXT_INSET,\n",
+        "            0.0,\n",
+        [EDITS],
+    ),
+    (
+        "a press in the box does nothing",
+        "            Target::ExcludeInput => self.press_exclude(x),\n",
+        "            Target::ExcludeInput => {}\n",
+        [EDITS, SHOWN],
+    ),
+    (
+        "the caret is drawn at the start",
+        "                    cursor: self.exclude_cursor(),\n",
+        "                    cursor: text::TextCursor::default(),\n",
+        [EDITS],
+    ),
+    (
+        "the selection is not drawn",
+        "                    selection_anchor: if self.exclude_editor.text() == self.exclude_input {\n",
+        "                    selection_anchor: if false {\n",
+        [EDITS],
+    ),
+    (
+        "the box with the keys draws no caret",
+        "                    focused: state.focused,\n                    x: card_x + PADDING + EXCLUDE_TEXT_INSET,\n",
+        "                    focused: false,\n                    x: card_x + PADDING + EXCLUDE_TEXT_INSET,\n",
+        [EDITS],
     ),
 ]
 

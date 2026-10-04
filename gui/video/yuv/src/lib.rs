@@ -1,24 +1,32 @@
-//! libyuv's arithmetic, ported: pictures in YUV -- the form video codecs and
-//! AVIF store them in -- turned into `0xAARRGGBB` pixels, and planes of
-//! samples scaled to another size.
+//! Pictures in YUV -- the form video codecs and AVIF store them in --
+//! turned into `0xAARRGGBB` pixels as libavif turns them, and planes of
+//! samples scaled to another size as libyuv scales them.
 //!
-//! - [`convert`]: YUV to ARGB, as libyuv's x86 code computes it (its C
-//!   copies the x86 formulation): BT.601, BT.709 and BT.2020 at limited and
-//!   full range ([`convert::I601`] and its siblings), 8-, 10- and 12-bit
-//!   samples, 4:4:4, 4:2:2 and 4:2:0 with libyuv's chroma upsampling, grey,
-//!   alpha carried through, and premultiplied alpha undone.
+//! - [`reformat`]: a picture to pixels, libavif's `avifImageYUVToRGB`: which
+//!   arithmetic each colour description gets -- libyuv's fixed point for the
+//!   matrices libyuv has constants for, libavif's own floating point for the
+//!   rest (SMPTE 240M, FCC, YCgCo, the identity matrix) -- with alpha, and
+//!   premultiplied alpha undone. What a caller with a decoded picture calls.
+//! - [`convert`]: libyuv's conversions beneath it, as libyuv's x86 code
+//!   computes them (its C copies the x86 formulation): BT.601, BT.709 and
+//!   BT.2020 at limited and full range ([`convert::I601`] and its siblings),
+//!   8-, 10- and 12-bit samples, 4:4:4, 4:2:2 and 4:2:0 with libyuv's chroma
+//!   upsampling, grey, alpha carried through, and `ARGBUnattenuate`.
 //! - [`scale`]: `ScalePlane` and `ScalePlane_12` with `kFilterBox`, every
 //!   method they pick by the sizes, as libyuv's C computes them.
 //!
-//! The revision followed is 1924 (`644251f252a84bf8ce91ff0aca86a9b16b069ab8`),
-//! the one libavif 1.4.2 pins. Where libyuv's C and its x86 SIMD compute
-//! different pixels, this is the C, libyuv's reference (design-decisions
-//! §1344). Its users: AVIF pictures (`gui/imagecodec`), and video
-//! (`gui/video`).
+//! libyuv's revision is 1924 (`644251f252a84bf8ce91ff0aca86a9b16b069ab8`),
+//! the one libavif 1.4.2 pins; libavif's is 1.3.0. Where libyuv's C and its
+//! x86 SIMD compute different pixels, this is the C, libyuv's reference
+//! (design-decisions §1344). Its users: AVIF pictures (`gui/imagecodec`),
+//! and video frames (`gui/video/codec`), which therefore have the colours an
+//! AVIF still of the same picture would.
 //!
 //! Portions of this crate are copyright 2011, 2013 and 2015 The LibYuv
 //! Project Authors, from libyuv, and used under its BSD licence and patent
-//! grant: `licenses/libyuv-LICENSE`, `licenses/libyuv-PATENTS`.
+//! grant: `licenses/libyuv-LICENSE`, `licenses/libyuv-PATENTS`. Portions
+//! ([`reformat`]) are copyright 2019-2020 Joe Drago, from libavif, used
+//! under its BSD-2-Clause licence: `gui/imagecodec/licenses/libavif-LICENSE.txt`.
 
 #![no_std]
 
@@ -28,6 +36,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 pub mod convert;
+pub mod reformat;
 pub mod scale;
 
 /// A sample of 8 or 16 bits.

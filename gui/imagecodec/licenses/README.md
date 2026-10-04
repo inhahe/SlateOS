@@ -142,7 +142,7 @@ under the BSD-2-Clause licence, reproduced with libavif's other notices in
 | `src/avif/setup.rs` | `src/read.c`: `avifDecoderParse`, `avifDecoderReset`; `src/avif.c`, `src/utils.c`: the clean-aperture crop; `src/gainmap.c`: `avifGainMapValidateMetadata` |
 | `src/avif/obu.rs` | `src/obu.c`, which libavif took from dav1d |
 | `src/avif/decode.rs` | `src/read.c`: `avifDecoderNextImage`, `avifDecoderDecodeTiles` and the grid tile copy; `src/codec_dav1d.c` |
-| `src/avif/convert.rs` | `src/reformat.c`, `src/reformat_libyuv.c`, `src/alpha.c`, `src/colr.c` (the matrix coefficients) |
+| `gui/video/yuv/src/reformat.rs` (a crate of its own, which video frames share) | `src/reformat.c`, `src/reformat_libyuv.c`, `src/alpha.c`, `src/colr.c` (the matrix coefficients) |
 
 The AV1 decoding itself is rav1d, a separate crate with its own notices
 (`gui/video/rav1d/COPYING`).
@@ -155,4 +155,6 @@ names each one and pins it by SHA-256.
 
 The YUV-to-RGB conversions and the scaling AVIF pictures go through are
 libyuv's, ported in their own crate, `gui/video/yuv`, whose `licenses/`
-carries libyuv's licence, patent grant and notice.
+carries libyuv's licence, patent grant and notice. That crate also carries
+libavif's choice among them (`src/reformat.rs`, above), under the libavif
+notice here.

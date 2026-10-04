@@ -2,7 +2,7 @@
 name = "yuv"
 version = "0.1.0"
 edition = "2024"
-description = "libyuv's YUV-to-RGB conversions and plane scaling, ported: what AVIF pictures and video frames are drawn with."
+description = "Pictures in YUV to RGB as libavif converts them -- libyuv's fixed point and libavif's floating point, ported -- and libyuv's plane scaling: what AVIF pictures and video frames are drawn with."
 publish = false
 
 [lib]

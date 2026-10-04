@@ -21,7 +21,7 @@ diskimager, ebook, explorer, fileassoc, filediff, fontmanager, hexeditor,
 imageviewer, ircclient, jsonviewer, reminders, mindmap, musicplayer, notes,
 paint, partmanager, pdfviewer, photomanager, podcast, pomodoro,
 procexplorer, radio, remotedesktop, screenrecorder, screenshot, settings,
-spreadsheet, startupmanager, stopwatch and sudoku (2026-10-04).
+spreadsheet, startupmanager, stopwatch, sudoku and sysinfo (2026-10-04).
 Calendar's, diagram's, diskimager's, explorer's, filediff's, hexeditor's,
 imageviewer's, ircclient's, jsonviewer's, reminders', mindmap's,
 pdfviewer's, remotedesktop's, spreadsheet's and sudoku's cards were modal for
@@ -36,7 +36,7 @@ each application's card is checked for both. (Reminders takes no press at all; i
 production code draws `guitk::shortcut::render_card` and has no function
 handling a mouse event that reads the card's flag. Those not yet fixed:
 
-sysinfo, sysmonitor, systemrestore, undelete, whiteboard, wordle,
+sysmonitor, systemrestore, undelete, whiteboard, wordle,
 worldclock.
 
 A scan is a lead, not a verdict: an application may guard its card some way

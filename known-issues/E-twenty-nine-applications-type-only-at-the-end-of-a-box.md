@@ -19,8 +19,8 @@ and Backspace `pop`s it.
 (`known-issues-resolved/E-thirty-applications-answer-f1-with-nothing.md`).
 
 **The twenty-nine:** credmanager (the entry form, the master password,
-search), dbviewer (cell editing), dictionary (the query), lockscreen (the
-password), passwordgen (its input).
+search), dictionary (the query), lockscreen (the password), passwordgen (its
+input).
 
 Not among them: `terminal`, whose typing goes to the shell's own line
 editor; `typingtutor`, where a line typed straight through is the exercise;
@@ -96,4 +96,6 @@ caret; Ctrl+Home and Ctrl+End take the files to their ends); charmap
 unless some of the query is selected); clipmanager (2026-10-04: the search,
 the tag box and the template's two boxes edit at a caret); filesearch
 (2026-10-04: the query edits at a caret; Ctrl+A and Ctrl+C are its own, and
-the two sorts on them take Shift (design-decisions 1233)).
+the two sorts on them take Shift (design-decisions 1233)); dbviewer
+(2026-10-04: the SQL editor and the filter's value edit at a caret -- not
+cell editing, as listed -- and the editor draws the query as it was typed).

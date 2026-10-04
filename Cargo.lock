@@ -2893,6 +2893,7 @@ dependencies = [
  "safeio",
  "scratchdir",
  "settingsfile",
+ "textline",
  "thumbs",
 ]
 

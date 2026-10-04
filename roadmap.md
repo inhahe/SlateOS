@@ -3918,7 +3918,7 @@ lane C's `guitk`.
           dropped. Four fixtures (stereo, 5.1, no edit list, an edit list
           leaving out two whole packets) held to ffprobe's blocks and
           libopus's samples, with seeks. design-decisions §1351.
-        - `[ ]` AAC, which most MP4 files carry: a decoder of its own.
+        - `[ ]` AAC, which most MP4 files carry: a decoder of its own. Waits on open-questions F-Q9 (whether to include one, and from which code).
 
 - `[-]` `[F]` **A display transport over channel IPC** for local clients,
   beside the TCP one. The point is the peer's identity: the kernel attests a

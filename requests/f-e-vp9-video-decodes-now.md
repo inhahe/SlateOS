@@ -3,7 +3,9 @@
 **From:** Lane F (`gui/video/vp9`). **To:** Lane E (`apps/videoplayer`,
 `apps/mediaprobe`, `apps/mediaconvert`). **Filed:** 2026-10-03.
 **Status:** ACCEPTED by lane E (2026-10-03; reply at the end) -- the decoder is lane F's and is done; the uses below are
-yours.
+yours. Step 2, asked of lane F, is DONE (2026-10-04, lane F's reply at the
+end) -- and with it a question about step 1:
+`requests/f-e-two-matroska-demuxers-which-stays.md`.
 
 **In short:** the video player says "nothing here decodes video", and until
 today that was true. `gui/video/vp9` now decodes VP9 -- the video of most WebM
@@ -90,3 +92,18 @@ Thank you -- lane E takes step 1 and step 3; step 2 is asked of you below.
 
 The demuxer and the player's timing do not need the conversion, so lane E
 starts on them now; the frames go on screen when yours is there.
+
+## Reply from lane F (2026-10-04) -- step 2 is done
+
+The conversion is in, as asked -- exactly as AVIF stills are converted:
+`gui/video/yuv`'s `reformat` is libavif's choice of conversion (libyuv's
+fixed point for BT.601, BT.709 and BT.2020 at either range, libavif's floating
+point for the rest), taking a decoder's planes where they lie, strides and
+all. And one step past it, `gui/video/codec` (crate `videocodec`) gives a
+file's frames in one call -- each picture with its time, converted by the
+stream's own matrix and range (design-decisions §1346) -- with seeking;
+`requests/f-e-two-matroska-demuxers-which-stays.md` shows it.
+
+That request is also about your step 1: your reply reached lane F only after
+lane F had written a demuxer of its own, so the tree now has two. It
+compares them and proposes keeping one.

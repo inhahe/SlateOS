@@ -1583,6 +1583,12 @@ impl FileDiffApp {
             self.show_help = false;
             return EventResult::Consumed;
         }
+        if self.show_help {
+            // Modal: every other key is the card's while it is up. It was
+            // not, and the search, a folder's keys and the scroll keys all
+            // acted on the comparison the card covers.
+            return EventResult::Consumed;
+        }
         if self.search.visible {
             return self.handle_search_key(key);
         }
@@ -1852,6 +1858,16 @@ impl FileDiffApp {
 
     /// Handle mouse input.
     fn handle_mouse(&mut self, mouse: &MouseEvent) -> EventResult {
+        if self.show_help {
+            // The card is modal for the pointer as it is for the keys: a
+            // press puts it away, as it does in every other window here, and
+            // the wheel scrolls nothing it covers.
+            if matches!(mouse.kind, MouseEventKind::Press(_)) {
+                self.show_help = false;
+                return EventResult::Consumed;
+            }
+            return EventResult::Ignored;
+        }
         match &mouse.kind {
             MouseEventKind::Scroll { dy, .. } => {
                 // `wheel::rows_f`, not an `Accumulator`: these offsets are
@@ -4507,21 +4523,10 @@ mod tests {
         let left: String = (0..400)
             .map(|i| format!("line{i}"))
             .collect::<Vec<_>>()
-            .join(
-                "
-",
-            );
+            .join("\n");
         let mut right_lines: Vec<String> = (0..400).map(|i| format!("line{i}")).collect();
         right_lines[399] = "changed".to_string();
-        app.load_files(
-            "a",
-            &left,
-            "b",
-            &right_lines.join(
-                "
-",
-            ),
-        );
+        app.load_files("a", &left, "b", &right_lines.join("\n"));
         app
     }
 
@@ -4531,6 +4536,66 @@ mod tests {
             y: 200.0,
             kind: MouseEventKind::Scroll { dx: 0.0, dy },
         }));
+    }
+
+    /// **The card is modal for the keys and the pointer**: while it is up,
+    /// keys that are not its own do nothing, the wheel scrolls nothing, and
+    /// a press puts it away. It was modal for none of it. The controls at
+    /// the end are the same key and turn with the card down.
+    #[test]
+    fn the_shortcut_card_takes_every_key_and_press_while_it_is_up() {
+        use guitk::event::MouseButton;
+        let mut app = long_diff();
+        let key = |app: &mut FileDiffApp, k: Key| {
+            app.handle_event(&Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers: guitk::event::Modifiers::NONE,
+                text: String::new(),
+            }))
+        };
+        let press = |app: &mut FileDiffApp, button: MouseButton| {
+            app.handle_event(&Event::Mouse(MouseEvent {
+                x: 100.0,
+                y: 200.0,
+                kind: MouseEventKind::Press(button),
+            }))
+        };
+
+        key(&mut app, Key::F1);
+        assert!(app.show_help);
+        key(&mut app, Key::PageDown);
+        assert_eq!(
+            app.scroll_left, 0.0,
+            "Page Down scrolled the comparison under the card"
+        );
+        wheel_at(&mut app, 100.0, -1.0);
+        assert_eq!(
+            app.scroll_left, 0.0,
+            "the wheel scrolled the comparison under the card"
+        );
+        assert!(
+            app.show_help,
+            "a key or turn that is not the card's put it away"
+        );
+
+        assert_eq!(press(&mut app, MouseButton::Left), EventResult::Consumed);
+        assert!(!app.show_help, "a press did not put the card away");
+        key(&mut app, Key::F1);
+        press(&mut app, MouseButton::Right);
+        assert!(!app.show_help, "a right-button press left the card up");
+
+        wheel_at(&mut app, 100.0, -1.0);
+        assert!(
+            app.scroll_left > 0.0,
+            "control: the wheel scrolls nothing at all"
+        );
+        let before = app.scroll_left;
+        key(&mut app, Key::PageDown);
+        assert!(
+            app.scroll_left > before,
+            "control: Page Down scrolls nothing at all"
+        );
     }
 
     #[test]

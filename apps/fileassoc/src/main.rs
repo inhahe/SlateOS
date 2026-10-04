@@ -1955,6 +1955,15 @@ impl FileAssocUI {
             Event::Mouse(mouse) => {
                 let (x, y) = (mouse.x, mouse.y);
                 match mouse.kind {
+                    // The card is modal for the pointer as it is for the
+                    // keys: a press, with any button, puts it away rather
+                    // than reaching the control drawn under it, and the wheel
+                    // scrolls nothing it covers.
+                    MouseEventKind::Press(_) if self.show_help => {
+                        self.show_help = false;
+                        EventResult::Consumed
+                    }
+                    MouseEventKind::Scroll { .. } if self.show_help => EventResult::Ignored,
                     MouseEventKind::Press(MouseButton::Left) => self.handle_click(x, y),
                     // `dy` is a notch count, not a distance (see `guitk::wheel`),
                     // and three rows a notch is the toolkit's convention.
@@ -5435,6 +5444,56 @@ mod tests {
             ui.status.contains("Could not read"),
             "status was {:?}",
             ui.status
+        );
+    }
+
+    /// **A press while the card is up puts it away and does nothing else,
+    /// and the wheel scrolls nothing under it.** A press used to go straight
+    /// through the card to the control drawn under it. The controls at the
+    /// end are the same press and turn with the card down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let mut ui = FileAssocUI::new();
+        let (cx, cy) = layout().rows.centre();
+        let wheel = |ui: &mut FileAssocUI| {
+            ui.handle_event(&Event::Mouse(MouseEvent {
+                x: cx,
+                y: cy,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy: -1.0 },
+            }))
+        };
+        let category = probe::target_matching(&ui, |t| matches!(t, Target::Category(Some(_))))
+            .expect("a category");
+
+        probe::key(&mut ui, &probe::press(Key::F1));
+        assert!(ui.show_help);
+        wheel(&mut ui);
+        assert!(
+            ui.scroll_offset.abs() < f32::EPSILON,
+            "the wheel scrolled the table under the card"
+        );
+        assert_eq!(probe::click(&mut ui, category), EventResult::Consumed);
+        assert!(!ui.show_help, "the press did not put the card away");
+        assert_eq!(
+            ui.selected_category, None,
+            "the press went through the card to a category"
+        );
+
+        // Any button: the right one does nothing to a control, but it is
+        // still a press on the card.
+        probe::key(&mut ui, &probe::press(Key::F1));
+        probe::click_with(&mut ui, category, MouseButton::Right);
+        assert!(!ui.show_help, "a right-button press left the card up");
+
+        wheel(&mut ui);
+        assert!(
+            ui.scroll_offset > 0.0,
+            "control: the wheel scrolls nothing at all"
+        );
+        probe::click(&mut ui, category);
+        assert!(
+            ui.selected_category.is_some(),
+            "control: the press does nothing even with the card down"
         );
     }
 

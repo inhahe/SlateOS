@@ -130,6 +130,31 @@ MUTATIONS = [
         '        if key.key == Key::Escape && self.from_folders && self.dir_compare.is_some() {',
         ['enter_opens_the_pair_and_escape_goes_back_to_the_folders'],
     ),
+    # -- the shortcut card is modal, for the keys and the pointer
+    (
+        "a key that is not the card's acts behind it",
+        '        if self.show_help {\n'
+        '            // Modal: every other key is the card\'s while it is up. It was\n',
+        '        if false {\n'
+        '            // Modal: every other key is the card\'s while it is up. It was\n',
+        ['the_shortcut_card_takes_every_key_and_press_while_it_is_up'],
+    ),
+    (
+        "the wheel scrolls what the card covers",
+        '        if self.show_help {\n'
+        '            // The card is modal for the pointer as it is for the keys: a\n',
+        '        if false {\n'
+        '            // The card is modal for the pointer as it is for the keys: a\n',
+        ['the_shortcut_card_takes_every_key_and_press_while_it_is_up'],
+    ),
+    (
+        "a press does not put the card away",
+        '            if matches!(mouse.kind, MouseEventKind::Press(_)) {\n'
+        '                self.show_help = false;\n',
+        '            if matches!(mouse.kind, MouseEventKind::Press(guitk::event::MouseButton::Left)) {\n'
+        '                self.show_help = false;\n',
+        ['the_shortcut_card_takes_every_key_and_press_while_it_is_up'],
+    ),
 ]
 
 if __name__ == "__main__":

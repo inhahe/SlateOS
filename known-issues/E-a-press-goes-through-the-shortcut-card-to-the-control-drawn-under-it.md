@@ -17,15 +17,15 @@ press.
 field. Fixed the same day in colorpicker, contacts and dbviewer; then in
 alarmclock, archivemanager, benchmark, calendar, camera, charmap,
 clipmanager, defrag, devicemanager, diagram, diskanalyzer, diskcleanup
-diskimager, ebook and explorer (2026-10-04) -- calendar's, diagram's,
-diskimager's and explorer's cards were modal for the keys no more than for the pointer,
+diskimager, ebook, explorer, fileassoc and filediff (2026-10-04) --
+calendar's, diagram's, diskimager's, explorer's and filediff's cards were modal for the keys no more than for the pointer,
 so each application's card is checked for both.
 
 **Still to do.** A scan the same day found 66 more applications whose
 production code draws `guitk::shortcut::render_card` and has no function
 handling a mouse event that reads the card's flag:
 
-fileassoc, filediff, finance, flashcards,
+finance, flashcards,
 fontmanager, habits, hexeditor, imageviewer, ircclient, jsonviewer, kanban,
 logviewer, markdowneditor, metronome, mindmap, musicplayer, notes, paint,
 partmanager, passwordgen, pdfviewer, photomanager, pinball, podcast,

@@ -4523,6 +4523,7 @@ dependencies = [
  "safeio",
  "scratchdir",
 ]
+ "textline",
 
 [[package]]
 name = "wall"

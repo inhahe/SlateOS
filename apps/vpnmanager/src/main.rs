@@ -656,7 +656,25 @@ pub struct VpnManager {
     /// The user's focus width, which the boxes draw their focus mark at
     /// (`appearance_changed`).
     focus_ring_width: f32,
+    /// Whether the list of keys is up.
+    show_help: bool,
 }
+
+/// The keys this window answers, as the F1 list shows them.
+///
+/// It had no list: F1 did nothing, and every key here could be found only by
+/// pressing it -- Escape among them, which closes the window.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1 / ?", "This list"),
+    ("Up / Down", "Choose a profile"),
+    ("Left / Right", "Previous or next tab"),
+    ("PageUp / PageDown", "Scroll the profiles"),
+    ("Home", "Back to the first profile"),
+    ("Ctrl+F", "Search the profiles"),
+    ("Tab", "To the search, or the next box"),
+    ("Enter", "Save, add the range, or end the search"),
+    ("Escape", "Leave the box, cancel, or close the window"),
+];
 
 impl VpnManager {
     /// Create a new VPN manager, holding nothing.
@@ -695,6 +713,7 @@ impl VpnManager {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             hover: None,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
+            show_help: false,
             profiles,
             connections,
             log,
@@ -1660,22 +1679,6 @@ pub enum Field {
 }
 
 impl Field {
-    /// The field after this one in tab order.
-    ///
-    /// The dialog's four fields form one cycle and the two loose boxes are
-    /// each their own, because Tab out of the search box has nowhere on the
-    /// sidebar to go.
-    fn next(self) -> Self {
-        match self {
-            Self::Search => Self::Search,
-            Self::AllowedIp => Self::AllowedIp,
-            Self::Name => Self::Server,
-            Self::Server => Self::Port,
-            Self::Port => Self::Mtu,
-            Self::Mtu => Self::Name,
-        }
-    }
-
     /// Whether this field belongs to the add/edit dialog.
     ///
     /// A dialog field cannot hold the keyboard while the dialog is closed: its
@@ -1817,6 +1820,21 @@ pub fn render_frame(app: &VpnManager, width: f32, height: f32) -> Frame {
         {
             frame.push(cmd);
         }
+    }
+
+    // The list of keys over all of it: it is the one thing on screen a reader
+    // asked for explicitly. The hits under it go, as under the dialog.
+    if app.show_help {
+        frame.discard_hits();
+        let window = (frame.width, frame.height);
+        guitk::shortcut::render_card(
+            &mut frame,
+            &app.palette,
+            window,
+            0.0,
+            SHORTCUTS,
+            "F1 or ? closes this",
+        );
     }
 
     frame
@@ -4075,6 +4093,23 @@ impl VpnManager {
         Action::Redraw
     }
 
+    /// The box Tab moves to from `field`: round the dialog's four, and
+    /// between the search and the split-tunnel tab's range box while that box
+    /// is drawn -- the tab is open on a profile. With no range box, Tab stays
+    /// in the search: there is nowhere else on the sidebar to go.
+    fn next_box(&self, field: Field) -> Field {
+        let ranges_drawn =
+            self.current_tab == DetailTab::SplitTunnel && self.selected_profile.is_some();
+        match field {
+            Field::Search if ranges_drawn => Field::AllowedIp,
+            Field::Search | Field::AllowedIp => Field::Search,
+            Field::Name => Field::Server,
+            Field::Server => Field::Port,
+            Field::Port => Field::Mtu,
+            Field::Mtu => Field::Name,
+        }
+    }
+
     /// Give a text box the keyboard.
     fn focus_field(&mut self, field: Field) -> Action {
         // A dialog box only takes focus while the dialog is up, and the two
@@ -4651,8 +4686,38 @@ impl VpnManager {
         if let Some(action) = self.dispatch_key_to_picker(key) {
             return action;
         }
+        // The list of keys next: it is drawn over everything but the chooser,
+        // and modal while it is up -- a plain F1, `?` or Escape puts it away,
+        // and no other key reaches what it covers, where Escape closes the
+        // window.
+        let plain = textline::is_plain(key.modifiers);
+        let question = key.key == Key::Slash && key.modifiers.shift;
+        if self.show_help {
+            if plain && (matches!(key.key, Key::F1 | Key::Escape) || question) {
+                self.show_help = false;
+            }
+            return Action::Redraw;
+        }
+        // F1 raises it from anywhere, a box included, because it is never
+        // typed; `?` is typed in a box, so it raises the list only from
+        // outside one.
+        if plain && (key.key == Key::F1 || question && self.focus.is_none()) {
+            self.show_help = true;
+            return Action::Redraw;
+        }
+        // Ctrl+F: the search, from the window or its range box. A Ctrl chord,
+        // not Ctrl held -- AltGr arrives as Ctrl+Alt, and types.
+        if key.key == Key::F && textline::is_ctrl_chord(key.modifiers) && !self.show_add_dialog {
+            return self.focus_field(Field::Search);
+        }
         if let Some(field) = self.focus {
             return self.handle_key_in_field(key, field);
+        }
+        // Every other key is taken plain: a chord with Alt or the Windows key
+        // is the window manager's or the desktop's -- Alt+Left switched the
+        // tab under a window being dragged.
+        if !plain {
+            return Action::None;
         }
         // With the dialog up, the keys below would move a selection and switch
         // tabs behind it. Escape closes it; nothing else reaches past it.
@@ -4666,6 +4731,8 @@ impl VpnManager {
         }
         match key.key {
             Key::Escape => Action::Quit,
+            // The keyboard's way into the boxes: the search first.
+            Key::Tab => self.focus_field(Field::Search),
             Key::Down => self.move_selection(1),
             Key::Up => self.move_selection(-1),
             Key::Right => self.move_tab(1),
@@ -4694,7 +4761,7 @@ impl VpnManager {
                 Action::Redraw
             }
             Key::Tab => {
-                self.focus = Some(field.next());
+                self.focus = Some(self.next_box(field));
                 Action::Redraw
             }
             Key::Enter => match field {
@@ -4832,6 +4899,16 @@ impl VpnManager {
             Event::Mouse(mouse) if self.picker.is_some() => self
                 .dispatch_mouse_to_picker(mouse)
                 .unwrap_or(Action::Redraw),
+            // The list of keys is modal for the pointer as it is for the keys:
+            // a press with any button puts it away and does nothing else, and
+            // the wheel scrolls nothing it covers.
+            Event::Mouse(mouse) if self.show_help => match mouse.kind {
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                    self.show_help = false;
+                    Action::Redraw
+                }
+                _ => Action::None,
+            },
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::Press(button) => self.handle_click(mouse.x, mouse.y, button, size),
                 // What is under the pointer is drawn lit; only a change in it
@@ -8622,5 +8699,271 @@ mod tests {
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    // --- The list of keys, and the keyboard's way to the boxes ---
+
+    fn key_of(k: Key, modifiers: guitk::event::Modifiers, text: &str) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        }
+    }
+
+    fn hit(app: &mut VpnManager, k: Key, modifiers: guitk::event::Modifiers) -> Action {
+        app.handle_key(&key_of(k, modifiers, ""))
+    }
+
+    fn drawn_strings(app: &VpnManager) -> Vec<String> {
+        render_frame(app, WINDOW_WIDTH, WINDOW_HEIGHT)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **Every key the list of keys advertises is answered by this window**,
+    /// over a list of profiles with one chosen in the middle -- Enter from the
+    /// search box, the one place outside the dialog it is a key. Escape, from
+    /// the window, closes it.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let mut app = crowded();
+                app.select_profile(5);
+                if *label == "Enter" {
+                    app.focus_field(Field::Search);
+                }
+                assert_ne!(
+                    app.handle_key(&stroke),
+                    Action::None,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The list of keys reaches the window**, and goes on F1, `?` or a plain
+    /// Escape -- not on Alt+Escape, which is the desktop's.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        use guitk::event::Modifiers;
+        let mut app = VpnManager::with_sample_profiles();
+        assert!(
+            !drawn_strings(&app)
+                .iter()
+                .any(|t| t.contains("F1 or ? closes this")),
+            "the list is up before anybody asked for it"
+        );
+        for chord in [Modifiers::alt(), Modifiers::super_key()] {
+            hit(&mut app, Key::F1, chord);
+            assert!(
+                !app.show_help,
+                "{chord:?}+F1, the desktop's, raised the list"
+            );
+        }
+        hit(&mut app, Key::F1, Modifiers::NONE);
+        let missing = guitk::shortcut::missing_rows(&drawn_strings(&app), SHORTCUTS);
+        assert!(missing.is_empty(), "{missing:?}");
+        hit(&mut app, Key::Escape, Modifiers::alt());
+        assert!(app.show_help, "Alt+Escape put the list away");
+        assert_eq!(
+            hit(&mut app, Key::Escape, Modifiers::NONE),
+            Action::Redraw,
+            "Escape under the list closed the window"
+        );
+        assert!(!app.show_help, "Escape left the list up");
+        app.handle_key(&key_of(Key::Slash, Modifiers::shift(), "?"));
+        assert!(app.show_help, "? raised nothing");
+        app.handle_key(&key_of(Key::Slash, Modifiers::shift(), "?"));
+        assert!(!app.show_help, "? left the list up");
+        hit(&mut app, Key::F1, Modifiers::NONE);
+        hit(&mut app, Key::F1, Modifiers::NONE);
+        assert!(!app.show_help, "F1 left the list up");
+    }
+
+    /// **`?` is typed into the search**, where it is a character, and F1
+    /// raises the list from there, where it never is.
+    #[test]
+    fn a_question_mark_is_typed_into_the_search_and_f1_still_raises_the_list() {
+        use guitk::event::Modifiers;
+        let mut app = VpnManager::with_sample_profiles();
+        click(&mut app, Target::Focus(Field::Search));
+        app.handle_key(&key_of(Key::Slash, Modifiers::shift(), "?"));
+        assert!(!app.show_help, "? raised the list from the search box");
+        assert_eq!(app.search_query, "?", "? was not typed");
+        hit(&mut app, Key::F1, Modifiers::NONE);
+        assert!(
+            app.show_help,
+            "F1 did not raise the list from the search box"
+        );
+    }
+
+    /// **The list of keys is modal**: with it up, no key, press or turn of the
+    /// wheel reaches what it covers. The controls are the same with it down.
+    #[test]
+    fn the_shortcut_list_takes_the_keys_and_a_press() {
+        use guitk::event::Modifiers;
+        let mut app = crowded();
+        app.select_profile(0);
+        let row = rect_of(&app, Target::Profile(id_at(&app, 3))).expect("a fourth row");
+        let (rx, ry) = (row.x + row.w / 2.0, row.y + row.h / 2.0);
+        let size = (WINDOW_WIDTH, WINDOW_HEIGHT);
+        let press_at = |app: &mut VpnManager, button: MouseButton| {
+            app.handle_event(
+                &Event::Mouse(MouseEvent {
+                    x: rx,
+                    y: ry,
+                    kind: MouseEventKind::Press(button),
+                }),
+                size,
+            )
+        };
+
+        hit(&mut app, Key::F1, Modifiers::NONE);
+        hit(&mut app, Key::Down, Modifiers::NONE);
+        hit(&mut app, Key::Right, Modifiers::NONE);
+        hit(&mut app, Key::Tab, Modifiers::NONE);
+        hit(&mut app, Key::F, Modifiers::ctrl());
+        assert!(
+            app.show_help,
+            "a key other than F1, ? or Escape put the list away"
+        );
+        assert_eq!(
+            app.selected_profile,
+            Some(0),
+            "Down moved the selection under it"
+        );
+        assert_eq!(
+            app.current_tab,
+            DetailTab::Overview,
+            "Right moved the tab under it"
+        );
+        assert_eq!(app.focus, None, "a key gave a box the keyboard under it");
+        app.handle_event(
+            &Event::Mouse(MouseEvent {
+                x: rx,
+                y: ry,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+            }),
+            size,
+        );
+        assert!(
+            app.scroll_offset.abs() < f32::EPSILON,
+            "the wheel scrolled the profiles under it"
+        );
+        assert!(app.show_help, "the wheel put the list away");
+        press_at(&mut app, MouseButton::Left);
+        assert!(!app.show_help, "the press did not put the list away");
+        assert_eq!(
+            app.selected_profile,
+            Some(0),
+            "the press chose a profile under it"
+        );
+        hit(&mut app, Key::F1, Modifiers::NONE);
+        press_at(&mut app, MouseButton::Right);
+        assert!(!app.show_help, "a right-button press left the list up");
+
+        // The controls.
+        hit(&mut app, Key::Down, Modifiers::NONE);
+        assert_eq!(app.selected_profile, Some(1));
+        press_at(&mut app, MouseButton::Left);
+        assert_eq!(app.selected_profile, Some(3));
+    }
+
+    /// **Tab and Ctrl+F reach the search from the keyboard**, which only a
+    /// press did; Tab goes on to the split-tunnel range box while that tab is
+    /// open on a profile, and back.
+    #[test]
+    fn tab_and_ctrl_f_reach_the_boxes() {
+        use guitk::event::Modifiers;
+        let mut app = VpnManager::with_sample_profiles();
+        hit(&mut app, Key::Tab, Modifiers::NONE);
+        assert_eq!(
+            app.focus,
+            Some(Field::Search),
+            "Tab did not reach the search"
+        );
+        hit(&mut app, Key::Tab, Modifiers::NONE);
+        assert_eq!(
+            app.focus,
+            Some(Field::Search),
+            "Tab left the search with nowhere to go"
+        );
+        hit(&mut app, Key::Escape, Modifiers::NONE);
+        assert_eq!(app.focus, None);
+        hit(&mut app, Key::F, Modifiers::ctrl());
+        assert_eq!(
+            app.focus,
+            Some(Field::Search),
+            "Ctrl+F did not reach the search"
+        );
+
+        // The split-tunnel tab with no profile chosen draws no range box, and
+        // Tab has nowhere to take the keyboard from the search.
+        hit(&mut app, Key::Escape, Modifiers::NONE);
+        app.selected_profile = None;
+        app.set_tab(DetailTab::SplitTunnel);
+        hit(&mut app, Key::Tab, Modifiers::NONE);
+        hit(&mut app, Key::Tab, Modifiers::NONE);
+        assert_eq!(
+            app.focus,
+            Some(Field::Search),
+            "Tab went to a range box that is not drawn"
+        );
+
+        hit(&mut app, Key::Escape, Modifiers::NONE);
+        app.select_profile(0);
+        app.set_tab(DetailTab::SplitTunnel);
+        hit(&mut app, Key::Tab, Modifiers::NONE);
+        hit(&mut app, Key::Tab, Modifiers::NONE);
+        assert_eq!(
+            app.focus,
+            Some(Field::AllowedIp),
+            "Tab from the search did not reach the range box"
+        );
+        hit(&mut app, Key::Tab, Modifiers::NONE);
+        assert_eq!(app.focus, Some(Field::Search), "Tab from the range box");
+        hit(&mut app, Key::Tab, Modifiers::NONE);
+        hit(&mut app, Key::F, Modifiers::ctrl());
+        assert_eq!(
+            app.focus,
+            Some(Field::Search),
+            "Ctrl+F from the range box did not reach the search"
+        );
+
+        // AltGr+F types, and is no Ctrl+F.
+        hit(&mut app, Key::Escape, Modifiers::NONE);
+        let altgr = Modifiers {
+            ctrl: true,
+            alt: true,
+            ..Modifiers::NONE
+        };
+        hit(&mut app, Key::F, altgr);
+        assert_eq!(app.focus, None, "AltGr+F was taken for Ctrl+F");
+    }
+
+    /// **A chord is not one of this window's keys**: Alt+Left switched the tab
+    /// and Alt+Down the profile, and both are the window manager's.
+    #[test]
+    fn a_chord_is_not_one_of_this_windows_keys() {
+        use guitk::event::Modifiers;
+        let mut app = crowded();
+        app.select_profile(0);
+        assert_eq!(hit(&mut app, Key::Right, Modifiers::alt()), Action::None);
+        assert_eq!(hit(&mut app, Key::Down, Modifiers::alt()), Action::None);
+        assert_eq!(
+            hit(&mut app, Key::Escape, Modifiers::super_key()),
+            Action::None
+        );
+        assert_eq!(app.current_tab, DetailTab::Overview);
+        assert_eq!(app.selected_profile, Some(0));
     }
 }

@@ -491,6 +491,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]
@@ -1231,6 +1232,7 @@ dependencies = [
  "oswindow",
  "pathtext",
  "settingsfile",
+ "textline",
  "yamldoc",
 ]
 

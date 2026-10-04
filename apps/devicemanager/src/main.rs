@@ -869,6 +869,11 @@ pub struct DeviceManagerState {
     pub show_resource_view: bool,
     /// Hovered properties tab index.
     pub hovered_tab_index: Option<usize>,
+    /// Whether the pointer is over the search box, so it is drawn lit (lane
+    /// C, c-e-a-theme-can-shape-the-controls).
+    pub hovered_search: bool,
+    /// How wide the focus mark is drawn, from the user's appearance settings.
+    pub focus_ring_width: f32,
 }
 
 impl DeviceManagerState {
@@ -919,6 +924,8 @@ impl DeviceManagerState {
             hovered_toolbar_action: None,
             show_resource_view: false,
             hovered_tab_index: None,
+            hovered_search: false,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
         }
     }
 
@@ -1995,6 +2002,31 @@ fn render_toolbar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
 }
 
 /// Render the search bar below the toolbar.
+/// The search box, inside its band at the top of the sidebar: one rectangle
+/// for the drawing and the pointer's light.
+fn search_box() -> guitk::frame::Rect {
+    let band = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT;
+    guitk::frame::Rect::new(
+        8.0,
+        band + 4.0,
+        SIDEBAR_WIDTH - 16.0,
+        SEARCH_BAR_HEIGHT - 8.0,
+    )
+}
+
+/// How the search box is drawn now: lit under the pointer and marked while
+/// the keys type into it -- neither while the list of keys or the file
+/// dialog takes them first.
+fn search_box_state(state: &DeviceManagerState) -> guitk::field::State {
+    let open = !state.show_help && !state.picker.is_open();
+    guitk::field::State {
+        hovered: open && state.hovered_search,
+        focused: open && state.search_focused,
+        disabled: false,
+        invalid: false,
+    }
+}
+
 fn render_search_bar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
     let y = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT;
 
@@ -2007,35 +2039,17 @@ fn render_search_bar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) 
         corner_radii: CornerRadii::ZERO,
     });
 
-    // Search input background
-    let input_x = 8.0;
-    let input_y = y + 4.0;
-    let input_w = SIDEBAR_WIDTH - 16.0;
-    let input_h = SEARCH_BAR_HEIGHT - 8.0;
-
-    let border_color = if state.search_focused {
-        state.palette.blue
-    } else {
-        state.palette.surface1
-    };
-
-    cmds.push(RenderCommand::FillRect {
-        x: input_x,
-        y: input_y,
-        width: input_w,
-        height: input_h,
-        color: state.palette.base,
-        corner_radii: CornerRadii::all(3.0),
-    });
-    cmds.push(RenderCommand::StrokeRect {
-        x: input_x,
-        y: input_y,
-        width: input_w,
-        height: input_h,
-        color: border_color,
-        line_width: 1.0,
-        corner_radii: CornerRadii::all(3.0),
-    });
+    // The search box: the toolkit's field (lane C,
+    // c-e-a-theme-can-shape-the-controls).
+    let input = search_box();
+    let (input_x, input_y, input_w) = (input.x, input.y, input.w);
+    guitk::field::draw(
+        cmds,
+        &state.palette,
+        input,
+        search_box_state(state),
+        state.focus_ring_width,
+    );
 
     let display_text = if state.search_query.is_empty() {
         "Search devices...".to_string()
@@ -3587,6 +3601,7 @@ fn handle_mouse_event(
             state.hovered_tree_index = None;
             state.hovered_toolbar_action = None;
             state.hovered_tab_index = None;
+            state.hovered_search = search_box().contains(mx, my);
 
             // Toolbar hover
             let toolbar_y = TITLE_BAR_HEIGHT;
@@ -3624,6 +3639,14 @@ fn handle_mouse_event(
                 }
             }
 
+            EventResult::Consumed
+        }
+        // Nothing is under a pointer that has left the window.
+        MouseEventKind::Leave => {
+            state.hovered_tree_index = None;
+            state.hovered_toolbar_action = None;
+            state.hovered_tab_index = None;
+            state.hovered_search = false;
             EventResult::Consumed
         }
         MouseEventKind::Scroll { dy, .. } => {
@@ -3699,6 +3722,18 @@ fn is_node_visible(state: &DeviceManagerState, index: usize) -> bool {
 // ============================================================================
 
 impl oswindow::app::App for DeviceManagerState {
+    /// The user's colours. The window drew in the defaults whatever the
+    /// theme: the hand-copied constants were mapped onto the palette, and the
+    /// palette was never told when the theme changed.
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
+    /// The focus mark is drawn at the width the user asked for.
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
+    }
+
     fn title(&self) -> String {
         String::from("Device Manager")
     }
@@ -3773,6 +3808,99 @@ mod tests {
     )]
 
     use super::*;
+
+    /// **The search box is the toolkit's field, in the user's colours**
+    /// (lane C, c-e-a-theme-can-shape-the-controls): lit under the pointer
+    /// and out when it goes, marked at the user's focus width while the keys
+    /// type into it -- neither while the list of keys covers the window. The
+    /// box is drawn from the palette the theme handed over: the window never
+    /// took one, and drew in the defaults whatever the theme.
+    #[test]
+    fn the_search_box_is_the_toolkits_field() {
+        use guitk::field::State;
+        use oswindow::app::App;
+        let mut state = DeviceManagerState::new();
+        let palette = Palette::for_mode(true);
+        let width = {
+            let settings = appearance::AppearanceSettings {
+                focus_ring_scale: 2.5,
+                ..Default::default()
+            };
+            App::appearance_changed(&mut state, &settings);
+            settings.focus_ring_width()
+        };
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        let seq = |palette: &Palette, s: State| {
+            let mut want: Vec<RenderCommand> = Vec::new();
+            guitk::field::draw(&mut want, palette, search_box(), s, width);
+            want
+        };
+        assert_ne!(
+            seq(&palette, State::default()),
+            seq(&state.palette, State::default()),
+            "the test's palette has to differ from the one the window starts with"
+        );
+        App::theme_changed(&mut state, &palette);
+        let draws = |state: &DeviceManagerState, s: State| {
+            let cmds = render(state);
+            let has = |w: &[RenderCommand]| !w.is_empty() && cmds.windows(w.len()).any(|c| c == w);
+            has(&seq(&palette, s))
+                && (s.focused || !has(&seq(&palette, State { focused: true, ..s })))
+        };
+        let pointer = |state: &mut DeviceManagerState, kind: MouseEventKind| {
+            let (x, y) = search_box().centre();
+            handle_event(
+                state,
+                &Event::Mouse(guitk::event::MouseEvent { x, y, kind }),
+            );
+        };
+        let lit = State {
+            hovered: true,
+            ..State::default()
+        };
+        let both = State {
+            focused: true,
+            ..lit
+        };
+
+        assert!(
+            draws(&state, State::default()),
+            "the box is not drawn in the theme's colours"
+        );
+        pointer(&mut state, MouseEventKind::Move);
+        assert!(
+            draws(&state, lit),
+            "the box does not light under the pointer"
+        );
+        // Out when the pointer leaves -- checked before the box has the keys,
+        // whose mark can hide the light.
+        pointer(&mut state, MouseEventKind::Leave);
+        assert!(
+            draws(&state, State::default()),
+            "the light stayed when the pointer left"
+        );
+        pointer(&mut state, MouseEventKind::Move);
+        pointer(&mut state, MouseEventKind::Press(MouseButton::Left));
+        assert!(state.search_focused);
+        assert!(draws(&state, both), "the box is not marked with the keys");
+        state.show_help = true;
+        assert!(
+            draws(&state, State::default()),
+            "the box shows through the list of keys"
+        );
+        state.show_help = false;
+        pointer(&mut state, MouseEventKind::Leave);
+        assert!(
+            draws(
+                &state,
+                State {
+                    focused: true,
+                    ..State::default()
+                }
+            ),
+            "the light stayed when the pointer left"
+        );
+    }
 
     /// **Every key the card advertises is answered by this window.**
     ///

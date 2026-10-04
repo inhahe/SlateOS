@@ -377,22 +377,23 @@ MUTATIONS = [
         '    let plain = true;\n    let card_id = app.selected_card?;',
         ['each_kind_of_key_is_asked_for_as_itself'],
     ),
-    (
-        "a command's letter is typed into the input line",
-        '    if textline::types_into_field(key) {\n        app.input_buffer.extend(key.typed());',
-        '    if key.types_text() {\n        app.input_buffer.extend(key.typed());',
-        ['each_kind_of_key_is_asked_for_as_itself'],
-    ),
+    # No row for "a command's letter is typed into the input line": since
+    # 2026-10-04 the box's typing is textline::apply_key's, which tells a
+    # command from AltGr itself, in its own crate and with its own tests;
+    # each_kind_of_key_is_asked_for_as_itself still holds the box to it.
     (
         'a chord works the input line',
-        '    if !textline::is_plain(key.modifiers) {\n        return false;\n    }\n    match key.key {\n        Key::Escape => {\n            app.input_mode = InputMode::None;',
-        '    match key.key {\n        Key::Escape => {\n            app.input_mode = InputMode::None;',
+        '    if !textline::is_plain(key.modifiers) {\n        return input_key(app, key);\n    }\n',
+        '',
         ['each_kind_of_key_is_asked_for_as_itself'],
     ),
 ]
 
 FIELD = "the_input_dialogs_box_is_the_toolkits_field"
 CARET = "the_input_dialogs_caret_follows_the_typing"
+EDITS = "the_input_box_edits_at_a_caret"
+FROM_END = "a_title_to_edit_is_edited_from_its_end"
+SHOWN = "the_input_box_edits_the_text_it_shows"
 
 MUTATIONS += [
     # The input dialog's box is the toolkit's field (2026-10-04; lane C,
@@ -417,9 +418,75 @@ MUTATIONS += [
     ),
     (
         "the caret is at the start of the typing",
-        "            cursor: text::TextCursor::from(app.input_buffer.len()),\n",
+        "            cursor: input_cursor(app),\n",
         "            cursor: text::TextCursor::from(0),\n",
-        [CARET],
+        [CARET, EDITS],
+    ),
+]
+
+# The input dialog's box edits at a caret (2026-10-04,
+# known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box): it
+# took typing at its end and Backspace from it, and nothing else.
+MUTATIONS += [
+    (
+        "a cut or a copy takes nothing to the clipboard",
+        "        app.input_clipboard = copied;\n",
+        "        let _ = copied;\n",
+        [EDITS],
+    ),
+    (
+        "a caret moved is not drawn",
+        "    before\n        != (\n            app.input_editor.cursor(),\n            app.input_editor.selection_anchor(),\n        )\n}\n",
+        "    false\n}\n",
+        [FROM_END],
+    ),
+    (
+        "a key that changes nothing is a redraw",
+        "    before\n        != (\n            app.input_editor.cursor(),\n            app.input_editor.selection_anchor(),\n        )\n}\n",
+        "    edit.handled\n}\n",
+        [FROM_END],
+    ),
+    (
+        "a key finds the editor holding another text",
+        "fn input_key(app: &mut KanbanApp, key: &KeyEvent) -> bool {\n    if app.input_editor.text() != app.input_buffer {\n",
+        "fn input_key(app: &mut KanbanApp, key: &KeyEvent) -> bool {\n    if false {\n",
+        [SHOWN],
+    ),
+    (
+        "a press finds the editor holding another text",
+        "    let drawn = input_cursor(app);\n    if app.input_editor.text() != app.input_buffer {\n",
+        "    let drawn = input_cursor(app);\n    if false {\n",
+        [SHOWN],
+    ),
+    (
+        "a press puts the caret at the start",
+        "        x - rect.x - INPUT_TEXT_INSET,\n",
+        "        0.0,\n",
+        [EDITS],
+    ),
+    (
+        "a press in the box does nothing",
+        "                press_input(self, m.x);\n",
+        "",
+        [EDITS, SHOWN],
+    ),
+    (
+        "a press reaches the box under the list of keys",
+        "                    && !self.show_help\n",
+        "",
+        [FROM_END],
+    ),
+    (
+        "a press with no dialog up is taken",
+        "                    && self.input_mode != InputMode::None\n",
+        "",
+        [FROM_END],
+    ),
+    (
+        "the selection is not drawn",
+        "            selection_anchor: if app.input_editor.text() == app.input_buffer {\n",
+        "            selection_anchor: if false {\n",
+        [EDITS],
     ),
 ]
 

@@ -22,9 +22,9 @@ and Backspace `pop`s it.
 clipmanager (its form), contacts (search and the form), credmanager (the
 entry form, the master password, search), dbviewer (cell editing), diagram
 (a shape's label), dictionary (the query), filesearch (the query), hexeditor
-(search and Go To), kanban (its input), lockscreen (the password), mindmap
-(a node's text and its search), passwordgen (its input), startupmanager (the
-dialog and search), tmux (its command prompt), undelete (search).
+(search and Go To), lockscreen (the password), mindmap (a node's text and
+its search), passwordgen (its input), startupmanager (the dialog and
+search), tmux (its command prompt), undelete (search).
 
 Not among them: `terminal`, whose typing goes to the shell's own line
 editor; `typingtutor`, where a line typed straight through is the exercise;
@@ -82,4 +82,5 @@ filediff (2026-10-04: the find bar); ircclient (2026-10-04: the message
 line); logviewer (2026-10-04: the search box); diskanalyzer (2026-10-04: the
 path field); defrag (2026-10-04: the exclusion box); colorpicker
 (2026-10-04: the value box, its typing hex alone); editor (2026-10-04: the
-find bar's two fields).
+find bar's two fields); kanban (2026-10-04: the input dialog's box edits at
+a caret, and a command's letter no longer types into it).

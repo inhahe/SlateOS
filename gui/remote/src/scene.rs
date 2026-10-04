@@ -849,20 +849,30 @@ pub struct ViewerImage {
 pub struct ViewerWindow {
     pub commands: RenderTree,
     pub images: BTreeMap<u64, ViewerImage>,
-    /// Whether the window shows video in place of its commands: from its
-    /// stream's first frame until the stream says it stopped.
-    pub showing_video: bool,
-    /// The window's video frames not yet taken, oldest first: each to be
-    /// decoded after the ones before it ([`Self::take_video`]).
-    pub video: Vec<SceneVideo>,
+    /// The window's video updates not yet taken, oldest first
+    /// ([`Self::take_video`]): frames, each to be decoded after the ones
+    /// before it, and a [`VideoUpdate::Stop`] where the window went back to
+    /// its commands. A stop drops the frames before it, which will never
+    /// show, so it is only ever first.
+    pub video: Vec<VideoUpdate>,
 }
 
 impl ViewerWindow {
-    /// The video frames that arrived since the last call, oldest first, for
-    /// the viewer to decode -- every one, in order, as each is coded against
-    /// the last.
-    pub fn take_video(&mut self) -> Vec<SceneVideo> {
+    /// The video updates that arrived since the last call, oldest first, for
+    /// the viewer to obey in order: the window shows video in place of its
+    /// commands from a frame until a stop. Every frame is to be decoded, as
+    /// each is coded against the last; a frame after a stop starts a new
+    /// stream, with a key frame.
+    pub fn take_video(&mut self) -> Vec<VideoUpdate> {
         core::mem::take(&mut self.video)
+    }
+
+    /// How many of the untaken updates are frames.
+    fn pending_frames(&self) -> usize {
+        self.video
+            .iter()
+            .filter(|u| matches!(u, VideoUpdate::Frame(_)))
+            .count()
     }
 }
 
@@ -916,7 +926,7 @@ impl SceneViewer {
                 && self
                     .windows
                     .get(&win.id)
-                    .is_some_and(|w| w.video.len() >= MAX_PENDING_VIDEO_FRAMES)
+                    .is_some_and(|w| w.pending_frames() >= MAX_PENDING_VIDEO_FRAMES)
             {
                 return Err(SceneError::VideoBacklog { window: win.id });
             }
@@ -932,13 +942,12 @@ impl SceneViewer {
             }
             match &win.video {
                 None => {}
-                Some(VideoUpdate::Frame(v)) => {
-                    held.showing_video = true;
-                    held.video.push(v.clone());
-                }
+                Some(frame @ VideoUpdate::Frame(_)) => held.video.push(frame.clone()),
                 Some(VideoUpdate::Stop) => {
-                    held.showing_video = false;
+                    // The frames before a stop will never show: only the stop
+                    // is left to obey.
                     held.video.clear();
+                    held.video.push(VideoUpdate::Stop);
                 }
             }
             self.windows.insert(win.id, held);
@@ -1667,24 +1676,38 @@ mod tests {
         }
         viewer.apply(&window(None, None)).unwrap();
         let held = viewer.windows.get_mut(&4).unwrap();
-        assert!(held.showing_video);
-        let taken: Vec<u8> = held.take_video().iter().map(|v| v.frame[0]).collect();
-        assert_eq!(taken, [0, 1, 2], "every frame, in order");
+        let first_bytes = |updates: Vec<VideoUpdate>| -> Vec<Option<u8>> {
+            updates
+                .iter()
+                .map(|u| match u {
+                    VideoUpdate::Frame(v) => Some(v.frame[0]),
+                    VideoUpdate::Stop => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            first_bytes(held.take_video()),
+            [Some(0), Some(1), Some(2)],
+            "every frame, in order"
+        );
         assert!(held.take_video().is_empty());
 
-        viewer
-            .apply(&window(Some(VideoUpdate::Frame(vp9_frame(&[7]))), None))
-            .unwrap();
+        // A stop drops the frames not taken, which will never show; a frame
+        // after it is a new stream's.
+        for update in [
+            VideoUpdate::Frame(vp9_frame(&[7])),
+            VideoUpdate::Stop,
+            VideoUpdate::Frame(vp9_frame(&[8])),
+        ] {
+            viewer.apply(&window(Some(update), None)).unwrap();
+        }
+        let held = viewer.windows.get_mut(&4).unwrap();
+        assert_eq!(first_bytes(held.take_video()), [None, Some(8)]);
+
+        // The stop counts towards no backlog, frames do.
         viewer
             .apply(&window(Some(VideoUpdate::Stop), None))
             .unwrap();
-        let held = &viewer.windows[&4];
-        assert!(!held.showing_video);
-        assert!(
-            held.video.is_empty(),
-            "a stopped stream's frames are no use"
-        );
-
         for n in 0..MAX_PENDING_VIDEO_FRAMES {
             let f = window(Some(VideoUpdate::Frame(vp9_frame(&[n as u8]))), None);
             viewer.apply(&f).unwrap();
@@ -1698,7 +1721,8 @@ mod tests {
             Err(SceneError::VideoBacklog { window: 4 })
         );
         let held = &viewer.windows[&4];
-        assert_eq!(held.video.len(), MAX_PENDING_VIDEO_FRAMES);
+        assert_eq!(held.video.len(), MAX_PENDING_VIDEO_FRAMES + 1);
+        assert_eq!(held.video.first(), Some(&VideoUpdate::Stop));
         assert!(
             held.commands.commands.is_empty(),
             "the refused frame changed nothing"

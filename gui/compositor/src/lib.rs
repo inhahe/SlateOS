@@ -18135,11 +18135,14 @@ mod tests {
         let mut viewer = SceneViewer::new();
         let mut decoder = vp9::Decoder::new();
         // Every frame the viewer holds for the game, decoded in order; the
-        // last one's picture.
+        // last one's picture. A stop is not expected until the end.
         let mut take = |viewer: &mut SceneViewer| -> Option<Vec<u32>> {
             let held = viewer.windows.get_mut(&game.raw())?;
             let mut last = None;
-            for video in held.take_video() {
+            for update in held.take_video() {
+                let VideoUpdate::Frame(video) = update else {
+                    panic!("a stop while the game still presents its buffer");
+                };
                 assert_eq!((video.width, video.height), (160, 96));
                 let picture = decoder.decode(&video.frame).unwrap()?;
                 let planes = [0, 1, 2].map(|p| picture.plane8(p).unwrap());
@@ -18155,7 +18158,6 @@ mod tests {
         ));
         assert_eq!(video_of(&first, ui), None, "commands send no video");
         viewer.apply(&first).unwrap();
-        assert!(viewer.windows[&game.raw()].showing_video);
         let got = take(&mut viewer).expect("the first picture");
         assert!(
             psnr(&got, &pixels(&comp)) > 35.0,
@@ -18188,7 +18190,10 @@ mod tests {
         let stopped = capture(&mut comp, stream, 200);
         assert_eq!(video_of(&stopped, game), Some(VideoUpdate::Stop));
         viewer.apply(&stopped).unwrap();
-        assert!(!viewer.windows[&game.raw()].showing_video);
+        assert_eq!(
+            viewer.windows.get_mut(&game.raw()).unwrap().take_video(),
+            [VideoUpdate::Stop]
+        );
     }
 
     #[test]

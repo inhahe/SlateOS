@@ -1920,6 +1920,19 @@ impl IrcClientApp {
 
     fn handle_mouse(&mut self, event: &MouseEvent) -> bool {
         let (x, y) = (event.x, event.y);
+        // The card is modal for the pointer as it is for the keys: a press,
+        // with any button, puts it away rather than reaching the channel or
+        // nick drawn under it, and the wheel scrolls nothing it covers.
+        if self.show_help {
+            match event.kind {
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                    self.show_help = false;
+                    return true;
+                }
+                MouseEventKind::Scroll { .. } => return false,
+                _ => {}
+            }
+        }
         match event.kind {
             MouseEventKind::Press(MouseButton::Left) => {
                 if let Some(panel) = self.sidebar_panel_at(x, y) {
@@ -1975,6 +1988,17 @@ impl IrcClientApp {
     }
 
     fn handle_key(&mut self, event: &KeyEvent) -> bool {
+        // The shortcut card is modal: while it is up, F1 and Escape put it
+        // away and every other key is its own. It was not -- what was typed
+        // went into the message line under it, and Enter sent that line to
+        // the channel the card covered.
+        if self.show_help {
+            let closes = matches!(event.key, Key::F1 | Key::Escape);
+            if closes {
+                self.show_help = false;
+            }
+            return closes;
+        }
         match event.key {
             Key::Enter => self.submit_input(),
             Key::Backspace => self.input_text.pop().is_some(),
@@ -1990,11 +2014,8 @@ impl IrcClientApp {
                 self.scroll_chat(-PAGE_SCROLL_LINES);
                 self.chat_scroll != before
             }
+            // (The card's own Escape is taken at the top, while it is up.)
             Key::Escape => {
-                if self.show_help {
-                    self.show_help = false;
-                    return true;
-                }
                 if self.input_text.is_empty() {
                     return false;
                 }
@@ -3869,6 +3890,76 @@ mod tests {
         vec![typed(), long, scrolled_up, recalled, walked_back, helping]
     }
 
+    /// **The card is modal for the keys and the pointer**: while it is up,
+    /// F1 and Escape put it away and nothing else does or acts; a press puts
+    /// it away and does nothing else; the wheel scrolls nothing under it.
+    /// Enter sent the line under the card to the channel. The controls at
+    /// the end are the same keys and press with the card down.
+    #[test]
+    fn the_shortcut_card_takes_every_key_and_press_while_it_is_up() {
+        let mut app = joined();
+        app.input_text = String::from("hello");
+        let panel = app.active_panel.clone();
+        // A sidebar row naming some other panel, found with the geometry the
+        // press is read with.
+        let (rx, ry) = (20.0, {
+            let mut y = CONTENT_TOP;
+            while app.sidebar_panel_at(20.0, y).is_none_or(|p| p == panel) {
+                y += 2.0;
+                assert!(y < WINDOW_HEIGHT, "no other panel in the sidebar");
+            }
+            y
+        });
+        let press = |button| {
+            Event::Mouse(MouseEvent {
+                x: rx,
+                y: ry,
+                kind: MouseEventKind::Press(button),
+            })
+        };
+        let typed_h = Event::Key(KeyEvent {
+            key: Key::H,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::from("h"),
+        });
+
+        app.handle_event(&key(Key::F1));
+        assert!(app.show_help);
+        app.handle_event(&typed_h);
+        app.handle_event(&key(Key::Enter));
+        assert_eq!(
+            app.input_text, "hello",
+            "a key typed or sent the line under the card"
+        );
+        app.handle_event(&key(Key::Tab));
+        assert!(app.show_help, "a key that is not the card's put it away");
+
+        assert!(app.handle_event(&press(MouseButton::Left)));
+        assert!(!app.show_help, "the press did not put the card away");
+        assert_eq!(
+            app.active_panel, panel,
+            "the press went through the card to another panel"
+        );
+        app.handle_event(&key(Key::F1));
+        app.handle_event(&press(MouseButton::Right));
+        assert!(!app.show_help, "a right-button press left the card up");
+        app.handle_event(&key(Key::F1));
+        app.handle_event(&key(Key::Escape));
+        assert!(!app.show_help, "Escape did not put the card away");
+
+        app.handle_event(&key(Key::Enter));
+        assert!(
+            app.input_text.is_empty(),
+            "control: Enter sends nothing with the card down"
+        );
+        app.handle_event(&press(MouseButton::Left));
+        assert_ne!(
+            app.active_panel, panel,
+            "control: the press does nothing even with the card down"
+        );
+    }
+
     fn drawn_text(app: &IrcClientApp) -> String {
         app.render_commands()
             .iter()
@@ -4653,6 +4744,31 @@ mod tests {
     fn a_short_conversation_cannot_be_scrolled_at_all() {
         let app = app_with_history(3);
         assert_eq!(app.max_chat_scroll(), 0, "it all fits");
+    }
+
+    /// **The wheel scrolls nothing under the shortcut card**; the control
+    /// is the same turn with the card down.
+    #[test]
+    fn the_wheel_scrolls_no_chat_under_the_card() {
+        let mut app = app_with_history(200);
+        let chat = app.chat_rect();
+        let notch = Event::Mouse(MouseEvent {
+            x: chat.x + chat.w / 2.0,
+            y: chat.y + chat.h / 2.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: 1.0 },
+        });
+        app.handle_event(&key(Key::F1));
+        app.handle_event(&notch);
+        assert_eq!(
+            app.chat_scroll, 0,
+            "the wheel scrolled the chat under the card"
+        );
+        app.handle_event(&key(Key::F1));
+        app.handle_event(&notch);
+        assert!(
+            app.chat_scroll > 0,
+            "control: the wheel scrolls nothing at all"
+        );
     }
 
     #[test]

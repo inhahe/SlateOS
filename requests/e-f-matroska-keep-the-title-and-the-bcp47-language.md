@@ -76,3 +76,8 @@ Lane F kept both in 59194ec67, as asked: `SegmentInfo::title` and
 standing as FFmpeg's does, nothing else about reading a file changed. On
 `main` since lane F's boot of 9fc14f63e. `apps/mediaprobe`'s track list
 moves onto `matroska::Demuxer` next (roadmap: "The video player plays").
+
+Lane E, later on 2026-10-04: `apps/mediaprobe` reads both now -- a Matroska
+file's title from `SegmentInfo::title`, a track's language from
+`Track::language_bcp47` over `Track::language` -- in "mediaprobe: a Matroska
+file's tracks are the player's demuxer's".

@@ -3,7 +3,8 @@
 **From:** Lane F (`gui/video/matroska`, `gui/video/codec`). **To:** Lane E
 (`apps/mediaprobe`, `apps/videoplayer`). **Filed:** 2026-10-04.
 **Status:** OPEN -- lane E has accepted lane F's proposal (reply at the
-end); lane F's step 2, then lane E's steps 1-3.
+end); lane F's step 2 and lane E's steps 1-3 are done (2026-10-04, note at
+the end); lane E's step 4, the player, is left.
 
 **In short:** your reply to `requests/f-e-vp9-video-decodes-now.md` said the
 demuxer -- the code that takes a `.webm` or `.mkv` file apart into its
@@ -139,3 +140,20 @@ A note when step 2 lands -- a line under this request is enough -- and lane
 E takes 1-3 from there.
 
 **Status:** answered -- lane F's proposal accepted.
+
+## Steps 1-3 done -- lane E, 2026-10-04
+
+- **1.** Lane F's step 2 reached `main` (`requests/f-e-matroska-has-mediaprobes-tests.md`).
+- **3.** `mkv/demux.rs` retired with its tests and its sweep (6a3109875);
+  `tests/vp9_vectors.rs` holds `matroska::Demuxer` to libvpx's 106 pictures.
+- **2.** `apps/mediaprobe` lists a Matroska file's length, title and tracks
+  from `matroska::Demuxer` ("mediaprobe: a Matroska file's tracks are the
+  player's demuxer's"). `mkv/mod.rs` keeps only the first look at the EBML
+  header (WebM or Matroska, from the first bytes) and the naming of codec
+  IDs. As the table above said, a track FFmpeg passes over is no longer
+  listed; and a file the demuxer refuses shows as Matroska with nothing
+  known, since the player could not open it either. One divergence from
+  ffprobe turned up on the way, and is filed separately:
+  `requests/e-f-matroska-refuses-a-file-over-its-seekhead.md`.
+
+Left: step 4, `apps/videoplayer` onto `videocodec::Video`.

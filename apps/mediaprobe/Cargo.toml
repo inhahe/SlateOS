@@ -5,16 +5,20 @@ edition = "2024"
 description = "SlateOS video file facts for applications: container, length and each track's codec, picture, rate and language, read from headers without decoding."
 
 [dependencies]
+# The tree's one Matroska demuxer (lane F's), which reads a Matroska or WebM
+# file's length, title and tracks here as it reads them for the video player
+# -- so that the tracks listed are the tracks played. This crate walked the
+# file's EBML itself until 2026-10-04
+# (requests/f-e-two-matroska-demuxers-which-stays.md).
+matroska = { path = "../../gui/video/matroska" }
 
 [dev-dependencies]
-# The tree's Matroska demuxer and VP9 decoder, held together to libvpx's own
-# pictures: libvpx's VP9 test vectors (tests/data, libvpx's licence beside
-# them) demuxed by lane F's `matroska`, decoded by lane F's port of libvpx,
-# and each picture hashed as libvpx's md5_helper does. The vectors came with
-# this crate's own demuxer, retired 2026-10-04 for `matroska`
-# (requests/f-e-two-matroska-demuxers-which-stays.md); the test stayed, on
-# the demuxer that replaced it.
-matroska = { path = "../../gui/video/matroska" }
+# The tree's VP9 decoder, held with the demuxer to libvpx's own pictures:
+# libvpx's VP9 test vectors (tests/data, libvpx's licence beside them)
+# demuxed by `matroska`, decoded by lane F's port of libvpx, and each picture
+# hashed as libvpx's md5_helper does. The vectors came with this crate's own
+# demuxer, retired 2026-10-04 for `matroska`; the test stayed, on the
+# demuxer that replaced it.
 vp9 = { path = "../../gui/video/vp9" }
 md5 = { path = "../../md5" }
 

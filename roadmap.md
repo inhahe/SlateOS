@@ -2948,19 +2948,26 @@ word; text inside them that says "lane C" is history.
     lane F's port of both being on `main` -- 2026-10-04;
     `tests/vp9_vectors.rs` holds `matroska::Demuxer` to libvpx's pictures
     now;
-  - `[ ]` `apps/mediaprobe` reads its track list from `matroska::Demuxer`
-    -- unblocked 2026-10-04: lane F keeps a file's title and a track's BCP
-    47 language now (59194ec67,
-    `requests/e-f-matroska-keep-the-title-and-the-bcp47-language.md`).
+  - `[x]` `apps/mediaprobe` reads its track list from `matroska::Demuxer`
+    -- 2026-10-04: a Matroska file's length, title and tracks are the
+    demuxer's, so a track FFmpeg passes over is not listed, and a file the
+    player cannot open shows as Matroska with nothing known; `mkv/mod.rs`
+    keeps only the first look at the EBML header. The crate's mutation
+    sweep of its three header readers, lost 2026-10-03, is back. A
+    divergence from ffprobe found on the way -- a SeekHead `matroska`
+    refuses a whole file over -- is
+    `requests/e-f-matroska-refuses-a-file-over-its-seekhead.md`.
 
-- `[-]` `[E]` **Text boxes with a caret** --
+- `[x]` `[E]` **Text boxes with a caret** --
   `known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box.md`:
   twenty-nine programs' boxes took typing only at their end, with no caret,
   selection or clipboard. One program at a time onto `textline::apply_key`
-  over a `TextInput`, as netscan's and sysmonitor's: twenty-six done
-  2026-10-04, listed in the known issue. Left: the masked boxes --
-  passwordgen's analyser, lockscreen's password, credmanager's master
-  password with its entry form and search.
+  over a `TextInput`, as netscan's and sysmonitor's: all twenty-nine done
+  2026-10-04, listed in the known issue -- the masked boxes (passwordgen's
+  analyser, lockscreen's password, credmanager's secrets) through
+  `textline::apply_masked_key`, a caret that moves between the mask's
+  characters. The known issue moves to `known-issues-resolved/` once this
+  is on `main`.
 
 - `[x]` `[E]` **`apps/terminal` runs the user's shell on a kernel
   pseudo-terminal** — 2026-09-24, the "interactive terminal" joint task

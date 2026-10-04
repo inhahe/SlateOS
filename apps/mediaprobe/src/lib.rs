@@ -12,13 +12,18 @@
 //! | Container | Length | Tracks |
 //! |---|---|---|
 //! | MP4, M4V, MOV, 3GP | `mvhd` (`mehd` for a fragmented file) | each `trak`: `tkhd`, `mdhd`, `hdlr`, the first `stsd` entry, `stsz`'s count |
-//! | Matroska, WebM | `Info`'s `Duration` at its `TimestampScale` | each `TrackEntry` |
+//! | Matroska, WebM | `Info`'s `Duration` at its `TimestampScale` | each `TrackEntry` FFmpeg reads, by `gui/video/matroska` |
 //! | AVI | the video stream's `strh` (OpenDML's `dmlh` count past 1 GiB) | each `strl`: `strh`, `strf`, `strn` |
 //!
-//! Everything is bounded: boxes and elements are stepped over by their sizes
+//! A Matroska or WebM file is read by `matroska::Demuxer`, the demuxer the
+//! video player plays it through, so that a file's tracks as listed are its
+//! tracks as played (`mkv`).
+//!
+//! Everything is bounded: boxes and chunks are stepped over by their sizes
 //! with a seek, only the small ones this reads are read, each to a cap, and a
 //! size that would run past its parent or the file ends the walk rather than
-//! a panic or a loop.
+//! a panic or a loop. The Matroska demuxer reads a track's codec setup whole,
+//! as the player needs it -- never more than the file holds.
 
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
@@ -250,7 +255,7 @@ pub fn probe<R: Read + Seek>(r: &mut R) -> io::Result<Probe> {
     let container = Container::detect(&head);
     let mut probe = match container {
         Container::Mp4 | Container::QuickTime => mp4::probe(r, len)?,
-        Container::Matroska | Container::WebM => mkv::probe(r, len)?,
+        Container::Matroska | Container::WebM => mkv::probe(r)?,
         Container::Avi => avi::probe(r, len)?,
         Container::Unknown => Probe::default(),
     };

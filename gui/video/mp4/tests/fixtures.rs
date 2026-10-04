@@ -444,6 +444,26 @@ fn packets_of_mdat_to_end() {
 }
 
 #[test]
+fn packets_of_moov_to_end() {
+    demuxes_as_ffmpeg_does("moov_to_end.mp4");
+}
+
+#[test]
+fn packets_of_trak_to_end() {
+    demuxes_as_ffmpeg_does("trak_to_end.mp4");
+}
+
+#[test]
+fn packets_of_edit_before_key_shows() {
+    demuxes_as_ffmpeg_does("edit_before_key_shows.mp4");
+}
+
+#[test]
+fn packets_of_edit_at_shown_key() {
+    demuxes_as_ffmpeg_does("edit_at_shown_key.mp4");
+}
+
+#[test]
 fn packets_of_hoov() {
     demuxes_as_ffmpeg_does("hoov.mp4");
 }
@@ -486,6 +506,11 @@ fn packets_of_clap_outside() {
 #[test]
 fn packets_of_clap_too_wide() {
     demuxes_as_ffmpeg_does("clap_too_wide.mp4");
+}
+
+#[test]
+fn packets_of_clap_wider_by_half() {
+    demuxes_as_ffmpeg_does("clap_wider_by_half.mp4");
 }
 
 #[test]
@@ -744,4 +769,14 @@ fn seeks_in_rap_group() {
 #[test]
 fn seeks_in_ctts_tail() {
     seeks_as_ffmpeg_does("ctts_tail.mp4");
+}
+
+#[test]
+fn seeks_in_edit_before_key_shows() {
+    seeks_as_ffmpeg_does("edit_before_key_shows.mp4");
+}
+
+#[test]
+fn seeks_in_edit_at_shown_key() {
+    seeks_as_ffmpeg_does("edit_at_shown_key.mp4");
 }

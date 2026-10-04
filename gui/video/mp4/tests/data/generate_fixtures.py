@@ -308,10 +308,15 @@ class Trak:
 
 
 def mp4(traks, movie_scale=1000, brand=b"isom", moov_kind=b"moov", mdat_header=None, cut=None,
-        movie_display=MATRIX):
+        movie_display=MATRIX, moov_last=False, moov_to_end=False, last_trak_to_end=False):
     """A file: ftyp, moov, then mdat with each track's chunks interleaved
-    chunk by chunk. `mdat_header` writes the mdat's header itself (a 64-bit
-    size, or 0 for one running to the end)."""
+    chunk by chunk -- or, `moov_last`, ftyp, mdat, moov. `mdat_header` writes
+    the mdat's header itself (a 64-bit size, or 0 for one running to the
+    end); `moov_to_end` gives the moov a size of 0, running to the end of the
+    file (so it must be last), and `last_trak_to_end` the moov's last trak,
+    running to the end of the moov."""
+    if moov_to_end and not moov_last:
+        raise SystemExit("a moov running to the end of the file must be its last box")
     ftyp = box(b"ftyp", brand, u32(0x200), b"isom", b"iso2", b"mp41")
     chunks = [t.chunk_data() for t in traks]
     order = []
@@ -322,22 +327,27 @@ def mp4(traks, movie_scale=1000, brand=b"isom", moov_kind=b"moov", mdat_header=N
 
     def moov_with(offsets):
         duration = max(sum(s[1] for s in t.samples) * movie_scale // t.timescale for t in traks)
-        body = mvhd(movie_scale, duration, movie_display) + b"".join(
-            t.trak(i + 1, offsets[i], movie_scale) for i, t in enumerate(traks))
-        return box(moov_kind, body)
+        boxes = [t.trak(i + 1, offsets[i], movie_scale) for i, t in enumerate(traks)]
+        if last_trak_to_end:
+            boxes[-1] = u32(0) + boxes[-1][4:]
+        moov = box(moov_kind, mvhd(movie_scale, duration, movie_display) + b"".join(boxes))
+        return u32(0) + moov[4:] if moov_to_end else moov
 
     zero = [[0] * len(c) for c in chunks]
     moov_len = len(moov_with(zero))
     payload_len = sum(len(chunks[ti][k]) for ti, k in order)
     header = mdat_header(payload_len) if mdat_header else u32(8 + payload_len) + b"mdat"
-    at = len(ftyp) + moov_len + len(header)
+    at = len(ftyp) + (0 if moov_last else moov_len) + len(header)
     offsets = [[0] * len(c) for c in chunks]
     payload = b""
     for ti, k in order:
         offsets[ti][k] = at
         at += len(chunks[ti][k])
         payload += chunks[ti][k]
-    data = ftyp + moov_with(offsets) + header + payload
+    if moov_last:
+        data = ftyp + header + payload + moov_with(offsets)
+    else:
+        data = ftyp + moov_with(offsets) + header + payload
     return data[:cut] if cut else data
 
 
@@ -403,10 +413,29 @@ def synthetic():
     out["co64_stz2.mp4"] = mp4([Trak(b"vide", av01, 10240, v12, [6, 6], sizes=16, offsets="co64"),
                                 Trak(b"soun", opus, 48000, s20, [10, 10], sizes=8)])
     out["stz2_4bit.mp4"] = mp4([Trak(b"vide", av01, 10240, video_samples(6, size=9), [6], sizes=4)])
+    # A box's size in 64 bits -- an mdat's, before the moov, which is found
+    # only by reading it -- and sizes of 0, running a box to its parent's end:
+    # an mdat's, the file's last; a moov's, after the mdat; and a trak's, the
+    # last in its moov.
     out["largesize.mp4"] = mp4([Trak(b"vide", av01, 10240, v12, [12])],
-                               mdat_header=lambda n: u32(1) + b"mdat" + u64(16 + n))
+                               mdat_header=lambda n: u32(1) + b"mdat" + u64(16 + n), moov_last=True)
     out["mdat_to_end.mp4"] = mp4([Trak(b"vide", av01, 10240, v12, [12])],
                                  mdat_header=lambda n: u32(0) + b"mdat")
+    out["moov_to_end.mp4"] = mp4([Trak(b"vide", av01, 10240, v12, [12])], moov_last=True,
+                                 moov_to_end=True)
+    out["trak_to_end.mp4"] = mp4([Trak(b"vide", av01, 10240, v12, [6, 6]),
+                                  Trak(b"soun", opus, 48000, s20, [10, 10])], last_trak_to_end=True)
+    # B-frames' composition offsets with an edit starting between a key
+    # frame's decoding and its showing -- FFmpeg goes back a group of
+    # pictures, to a key frame shown before the edit -- and one starting as a
+    # key frame is shown, inside a run of the offsets, from which the rest
+    # of the edit's offsets are counted.
+    bframes = video_samples(12, keys=(0, 4, 8))
+    runs = [(1, 1024), (1, 3072), (1, 0), (2, 2048), (2, 0), (2, 1024), (1, 3072), (2, 0)]
+    out["edit_before_key_shows.mp4"] = mp4([Trak(b"vide", av01, 10240, bframes, [12], ctts_version=0,
+                                                 ctts_override=runs, edits=[(300, 4608)])])
+    out["edit_at_shown_key.mp4"] = mp4([Trak(b"vide", av01, 10240, bframes, [12], ctts_version=0,
+                                             ctts_override=runs, edits=[(300, 6144)])])
     # A moov written as 'hoov', which FFmpeg reads as one.
     out["hoov.mp4"] = mp4([Trak(b"vide", av01, 10240, v12, [12])], moov_kind=b"hoov")
     # The mdat cut short: the samples past the end.
@@ -466,6 +495,9 @@ def described():
     one("clap_offset.mp4", clap((48, 1), (40, 1), (-4, 1), (2, 1)))
     one("clap_fraction.mp4", clap((95, 2), (40, 1), (0, 1), (0, 1)))
     one("clap_too_wide.mp4", clap((80, 1), (40, 1), (0, 1), (0, 1)))
+    # Half a pixel too wide: only the width check refuses it -- its edges,
+    # rounded toward zero, fit the picture.
+    one("clap_wider_by_half.mp4", clap((129, 2), (40, 1), (0, 1), (0, 1)))
     one("clap_outside.mp4", clap((48, 1), (40, 1), (-40, 1), (0, 1)))
     one("clap_twice.mp4", clap((48, 1), (40, 1), (0, 1), (0, 1)),
         clap((80, 1), (40, 1), (0, 1), (0, 1)))
@@ -581,6 +613,8 @@ SEEKABLE = {
     "stps.mp4": SEEKS,
     "rap_group.mp4": SEEKS,
     "ctts_tail.mp4": [0.0, 0.25, 0.4],
+    "edit_before_key_shows.mp4": [0.0, 0.1, 0.2],
+    "edit_at_shown_key.mp4": [0.0, 0.1, 0.2],
 }
 
 

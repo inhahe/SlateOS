@@ -41,6 +41,11 @@
 //! [`probe`] tells an MP4 file from others by its first boxes, as FFmpeg's
 //! probe does.
 //!
+//! `mutate.py` breaks the code one rule at a time -- an edit list's rule
+//! skipped, a table misread, a box's size rule dropped, a picture's
+//! description read another way -- and checks that the tests named for each
+//! rule are the ones that notice.
+//!
 //! # Whose code
 //!
 //! FFmpeg's, translated: the index building, the edit lists, the fragments,

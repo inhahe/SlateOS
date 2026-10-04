@@ -893,6 +893,11 @@ mod tests {
         ];
         assert_eq!(search_timestamp(&index, 25, true, false), Some(2));
         assert_eq!(
+            search_timestamp(&index, 15, true, false),
+            Some(0),
+            "back from the frame at or before to the key frame before it"
+        );
+        assert_eq!(
             search_timestamp(&index, 25, false, false),
             None,
             "no key frame after"
@@ -925,5 +930,21 @@ mod tests {
         ];
         assert_eq!(search_timestamp(&index, 0, true, false), Some(0));
         assert_eq!(search_timestamp(&index, 0, false, false), Some(4));
+        // Two edits, the second replaying its group of pictures from the key
+        // frame before it: the replayed entries, discarded, run back in time.
+        // Landing on them, the search moves to the next kept entry -- here
+        // past the time wanted -- and so settles in the first edit; judging
+        // by their own times it would stop among them.
+        let index = [
+            entry(0, KEYFRAME),
+            entry(1024, 0),
+            entry(2048, 0),
+            entry(1024, KEYFRAME | DISCARD),
+            entry(2048, DISCARD),
+            entry(3072, 0),
+            entry(4096, 0),
+            entry(5120, 0),
+        ];
+        assert_eq!(search_timestamp(&index, 2048, true, false), Some(0));
     }
 }

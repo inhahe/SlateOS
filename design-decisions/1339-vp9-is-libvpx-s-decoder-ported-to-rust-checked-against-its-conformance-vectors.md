@@ -112,14 +112,20 @@ outside the tree for that comparison). How it is built:
   quantisers are checked bit-exact against libvpx's C on seeded blocks
   (`tools/fdct_reference.c`, `tools/quantize_reference.c`); the probability
   updates against the decoder's reader for every pair of probabilities.
+- **libvpx's structure, kept.** libvpx's encoder is one structure every
+  part reaches into (`VP9_COMP`); the port keeps it as `enc/cpi.rs`'s `Cpi`,
+  with rate control, cyclic refresh and the frame loop as `impl Cpi` blocks
+  in modules of their own, so a function ports line for line.
 
-So far every frame is a key frame at a quantiser the caller fixes, with
-fixed decisions (16x16 blocks, DC prediction). Every frame decodes to what
-the encoder says it reconstructed -- at random decisions, at seven sizes from
-1x1 up, at five quantisers, with transform sizes fixed and chosen per block
--- and what the encoder counts equals what the decoder counts on the same
-frame. Quantiser 0 reproduces the source exactly. Rate control, libvpx's
-decisions and inter frames come next, in that order of dependence.
+So far every frame is a key frame, with fixed decisions (16x16 blocks, DC
+prediction), at the quantiser libvpx's one-pass CBR rate control picks: the
+reference encode's first frame gets libvpx's quantiser (161) and loop filter
+level (24), from the same model and the same floating point. Every frame
+decodes to what the encoder says it reconstructed -- at random decisions,
+at seven sizes from 1x1 up, at five quantisers, with transform sizes fixed
+and chosen per block -- and what the encoder counts equals what the decoder
+counts on the same frame. Quantiser 0 reproduces the source exactly.
+libvpx's decisions and inter frames come next.
 
 **Alternatives.**
 

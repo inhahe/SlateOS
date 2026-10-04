@@ -10,13 +10,19 @@
 //! - `tokenize`: quantised coefficients as the tokens that code them.
 //! - `encodeframe`: a frame's blocks predicted, coded and reconstructed.
 //! - `encoder`: the frame loop and the public [`Encoder`].
+//! - `cpi`: the compressor's state, libvpx's `VP9_COMP`.
+//! - `ratectrl`: one-pass constant-bitrate rate control.
+//! - `aq_cyclicrefresh`: cyclic refresh, the realtime adaptive quantisation.
 
+pub(crate) mod aq_cyclicrefresh;
 pub(crate) mod bitstream;
 pub(crate) mod cost;
+pub(crate) mod cpi;
 pub(crate) mod encodeframe;
 pub(crate) mod encoder;
 pub(crate) mod fdct;
 pub(crate) mod quantize;
+pub(crate) mod ratectrl;
 pub(crate) mod subexp;
 pub(crate) mod tokenize;
 pub(crate) mod writer;

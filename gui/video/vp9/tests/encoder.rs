@@ -59,14 +59,15 @@ fn pictures(name: &str) -> Vec<Picture> {
         .collect()
 }
 
-/// Encode `source`, decode the result, and check it against the encoder's
+/// Encode `source` with the quantiser pinned at `quantizer` (libvpx's 0 to
+/// 63 scale), decode the result, and check it against the encoder's
 /// reconstruction. Returns the compressed size and the worst plane's PSNR.
 fn round_trip(source: &Picture, quantizer: u8) -> (usize, f64) {
     let (w, h) = (source.width(), source.height());
     let mut encoder = Encoder::new(EncoderConfig {
-        width: w,
-        height: h,
-        quantizer,
+        min_quantizer: quantizer,
+        max_quantizer: quantizer,
+        ..EncoderConfig::realtime(w, h, 1000)
     })
     .unwrap();
     let planes = [0, 1, 2].map(|i| source.plane8(i).unwrap());
@@ -90,14 +91,9 @@ fn round_trip(source: &Picture, quantizer: u8) -> (usize, f64) {
 fn real_pictures_round_trip_at_every_quantiser() {
     // (quantiser, the least PSNR in dB any plane may give): about 1.5 dB
     // under the least the encoder's fixed decisions gave when this was
-    // written. A transform or quantiser gone wrong costs far more.
-    let floors = [
-        (30u8, 41.0),
-        (60, 36.5),
-        (120, 29.5),
-        (200, 19.0),
-        (255, 14.5),
-    ];
+    // written. A transform or quantiser gone wrong costs far more. The
+    // quantisers are libvpx's 0-to-63 scale: indices 32, 60, 120, 200, 255.
+    let floors = [(8u8, 41.0), (15, 36.5), (30, 29.5), (50, 19.0), (63, 14.5)];
     for name in [
         "vp90-2-01-sharpness-1.webm",
         "vp90-2-02-size-66x66.webm",

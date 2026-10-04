@@ -4390,6 +4390,16 @@ impl ContactsApp {
     /// The hit boxes come from a frame drawn at the same size, so a control
     /// the window was too small to draw is a control that cannot be pressed.
     fn handle_mouse(&mut self, event: &MouseEvent, size: (f32, f32)) {
+        if self.show_help {
+            // The card is modal for the pointer as it is for the keys: a
+            // press, with any button, puts it away rather than reaching the
+            // control drawn under it -- Delete included, which would remove
+            // a contact the reader cannot see for the card.
+            if matches!(event.kind, MouseEventKind::Press(_)) {
+                self.show_help = false;
+            }
+            return;
+        }
         let MouseEventKind::Press(MouseButton::Left) = event.kind else {
             return;
         };
@@ -5456,6 +5466,69 @@ mod tests {
         assert_ne!(
             app.view, view,
             "control: N does nothing even with the card down"
+        );
+    }
+
+    /// **A press while the card is up puts it away, and does nothing else.**
+    ///
+    /// It used to go straight through the card to the control drawn under
+    /// it -- Delete among them. The control at the end is the same press with
+    /// the card down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let mut app = ContactsApp::new();
+        app.load_sample_data();
+        let size = ContactsApp::SIZE;
+        let f1 = Event::Key(KeyEvent {
+            key: Key::F1,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        });
+        let count = app.store.contacts.len();
+        let delete = guitk::probe::rect_of(&app, Target::DeleteContact).expect("a Delete button");
+        let (x, y) = delete.centre();
+
+        app.handle_event(&f1, size);
+        assert!(card_text(&app).contains("F1 closes this"));
+        app.click_at(x, y, MouseButton::Left, size);
+        assert_eq!(
+            app.store.contacts.len(),
+            count,
+            "the press went through the card and deleted a contact"
+        );
+        assert!(
+            !card_text(&app).contains("F1 closes this"),
+            "the press did not put the card away"
+        );
+
+        // Any button: the right one does nothing to a control, but it is
+        // still a press on the card.
+        app.handle_event(&f1, size);
+        app.click_at(x, y, MouseButton::Right, size);
+        assert!(
+            !card_text(&app).contains("F1 closes this"),
+            "a right-button press left the card up"
+        );
+
+        // A move under the card is not a press, and does not put it away.
+        app.handle_event(&f1, size);
+        app.handle_event(
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Move,
+            }),
+            size,
+        );
+        assert!(card_text(&app).contains("F1 closes this"));
+        app.handle_event(&f1, size);
+
+        app.click_at(x, y, MouseButton::Left, size);
+        assert_eq!(
+            app.store.contacts.len(),
+            count - 1,
+            "control: the press deletes nothing even with the card down"
         );
     }
 

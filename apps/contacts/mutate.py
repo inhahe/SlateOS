@@ -606,6 +606,38 @@ MUTATIONS = [
         '',
         ['a_chord_is_neither_a_contacts_key_nor_typing_and_altgr_types'],
     ),
+    # -- the shortcut card's hold on the pointer
+    (
+        'a press goes through the shortcut card',
+        '        if self.show_help {\n'
+        '            // The card is modal for the pointer as it is for the keys: a\n'
+        '            // press, with any button, puts it away rather than reaching the\n'
+        '            // control drawn under it -- Delete included, which would remove\n'
+        '            // a contact the reader cannot see for the card.\n'
+        '            if matches!(event.kind, MouseEventKind::Press(_)) {\n'
+        '                self.show_help = false;\n'
+        '            }\n'
+        '            return;\n'
+        '        }\n',
+        '',
+        ['the_shortcut_card_takes_a_press_rather_than_passing_it_on'],
+    ),
+    (
+        'only the left button puts the card away',
+        '            if matches!(event.kind, MouseEventKind::Press(_)) {\n'
+        '                self.show_help = false;\n',
+        '            if matches!(event.kind, MouseEventKind::Press(MouseButton::Left)) {\n'
+        '                self.show_help = false;\n',
+        ['the_shortcut_card_takes_a_press_rather_than_passing_it_on'],
+    ),
+    (
+        'a move puts the card away',
+        '            if matches!(event.kind, MouseEventKind::Press(_)) {\n'
+        '                self.show_help = false;\n',
+        '            if !matches!(event.kind, MouseEventKind::Leave) {\n'
+        '                self.show_help = false;\n',
+        ['the_shortcut_card_takes_a_press_rather_than_passing_it_on'],
+    ),
 ]
 
 if __name__ == "__main__":

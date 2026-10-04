@@ -269,6 +269,7 @@ FORM = "the_form_boxes_are_the_toolkits_field"
 EDITS = "the_form_boxes_edit_like_a_field"
 SEARCH = "the_search_box_is_the_toolkits_field"
 FOLDS = "the_search_finds_a_name_whatever_the_case_of_its_letters"
+CHECKS = "the_components_are_checkboxes_that_change"
 SEARCH_FOCUS = (
     "            focused: self.dialog == DialogKind::None && self.progress.is_none() && !self.show_help,\n"
 )
@@ -276,14 +277,14 @@ SEARCH_FOCUS = (
 MAIN += [
     (
         "the form box with the keyboard has no mark",
-        "            focused: field == self.form_field && !self.show_help,\n",
+        "            focused: self.form_focus == FormFocus::Text(field) && !self.show_help,\n",
         "            focused: false,\n",
         [FORM],
     ),
     (
         "the form keeps its mark under the list of keys",
-        "            focused: field == self.form_field && !self.show_help,\n",
-        "            focused: field == self.form_field,\n",
+        "            focused: self.form_focus == FormFocus::Text(field) && !self.show_help,\n",
+        "            focused: self.form_focus == FormFocus::Text(field),\n",
         [FORM],
     ),
     (
@@ -306,9 +307,9 @@ MAIN += [
     ),
     (
         "Tab leaves the keyboard where it was",
-        "                self.focus_form_field(match self.form_field {\n",
-        "                let _ = (match self.form_field {\n",
-        [FORM, EDITS],
+        "                self.step_form_focus(key.modifiers.shift);\n",
+        "                let _ = key.modifiers.shift;\n",
+        [FORM, EDITS, CHECKS],
     ),
     (
         "the form types only at its end",
@@ -317,7 +318,7 @@ MAIN += [
         "        }\n"
         "        let edit = textline::apply_key(\n",
         "        if textline::types_into_field(key) {\n"
-        "            self.form_text_mut().push_str(&key.text);\n"
+        "            self.form_text_mut(field).push_str(&key.text);\n"
         "            return EventResult::Consumed;\n"
         "        }\n"
         "        if self.form_editor.text() != text {\n"
@@ -355,7 +356,7 @@ MAIN += [
     ),
     (
         "an edit is not written back to the form",
-        "            *self.form_text_mut() = edited;\n",
+        "            *self.form_text_mut(field) = edited;\n",
         "            let _ = edited;\n",
         [EDITS],
     ),
@@ -375,7 +376,7 @@ MAIN += [
     (
         "a press moves the keyboard but not the box's text",
         "        } else {\n            self.focus_form_field(field);\n        }\n",
-        "        } else {\n            self.form_field = field;\n        }\n",
+        "        } else {\n            self.form_focus = FormFocus::Text(field);\n        }\n",
         [EDITS],
     ),
     (
@@ -425,6 +426,118 @@ MAIN += [
         "        self.focus_ring_width = settings.focus_ring_width();\n",
         "        let _ = settings;\n",
         [FORM, SEARCH],
+    ),
+]
+
+# The form's components are the toolkit's checkboxes, and the ones this
+# system can keep can be changed (2026-10-04): they were drawn as checkboxes
+# that nothing changed.
+MAIN += [
+    (
+        "a component cannot be ticked",
+        "            *chosen = !*chosen;\n",
+        "            let _ = chosen;\n",
+        [CHECKS],
+    ),
+    (
+        "a press on a disabled checkbox takes the keyboard",
+        "    fn press_component(&mut self, i: usize) {\n"
+        "        if !self.keepable(i) {\n"
+        "            return;\n"
+        "        }\n",
+        "    fn press_component(&mut self, i: usize) {\n",
+        [CHECKS],
+    ),
+    (
+        "a disabled checkbox is drawn enabled",
+        "                    disabled: !keepable,\n",
+        "                    disabled: false,\n",
+        [CHECKS],
+    ),
+    (
+        "a checkbox with the keyboard has no ring",
+        "                    focused: self.form_focus == FormFocus::Component(i) && !self.show_help,\n",
+        "                    focused: false,\n",
+        [CHECKS],
+    ),
+    (
+        "a checkbox keeps its ring under the list of keys",
+        "                    focused: self.form_focus == FormFocus::Component(i) && !self.show_help,\n",
+        "                    focused: self.form_focus == FormFocus::Component(i),\n",
+        [CHECKS],
+    ),
+    (
+        "Tab passes the checkboxes over",
+        "                .filter(|i| self.keepable(*i))\n",
+        "                .filter(|_| false)\n",
+        [CHECKS],
+    ),
+    (
+        "Tab stops at a disabled checkbox",
+        "                .filter(|i| self.keepable(*i))\n",
+        "                .filter(|_| true)\n",
+        [CHECKS],
+    ),
+    (
+        "Shift+Tab goes forward",
+        "        let next = if back {\n",
+        "        let next = if false {\n",
+        [CHECKS, EDITS],
+    ),
+    (
+        "Tab stops at the last stop",
+        "            at.saturating_add(1).checked_rem(stops.len()).unwrap_or(0)\n",
+        "            at.saturating_add(1).min(stops.len().saturating_sub(1))\n",
+        [CHECKS],
+    ),
+    (
+        "Space does nothing to a checkbox",
+        "                self.toggle_component(i);\n"
+        "                return EventResult::Consumed;\n",
+        "                return EventResult::Consumed;\n",
+        [CHECKS],
+    ),
+    (
+        "every key flips a checkbox",
+        "                if !checkbox::toggles(key) {\n"
+        "                    return EventResult::Ignored;\n"
+        "                }\n",
+        "",
+        [CHECKS],
+    ),
+    (
+        "a press on a checkbox does nothing",
+        "                    self.press_component(i);\n",
+        "                    let _ = i;\n",
+        [CHECKS],
+    ),
+    (
+        "a press on a checkbox's label misses it",
+        "                checkbox::hit(*cx, *cy, COMPONENT_ROW_HEIGHT, label).contains(x, y)\n",
+        '                checkbox::hit(*cx, *cy, COMPONENT_ROW_HEIGHT, &label[..0]).contains(x, y)\n',
+        [CHECKS],
+    ),
+    (
+        "the form opens on the last one's choice",
+        "        self.form_components = (0..SnapshotComponent::all().len())\n"
+        "            .map(|i| self.keepable(i))\n"
+        "            .collect();\n",
+        "",
+        [CHECKS],
+    ),
+    (
+        "a point of nothing is not refused for what it is",
+        "        if chosen.is_empty() {\n"
+        '            return self.refuse(title, "Choose at least one component to keep");\n'
+        "        }\n",
+        "",
+        [CHECKS],
+    ),
+    (
+        "the form says it keeps something when nothing is chosen",
+        "        let holds = if self.form_selected_components().is_empty() {\n",
+        "        let holds = if false {\n",
+        [CHECKS],
     ),
 ]
 

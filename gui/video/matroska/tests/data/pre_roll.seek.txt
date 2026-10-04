@@ -1,0 +1,15 @@
+# pre_roll.mkv: ffprobe's first 6 packets after each seek (generate_fixtures.py).
+seek 30
+packet 0 0 K__
+packet 0 1000 K__
+packet 0 2000 K__
+seek 100
+packet 0 0 K__
+packet 0 1000 K__
+packet 0 2000 K__
+seek 1050
+packet 0 1000 K__
+packet 0 2000 K__
+seek 1100
+packet 0 1000 K__
+packet 0 2000 K__

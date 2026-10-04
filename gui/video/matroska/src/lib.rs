@@ -11,8 +11,9 @@
 //! [`Demuxer`] reads one: the segment's description and its tracks
 //! ([`Track`]) when opened, then each packet in file order
 //! ([`Demuxer::next_packet`]), and from a time on ([`Demuxer::seek`]) --
-//! through the Cues where there are any, by walking the Clusters where
-//! there are not. A packet's timestamp is FFmpeg's: the Cluster's plus the
+//! through the Cues where the file has them for the track, and where it
+//! does not by walking the Clusters for key frames, only as far as the time
+//! sought. A packet's timestamp is FFmpeg's: the Cluster's plus the
 //! block's, less the track's codec delay, in the segment's ticks
 //! (each [`Demuxer::time_base`] seconds; the segment's `TimestampScale`
 //! nanoseconds in every file written today).
@@ -35,8 +36,17 @@
 //! file's length before anything is read or allocated for it; a block holds
 //! at most 256 laces and a binary element at most 256 MiB (FFmpeg's limit).
 //! A damaged Cluster ends reading at that point, and the next packet comes
-//! from the next Cluster the file still holds, found by its ID as FFmpeg
-//! resynchronises.
+//! from the next top-level element the file still holds, found by its ID as
+//! FFmpeg resynchronises -- the search starting one byte past the last
+//! element FFmpeg would have counted good, so that even a frame whose bytes
+//! look like a Cluster is found or missed as FFmpeg finds or misses it.
+//!
+//! # Held to FFmpeg
+//!
+//! Every packet of 37 files, and the packets after 78 seeks, are ffprobe's
+//! (`tests/fixtures.rs`, `tests/data/generate_fixtures.py`); what ffprobe
+//! cannot show is in `tests/beyond_ffprobe.rs`; and `mutate.py` breaks the
+//! code one rule at a time and checks the tests notice.
 
 mod block;
 mod cues;

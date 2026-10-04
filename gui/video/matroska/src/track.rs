@@ -184,7 +184,10 @@ pub struct Track {
     /// nanoseconds (Opus's pre-skip). FFmpeg takes it off every timestamp,
     /// and so does this.
     pub codec_delay: u64,
-    /// How much sound to decode before a seek's target, in nanoseconds.
+    /// How much sound a decoder needs after a jump before its output is
+    /// right, in nanoseconds (Opus: 80 ms). [`crate::Demuxer::seek`] does not
+    /// act on it, as FFmpeg's seek does not: a caller seeking in sound seeks
+    /// this much before the time it wants, and drops what decodes before it.
     pub seek_pre_roll: u64,
     pub video: Option<Video>,
     pub audio: Option<Audio>,

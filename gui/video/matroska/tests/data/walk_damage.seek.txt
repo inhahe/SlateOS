@@ -1,0 +1,7 @@
+# walk_damage.mkv: ffprobe's first 6 packets after each seek (generate_fixtures.py).
+seek 1700
+packet 0 0 K__
+packet 0 2000 K__
+packet 0 4000 K__
+seek 3500
+packet 0 4000 K__

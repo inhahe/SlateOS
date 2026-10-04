@@ -22,10 +22,6 @@ pub(crate) struct Block {
     pub frames: Vec<Range<usize>>,
 }
 
-/// The most bytes a block's header takes: a track number of up to 8 bytes,
-/// the timestamp and the flags.
-pub(crate) const HEADER_MAX: u64 = 11;
-
 /// A block's header alone: its track, timestamp and flags.
 ///
 /// # Errors

@@ -189,7 +189,7 @@ MAIN = [
     ),
     (
         "DHCP is sent as a static configuration",
-        "        if config.dhcp_enabled {\n            // Two refusals",
+        "        if config.dhcp_enabled == Some(true) {\n            // Two refusals",
         "        if false {\n            // Two refusals",
         [NO_DHCP],
     ),
@@ -402,7 +402,7 @@ MAIN += [
     ),
     (
         "an address box under DHCP takes the keyboard",
-        "                self.editing_ip && !self.edit_ip_config.dhcp_enabled\n",
+        "                self.editing_ip && self.edit_ip_config.dhcp_enabled != Some(true)\n",
         "                self.editing_ip\n",
         [DHCP],
     ),
@@ -549,7 +549,7 @@ MAIN += [
     ),
     (
         "a switch nobody moved is refused as a switch to DHCP",
-        "            return Err(if iface.ip_config.dhcp_enabled {\n",
+        "            return Err(if iface.ip_config.dhcp_enabled == Some(true) {\n",
         "            return Err(if false {\n",
         [REFUSAL],
     ),
@@ -642,6 +642,32 @@ MAIN += [
         "        if self.question.is_some() && matches!(event, Event::Mouse(_)) {\n",
         "        if false {\n",
         [ASKS],
+    ),
+]
+
+# An interface whose DHCP nothing reports opens as not reported, not as
+# "on" (2026-10-04, known-issues/E-the-network-managers-editor-says-dhcp-
+# is-on-for-an-interface-whose-dhcp-nothing-reports.md).
+NOT_REPORTED = "an_interface_whose_dhcp_nothing_reports_opens_as_not_reported"
+
+MAIN += [
+    (
+        "a kernel-listed interface opens with DHCP on",
+        "            dns_servers,\n            dhcp_enabled: None,\n        },\n",
+        "            dns_servers,\n            dhcp_enabled: Some(true),\n        },\n",
+        [NOT_REPORTED],
+    ),
+    (
+        "the IP tab guesses DHCP",
+        '        None => "DHCP: Not reported",\n',
+        '        None => "DHCP: Enabled",\n',
+        [NOT_REPORTED],
+    ),
+    (
+        "the switch leaves not reported where it is",
+        "                    Some(self.edit_ip_config.dhcp_enabled != Some(true));\n",
+        "                    self.edit_ip_config.dhcp_enabled.map(|on| !on);\n",
+        [NOT_REPORTED],
     ),
 ]
 

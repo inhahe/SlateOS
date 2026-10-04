@@ -230,7 +230,12 @@ pub struct IpConfig {
     pub subnet_mask: String,
     pub gateway: String,
     pub dns_servers: Vec<String>,
-    pub dhcp_enabled: bool,
+    /// Whether the interface takes its addresses from DHCP: on, off -- set
+    /// by hand -- or `None`, nothing says. The kernel's `/proc/net` does
+    /// not, so every interface read from it starts at `None`; it started at
+    /// "on", which disabled its address boxes and read "DHCP: Enabled" on
+    /// the IP tab while Properties, rightly, read "Not reported".
+    pub dhcp_enabled: Option<bool>,
 }
 
 impl Default for IpConfig {
@@ -240,7 +245,7 @@ impl Default for IpConfig {
             subnet_mask: String::from("255.255.255.0"),
             gateway: String::new(),
             dns_servers: Vec::new(),
-            dhcp_enabled: true,
+            dhcp_enabled: None,
         }
     }
 }
@@ -248,7 +253,7 @@ impl Default for IpConfig {
 impl IpConfig {
     /// Validate basic IP configuration fields.
     fn validate(&self) -> Result<(), String> {
-        if !self.dhcp_enabled {
+        if self.dhcp_enabled != Some(true) {
             if self.ip_address.is_empty() {
                 return Err("IP address is required for static configuration".into());
             }
@@ -948,7 +953,7 @@ fn interface_of(a: &hwquery::NetworkAdapterInfo, id: u32) -> NetworkInterface {
             subnet_mask: address_value(&a.subnet),
             gateway: address_value(&a.gateway),
             dns_servers,
-            dhcp_enabled: true,
+            dhcp_enabled: None,
         },
         state: match a.up {
             Some(true) => ConnectionState::Connected,
@@ -1281,10 +1286,10 @@ impl NetManagerApp {
         };
         let name = iface.name.clone();
         let config = &self.edit_ip_config;
-        if config.dhcp_enabled {
+        if config.dhcp_enabled == Some(true) {
             // Two refusals, because "cannot switch to DHCP" is untrue when
             // the switch was on from the start and nobody moved it.
-            return Err(if iface.ip_config.dhcp_enabled {
+            return Err(if iface.ip_config.dhcp_enabled == Some(true) {
                 String::from(
                     "DHCP is switched on, and Apply sends nothing under DHCP: switch it off to set a static configuration (the dhcpcd command manages DHCP, run as an administrator)",
                 )
@@ -1354,7 +1359,7 @@ impl NetManagerApp {
     /// nothing under DHCP -- a list edited then is a change nothing can
     /// make.
     pub fn dns_editable(&self) -> bool {
-        !self.edit_ip_config.dhcp_enabled
+        self.edit_ip_config.dhcp_enabled != Some(true)
     }
 
     /// Open the editor on the selected interface, if it is not open: a
@@ -2509,12 +2514,20 @@ fn render_tab_ip_config(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32
     y = render_section_title(frame, &app.palette, "IP Configuration", lx, y);
 
     // DHCP toggle
-    let dhcp_label = if ip.dhcp_enabled {
-        "DHCP: Enabled"
-    } else {
-        "DHCP: Disabled (Static)"
+    // What Properties says when nothing reports it, rather than a guess.
+    let dhcp_label = match ip.dhcp_enabled {
+        Some(true) => "DHCP: Enabled",
+        Some(false) => "DHCP: Disabled (Static)",
+        None => "DHCP: Not reported",
     };
-    let dhcp = render_toggle_row(frame, &app.palette, dhcp_label, ip.dhcp_enabled, lx, y);
+    let dhcp = render_toggle_row(
+        frame,
+        &app.palette,
+        dhcp_label,
+        ip.dhcp_enabled == Some(true),
+        lx,
+        y,
+    );
     frame.hit(Target::DhcpToggle, dhcp);
     y += FIELD_HEIGHT + 8.0;
 
@@ -3476,7 +3489,7 @@ fn render_address_row(
         x: vx,
         y: y + 7.0,
         text: if value.is_empty() { "---" } else { value }.to_string(),
-        color: if app.edit_ip_config.dhcp_enabled {
+        color: if app.edit_ip_config.dhcp_enabled == Some(true) {
             app.palette.overlay0
         } else {
             app.palette.text
@@ -3770,7 +3783,7 @@ impl NetManagerApp {
         match field {
             Field::DnsInput => self.dns_editable(),
             Field::Ip | Field::Mask | Field::Gateway => {
-                self.editing_ip && !self.edit_ip_config.dhcp_enabled
+                self.editing_ip && self.edit_ip_config.dhcp_enabled != Some(true)
             }
         }
     }
@@ -3949,7 +3962,10 @@ impl NetManagerApp {
                 if !self.editing_ip {
                     self.start_editing_ip();
                 }
-                self.edit_ip_config.dhcp_enabled = !self.edit_ip_config.dhcp_enabled;
+                // Not reported moves to on, as off does: the switch is drawn
+                // off for both.
+                self.edit_ip_config.dhcp_enabled =
+                    Some(self.edit_ip_config.dhcp_enabled != Some(true));
                 // Under DHCP the address boxes are disabled, and a disabled
                 // box does not keep the keyboard.
                 if self.focus.is_some_and(|field| !self.field_enabled(field)) {
@@ -4412,7 +4428,7 @@ fn sample_interfaces() -> Vec<NetworkInterface> {
                 subnet_mask: "255.255.255.0".into(),
                 gateway: "192.168.1.1".into(),
                 dns_servers: vec!["8.8.8.8".into(), "8.8.4.4".into(), "1.1.1.1".into()],
-                dhcp_enabled: true,
+                dhcp_enabled: Some(true),
             },
             state: ConnectionState::Connected,
             speed_mbps: Some(1000),
@@ -4432,7 +4448,7 @@ fn sample_interfaces() -> Vec<NetworkInterface> {
                 subnet_mask: "255.255.255.0".into(),
                 gateway: "192.168.1.1".into(),
                 dns_servers: vec!["8.8.8.8".into()],
-                dhcp_enabled: true,
+                dhcp_enabled: Some(true),
             },
             state: ConnectionState::Connected,
             speed_mbps: Some(300),
@@ -4452,7 +4468,7 @@ fn sample_interfaces() -> Vec<NetworkInterface> {
                 subnet_mask: "255.255.255.0".into(),
                 gateway: "10.0.0.1".into(),
                 dns_servers: vec!["10.0.0.1".into()],
-                dhcp_enabled: false,
+                dhcp_enabled: Some(false),
             },
             state: ConnectionState::Disconnected,
             speed_mbps: None,
@@ -4472,7 +4488,7 @@ fn sample_interfaces() -> Vec<NetworkInterface> {
                 subnet_mask: "255.255.0.0".into(),
                 gateway: String::new(),
                 dns_servers: Vec::new(),
-                dhcp_enabled: false,
+                dhcp_enabled: Some(false),
             },
             state: ConnectionState::Connected,
             speed_mbps: Some(10000),
@@ -4492,7 +4508,7 @@ fn sample_interfaces() -> Vec<NetworkInterface> {
                 subnet_mask: "255.0.0.0".into(),
                 gateway: String::new(),
                 dns_servers: Vec::new(),
-                dhcp_enabled: false,
+                dhcp_enabled: Some(false),
             },
             state: ConnectionState::Connected,
             speed_mbps: None,
@@ -4512,7 +4528,7 @@ fn sample_interfaces() -> Vec<NetworkInterface> {
                 subnet_mask: "255.255.0.0".into(),
                 gateway: String::new(),
                 dns_servers: Vec::new(),
-                dhcp_enabled: false,
+                dhcp_enabled: Some(false),
             },
             state: ConnectionState::Disconnected,
             speed_mbps: None,
@@ -4831,7 +4847,10 @@ mod tests {
     #[test]
     fn test_ip_config_default() {
         let cfg = IpConfig::default();
-        assert!(cfg.dhcp_enabled);
+        assert_eq!(
+            cfg.dhcp_enabled, None,
+            "nothing has said whether DHCP is on"
+        );
         assert!(cfg.ip_address.is_empty());
         assert_eq!(cfg.subnet_mask, "255.255.255.0");
         assert!(cfg.dns_servers.is_empty());
@@ -4840,7 +4859,7 @@ mod tests {
     #[test]
     fn test_ip_config_validate_dhcp_ok() {
         let cfg = IpConfig {
-            dhcp_enabled: true,
+            dhcp_enabled: Some(true),
             ..IpConfig::default()
         };
         assert!(cfg.validate().is_ok());
@@ -4849,7 +4868,7 @@ mod tests {
     #[test]
     fn test_ip_config_validate_static_missing_ip() {
         let cfg = IpConfig {
-            dhcp_enabled: false,
+            dhcp_enabled: Some(false),
             ip_address: String::new(),
             ..IpConfig::default()
         };
@@ -4859,7 +4878,7 @@ mod tests {
     #[test]
     fn test_ip_config_validate_static_invalid_ip() {
         let cfg = IpConfig {
-            dhcp_enabled: false,
+            dhcp_enabled: Some(false),
             ip_address: "999.999.999.999".into(),
             subnet_mask: "255.255.255.0".into(),
             ..IpConfig::default()
@@ -4870,7 +4889,7 @@ mod tests {
     #[test]
     fn test_ip_config_validate_static_valid() {
         let cfg = IpConfig {
-            dhcp_enabled: false,
+            dhcp_enabled: Some(false),
             ip_address: "192.168.1.100".into(),
             subnet_mask: "255.255.255.0".into(),
             gateway: "192.168.1.1".into(),
@@ -4882,7 +4901,7 @@ mod tests {
     #[test]
     fn test_ip_config_validate_bad_dns() {
         let cfg = IpConfig {
-            dhcp_enabled: true,
+            dhcp_enabled: Some(true),
             dns_servers: vec!["not-an-ip".into()],
             ..IpConfig::default()
         };
@@ -4892,7 +4911,7 @@ mod tests {
     #[test]
     fn test_ip_config_validate_bad_gateway() {
         let cfg = IpConfig {
-            dhcp_enabled: false,
+            dhcp_enabled: Some(false),
             ip_address: "10.0.0.1".into(),
             subnet_mask: "255.255.255.0".into(),
             gateway: "bad".into(),
@@ -4904,7 +4923,7 @@ mod tests {
     #[test]
     fn test_ip_config_validate_empty_gateway_ok() {
         let cfg = IpConfig {
-            dhcp_enabled: false,
+            dhcp_enabled: Some(false),
             ip_address: "10.0.0.1".into(),
             subnet_mask: "255.255.255.0".into(),
             gateway: String::new(),
@@ -5232,7 +5251,7 @@ mod tests {
     fn test_apply_ip_config_valid() {
         let mut app = NetManagerApp::with_sample_data();
         app.start_editing_ip();
-        app.edit_ip_config.dhcp_enabled = false;
+        app.edit_ip_config.dhcp_enabled = Some(false);
         app.edit_ip_config.ip_address = "10.0.0.50".into();
         app.edit_ip_config.subnet_mask = "255.255.255.0".into();
         app.edit_ip_config.gateway = "10.0.0.1".into();
@@ -5254,7 +5273,7 @@ mod tests {
     fn test_apply_ip_config_invalid() {
         let mut app = NetManagerApp::with_sample_data();
         app.start_editing_ip();
-        app.edit_ip_config.dhcp_enabled = false;
+        app.edit_ip_config.dhcp_enabled = Some(false);
         app.edit_ip_config.ip_address = "bad".into();
         assert!(app.apply_ip_config().is_err());
     }
@@ -6643,7 +6662,7 @@ mod tests {
         let (dir, mut app) = app_on(ETH0_UP);
         app.configure = obliging;
         app.start_editing_ip();
-        app.edit_ip_config.dhcp_enabled = false;
+        app.edit_ip_config.dhcp_enabled = Some(false);
         app.edit_ip_config.ip_address = String::from("10.0.2.99");
         app.edit_ip_config.gateway = String::new();
         app.edit_ip_config.dns_servers = vec![String::from("1.1.1.1"), String::from("9.9.9.9")];
@@ -6687,7 +6706,7 @@ mod tests {
         let (_dir, mut app) = app_on(ETH0_UP);
         app.configure = refusing;
         app.start_editing_ip();
-        app.edit_ip_config.dhcp_enabled = false;
+        app.edit_ip_config.dhcp_enabled = Some(false);
         app.edit_ip_config.ip_address = String::from("10.0.2.99");
         let why = app.apply_ip_config().expect_err("the kernel refused");
         assert!(why.contains("administrator rights"), "{why}");
@@ -6705,10 +6724,50 @@ mod tests {
         let (_dir, mut app) = app_on(ETH0_UP);
         app.configure = obliging;
         app.start_editing_ip();
-        app.edit_ip_config.dhcp_enabled = true;
+        app.edit_ip_config.dhcp_enabled = Some(true);
         let why = app.apply_ip_config().expect_err("DHCP is refused");
         assert!(why.contains("dhcpcd"), "{why}");
         assert!(asked().is_empty(), "something was sent for DHCP");
+    }
+
+    /// **An interface whose DHCP nothing reports opens as that**: the IP tab
+    /// reads "DHCP: Not reported", as Properties does, and its address boxes
+    /// and DNS list can be changed -- what Apply sends is the configuration
+    /// typed. It opened with the switch on, its boxes disabled, so nothing
+    /// could be applied until a switch that was never on was turned off. The
+    /// switch, pressed, goes on and then off.
+    #[test]
+    fn an_interface_whose_dhcp_nothing_reports_opens_as_not_reported() {
+        let says = |app: &NetManagerApp, s: &str| {
+            render_frame(app, SIZE.0, SIZE.1)
+                .commands()
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == s))
+        };
+        let (_dir, mut app) = app_on(ETH0_UP);
+        app.configure = obliging;
+        assert_eq!(app.edit_ip_config.dhcp_enabled, None, "DHCP was guessed");
+        app.set_tab(DetailTab::IpConfig);
+        assert!(says(&app, "DHCP: Not reported"), "the IP tab guesses");
+        click(&mut app, Target::EditIp);
+        assert_eq!(app.focus, Some(Field::Ip), "the address box is disabled");
+        click(&mut app, Target::Tab(DetailTab::Dns));
+        assert!(
+            rect_of(&app, Target::Focus(Field::DnsInput)).is_some(),
+            "the DNS list cannot be changed"
+        );
+        app.edit_ip_config.ip_address = String::from("10.0.2.99");
+        assert_eq!(app.apply_ip_config(), Ok(()), "Apply refused");
+        assert_eq!(asked().len(), 1, "Apply sent nothing");
+
+        let (_dir, mut app) = app_on(ETH0_UP);
+        app.set_tab(DetailTab::IpConfig);
+        click(&mut app, Target::DhcpToggle);
+        assert_eq!(app.edit_ip_config.dhcp_enabled, Some(true));
+        assert!(says(&app, "DHCP: Enabled"));
+        click(&mut app, Target::DhcpToggle);
+        assert_eq!(app.edit_ip_config.dhcp_enabled, Some(false));
+        assert!(says(&app, "DHCP: Disabled (Static)"));
     }
 
     /// **The DHCP refusal says what happened**: "cannot switch to DHCP"
@@ -6718,8 +6777,9 @@ mod tests {
     #[test]
     fn the_dhcp_refusal_says_whether_the_switch_was_moved() {
         let mut app = NetManagerApp::with_sample_data();
-        assert!(
+        assert_eq!(
             app.edit_ip_config.dhcp_enabled,
+            Some(true),
             "the first interface is DHCP's"
         );
         app.start_editing_ip();
@@ -6728,7 +6788,7 @@ mod tests {
 
         let mut app = configured_by_hand();
         app.start_editing_ip();
-        app.edit_ip_config.dhcp_enabled = true;
+        app.edit_ip_config.dhcp_enabled = Some(true);
         let why = app.apply_ip_config().expect_err("DHCP is refused");
         assert!(why.starts_with("Cannot switch Ethernet 1 to DHCP"), "{why}");
     }
@@ -6948,7 +7008,7 @@ mod tests {
         let mut app = NetManagerApp::with_sample_data();
         app.set_tab(DetailTab::IpConfig);
         click(&mut app, Target::EditIp);
-        app.edit_ip_config.dhcp_enabled = false;
+        app.edit_ip_config.dhcp_enabled = Some(false);
         app.edit_ip_config.ip_address = "999.1.1.1".into();
 
         click(&mut app, Target::ApplyIp);
@@ -7094,7 +7154,7 @@ mod tests {
         app.configure = obliging;
         app.set_tab(DetailTab::IpConfig);
         app.start_editing_ip();
-        app.edit_ip_config.dhcp_enabled = false;
+        app.edit_ip_config.dhcp_enabled = Some(false);
         app.edit_ip_config.ip_address = String::from("10.0.2.99");
 
         click(&mut app, Target::Interface(1));
@@ -7123,7 +7183,7 @@ mod tests {
         app.configure = refusing;
         app.set_tab(DetailTab::IpConfig);
         app.start_editing_ip();
-        app.edit_ip_config.dhcp_enabled = false;
+        app.edit_ip_config.dhcp_enabled = Some(false);
         app.edit_ip_config.ip_address = String::from("10.0.2.99");
 
         click(&mut app, Target::Interface(1));
@@ -7168,7 +7228,7 @@ mod tests {
     /// sends nothing under DHCP.
     fn configured_by_hand() -> NetManagerApp {
         let mut app = NetManagerApp::with_sample_data();
-        app.interfaces[0].ip_config.dhcp_enabled = false;
+        app.interfaces[0].ip_config.dhcp_enabled = Some(false);
         app.select_interface(0);
         assert_eq!(app.edit_ip_config.dns_servers.len(), 3);
         app
@@ -7182,8 +7242,9 @@ mod tests {
     #[test]
     fn under_dhcp_the_dns_list_cannot_be_changed_and_says_why() {
         let mut app = NetManagerApp::with_sample_data();
-        assert!(
+        assert_eq!(
             app.edit_ip_config.dhcp_enabled,
+            Some(true),
             "the first interface is DHCP's"
         );
         app.set_tab(DetailTab::Dns);
@@ -7296,7 +7357,7 @@ mod tests {
         assert_eq!(app.interfaces.len(), 2);
         app.select_interface(1);
         app.start_editing_ip();
-        app.edit_ip_config.dhcp_enabled = false;
+        app.edit_ip_config.dhcp_enabled = Some(false);
         app.edit_ip_config.ip_address = String::from("10.0.3.99");
 
         // wlan0 is listed first now: the selection follows it, and the edit
@@ -7334,8 +7395,9 @@ mod tests {
             .position(|i| i.name == "br0")
             .expect("the sample data has br0");
         app.select_interface(br0);
-        assert!(
-            !app.edit_ip_config.dhcp_enabled,
+        assert_eq!(
+            app.edit_ip_config.dhcp_enabled,
+            Some(false),
             "br0 is configured by hand"
         );
         app.set_tab(DetailTab::IpConfig);
@@ -7507,7 +7569,7 @@ mod tests {
     #[test]
     fn the_dns_box_is_the_toolkits_field() {
         let mut app = ringed();
-        app.interfaces[0].ip_config.dhcp_enabled = false;
+        app.interfaces[0].ip_config.dhcp_enabled = Some(false);
         app.select_interface(0);
         app.set_tab(DetailTab::Dns);
         let rect = rect_of(&app, Target::Focus(Field::DnsInput)).expect("the DNS box");
@@ -7721,8 +7783,9 @@ mod tests {
     fn under_dhcp_the_address_boxes_are_disabled_and_take_no_keyboard() {
         let mut app = NetManagerApp::with_sample_data();
         app.set_tab(DetailTab::IpConfig);
-        assert!(
+        assert_eq!(
             app.edit_ip_config.dhcp_enabled,
+            Some(true),
             "the first interface is DHCP's"
         );
         click(&mut app, Target::EditIp);
@@ -7738,7 +7801,7 @@ mod tests {
         assert_eq!(app.activate(Target::Focus(Field::Ip)), Action::None);
 
         click(&mut app, Target::DhcpToggle);
-        assert!(!app.edit_ip_config.dhcp_enabled);
+        assert_eq!(app.edit_ip_config.dhcp_enabled, Some(false));
         let rect = rect_of(&app, Target::Focus(Field::Ip)).expect("a static box takes a press");
         click(&mut app, Target::Focus(Field::Ip));
         assert_eq!(app.focus, Some(Field::Ip));

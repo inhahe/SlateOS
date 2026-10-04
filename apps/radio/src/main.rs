@@ -1073,6 +1073,20 @@ impl RadioApp {
     }
 
     fn handle_mouse(&mut self, event: &MouseEvent) -> bool {
+        // The list of keys is modal for the pointer as it is for the keys, and
+        // drawn over everything: a press with any button puts it away and does
+        // nothing else -- a press on the picked station used to start its
+        // stream under the list -- and the wheel scrolls nothing it covers.
+        if self.show_help {
+            match event.kind {
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                    self.show_help = false;
+                    return true;
+                }
+                MouseEventKind::Scroll { .. } => return false,
+                _ => {}
+            }
+        }
         let (x, y) = (event.x, event.y);
         match event.kind {
             MouseEventKind::Press(MouseButton::Left) => {
@@ -3131,6 +3145,61 @@ mod tests {
                 .visible_range(len)
                 .contains(&app.selected_station()),
             "a key that moved the selection left it out of view"
+        );
+    }
+
+    /// **A press with the list of keys up puts it away and does nothing
+    /// else, and the wheel scrolls nothing under it.** A press on the picked
+    /// station started its stream under the list. The controls are the same
+    /// turn and press with the list down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let mut app = RadioApp::new();
+        app.set_size(900.0, 400.0);
+        assert_eq!(
+            app.selected_station(),
+            0,
+            "the fixture picks the first station"
+        );
+        let (x, y) = station_row_point(&app, 0);
+        let mouse = |kind| Event::Mouse(MouseEvent { x, y, kind });
+
+        app.handle_key(&key(Key::F1));
+        assert!(app.show_help);
+        assert!(app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Left))));
+        assert!(!app.show_help, "the press did not put the list away");
+        assert_ne!(
+            app.play_state,
+            PlayState::Playing,
+            "the press started the station under the list"
+        );
+
+        app.handle_key(&key(Key::F1));
+        app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Right)));
+        assert!(!app.show_help, "a right-button press left the list up");
+
+        app.handle_key(&key(Key::F1));
+        app.handle_event(&turn(&app, -1.0));
+        assert_eq!(
+            app.station_view.first_visible(),
+            0,
+            "the wheel scrolled the list under it"
+        );
+        assert!(app.show_help, "the wheel put the list away");
+        app.handle_key(&key(Key::Escape));
+
+        // The controls.
+        app.handle_event(&turn(&app, -1.0));
+        assert!(
+            app.station_view.first_visible() > 0,
+            "control: the wheel scrolls nothing at all"
+        );
+        app.handle_event(&turn(&app, 1.0));
+        app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Left)));
+        assert_eq!(
+            app.play_state,
+            PlayState::Playing,
+            "control: a press on the picked station plays nothing"
         );
     }
 

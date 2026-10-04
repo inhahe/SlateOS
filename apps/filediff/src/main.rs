@@ -32,14 +32,14 @@ use appearance::Palette;
 use appearance::Surface;
 #[allow(unused_imports)]
 use guitk::dialog::{FilePicker, Picked};
-use guitk::event::{Event, EventResult, Key, KeyEvent, MouseEvent, MouseEventKind};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::field;
 use guitk::frame::Rect;
 use guitk::textedit;
+use guitk::textinput::TextInput;
 use pathtext::ShowPath;
 // Only the tests build a modifier set by hand; the handlers read the one on
-// the event they were given. `MouseButton` went with it -- it had no reader at
-// all, in either build.
+// the event they were given.
 #[cfg(test)]
 use guitk::event::Modifiers;
 #[allow(unused_imports)]
@@ -116,6 +116,9 @@ const CONTENT_FONT_SIZE: f32 = 13.0;
 
 /// Font size for UI elements (toolbar, status bar).
 const UI_FONT_SIZE: f32 = 12.0;
+/// The most the find bar's box holds, in characters: a search is a line, and
+/// a paste of a page would be searched for at every key.
+const SEARCH_CAPACITY: usize = 1024;
 
 /// Height of each diff line in pixels.
 const LINE_HEIGHT: f32 = 20.0;
@@ -1096,6 +1099,11 @@ pub struct FileDiffApp {
     pub ignore_opts: IgnoreOptions,
     /// Search state.
     pub search: SearchState,
+    /// The find bar's editor -- its caret and selection over the query --
+    /// reloaded when the query changed under it.
+    search_editor: TextInput,
+    /// What the find bar's Ctrl+C and Ctrl+X took, for its Ctrl+V.
+    search_clipboard: String,
 
     /// Directory comparison result (when in directory mode).
     pub dir_compare: Option<DirCompareResult>,
@@ -1163,6 +1171,8 @@ impl FileDiffApp {
             change_indices: Vec::new(),
             ignore_opts: IgnoreOptions::default(),
             search: SearchState::default(),
+            search_editor: TextInput::new(),
+            search_clipboard: String::new(),
             dir_compare: None,
             dir_mode: false,
             dir_scroll: 0.0,
@@ -1747,7 +1757,7 @@ impl FileDiffApp {
 
             // Search
             Key::F => {
-                self.search.visible = true;
+                self.focus_search();
                 EventResult::Consumed
             }
             _ => EventResult::Ignored,
@@ -1817,51 +1827,117 @@ impl FileDiffApp {
             self.rerun_search();
             return EventResult::Consumed;
         }
-        // What a key typed, AltGr's among it, and not a command's letter,
-        // which a chord carries: Alt+X typed an `x` into the query.
-        if textline::types_into_field(key) {
-            self.search.query.extend(key.typed());
-            self.rerun_search();
+        // Ctrl+F again: what the box holds, selected.
+        if key.key == Key::F && textline::is_ctrl_chord(key.modifiers) {
+            self.focus_search();
             return EventResult::Consumed;
         }
-        // The box's own keys are plain.
-        if !textline::is_plain(key.modifiers) {
-            return EventResult::Ignored;
-        }
-        match key.key {
-            Key::Escape => {
-                self.search.visible = false;
-                EventResult::Consumed
-            }
-            Key::Enter => {
-                self.search.next_match();
-                self.scroll_to_current_match();
-                EventResult::Consumed
-            }
-            Key::Backspace => {
-                self.search.query.pop();
-                self.rerun_search();
-                EventResult::Consumed
-            }
-            Key::F3 => {
-                if key.modifiers.shift {
-                    self.search.prev_match();
-                } else {
-                    self.search.next_match();
+        // The bar's own keys are plain.
+        if textline::is_plain(key.modifiers) {
+            match key.key {
+                Key::Escape => {
+                    self.search.visible = false;
+                    return EventResult::Consumed;
                 }
-                self.scroll_to_current_match();
-                EventResult::Consumed
+                Key::Enter => {
+                    self.search.next_match();
+                    self.scroll_to_current_match();
+                    return EventResult::Consumed;
+                }
+                Key::F3 => {
+                    if key.modifiers.shift {
+                        self.search.prev_match();
+                    } else {
+                        self.search.next_match();
+                    }
+                    self.scroll_to_current_match();
+                    return EventResult::Consumed;
+                }
+                _ => {}
             }
-            // Ctrl+I, answered above, is whether the search matches case.
-            // `SearchState::case_sensitive` is handed to
-            // `textfind::Case::sensitive` on every search and was `false`
-            // with no writer, so finding `Config` also found `config` and
-            // there was no way to ask for only one of them -- in a tool
-            // people open to find out which of two files says `MAX_SIZE` and
-            // which says `max_size`. Alt+C is a different question: that one
-            // is whether the *comparison* ignores case.
-            _ => EventResult::Ignored,
         }
+        // Ctrl+I, answered above, is whether the search matches case.
+        // `SearchState::case_sensitive` is handed to
+        // `textfind::Case::sensitive` on every search and was `false` with no
+        // writer, so finding `Config` also found `config` and there was no
+        // way to ask for only one of them -- in a tool people open to find
+        // out which of two files says `MAX_SIZE` and which says `max_size`.
+        // Alt+C is a different question: that one is whether the
+        // *comparison* ignores case.
+        //
+        // Every other key is the box's editor's: the caret keys, Backspace
+        // and Delete at the caret, Ctrl+A, C, X and V, and typing -- what
+        // `AltGr` types among it, and no command's letter (Alt+X typed an `x`
+        // into the query). The box took typing at its end and Backspace from
+        // it, and nothing else.
+        if self.search_key(key) {
+            EventResult::Consumed
+        } else {
+            EventResult::Ignored
+        }
+    }
+
+    /// A key for the find bar's box: whether the box took it. A query that
+    /// changed is searched for again.
+    fn search_key(&mut self, key: &KeyEvent) -> bool {
+        if self.search_editor.text() != self.search.query {
+            self.search_editor.set_text(&self.search.query);
+        }
+        let edit = textline::apply_key(
+            &mut self.search_editor,
+            key,
+            SEARCH_CAPACITY,
+            &self.search_clipboard,
+            CONTENT_FONT_SIZE,
+        );
+        if let Some(copied) = edit.copied {
+            self.search_clipboard = copied;
+        }
+        if self.search_editor.text() != self.search.query {
+            self.search.query = self.search_editor.text().to_owned();
+            self.rerun_search();
+        }
+        edit.handled
+    }
+
+    /// Ctrl+F: the find bar opens, or is already open, with what its box
+    /// holds selected, so typing starts a new search and an arrow key keeps
+    /// the old one to edit.
+    fn focus_search(&mut self) {
+        self.search.visible = true;
+        self.search_editor.set_text(&self.search.query);
+        self.search_editor.select_all();
+    }
+
+    /// Where the find bar's caret is: the editor's, or the end of the query
+    /// where the query changed under the editor. One answer for the drawing
+    /// and for a press.
+    fn search_cursor(&self) -> text::TextCursor {
+        if self.search_editor.text() == self.search.query {
+            self.search_editor.cursor()
+        } else {
+            text::TextCursor::from(self.search.query.len())
+        }
+    }
+
+    /// A press in the find bar's box at `x`: the caret under the pointer,
+    /// measured against the box as it was drawn.
+    fn press_search(&mut self, x: f32) {
+        let rect = FindBar::at(self.width).query;
+        let drawn = self.search_cursor();
+        if self.search_editor.text() != self.search.query {
+            self.search_editor.set_text(&self.search.query);
+        }
+        let cursor = textedit::cursor_at_click(
+            &self.search.query,
+            drawn,
+            (rect.w - FindBar::INSET * 2.0).max(0.0),
+            CONTENT_FONT_SIZE,
+            FontWeightHint::Regular,
+            x - rect.x - FindBar::INSET,
+        );
+        self.search_editor.set_selection_anchor(None);
+        self.search_editor.set_cursor(cursor);
     }
 
     /// Handle mouse input.
@@ -1877,6 +1953,15 @@ impl FileDiffApp {
             return EventResult::Ignored;
         }
         match &mouse.kind {
+            // The find bar's box, where it is drawn: the caret under the
+            // pointer. Nothing else here answers a press.
+            MouseEventKind::Press(MouseButton::Left)
+                if self.search.visible
+                    && FindBar::at(self.width).query.contains(mouse.x, mouse.y) =>
+            {
+                self.press_search(mouse.x);
+                EventResult::Consumed
+            }
             MouseEventKind::Scroll { dy, .. } => {
                 // `wheel::rows_f`, not an `Accumulator`: these offsets are
                 // fractional row counts, so a trackpad's 0.2 of a notch can be
@@ -2833,19 +2918,25 @@ impl FileDiffApp {
         };
         words(tree, l.label, "Find:".to_string());
 
-        // The query, in the toolkit's field, with the caret after the typing
-        // and scrolled so the end being typed stays in view.
+        // The query, in the toolkit's field, with its caret and selection
+        // where they are and scrolled so the caret stays in view. The caret
+        // was fixed at the end, the only place the keys could type. The
+        // editor's selection only while it is the box's: a query changed
+        // under it has not been reloaded into it yet.
         let state = self.query_box_state();
         field::draw(tree, &self.palette, l.query, state, self.focus_ring_width);
         let line = text::line_height(CONTENT_FONT_SIZE, FontWeightHint::Regular);
+        let editing = self.search_editor.text() == self.search.query;
         textedit::draw(
             tree,
             &textedit::SingleLine {
                 text: &self.search.query,
-                // Typed and erased at its end, so the end is where the caret
-                // is.
-                cursor: text::TextCursor::from(self.search.query.len()),
-                selection_anchor: None,
+                cursor: self.search_cursor(),
+                selection_anchor: if editing {
+                    self.search_editor.selection_anchor()
+                } else {
+                    None
+                },
                 focused: state.focused,
                 x: l.query.x + FindBar::INSET,
                 y: l.query.y + (l.query.h - line) / 2.0,
@@ -6194,5 +6285,192 @@ mod tests {
         assert_eq!(app.handle_key(&ctrl(Key::D)), EventResult::Consumed);
         assert_eq!(app.folder_step, Some(Side::Left));
         assert!(app.picker.is_open());
+    }
+
+    // -- The find bar's box edits at a caret ------------------------------------
+
+    fn send(app: &mut FileDiffApp, k: KeyEvent) -> EventResult {
+        app.handle_event(&Event::Key(k))
+    }
+
+    fn type_into(app: &mut FileDiffApp, text: &str) {
+        send(
+            app,
+            KeyEvent {
+                key: Key::A,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: text.to_owned(),
+            },
+        );
+    }
+
+    fn press_at(app: &mut FileDiffApp, x: f32, y: f32) -> EventResult {
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }))
+    }
+
+    /// The x of every caret drawn in the find bar's box.
+    fn query_carets(app: &FileDiffApp) -> Vec<f32> {
+        let rect = FindBar::at(app.width).query;
+        app.render_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Line { x1, x2, y1, .. }
+                    if (x1 - x2).abs() < f32::EPSILON && rect.contains(*x1, *y1 + 1.0) =>
+                {
+                    Some(*x1)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **The find bar's box edits at a caret**: the arrows, Home and End
+    /// move it, typing goes where it is, Delete deletes at it, Ctrl+A, C, X
+    /// and V select, copy, cut and paste, a press puts it where it lands --
+    /// it and the selection are drawn where they are, and every edit is
+    /// searched for. The box took typing at its end and Backspace from it,
+    /// and nothing else.
+    #[test]
+    fn the_find_bars_box_edits_at_a_caret() {
+        let mut app = searching_app(ViewMode::Unified, "");
+        send(&mut app, ctrl(Key::F));
+        type_into(&mut app, "zlu");
+        send(&mut app, key(Key::Left));
+        send(&mut app, key(Key::Left));
+        type_into(&mut app, "u");
+        assert_eq!(app.search.query, "zulu", "the caret did not move");
+        assert_eq!(app.search.matches.len(), 1, "the edit was not searched for");
+        let rect = FindBar::at(app.width).query;
+        let at = rect.x
+            + FindBar::INSET
+            + text::measure("zu", CONTENT_FONT_SIZE, FontWeightHint::Regular);
+        let carets = query_carets(&app);
+        assert_eq!(carets.len(), 1, "one caret in the box");
+        assert!(
+            carets.iter().all(|x| (x - at).abs() < 0.5),
+            "the caret is drawn at {carets:?}, not after the `zu` it follows at {at}"
+        );
+
+        send(&mut app, key(Key::Home));
+        send(&mut app, key(Key::Delete));
+        assert_eq!(app.search.query, "ulu", "Delete at the caret");
+        send(&mut app, key(Key::End));
+        let mut shift_home = key(Key::Home);
+        shift_home.modifiers.shift = true;
+        send(&mut app, shift_home);
+        let line = text::line_height(CONTENT_FONT_SIZE, FontWeightHint::Regular);
+        let (sel_x, sel_w) = (
+            rect.x + FindBar::INSET,
+            text::measure("ulu", CONTENT_FONT_SIZE, FontWeightHint::Regular),
+        );
+        assert!(
+            app.render_tree().commands.iter().any(|c| matches!(c,
+                RenderCommand::FillRect { x, width, height, .. }
+                    if (x - sel_x).abs() < 0.5
+                        && (width - sel_w).abs() < 0.5
+                        && (height - line).abs() < 0.5)),
+            "the selection is not drawn over what it selects"
+        );
+        send(&mut app, ctrl(Key::C));
+        type_into(&mut app, "z");
+        assert_eq!(app.search.query, "z", "Shift+Home did not select");
+        send(&mut app, ctrl(Key::V));
+        assert_eq!(app.search.query, "zulu", "Ctrl+C or Ctrl+V");
+        send(&mut app, ctrl(Key::A));
+        send(&mut app, ctrl(Key::X));
+        assert_eq!(app.search.query, "", "Ctrl+A and Ctrl+X");
+        assert!(
+            app.search.matches.is_empty(),
+            "the cut was not searched for"
+        );
+        send(&mut app, ctrl(Key::V));
+        assert_eq!(app.search.query, "zulu", "Ctrl+X took nothing");
+
+        // A press at the start of the text puts the caret there, and one past
+        // its end at its end.
+        let mid = rect.y + rect.h / 2.0;
+        assert_eq!(
+            press_at(&mut app, rect.x + FindBar::INSET + 0.5, mid),
+            EventResult::Consumed
+        );
+        type_into(&mut app, "<");
+        assert_eq!(
+            app.search.query, "<zulu",
+            "the press did not put the caret there"
+        );
+        press_at(&mut app, rect.right() - 2.0, mid);
+        type_into(&mut app, ">");
+        assert_eq!(app.search.query, "<zulu>");
+    }
+
+    /// **Ctrl+F selects what the find bar holds**, opening it or not, so
+    /// typing starts a new search and an arrow keeps the old one to edit;
+    /// and **the bar's own keys stay its own**: Enter goes to the next match
+    /// rather than into the box.
+    #[test]
+    fn ctrl_f_selects_what_the_find_bar_holds() {
+        let mut app = searching_app(ViewMode::Unified, "");
+        send(&mut app, ctrl(Key::F));
+        type_into(&mut app, "alpha");
+        send(&mut app, key(Key::Escape));
+        assert!(!app.search.visible);
+        send(&mut app, ctrl(Key::F));
+        assert!(app.search.visible);
+        type_into(&mut app, "zulu");
+        assert_eq!(app.search.query, "zulu", "Ctrl+F did not select the search");
+        // Again, with the bar open.
+        send(&mut app, ctrl(Key::F));
+        type_into(&mut app, "z");
+        assert_eq!(
+            app.search.query, "z",
+            "Ctrl+F in the open bar did not select the search"
+        );
+        send(&mut app, ctrl(Key::F));
+        send(&mut app, key(Key::Right));
+        type_into(&mut app, "!");
+        assert_eq!(app.search.query, "z!", "an arrow did not keep the search");
+        assert_eq!(send(&mut app, key(Key::Enter)), EventResult::Consumed);
+        assert_eq!(app.search.query, "z!", "Enter went into the box");
+    }
+
+    /// **The box edits the search it shows**, however the search came to be
+    /// in it: its editor is loaded from the query whenever a press or a key
+    /// finds the two apart, so a press lands in what is shown and a key
+    /// types after it. And a press elsewhere -- with the bar shut, or off
+    /// its box -- is nobody's.
+    #[test]
+    fn the_find_bars_box_edits_the_search_it_shows() {
+        let mut app = searching_app(ViewMode::Unified, "alpha");
+        let rect = FindBar::at(app.width).query;
+        press_at(
+            &mut app,
+            rect.x + FindBar::INSET + 0.5,
+            rect.y + rect.h / 2.0,
+        );
+        type_into(&mut app, "<");
+        assert_eq!(
+            app.search.query, "<alpha",
+            "the press missed the shown text"
+        );
+        app.search.query = String::from("zulu");
+        type_into(&mut app, "?");
+        assert_eq!(app.search.query, "zulu?", "the key edited another search");
+
+        assert_eq!(
+            press_at(&mut app, rect.x - 4.0, rect.y + rect.h / 2.0),
+            EventResult::Ignored
+        );
+        app.search.visible = false;
+        assert_eq!(
+            press_at(&mut app, rect.x + 4.0, rect.y + rect.h / 2.0),
+            EventResult::Ignored,
+            "a shut bar's box took a press"
+        );
     }
 }

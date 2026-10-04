@@ -7,7 +7,9 @@ members = [
     # Lane F's video codecs, each its own crate under `gui/video/`, which
     # `gui/*` cannot reach and which is itself excluded below. The first is
     # rav1d, the AV1 decoder, vendored (`gui/video/rav1d/VENDORED.md`); the
-    # second, vp9, libvpx's VP9 decoder ported (design-decisions.md §1339).
+    # second, vp9, libvpx's VP9 decoder ported (design-decisions.md §1339);
+    # and matroska, the Matroska and WebM demuxer their packets come from.
+    "gui/video/matroska",
     "gui/video/rav1d",
     "gui/video/vp9",
     "init/*",

@@ -3787,6 +3787,25 @@ lane C's `guitk`.
     `open-questions.md` F-Q4 -- dav1d's assembly, or SIMD in Rust
     (known-issues.md, "[F] AVIF decoding has no committed benchmark").
 
+- `[-]` `[F]` **Video files** (`roadmap-detailed.md` §3.2, "OS-level video
+  codec support"): the video player (`apps/videoplayer`, lane E) has its
+  window and a file's description (`apps/mediaprobe`), and nothing that
+  opens a file's pictures.
+  - `[x]` Matroska and WebM, demultiplexed (`gui/video/matroska`,
+    design-decisions §1345): written from RFC 9559 with FFmpeg's behaviour
+    where the RFC leaves a choice -- every packet of eleven fixtures and
+    thirty seeks held to `ffprobe`'s, and every frame of VP9, VP9 with
+    alpha and AV1 played through it held to ffmpeg's decoders. What it
+    leaves out: `known-issues/F-the-matroska-demuxer-leaves-out-what-no-webm-file-needs.md`.
+  - `[ ]` A frame-level API for a player: a file's pictures in order, with
+    their times, converted to RGB by each stream's own colour (its matrix
+    and range, not only BT.601), so that the player calls one thing.
+  - `[ ]` VP8 video (libvpx's decoder, ported as VP9's was), and MP4
+    (`apps/mediaprobe` reads its headers; the sample tables are like
+    AVIF's sequences').
+  - `[ ]` Sound needs Opus and Vorbis decoders, which nothing has yet (the
+    music player has none either).
+
 - `[-]` `[F]` **A display transport over channel IPC** for local clients,
   beside the TCP one. The point is the peer's identity: the kernel attests a
   channel's peer, a TCP peer cannot say what process it is, and `client_pid`

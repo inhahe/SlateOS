@@ -1,0 +1,7 @@
+# compressed.mkv: what ffprobe makes of it (generate_fixtures.py).
+stream 0 snow 1/1000
+stream 1 snow 1/1000
+packet 0 0 20 14 224 K__ 77efa391727bc077804d698088be7fa8 -
+packet 1 0 20 40 240 K__ f97b4b2d1b121548cc1f09b3ae98753f -
+packet 0 20 20 16 297 K__ fcc2060b10a2e78f231df8db673b7d0e -
+packet 1 20 20 33 315 K__ 0f54623bf335a3e213d8e8522160004e -

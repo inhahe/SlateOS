@@ -2330,6 +2330,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "matroska"
+version = "0.1.0"
+dependencies = [
+ "deflate",
+ "md5",
+ "rav1d",
+ "vp9",
+]
+
+[[package]]
 name = "maze"
 version = "0.1.0"
 dependencies = [

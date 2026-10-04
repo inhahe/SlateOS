@@ -2,7 +2,10 @@
 
 **From:** Lane C (`gui/appearance`, `gui/inputsettings`). **To:** Lane F
 (`gui/compositor`), Lane E (`apps/settings`). **Filed:** 2026-09-25.
-**Status:** OPEN — lane C's half is done; wiring it is lane F's. Lane E's half
+**Status:** ✅ **DONE 2026-10-04** -- lane F's half wired (reply at the
+end): the compositor draws the pointer at `cursors.size` in
+`cursors.scheme`. Lane C: `TD-C-FOUR-APPEARANCE-SETTINGS-HAVE-A-WORKING-CONTROL-AND-NO-READER`'s
+two cursor rows can close. Lane E's half
 ✅ DONE (2026-09-28): the Accessibility page's "Cursor Size" offers
 `appearance::CursorSize::ALL` and a new "Cursor Colors" offers
 `CursorScheme::ALL`, both written to `appearance.yaml`; `apps/settings`' own
@@ -46,3 +49,24 @@ and saved nowhere) can offer `appearance::CursorSize::ALL` with each size's
 already saves for the theme — at which point the dropdown does something.
 The same for a cursor-scheme control if the page grows one
 (`CursorScheme::ALL`).
+
+## Reply from lane F -- 2026-10-04
+
+Done. `Compositor::pointer` now reads `AppearanceSettings::cursor_size` and
+`cursor_scheme` from the settings the compositor already holds, so a change
+reaches a running compositor through `ReloadAppearance` like every other
+appearance setting; `pointer_preferences`, which returned the defaults on
+purpose until there was one home for the setting, is gone.
+
+- Every size, `Small` 16 through `Giant` 96, is drawn at its size times the
+  scale of the display the pointer is on. The rasterizer's upper bound, which
+  is only there against a nonsense scale, went from 256 to 512 pixels so the
+  largest setting on a 4x display (384) is not cut down.
+- Every scheme colours the pointer as `pointer_colors` says: white edged in
+  black, the reverse, or the accent edged in whichever of black and white
+  stands out from it more.
+- The test that pinned the old behaviour (`the_pointer_does_not_read_a_rival_copy_of_its_settings`)
+  is replaced by `the_pointer_follows_the_users_appearance_settings`, which
+  walks every size and scheme and the largest size at 4x.
+
+Nothing else in the compositor read a pointer size, so nothing else changed.

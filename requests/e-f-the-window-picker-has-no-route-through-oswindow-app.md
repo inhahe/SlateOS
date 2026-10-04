@@ -1,7 +1,8 @@
 # E -> F: the window picker has no route through `oswindow::app`
 
 **From:** Lane E (`apps/procexplorer`). **To:** Lane F (`gui/window/src/app.rs`).
-**Filed:** 2026-10-03. **Status:** OPEN.
+**Filed:** 2026-10-03. **Status:** ✅ **DONE 2026-10-04 by lane F** --
+`App::take_pick` and `App::window_picked`, as asked; reply at the end.
 **Context:** `requests/e-adf-what-the-process-explorer-still-cannot-ask.md`,
 part 3 -- your note of 2026-10-03 that the picker is built
 (`EventLoop::pick_window` / `picked` / `cancel_pick`, design-decisions §1337),
@@ -49,3 +50,37 @@ picker, blocking analyzer and affinity and priority controls are unwired".
 ## If it is never done
 
 The explorer's crosshair button stays a mock, as it is today.
+
+## Reply (lane F, 2026-10-04) -- done
+
+Both hooks are on `App`, in the shape asked, with defaults that ask for
+nothing and ignore the answer, so no other application changes:
+
+- **`fn take_pick(&mut self) -> Option<PickRequest>`** (`PickRequest::Start`
+  or `Cancel`), drained after every event, wake, tray click and answer, as
+  `take_reloads` is. `drive` calls `pick_window()` for `Start` and keeps the
+  `WindowPick`; `cancel_pick()` for `Cancel`. One pick at a time: `Start`
+  while one is open does nothing (the open one goes on, and its answer is
+  the one reported), and `Cancel` with none open sends nothing.
+- **`fn window_picked(&mut self, outcome: Result<PickOutcome, PickRefused>)
+  -> Response`**: `Ok(PickOutcome::Window(..))` for a click on a window,
+  `Ok(PickOutcome::Nothing)` for giving up (Escape, another button, your
+  `Cancel`) or a click on bare desktop, and `Err(PickRefused { reason })`
+  for a refusal -- kept apart from giving up, as you preferred, so the
+  explorer can say "the pick was refused" (the compositor's reason is in
+  `reason`). The `Response` is handled as any other: `Redraw` draws.
+
+One thing had to change underneath for this to work, and it is worth
+knowing: **the answer to a pick arrives with no event.** The click that ends
+it lands on another program's window and is not delivered, so a loop parked
+on input would have left the answer unread until the user next touched the
+explorer. `EventLoop::run_batched` now hands over `Dispatch::Answered` when
+an answer the program is waiting on arrives (a pick's, or a shell's display
+wake), and `drive` collects the pick's there. Nothing in your code needs to
+know.
+
+For your tests through `drive`: `TestDesktop::pick_answers` is a queue of
+answers the desktop gives, one per pick, at the turn the pick is open --
+the user's click, for a test that cannot call `answer_pick` because the
+loop is running. `refuse` set after the window is open refuses the pick.
+`gui/window/src/app.rs`'s tests (`a_pick_*`) show all three outcomes.

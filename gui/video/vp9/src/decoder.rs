@@ -72,6 +72,11 @@ pub struct PlaneView<'a, P> {
 }
 
 impl Picture {
+    /// A picture of `frame`, which nothing will write again.
+    pub(crate) fn from_frame(frame: Arc<AnyFrame>) -> Self {
+        Self { frame }
+    }
+
     /// The picture's width in luma samples.
     #[must_use]
     pub fn width(&self) -> u32 {
@@ -200,6 +205,9 @@ pub struct Decoder {
     fc: FrameContext,
     frame_contexts: [FrameContext; FRAME_CONTEXTS],
     counts: Counts,
+    /// The last frame's blocks, for tests that hold an encoder's to them.
+    #[cfg(test)]
+    last_mi: Option<block::MiGrid>,
     mi_cols: usize,
     mi_rows: usize,
     /// The motion vectors of the last frame decoded (not shown from a slot):
@@ -241,6 +249,27 @@ enum Header {
 }
 
 impl Decoder {
+    /// What the last frame decoded counted, if it counted (it was neither
+    /// error resilient nor frame-parallel): for tests that hold an encoder's
+    /// counts to the decoder's.
+    #[cfg(test)]
+    pub(crate) fn last_counts(&self) -> &Counts {
+        &self.counts
+    }
+
+    /// The last frame's blocks, as decoded.
+    #[cfg(test)]
+    pub(crate) fn last_mi(&self) -> Option<&block::MiGrid> {
+        self.last_mi.as_ref()
+    }
+
+    /// The last frame's quantiser index, loop filter level and
+    /// segmentation, as its header set them.
+    #[cfg(test)]
+    pub(crate) fn last_frame_settings(&self) -> (i32, u8, Segmentation) {
+        (self.quant.base_qindex, self.lf.filter_level, self.seg)
+    }
+
     /// A decoder at the start of a stream.
     #[must_use]
     pub fn new() -> Self {
@@ -287,6 +316,8 @@ impl Decoder {
             fc: FrameContext::uninitialized(),
             frame_contexts: core::array::from_fn(|_| FrameContext::uninitialized()),
             counts: Counts::default(),
+            #[cfg(test)]
+            last_mi: None,
             mi_cols: 0,
             mi_rows: 0,
             prev_mvs: Vec::new(),
@@ -514,6 +545,10 @@ impl Decoder {
             &mut self.scratch,
         )?;
 
+        #[cfg(test)]
+        {
+            self.last_mi = Some(decoded.mi.clone());
+        }
         if self.lf.filter_level != 0 {
             loopfilter::filter_frame(
                 frame,

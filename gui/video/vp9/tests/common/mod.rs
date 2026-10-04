@@ -343,3 +343,167 @@ pub fn md5_path(vector: &Path) -> PathBuf {
     name.push(".md5");
     PathBuf::from(name)
 }
+
+/// One picture of a reference encode's input: I420, each plane tightly
+/// packed, its luma `width` x `height` and its chroma half that each way,
+/// rounded up -- the layout `vpxenc --i420` reads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct I420 {
+    pub width: usize,
+    pub height: usize,
+    pub planes: [Vec<u8>; 3],
+}
+
+impl I420 {
+    /// Plane `i`'s width and height.
+    pub fn plane_size(&self, i: usize) -> (usize, usize) {
+        if i == 0 {
+            (self.width, self.height)
+        } else {
+            (self.width.div_ceil(2), self.height.div_ceil(2))
+        }
+    }
+
+    /// The `width` x `height` window at (`x0`, `y0`), both even so that the
+    /// chroma lines up.
+    pub fn window(&self, x0: usize, y0: usize, width: usize, height: usize) -> Self {
+        assert!(
+            x0.is_multiple_of(2) && y0.is_multiple_of(2),
+            "a window at an odd offset"
+        );
+        let mut planes: [Vec<u8>; 3] = Default::default();
+        for (i, out) in planes.iter_mut().enumerate() {
+            let s = usize::from(i > 0);
+            let stride = self.plane_size(i).0;
+            let (w, h) = ((width + s) >> s, (height + s) >> s);
+            let (x, y) = (x0 >> s, y0 >> s);
+            for row in y..y + h {
+                out.extend_from_slice(&self.planes[i][row * stride + x..][..w]);
+            }
+        }
+        Self {
+            width,
+            height,
+            planes,
+        }
+    }
+
+    /// The picture as `vpxenc --i420` reads it: the planes, one after
+    /// another.
+    pub fn raw(&self) -> Vec<u8> {
+        self.planes.concat()
+    }
+}
+
+/// The second reference encode's picture size (`tests/data/encoder/README.md`):
+/// not a whole number of 8x8 cells either way, so blocks hang over the
+/// picture's right and bottom edges and the last cells are partly outside
+/// it; no more than 360 rows, which takes libvpx's low-resolution
+/// partitioning branch; and no fewer than 640x360 pixels in all, so that
+/// libvpx estimates the noise.
+pub const CUT_WIDTH: usize = 651;
+pub const CUT_HEIGHT: usize = 357;
+
+/// Camera-like noise on a picture's luma, the same on every run: each sample
+/// moves by the sum of three draws from {-1, 0, 1}, drawn from Numerical
+/// Recipes' linear congruential generator seeded with `seed`.
+fn add_noise(picture: &mut I420, seed: u32) {
+    let mut state = seed;
+    let mut draw = || {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        i32::try_from((state >> 16) % 3).unwrap() - 1
+    };
+    for v in &mut picture.planes[0] {
+        let n = draw() + draw() + draw();
+        *v = u8::try_from((i32::from(*v) + n).clamp(0, 255)).unwrap();
+    }
+}
+
+/// One step of a fade to black: luma scaled by `k / n`, chroma drawn towards
+/// grey by the same factor, each rounded towards zero.
+fn fade(picture: &mut I420, k: i32, n: i32) {
+    for v in &mut picture.planes[0] {
+        *v = u8::try_from(i32::from(*v) * k / n).unwrap();
+    }
+    for plane in &mut picture.planes[1..] {
+        for v in plane.iter_mut() {
+            *v = u8::try_from(128 + (i32::from(*v) - 128) * k / n).unwrap();
+        }
+    }
+}
+
+/// The second reference encode's input (`tests/data/encoder/README.md`): 150
+/// pictures of [`CUT_WIDTH`] x [`CUT_HEIGHT`], cut from two conformance
+/// vectors to reach what the first reference's thirty pictures of steady
+/// motion never do:
+///
+/// - 0-49: a window on `vp90-2-22-svc_1280x720_1.webm` (its pictures 30 to
+///   79): two people talking, across the golden refresh at picture 40;
+/// - 50-79: a window on `vp90-2-02-size-lf-1920x1080.webm` (pictures 0 to
+///   29), leaves against a sky: a scene cut;
+/// - 80-114: that vector's picture 29, still, with fresh noise each picture:
+///   the noise estimate rises;
+/// - 115-149: the first vector again (pictures 80 to 114), fading to black:
+///   a second cut, then a change of light that is not motion.
+///
+/// `shown(name, count)` gives the first `count` pictures the full suite's
+/// vector `name` shows, decoded -- the caller's decoder, so that this module
+/// needs no crate path -- or `None` when they cannot be had.
+pub fn cut_reference_input(shown: impl Fn(&str, usize) -> Option<Vec<I420>>) -> Option<Vec<I420>> {
+    let talk = shown("vp90-2-22-svc_1280x720_1.webm", 115)?;
+    let trees = shown("vp90-2-02-size-lf-1920x1080.webm", 30)?;
+    let (w, h) = (CUT_WIDTH, CUT_HEIGHT);
+    let mut out: Vec<I420> = talk[30..80]
+        .iter()
+        .map(|p| p.window(300, 180, w, h))
+        .collect();
+    out.extend(trees.iter().map(|p| p.window(600, 360, w, h)));
+    for i in 0..35u32 {
+        let mut p = trees[29].window(600, 360, w, h);
+        add_noise(&mut p, 0x9e37_79b9 ^ i);
+        out.push(p);
+    }
+    for (k, p) in (0i32..).zip(&talk[80..115]) {
+        let mut p = p.window(300, 180, w, h);
+        fade(&mut p, 35 - k, 35);
+        out.push(p);
+    }
+    assert_eq!(out.len(), 150);
+    Some(out)
+}
+
+/// The third reference encode's picture size (`tests/data/encoder/README.md`):
+/// 352x288 or fewer pixels, where libvpx's speed 8 partitions inter frames
+/// by its learned search, and not a whole number of 8x8 cells either way.
+pub const SMALL_WIDTH: usize = 350;
+pub const SMALL_HEIGHT: usize = 286;
+
+/// The third reference encode's input (`tests/data/encoder/README.md`): 90
+/// pictures of [`SMALL_WIDTH`] x [`SMALL_HEIGHT`] --
+///
+/// - 0-49: a window on `vp90-2-22-svc_1280x720_1.webm` (its pictures 0 to
+///   49): two people talking, across the golden refresh at picture 40;
+/// - 50-74: a window on `vp90-2-02-size-lf-1920x1080.webm` (pictures 0 to
+///   24), leaves against a sky: a scene cut;
+/// - 75-89: the first vector again (pictures 50 to 64), fading to black.
+///
+/// `shown` as for [`cut_reference_input`].
+pub fn small_reference_input(
+    shown: impl Fn(&str, usize) -> Option<Vec<I420>>,
+) -> Option<Vec<I420>> {
+    let talk = shown("vp90-2-22-svc_1280x720_1.webm", 65)?;
+    let trees = shown("vp90-2-02-size-lf-1920x1080.webm", 25)?;
+    let (w, h) = (SMALL_WIDTH, SMALL_HEIGHT);
+    let mut out: Vec<I420> = talk[..50]
+        .iter()
+        .map(|p| p.window(464, 216, w, h))
+        .collect();
+    out.extend(trees.iter().map(|p| p.window(784, 396, w, h)));
+    for (k, p) in (0i32..).zip(&talk[50..65]) {
+        let mut p = p.window(464, 216, w, h);
+        fade(&mut p, 15 - k, 15);
+        out.push(p);
+    }
+    assert_eq!(out.len(), 90);
+    Some(out)
+}

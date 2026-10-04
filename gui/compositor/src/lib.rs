@@ -11624,8 +11624,12 @@ impl Compositor {
     /// out of the compositor is what lets a presenter hand the same
     /// description to a hardware cursor plane instead.
     ///
-    /// The size is `pointer_preferences`' size
-    /// times the scale of the display the pointer is on, so a pointer crossing
+    /// The size and colours are the user's: `appearance.yaml`'s
+    /// `cursors.size` and `cursors.scheme` (`AppearanceSettings::cursor_size`
+    /// and `cursor_scheme`, the one home the pointer's settings have --
+    /// `design-decisions/0872`), so a change reaches a running compositor
+    /// through `ReloadAppearance` as every other appearance setting does. The
+    /// size is scaled by the display the pointer is on, so a pointer crossing
     /// onto a 2x monitor doubles as it crosses, exactly as the window
     /// decorations there do.
     #[must_use]
@@ -11643,12 +11647,12 @@ impl Compositor {
         }
         let (x, y) = (self.cursor_x, self.cursor_y);
         let scale = self.display_manager.scale_for(&Rect::new(x, y, 1, 1));
-        let (size, scheme) = Self::pointer_preferences();
+        let (size, scheme) = (self.appearance.cursor_size, self.appearance.cursor_scheme);
         #[allow(
             clippy::cast_precision_loss,
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
-            reason = "16 to 48 pixels times a display scale; the rasterizer clamps the result, and a nonsense scale saturates rather than wrapping"
+            reason = "16 to 96 pixels times a display scale; the rasterizer clamps the result, and a nonsense scale saturates rather than wrapping"
         )]
         let size_px = (size.pixels() as f32 * scale).round() as u32;
         let (fill, outline) = Self::pointer_colors(scheme, self.palette.accent);
@@ -11662,27 +11666,6 @@ impl Compositor {
                 outline,
             },
         })
-    }
-
-    /// The pointer's size and colour scheme: the defaults, on purpose, until
-    /// the user's choice has one home.
-    ///
-    /// Three settings hold a pointer size — `appearance`'s `cursor_size`,
-    /// `inputsettings`' `mouse.cursor_size`, and the Settings app's own
-    /// `CursorSize`, which it never saves — and no control writes any of them
-    /// where another program can read it. `known-issues.md` →
-    /// `TD-C-FOUR-APPEARANCE-SETTINGS-HAVE-A-WORKING-CONTROL-AND-NO-READER`,
-    /// lane C's entry about lane C's models, asks that they be collapsed to one
-    /// before anything reads one: wiring one of several rival copies leaves the
-    /// others silently wrong instead of uniformly inert. The pointer now exists
-    /// to read the survivor, and which one survives is asked in
-    /// `requests/f-ce-the-pointer-is-drawn-now-which-cursor-size-setting-survives.md`.
-    /// When it is answered, this reads it and nothing else changes.
-    const fn pointer_preferences() -> (appearance::CursorSize, appearance::CursorScheme) {
-        (
-            appearance::CursorSize::Normal,
-            appearance::CursorScheme::Default,
-        )
     }
 
     /// The pointer's fill and outline for `scheme`, as `0xAARRGGBB`: white
@@ -25025,21 +25008,47 @@ mod tests {
         assert_eq!(comp.pointer().expect("pointer").style.size_px, normal * 2);
     }
 
-    /// The user's pointer settings are not read yet, on purpose — see
-    /// `pointer_preferences`. This pins that: a change to one of the rival
-    /// copies must not reach the pointer until the copies are one, or the
-    /// others become silently wrong. It is the test to update, not to delete,
-    /// when the survivor is named.
+    /// The pointer is the size and colours the user chose in
+    /// `appearance.yaml`, and follows a change to them -- every size the
+    /// setting offers, at the display's scale, and every scheme.
     #[test]
-    fn the_pointer_does_not_read_a_rival_copy_of_its_settings() {
+    fn the_pointer_follows_the_users_appearance_settings() {
         let mut comp = Compositor::new(800, 600, 60).expect("compositor");
-        let before = comp.pointer().expect("pointer").style;
+        assert_eq!(
+            comp.pointer().expect("pointer").style.size_px,
+            appearance::CursorSize::Normal.pixels(),
+            "the default is not the setting's default"
+        );
+        for &size in appearance::CursorSize::ALL {
+            for &scheme in appearance::CursorScheme::ALL {
+                comp.set_appearance(AppearanceSettings {
+                    cursor_size: size,
+                    cursor_scheme: scheme,
+                    ..AppearanceSettings::default()
+                });
+                let style = comp.pointer().expect("pointer").style;
+                assert_eq!(style.size_px, size.pixels(), "{size:?}");
+                let colors = Compositor::pointer_colors(scheme, comp.palette.accent);
+                assert_eq!((style.fill, style.outline), colors, "{scheme:?}");
+            }
+        }
+        // The largest at a 4x display is drawn at its size, not cut down to
+        // a bound meant for nonsense scales.
         comp.set_appearance(AppearanceSettings {
-            cursor_size: appearance::CursorSize::ExtraLarge,
-            cursor_scheme: appearance::CursorScheme::Inverted,
+            cursor_size: appearance::CursorSize::Giant,
             ..AppearanceSettings::default()
         });
-        assert_eq!(comp.pointer().expect("pointer").style, before);
+        if let Some(d) = comp.display_manager.displays.first_mut() {
+            d.scale_factor = 4.0;
+        }
+        let style = comp.pointer().expect("pointer").style;
+        assert_eq!(style.size_px, 4 * appearance::CursorSize::Giant.pixels());
+        let image = cursor::render(CursorShape::Arrow, &style).expect("an arrow");
+        assert!(
+            image.width > 4 * appearance::CursorSize::Giant.pixels(),
+            "the largest pointer was clamped: {} px wide",
+            image.width
+        );
     }
 
     #[test]

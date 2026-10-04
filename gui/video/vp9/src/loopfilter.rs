@@ -329,7 +329,7 @@ pub(crate) fn filter_frame(
     }
 }
 
-fn filter_frame_t<P: Pixel>(
+pub(crate) fn filter_frame_t<P: Pixel>(
     frame: &mut FrameBuf<P>,
     mi: &MiGrid,
     levels: &LevelTable,
@@ -1457,10 +1457,16 @@ fn lanes8(v: &mut Lanes<8>, t: &Thresholds) -> Option<Reach> {
         return Some(2);
     }
     let f8 = flat8(v);
-    for k in 1..7 {
-        let narrow = if (2..6).contains(&k) { f4[k - 2] } else { v[k] };
-        v[k] = select(&flat, &f8[k - 1], &narrow);
-    }
+    // Sample by sample, every index a constant: as a loop, the compiler
+    // rebuilt each lane vector a sample at a time.
+    let [_, p2, _, _, _, _, q2, _] = *v;
+    let [n1, n0, m0, m1] = f4;
+    v[1] = select(&flat, &f8[0], &p2);
+    v[2] = select(&flat, &f8[1], &n1);
+    v[3] = select(&flat, &f8[2], &n0);
+    v[4] = select(&flat, &f8[3], &m0);
+    v[5] = select(&flat, &f8[4], &m1);
+    v[6] = select(&flat, &f8[5], &q2);
     Some(3)
 }
 
@@ -1486,31 +1492,38 @@ fn lanes16(v: &mut Lanes<16>, t: &Thresholds) -> Option<Reach> {
         flat2[j] = flat[j] & outer[j] & ones(ends);
     }
     let f8 = flat8(&inner);
+    // Sample by sample, every index a constant (see `lanes8`): the narrow
+    // filter's p1..q1, then the 7-tap filter's p2..q2 where flat.
+    let [n1, n0, m0, m1] = f4;
+    let eight = [
+        select(&flat, &f8[0], &v[5]),
+        select(&flat, &f8[1], &n1),
+        select(&flat, &f8[2], &n0),
+        select(&flat, &f8[3], &m0),
+        select(&flat, &f8[4], &m1),
+        select(&flat, &f8[5], &v[10]),
+    ];
     if !any(&flat2) {
-        for k in 5..11 {
-            let narrow = if (6..10).contains(&k) {
-                f4[k - 6]
-            } else {
-                v[k]
-            };
-            v[k] = select(&flat, &f8[k - 5], &narrow);
-        }
+        v[5..11].copy_from_slice(&eight);
         return Some(3);
     }
     let f16 = flat16(v);
-    for k in 1..15 {
-        let narrow = if (6..10).contains(&k) {
-            f4[k - 6]
-        } else {
-            v[k]
-        };
-        let eight = if (5..11).contains(&k) {
-            f8[k - 5]
-        } else {
-            v[k]
-        };
-        v[k] = select(&flat2, &f16[k - 1], &select(&flat, &eight, &narrow));
-    }
+    // And the 15-tap filter's p6..q6 where flat2.
+    let [e2, e1, e0, d0, d1, d2] = eight;
+    v[1] = select(&flat2, &f16[0], &v[1]);
+    v[2] = select(&flat2, &f16[1], &v[2]);
+    v[3] = select(&flat2, &f16[2], &v[3]);
+    v[4] = select(&flat2, &f16[3], &v[4]);
+    v[5] = select(&flat2, &f16[4], &e2);
+    v[6] = select(&flat2, &f16[5], &e1);
+    v[7] = select(&flat2, &f16[6], &e0);
+    v[8] = select(&flat2, &f16[7], &d0);
+    v[9] = select(&flat2, &f16[8], &d1);
+    v[10] = select(&flat2, &f16[9], &d2);
+    v[11] = select(&flat2, &f16[10], &v[11]);
+    v[12] = select(&flat2, &f16[11], &v[12]);
+    v[13] = select(&flat2, &f16[12], &v[13]);
+    v[14] = select(&flat2, &f16[13], &v[14]);
     Some(7)
 }
 

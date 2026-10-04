@@ -85,9 +85,124 @@ decode on threads, as libvpx's do. Two things from it:
 - **The rest of the gap to libvpx's SIMD is instructions SSE2 lacks**
   (SSSE3's `pmaddubsw` multiplies bytes in pairs; AVX2 doubles the width).
   Using them means choosing them at run time, which in Rust needs `unsafe`
-  -- in a crate that parses hostile input and forbids it today. Not taken
-  up while threads still have more to give; if it is, it is a question for
-  the operator, not a change to make quietly.
+  -- in a crate that parses hostile input and forbids it today. Put to the
+  operator as `open-questions/F-Q5.md` once threads had given what they
+  could, rather than changed quietly.
+
+**The encoder, begun 2026-10-03.** The port is of libvpx's realtime path,
+the one `vpxenc --rt --cpu-used=8` with CBR rate control runs, since filming
+a screen is a realtime job. Its test goes beyond "it decodes": libvpx's
+encoder is deterministic too, so the port's frames are to be byte-identical
+to `vpxenc`'s on the same input and settings (a reference encode is kept
+outside the tree for that comparison). How it is built:
+
+- **The deciding is apart from the doing.** `enc/encodeframe.rs` carries out
+  decisions -- partitions, modes, transform sizes -- exactly as libvpx's
+  `encode_superblock` does: predict, subtract, transform, quantise,
+  reconstruct, tokenize, count. What to decide is asked of a `Decide`
+  implementation. libvpx's realtime choices (variance-based partitioning,
+  `vp9_pick_intra_mode`, `vp9_pick_inter_mode`) are ported as one; a test's
+  random choice is another, which reaches every partition, mode and
+  transform size the stream can say.
+- **One set of contexts.** The contexts each decision is coded with
+  (`vp9_pred_common.c`) moved out of the decoder into `context.rs`, which
+  the decoder reads with and the encoder writes with. A context computed
+  two ways is a stream that decodes to garbage.
+- **Each piece against libvpx's C first.** The forward transforms and both
+  quantisers are checked bit-exact against libvpx's C on seeded blocks
+  (`tools/fdct_reference.c`, `tools/quantize_reference.c`); the probability
+  updates against the decoder's reader for every pair of probabilities.
+- **libvpx's structure, kept.** libvpx's encoder is one structure every
+  part reaches into (`VP9_COMP`); the port keeps it as `enc/cpi.rs`'s `Cpi`,
+  with rate control, cyclic refresh and the frame loop as `impl Cpi` blocks
+  in modules of their own, so a function ports line for line.
+
+**Status, 2026-10-03: the first frame is libvpx's.** The reference encode
+(`tests/data/encoder/rt8.ivf`, how it was made beside it) opens with a key
+frame, and the port's first frame is byte-identical to it: libvpx's one-pass
+CBR rate control picks the same quantiser from the same model in the same
+floating point, its variance partitioning cuts the same blocks, its realtime
+intra search picks the same modes, and the coefficients, tokens, probability
+updates and headers come out bit for bit. Every frame also decodes to what
+the encoder says it reconstructed -- at random decisions, at seven sizes from
+1x1 up, at five quantisers -- and what the encoder counts equals what the
+decoder counts. Every frame is a key frame so far; inter frames come next,
+and the reference's 29 others are their test.
+
+**2026-10-04: inter frames are coded, with decisions given.** The doing half
+of an inter frame is in: the reference slots and their refresh, the inter
+frame's headers, prediction from the references (the decoder's own
+predictor, over references whose edges are extended past the picture as
+libvpx's encoder extends them, which blocks at the picture's edge predict
+from), the fast quantiser libvpx's realtime path uses on inter blocks,
+motion vector prediction (shared with the decoder, as the contexts are),
+vector coding, sub-8x8 inter blocks, the segment map's temporal prediction,
+and every probability update an inter frame's header can carry. Decisions
+are still a caller's: a test draws every one at random -- references, inter
+modes, vectors near and far and at both precisions, filters, segments with
+every feature, skips -- and each frame of a key-then-inter stream decodes to
+the encoder's reconstruction while the encoder counts what the decoder
+counts, over a thousand streams in a soak. Until libvpx's inter decisions
+are ported, `Encoder::encode` keeps coding every frame as a key frame.
+
+**2026-10-04: every frame is libvpx's.** The inter decisions are in: the
+speed-8 variance partitioning and its shortcut of copying the last frame's
+partition, the realtime inter mode search (`vp9_pick_inter_mode`, with the
+fast diamond, sub-pixel and integral-projection searches, the filter search
+and the encode breakout), cyclic refresh's band of refreshed blocks and
+their segments, and what libvpx learns from the source -- each superblock's
+change since the last picture, scene cuts, the noise level, skin. All 30
+frames of the reference encode are now byte-identical to `vpxenc`'s from the
+encoder's own decisions. Two things it took:
+
+- **A decision trace on both sides.** A differing frame says little about
+  why: one block that picked another mode changes every byte after it. So a
+  copy of libvpx is instrumented to log each superblock's partition and each
+  candidate its mode search scored, the port logs the same lines in tests,
+  and a comparer finds the first line that differs. The tools and the
+  procedure are in the tree (`gui/video/vp9/tools/trace/`); on the
+  reference encode the two logs agree on all 365,835 lines.
+- **libvpx's stale state, reproduced.** libvpx reads state it never
+  refreshed, and its decisions depend on it: the mode-info buffer it swaps
+  with every frame and never clears (a check of low motion reads the vector
+  left by whatever block last covered the cell, two frames ago), cost tables
+  rebuilt only every eighth frame (a table never built is zeros), a mode's
+  threshold carried from frame to frame. The port models each as libvpx
+  holds it, with a comment at the read. Reading them as bugs and "fixing"
+  them would make different frames from `vpxenc`'s, which is the one test
+  the encoder has.
+
+A second reference encode reaches what that clip never does
+(`tests/data/encoder/rt8cut.ivf`): 150 pictures of 651x357 cut from two
+conformance vectors -- two scene cuts, a still picture with fresh noise on
+each frame, a fade to black -- so that libvpx codes its cuts at the
+overshoot quantiser, raises its noise estimate to Medium, refreshes golden
+three times, sees a change of light that is not motion, and partitions
+blocks hanging over the picture's edges. Its trace found one difference,
+at the first cut: the port capped an intra block's transform at 16x16 when
+the frame coded no segments, where libvpx asks only whether the encode runs
+cyclic refresh at all. With that fixed, all 150 frames are `vpxenc`'s and
+the traces agree on all 867,893 lines. How the encoder keeps time is §1340.
+
+**At every size, 2026-10-04.** At 352x288 and below libvpx partitions inter
+frames differently: it searches each superblock's square partitions before
+coding any of it, a small network deciding which of whole and cut to try
+(`nonrd_pick_partition`, `ml_predict_var_partitioning`). That is ported, and
+a third reference encode at 350x286 (`tests/data/encoder/rt8small.ivf`) is
+byte-identical for all 90 frames, its traces agreeing on all 152,823 lines.
+What it took, beyond the search itself:
+
+- **The network's logarithm is glibc's FMA build** (§1341).
+- **More of libvpx's state between blocks.** Searching a whole superblock
+  before coding it exposes state the variance path never let anyone read:
+  each search leaves its prediction in the reconstruction, which the next
+  block's intra search reads as its neighbour, and leaves the winner's when
+  it kept its predictions aside to reuse them; each block's mode
+  information carries the "codes nothing" flag its buffer cell held two
+  frames ago, which the next block's skip context reads; the cyclic refresh
+  judges a block by `x->skip` as the block before it left it; and a block
+  smaller than `x->max_partition_size` -- 64x64 here, 32x32 on the variance
+  path -- also starts its motion search from the vector it found last.
 
 **Alternatives.**
 

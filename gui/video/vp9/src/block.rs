@@ -47,7 +47,7 @@ use crate::Error;
 use crate::boolread::BoolReader;
 use crate::common::{
     ALTREF_FRAME, BLOCK_4X4, BLOCK_4X8, BLOCK_8X4, BLOCK_8X8, BLOCK_64X64, BLOCK_INVALID,
-    BlockSize, CLASS0_SIZE, COMPOUND_REFERENCE, DC_PRED, DCT_DCT, GOLDEN_FRAME, INTER_MODE_TREE,
+    BlockSize, CLASS0_SIZE, COMPOUND_REFERENCE, DCT_DCT, GOLDEN_FRAME, INTER_MODE_TREE,
     INTRA_FRAME, INTRA_MODE_TO_TX_TYPE, INTRA_MODE_TREE, InterpFilter, LAST_FRAME, MAX_REF_FRAMES,
     MI_MASK, MV_CLASS_TREE, MV_FP_TREE, MV_JOINT_TREE, MV_LOW, MV_UPP, Mv, NEARESTMV, NEARMV,
     NEWMV, NO_REF_FRAME, PARTITION_HORZ, PARTITION_NONE, PARTITION_PLOFFSET, PARTITION_SPLIT,
@@ -56,6 +56,7 @@ use crate::common::{
     SWITCHABLE_INTERP_TREE, TX_4X4, TX_8X8, TX_16X16, TX_32X32, TX_MODE_SELECT, TxMode, TxSize,
     ZEROMV,
 };
+use crate::context;
 use crate::detokenize::{self, BlockCounts, Scan};
 use crate::frame::{AnyBuffers, AnyFrame, Buffers, FrameBuf, Pixel};
 use crate::header::{self, Segmentation};
@@ -144,6 +145,11 @@ pub(crate) struct ModeInfo {
     pub mi_col: usize,
     pub bw: usize,
     pub bh: usize,
+    /// Whether an inter block coded any luma coefficient: what a test that
+    /// replays a stream's decisions through the encoder needs to know,
+    /// since an encoder may skip a block's luma transform outright.
+    #[cfg(test)]
+    pub y_coded: bool,
 }
 
 impl ModeInfo {
@@ -158,7 +164,7 @@ impl ModeInfo {
     }
 
     /// The luma mode of sub-block `block`: libvpx's `get_y_mode`.
-    fn y_mode(&self, block: usize) -> PredictionMode {
+    pub fn y_mode(&self, block: usize) -> PredictionMode {
         if self.sb_type < BLOCK_8X8 {
             self.bmi.get(block).map_or(self.mode, |b| b.mode)
         } else {
@@ -211,12 +217,18 @@ pub(crate) struct MiGrid {
 const NO_BLOCK: u32 = u32::MAX;
 
 impl MiGrid {
-    fn new(mi_cols: usize, mi_rows: usize) -> Self {
+    pub(crate) fn new(mi_cols: usize, mi_rows: usize) -> Self {
         let cols = Columns {
             col0: 0,
             width: mi_cols,
         };
         Self::window(mi_cols, mi_rows, cols)
+    }
+
+    /// A grid of only the `width` columns of cells from `col0`, for a tile
+    /// column coded alone: put together with [`MiGrid::absorb`].
+    pub(crate) fn for_columns(mi_cols: usize, mi_rows: usize, col0: usize, width: usize) -> Self {
+        Self::window(mi_cols, mi_rows, Columns { col0, width })
     }
 
     /// A grid of only `cols`, for a tile column decoding alone.
@@ -235,7 +247,7 @@ impl MiGrid {
         self.blocks.get(self.index_at(mi_row, mi_col)?)
     }
 
-    fn index_at(&self, mi_row: usize, mi_col: usize) -> Option<usize> {
+    pub(crate) fn index_at(&self, mi_row: usize, mi_col: usize) -> Option<usize> {
         if mi_row >= self.mi_rows || mi_col >= self.mi_cols {
             return None;
         }
@@ -246,8 +258,13 @@ impl MiGrid {
             .map(|i| i as usize)
     }
 
+    /// Mark `n` cells of `row` from `col` as covered by no block.
+    pub(crate) fn uncover(&mut self, row: usize, col: usize, n: usize) {
+        self.cover(row, col, n, NO_BLOCK);
+    }
+
     /// Record `block` as covering `n` cells of `row` from `col`.
-    fn cover(&mut self, row: usize, col: usize, n: usize, block: u32) {
+    pub(crate) fn cover(&mut self, row: usize, col: usize, n: usize, block: u32) {
         if let Some(cells) = self
             .cols
             .run(row, col, n)
@@ -259,7 +276,7 @@ impl MiGrid {
 
     /// Take in a tile column's grid: its blocks, after this grid's, and its
     /// columns' cells, pointing at them.
-    fn absorb(&mut self, part: MiGrid) -> Result<(), Error> {
+    pub(crate) fn absorb(&mut self, part: MiGrid) -> Result<(), Error> {
         let offset =
             u32::try_from(self.blocks.len()).map_err(|_| Error::Corrupt("too many blocks"))?;
         let Columns { col0, width } = part.cols;
@@ -1048,11 +1065,19 @@ impl<'a, P: Pixel> Dec<'a, P> {
             if mi.skip {
                 false
             } else {
-                let eobtotal = self.reconstruct(r, &mi, &pos, false);
+                let (eobtotal, luma) = self.reconstruct(r, &mi, &pos, false);
+                #[cfg(test)]
+                if let Some(b) = self.mi.blocks.get_mut(idx as usize) {
+                    b.y_coded = luma > 0;
+                }
+                // Only tests keep it.
+                #[cfg(not(test))]
+                let _ = luma;
                 bsize >= BLOCK_8X8 && eobtotal == 0
             }
         } else {
-            self.reconstruct(r, &mi, &pos, true);
+            // An intra block is never marked skipped for the loop filter.
+            let _ = self.reconstruct(r, &mi, &pos, true);
             false
         };
         if skip_lf && let Some(b) = self.mi.blocks.get_mut(idx as usize) {
@@ -1089,16 +1114,18 @@ impl<'a, P: Pixel> Dec<'a, P> {
 
     /// Predict (intra) and add the residual of every transform block in the
     /// frame: libvpx's loops over `predict_and_reconstruct_intra_block` and
-    /// `reconstruct_inter_block`. Returns the total end-of-block count.
+    /// `reconstruct_inter_block`. Returns the total end-of-block count, and
+    /// the luma plane's.
     fn reconstruct(
         &mut self,
         r: &mut BoolReader<'_>,
         mi: &ModeInfo,
         pos: &BlockPos,
         intra: bool,
-    ) -> usize {
+    ) -> (usize, usize) {
         let info = self.info;
         let mut eobtotal = 0usize;
+        let mut luma = 0usize;
         for plane in 0..3usize {
             let (sx, sy) = if plane == 0 {
                 (0, 0)
@@ -1141,7 +1168,7 @@ impl<'a, P: Pixel> Dec<'a, P> {
             while row < max_blocks_high {
                 let mut col = 0;
                 while col < max_blocks_wide {
-                    eobtotal += self.transform_block(
+                    let eob = self.transform_block(
                         r,
                         mi,
                         pos,
@@ -1152,12 +1179,16 @@ impl<'a, P: Pixel> Dec<'a, P> {
                         intra,
                         ctx_limits,
                     );
+                    eobtotal += eob;
+                    if plane == 0 {
+                        luma += eob;
+                    }
                     col += step;
                 }
                 row += step;
             }
         }
-        eobtotal
+        (eobtotal, luma)
     }
 
     /// One transform block: intra prediction if `intra`, then its tokens and
@@ -1425,8 +1456,8 @@ impl<'a, P: Pixel> Dec<'a, P> {
         let above_mi = self.block(above).copied();
         let left_mi = self.block(left).copied();
         let read = |r: &mut BoolReader<'_>, mi: &ModeInfo, b: usize| -> PredictionMode {
-            let a = above_block_mode(mi, above_mi.as_ref(), b);
-            let l = left_block_mode(mi, left_mi.as_ref(), b);
+            let a = context::above_block_mode(mi, above_mi.as_ref(), b);
+            let l = context::left_block_mode(mi, left_mi.as_ref(), b);
             let probs = tables::KF_Y_MODE_PROB
                 .get(usize::from(a))
                 .and_then(|p| p.get(usize::from(l)))
@@ -1552,14 +1583,8 @@ impl<'a, P: Pixel> Dec<'a, P> {
             return predicted;
         }
         let id = if seg.temporal_update {
-            // vp9_get_pred_context_seg_id.
-            let a = self.block(above).is_some_and(|m| m.seg_id_predicted);
-            let l = self.block(left).is_some_and(|m| m.seg_id_predicted);
-            let prob = seg
-                .pred_probs
-                .get(usize::from(a) + usize::from(l))
-                .copied()
-                .unwrap_or(128);
+            let ctx = context::seg_id_pred_context(self.block(above), self.block(left));
+            let prob = seg.pred_probs.get(ctx).copied().unwrap_or(128);
             mi.seg_id_predicted = r.read_bool(prob);
             if mi.seg_id_predicted {
                 predicted
@@ -1584,9 +1609,7 @@ impl<'a, P: Pixel> Dec<'a, P> {
         if self.info.seg.feature_active(segment_id, SEG_LVL_SKIP) {
             return true;
         }
-        // vp9_get_skip_context.
-        let ctx = usize::from(self.block(above).is_some_and(|m| m.skip))
-            + usize::from(self.block(left).is_some_and(|m| m.skip));
+        let ctx = context::skip_context(self.block(above), self.block(left));
         let prob = self.fc.skip_probs.get(ctx).copied().unwrap_or(128);
         let skip = r.read_bool(prob);
         if let Some(c) = self.counts()
@@ -1621,18 +1644,7 @@ impl<'a, P: Pixel> Dec<'a, P> {
                 .unwrap_or(TX_4X4);
             return max_tx.min(biggest);
         }
-        // get_tx_size_context.
-        let a = self.block(above);
-        let l = self.block(left);
-        let mut above_ctx = a.map_or(max_tx, |m| if m.skip { max_tx } else { m.tx_size });
-        let mut left_ctx = l.map_or(max_tx, |m| if m.skip { max_tx } else { m.tx_size });
-        if l.is_none() {
-            left_ctx = above_ctx;
-        }
-        if a.is_none() {
-            above_ctx = left_ctx;
-        }
-        let ctx = usize::from(above_ctx + left_ctx > max_tx);
+        let ctx = context::tx_size_context(self.block(above), self.block(left), max_tx);
         let p = &self.fc.tx_probs;
         let probs: &[u8] = match max_tx {
             TX_8X8 => p.p8x8.get(ctx).map_or(&[], |v| v.as_slice()),
@@ -1704,17 +1716,7 @@ impl<'a, P: Pixel> Dec<'a, P> {
         if seg.feature_active(segment_id, SEG_LVL_REF_FRAME) {
             return seg.data(segment_id, SEG_LVL_REF_FRAME) != i32::from(INTRA_FRAME);
         }
-        // get_intra_inter_context.
-        let a = self.block(above);
-        let l = self.block(left);
-        let ctx = match (a, l) {
-            (Some(a), Some(l)) => {
-                let (ai, li) = (!a.is_inter(), !l.is_inter());
-                if ai && li { 3 } else { usize::from(ai || li) }
-            }
-            (Some(e), None) | (None, Some(e)) => 2 * usize::from(!e.is_inter()),
-            (None, None) => 0,
-        };
+        let ctx = context::intra_inter_context(self.block(above), self.block(left));
         let prob = self.fc.intra_inter_prob.get(ctx).copied().unwrap_or(128);
         let is_inter = r.read_bool(prob);
         if let Some(c) = self.counts()
@@ -1823,7 +1825,7 @@ impl<'a, P: Pixel> Dec<'a, P> {
         let l = self.block(left).copied();
         // read_block_reference_mode.
         let mode = if info.reference_mode == REFERENCE_MODE_SELECT {
-            let ctx = reference_mode_context(info, a.as_ref(), l.as_ref());
+            let ctx = context::reference_mode_context(info.comp_fixed_ref, a.as_ref(), l.as_ref());
             let prob = self.fc.comp_inter_prob.get(ctx).copied().unwrap_or(128);
             let m = r.read(prob) as ReferenceMode;
             if let Some(c) = self.counts()
@@ -1845,7 +1847,13 @@ impl<'a, P: Pixel> Dec<'a, P> {
                     .copied()
                     .unwrap_or(false),
             );
-            let ctx = comp_ref_context(info, a.as_ref(), l.as_ref());
+            let ctx = context::comp_ref_context(
+                info.comp_fixed_ref,
+                info.comp_var_ref,
+                &info.ref_frame_sign_bias,
+                a.as_ref(),
+                l.as_ref(),
+            );
             let prob = self.fc.comp_ref_prob.get(ctx).copied().unwrap_or(128);
             let bit = r.read(prob) as usize;
             if let Some(c) = self.counts()
@@ -1858,7 +1866,7 @@ impl<'a, P: Pixel> Dec<'a, P> {
             refs[1 - idx] = info.comp_var_ref[bit.min(1)];
             refs
         } else {
-            let ctx0 = single_ref_p1_context(a.as_ref(), l.as_ref());
+            let ctx0 = context::single_ref_p1_context(a.as_ref(), l.as_ref());
             let prob0 = self.fc.single_ref_prob.get(ctx0).map_or(128, |p| p[0]);
             let bit0 = r.read(prob0) as usize;
             if let Some(c) = self.counts()
@@ -1867,7 +1875,7 @@ impl<'a, P: Pixel> Dec<'a, P> {
                 *slot = slot.wrapping_add(1);
             }
             let first = if bit0 == 1 {
-                let ctx1 = single_ref_p2_context(a.as_ref(), l.as_ref());
+                let ctx1 = context::single_ref_p2_context(a.as_ref(), l.as_ref());
                 let prob1 = self.fc.single_ref_prob.get(ctx1).map_or(128, |p| p[1]);
                 let bit1 = r.read(prob1) as usize;
                 if let Some(c) = self.counts()
@@ -1911,19 +1919,7 @@ impl<'a, P: Pixel> Dec<'a, P> {
         above: Option<usize>,
         left: Option<usize>,
     ) -> InterpFilter {
-        // get_pred_context_switchable_interp.
-        let sw = SWITCHABLE_FILTERS as InterpFilter;
-        let left_type = self.block(left).map_or(sw, |m| m.interp_filter);
-        let above_type = self.block(above).map_or(sw, |m| m.interp_filter);
-        let ctx = usize::from(if left_type == above_type {
-            left_type
-        } else if left_type == sw {
-            above_type
-        } else if above_type == sw {
-            left_type
-        } else {
-            sw
-        });
+        let ctx = context::switchable_interp_context(self.block(above), self.block(left));
         let probs = self
             .fc
             .switchable_interp_prob
@@ -1956,7 +1952,7 @@ impl<'a, P: Pixel> Dec<'a, P> {
         mi.ref_frame = self.read_ref_frames(r, mi.segment_id, above, left);
         let is_compound = mi.has_second_ref();
         let search = mv_ref_blocks(bsize);
-        let inter_mode_ctx = self.mode_context(&search, pos);
+        let inter_mode_ctx = self.mvp().mode_context(&search, pos);
 
         if info.seg.feature_active(mi.segment_id, SEG_LVL_SKIP) {
             mi.mode = ZEROMV;
@@ -1990,12 +1986,15 @@ impl<'a, P: Pixel> Dec<'a, P> {
                     b_mode = self.read_inter_mode(r, inter_mode_ctx);
                     if b_mode == NEARESTMV || b_mode == NEARMV {
                         for (rf, best) in best_sub8x8.iter_mut().enumerate().take(refs) {
-                            *best = self.append_sub8x8_mvs_for_idx(mi, &search, pos, b_mode, j, rf);
+                            *best = self
+                                .mvp()
+                                .append_sub8x8_mvs_for_idx(mi, &search, pos, b_mode, j, rf);
                         }
                     } else if b_mode == NEWMV && !got_mv_refs_for_new {
                         for (rf, best) in best_ref_mvs.iter_mut().enumerate().take(refs) {
                             let frame = mi.ref_frame[rf];
-                            let (list, _) = self.find_mv_refs(mi, pos, NEWMV, frame, &search, None);
+                            let (list, _) =
+                                self.mvp().find_mv_refs(pos, NEWMV, frame, &search, None);
                             *best = lower_mv_precision(list[0], allow_hp);
                             got_mv_refs_for_new = true;
                         }
@@ -2013,6 +2012,9 @@ impl<'a, P: Pixel> Dec<'a, P> {
                         return Err(Error::Corrupt("an invalid motion vector"));
                     }
                     mi.bmi[j].mv = mvs;
+                    // The mode too, though nothing in decoding reads an inter
+                    // sub-block's: its neighbours' contexts read intra modes.
+                    mi.bmi[j].mode = b_mode;
                     if num_4x4_h == 2 {
                         mi.bmi[j + 2] = mi.bmi[j];
                     }
@@ -2029,7 +2031,7 @@ impl<'a, P: Pixel> Dec<'a, P> {
             if mi.mode != ZEROMV {
                 for rf in 0..refs {
                     let frame = mi.ref_frame[rf];
-                    let (list, count) = self.find_mv_refs(mi, pos, mi.mode, frame, &search, None);
+                    let (list, count) = self.mvp().find_mv_refs(pos, mi.mode, frame, &search, None);
                     best_ref_mvs[rf] =
                         lower_mv_precision(list[count.saturating_sub(1).min(1)], allow_hp);
                 }
@@ -2110,9 +2112,43 @@ impl<'a, P: Pixel> Dec<'a, P> {
 
     // --- Motion vector prediction -----------------------------------------------------
 
+    /// What this tile's motion vector prediction reads.
+    fn mvp(&self) -> MvPredictor<'_> {
+        MvPredictor {
+            mi: &self.mi,
+            mi_rows: self.info.mi_rows,
+            mi_cols: self.info.mi_cols,
+            tile_start: self.tile.mi_col_start,
+            tile_end: self.tile.mi_col_end,
+            prev_mvs: self.prev_mvs,
+            sign_bias: &self.info.ref_frame_sign_bias,
+        }
+    }
+}
+
+// --- Motion vector prediction ----------------------------------------------------------
+
+/// What motion vector prediction reads around a block: the blocks of the
+/// frame coded so far, the tile they are in, and the last frame's vectors.
+/// The decoder's tiles and the encoder share it, so the two predict alike.
+#[derive(Clone, Copy)]
+pub(crate) struct MvPredictor<'a> {
+    pub mi: &'a MiGrid,
+    pub mi_rows: usize,
+    pub mi_cols: usize,
+    /// The tile's columns of cells: candidates outside them are not used.
+    pub tile_start: usize,
+    pub tile_end: usize,
+    /// The last frame's vectors, if it may be used: libvpx's
+    /// `use_prev_frame_mvs`.
+    pub prev_mvs: Option<&'a [MvRef]>,
+    pub sign_bias: &'a [bool; MAX_REF_FRAMES],
+}
+
+impl MvPredictor<'_> {
     /// libvpx's `get_mode_context`: the inter mode context from the two
     /// nearest neighbours' modes.
-    fn mode_context(&self, search: &[[i8; 2]; 8], pos: &BlockPos) -> usize {
+    pub(crate) fn mode_context(&self, search: &[[i8; 2]; 8], pos: &BlockPos) -> usize {
         let mut counter = 0usize;
         for p in search.iter().take(2) {
             if let Some(c) = self.candidate(pos, *p) {
@@ -2134,13 +2170,13 @@ impl<'a, P: Pixel> Dec<'a, P> {
 
     /// The block at a search offset (row, column) from the current one, if
     /// it is inside the tile: libvpx's `is_inside` and `xd->mi[...]`.
-    fn candidate(&self, pos: &BlockPos, p: [i8; 2]) -> Option<&ModeInfo> {
+    pub(crate) fn candidate(&self, pos: &BlockPos, p: [i8; 2]) -> Option<&ModeInfo> {
         let row = pos.mi_row as i64 + i64::from(p[0]);
         let col = pos.mi_col as i64 + i64::from(p[1]);
         if row < 0
-            || col < self.tile.mi_col_start as i64
-            || row >= self.info.mi_rows as i64
-            || col >= self.tile.mi_col_end as i64
+            || col < self.tile_start as i64
+            || row >= self.mi_rows as i64
+            || col >= self.tile_end as i64
         {
             return None;
         }
@@ -2151,17 +2187,15 @@ impl<'a, P: Pixel> Dec<'a, P> {
     /// `ref_frame`, clamped. `block` is the sub-8x8 block's index when
     /// predicting for one, which makes the two nearest candidates their
     /// sub-blocks. Returns the list and how many of it count.
-    fn find_mv_refs(
+    pub(crate) fn find_mv_refs(
         &self,
-        mi: &ModeInfo,
         pos: &BlockPos,
         mode: PredictionMode,
         ref_frame: RefFrame,
         search: &[[i8; 2]; 8],
         block: Option<usize>,
     ) -> ([Mv; 2], usize) {
-        let _ = mi;
-        let sign_bias = &self.info.ref_frame_sign_bias;
+        let sign_bias = self.sign_bias;
         let bias = |f: RefFrame| sign_bias.get(f.max(0) as usize).copied().unwrap_or(false);
         let mut list = [Mv::ZERO; 2];
         let mut count = 0usize;
@@ -2169,7 +2203,7 @@ impl<'a, P: Pixel> Dec<'a, P> {
         let early_break = mode != NEARMV;
         let prev = self
             .prev_mvs
-            .and_then(|p| p.get(pos.mi_row * self.info.mi_cols + pos.mi_col));
+            .and_then(|p| p.get(pos.mi_row * self.mi_cols + pos.mi_col));
 
         // ADD_MV_REF_LIST_EB: returns true when the search is done.
         let add = |mv: Mv, list: &mut [Mv; 2], count: &mut usize| -> bool {
@@ -2308,7 +2342,7 @@ impl<'a, P: Pixel> Dec<'a, P> {
 
     /// libvpx's `append_sub8x8_mvs_for_idx`: the nearest (or near) vector
     /// for sub-block `block` of the current block.
-    fn append_sub8x8_mvs_for_idx(
+    pub(crate) fn append_sub8x8_mvs_for_idx(
         &self,
         mi: &ModeInfo,
         search: &[[i8; 2]; 8],
@@ -2321,14 +2355,14 @@ impl<'a, P: Pixel> Dec<'a, P> {
         let bmi = &mi.bmi;
         match block {
             0 => {
-                let (list, count) = self.find_mv_refs(mi, pos, b_mode, frame, search, Some(block));
+                let (list, count) = self.find_mv_refs(pos, b_mode, frame, search, Some(block));
                 list[count.saturating_sub(1).min(1)]
             }
             1 | 2 => {
                 if b_mode == NEARESTMV {
                     bmi[0].mv[rf]
                 } else {
-                    let (list, _) = self.find_mv_refs(mi, pos, b_mode, frame, search, Some(block));
+                    let (list, _) = self.find_mv_refs(pos, b_mode, frame, search, Some(block));
                     list.iter()
                         .copied()
                         .find(|&m| m != bmi[0].mv[rf])
@@ -2343,7 +2377,7 @@ impl<'a, P: Pixel> Dec<'a, P> {
                 } else if bmi[2].mv[rf] != bmi[0].mv[rf] {
                     bmi[0].mv[rf]
                 } else {
-                    let (list, _) = self.find_mv_refs(mi, pos, b_mode, frame, search, Some(block));
+                    let (list, _) = self.find_mv_refs(pos, b_mode, frame, search, Some(block));
                     list.iter()
                         .copied()
                         .find(|&m| m != bmi[2].mv[rf])
@@ -2367,252 +2401,9 @@ pub(crate) fn uv_tx_size(bsize: BlockSize, tx_size: TxSize, ss_x: u8, ss_y: u8) 
         .unwrap_or(TX_4X4)
 }
 
-/// libvpx's `vp9_above_block_mode`.
-fn above_block_mode(cur: &ModeInfo, above: Option<&ModeInfo>, b: usize) -> PredictionMode {
-    if b == 0 || b == 1 {
-        match above {
-            Some(a) if !a.is_inter() => a.y_mode(b + 2),
-            _ => DC_PRED,
-        }
-    } else {
-        cur.bmi.get(b - 2).map_or(DC_PRED, |m| m.mode)
-    }
-}
-
-/// libvpx's `vp9_left_block_mode`.
-fn left_block_mode(cur: &ModeInfo, left: Option<&ModeInfo>, b: usize) -> PredictionMode {
-    if b == 0 || b == 2 {
-        match left {
-            Some(l) if !l.is_inter() => l.y_mode(b + 1),
-            _ => DC_PRED,
-        }
-    } else {
-        cur.bmi.get(b - 1).map_or(DC_PRED, |m| m.mode)
-    }
-}
-
-/// libvpx's `vp9_get_reference_mode_context`.
-fn reference_mode_context(info: &FrameInfo, a: Option<&ModeInfo>, l: Option<&ModeInfo>) -> usize {
-    let fixed = info.comp_fixed_ref;
-    match (a, l) {
-        (Some(a), Some(l)) => {
-            if !a.has_second_ref() && !l.has_second_ref() {
-                usize::from((a.ref_frame[0] == fixed) ^ (l.ref_frame[0] == fixed))
-            } else if !a.has_second_ref() {
-                2 + usize::from(a.ref_frame[0] == fixed || !a.is_inter())
-            } else if !l.has_second_ref() {
-                2 + usize::from(l.ref_frame[0] == fixed || !l.is_inter())
-            } else {
-                4
-            }
-        }
-        (Some(e), None) | (None, Some(e)) => {
-            if e.has_second_ref() {
-                3
-            } else {
-                usize::from(e.ref_frame[0] == fixed)
-            }
-        }
-        (None, None) => 1,
-    }
-}
-
-/// libvpx's `vp9_get_pred_context_comp_ref_p`.
-fn comp_ref_context(info: &FrameInfo, a: Option<&ModeInfo>, l: Option<&ModeInfo>) -> usize {
-    let fix_ref_idx = usize::from(
-        info.ref_frame_sign_bias
-            .get(info.comp_fixed_ref.max(0) as usize)
-            .copied()
-            .unwrap_or(false),
-    );
-    let var_ref_idx = 1 - fix_ref_idx;
-    let var1 = info.comp_var_ref[1];
-    let var0 = info.comp_var_ref[0];
-    let fixed = info.comp_fixed_ref;
-    match (a, l) {
-        (Some(a), Some(l)) => {
-            let (ai, li) = (!a.is_inter(), !l.is_inter());
-            if ai && li {
-                2
-            } else if ai || li {
-                let e = if ai { l } else { a };
-                if e.has_second_ref() {
-                    1 + 2 * usize::from(e.ref_frame[var_ref_idx] != var1)
-                } else {
-                    1 + 2 * usize::from(e.ref_frame[0] != var1)
-                }
-            } else {
-                let l_sg = !l.has_second_ref();
-                let a_sg = !a.has_second_ref();
-                let vrfa = if a_sg {
-                    a.ref_frame[0]
-                } else {
-                    a.ref_frame[var_ref_idx]
-                };
-                let vrfl = if l_sg {
-                    l.ref_frame[0]
-                } else {
-                    l.ref_frame[var_ref_idx]
-                };
-                if vrfa == vrfl && var1 == vrfa {
-                    0
-                } else if l_sg && a_sg {
-                    if (vrfa == fixed && vrfl == var0) || (vrfl == fixed && vrfa == var0) {
-                        4
-                    } else if vrfa == vrfl {
-                        3
-                    } else {
-                        1
-                    }
-                } else if l_sg || a_sg {
-                    let vrfc = if l_sg { vrfa } else { vrfl };
-                    let rfs = if a_sg { vrfa } else { vrfl };
-                    if vrfc == var1 && rfs != var1 {
-                        1
-                    } else if rfs == var1 && vrfc != var1 {
-                        2
-                    } else {
-                        4
-                    }
-                } else if vrfa == vrfl {
-                    4
-                } else {
-                    2
-                }
-            }
-        }
-        (Some(e), None) | (None, Some(e)) => {
-            if !e.is_inter() {
-                2
-            } else if e.has_second_ref() {
-                4 * usize::from(e.ref_frame[var_ref_idx] != var1)
-            } else {
-                3 * usize::from(e.ref_frame[0] != var1)
-            }
-        }
-        (None, None) => 2,
-    }
-}
-
-/// libvpx's `vp9_get_pred_context_single_ref_p1`.
-fn single_ref_p1_context(a: Option<&ModeInfo>, l: Option<&ModeInfo>) -> usize {
-    let last = |f: RefFrame| f == LAST_FRAME;
-    match (a, l) {
-        (Some(a), Some(l)) => {
-            let (ai, li) = (!a.is_inter(), !l.is_inter());
-            if ai && li {
-                2
-            } else if ai || li {
-                let e = if ai { l } else { a };
-                if e.has_second_ref() {
-                    1 + usize::from(last(e.ref_frame[0]) || last(e.ref_frame[1]))
-                } else {
-                    4 * usize::from(last(e.ref_frame[0]))
-                }
-            } else {
-                let (a2, l2) = (a.has_second_ref(), l.has_second_ref());
-                let (a0, a1, l0, l1) = (
-                    a.ref_frame[0],
-                    a.ref_frame[1],
-                    l.ref_frame[0],
-                    l.ref_frame[1],
-                );
-                if a2 && l2 {
-                    1 + usize::from(last(a0) || last(a1) || last(l0) || last(l1))
-                } else if a2 || l2 {
-                    let rfs = if a2 { l0 } else { a0 };
-                    let (crf1, crf2) = if a2 { (a0, a1) } else { (l0, l1) };
-                    if last(rfs) {
-                        3 + usize::from(last(crf1) || last(crf2))
-                    } else {
-                        usize::from(last(crf1) || last(crf2))
-                    }
-                } else {
-                    2 * usize::from(last(a0)) + 2 * usize::from(last(l0))
-                }
-            }
-        }
-        (Some(e), None) | (None, Some(e)) => {
-            if !e.is_inter() {
-                2
-            } else if e.has_second_ref() {
-                1 + usize::from(last(e.ref_frame[0]) || last(e.ref_frame[1]))
-            } else {
-                4 * usize::from(last(e.ref_frame[0]))
-            }
-        }
-        (None, None) => 2,
-    }
-}
-
-/// libvpx's `vp9_get_pred_context_single_ref_p2`.
-fn single_ref_p2_context(a: Option<&ModeInfo>, l: Option<&ModeInfo>) -> usize {
-    let golden = |f: RefFrame| f == GOLDEN_FRAME;
-    let last = |f: RefFrame| f == LAST_FRAME;
-    match (a, l) {
-        (Some(a), Some(l)) => {
-            let (ai, li) = (!a.is_inter(), !l.is_inter());
-            if ai && li {
-                2
-            } else if ai || li {
-                let e = if ai { l } else { a };
-                if e.has_second_ref() {
-                    1 + 2 * usize::from(golden(e.ref_frame[0]) || golden(e.ref_frame[1]))
-                } else if last(e.ref_frame[0]) {
-                    3
-                } else {
-                    4 * usize::from(golden(e.ref_frame[0]))
-                }
-            } else {
-                let (a2, l2) = (a.has_second_ref(), l.has_second_ref());
-                let (a0, a1, l0, l1) = (
-                    a.ref_frame[0],
-                    a.ref_frame[1],
-                    l.ref_frame[0],
-                    l.ref_frame[1],
-                );
-                if a2 && l2 {
-                    if a0 == l0 && a1 == l1 {
-                        3 * usize::from(golden(a0) || golden(a1) || golden(l0) || golden(l1))
-                    } else {
-                        2
-                    }
-                } else if a2 || l2 {
-                    let rfs = if a2 { l0 } else { a0 };
-                    let (crf1, crf2) = if a2 { (a0, a1) } else { (l0, l1) };
-                    if golden(rfs) {
-                        3 + usize::from(golden(crf1) || golden(crf2))
-                    } else if rfs == ALTREF_FRAME {
-                        usize::from(golden(crf1) || golden(crf2))
-                    } else {
-                        1 + 2 * usize::from(golden(crf1) || golden(crf2))
-                    }
-                } else if last(a0) && last(l0) {
-                    3
-                } else if last(a0) || last(l0) {
-                    let edge0 = if last(a0) { l0 } else { a0 };
-                    4 * usize::from(golden(edge0))
-                } else {
-                    2 * usize::from(golden(a0)) + 2 * usize::from(golden(l0))
-                }
-            }
-        }
-        (Some(e), None) | (None, Some(e)) => {
-            if !e.is_inter() || (last(e.ref_frame[0]) && !e.has_second_ref()) {
-                2
-            } else if !e.has_second_ref() {
-                4 * usize::from(golden(e.ref_frame[0]))
-            } else {
-                3 * usize::from(golden(e.ref_frame[0]) || golden(e.ref_frame[1]))
-            }
-        }
-        (None, None) => 2,
-    }
-}
-
 /// The neighbours a block size searches for motion vectors, as (row,
 /// column) offsets: libvpx's `mv_ref_blocks`.
-fn mv_ref_blocks(bsize: BlockSize) -> [[i8; 2]; 8] {
+pub(crate) fn mv_ref_blocks(bsize: BlockSize) -> [[i8; 2]; 8] {
     tables::MV_REF_BLOCKS
         .get(usize::from(bsize))
         .copied()
@@ -2630,7 +2421,7 @@ fn mv_ref_blocks(bsize: BlockSize) -> [[i8; 2]; 8] {
 
 /// libvpx's `clamp_mv_ref`: a candidate kept within 16 pixels (in eighth
 /// pixels) of the frame around the block.
-fn clamp_mv_ref(mv: Mv, pos: &BlockPos) -> Mv {
+pub(crate) fn clamp_mv_ref(mv: Mv, pos: &BlockPos) -> Mv {
     const MV_BORDER: i32 = 16 << 3;
     let clamp = |v: i16, lo: i32, hi: i32| i32::from(v).clamp(lo, hi.max(lo)) as i16;
     Mv {
@@ -2649,13 +2440,13 @@ fn clamp_mv_ref(mv: Mv, pos: &BlockPos) -> Mv {
 
 /// libvpx's `use_mv_hp`: whether a reference vector is small enough for
 /// eighth-pixel precision.
-fn use_mv_hp(mv: Mv) -> bool {
+pub(crate) fn use_mv_hp(mv: Mv) -> bool {
     i32::from(mv.row).abs() < 64 && i32::from(mv.col).abs() < 64
 }
 
 /// libvpx's `lower_mv_precision`: round odd components toward zero when
 /// eighth-pixel precision is off.
-fn lower_mv_precision(mv: Mv, allow_hp: bool) -> Mv {
+pub(crate) fn lower_mv_precision(mv: Mv, allow_hp: bool) -> Mv {
     if allow_hp && use_mv_hp(mv) {
         return mv;
     }
@@ -2673,13 +2464,13 @@ fn lower_mv_precision(mv: Mv, allow_hp: bool) -> Mv {
 }
 
 /// libvpx's `is_mv_valid`.
-fn is_mv_valid(mv: Mv) -> bool {
+pub(crate) fn is_mv_valid(mv: Mv) -> bool {
     let (r, c) = (i32::from(mv.row), i32::from(mv.col));
     r > MV_LOW && r < MV_UPP && c > MV_LOW && c < MV_UPP
 }
 
 /// libvpx's `read_mv_component`.
-fn read_mv_component(
+pub(crate) fn read_mv_component(
     r: &mut BoolReader<'_>,
     comp: &crate::probs::MvComponentProbs,
     use_hp: bool,
@@ -2714,7 +2505,7 @@ fn read_mv_component(
 }
 
 /// libvpx's `vp9_inc_mv`: count a decoded vector difference.
-fn inc_mv(mv: Mv, counts: &mut MvCounts) {
+pub(crate) fn inc_mv(mv: Mv, counts: &mut MvCounts) {
     let joint = match (mv.row == 0, mv.col == 0) {
         (true, true) => 0,
         (true, false) => 1,

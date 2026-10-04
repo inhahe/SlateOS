@@ -255,6 +255,19 @@ pub enum Dispatch {
     /// draws it in the same frame. Several wakes between two looks arrive as
     /// one.
     Woken,
+    /// An answer this program was waiting on has arrived: a window pick's
+    /// ([`EventLoop::picked`]) or the displays' wake
+    /// ([`EventLoop::displays_woke`]). Ask the one you are waiting on.
+    ///
+    /// Not an [`Event`]: an answer is addressed to the request that asked for
+    /// it, not to a window, and it often comes with no input at all -- the
+    /// click that ends a pick lands on another program's window and is not
+    /// delivered, the key that wakes the screen is swallowed. Without this, a
+    /// loop parked on input would leave the answer unread until something
+    /// else happened to wake it. Arrives after the batch's events and wakes,
+    /// before its [`Dispatch::Settled`]; several answers between two looks
+    /// arrive as one, and each answer is announced once.
+    Answered,
     /// The compositor asks for this window to be drawn whole again — part of
     /// the desktop's artifact recovery (Ctrl+Super+R). Draw the entire window,
     /// not just what you believe has changed: a region you believe is clean is
@@ -963,6 +976,10 @@ pub struct EventLoop<T: Transport> {
     /// The modifier keys held when the compositor handled the key or pointer
     /// event last returned. See [`EventLoop::modifiers`].
     modifiers: Modifiers,
+    /// Requests whose answer waits on the user -- a window pick, a display
+    /// sleep -- and has not yet been announced, by sequence number. See
+    /// [`EventLoop::take_answered`].
+    awaited: Vec<u32>,
 }
 
 /// Two presses of one button in one window, close together in time and on
@@ -1100,6 +1117,7 @@ impl<T: Transport> EventLoop<T> {
             waker: None,
             clicks: Clicks::new(),
             modifiers: Modifiers::NONE,
+            awaited: Vec::new(),
         }
     }
 
@@ -1226,6 +1244,7 @@ impl<T: Transport> EventLoop<T> {
     /// comes back through [`Self::displays_woke`].
     pub fn sleep_displays(&mut self) -> Result<DisplaySleep, Error<T>> {
         let seq = self.conn.send(RequestBody::SleepDisplays)?;
+        self.awaited.push(seq);
         Ok(DisplaySleep { seq })
     }
 
@@ -1241,7 +1260,8 @@ impl<T: Transport> EventLoop<T> {
     /// to sleep (only a shell may), and [`ClientError::Mismatched`] for an
     /// answer that is not one.
     pub fn displays_woke(&mut self, sleep: &DisplaySleep) -> Result<bool, Error<T>> {
-        match self.conn.take_reply(sleep.seq) {
+        let reply = self.take_awaited(sleep.seq);
+        match reply {
             None => Ok(false),
             Some(ResponseBody::Ok) => Ok(true),
             Some(ResponseBody::Error { message }) => Err(ClientError::Refused(message)),
@@ -1280,6 +1300,7 @@ impl<T: Transport> EventLoop<T> {
     /// As [`Connection::send`]. A refusal arrives through [`Self::picked`].
     pub fn pick_window(&mut self) -> Result<WindowPick, Error<T>> {
         let seq = self.conn.send(RequestBody::PickWindow)?;
+        self.awaited.push(seq);
         Ok(WindowPick { seq })
     }
 
@@ -1295,7 +1316,8 @@ impl<T: Transport> EventLoop<T> {
     /// was open -- and [`ClientError::Mismatched`] for an answer that is not
     /// one.
     pub fn picked(&mut self, pick: &WindowPick) -> Result<Option<PickOutcome>, Error<T>> {
-        match self.conn.take_reply(pick.seq) {
+        let reply = self.take_awaited(pick.seq);
+        match reply {
             None => Ok(None),
             Some(ResponseBody::Picked(Some(window))) => Ok(Some(PickOutcome::Window(window))),
             Some(ResponseBody::Picked(None)) => Ok(Some(PickOutcome::Nothing)),
@@ -2122,6 +2144,32 @@ impl<T: Transport> EventLoop<T> {
             .is_some_and(|woken| woken.swap(false, Ordering::AcqRel))
     }
 
+    /// Whether an answer this program is waiting on -- a window pick's, the
+    /// displays' wake -- has arrived since this was last asked, clearing the
+    /// news. The answer itself stays for [`Self::picked`] or
+    /// [`Self::displays_woke`] to collect, and one already collected is not
+    /// news.
+    ///
+    /// [`Self::run_batched`] asks this itself and hands it over as
+    /// [`Dispatch::Answered`]; only a caller driving the loop by hand needs
+    /// to.
+    pub fn take_answered(&mut self) -> bool {
+        let before = self.awaited.len();
+        let conn = &self.conn;
+        self.awaited.retain(|&seq| !conn.has_reply(seq));
+        self.awaited.len() != before
+    }
+
+    /// Collect the answer to a request that waits on the user, and stop
+    /// awaiting it: taken before it was announced, it is not announced after.
+    fn take_awaited(&mut self, seq: u32) -> Option<ResponseBody> {
+        let reply = self.conn.take_reply(seq);
+        if reply.is_some() {
+            self.awaited.retain(|&s| s != seq);
+        }
+        reply
+    }
+
     /// Park until input arrives or the nearest wake-up comes due.
     ///
     /// The counterpart to [`Self::poll`], and the reason a caller driving the
@@ -2252,7 +2300,7 @@ impl<T: Transport> EventLoop<T> {
     {
         self.run_batched(|events, dispatch| match dispatch {
             Dispatch::Event { window, event } => handler(events, window, event),
-            Dispatch::Woken | Dispatch::Repaint { .. } | Dispatch::Settled => {
+            Dispatch::Woken | Dispatch::Answered | Dispatch::Repaint { .. } | Dispatch::Settled => {
                 EventResponse::Continue
             }
         })
@@ -2310,6 +2358,15 @@ impl<T: Transport> EventLoop<T> {
             if self.running && self.take_woken() {
                 dispatched = true;
                 if handler(self, Dispatch::Woken) == EventResponse::Exit {
+                    self.running = false;
+                }
+            }
+            // The same for an answer the program is waiting on: it comes
+            // with no event when the click or key that settles it went
+            // elsewhere, and is then the whole reason the loop woke.
+            if self.running && self.take_answered() {
+                dispatched = true;
+                if handler(self, Dispatch::Answered) == EventResponse::Exit {
                     self.running = false;
                 }
             }
@@ -2474,6 +2531,12 @@ pub mod testing {
         /// [`Self::answer_pick`], which stands in for the user's click, or as
         /// given up by a `CancelPick`.
         pub picking: Option<u32>,
+        /// Answers to give the picks this desktop is asked for, in order:
+        /// each is given at the first [`Self::turn`] that finds a pick open,
+        /// as the user's click would be. For a test of an application under
+        /// `app::drive`, which cannot call [`Self::answer_pick`] itself while
+        /// the loop runs. Empty, picks stay open until answered by hand.
+        pub pick_answers: VecDeque<Option<crate::PickedWindow>>,
         /// Input to deliver, one batch per turn.
         pub script: VecDeque<Vec<InputEvent>>,
         /// The config-directory turn, held for as long as this desktop exists.
@@ -2521,6 +2584,7 @@ pub mod testing {
                 clipboard: None,
                 sleeping: Vec::new(),
                 picking: None,
+                pick_answers: VecDeque::new(),
                 script: VecDeque::new(),
                 #[cfg(test)]
                 _config_turn: settingsfile::testing::config_turn(),
@@ -2763,7 +2827,13 @@ pub mod testing {
         /// say so. Without it a client waiting for input that will never come
         /// would spin until the harness timed out.
         pub fn turn(&mut self) {
-            let answered = self.serve();
+            let mut answered = self.serve();
+            if self.picking.is_some()
+                && let Some(window) = self.pick_answers.pop_front()
+            {
+                self.answer_pick(window);
+                answered = true;
+            }
             if let Some(batch) = self.script.pop_front() {
                 self.send_input(&batch);
             } else if !answered {
@@ -3792,6 +3862,62 @@ mod tests {
             server.borrow_mut().asked(),
             vec!["PickWindow", "CancelPick"]
         );
+    }
+
+    /// An answer is news once: seen arriving, then not again, and not at all
+    /// if it was collected first -- for a pick and for a sleep alike.
+    #[test]
+    fn an_awaited_answer_is_news_once() {
+        let (mut events, server) = wired();
+        let sleep = events.sleep_displays().unwrap();
+        server.borrow_mut().serve();
+        events.poll().unwrap();
+        assert!(!events.take_answered(), "news before the wake");
+        server.borrow_mut().wake_displays();
+        events.poll().unwrap();
+        assert!(events.take_answered(), "the wake was not news");
+        assert!(!events.take_answered(), "the same wake was news twice");
+        assert!(
+            events.displays_woke(&sleep).unwrap(),
+            "the answer went with the news"
+        );
+
+        // Collected before anyone asked whether there was news.
+        let pick = events.pick_window().unwrap();
+        server.borrow_mut().serve();
+        server.borrow_mut().answer_pick(None);
+        events.poll().unwrap();
+        assert_eq!(events.picked(&pick).unwrap(), Some(PickOutcome::Nothing));
+        assert!(!events.take_answered(), "an answer already taken was news");
+    }
+
+    /// An answer that comes with no event still reaches the handler: the
+    /// click that ends a pick lands on another program's window, so nothing
+    /// else would wake the loop to read it.
+    #[test]
+    fn the_loop_hands_over_an_answer_that_came_alone() {
+        let (mut events, server) = wired();
+        let pick = events.pick_window().unwrap();
+        let window = PickedWindow {
+            window: 7,
+            title: String::from("Terminal"),
+            app_id: String::from("terminal"),
+            pid: None,
+        };
+        server
+            .borrow_mut()
+            .pick_answers
+            .push_back(Some(window.clone()));
+        let mut seen = Vec::new();
+        events
+            .run_batched(|events, dispatch| {
+                if dispatch == Dispatch::Answered {
+                    seen.push(events.picked(&pick).unwrap());
+                }
+                EventResponse::Continue
+            })
+            .unwrap();
+        assert_eq!(seen, vec![Some(PickOutcome::Window(window))]);
     }
 
     /// A copy goes to the compositor and a paste comes back from it, so what

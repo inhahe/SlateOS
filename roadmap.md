@@ -3686,18 +3686,63 @@ lane C's `guitk`.
     intra-only and show-existing frames. 91 small vectors are committed
     (`tests/data`); the rest are fetched by `tools/fetch_vectors.py` and run
     with `--ignored`.
-  - `[-]` Threads, one per core (§1332). `[x]` Tile columns, each into a
+  - `[x]` Threads, one per core (§1332). `[x]` Tile columns, each into a
     strip of its own and put together in column order, so the pictures are
-    the same on any number of threads (the suite runs at 1 and 4). `[ ]` The
+    the same on any number of threads (the suite runs at 1 and 4). `[x]` The
     loop filter's superblock rows as libvpx's wavefront, which also helps
-    video with one tile column.
+    video with one tile column -- done the same way, bit-exact.
   - `[-]` Speed. `[x]` A committed benchmark against libvpx
     (`tests/bench.rs`); motion compensation and the loop filter rewritten to
     vectorise for SSE2, exact in 16-bit lanes; `opt-level = 3` for the crate.
     One thread on libvpx's 1080p vector: 32 fps, libvpx's C 17, its SIMD 77
-    (an i7-8700K). `[ ]` The loop filter's threads (above), frame-buffer
-    reuse, then the next profile.
-  - `[ ]` The encoder, checked by decoding what it writes.
+    (an i7-8700K). `[x]` The loop filter's threads (above) and frame-buffer
+    reuse. The rest of the gap to libvpx's SIMD on one core needs SSSE3/AVX2
+    chosen at run time, so `unsafe`: `open-questions/F-Q5.md`.
+  - `[-]` The encoder: libvpx's realtime path (`vpxenc --rt --cpu-used=8`,
+    CBR), to be byte-identical to `vpxenc` (§1339). `[x]` The forward
+    transforms and quantisers, bit-exact against libvpx's C; the bitstream
+    writer, tokenizer and probability updates; block coding and
+    reconstruction (`vp9::Encoder`). Key frames with fixed decisions decode
+    to exactly the encoder's reconstruction, at random partitions, modes and
+    transform sizes too, and the encoder counts what the decoder counts.
+    `[x]` libvpx's one-pass CBR rate control and the frame loop around it.
+    `[x]` libvpx's key-frame decisions (variance partitioning, the realtime
+    intra mode search): the reference encode's first frame
+    (`tests/data/encoder/rt8.ivf`) is byte-identical to `vpxenc`'s.
+    `[x]` Inter frames coded from given decisions: references, inter headers,
+    vector prediction and coding, sub-8x8 inter, segment-map prediction --
+    random decisions decode to the encoder's reconstruction, counts agree.
+    `[x]` libvpx's inter decisions: the speed-8 variance partitioning with
+    its copy-partition shortcut, the realtime inter mode search
+    (`vp9_pick_inter_mode`: the fast diamond, sub-pixel and
+    integral-projection searches, the filter search, the encode breakout),
+    cyclic refresh's band and segment updates, source SAD, scene, noise and
+    skin detection. All 30 frames of the reference encode are byte-identical
+    to `vpxenc`'s from the encoder's own decisions, and a trace of every
+    decision matches libvpx's line for line. `[x]` A second reference encode
+    for the paths that clip never reaches (`tests/data/encoder/rt8cut.ivf`,
+    150 pictures of 651x357): two scene cuts coded at the overshoot
+    quantiser, the noise estimate rising to Medium, three golden refreshes,
+    a fade, blocks over the picture's right and bottom edges. All 150 frames
+    are byte-identical from the encoder's own decisions and from libvpx's
+    replayed; the decision traces agree on all 867,893 lines.
+    `[x]` The learned partitioning libvpx uses at 352x288 and below
+    (`nonrd_pick_partition` trimmed by `ml_predict_var_partitioning`'s
+    networks, with glibc's `logf` as x86-64 runs it, §1341): a third
+    reference encode at 350x286 (`tests/data/encoder/rt8small.ivf`) is
+    byte-identical for all 90 frames, the traces agreeing on all 152,823
+    lines. Every frame size now makes `vpxenc`'s frames.
+    `[x]` Threads (§1342): each tile column on a thread of its own, into a
+    strip with its own copy of the decisions' state, put together in column
+    order -- the same bytes on any number of threads, and `vpxenc`'s with
+    the same `--tile-columns` (two more reference encodes, four columns at
+    1280x720 and two at 651x357, match on one to four threads). By default a
+    picture has as many columns as its width allows, as `vpxenc`'s does.
+    `[-]` Speed: the hot paths rewritten to vectorise for SSE2, exactly --
+    the sub-pixel variance, the quantisers (raster order and inverse scans),
+    the 8x8 DCT (eight columns at once in 32 bits), the block measures; 2.3x
+    fewer instructions for the first reference (callgrind). Encoding speed in
+    `tests/bench.rs` (`bench_vp9_encode`).
 
 - `[-]` `[F]` **AVIF pictures**, decided 2026-09-27 (§1333): a HEIF container reader
   and a port of rav1d (dav1d in Rust, BSD) in `gui/imagecodec`, so AVIF opens
@@ -3753,7 +3798,12 @@ lane C's `guitk`.
     `PickWindow` arms a one-shot pick under a compositor-drawn crosshair, the
     next click names the window -- title, program, attested pid -- and
     reaches no window; started only by the focused program; Escape, another
-    button or `CancelPick` gives up. `oswindow::EventLoop::pick_window`.
+    button or `CancelPick` gives up. `oswindow::EventLoop::pick_window`, and
+    for applications under `app::drive`, `App::take_pick` /
+    `App::window_picked` (2026-10-04,
+    `requests/e-f-the-window-picker-has-no-route-through-oswindow-app.md`);
+    the answer, which comes with no event, wakes the loop
+    (`Dispatch::Answered`).
   - `[x]` The attested pid in the window list (`WindowInfo::process`,
     window list version 6), for per-program grouping on the taskbar; `pid`
     stays the per-connection number.

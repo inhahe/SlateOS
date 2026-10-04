@@ -3049,6 +3049,21 @@ impl SystemRestoreUI {
 
     /// Handle a mouse event.
     fn handle_mouse(&mut self, mouse: &MouseEvent) -> EventResult {
+        // The list of keys is modal for the pointer as it is for the keys, and
+        // drawn over everything, the questions and the progress overlay
+        // included: a press with any button puts it away and does nothing
+        // else -- it used to answer the question under it, "Restore" or
+        // "Delete" among the answers -- and the wheel scrolls nothing it
+        // covers.
+        if self.show_help {
+            return match mouse.kind {
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                    self.show_help = false;
+                    EventResult::Consumed
+                }
+                _ => EventResult::Ignored,
+            };
+        }
         match mouse.kind {
             MouseEventKind::Press(MouseButton::Left) => self.handle_click(mouse.x, mouse.y),
             MouseEventKind::Scroll { dy, .. } => {
@@ -6650,6 +6665,76 @@ working filter from a broken one"
         assert_eq!(ui.handle_event(&click(4.0, 4.0)), EventResult::Consumed);
         assert_eq!(ui.dialog, DialogKind::None);
         assert_eq!(ui.selected_id, before, "the click did not reach the list");
+    }
+
+    /// **A press with the list of keys up puts it away and does nothing
+    /// else, and the wheel scrolls nothing under it.** A press answered the
+    /// question drawn under the list -- "Delete", here. The controls are the
+    /// same turn and press with the list down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
+        let f1 = press(Key::F1);
+
+        // The wheel, in a window short enough for the list to scroll.
+        ui.handle_event(&Event::Resize {
+            width: 1000,
+            height: 360,
+        });
+        let wheel = Event::Mouse(MouseEvent {
+            x: 200.0,
+            y: ui.content_top() + 20.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -1.0 },
+        });
+        ui.handle_event(&f1);
+        assert!(ui.show_help);
+        ui.handle_event(&wheel);
+        assert_eq!(
+            ui.scroll_offset, 0.0,
+            "the wheel scrolled the list under the list of keys"
+        );
+        assert!(ui.show_help, "the wheel put the list away");
+        ui.handle_event(&press(Key::Escape));
+        ui.handle_event(&wheel);
+        assert!(
+            ui.scroll_offset > 0.0,
+            "control: the wheel scrolls nothing at all"
+        );
+
+        // A press, on the question's Delete.
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
+        let before = ui.manager.tree.count();
+        ui.handle_event(&press(Key::Delete));
+        let asked = ui.dialog.clone();
+        assert_ne!(asked, DialogKind::None, "Delete asked nothing");
+        let confirm = ui
+            .dialog_buttons()
+            .into_iter()
+            .find(|(_, b)| *b == DialogButton::Confirm)
+            .expect("drawn")
+            .0;
+        let (x, y) = centre(confirm);
+        ui.handle_event(&f1);
+        assert_eq!(ui.handle_event(&click(x, y)), EventResult::Consumed);
+        assert!(!ui.show_help, "the press did not put the list away");
+        assert_eq!(
+            ui.dialog, asked,
+            "the press answered the question under the list"
+        );
+        assert_eq!(ui.manager.tree.count(), before);
+        ui.handle_event(&f1);
+        ui.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Right),
+        }));
+        assert!(!ui.show_help, "a right-button press left the list up");
+        ui.handle_event(&click(x, y));
+        assert_eq!(
+            ui.dialog,
+            DialogKind::None,
+            "control: the press answers nothing even with the list down"
+        );
     }
 
     #[test]

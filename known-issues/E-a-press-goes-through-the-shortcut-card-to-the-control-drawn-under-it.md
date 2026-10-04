@@ -21,7 +21,8 @@ diskimager, ebook, explorer, fileassoc, filediff, fontmanager, hexeditor,
 imageviewer, ircclient, jsonviewer, reminders, mindmap, musicplayer, notes,
 paint, partmanager, pdfviewer, photomanager, podcast, pomodoro,
 procexplorer, radio, remotedesktop, screenrecorder, screenshot, settings,
-spreadsheet, startupmanager, stopwatch, sudoku and sysinfo (2026-10-04).
+spreadsheet, startupmanager, stopwatch, sudoku, sysinfo and systemrestore
+(2026-10-04).
 Calendar's, diagram's, diskimager's, explorer's, filediff's, hexeditor's,
 imageviewer's, ircclient's, jsonviewer's, reminders', mindmap's,
 pdfviewer's, remotedesktop's, spreadsheet's and sudoku's cards were modal for
@@ -36,7 +37,7 @@ each application's card is checked for both. (Reminders takes no press at all; i
 production code draws `guitk::shortcut::render_card` and has no function
 handling a mouse event that reads the card's flag. Those not yet fixed:
 
-sysmonitor, systemrestore, undelete, whiteboard, wordle,
+undelete, whiteboard, wordle,
 worldclock.
 
 A scan is a lead, not a verdict: an application may guard its card some way
@@ -50,7 +51,9 @@ worth copying wherever an application hit-tests its frame. (The scan below
 does not know it; read an application's drawing before trusting its name.)
 Kanban and passwordgen were struck off for another: neither takes a press on
 its window at all -- only their file dialogs do -- and both cards were
-already modal for the keys.
+already modal for the keys. Sysmonitor was struck off for a third: it has no
+shortcut card at all, and the `render_card(` the scan found is its own
+method, which draws a dashboard panel.
 Delete each name as it is fixed; to see what is left, run from the tree's
 root:
 

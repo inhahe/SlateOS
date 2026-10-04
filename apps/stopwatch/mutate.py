@@ -33,6 +33,42 @@ MUTATIONS = [
 ]
 
 CARD = 'the_shortcut_card_takes_a_press_rather_than_passing_it_on'
+TOUCHPAD = 'a_touchpads_small_turns_add_up_to_rows'
+RUN = 'a_fraction_of_a_notch_does_not_outlive_the_run'
+
+MUTATIONS += [
+    # The wheel adds a touchpad's small turns up (2026-10-04).
+    (
+        "the laps' fraction of a notch is truncated",
+        '                    let rows = state.lap_wheel.rows(dy);\n',
+        '                    let rows = wheel::rows_f(dy) as isize;\n',
+        [TOUCHPAD],
+    ),
+    (
+        "the history's fraction of a notch is truncated",
+        '                    let rows = state.history_wheel.rows(dy);\n',
+        '                    let rows = wheel::rows_f(dy) as isize;\n',
+        [TOUCHPAD],
+    ),
+    (
+        'the history turns the laps\' wheel',
+        '                    let rows = state.history_wheel.rows(dy);\n',
+        '                    let rows = state.lap_wheel.rows(dy);\n',
+        [TOUCHPAD],
+    ),
+    (
+        'a turn that moves nothing says it moved',
+        '            if (state.lap_scroll, state.history_scroll) == before {\n',
+        '            if false {\n',
+        [TOUCHPAD],
+    ),
+    (
+        'a fraction of a notch outlives the run',
+        '        self.lap_wheel.reset();\n',
+        '',
+        [RUN],
+    ),
+]
 
 MUTATIONS += [
     # The list of keys takes the pointer (2026-10-04; known-issues

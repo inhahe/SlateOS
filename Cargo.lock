@@ -2551,6 +2551,7 @@ dependencies = [
  "oswindow",
  "scratchdir",
 ]
+ "textline",
 
 [[package]]
 name = "netstat"

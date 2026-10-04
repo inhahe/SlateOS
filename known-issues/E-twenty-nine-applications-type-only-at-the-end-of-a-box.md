@@ -1,8 +1,8 @@
 ### [E] Twenty-nine applications' text boxes type only at the end -- 2026-10-04
 
-**Status:** FIXED on lane E's branch, 2026-10-04 -- every one of the
-twenty-nine edits at a caret. Moves to `known-issues-resolved/` once it is
-on `main` and boot-tested.
+**Status:** OPEN -- done on lane E's branch, 2026-10-04: every one of the
+twenty-nine edits at a caret. It moves to `known-issues-resolved/` once
+that is on `main` and boot-tested.
 
 **In short:** in twenty-nine applications a text box takes typing only at
 its end. There is no caret to move: the arrow keys, Home and End do nothing

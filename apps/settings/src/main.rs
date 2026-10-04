@@ -894,6 +894,13 @@ pub enum DropdownId {
     ColorTheme,
     /// The icon theme, chosen apart from the colours (`icon_theme`, §880).
     IconTheme,
+    /// The shapes of the controls -- a theme's `widget-style`, chosen apart
+    /// from its colours (`widget_theme`, design-decisions §1435).
+    WidgetTheme,
+    /// How the desktop moves -- a theme's `animation`, chosen apart from its
+    /// colours and beside the animation speed, which scales it
+    /// (`animation_theme`, §1446).
+    AnimationTheme,
     /// The clock's time zone, or the machine's own.
     TimeZone,
     /// A zone to add a world clock for.
@@ -958,7 +965,7 @@ impl DropdownId {
     /// a list that names itself exhaustive and is not will be read as
     /// exhaustive by the next person, reason or no reason. The gate's own
     /// wording: "A subset named ALL is the same defect wearing the other hat."
-    pub const FIXED: [Self; 22] = [
+    pub const FIXED: [Self; 24] = [
         Self::QuietStart,
         Self::QuietEnd,
         Self::TimeZone,
@@ -967,6 +974,8 @@ impl DropdownId {
         Self::AutoDarkFrom,
         Self::ColorTheme,
         Self::IconTheme,
+        Self::WidgetTheme,
+        Self::AnimationTheme,
         Self::WallpaperFit,
         Self::Resolution,
         Self::RefreshRate,
@@ -1127,6 +1136,15 @@ impl SettingsState {
         self.themes.iter().find(|t| t.id.as_os_str() == id)
     }
 
+    /// A chosen theme's name as shown: its listed name, or its id drawn as
+    /// text for one not installed (any more).
+    fn theme_name(&self, id: &std::ffi::OsStr) -> String {
+        self.listed_theme(id).map_or_else(
+            || std::path::Path::new(id).shown().to_string(),
+            |t| t.name.clone(),
+        )
+    }
+
     /// A theme's row in the Colors list: its name, and why it cannot be
     /// chosen when it cannot -- listed rather than left out, so a theme's
     /// author can see why theirs is not offered.
@@ -1160,6 +1178,52 @@ impl SettingsState {
         } else {
             format!("{} -- no icons", info.name)
         }
+    }
+
+    /// A theme's row in the Controls list: its name, or why it cannot be
+    /// chosen -- unreadable, or with no `widget-style` to offer.
+    fn widget_theme_item(info: &appearance::themes::ThemeInfo) -> String {
+        if info.provides_widget_style() {
+            info.name.clone()
+        } else if let Some(problem) = &info.problem {
+            format!("{} -- cannot be used: it {problem}", info.name)
+        } else {
+            format!("{} -- no control shapes", info.name)
+        }
+    }
+
+    /// A theme's row in the Motion list: its name, or why it cannot be
+    /// chosen -- unreadable, or with no `animation` to offer.
+    fn animation_theme_item(info: &appearance::themes::ThemeInfo) -> String {
+        if info.provides_animation() {
+            info.name.clone()
+        } else if let Some(problem) = &info.problem {
+            format!("{} -- cannot be used: it {problem}", info.name)
+        } else {
+            format!("{} -- no motion", info.name)
+        }
+    }
+
+    /// What the page says under the motion: how the chosen theme moves -- at
+    /// the normal speed, which the speed above then scales -- and why a
+    /// chosen theme's motion is not in use.
+    fn animation_theme_notes(&self) -> Vec<String> {
+        let theme = &self.appearance.settings.animation_theme;
+        let motion = theme.motion();
+        let mut notes = vec![if motion.is_still() {
+            "Nothing moves: panels and menus appear and go at once.".to_string()
+        } else {
+            let how = match motion.curve() {
+                guitk::motion::Curve::EaseOut => "Glides in and settles",
+                guitk::motion::Curve::Linear => "Moves at an even pace",
+                guitk::motion::Curve::Spring => "Springs a little past its place and back",
+            };
+            format!("{how}, {} ms a move at Normal speed.", motion.standard_ms())
+        }];
+        if let Some(problem) = theme.problem() {
+            notes.push(problem.to_string());
+        }
+        notes
     }
 
     /// What the page says under the colour theme: that it draws one mode
@@ -4458,31 +4522,21 @@ impl SettingsState {
         // c-e-a-colour-theme-picker). The accent below applies under any
         // theme: a theme never sets it.
         s.section("Theme");
-        let color_name = self
-            .listed_theme(self.appearance.settings.color_theme.id())
-            .map_or_else(
-                || {
-                    std::path::Path::new(self.appearance.settings.color_theme.id())
-                        .shown()
-                        .to_string()
-                },
-                |t| t.name.clone(),
-            );
+        let color_name = self.theme_name(self.appearance.settings.color_theme.id());
         s.dropdown_row("Colors", DropdownId::ColorTheme, &color_name);
         for note in self.color_theme_notes() {
             s.note(&note, 28.0);
         }
-        let icon_name = self
-            .listed_theme(self.appearance.settings.icon_theme.id())
-            .map_or_else(
-                || {
-                    std::path::Path::new(self.appearance.settings.icon_theme.id())
-                        .shown()
-                        .to_string()
-                },
-                |t| t.name.clone(),
-            );
+        let icon_name = self.theme_name(self.appearance.settings.icon_theme.id());
         s.dropdown_row("Icons", DropdownId::IconTheme, &icon_name);
+        // The controls' shapes, a theme's own axis as icons are (lane C,
+        // c-e-a-theme-can-shape-the-controls): a theme that sets colours and
+        // controls is offered in both lists, and chosen in each apart.
+        let widget_name = self.theme_name(self.appearance.settings.widget_theme.id());
+        s.dropdown_row("Controls", DropdownId::WidgetTheme, &widget_name);
+        if let Some(problem) = self.appearance.settings.widget_theme.problem() {
+            s.note(problem, 28.0);
+        }
         s.gap();
 
         // The automatic mode's hours, where it is chosen. "System (Auto)" is
@@ -4520,6 +4574,13 @@ impl SettingsState {
             .map(|sp| (sp.label(), *sp == self.appearance.settings.animation_speed))
             .collect();
         s.pill_row("Animation Speed", PillId::AnimationSpeed, &speeds);
+        // How things move, beside how fast: the theme says the one, the
+        // speed above scales it (lane C, c-e-a-theme-can-set-the-motion).
+        let motion_name = self.theme_name(self.appearance.settings.animation_theme.id());
+        s.dropdown_row("Motion", DropdownId::AnimationTheme, &motion_name);
+        for note in self.animation_theme_notes() {
+            s.note(&note, 28.0);
+        }
 
         // Its own section rather than an entry under Effects: hiding the
         // taskbar is a behaviour, not a visual treatment, which is also why the
@@ -6095,6 +6156,24 @@ impl SettingsState {
                     .unwrap_or(0);
                 (items, at)
             }
+            DropdownId::WidgetTheme => {
+                let items = self.themes.iter().map(Self::widget_theme_item).collect();
+                let at = self
+                    .themes
+                    .iter()
+                    .position(|t| t.id.as_os_str() == self.appearance.settings.widget_theme.id())
+                    .unwrap_or(0);
+                (items, at)
+            }
+            DropdownId::AnimationTheme => {
+                let items = self.themes.iter().map(Self::animation_theme_item).collect();
+                let at = self
+                    .themes
+                    .iter()
+                    .position(|t| t.id.as_os_str() == self.appearance.settings.animation_theme.id())
+                    .unwrap_or(0);
+                (items, at)
+            }
             DropdownId::DayWallpaperFrom | DropdownId::NightWallpaperFrom => {
                 let day = dropdown_id == DropdownId::DayWallpaperFrom;
                 let current = day_and_night(&self.appearance.settings.wallpaper_schedule)
@@ -7240,6 +7319,22 @@ impl SettingsState {
                         } else {
                             appearance::icons::IconTheme::load(&info.id)
                         };
+                }
+            }
+            DropdownId::WidgetTheme => {
+                if let Some(info) = self.themes.get(index)
+                    && info.provides_widget_style()
+                {
+                    self.appearance.settings.widget_theme =
+                        appearance::themes::WidgetTheme::load_from(&self.theme_dirs, &info.id);
+                }
+            }
+            DropdownId::AnimationTheme => {
+                if let Some(info) = self.themes.get(index)
+                    && info.provides_animation()
+                {
+                    self.appearance.settings.animation_theme =
+                        appearance::themes::AnimationTheme::load_from(&self.theme_dirs, &info.id);
                 }
             }
             DropdownId::DayWallpaperFrom | DropdownId::NightWallpaperFrom => {
@@ -8854,6 +8949,25 @@ mod tests {
         );
         theme("plain", Some("meta:\n  name: Plain\n"), false);
         theme("pack", None, true);
+        // Themes of one other axis each: controls, a springing motion, and
+        // a motion of nothing at all.
+        theme(
+            "rounded",
+            Some("meta:\n  name: Rounded\nwidget-style:\n  field:\n    focus: ring\n"),
+            false,
+        );
+        theme(
+            "bouncy",
+            Some(
+                "meta:\n  name: Bouncy\nanimation:\n  enabled: true\n  duration-ms: 350\n  easing: spring\n",
+            ),
+            false,
+        );
+        theme(
+            "still",
+            Some("meta:\n  name: Still\nanimation:\n  enabled: false\n"),
+            false,
+        );
         dir
     }
 
@@ -8937,6 +9051,77 @@ mod tests {
             app.appearance.settings.color_theme.id(),
             std::ffi::OsStr::new("dusk"),
             "choosing icons changed the colours"
+        );
+    }
+
+    /// A theme's control shapes and its motion are chosen in lists of their
+    /// own, each apart from the colours and from each other; a theme with
+    /// nothing for a list cannot be chosen from it; and the page says how the
+    /// chosen motion moves (lane C, c-e-a-theme-can-shape-the-controls and
+    /// c-e-a-theme-can-set-the-motion).
+    #[test]
+    fn controls_and_motion_are_chosen_apart_from_the_colours() {
+        use std::ffi::OsStr;
+        let dir = scratch_themes();
+        let mut app = themes_state(&dir);
+        let colors = app.appearance.settings.color_theme.id().to_os_string();
+        let pick = |app: &mut SettingsState, id: DropdownId, row: &str| {
+            app.show_dropdown(id);
+            let items = app.dropdown_layout().expect("a layout").items;
+            let at = items
+                .iter()
+                .position(|i| i.starts_with(row))
+                .unwrap_or_else(|| panic!("{row} is not listed: {items:?}"));
+            app.apply_dropdown_selection(at);
+            items
+        };
+
+        let items = pick(&mut app, DropdownId::WidgetTheme, "Rounded");
+        assert!(
+            items.contains(&"Nord -- no control shapes".to_string()),
+            "{items:?}"
+        );
+        assert_eq!(
+            app.appearance.settings.widget_theme.id(),
+            OsStr::new("rounded")
+        );
+        // A theme with no controls changes nothing chosen from this list.
+        pick(&mut app, DropdownId::WidgetTheme, "Nord");
+        assert_eq!(
+            app.appearance.settings.widget_theme.id(),
+            OsStr::new("rounded")
+        );
+
+        let items = pick(&mut app, DropdownId::AnimationTheme, "Bouncy");
+        assert!(
+            items.contains(&"Nord -- no motion".to_string()),
+            "{items:?}"
+        );
+        assert_eq!(
+            app.appearance.settings.animation_theme.id(),
+            OsStr::new("bouncy")
+        );
+        let texts = drawn_texts(&app);
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.starts_with("Springs a little past its place and back, 350 ms")),
+            "the motion is not described: {texts:?}"
+        );
+        assert!(texts.iter().any(|t| t == "Bouncy"), "{texts:?}");
+
+        pick(&mut app, DropdownId::AnimationTheme, "Still");
+        let texts = drawn_texts(&app);
+        assert!(
+            texts.iter().any(|t| t.starts_with("Nothing moves")),
+            "{texts:?}"
+        );
+
+        // Each list chose its own axis only.
+        assert_eq!(app.appearance.settings.color_theme.id(), colors.as_os_str());
+        assert_eq!(
+            app.appearance.settings.widget_theme.id(),
+            OsStr::new("rounded")
         );
     }
 

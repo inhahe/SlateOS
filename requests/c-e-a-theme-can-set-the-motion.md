@@ -2,7 +2,7 @@
 
 **From:** Lane C (`gui/toolkit`, `gui/appearance`, `gui/desktop`). **To:** Lane E
 (`apps/settings`, and any application with a sliding or fading part of its own).
-**Filed:** 2026-09-29. **Status:** OPEN -- lane C's half is done.
+**Filed:** 2026-09-29. **Status:** OPEN -- lane C's half is done; lane E's part 1 done 2026-10-03 (reply at the end).
 **Decision behind it:** `design-decisions.md` §1446.
 
 **In short:** a theme can now say how the desktop moves -- how long a panel
@@ -64,3 +64,17 @@ on under a theme that merely has no transitions.
 Mark this request DONE with the commit, and tell lane C through the usual
 route; `roadmap.md` → *A theme sets how the desktop moves* then loses its
 **Lane E** clause.
+
+## Lane E (2026-10-03) -- part 1 done
+
+Settings' Themes page has a **Motion** list right under Animation Speed:
+every installed theme, one with a usable `animation` by its name (the
+built-in always; `enabled: false` counts), the rest saying why not ("-- no
+motion", or why it could not be read); choosing sets `animation_theme`
+through `AnimationTheme::load_from` and nothing else. Under it, what the
+theme's motion is, before the user's speed: "Glides in and settles", "Moves
+at an even pace" or "Springs a little past its place and back", with its
+`standard_ms()` at Normal speed -- or "Nothing moves" -- and the theme's
+`problem()` if it has one. Test:
+`controls_and_motion_are_chosen_apart_from_the_colours`. Part 2 (lane E's
+own transitions) is next.

@@ -3,7 +3,7 @@
 **From:** Lane C (`gui/toolkit`, `gui/appearance`). **To:** Lane E
 (`apps/settings`, `apps/explorer`, `apps/terminal`, `apps/dictionary`, and
 any application that draws a text field of its own).
-**Filed:** 2026-09-28. **Status:** OPEN -- lane C's half is done.
+**Filed:** 2026-09-28. **Status:** OPEN -- lane C's half is done; lane E's part 1 done 2026-10-03 (reply at the end).
 **Decision behind it:** `design-decisions.md` §1435.
 
 **In short:** a theme can now choose how the controls are shaped, not only
@@ -69,3 +69,16 @@ themselves:
 
 Without the call they draw the toolkit's standard width, which is what every
 host got before.
+
+## Lane E (2026-10-03) -- part 1 done
+
+Settings' Themes page has a **Controls** list beside Colors and Icons: every
+installed theme, a theme with a usable `widget-style` by its name, the rest
+saying why not ("-- no control shapes", or "-- cannot be used: it ..." for one
+that could not be read); choosing sets `widget_theme` through
+`WidgetTheme::load_from` (the page's own theme directories) and changes
+nothing else, and a chosen theme's `problem()` is said under the list. Test:
+`controls_and_motion_are_chosen_apart_from_the_colours`. Parts 2 (the
+explorer's, the terminal's and the dictionary's own scrollbars, and
+hand-drawn text boxes) and 3 (the focus width for `PathBar` and
+`InputDialog`) are next.

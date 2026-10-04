@@ -30,12 +30,16 @@ use std::collections::HashMap;
 use guitk::color::Color;
 use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::field;
 use guitk::frame::Rect;
 use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::scroll_window;
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::text::TextCursor;
+use guitk::textedit;
+use guitk::textinput::TextInput;
 use oswindow::app::{self, App, Response};
 use oswindow::{Event, RenderTree};
 use std::process::ExitCode;
@@ -170,6 +174,15 @@ const SEEK_STRIP_HEIGHT: f32 = 8.0;
 const HEADER_HEIGHT: f32 = 48.0;
 const EPISODE_ROW_HEIGHT: f32 = 72.0;
 const SEARCH_BAR_HEIGHT: f32 = 40.0;
+/// The size the search box's text is drawn at.
+const SEARCH_TEXT_SIZE: f32 = 14.0;
+/// How far the search box's text sits in from its left and right edges.
+const SEARCH_TEXT_INSET: f32 = 12.0;
+/// The most characters the search box holds.
+const SEARCH_CAPACITY: usize = 256;
+/// Where the search's first result row is drawn: under the box and the line
+/// that counts the results.
+const SEARCH_LIST_TOP: f32 = HEADER_HEIGHT + 12.0 + SEARCH_BAR_HEIGHT + 12.0 + 24.0;
 const CATEGORY_PILL_HEIGHT: f32 = 28.0;
 const TOOLBAR_HEIGHT: f32 = 36.0;
 /// Y of the first episode row: under the header, the filter bar, and the
@@ -1021,6 +1034,18 @@ pub struct PodcastApp {
     pub selected_episode_id: Option<u64>,
     pub search_query: String,
     pub search_results: Vec<(u64, u64)>, // (podcast_id, episode_id)
+    /// The search box's caret and selection, laid over `search_query`,
+    /// which stays the truth: reloaded whenever the query changes under it.
+    search_editor: TextInput,
+    /// What Ctrl+C or Ctrl+X last took from the search box, for Ctrl+V.
+    search_clipboard: String,
+    /// How wide the mark is round the box that has the keyboard: the user's
+    /// focus width (`App::appearance_changed`), the toolkit's until it is
+    /// known.
+    pub focus_ring_width: f32,
+    /// The view an episode's details were opened from -- the episode list or
+    /// the search -- which Escape goes back to.
+    detail_from: MainView,
     /// Index of the first subscription drawn in the sidebar.
     ///
     /// A row index rather than a pixel offset: the sidebar draws whole items,
@@ -1071,6 +1096,10 @@ impl PodcastApp {
             episode_filter: EpisodeFilter::All,
             selected_episode_id: None,
             search_query: String::new(),
+            search_editor: TextInput::new(),
+            search_clipboard: String::new(),
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
+            detail_from: MainView::EpisodeList,
             search_results: Vec::new(),
             sidebar_scroll: 0,
             episode_list_scroll: 0,
@@ -2160,19 +2189,25 @@ impl PodcastApp {
             self.select_sidebar(target);
             return true;
         }
-        if self.main_view == MainView::EpisodeList {
-            if let Some(filter) = self.filter_pill_at(event.x, event.y) {
-                // A filter shortens the list, so a scrolled position in the
-                // old one names nothing in the new one.
-                self.episode_filter = filter;
-                self.episode_list_scroll = 0;
-                return true;
-            }
+        if self.main_view == MainView::Search && self.search_box_rect().contains(event.x, event.y) {
+            self.press_search_box(event.x);
+            return true;
+        }
+        if self.main_view == MainView::EpisodeList
+            && let Some(filter) = self.filter_pill_at(event.x, event.y)
+        {
+            // A filter shortens the list, so a scrolled position in the
+            // old one names nothing in the new one.
+            self.episode_filter = filter;
+            self.episode_list_scroll = 0;
+            return true;
+        }
+        if matches!(self.main_view, MainView::EpisodeList | MainView::Search) {
             if let Some((pod_id, ep_id)) = self.episode_row_at(event.x, event.y) {
                 // First click selects, second opens: a list you cannot look at
                 // without leaving it is a list you cannot browse.
                 if self.selected_episode_id == Some(ep_id) {
-                    self.main_view = MainView::EpisodeDetail;
+                    self.open_episode_detail();
                 } else {
                     self.selected_episode_id = Some(ep_id);
                     self.current_podcast_id.get_or_insert(pod_id);
@@ -2294,6 +2329,13 @@ impl PodcastApp {
             }
             return true;
         }
+        // In the search, a key the box answers is the box's: typing -- the
+        // letters that are commands elsewhere, and Space -- the caret keys,
+        // Backspace and Delete, and Ctrl+A, C, X and V. It was a box that
+        // said "Type to search" and took no typing: S changed the speed.
+        if self.main_view == MainView::Search && self.handle_search_key(event) {
+            return true;
+        }
 
         // Before anything else: Space plays, and a guard arm placed after a
         // bare `Key::S` would never be reached. A Ctrl chord, not Ctrl held:
@@ -2332,23 +2374,30 @@ impl PodcastApp {
             Key::Up => self.move_episode_selection(-1),
             Key::Down => self.move_episode_selection(1),
             Key::Enter => {
-                if self.main_view == MainView::EpisodeList && self.selected_episode_id.is_some() {
-                    self.main_view = MainView::EpisodeDetail;
+                let opens = match self.main_view {
+                    MainView::EpisodeList => self.selected_episode_id.is_some(),
+                    MainView::Search => self.selected_episode().is_some(),
+                    _ => false,
+                };
+                if opens {
+                    self.open_episode_detail();
                     true
                 } else {
                     self.play_selected_episode()
                 }
             }
             Key::Escape => {
-                // Out of the detail view, back to the list it came from.
+                // Out of the detail view, back to the list it came from: the
+                // episode list, or the search.
                 if self.main_view == MainView::EpisodeDetail {
-                    self.main_view = MainView::EpisodeList;
+                    self.main_view = self.detail_from;
                     true
                 } else {
                     false
                 }
             }
-            Key::Tab => {
+            // The filter pills are the episode list's; the search has none.
+            Key::Tab if self.main_view != MainView::Search => {
                 self.cycle_filter();
                 true
             }
@@ -2365,6 +2414,109 @@ impl PodcastApp {
                 true
             }
             _ => self.handle_typed(event),
+        }
+    }
+
+    /// Open the details of the selected episode, remembering the list it
+    /// was opened from for Escape.
+    fn open_episode_detail(&mut self) {
+        self.detail_from = self.main_view;
+        self.main_view = MainView::EpisodeDetail;
+    }
+
+    /// A key while the search is showing. Escape, plain, empties a query
+    /// that has something in it; every key a field answers is the box's
+    /// editor's (`textline::apply_key`), the query searched again when it
+    /// changed. Returns whether the key was the box's: Enter, the arrows up
+    /// and down and the rest are the list's.
+    fn handle_search_key(&mut self, event: &KeyEvent) -> bool {
+        if event.key == Key::Escape
+            && textline::is_plain(event.modifiers)
+            && !self.search_query.is_empty()
+        {
+            self.set_search_query(String::new());
+            return true;
+        }
+        if self.search_editor.text() != self.search_query {
+            self.search_editor.set_text(&self.search_query);
+        }
+        let edit = textline::apply_key(
+            &mut self.search_editor,
+            event,
+            SEARCH_CAPACITY,
+            &self.search_clipboard,
+            SEARCH_TEXT_SIZE,
+        );
+        if let Some(copied) = edit.copied {
+            self.search_clipboard = copied;
+        }
+        if self.search_editor.text() != self.search_query {
+            let query = self.search_editor.text().to_owned();
+            self.set_search_query(query);
+        }
+        edit.handled
+    }
+
+    /// Search for `query`, from the top of its results.
+    fn set_search_query(&mut self, query: String) {
+        self.search_query = query;
+        self.perform_search();
+        self.episode_list_scroll = 0;
+    }
+
+    /// Where the search box is drawn, and pressed.
+    pub fn search_box_rect(&self) -> Rect {
+        Rect::new(
+            SIDEBAR_WIDTH + 16.0,
+            HEADER_HEIGHT + 12.0,
+            (self.width - SIDEBAR_WIDTH - 32.0).max(0.0),
+            SEARCH_BAR_HEIGHT,
+        )
+    }
+
+    /// Where the search box's caret is drawn: the editor's, or the end of
+    /// the query if the query changed under the editor. One answer for the
+    /// drawing and for a press.
+    fn search_cursor(&self) -> TextCursor {
+        if self.search_editor.text() == self.search_query {
+            self.search_editor.cursor()
+        } else {
+            TextCursor::from(self.search_query.len())
+        }
+    }
+
+    /// A press in the search box at `x`: the caret goes under the pointer,
+    /// measured against the box as it was drawn before the press.
+    fn press_search_box(&mut self, x: f32) {
+        let rect = self.search_box_rect();
+        let drawn = self.search_cursor();
+        if self.search_editor.text() != self.search_query {
+            self.search_editor.set_text(&self.search_query);
+        }
+        let cursor = textedit::cursor_at_click(
+            &self.search_query,
+            drawn,
+            (rect.w - 2.0 * SEARCH_TEXT_INSET).max(0.0),
+            SEARCH_TEXT_SIZE,
+            FontWeightHint::Regular,
+            x - rect.x - SEARCH_TEXT_INSET,
+        );
+        self.search_editor.set_selection_anchor(None);
+        self.search_editor.set_cursor(cursor);
+    }
+
+    /// How the search box is drawn: with the keyboard whenever the search is
+    /// showing -- what is typed goes to it -- unless the list of keys or the
+    /// file dialog is over it, and red while the query finds nothing. Never
+    /// lit under the pointer: this window does not follow it.
+    fn search_box_state(&self) -> field::State {
+        field::State {
+            hovered: false,
+            focused: self.main_view == MainView::Search
+                && !self.show_help
+                && !self.picker.is_open(),
+            disabled: false,
+            invalid: !self.search_query.is_empty() && self.search_results.is_empty(),
         }
     }
 
@@ -2408,6 +2560,15 @@ impl PodcastApp {
     /// The episode the keyboard is on, as a (podcast, episode) pair.
     pub fn selected_episode(&self) -> Option<(u64, u64)> {
         let wanted = self.selected_episode_id?;
+        // An episode's details are about that episode wherever it was found
+        // -- a search's result is in no sidebar list, and Play under its
+        // details played nothing.
+        if self.main_view == MainView::EpisodeDetail {
+            return self
+                .podcasts
+                .iter()
+                .find_map(|p| p.find_episode(wanted).map(|_| (p.id, wanted)));
+        }
         self.listed_episodes()
             .into_iter()
             .find(|&(_, ep_id)| ep_id == wanted)
@@ -2813,7 +2974,12 @@ impl PodcastApp {
         // of a short one, so a change of feed starts at the top of it.
         self.episode_list_scroll = 0;
         match target {
-            SidebarTarget::Search => self.main_view = MainView::Search,
+            SidebarTarget::Search => {
+                self.main_view = MainView::Search;
+                // The results of the query as it stands, the caret after it.
+                self.perform_search();
+                self.search_editor.set_text(&self.search_query);
+            }
             SidebarTarget::AllEpisodes => {
                 self.sidebar_selection = SidebarSelection::AllEpisodes;
                 self.main_view = MainView::EpisodeList;
@@ -2958,6 +3124,13 @@ impl PodcastApp {
 
     /// The episodes the list is showing, in the order it shows them.
     pub fn listed_episodes(&self) -> Vec<(u64, u64)> {
+        // The search's results are a list like any other: the arrows move
+        // through them, Enter opens one, and a press selects one. They were
+        // drawn and nothing could reach them -- the arrows moved through the
+        // sidebar's list, hidden behind the search.
+        if self.main_view == MainView::Search {
+            return self.search_results.clone();
+        }
         match &self.sidebar_selection {
             SidebarSelection::Podcast(id) => self.filtered_episodes_for_podcast(*id),
             SidebarSelection::Category(cat) => self.episodes_for_category(*cat),
@@ -2970,14 +3143,25 @@ impl PodcastApp {
         scroll_window::visible(
             total,
             EPISODE_ROW_HEIGHT,
-            content_h - EPISODE_LIST_TOP - LIST_MORE_HEIGHT,
+            content_h - self.list_top() - LIST_MORE_HEIGHT,
             self.episode_list_scroll,
         )
     }
 
+    /// Where the first row of the list on screen is drawn: the episode
+    /// list's, or the search's results'.
+    fn list_top(&self) -> f32 {
+        if self.main_view == MainView::Search {
+            SEARCH_LIST_TOP
+        } else {
+            EPISODE_LIST_TOP
+        }
+    }
+
     /// Which episode a point in the list is on, if any.
     pub fn episode_row_at(&self, x: f32, y: f32) -> Option<(u64, u64)> {
-        if x < SIDEBAR_WIDTH || y < EPISODE_LIST_TOP {
+        let top = self.list_top();
+        if x < SIDEBAR_WIDTH || y < top {
             return None;
         }
         let content_h = self.content_bottom();
@@ -2986,9 +3170,9 @@ impl PodcastApp {
         #[allow(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
-            reason = "guarded at or below EPISODE_LIST_TOP above, so the quotient is >= 0"
+            reason = "guarded at or below the list's top above, so the quotient is >= 0"
         )]
-        let drawn = ((y - EPISODE_LIST_TOP) / EPISODE_ROW_HEIGHT) as usize;
+        let drawn = ((y - top) / EPISODE_ROW_HEIGHT) as usize;
         if drawn >= window.count {
             return None;
         }
@@ -4137,49 +4321,15 @@ impl PodcastApp {
         let pad = content_x + 16.0;
         let text_w = content_w - 32.0;
 
-        // Search input field.
-        let input_y = HEADER_HEIGHT + 12.0;
-        self.palette.push_surface(
-            cmds,
-            pad,
-            input_y,
-            text_w,
-            SEARCH_BAR_HEIGHT,
-            8.0,
-            Surface::Card,
-        );
-        cmds.push(RenderCommand::StrokeRect {
-            x: pad,
-            y: input_y,
-            width: text_w,
-            height: SEARCH_BAR_HEIGHT,
-            color: self.palette.surface1,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(8.0),
-        });
-
-        let display_text = if self.search_query.is_empty() {
-            "Search podcasts and episodes..."
-        } else {
-            &self.search_query
-        };
-        cmds.push(RenderCommand::Text {
-            x: pad + 12.0,
-            y: input_y + 10.0,
-            text: display_text.to_string(),
-            color: if self.search_query.is_empty() {
-                self.palette.subtext0
-            } else {
-                self.palette.text
-            },
-            font_size: 14.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(text_w - 24.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        // The search box: the toolkit's field, with the keyboard whenever
+        // the search is showing.
+        let rect = self.search_box_rect();
+        let state = self.search_box_state();
+        field::draw(cmds, &self.palette, rect, state, self.focus_ring_width);
+        self.render_search_text(cmds, rect, state.focused);
 
         // Results.
-        let results_y = input_y + SEARCH_BAR_HEIGHT + 12.0;
+        let results_y = rect.y + SEARCH_BAR_HEIGHT + 12.0;
         if self.search_query.is_empty() {
             cmds.push(RenderCommand::Text {
                 x: pad,
@@ -4203,27 +4353,108 @@ impl PodcastApp {
                 overflow: TextOverflow::Ellipsis,
             });
 
-            let mut ep_y = results_y + 24.0;
-            for (pod_id, ep_id) in &self.search_results {
-                if ep_y > content_h {
-                    break;
-                }
+            // The rows the episode list draws, in the same window over the
+            // same scroll, so the arrows, a press and the wheel find the row
+            // drawn -- and the selection is drawn on the one selected.
+            let window = self.episode_list_window(self.search_results.len(), content_h);
+            for (drawn, (pod_id, ep_id)) in self
+                .search_results
+                .get(window.start..window.end())
+                .unwrap_or_default()
+                .iter()
+                .enumerate()
+            {
                 if let Some(podcast) = self.find_podcast(*pod_id)
                     && let Some(ep) = podcast.find_episode(*ep_id)
                 {
                     self.render_episode_row(
                         cmds,
                         content_x + 8.0,
-                        ep_y,
+                        SEARCH_LIST_TOP + drawn as f32 * EPISODE_ROW_HEIGHT,
                         content_w - 16.0,
                         ep,
                         &podcast.title,
-                        false,
+                        self.selected_episode_id == Some(*ep_id),
                     );
                 }
-                ep_y += EPISODE_ROW_HEIGHT;
+            }
+            let hidden = self.search_results.len().saturating_sub(window.count);
+            if hidden > 0 {
+                cmds.push(RenderCommand::Text {
+                    x: pad,
+                    y: SEARCH_LIST_TOP + window.count as f32 * EPISODE_ROW_HEIGHT,
+                    text: format!("{hidden} more"),
+                    color: self.palette.subtext0,
+                    font_size: 11.0,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(text_w),
+                    overflow: TextOverflow::Ellipsis,
+                });
             }
         }
+    }
+
+    /// The search box's text -- the query, or what the box is for, faint,
+    /// while it is empty -- and, with the keyboard, its caret and selection.
+    /// An empty box with the keyboard draws the caret before what it is for,
+    /// where the first character typed will appear, as the toolkit's own
+    /// input dialog does.
+    fn render_search_text(&self, cmds: &mut Vec<RenderCommand>, rect: Rect, focused: bool) {
+        let line = text::line_height(SEARCH_TEXT_SIZE, FontWeightHint::Regular);
+        let (x, y, width) = (
+            rect.x + SEARCH_TEXT_INSET,
+            rect.y + (rect.h - line) / 2.0,
+            (rect.w - 2.0 * SEARCH_TEXT_INSET).max(0.0),
+        );
+        let mut tree = guitk::render::RenderTree::new();
+        if self.search_query.is_empty() {
+            tree.push(RenderCommand::Text {
+                x,
+                y,
+                text: "Search podcasts and episodes...".to_string(),
+                color: self.palette.subtext0,
+                font_size: SEARCH_TEXT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(width),
+                overflow: TextOverflow::Ellipsis,
+            });
+            if focused {
+                textedit::push_caret(
+                    &mut tree,
+                    x,
+                    y,
+                    line,
+                    self.palette.text,
+                    textedit::CARET_WIDTH,
+                );
+            }
+        } else {
+            let editing = self.search_editor.text() == self.search_query;
+            textedit::draw(
+                &mut tree,
+                &textedit::SingleLine {
+                    text: &self.search_query,
+                    cursor: self.search_cursor(),
+                    selection_anchor: if editing {
+                        self.search_editor.selection_anchor()
+                    } else {
+                        None
+                    },
+                    focused,
+                    x,
+                    y,
+                    width,
+                    line_height: line,
+                    font_size: SEARCH_TEXT_SIZE,
+                    weight: FontWeightHint::Regular,
+                    color: self.palette.text,
+                    selection_bg: self.palette.accent,
+                    selection_fg: self.palette.crust,
+                    caret_width: textedit::CARET_WIDTH,
+                },
+            );
+        }
+        cmds.extend(tree.commands);
     }
 
     /// Where every control in the now-playing bar is.
@@ -4511,6 +4742,10 @@ impl PodcastApp {
 impl App for PodcastApp {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -7880,6 +8115,344 @@ mod tests {
             app.sidebar_target_at(20.0, boundary),
             Some(*target),
             "the pixel a row ends on belongs to the next row, not to both"
+        );
+    }
+
+    // -- the search: a box that takes typing, and results that are a list --
+    //
+    // The search view said "Type to search across all podcasts and episodes"
+    // and took no typing: every letter went to the window's keys, so S
+    // changed the speed, A switched auto-play, D downloaded and Space played.
+    // Its results were drawn, and nothing reached them: the arrows moved
+    // through the sidebar's list, hidden behind the search, and a press on a
+    // result did nothing.
+
+    /// `text`, typed a character at a time.
+    fn type_into(app: &mut PodcastApp, text: &str) {
+        for ch in text.chars() {
+            app.handle_event(&typed(Key::Unknown(0), ch));
+        }
+    }
+
+    /// The Ctrl+Alt AltGr arrives as.
+    const ALTGR: Modifiers = Modifiers {
+        shift: false,
+        ctrl: true,
+        alt: true,
+        super_key: false,
+    };
+
+    /// A key `k` typing `text`, held with `modifiers`.
+    fn chord(k: Key, text: &str, modifiers: Modifiers) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        })
+    }
+
+    /// The window with the sample library, in the search.
+    fn searching_app() -> PodcastApp {
+        let mut app = PodcastApp::with_sample_data(1000.0, 700.0);
+        app.select_sidebar(SidebarTarget::Search);
+        assert_eq!(
+            app.main_view,
+            MainView::Search,
+            "control: the sidebar opens the search"
+        );
+        app
+    }
+
+    /// **The search takes typing, and finds as it is typed**: the letters
+    /// that are commands elsewhere and Space among it, a command's letter
+    /// not; the caret keys and the clipboard edit it; Escape empties it.
+    #[test]
+    fn the_search_takes_typing_and_finds_as_it_is_typed() {
+        let mut app = searching_app();
+        let state = |app: &PodcastApp| {
+            (
+                app.playback_speed,
+                app.auto_play_next,
+                app.player_state,
+                app.download_queue.len(),
+            )
+        };
+        let before = state(&app);
+        type_into(&mut app, "async rust");
+        assert_eq!(app.search_query, "async rust", "the search took no typing");
+        assert_eq!(
+            state(&app),
+            before,
+            "a letter typed into the search was a command"
+        );
+        assert!(
+            !app.search_results.is_empty(),
+            "nothing was found as it was typed"
+        );
+
+        app.handle_event(&chord(Key::S, "s", Modifiers::alt()));
+        app.handle_event(&chord(Key::X, "x", Modifiers::ctrl()));
+        assert_eq!(app.search_query, "async rust", "a command typed its letter");
+        app.handle_event(&chord(Key::Q, "@", ALTGR));
+        assert_eq!(app.search_query, "async rust@", "AltGr did not type");
+        app.handle_event(&key(Key::Backspace));
+
+        app.handle_event(&key(Key::Home));
+        type_into(&mut app, "x");
+        assert_eq!(
+            app.search_query, "xasync rust",
+            "Home did not move the caret"
+        );
+        assert!(
+            app.search_results.is_empty(),
+            "the query as it now reads was not searched again"
+        );
+        app.handle_event(&key(Key::Delete));
+        assert_eq!(
+            app.search_query, "xsync rust",
+            "Delete did not delete after the caret"
+        );
+        app.handle_event(&chord(Key::A, "", Modifiers::ctrl()));
+        app.handle_event(&chord(Key::X, "", Modifiers::ctrl()));
+        assert_eq!(app.search_query, "", "Ctrl+A and Ctrl+X did not cut");
+        app.handle_event(&chord(Key::V, "", Modifiers::ctrl()));
+        assert_eq!(
+            app.search_query, "xsync rust",
+            "Ctrl+V did not paste what was cut"
+        );
+
+        app.handle_event(&key(Key::Escape));
+        assert_eq!(app.search_query, "", "Escape did not empty the search");
+        assert!(
+            app.search_results.is_empty(),
+            "an empty search still lists results"
+        );
+        type_into(&mut app, "a");
+        assert_eq!(
+            app.search_query, "a",
+            "typing after Escape edited the query as it read before"
+        );
+
+        // A key the box does not answer is still the window's.
+        app.handle_event(&chord(Key::O, "", Modifiers::ctrl()));
+        assert!(
+            app.picker.is_open(),
+            "Ctrl+O did not open the file dialog from the search"
+        );
+    }
+
+    /// **The search's results are a list**: the arrows move through them,
+    /// Enter opens one and Escape comes back to the search, a press selects
+    /// one and a second opens it, and the details of a result play it.
+    #[test]
+    fn the_searchs_results_are_a_list() {
+        // The sidebar on one podcast and the search finding another's
+        // episodes: a list that was the sidebar's in disguise would hold
+        // none of them.
+        let mut app = PodcastApp::with_sample_data(1000.0, 700.0);
+        let rust = app
+            .podcasts
+            .iter()
+            .find(|p| p.title == "The Rustacean Station")
+            .expect("the fixture's first podcast")
+            .id;
+        app.select_sidebar(SidebarTarget::Podcast(rust));
+        app.select_sidebar(SidebarTarget::Search);
+        type_into(&mut app, "case");
+        let results = app.search_results.clone();
+        assert!(
+            results.len() >= 2,
+            "the fixture finds too little: {results:?}"
+        );
+        assert!(
+            results.iter().all(|(pod, _)| *pod != rust),
+            "the fixture's results are in the sidebar's list"
+        );
+
+        app.handle_event(&key(Key::Down));
+        assert_eq!(
+            app.selected_episode(),
+            results.first().copied(),
+            "Down did not select the first result"
+        );
+        app.handle_event(&key(Key::Down));
+        assert_eq!(app.selected_episode(), results.get(1).copied());
+
+        app.handle_event(&key(Key::Enter));
+        assert_eq!(
+            app.main_view,
+            MainView::EpisodeDetail,
+            "Enter did not open the result"
+        );
+        app.handle_event(&key(Key::Enter));
+        assert_eq!(
+            app.current_episode_id,
+            results.get(1).map(|r| r.1),
+            "Play under a result's details played something else"
+        );
+        app.handle_event(&key(Key::Escape));
+        assert_eq!(
+            app.main_view,
+            MainView::Search,
+            "Escape did not come back to the search"
+        );
+
+        // A press on the first row selects it, and a second opens it.
+        let x = SIDEBAR_WIDTH + 40.0;
+        let y = SEARCH_LIST_TOP + EPISODE_ROW_HEIGHT / 2.0;
+        assert_eq!(
+            app.episode_row_at(x, y),
+            results.first().copied(),
+            "the first row is not where the first result is drawn"
+        );
+        assert_eq!(
+            app.episode_row_at(x, SEARCH_LIST_TOP + EPISODE_ROW_HEIGHT - 2.0),
+            results.first().copied(),
+            "the foot of the first row is not the first result"
+        );
+        assert_eq!(
+            app.episode_row_at(x, SEARCH_LIST_TOP - 2.0),
+            None,
+            "the line above the results is a result"
+        );
+        app.handle_event(&click_at(x, y));
+        assert_eq!(
+            app.selected_episode(),
+            results.first().copied(),
+            "a press selected nothing"
+        );
+        app.handle_event(&click_at(x, y));
+        assert_eq!(
+            app.main_view,
+            MainView::EpisodeDetail,
+            "a second press did not open it"
+        );
+        app.handle_event(&key(Key::Escape));
+
+        // Each result row is drawn, the selected one as selected.
+        let drawn: Vec<String> = app
+            .render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        for (pod_id, ep_id) in &results {
+            let title = app
+                .find_podcast(*pod_id)
+                .and_then(|p| p.find_episode(*ep_id))
+                .map(|e| e.title.clone())
+                .expect("a result names an episode");
+            assert!(drawn.contains(&title), "result {title:?} is not drawn");
+        }
+
+        // Space types into the search; it does not play.
+        app.handle_event(&key(Key::Escape));
+        let playing = app.player_state;
+        app.handle_event(&typed(Key::Space, ' '));
+        assert_eq!(app.search_query, " ", "Space did not type into the search");
+        assert_eq!(app.player_state, playing, "Space played from the search");
+    }
+
+    /// **The search box is the toolkit's field**: with the keyboard while the
+    /// search shows -- not under the list of keys or the file dialog -- the
+    /// caret before the placeholder of an empty box and after what was
+    /// typed, under a press, and red while the query finds nothing.
+    #[test]
+    fn the_search_box_is_the_toolkits_field() {
+        let mut app = searching_app();
+        let mut p = app.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        oswindow::app::App::theme_changed(&mut app, &p);
+        oswindow::app::App::appearance_changed(
+            &mut app,
+            &appearance::AppearanceSettings {
+                focus_ring_scale: 2.5,
+                ..appearance::AppearanceSettings::default()
+            },
+        );
+        assert!(
+            app.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        let rect = app.search_box_rect();
+        let draws = |app: &PodcastApp, state: field::State| {
+            let seq = |s: field::State| {
+                let mut v: Vec<RenderCommand> = Vec::new();
+                field::draw(&mut v, &p, rect, s, app.focus_ring_width);
+                v
+            };
+            let cmds = app.render_commands();
+            let has = |want: &[RenderCommand]| cmds.windows(want.len()).any(|w| w == want);
+            has(&seq(state))
+                && (state.focused
+                    || !has(&seq(field::State {
+                        focused: true,
+                        ..state
+                    })))
+        };
+        let carets = |app: &PodcastApp| -> Vec<f32> {
+            app.render_commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Line { x1, y1, x2, y2, .. }
+                        if x1 == x2 && rect.contains(*x1, *y1) && rect.contains(*x2, *y2) =>
+                    {
+                        Some(*x1)
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let idle = field::State::default();
+        let focused = field::State {
+            focused: true,
+            ..idle
+        };
+        let start = rect.x + SEARCH_TEXT_INSET;
+        assert!(draws(&app, focused), "the search box has no keyboard mark");
+        assert_eq!(
+            carets(&app),
+            vec![start],
+            "the empty box has no caret at its start"
+        );
+
+        type_into(&mut app, "zz");
+        let red = field::State {
+            invalid: true,
+            ..focused
+        };
+        assert!(draws(&app, red), "a search that finds nothing is not red");
+        let end = start + text::measure("zz", SEARCH_TEXT_SIZE, FontWeightHint::Regular);
+        let at = carets(&app);
+        assert!(
+            at.len() == 1 && (at[0] - end).abs() < 0.5,
+            "the caret is not after what was typed: {at:?}, not {end}"
+        );
+
+        app.handle_event(&click_at(start + 1.0, rect.y + rect.h / 2.0));
+        type_into(&mut app, "a");
+        assert_eq!(
+            app.search_query, "azz",
+            "the caret did not go where the press was"
+        );
+
+        app.handle_event(&key(Key::F1));
+        let covered = field::State {
+            invalid: true,
+            ..idle
+        };
+        assert!(
+            draws(&app, covered),
+            "the search box keeps its mark under the list of keys"
+        );
+        app.handle_event(&key(Key::F1));
+        app.handle_event(&chord(Key::O, "", Modifiers::ctrl()));
+        assert!(
+            draws(&app, covered),
+            "the search box keeps its mark under the file dialog"
         );
     }
 

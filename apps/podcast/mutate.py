@@ -90,6 +90,170 @@ MUTATIONS = [
     ),
 ]
 
+# The search takes typing, its box is the toolkit's field, and its results
+# are a list the arrows and the pointer reach (2026-10-04; lane C,
+# c-e-a-theme-can-shape-the-controls).
+TYPING = "the_search_takes_typing_and_finds_as_it_is_typed"
+RESULTS = "the_searchs_results_are_a_list"
+FIELD = "the_search_box_is_the_toolkits_field"
+
+MUTATIONS += [
+    (
+        "the search takes no typing",
+        "        if self.main_view == MainView::Search && self.handle_search_key(event) {\n",
+        "        if false && self.handle_search_key(event) {\n",
+        [TYPING, RESULTS, FIELD],
+    ),
+    (
+        "Escape leaves a query in the search",
+        "        if event.key == Key::Escape\n"
+        "            && textline::is_plain(event.modifiers)\n"
+        "            && !self.search_query.is_empty()\n"
+        "        {\n"
+        "            self.set_search_query(String::new());\n"
+        "            return true;\n"
+        "        }\n",
+        "",
+        [TYPING],
+    ),
+    (
+        "the query is not searched again as it is typed",
+        "        self.search_query = query;\n        self.perform_search();\n",
+        "        self.search_query = query;\n",
+        [TYPING],
+    ),
+    (
+        "the search box's editor is not reloaded",
+        "        if self.search_editor.text() != self.search_query {\n"
+        "            self.search_editor.set_text(&self.search_query);\n"
+        "        }\n"
+        "        let edit = textline::apply_key(\n",
+        "        let edit = textline::apply_key(\n",
+        [TYPING, RESULTS],
+    ),
+    (
+        "a cut takes nothing to the clipboard",
+        "            self.search_clipboard = copied;\n",
+        "            let _ = copied;\n",
+        [TYPING],
+    ),
+    (
+        "a key the box does not answer is taken",
+        "        edit.handled\n    }\n",
+        "        true\n    }\n",
+        [TYPING],
+    ),
+    (
+        "the results are not the list",
+        "        if self.main_view == MainView::Search {\n"
+        "            return self.search_results.clone();\n"
+        "        }\n",
+        "",
+        [RESULTS],
+    ),
+    (
+        "a result's details play nothing",
+        "        if self.main_view == MainView::EpisodeDetail {\n"
+        "            return self\n",
+        "        if false {\n"
+        "            return self\n",
+        [RESULTS],
+    ),
+    (
+        "Escape from a result's details goes to the episode list",
+        "                    self.main_view = self.detail_from;\n",
+        "                    self.main_view = MainView::EpisodeList;\n",
+        [RESULTS],
+    ),
+    (
+        "Enter does not open a result",
+        "                    MainView::Search => self.selected_episode().is_some(),\n",
+        "                    MainView::Search => false,\n",
+        [RESULTS],
+    ),
+    (
+        "a press on a result does nothing",
+        "        if matches!(self.main_view, MainView::EpisodeList | MainView::Search) {\n",
+        "        if matches!(self.main_view, MainView::EpisodeList) {\n",
+        [RESULTS],
+    ),
+    (
+        "a press finds the result under the episode list's rows",
+        "        if self.main_view == MainView::Search {\n            SEARCH_LIST_TOP\n",
+        "        if false {\n            SEARCH_LIST_TOP\n",
+        [RESULTS],
+    ),
+    (
+        "the search box never has the keyboard's mark",
+        "            focused: self.main_view == MainView::Search\n"
+        "                && !self.show_help\n"
+        "                && !self.picker.is_open(),\n",
+        "            focused: false,\n",
+        [FIELD],
+    ),
+    (
+        "the search box keeps its mark under the list of keys",
+        "            focused: self.main_view == MainView::Search\n"
+        "                && !self.show_help\n"
+        "                && !self.picker.is_open(),\n",
+        "            focused: self.main_view == MainView::Search\n"
+        "                && !self.picker.is_open(),\n",
+        [FIELD],
+    ),
+    (
+        "the search box keeps its mark under the file dialog",
+        "            focused: self.main_view == MainView::Search\n"
+        "                && !self.show_help\n"
+        "                && !self.picker.is_open(),\n",
+        "            focused: self.main_view == MainView::Search\n"
+        "                && !self.show_help,\n",
+        [FIELD],
+    ),
+    (
+        "a search that finds nothing is not red",
+        "            invalid: !self.search_query.is_empty() && self.search_results.is_empty(),\n",
+        "            invalid: false,\n",
+        [FIELD],
+    ),
+    (
+        "an empty box with the keyboard has no caret",
+        "                textedit::push_caret(\n"
+        "                    &mut tree,\n"
+        "                    x,\n"
+        "                    y,\n"
+        "                    line,\n"
+        "                    self.palette.text,\n"
+        "                    textedit::CARET_WIDTH,\n"
+        "                );\n",
+        "                let _ = (x, y, line);\n",
+        [FIELD],
+    ),
+    (
+        "the search's caret is at its start",
+        "                    cursor: self.search_cursor(),\n",
+        "                    cursor: TextCursor::default(),\n",
+        [FIELD],
+    ),
+    (
+        "a press leaves the caret where it was",
+        "        self.search_editor.set_cursor(cursor);\n",
+        "        let _ = cursor;\n",
+        [FIELD],
+    ),
+    (
+        "a press in the search box does nothing",
+        "            self.press_search_box(event.x);\n",
+        "            let _ = event.x;\n",
+        [FIELD],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [FIELD],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "podcast", timeout=600, only=only))

@@ -20,9 +20,15 @@
 //! integer arithmetic, so the result does not depend on the platform's own
 //! `fma`.
 //!
-//! Translated into Rust from glibc 2.39's `sysdeps/ieee754/flt-32/e_logf.c`
-//! and `e_logf_data.c` (copyright Arm Limited, from Arm's optimized-routines,
-//! used under its MIT licence as glibc distributes it).
+//! Translated into Rust from Arm's optimized-routines, `math/logf.c` and
+//! `math/logf_data.c` (copyright Arm Limited, used under the MIT licence:
+//! `licenses/arm-optimized-routines-LICENSE`) -- the function, table and
+//! polynomial glibc 2.39 ships as `sysdeps/ieee754/flt-32/e_logf.c` and
+//! `e_logf_data.c`, which Arm contributed to it. (glibc distributes its copy
+//! under the LGPL; the translation is of Arm's own, which is the same code
+//! but for glibc's spellings -- `double_t` for `double`, `0x1ff << 23` for
+//! `0xff800000`.) What is glibc's here is only the compiled behaviour matched:
+//! its x86-64 FMA build's fusions.
 
 #![allow(
     clippy::cast_possible_truncation,

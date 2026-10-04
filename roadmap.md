@@ -3743,6 +3743,15 @@ lane C's `guitk`.
     the 8x8 DCT (eight columns at once in 32 bits), the block measures; 2.3x
     fewer instructions for the first reference (callgrind). Encoding speed in
     `tests/bench.rs` (`bench_vp9_encode`).
+  - `[x]` The fallback in the compositor's stream (§1343): a window
+    presenting a buffer -- a game's, a video player's -- streams to a remote
+    viewer as VP9, one stream per window per session (scene protocol version
+    3), coded when a new buffer arrives and timed by the capture's clock
+    (`Encoder::encode_timed`), its colour through `vp9::rgb`; the viewer
+    queues the frames to decode. Tested end to end, compositor to decoded
+    pixels. `[ ]` The remote desktop service that reads the stream, and with
+    it coding off the compositor's thread
+    (`known-issues/F-the-capture-stream-codes-video-on-the-compositors-thread.md`).
 
 - `[-]` `[F]` **AVIF pictures**, decided 2026-09-27 (§1333): a HEIF container reader
   and a port of rav1d (dav1d in Rust, BSD) in `gui/imagecodec`, so AVIF opens
@@ -5660,7 +5669,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [x] `[F]` **JPEG is libjpeg-turbo, ported** — JPEG decoded to within 3 levels of what every other program shows, and some kinds (CMYK, RGB-coded, arithmetic-coded, separate-scan sequential) wrongly or not at all. `gui/imagecodec/src/jpeg/` is now a port of libjpeg-turbo 3.1.1's decompressor -- markers, Huffman, progressive and arithmetic decoding, block smoothing, the accurate integer and reduced inverse DCTs, fancy upsampling, colour conversion, and its handling of damaged data -- with Chrome's choices on top (colour space, CMYK formula, 100 scans). Every JPEG test is exact now; 146 seeds at four sizes and 32,000 mutants agree with libjpeg-turbo to the bit. Faster too: 0.76 s for a 21-megapixel photograph, from 1.42 s. Lossless JPEG as well (`jdlhuff.c`, `jddiffct.c`, `jdlossls.c`), held by 56 fixtures of its own and 20,000 lossless mutants. design-decisions.md §1318.
   - [x] `[F]` **An application can decline a close to ask about unsaved work** — a window's close button closed it whatever the application answered, so every editor threw away unsaved changes without a word. `Response::KeepOpen` (and `EventResponse::KeepOpen`) keeps the window open and redraws, so the application can show its "Save changes?" question and exit itself when the user answers; any other answer still closes, so no window can have an X that does nothing. Lane E's request. design-decisions.md §1309.
   - [x] `[F]` **Double clicks reach applications** — double-clicking did nothing inside any application (the file picker could not open a file by double-clicking it; a double click selected no word), because the compositor sends single presses by design and nothing paired them. Every application's event loop (`oswindow::EventLoop::poll`) now delivers `DoubleClick` after the press that completes one, at the user's double-click speed from `input.yaml`, by design-decisions §502's rules plus a four-pixel slop. Timed by a stamp the compositor now puts on every input event (input protocol v7), so a busy application still pairs clicks by when they were made. Lane E's request. design-decisions.md §1310.
-  - [ ] `[F]` Video-encoded capture fallback (VP9 for games/video, §1332: libvpx, threaded; hardware where found)
+  - [-] `[F]` Video-encoded capture fallback (VP9 for games/video, §1332: libvpx, threaded; hardware where found) -- *(Lane F 2026-10-04: the compositor's stream codes buffer windows as VP9, §1343; the service that reads it is not built.)*
 
 ### 3.4 Window manager / desktop shell
 - [x] Desktop with draggable icons (snap-to-grid or free placement)

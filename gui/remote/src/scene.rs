@@ -40,7 +40,23 @@
 //!         drop : nothing
 //!       a pixel is a u32 0xAARRGGBB, little-endian: what the compositor
 //!       holds after normalising an upload
+//!     video   : u8                     0 nothing new, 1 a frame, 2 stopped
+//!     if 1: codec u8 (1 = VP9), w u32, h u32, len u32, then len bytes:
+//!           one compressed frame of the window's video
 //! ```
+//!
+//! ## Video
+//!
+//! A window that presents its own pixels -- a buffer it renders into, as a
+//! game or a video player does -- has no commands to forward. Its session
+//! codes those pixels as video instead (design.txt's "video-encoded capture"
+//! fallback; `design-decisions/1343`): each frame carries at most one
+//! compressed frame per window ([`SceneVideo`]), in order, and a viewer
+//! decodes every one -- each frame of a VP9 stream is coded against the ones
+//! before it -- and shows the latest as the window's content. When the
+//! window goes back to commands, the frame says so ([`VideoUpdate::Stop`]).
+//! The codec is the sender's and the viewer's business; this crate only
+//! carries the bytes.
 //!
 //! ## Pictures
 //!
@@ -78,7 +94,21 @@ pub const SCENE_MAGIC: [u8; 4] = *b"SCEN";
 /// commands (`n_image` and what follows; see the module docs), so a viewer
 /// holds the pixels an image command names. Version 1 forwarded none, and a
 /// viewer drew nothing wherever a window showed a picture.
-pub const SCENE_VERSION: u8 = 2;
+///
+/// **3** -- and then its video (`video`): a window presenting its own pixels
+/// streams them coded, where version 2 sent such a window as an empty
+/// command list.
+pub const SCENE_VERSION: u8 = 3;
+
+/// [`SceneVideo::codec`] for VP9 (profile 0: 8-bit 4:2:0), the only codec
+/// so far.
+pub const VIDEO_VP9: u8 = 1;
+
+/// Upper bound on one compressed video frame, to reject corrupt or hostile
+/// input before allocating: a VP9 frame of a 4K picture at a generous
+/// bitrate is well under a megabyte, a key frame of one at the finest
+/// quantiser a few.
+pub const MAX_VIDEO_FRAME_BYTES: u32 = 16 << 20;
 
 /// Upper bound on the window count and removed-id count in a single scene
 /// frame, to reject corrupt/hostile input before allocating.
@@ -108,6 +138,32 @@ pub struct SceneWindow {
     /// The changes to the window's pictures since the viewer last saw them,
     /// in the order to apply them.
     pub images: Vec<SceneImage>,
+    /// What changed in the window's video, if anything: see [`VideoUpdate`].
+    pub video: Option<VideoUpdate>,
+}
+
+/// One compressed frame of a window's video.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SceneVideo {
+    /// Which codec: [`VIDEO_VP9`].
+    pub codec: u8,
+    /// The picture's size in pixels. A stream's frames keep one size; a
+    /// window whose pixels change size starts its stream again, with a key
+    /// frame.
+    pub width: u32,
+    pub height: u32,
+    /// The compressed frame, at most [`MAX_VIDEO_FRAME_BYTES`].
+    pub frame: Vec<u8>,
+}
+
+/// What changed in a window's video this frame.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VideoUpdate {
+    /// The stream's next frame, to be decoded after every one before it.
+    Frame(SceneVideo),
+    /// The window draws commands again: its video is over, and its stream
+    /// with it -- video that resumes starts a new one.
+    Stop,
 }
 
 /// A change to one of a window's pictures, as a viewer applies it.
@@ -233,8 +289,57 @@ pub fn encode_scene_frame(frame: &SceneFrame) -> Vec<u8> {
         for change in &win.images {
             encode_image(change, &mut out);
         }
+        encode_video(win.video.as_ref(), &mut out);
     }
     out
+}
+
+const VIDEO_NONE: u8 = 0;
+const VIDEO_FRAME: u8 = 1;
+const VIDEO_STOP: u8 = 2;
+
+fn encode_video(update: Option<&VideoUpdate>, out: &mut Vec<u8>) {
+    match update {
+        None => out.push(VIDEO_NONE),
+        Some(VideoUpdate::Stop) => out.push(VIDEO_STOP),
+        Some(VideoUpdate::Frame(v)) => {
+            out.push(VIDEO_FRAME);
+            out.push(v.codec);
+            crate::write_u32(out, v.width);
+            crate::write_u32(out, v.height);
+            // A frame past the limit is refused on the way in; the length
+            // saturates rather than wraps so that it is refused, not misread.
+            crate::write_u32(out, u32::try_from(v.frame.len()).unwrap_or(u32::MAX));
+            out.extend_from_slice(&v.frame);
+        }
+    }
+}
+
+fn decode_video(r: &mut Reader<'_>) -> Result<Option<VideoUpdate>, DecodeError> {
+    Ok(match r.read_u8()? {
+        VIDEO_NONE => None,
+        VIDEO_STOP => Some(VideoUpdate::Stop),
+        VIDEO_FRAME => {
+            let codec = r.read_u8()?;
+            if codec != VIDEO_VP9 {
+                return Err(DecodeError::BadVideoCodec(codec));
+            }
+            let width = r.read_u32()?;
+            let height = r.read_u32()?;
+            let len = r.read_u32()?;
+            if len > MAX_VIDEO_FRAME_BYTES {
+                return Err(DecodeError::VideoTooLarge(len));
+            }
+            let len = usize::try_from(len).map_err(|_| DecodeError::VideoTooLarge(len))?;
+            Some(VideoUpdate::Frame(SceneVideo {
+                codec,
+                width,
+                height,
+                frame: r.take(len)?.to_vec(),
+            }))
+        }
+        other => return Err(DecodeError::BadTag(other)),
+    })
 }
 
 const IMAGE_WHOLE: u8 = 1;
@@ -411,6 +516,7 @@ pub fn decode_scene_frame(input: &[u8]) -> Result<(SceneFrame, usize), DecodeErr
         for _ in 0..n_image {
             images.push(decode_image(&mut r)?);
         }
+        let video = decode_video(&mut r)?;
         windows.push(SceneWindow {
             id,
             x,
@@ -420,6 +526,7 @@ pub fn decode_scene_frame(input: &[u8]) -> Result<(SceneFrame, usize), DecodeErr
             opacity,
             commands,
             images,
+            video,
         });
     }
 
@@ -482,6 +589,10 @@ pub struct WindowSnapshot<'a> {
     pub commands: &'a RenderTree,
     /// Every picture the window holds, in any order.
     pub images: Vec<ImageSnapshot<'a>>,
+    /// What changed in the window's video since this session's last frame:
+    /// the sender codes the window's pixels and says when its video stops
+    /// (see the module docs). Forwarded as it is.
+    pub video: Option<&'a VideoUpdate>,
 }
 
 /// Tracks what one remote viewer already holds, so successive frames forward a
@@ -637,6 +748,7 @@ impl SceneSession {
                 opacity: snap.opacity,
                 commands,
                 images,
+                video: snap.video.cloned(),
             });
         }
 
@@ -685,7 +797,18 @@ pub enum SceneError {
     BadImage { window: u64, id: u64 },
     /// The frame lists one window twice.
     WindowTwice { window: u64 },
+    /// A video frame for a window already holding
+    /// [`MAX_PENDING_VIDEO_FRAMES`] its owner has not taken: frames cannot
+    /// be dropped (each is coded against the last), so the stream must
+    /// start again.
+    VideoBacklog { window: u64 },
 }
+
+/// How many compressed video frames a window holds untaken
+/// ([`ViewerWindow::take_video`]) before [`SceneViewer::apply`] refuses
+/// more: two seconds at thirty a second, far more than a viewer that decodes
+/// as it applies ever holds.
+pub const MAX_PENDING_VIDEO_FRAMES: usize = 64;
 
 impl core::fmt::Display for SceneError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -701,6 +824,10 @@ impl core::fmt::Display for SceneError {
                 "picture {id} of window {window}: pixels that do not fit their rectangle"
             ),
             Self::WindowTwice { window } => write!(f, "window {window} listed twice"),
+            Self::VideoBacklog { window } => write!(
+                f,
+                "window {window} holds {MAX_PENDING_VIDEO_FRAMES} video frames not taken"
+            ),
         }
     }
 }
@@ -716,11 +843,27 @@ pub struct ViewerImage {
     pub pixels: Vec<u32>,
 }
 
-/// One window as a viewer holds it: its commands, and the pictures they name.
+/// One window as a viewer holds it: its commands, the pictures they name,
+/// and its video.
 #[derive(Clone, Debug, Default)]
 pub struct ViewerWindow {
     pub commands: RenderTree,
     pub images: BTreeMap<u64, ViewerImage>,
+    /// Whether the window shows video in place of its commands: from its
+    /// stream's first frame until the stream says it stopped.
+    pub showing_video: bool,
+    /// The window's video frames not yet taken, oldest first: each to be
+    /// decoded after the ones before it ([`Self::take_video`]).
+    pub video: Vec<SceneVideo>,
+}
+
+impl ViewerWindow {
+    /// The video frames that arrived since the last call, oldest first, for
+    /// the viewer to decode -- every one, in order, as each is coded against
+    /// the last.
+    pub fn take_video(&mut self) -> Vec<SceneVideo> {
+        core::mem::take(&mut self.video)
+    }
 }
 
 /// What a remote viewer holds: every window the stream has shown it, with its
@@ -769,6 +912,14 @@ impl SceneViewer {
             for change in &win.images {
                 check_image(&mut sizes, win.id, change)?;
             }
+            if matches!(win.video, Some(VideoUpdate::Frame(_)))
+                && self
+                    .windows
+                    .get(&win.id)
+                    .is_some_and(|w| w.video.len() >= MAX_PENDING_VIDEO_FRAMES)
+            {
+                return Err(SceneError::VideoBacklog { window: win.id });
+            }
         }
         let mut prev = core::mem::take(&mut self.windows);
         for win in &frame.windows {
@@ -778,6 +929,17 @@ impl SceneViewer {
             }
             for change in &win.images {
                 apply_image(&mut held.images, change);
+            }
+            match &win.video {
+                None => {}
+                Some(VideoUpdate::Frame(v)) => {
+                    held.showing_video = true;
+                    held.video.push(v.clone());
+                }
+                Some(VideoUpdate::Stop) => {
+                    held.showing_video = false;
+                    held.video.clear();
+                }
             }
             self.windows.insert(win.id, held);
         }
@@ -972,6 +1134,7 @@ mod tests {
                     opacity: 0.75,
                     commands: Some(sample_tree()),
                     images: Vec::new(),
+                    video: None,
                 },
                 SceneWindow {
                     id: 2,
@@ -982,6 +1145,7 @@ mod tests {
                     opacity: 1.0,
                     commands: None,
                     images: Vec::new(),
+                    video: None,
                 },
             ],
             removed: vec![7, 9],
@@ -1033,6 +1197,7 @@ mod tests {
                 opacity: 1.0,
                 commands: Some(sample_tree()),
                 images: Vec::new(),
+                video: None,
             }],
             removed: vec![],
         });
@@ -1058,6 +1223,7 @@ mod tests {
                     opacity: 1.0,
                     commands: Some(sample_tree()),
                     images: Vec::new(),
+                    video: None,
                 }],
                 removed: vec![],
             }));
@@ -1088,6 +1254,7 @@ mod tests {
                 opacity: 0.5,
                 commands: Some(sample_tree()),
                 images: Vec::new(),
+                video: None,
             }],
             removed: vec![3],
         });
@@ -1129,6 +1296,7 @@ mod tests {
             opacity: 1.0,
             commands: &tree_a,
             images: Vec::new(),
+            video: None,
         }];
 
         let f0 = session.build_frame(800, 600, &snaps_a);
@@ -1159,6 +1327,7 @@ mod tests {
             opacity: 1.0,
             commands: &tree_b,
             images: Vec::new(),
+            video: None,
         }];
         let f2 = session.build_frame(800, 600, &snaps_b);
         assert!(f2.windows[0].commands.is_some());
@@ -1178,6 +1347,7 @@ mod tests {
                 opacity: 1.0,
                 commands: &tree,
                 images: Vec::new(),
+                video: None,
             },
             WindowSnapshot {
                 id: 2,
@@ -1188,6 +1358,7 @@ mod tests {
                 opacity: 1.0,
                 commands: &tree,
                 images: Vec::new(),
+                video: None,
             },
         ];
         session.build_frame(10, 10, &two);
@@ -1201,6 +1372,7 @@ mod tests {
             opacity: 1.0,
             commands: &tree,
             images: Vec::new(),
+            video: None,
         }];
         let f = session.build_frame(10, 10, &one);
         assert_eq!(f.removed, vec![2]);
@@ -1219,6 +1391,7 @@ mod tests {
             opacity: 1.0,
             commands: &tree,
             images: Vec::new(),
+            video: None,
         }];
 
         let f0 = session.build_frame(10, 10, &snaps);
@@ -1247,6 +1420,7 @@ mod tests {
             opacity: 1.0,
             commands: &tree,
             images: Vec::new(),
+            video: None,
         }];
         session.build_frame(10, 10, &snaps);
         session.reset();
@@ -1269,6 +1443,7 @@ mod tests {
                 opacity: 1.0,
                 commands: None,
                 images,
+                video: None,
             }],
             removed: Vec::new(),
         })
@@ -1317,7 +1492,8 @@ mod tests {
             height: 1,
             pixels: vec![0],
         }]);
-        let at = bytes.len() - 4 - 8; // width and height, before the one pixel
+        // Width and height, before the one pixel and the window's video byte.
+        let at = bytes.len() - 1 - 4 - 8;
         bytes[at..at + 4].copy_from_slice(&100_000u32.to_le_bytes());
         bytes[at + 4..at + 8].copy_from_slice(&100_000u32.to_le_bytes());
         assert!(matches!(
@@ -1327,8 +1503,8 @@ mod tests {
 
         // More changes than a window may carry, refused on the count.
         let mut bytes = frame_with(Vec::new());
-        let at = bytes.len() - 4;
-        bytes[at..].copy_from_slice(&(MAX_IMAGE_CHANGES_PER_WINDOW + 1).to_le_bytes());
+        let at = bytes.len() - 1 - 4;
+        bytes[at..at + 4].copy_from_slice(&(MAX_IMAGE_CHANGES_PER_WINDOW + 1).to_le_bytes());
         assert_eq!(
             decode_scene_frame(&bytes).err(),
             Some(DecodeError::TooManyImageChanges(
@@ -1338,11 +1514,194 @@ mod tests {
 
         // A kind of change that does not exist.
         let mut bytes = frame_with(vec![SceneImage::Drop { id: 3 }]);
-        let at = bytes.len() - 8 - 1;
+        let at = bytes.len() - 1 - 8 - 1;
         bytes[at] = 9;
         assert_eq!(
             decode_scene_frame(&bytes).err(),
             Some(DecodeError::BadTag(9))
+        );
+    }
+
+    /// A frame with one window carrying `video`, encoded.
+    fn frame_with_video(video: Option<VideoUpdate>) -> Vec<u8> {
+        encode_scene_frame(&SceneFrame {
+            sequence: 1,
+            display_width: 10,
+            display_height: 10,
+            windows: vec![SceneWindow {
+                id: 4,
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 10,
+                opacity: 1.0,
+                commands: None,
+                images: Vec::new(),
+                video,
+            }],
+            removed: Vec::new(),
+        })
+    }
+
+    fn vp9_frame(bytes: &[u8]) -> SceneVideo {
+        SceneVideo {
+            codec: VIDEO_VP9,
+            width: 64,
+            height: 48,
+            frame: bytes.to_vec(),
+        }
+    }
+
+    /// Nothing, a frame and a stop all come back as they went.
+    #[test]
+    fn every_kind_of_video_update_round_trips() {
+        for video in [
+            None,
+            Some(VideoUpdate::Frame(vp9_frame(&[0x82, 0x49, 0x83, 1, 2, 3]))),
+            Some(VideoUpdate::Frame(vp9_frame(&[]))),
+            Some(VideoUpdate::Stop),
+        ] {
+            let bytes = frame_with_video(video.clone());
+            let (frame, used) = decode_scene_frame(&bytes).unwrap();
+            assert_eq!(used, bytes.len());
+            assert_eq!(frame.windows[0].video, video);
+        }
+    }
+
+    /// A video frame longer than the limit is refused on its length, before
+    /// anything is allocated; an unknown codec or kind of update by its byte;
+    /// a frame cut short as such.
+    #[test]
+    fn a_video_frame_too_large_or_unknown_or_short_is_refused() {
+        let frame = vp9_frame(&[1, 2, 3, 4]);
+        let bytes = frame_with_video(Some(VideoUpdate::Frame(frame)));
+        // The length, before the four bytes.
+        let len_at = bytes.len() - 4 - 4;
+        let mut long = bytes.clone();
+        long[len_at..len_at + 4].copy_from_slice(&(MAX_VIDEO_FRAME_BYTES + 1).to_le_bytes());
+        assert_eq!(
+            decode_scene_frame(&long).err(),
+            Some(DecodeError::VideoTooLarge(MAX_VIDEO_FRAME_BYTES + 1))
+        );
+        // The codec, before the width, height and length.
+        let mut codec = bytes.clone();
+        codec[len_at - 8 - 1] = 7;
+        assert_eq!(
+            decode_scene_frame(&codec).err(),
+            Some(DecodeError::BadVideoCodec(7))
+        );
+        // The kind of update, before the codec.
+        let mut kind = bytes.clone();
+        kind[len_at - 8 - 2] = 5;
+        assert_eq!(
+            decode_scene_frame(&kind).err(),
+            Some(DecodeError::BadTag(5))
+        );
+        // The frame's bytes cut short.
+        assert_eq!(
+            decode_scene_frame(&bytes[..bytes.len() - 1]).err(),
+            Some(DecodeError::UnexpectedEof)
+        );
+    }
+
+    /// The session forwards each window's video update as given.
+    #[test]
+    fn the_session_forwards_video_updates() {
+        let tree = RenderTree::new();
+        let update = VideoUpdate::Frame(vp9_frame(&[9, 9]));
+        let snaps = vec![WindowSnapshot {
+            id: 3,
+            x: 0,
+            y: 0,
+            width: 64,
+            height: 48,
+            opacity: 1.0,
+            commands: &tree,
+            images: Vec::new(),
+            video: Some(&update),
+        }];
+        let mut session = SceneSession::new();
+        let frame = session.build_frame(100, 100, &snaps);
+        assert_eq!(frame.windows[0].video.as_ref(), Some(&update));
+        let quiet = vec![WindowSnapshot {
+            id: 3,
+            x: 0,
+            y: 0,
+            width: 64,
+            height: 48,
+            opacity: 1.0,
+            commands: &tree,
+            images: Vec::new(),
+            video: None,
+        }];
+        let frame = session.build_frame(100, 100, &quiet);
+        assert_eq!(frame.windows[0].video, None);
+    }
+
+    /// A viewer queues a window's video frames in order until they are
+    /// taken; a stop forgets the untaken ones; a window holding the most it
+    /// may refuses another frame, and the frame's other changes with it.
+    #[test]
+    fn a_viewer_queues_video_frames_until_taken() {
+        let window = |video: Option<VideoUpdate>, commands: Option<RenderTree>| SceneFrame {
+            sequence: 0,
+            display_width: 10,
+            display_height: 10,
+            windows: vec![SceneWindow {
+                id: 4,
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 10,
+                opacity: 1.0,
+                commands,
+                images: Vec::new(),
+                video,
+            }],
+            removed: Vec::new(),
+        };
+        let mut viewer = SceneViewer::new();
+        for n in 0..3u8 {
+            let f = window(Some(VideoUpdate::Frame(vp9_frame(&[n]))), None);
+            viewer.apply(&f).unwrap();
+        }
+        viewer.apply(&window(None, None)).unwrap();
+        let held = viewer.windows.get_mut(&4).unwrap();
+        assert!(held.showing_video);
+        let taken: Vec<u8> = held.take_video().iter().map(|v| v.frame[0]).collect();
+        assert_eq!(taken, [0, 1, 2], "every frame, in order");
+        assert!(held.take_video().is_empty());
+
+        viewer
+            .apply(&window(Some(VideoUpdate::Frame(vp9_frame(&[7]))), None))
+            .unwrap();
+        viewer
+            .apply(&window(Some(VideoUpdate::Stop), None))
+            .unwrap();
+        let held = &viewer.windows[&4];
+        assert!(!held.showing_video);
+        assert!(
+            held.video.is_empty(),
+            "a stopped stream's frames are no use"
+        );
+
+        for n in 0..MAX_PENDING_VIDEO_FRAMES {
+            let f = window(Some(VideoUpdate::Frame(vp9_frame(&[n as u8]))), None);
+            viewer.apply(&f).unwrap();
+        }
+        let one_more = window(
+            Some(VideoUpdate::Frame(vp9_frame(&[0]))),
+            Some(sample_tree()),
+        );
+        assert_eq!(
+            viewer.apply(&one_more),
+            Err(SceneError::VideoBacklog { window: 4 })
+        );
+        let held = &viewer.windows[&4];
+        assert_eq!(held.video.len(), MAX_PENDING_VIDEO_FRAMES);
+        assert!(
+            held.commands.commands.is_empty(),
+            "the refused frame changed nothing"
         );
     }
 
@@ -1377,6 +1736,7 @@ mod tests {
                 opacity: 1.0,
                 commands: tree,
                 images: vec![image],
+                video: None,
             }]
         }
         let tree = sample_tree();

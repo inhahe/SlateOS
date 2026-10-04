@@ -218,6 +218,10 @@ pub(crate) struct FrameOptions {
     /// frame as a key frame: only a caller that decides inter blocks may.
     pub inter: bool,
     pub fixed: Option<FixedFrame>,
+    /// When the picture is shown, from and until, in the timebase's units:
+    /// [`Encoder::encode_timed`]'s. `None` is a frame after the last at the
+    /// configured rate, as `vpxenc` stamps them.
+    pub stamp: Option<(u64, u64)>,
 }
 
 /// A VP9 encoder: 8-bit 4:2:0 pictures in, one compressed frame each out,
@@ -242,6 +246,9 @@ pub struct Encoder {
     cpi: Cpi,
     /// The frames encoded so far: the next one's timestamp, in frames.
     frames: i64,
+    /// When the last picture's showing ended, in libvpx's ten-million-a-
+    /// second ticks: the next must end later.
+    last_end: Option<i64>,
     /// What each of the eight reference slots holds: libvpx's
     /// `ref_frame_map`. Reconstructions, loop-filtered, their edges
     /// extended.
@@ -314,6 +321,7 @@ impl Encoder {
         Self {
             cpi,
             frames: 0,
+            last_end: None,
             ref_frame_map: Default::default(),
             last: None,
             prev_mvs: vec![MvRef::default(); cells],
@@ -367,6 +375,30 @@ impl Encoder {
         self.encode_frame(planes, None, FrameOptions::default())
     }
 
+    /// [`Encoder::encode`] for a picture shown from `start` until `end`, in
+    /// units of the configured [`EncoderConfig::timebase`] -- the timestamp
+    /// and duration `vpx_codec_encode` takes -- rather than a frame after the
+    /// last at the configured rate: for pictures that come when they come, as
+    /// a screen capture's do. The rate control follows the frame rate the
+    /// times make, sharing the bitrate out by each picture's duration.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Unsupported`] as for [`Encoder::encode`], or if `end` is not
+    /// after `start`, or not after the last picture's end.
+    pub fn encode_timed(
+        &mut self,
+        planes: [PlaneView<'_, u8>; 3],
+        start: u64,
+        end: u64,
+    ) -> Result<Vec<u8>, Error> {
+        let opts = FrameOptions {
+            stamp: Some((start, end)),
+            ..FrameOptions::default()
+        };
+        self.encode_frame(planes, None, opts)
+    }
+
     /// [`Encoder::encode`] with the block decisions `d` makes, or libvpx's
     /// realtime ones, coded as `opts` says.
     #[allow(
@@ -400,7 +432,25 @@ impl Encoder {
             let g = gcd(num, den).max(1);
             p.saturating_mul(num / g) / (den / g).max(1)
         };
-        let (ts_start, ts_end) = (ticks(pts(self.frames)), ticks(pts(self.frames + 1)));
+        let (ts_start, ts_end) = match opts.stamp {
+            Some((start, end)) => {
+                let at = |t: u64| ticks(i64::try_from(t).unwrap_or(i64::MAX));
+                (at(start), at(end))
+            }
+            None => (ticks(pts(self.frames)), ticks(pts(self.frames + 1))),
+        };
+        // libvpx's frame rate is the durations' reciprocal: a picture timed
+        // by its caller must last, and end after the last one did. (A
+        // coarse timebase may give vpxenc's own stamps no duration at all,
+        // which libvpx's rate control passes over, and so does this.)
+        if opts.stamp.is_some()
+            && (ts_end <= ts_start || self.last_end.is_some_and(|last| ts_end <= last))
+        {
+            return Err(Error::Unsupported(
+                "a picture's time is not after the last picture's",
+            ));
+        }
+        self.last_end = Some(ts_end);
         self.frames += 1;
 
         let cpi = &mut self.cpi;
@@ -1903,6 +1953,7 @@ mod tests {
                 tx_mode: tx_modes[rng.below(4) as usize],
                 inter: n > 0,
                 fixed: Some(fixed),
+                stamp: None,
             };
             let at = format!("{w}x{h} run {run} (seed {seed}) frame {n} q{q} seg {segments}");
             let frame = enc
@@ -2057,6 +2108,49 @@ mod tests {
             enc.encode(views(&pic, w, h)).unwrap();
             assert_eq!(enc.cpi.rc.avg_frame_bandwidth, share, "{timebase:?}");
         }
+    }
+
+    /// A picture timed by its caller is coded as one stamped by the frame
+    /// rate: times equal to `vpxenc`'s give its very frames.
+    #[test]
+    fn timed_pictures_at_vpxencs_times_are_its_frames() {
+        let (w, h) = (96usize, 64usize);
+        let mut by_rate = Encoder::new(EncoderConfig::realtime(96, 64, 300)).unwrap();
+        let mut timed = Encoder::new(EncoderConfig::realtime(96, 64, 300)).unwrap();
+        // vpxenc's stamps at 30 frames a second, in milliseconds.
+        let pts = |n: u64| n * 1000 / 30;
+        for n in 0..12u64 {
+            let pic = picture_moved(w, h, 3, (n * 2) as usize);
+            let a = by_rate.encode(views(&pic, w, h)).unwrap();
+            let b = timed
+                .encode_timed(views(&pic, w, h), pts(n), pts(n + 1))
+                .unwrap();
+            assert_eq!(a, b, "frame {n}");
+        }
+    }
+
+    /// The rate control follows the times: pictures a tenth of a second
+    /// apart are ten a second, each given three times the bits of one of
+    /// thirty a second; and times that do not move on are refused.
+    #[test]
+    fn timed_pictures_set_the_frame_rate() {
+        let (w, h) = (64usize, 64usize);
+        let pic = picture_moved(w, h, 5, 0);
+        let mut enc = Encoder::new(EncoderConfig::realtime(64, 64, 300)).unwrap();
+        for n in 0..4u64 {
+            enc.encode_timed(views(&pic, w, h), n * 100, (n + 1) * 100)
+                .unwrap();
+        }
+        assert!(
+            (enc.cpi.framerate - 10.0).abs() < 1e-6,
+            "{} frames a second",
+            enc.cpi.framerate
+        );
+        assert_eq!(enc.cpi.rc.avg_frame_bandwidth, 30_000);
+        // A picture that lasts nothing, or ends before the last one did.
+        assert!(enc.encode_timed(views(&pic, w, h), 500, 500).is_err());
+        assert!(enc.encode_timed(views(&pic, w, h), 350, 400).is_err());
+        assert!(enc.encode_timed(views(&pic, w, h), 400, 450).is_ok());
     }
 
     /// libvpx's fit at its ends: q index 0 (AC step 4) and 255 (1828); and

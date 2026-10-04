@@ -435,6 +435,82 @@ MUTATIONS = [
     ),
 ]
 
+NAME_BOX = 'the_name_box_is_the_toolkits_field'
+CHORD = 'a_chord_is_not_typed_into_the_name_and_altgr_is'
+CARET = 'the_caret_follows_the_name'
+
+MUTATIONS += [
+    # The new habit's name box is the toolkit's field; chords are kept out
+    # of it and out of the window (2026-10-04; lane C,
+    # c-e-a-theme-can-shape-the-controls).
+    (
+        'the name box never has the keyboard',
+        '            focused: !self.show_help,\n',
+        '            focused: false,\n',
+        [NAME_BOX, CARET],
+    ),
+    (
+        'the name box keeps its mark under the card',
+        '            focused: !self.show_help,\n',
+        '            focused: true,\n',
+        [NAME_BOX],
+    ),
+    (
+        'an empty name is not red',
+        '            invalid: self.create_name_missing,\n',
+        '            invalid: false,\n',
+        [NAME_BOX],
+    ),
+    (
+        'Enter on an empty name marks nothing',
+        '            self.create_name_missing = true;\n',
+        '',
+        [NAME_BOX],
+    ),
+    (
+        'the box stays red once there is a name',
+        '            self.create_name.push_str(key);\n            self.create_name_missing = false;\n',
+        '            self.create_name.push_str(key);\n',
+        [NAME_BOX],
+    ),
+    (
+        'a form opened again is red from the last one',
+        '                self.show_create_form = true;\n                self.create_name_missing = false;\n',
+        '                self.show_create_form = true;\n',
+        [NAME_BOX],
+    ),
+    (
+        'the focus mark is the toolkit\'s width, not the user\'s',
+        '        self.focus_ring_width = settings.focus_ring_width();\n',
+        '        let _ = settings;\n',
+        [NAME_BOX],
+    ),
+    (
+        'Alt and Windows chords reach the window',
+        '                if textline::is_alt_or_windows_chord(key.modifiers) {\n                    return false;\n                }\n',
+        '',
+        [CHORD],
+    ),
+    (
+        'a Ctrl chord types its letter into the name',
+        '            _ if ctrl => {}\n',
+        '',
+        [CHORD],
+    ),
+    (
+        'AltGr is a Ctrl chord',
+        '                    textline::is_ctrl_chord(key.modifiers),\n',
+        '                    key.modifiers.ctrl,\n',
+        [CHORD],
+    ),
+    (
+        'the caret is at the start of the name',
+        '                cursor: guitk::text::TextCursor::from(self.create_name.len()),\n',
+        '                cursor: guitk::text::TextCursor::from(0),\n',
+        [CARET],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "habits", timeout=900, only=only))

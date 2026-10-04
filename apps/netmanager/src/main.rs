@@ -43,12 +43,16 @@ use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEventKind};
+use guitk::field;
 use guitk::frame::Rect;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::scroll_window;
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::text::TextCursor;
+use guitk::textedit;
+use guitk::textinput::TextInput;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 
@@ -575,14 +579,31 @@ pub struct NetManagerApp {
     /// shows the last page instead of a blank sidebar, because
     /// [`scroll_window::visible`] clamps the *result* and leaves this alone.
     pub sidebar_scroll: usize,
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     /// Which text field the keyboard is typing into, if any.
     ///
     /// `None` means keystrokes are navigation, not text. Kept as an explicit
     /// field rather than inferred from `editing_ip` because the DNS input is
     /// typeable on a tab where nothing is "being edited".
-    /// Whether the shortcut card is up.
-    pub show_help: bool,
     pub focus: Option<Field>,
+    /// The focused box's caret and selection, laid over its text.
+    ///
+    /// The box's string ([`Self::field_mut`]) stays the truth -- Apply,
+    /// Cancel and Add read it and reset it -- and this is the editor over it
+    /// while it has the keyboard. Whenever the string has changed under it
+    /// (Add empties the DNS box; Edit reloads the addresses), the next key or
+    /// press reloads it with the caret at the end, so the caret never points
+    /// into text that is no longer there.
+    editor: TextInput,
+    /// What the last copy or cut took, from any box.
+    clipboard: String,
+    /// The text box under the pointer, if any: its edge is warmed.
+    pub hover: Option<Field>,
+    /// How wide the mark is round a box that has the keyboard: the user's
+    /// focus width (`App::appearance_changed`), the toolkit's until it is
+    /// known.
+    pub focus_ring_width: f32,
     /// Carries the fraction of a row a wheel event is worth.
     ///
     /// Rounding each event on its own would discard it, and a precision
@@ -1002,6 +1023,10 @@ impl NetManagerApp {
             sidebar_scroll: 0,
             show_help: false,
             focus: None,
+            editor: TextInput::new(),
+            clipboard: String::new(),
+            hover: None,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             wheel: wheel::Accumulator::default(),
             window_size: (WINDOW_WIDTH, WINDOW_HEIGHT),
             listing: Listing::NotRead,
@@ -2286,45 +2311,12 @@ fn render_tab_ip_config(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32
     frame.hit(Target::DhcpToggle, dhcp);
     y += FIELD_HEIGHT + 8.0;
 
-    // IP fields (dimmed if DHCP is on and not editing)
-    let field_color = if ip.dhcp_enabled && !app.editing_ip {
-        app.palette.overlay0
-    } else {
-        app.palette.text
-    };
-
-    let ip_fields: &[(&str, &str, Field)] = &[
-        ("IP Address:", &ip.ip_address, Field::Ip),
-        ("Subnet Mask:", &ip.subnet_mask, Field::Mask),
-        ("Gateway:", &ip.gateway, Field::Gateway),
-    ];
-
-    for (label, value, field) in ip_fields {
-        let editing = app.editing_ip;
-        let value = if editing && app.focus == Some(*field) {
-            // The caret is drawn into the text rather than as a separate
-            // command, so that a field with focus is distinguishable in the
-            // render tree — which is the only thing a test can see.
-            format!("{value}_")
-        } else {
-            (*value).to_string()
-        };
-        let box_rect = render_editable_field(
-            frame,
-            &app.palette,
-            label,
-            &value,
-            lx,
-            vx,
-            y,
-            field_color,
-            editing,
-        );
-        if editing {
-            // Only while editing: outside edit mode the boxes are not drawn,
-            // and a click target with nothing under it is a trap.
-            frame.hit(Target::Focus(*field), box_rect);
-        }
+    for (label, field) in [
+        ("IP Address:", Field::Ip),
+        ("Subnet Mask:", Field::Mask),
+        ("Gateway:", Field::Gateway),
+    ] {
+        render_address_row(frame, app, label, field, (lx, vx, y));
         y += FIELD_HEIGHT + 6.0;
     }
 
@@ -2473,59 +2465,10 @@ fn render_tab_dns(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, pw: 
     y += 12.0;
     y = render_section_title(frame, &app.palette, "Add DNS Server", lx, y);
 
-    // Input field
+    // The box the address is typed into.
     let input = Rect::new(lx, y, FIELD_INPUT_WIDTH, FIELD_HEIGHT);
-    let focused = app.focus == Some(Field::DnsInput);
-    app.palette.push_surface(
-        frame,
-        input.x,
-        input.y,
-        input.w,
-        input.h,
-        4.0,
-        Surface::Card,
-    );
-    frame.push(RenderCommand::StrokeRect {
-        x: input.x,
-        y: input.y,
-        width: input.w,
-        height: input.h,
-        // A focused box is outlined in the accent colour, so that typing has
-        // somewhere visible to go before the first character arrives.
-        color: if focused {
-            app.palette.blue
-        } else {
-            app.palette.overlay0
-        },
-        line_width: 1.0,
-        corner_radii: CornerRadii::all(4.0),
-    });
+    render_text_box(frame, app, Field::DnsInput, input, "e.g. 8.8.8.8");
     frame.hit(Target::Focus(Field::DnsInput), input);
-    let typed = if focused {
-        format!("{}_", app.dns_input)
-    } else {
-        app.dns_input.clone()
-    };
-    let dns_display = if app.dns_input.is_empty() && !focused {
-        "e.g. 8.8.8.8"
-    } else {
-        &typed
-    };
-    let dns_color = if app.dns_input.is_empty() && !focused {
-        app.palette.overlay0
-    } else {
-        app.palette.text
-    };
-    frame.push(RenderCommand::Text {
-        x: lx + 8.0,
-        y: y + 7.0,
-        text: dns_display.to_string(),
-        color: dns_color,
-        font_size: 12.0,
-        font_weight: FontWeightHint::Regular,
-        max_width: Some(FIELD_INPUT_WIDTH - 16.0),
-        overflow: TextOverflow::Ellipsis,
-    });
 
     // Add button
     let add = render_button(
@@ -3254,71 +3197,134 @@ fn render_field_row(
     });
 }
 
-/// Render an editable field row with input box styling.
-///
-/// Returns the input box, so the caller can record it as a click target
-/// without measuring it a second time.
-// label + value strings + 3 geometry floats + color + editing flag + tree.
-// Grouping would not help.
-#[allow(clippy::too_many_arguments)]
-fn render_editable_field(
+/// One address row of the IP tab, its top at `y`: the label at `lx`, and at
+/// `vx` the address -- in the toolkit's field while the editor is open,
+/// plain text (dimmed under DHCP) otherwise.
+fn render_address_row(
     frame: &mut Frame,
-    pal: &Palette,
+    app: &NetManagerApp,
     label: &str,
-    value: &str,
-    lx: f32,
-    vx: f32,
-    y: f32,
-    color: Color,
-    editing: bool,
-) -> Rect {
+    field: Field,
+    (lx, vx, y): (f32, f32, f32),
+) {
     frame.push(RenderCommand::Text {
         x: lx,
         y: y + 6.0,
         text: label.to_string(),
-        color: pal.subtext0,
+        color: app.palette.subtext0,
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
         overflow: TextOverflow::Clip,
     });
-
-    let box_rect = Rect::new(vx, y, FIELD_INPUT_WIDTH, FIELD_HEIGHT);
-    if editing {
-        // Input box background
-        pal.push_surface(
-            frame,
-            box_rect.x,
-            box_rect.y,
-            box_rect.w,
-            box_rect.h,
-            4.0,
-            Surface::Card,
-        );
-        frame.push(RenderCommand::StrokeRect {
-            x: box_rect.x,
-            y: box_rect.y,
-            width: box_rect.w,
-            height: box_rect.h,
-            color: pal.blue,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+    if app.editing_ip {
+        let rect = Rect::new(vx, y, FIELD_INPUT_WIDTH, FIELD_HEIGHT);
+        render_text_box(frame, app, field, rect, "");
+        // Only a box that can take the keyboard is a target: a press on a
+        // disabled one would do nothing, and a target that does nothing is a
+        // trap.
+        if app.field_enabled(field) {
+            frame.hit(Target::Focus(field), rect);
+        }
+        return;
     }
-
-    let display = if value.is_empty() { "---" } else { value };
+    let value = app.field_text(field);
     frame.push(RenderCommand::Text {
-        x: vx + if editing { 8.0 } else { 0.0 },
+        x: vx,
         y: y + 7.0,
-        text: display.to_string(),
-        color,
+        text: if value.is_empty() { "---" } else { value }.to_string(),
+        color: if app.edit_ip_config.dhcp_enabled {
+            app.palette.overlay0
+        } else {
+            app.palette.text
+        },
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(FIELD_INPUT_WIDTH - 10.0),
         overflow: TextOverflow::Ellipsis,
     });
+}
 
-    box_rect
+/// The size a box's text is drawn at.
+const BOX_TEXT_SIZE: f32 = 12.0;
+
+/// How far a box's text sits in from either side of the box.
+const BOX_TEXT_INSET: f32 = 8.0;
+
+/// The most characters an address box holds: room for any address, IPv6's
+/// longest among them, and a stop for a paste of something that is not one.
+const ADDRESS_CAPACITY: usize = 64;
+
+/// How wide the text in a box drawn at `rect` may run before it scrolls.
+fn box_text_width(rect: Rect) -> f32 {
+    (rect.w - 2.0 * BOX_TEXT_INSET).max(0.0)
+}
+
+/// The box `field` at `rect`: the toolkit's field, in the state
+/// [`NetManagerApp::box_state`] says, holding the box's text -- with the
+/// caret and the selection while it has the keyboard, scrolled to keep the
+/// caret in view -- or `placeholder`, grey, while it is empty and idle.
+fn render_text_box(
+    frame: &mut Frame,
+    app: &NetManagerApp,
+    field: Field,
+    rect: Rect,
+    placeholder: &str,
+) {
+    let state = app.box_state(field);
+    field::draw(frame, &app.palette, rect, state, app.focus_ring_width);
+    let text = app.field_text(field);
+    let line = text::line_height(BOX_TEXT_SIZE, FontWeightHint::Regular);
+    let (tx, ty, tw) = (
+        rect.x + BOX_TEXT_INSET,
+        rect.y + (rect.h - line) / 2.0,
+        box_text_width(rect),
+    );
+    if text.is_empty() && !state.focused && !placeholder.is_empty() {
+        frame.push(RenderCommand::Text {
+            x: tx,
+            y: ty,
+            text: placeholder.to_string(),
+            color: app.palette.subtext0,
+            font_size: BOX_TEXT_SIZE,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(tw),
+            overflow: TextOverflow::Ellipsis,
+        });
+        return;
+    }
+    // The editor's selection, while the box has the keyboard and the editor
+    // still holds the box's text.
+    let selection_anchor = if app.focus == Some(field) && app.editor.text() == text {
+        app.editor.selection_anchor()
+    } else {
+        None
+    };
+    let mut typed = RenderTree::new();
+    textedit::draw(
+        &mut typed,
+        &textedit::SingleLine {
+            text,
+            cursor: app.drawn_cursor(field),
+            selection_anchor,
+            focused: state.focused,
+            x: tx,
+            y: ty,
+            width: tw,
+            line_height: line,
+            font_size: BOX_TEXT_SIZE,
+            weight: FontWeightHint::Regular,
+            color: if state.disabled {
+                app.palette.overlay0
+            } else {
+                app.palette.text
+            },
+            selection_bg: app.palette.accent,
+            selection_fg: app.palette.crust,
+            caret_width: textedit::CARET_WIDTH,
+        },
+    );
+    frame.extend(typed.commands);
 }
 
 /// Render a toggle indicator row.
@@ -3499,30 +3505,107 @@ impl NetManagerApp {
         }
     }
 
-    /// Give a field the keyboard.
+    /// The text behind a box: [`Self::field_mut`] for reading.
+    fn field_text(&self, field: Field) -> &str {
+        match field {
+            Field::Ip => &self.edit_ip_config.ip_address,
+            Field::Mask => &self.edit_ip_config.subnet_mask,
+            Field::Gateway => &self.edit_ip_config.gateway,
+            Field::DnsInput => &self.dns_input,
+        }
+    }
+
+    /// Whether `field` can take the keyboard now.
     ///
-    /// The three IP fields only accept focus while the IP config is being
-    /// edited: outside edit mode their boxes are not drawn, and a caret in an
-    /// invisible box is a keystroke going somewhere the user cannot see.
+    /// The DNS box always can. The three address boxes only while the
+    /// editor is open on a static configuration: outside the editor their
+    /// boxes are not drawn, and a caret in an invisible box is a keystroke
+    /// going somewhere the user cannot see; under DHCP they are drawn
+    /// disabled, since the addresses are the DHCP server's to give and Apply
+    /// would send none of them.
+    fn field_enabled(&self, field: Field) -> bool {
+        field == Field::DnsInput || (self.editing_ip && !self.edit_ip_config.dhcp_enabled)
+    }
+
+    /// Give a field the keyboard, its caret at the end of its text.
     fn focus_field(&mut self, field: Field) -> Action {
-        if field != Field::DnsInput && !self.editing_ip {
+        if !self.field_enabled(field) {
             return Action::None;
         }
         if self.focus == Some(field) {
             return Action::None;
         }
         self.focus = Some(field);
+        self.load_editor(field);
         Action::Redraw
     }
 
-    /// The field after `field` in tab order, staying within the same tab's
-    /// fields — Tab out of the DNS box goes nowhere, because there is nowhere
-    /// on that tab for it to go.
-    fn next_field(field: Field) -> Field {
-        match field {
-            Field::Ip => Field::Mask,
-            Field::Mask => Field::Gateway,
-            Field::Gateway | Field::DnsInput => Field::Ip,
+    /// Load the editor from `field`'s text, the caret at its end.
+    fn load_editor(&mut self, field: Field) {
+        let text = self.field_text(field).to_owned();
+        self.editor.set_text(&text);
+    }
+
+    /// Reload the editor from `field`'s text if the text has changed under
+    /// it -- from outside the box, by Add or Edit or a test.
+    fn sync_editor(&mut self, field: Field) {
+        if self.editor.text() != self.field_text(field) {
+            self.load_editor(field);
+        }
+    }
+
+    /// Where `field`'s caret is drawn: the editor's while the box has the
+    /// keyboard (its end, if the text changed under the editor), and the
+    /// start of the text otherwise -- an idle box shows the beginning of its
+    /// address. One answer for the drawing and for a press, so a press lands
+    /// on the character drawn under it however the box was scrolled.
+    fn drawn_cursor(&self, field: Field) -> TextCursor {
+        if self.focus != Some(field) {
+            return TextCursor::default();
+        }
+        let text = self.field_text(field);
+        if self.editor.text() == text {
+            self.editor.cursor()
+        } else {
+            TextCursor::from(text.len())
+        }
+    }
+
+    /// How the box `field` is drawn.
+    ///
+    /// Lit under the pointer, and with the keyboard's mark while it has the
+    /// keyboard -- not under the shortcut card, which covers it. Disabled
+    /// while it cannot take the keyboard: an address box under DHCP. Red
+    /// while what is in it would be refused: an address box holding
+    /// something that is not an address, or the DNS box holding one, or a
+    /// server already listed. An empty box is not red: it is not wrong yet,
+    /// only not filled in, and Apply says so if it matters.
+    fn box_state(&self, field: Field) -> field::State {
+        let enabled = self.field_enabled(field);
+        let text = self.field_text(field);
+        let refused = !is_valid_ipv4(text)
+            || (field == Field::DnsInput
+                && self.edit_ip_config.dns_servers.iter().any(|s| s == text));
+        field::State {
+            hovered: enabled && self.hover == Some(field),
+            focused: enabled && self.focus == Some(field) && !self.show_help,
+            disabled: !enabled,
+            invalid: enabled && !text.is_empty() && refused,
+        }
+    }
+
+    /// The box after `field` in tab order -- or before it, `backwards` --
+    /// round the three address boxes. The DNS box is the only box on its
+    /// tab, so Tab keeps it: the address boxes are on another tab, and a
+    /// keystroke sent to a box that is not drawn goes somewhere the user
+    /// cannot see. (Tab out of the DNS box used to move the keyboard to the
+    /// address box on the IP tab, with the DNS tab still showing.)
+    fn next_field(field: Field, backwards: bool) -> Field {
+        match (field, backwards) {
+            (Field::Ip, false) | (Field::Gateway, true) => Field::Mask,
+            (Field::Mask, false) | (Field::Ip, true) => Field::Gateway,
+            (Field::Gateway, false) | (Field::Mask, true) => Field::Ip,
+            (Field::DnsInput, _) => Field::DnsInput,
         }
     }
 
@@ -3615,11 +3698,19 @@ impl NetManagerApp {
                     self.start_editing_ip();
                 }
                 self.edit_ip_config.dhcp_enabled = !self.edit_ip_config.dhcp_enabled;
+                // Under DHCP the address boxes are disabled, and a disabled
+                // box does not keep the keyboard.
+                if self.focus.is_some_and(|field| !self.field_enabled(field)) {
+                    self.focus = None;
+                }
                 Action::Redraw
             }
             Target::EditIp => {
                 self.start_editing_ip();
-                self.focus = Some(Field::Ip);
+                // The address box takes the keyboard -- unless the
+                // configuration is DHCP's, whose boxes are disabled.
+                self.focus = None;
+                self.focus_field(Field::Ip);
                 Action::Redraw
             }
             Target::ApplyIp => {
@@ -3731,7 +3822,8 @@ impl NetManagerApp {
             return Action::None;
         }
         let (width, height) = size;
-        let Some(target) = render_frame(self, width, height).hit_test(x, y) else {
+        let frame = render_frame(self, width, height);
+        let Some(target) = frame.hit_test(x, y) else {
             // Clicking bare background puts the caret away, so a stray
             // keystroke afterwards does not land in a field the user has
             // stopped looking at.
@@ -3741,7 +3833,36 @@ impl NetManagerApp {
             }
             return Action::None;
         };
+        if let Target::Focus(field) = target {
+            // A press in a box puts the caret where it landed, which needs
+            // the box as it was drawn: the frame that answered the hit-test
+            // has it.
+            if let Some(rect) = frame.rect_of(|t| *t == target) {
+                return self.press_field(field, rect, x);
+            }
+        }
         self.activate(target)
+    }
+
+    /// The box under the pointer at `x`, `y` -- none while the shortcut card
+    /// is over everything.
+    fn field_at(&self, x: f32, y: f32, size: (f32, f32)) -> Option<Field> {
+        if self.show_help {
+            return None;
+        }
+        match render_frame(self, size.0, size.1).hit_test(x, y) {
+            Some(Target::Focus(field)) => Some(field),
+            _ => None,
+        }
+    }
+
+    /// Light the box under the pointer, and answer whether that changed.
+    fn set_hover(&mut self, over: Option<Field>) -> Action {
+        if over == self.hover {
+            return Action::None;
+        }
+        self.hover = over;
+        Action::Redraw
     }
 
     /// Route a keystroke.
@@ -3749,15 +3870,19 @@ impl NetManagerApp {
         if !key.pressed {
             return Action::None;
         }
+        // Every binding here is on a key itself, so a chord is none of them:
+        // Alt's chords are the window's and the Windows key's the desktop's,
+        // and each arrives carrying its key -- Alt+Escape quit.
+        let plain = textline::is_plain(key.modifiers);
 
         // Above the field branch, which takes every character and returns.
-        if key.key == Key::F1 {
+        if key.key == Key::F1 && plain {
             self.show_help = !self.show_help;
             return Action::Redraw;
         }
         if self.show_help {
             // Modal, and Escape especially: on this window it quits.
-            if matches!(key.key, Key::Escape | Key::Enter) {
+            if plain && matches!(key.key, Key::Escape | Key::Enter) {
                 self.show_help = false;
             }
             return Action::Redraw;
@@ -3765,6 +3890,9 @@ impl NetManagerApp {
 
         if let Some(field) = self.focus {
             return self.handle_key_in_field(key, field);
+        }
+        if !plain {
+            return Action::None;
         }
 
         match key.key {
@@ -3791,18 +3919,28 @@ impl NetManagerApp {
     }
 
     /// A keystroke while a text field holds the keyboard.
+    ///
+    /// Escape, Tab (Shift+Tab backwards) and Enter are the window's, plain;
+    /// every other key is the editor's -- the caret keys, Backspace and
+    /// Delete, Ctrl+A, C, X and V, and typing (`textline::apply_key`, which
+    /// knows a command from typing: a chord arrives carrying its letter, and
+    /// Ctrl+S typed an `s` into the address).
     fn handle_key_in_field(&mut self, key: &KeyEvent, field: Field) -> Action {
+        let plain = textline::is_plain(key.modifiers);
         match key.key {
-            Key::Escape => {
+            Key::Escape if plain => {
                 self.focus = None;
                 Action::Redraw
             }
-            Key::Tab => {
-                let next = Self::next_field(field);
-                self.focus = Some(next);
-                Action::Redraw
+            Key::Tab if plain => {
+                let next = Self::next_field(field, key.modifiers.shift);
+                if next == field {
+                    return Action::None;
+                }
+                self.focus = None;
+                self.focus_field(next)
             }
-            Key::Enter => {
+            Key::Enter if plain => {
                 if field == Field::DnsInput {
                     self.commit_dns_input();
                 } else {
@@ -3810,24 +3948,79 @@ impl NetManagerApp {
                 }
                 Action::Redraw
             }
-            Key::Backspace => {
-                if self.field_mut(field).pop().is_some() {
-                    Action::Redraw
-                } else {
-                    Action::None
-                }
-            }
-            _ => {
-                // `typed()` already drops the control characters that Enter,
-                // Tab, Escape and Backspace produce on most layouts, so an
-                // unmatched key cannot smuggle a `\r` into an address.
-                let typed: String = key.typed().collect();
-                if typed.is_empty() {
-                    return Action::None;
-                }
-                self.field_mut(field).push_str(&typed);
-                Action::Redraw
-            }
+            _ => self.edit_field(key, field),
+        }
+    }
+
+    /// Apply an editing key to the box `field`, and say whether anything
+    /// changed that shows.
+    fn edit_field(&mut self, key: &KeyEvent, field: Field) -> Action {
+        self.sync_editor(field);
+        let before = (
+            self.editor.text().to_owned(),
+            self.editor.cursor(),
+            self.editor.selection_anchor(),
+        );
+        let clipboard = self.clipboard.clone();
+        let done = textline::apply_key(
+            &mut self.editor,
+            key,
+            ADDRESS_CAPACITY,
+            &clipboard,
+            BOX_TEXT_SIZE,
+        );
+        if let Some(copied) = done.copied {
+            self.clipboard = copied;
+        }
+        let typed = self.editor.text() != before.0;
+        if typed {
+            *self.field_mut(field) = self.editor.text().to_owned();
+        }
+        if typed || self.editor.cursor() != before.1 || self.editor.selection_anchor() != before.2 {
+            Action::Redraw
+        } else {
+            Action::None
+        }
+    }
+
+    /// A press on the box `field`, drawn at `rect`: it takes the keyboard,
+    /// with the caret under the pointer at `x`.
+    fn press_field(&mut self, field: Field, rect: Rect, x: f32) -> Action {
+        if !self.field_enabled(field) {
+            return Action::None;
+        }
+        // Measured against the box as it was drawn, before the press.
+        let drawn = self.drawn_cursor(field);
+        let before = (
+            self.focus,
+            self.editor.cursor(),
+            self.editor.selection_anchor(),
+        );
+        if self.focus == Some(field) {
+            self.sync_editor(field);
+        } else {
+            self.focus = Some(field);
+            self.load_editor(field);
+        }
+        let cursor = textedit::cursor_at_click(
+            self.editor.text(),
+            drawn,
+            box_text_width(rect),
+            BOX_TEXT_SIZE,
+            FontWeightHint::Regular,
+            x - rect.x - BOX_TEXT_INSET,
+        );
+        self.editor.set_selection_anchor(None);
+        self.editor.set_cursor(cursor);
+        if (
+            self.focus,
+            self.editor.cursor(),
+            self.editor.selection_anchor(),
+        ) == before
+        {
+            Action::None
+        } else {
+            Action::Redraw
         }
     }
 
@@ -3877,8 +4070,28 @@ impl NetManagerApp {
     /// Route a whole event.
     pub fn handle_event(&mut self, event: &Event, size: (f32, f32)) -> Action {
         match event {
+            // The shortcut card is drawn over everything, so it takes the
+            // pointer as well as the keys: a press with any button puts it
+            // away and reaches nothing under it, and the wheel scrolls
+            // nothing it covers. A move or a release passes -- neither is a
+            // press. (A press went through the card to the control drawn
+            // under it -- Refresh, Apply, a DNS server's X.)
+            Event::Mouse(mouse) if self.show_help => match mouse.kind {
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                    self.show_help = false;
+                    Action::Redraw
+                }
+                // The wheel scrolls nothing the card covers, and nothing
+                // under the card is lit.
+                _ => self.set_hover(None),
+            },
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::Press(button) => self.handle_click(mouse.x, mouse.y, button, size),
+                MouseEventKind::Move | MouseEventKind::Enter => {
+                    let over = self.field_at(mouse.x, mouse.y, size);
+                    self.set_hover(over)
+                }
+                MouseEventKind::Leave => self.set_hover(None),
                 MouseEventKind::Scroll { dy, .. } => {
                     // Only the sidebar scrolls, so a wheel anywhere scrolls it
                     // rather than nothing. The accumulator keeps the fractions
@@ -4158,6 +4371,10 @@ fn sample_throughput_history() -> VecDeque<ThroughputSample> {
 impl App for NetManagerApp {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn wants_waker(&self) -> bool {
@@ -5620,7 +5837,7 @@ mod tests {
     /// four lines in every program, so they live in the toolkit — see
     /// [`guitk::probe`] for what each one guarantees. Imported under their
     /// bare names because that is what the tests below already say.
-    use guitk::probe::{click, press, rect_of, type_str, typing};
+    use guitk::probe::{click, press, press_with, rect_of, type_str, typing};
 
     /// **Every key the card advertises is answered by this window.**
     #[test]
@@ -6400,8 +6617,7 @@ mod tests {
 
     #[test]
     fn the_edit_button_opens_the_editor_and_apply_writes_it_back() {
-        let mut app = NetManagerApp::with_sample_data();
-        app.set_tab(DetailTab::IpConfig);
+        let mut app = on_a_static_interface();
 
         assert!(
             rect_of(&app, Target::ApplyIp).is_none(),
@@ -6415,7 +6631,6 @@ mod tests {
         for _ in 0..64 {
             app.handle_key(&press(Key::Backspace));
         }
-        app.edit_ip_config.dhcp_enabled = false;
         type_str(&mut app, "10.0.0.7");
 
         click(&mut app, Target::ApplyIp);
@@ -6468,10 +6683,28 @@ mod tests {
         assert_eq!(app.focus, None);
     }
 
+    /// A window on the IP tab of br0, an interface configured by hand, whose
+    /// address boxes take the keyboard once the editor is open. (The first
+    /// interface is DHCP's, whose boxes are disabled.)
+    fn on_a_static_interface() -> NetManagerApp {
+        let mut app = NetManagerApp::with_sample_data();
+        let br0 = app
+            .interfaces
+            .iter()
+            .position(|i| i.name == "br0")
+            .expect("the sample data has br0");
+        app.select_interface(br0);
+        assert!(
+            !app.edit_ip_config.dhcp_enabled,
+            "br0 is configured by hand"
+        );
+        app.set_tab(DetailTab::IpConfig);
+        app
+    }
+
     #[test]
     fn the_ip_fields_only_take_the_keyboard_while_the_editor_is_open() {
-        let mut app = NetManagerApp::with_sample_data();
-        app.set_tab(DetailTab::IpConfig);
+        let mut app = on_a_static_interface();
 
         assert!(
             rect_of(&app, Target::Focus(Field::Ip)).is_none(),
@@ -6488,8 +6721,7 @@ mod tests {
 
     #[test]
     fn tab_walks_the_ip_fields_and_typing_lands_in_the_focused_one() {
-        let mut app = NetManagerApp::with_sample_data();
-        app.set_tab(DetailTab::IpConfig);
+        let mut app = on_a_static_interface();
         click(&mut app, Target::EditIp);
         app.edit_ip_config.subnet_mask.clear();
         let address_before = app.edit_ip_config.ip_address.clone();
@@ -6507,13 +6739,22 @@ mod tests {
         assert_eq!(app.focus, Some(Field::Gateway));
         app.handle_key(&press(Key::Tab));
         assert_eq!(app.focus, Some(Field::Ip), "tab order did not come round");
+
+        // Shift+Tab walks it backwards.
+        let back = guitk::probe::shift(Key::Tab);
+        app.handle_key(&back);
+        assert_eq!(app.focus, Some(Field::Gateway), "Shift+Tab went forwards");
+        app.handle_key(&back);
+        assert_eq!(app.focus, Some(Field::Mask));
+        app.handle_key(&back);
+        assert_eq!(app.focus, Some(Field::Ip));
     }
 
     #[test]
     fn escape_in_a_field_puts_the_caret_away_rather_than_closing_the_window() {
-        let mut app = NetManagerApp::with_sample_data();
-        app.set_tab(DetailTab::IpConfig);
+        let mut app = on_a_static_interface();
         click(&mut app, Target::EditIp);
+        assert_eq!(app.focus, Some(Field::Ip), "Edit put the caret nowhere");
 
         assert_eq!(app.handle_key(&press(Key::Escape)), Action::Redraw);
         assert_eq!(app.focus, None);
@@ -6523,25 +6764,436 @@ mod tests {
         assert_eq!(app.handle_key(&press(Key::Escape)), Action::Quit);
     }
 
+    /// The caret drawn after `text` -- the `Line` straight after the text,
+    /// across its line -- or `None` for none.
+    fn caret_after(app: &NetManagerApp, text: &str) -> Option<f32> {
+        let frame = render_frame(app, SIZE.0, SIZE.1);
+        let cmds = frame.commands();
+        let at = cmds
+            .iter()
+            .position(|c| matches!(c, RenderCommand::RichText { text: t, .. } if t == text))?;
+        match cmds.get(at + 1) {
+            Some(RenderCommand::Line { x1, x2, .. }) if (x1 - x2).abs() < 0.01 => Some(*x1),
+            _ => None,
+        }
+    }
+
     #[test]
     fn a_focused_field_shows_a_caret_so_the_keyboard_has_somewhere_visible_to_go() {
-        let mut app = NetManagerApp::with_sample_data();
-        app.set_tab(DetailTab::IpConfig);
+        let mut app = on_a_static_interface();
         click(&mut app, Target::EditIp);
         app.edit_ip_config.ip_address = "1.2.3.4".into();
 
-        let carets = |app: &NetManagerApp| {
-            render_frame(app, SIZE.0, SIZE.1)
+        assert_eq!(app.focus, Some(Field::Ip));
+        let caret = caret_after(&app, "1.2.3.4").expect("the focused address drew no caret");
+        assert!(
+            !render_frame(&app, SIZE.0, SIZE.1)
                 .commands()
                 .iter()
-                .filter(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text == "1.2.3.4_"))
-                .count()
-        };
+                .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.ends_with('_'))),
+            "the caret is still a character"
+        );
+        // After the address: the text changed under the editor, so the caret
+        // went to its end.
+        let rect = rect_of(&app, Target::Focus(Field::Ip)).expect("the box");
+        let end = rect.x
+            + BOX_TEXT_INSET
+            + text::measure("1.2.3.4", BOX_TEXT_SIZE, FontWeightHint::Regular);
+        assert!(
+            (caret - end).abs() < 0.5,
+            "the caret is at {caret}, not after the address at {end}"
+        );
 
-        app.focus = Some(Field::Ip);
-        assert_eq!(carets(&app), 1, "the focused address drew no caret");
-        app.focus = Some(Field::Gateway);
-        assert_eq!(carets(&app), 0, "an unfocused address drew a caret");
+        click(&mut app, Target::Focus(Field::Gateway));
+        assert_eq!(
+            caret_after(&app, "1.2.3.4"),
+            None,
+            "an unfocused address drew a caret"
+        );
+    }
+
+    // -- The boxes are the toolkit's field, edited by the toolkit's editor
+    //    (lane C, c-e-a-theme-can-shape-the-controls)
+
+    /// Whether the window draws exactly the toolkit's field for `rect` in
+    /// `state` -- and, unless `state` has the keyboard, not the focused one
+    /// as well (an unfocused box's commands are a prefix of a focused
+    /// one's). A disabled box draws no focus mark either way, so for one
+    /// the two are the same drawing.
+    fn draws_box(app: &NetManagerApp, rect: Rect, state: field::State) -> bool {
+        let seq = |s: field::State| {
+            let mut v: Vec<RenderCommand> = Vec::new();
+            field::draw(&mut v, &app.palette, rect, s, app.focus_ring_width);
+            v
+        };
+        let frame = render_frame(app, SIZE.0, SIZE.1);
+        let cmds = frame.commands();
+        let has = |want: &[RenderCommand]| cmds.windows(want.len()).any(|w| w == want);
+        let focused = seq(field::State {
+            focused: true,
+            ..state
+        });
+        has(&seq(state)) && (state.focused || focused == seq(state) || !has(&focused))
+    }
+
+    /// A mouse event at `x`, `y`.
+    fn mouse(x: f32, y: f32, kind: MouseEventKind) -> Event {
+        Event::Mouse(guitk::event::MouseEvent { x, y, kind })
+    }
+
+    /// A window whose theme marks a box with the keyboard by a ring, at two
+    /// and a half times the toolkit's focus width.
+    fn ringed() -> NetManagerApp {
+        let mut app = NetManagerApp::with_sample_data();
+        let mut p = app.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        app.theme_changed(&p);
+        app.appearance_changed(&appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..appearance::AppearanceSettings::default()
+        });
+        assert!(
+            app.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        app
+    }
+
+    /// **The DNS box is the toolkit's field**: lit under the pointer, with
+    /// the keyboard in the theme's mark at the user's width, red while what
+    /// is in it would be refused -- not an address, or one already listed --
+    /// and giving up its mark under the shortcut card. It was a card-coloured
+    /// box with a blue edge and an `_` for a caret.
+    #[test]
+    fn the_dns_box_is_the_toolkits_field() {
+        let mut app = ringed();
+        app.set_tab(DetailTab::Dns);
+        let rect = rect_of(&app, Target::Focus(Field::DnsInput)).expect("the DNS box");
+        let idle = field::State::default();
+        assert!(
+            draws_box(&app, rect, idle),
+            "the DNS box is not the toolkit's field"
+        );
+
+        let (cx, cy) = rect.centre();
+        assert_eq!(
+            app.handle_event(&mouse(cx, cy, MouseEventKind::Move), SIZE),
+            Action::Redraw
+        );
+        let lit = field::State {
+            hovered: true,
+            ..idle
+        };
+        assert!(
+            draws_box(&app, rect, lit),
+            "the box under the pointer is not lit"
+        );
+        app.handle_event(&mouse(cx, cy, MouseEventKind::Leave), SIZE);
+        assert!(
+            draws_box(&app, rect, idle),
+            "the box stayed lit with the pointer gone"
+        );
+
+        click(&mut app, Target::Focus(Field::DnsInput));
+        let focused = field::State {
+            focused: true,
+            ..idle
+        };
+        assert!(
+            draws_box(&app, rect, focused),
+            "the box with the keyboard has no mark"
+        );
+
+        type_str(&mut app, "9.9.");
+        let red = field::State {
+            invalid: true,
+            ..focused
+        };
+        assert!(draws_box(&app, rect, red), "half an address is not red");
+        type_str(&mut app, "9.9");
+        assert!(draws_box(&app, rect, focused), "an address is red");
+        assert!(
+            app.edit_ip_config
+                .dns_servers
+                .iter()
+                .any(|s| s == "8.8.8.8"),
+            "the sample lists 8.8.8.8"
+        );
+        app.handle_key(&guitk::probe::ctrl(Key::A));
+        type_str(&mut app, "8.8.8.8");
+        assert_eq!(app.dns_input, "8.8.8.8");
+        assert!(
+            draws_box(&app, rect, red),
+            "a server already listed is not red"
+        );
+
+        app.handle_key(&press(Key::F1));
+        assert!(
+            draws_box(
+                &app,
+                rect,
+                field::State {
+                    focused: false,
+                    ..red
+                }
+            ),
+            "the box keeps the keyboard's mark under the shortcut card"
+        );
+    }
+
+    /// **A chord is a command, not typing, and the caret keys edit.** A
+    /// command arrives carrying its letter as text, so the box typed it:
+    /// Ctrl+S put an `s` in the address. AltGr arrives as Ctrl+Alt, and
+    /// types. And the box had no caret to move -- Backspace from the end was
+    /// the only edit there was.
+    #[test]
+    fn a_chord_is_not_typed_into_a_box_and_the_caret_keys_edit_it() {
+        let mut app = NetManagerApp::with_sample_data();
+        app.set_tab(DetailTab::Dns);
+        click(&mut app, Target::Focus(Field::DnsInput));
+        type_str(&mut app, "8.8.4.4");
+
+        for (key, text, modifiers) in [
+            (Key::S, "s", Modifiers::ctrl()),
+            (Key::X, "x", Modifiers::alt()),
+            (
+                Key::E,
+                "e",
+                Modifiers {
+                    super_key: true,
+                    ..Modifiers::NONE
+                },
+            ),
+        ] {
+            app.handle_key(&KeyEvent {
+                key,
+                pressed: true,
+                modifiers,
+                text: text.to_string(),
+            });
+            assert_eq!(
+                app.dns_input, "8.8.4.4",
+                "{modifiers:?} {key:?} typed into the box"
+            );
+        }
+        app.handle_key(&KeyEvent {
+            key: Key::Unknown(0),
+            pressed: true,
+            modifiers: Modifiers {
+                ctrl: true,
+                alt: true,
+                ..Modifiers::NONE
+            },
+            text: String::from("5"),
+        });
+        assert_eq!(app.dns_input, "8.8.4.45", "AltGr did not type");
+
+        app.handle_key(&press(Key::Backspace));
+        app.handle_key(&press(Key::Home));
+        app.handle_key(&press(Key::Delete));
+        type_str(&mut app, "9");
+        assert_eq!(
+            app.dns_input, "9.8.4.4",
+            "Home and Delete did not edit the start"
+        );
+        app.handle_key(&guitk::probe::ctrl(Key::A));
+        type_str(&mut app, "1.1.1.1");
+        assert_eq!(
+            app.dns_input, "1.1.1.1",
+            "typing did not replace the selection"
+        );
+    }
+
+    /// **The window's keys are plain keys**: F1 with Ctrl is not the card,
+    /// and Escape with Alt -- the window's own chord -- does not quit.
+    #[test]
+    fn a_chord_is_none_of_the_windows_keys() {
+        let mut app = NetManagerApp::with_sample_data();
+        app.handle_key(&press_with(Key::F1, Modifiers::ctrl()));
+        assert!(!app.show_help, "Ctrl+F1 raised the card");
+        assert_eq!(
+            app.handle_key(&press_with(Key::Escape, Modifiers::alt())),
+            Action::None,
+            "Alt+Escape quit"
+        );
+        let tab = app.active_tab;
+        app.handle_key(&press_with(Key::Right, Modifiers::alt()));
+        assert_eq!(app.active_tab, tab, "Alt+Right changed tab");
+        // Control: the keys themselves.
+        app.handle_key(&press(Key::Right));
+        assert_ne!(app.active_tab, tab);
+        app.handle_key(&press(Key::F1));
+        assert!(app.show_help);
+    }
+
+    /// **A press in a box puts the caret under the pointer**, not at the
+    /// end: at the start of the text, a press before its first character.
+    #[test]
+    fn a_press_in_a_box_puts_the_caret_under_the_pointer() {
+        let mut app = NetManagerApp::with_sample_data();
+        app.set_tab(DetailTab::Dns);
+        app.dns_input = String::from("8.8.4.4");
+        let rect = rect_of(&app, Target::Focus(Field::DnsInput)).expect("the DNS box");
+        let y = rect.centre().1;
+
+        let left = MouseEventKind::Press(MouseButton::Left);
+        app.handle_event(&mouse(rect.x + BOX_TEXT_INSET + 1.0, y, left.clone()), SIZE);
+        assert_eq!(app.focus, Some(Field::DnsInput));
+        type_str(&mut app, "1");
+        assert_eq!(
+            app.dns_input, "18.8.4.4",
+            "the caret did not go where the press was"
+        );
+
+        app.handle_event(&mouse(rect.right() - 2.0, y, left), SIZE);
+        type_str(&mut app, "2");
+        assert_eq!(
+            app.dns_input, "18.8.4.42",
+            "a press past the end did not reach it"
+        );
+    }
+
+    /// **Tab in the DNS box keeps the keyboard on its tab.** It moved it to
+    /// the address box on the IP tab, which is not drawn while the DNS tab
+    /// is, so what was typed next went somewhere nobody could see.
+    #[test]
+    fn tab_in_the_dns_box_keeps_the_keyboard_on_its_tab() {
+        let mut app = NetManagerApp::with_sample_data();
+        app.set_tab(DetailTab::Dns);
+        click(&mut app, Target::Focus(Field::DnsInput));
+        assert_eq!(app.handle_key(&press(Key::Tab)), Action::None);
+        assert_eq!(
+            app.focus,
+            Some(Field::DnsInput),
+            "Tab sent the keyboard to a box on another tab"
+        );
+        type_str(&mut app, "1");
+        assert_eq!(app.dns_input, "1");
+    }
+
+    /// **Under DHCP the address boxes are disabled**: drawn so, no target,
+    /// and no keyboard -- the addresses are the DHCP server's to give, and
+    /// Apply would send none of them. Switching DHCP on takes the keyboard
+    /// from the box that had it.
+    #[test]
+    fn under_dhcp_the_address_boxes_are_disabled_and_take_no_keyboard() {
+        let mut app = NetManagerApp::with_sample_data();
+        app.set_tab(DetailTab::IpConfig);
+        assert!(
+            app.edit_ip_config.dhcp_enabled,
+            "the first interface is DHCP's"
+        );
+        click(&mut app, Target::EditIp);
+        assert!(app.editing_ip);
+        assert_eq!(
+            app.focus, None,
+            "Edit gave the keyboard to a box DHCP fills in"
+        );
+        assert!(
+            rect_of(&app, Target::Focus(Field::Ip)).is_none(),
+            "a disabled box is a target"
+        );
+        assert_eq!(app.activate(Target::Focus(Field::Ip)), Action::None);
+
+        click(&mut app, Target::DhcpToggle);
+        assert!(!app.edit_ip_config.dhcp_enabled);
+        let rect = rect_of(&app, Target::Focus(Field::Ip)).expect("a static box takes a press");
+        click(&mut app, Target::Focus(Field::Ip));
+        assert_eq!(app.focus, Some(Field::Ip));
+
+        click(&mut app, Target::DhcpToggle);
+        assert_eq!(app.focus, None, "a disabled box kept the keyboard");
+        let disabled = field::State {
+            disabled: true,
+            ..field::State::default()
+        };
+        assert!(
+            draws_box(&app, rect, disabled),
+            "the box under DHCP is not drawn disabled"
+        );
+        let before = app.edit_ip_config.ip_address.clone();
+        type_str(&mut app, "9");
+        assert_eq!(app.edit_ip_config.ip_address, before);
+    }
+
+    /// **An address box is red while it holds something that is not an
+    /// address**, and not while it is empty: an empty gateway is "none".
+    #[test]
+    fn an_address_box_is_red_while_it_is_not_an_address() {
+        let mut app = on_a_static_interface();
+        click(&mut app, Target::EditIp);
+        let rect = rect_of(&app, Target::Focus(Field::Gateway)).expect("the gateway box");
+        click(&mut app, Target::Focus(Field::Gateway));
+        app.handle_key(&guitk::probe::ctrl(Key::A));
+        type_str(&mut app, "10.0.0.");
+        let focused = field::State {
+            focused: true,
+            ..field::State::default()
+        };
+        assert!(
+            draws_box(
+                &app,
+                rect,
+                field::State {
+                    invalid: true,
+                    ..focused
+                }
+            ),
+            "half a gateway is not red"
+        );
+        type_str(&mut app, "1");
+        assert!(draws_box(&app, rect, focused), "a gateway is red");
+        app.handle_key(&guitk::probe::ctrl(Key::A));
+        app.handle_key(&press(Key::Backspace));
+        assert_eq!(app.edit_ip_config.gateway, "");
+        assert!(draws_box(&app, rect, focused), "an empty gateway is red");
+    }
+
+    /// **The shortcut card takes a press rather than passing it on**, with
+    /// any button: it goes, and the tab drawn under it is not chosen. The
+    /// wheel scrolls nothing it covers. The control: with the card down, the
+    /// same press chooses the tab and the same wheel scrolls the list.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        for button in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
+            let mut app = NetManagerApp::with_sample_data();
+            let rect = rect_of(&app, Target::Tab(DetailTab::Dns)).expect("the DNS tab");
+            let (x, y) = rect.centre();
+            app.handle_key(&press(Key::F1));
+            assert!(app.show_help);
+            assert_eq!(
+                app.handle_event(&mouse(x, y, MouseEventKind::Press(button)), SIZE),
+                Action::Redraw
+            );
+            assert!(!app.show_help, "{button:?} did not put the card away");
+            assert_ne!(
+                app.active_tab,
+                DetailTab::Dns,
+                "{button:?} went through the card to the tab under it"
+            );
+        }
+
+        let mut app = NetManagerApp::with_sample_data();
+        let rect = rect_of(&app, Target::Tab(DetailTab::Dns)).expect("the DNS tab");
+        let (x, y) = rect.centre();
+        let wheel = MouseEventKind::Scroll { dx: 0.0, dy: -3.0 };
+        app.handle_key(&press(Key::F1));
+        app.handle_event(&mouse(x, y, wheel.clone()), SIZE);
+        assert_eq!(
+            app.sidebar_scroll, 0,
+            "the wheel scrolled the list under the card"
+        );
+        assert!(app.show_help, "the wheel put the card away");
+
+        app.handle_key(&press(Key::F1));
+        app.handle_event(&mouse(x, y, wheel), SIZE);
+        assert_ne!(app.sidebar_scroll, 0, "control: the wheel scrolls nothing");
+        click(&mut app, Target::Tab(DetailTab::Dns));
+        assert_eq!(
+            app.active_tab,
+            DetailTab::Dns,
+            "control: the press chose nothing"
+        );
     }
 
     #[test]
@@ -6555,7 +7207,10 @@ mod tests {
 
         for text in ["\r", "\t", "\x1b", "\u{8}"] {
             app.handle_key(&KeyEvent {
-                key: Key::F1,
+                // Not F1, which is the card's: a key that reaches the box.
+                // (It was F1, so every one of these opened or closed the
+                // card and none reached the box this test is about.)
+                key: Key::Unknown(0),
                 pressed: true,
                 modifiers: Modifiers::NONE,
                 text: text.to_string(),
@@ -6594,6 +7249,12 @@ mod tests {
             Some("9.9.9.9")
         );
         assert_eq!(app.dns_input, "", "the box kept what it had already added");
+
+        // The box still has the keyboard, and what is typed next starts
+        // afresh: the editor over it does not bring the added address back.
+        assert_eq!(app.focus, Some(Field::DnsInput));
+        type_str(&mut app, "1.0.0.1");
+        assert_eq!(app.dns_input, "1.0.0.1", "the added address came back");
     }
 
     #[test]

@@ -42,9 +42,12 @@ use appearance::Surface;
 use guitk::color::Color;
 use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::field;
+use guitk::frame::Rect;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::textedit;
 use guitk::undo::{Travel, UndoHistory};
 use pathtext::ShowPath;
 
@@ -1427,6 +1430,10 @@ pub struct MindMapApp {
     pub edit_buffer: String,
     /// Whether we are in text editing mode.
     pub editing_node: Option<NodeId>,
+    /// How wide the mark is round a box while it has the keyboard -- the
+    /// node being renamed, the find bar's query: the user's focus width
+    /// (`App::appearance_changed`), the toolkit's until it is known.
+    pub focus_ring_width: f32,
     /// The user's colours, replaced whenever the theme changes.
     ///
     /// Seeded from the defaults so the field is never absent; the framework
@@ -1497,6 +1504,7 @@ impl MindMapApp {
             show_search: false,
             edit_buffer: String::new(),
             editing_node: None,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
         };
         // Auto-layout the initial map
         let cx = app.win_width / 2.0;
@@ -3680,33 +3688,38 @@ impl MindMapApp {
         } else {
             NODE_FONT_SIZE
         };
-        let display_text = if is_editing {
-            format!("{}|", self.edit_buffer)
+        let weight = if is_root {
+            FontWeightHint::Bold
         } else {
-            node.text.clone()
+            FontWeightHint::Regular
         };
+        let size = font_size * self.zoom;
 
-        // Center the text approximately
-        let text_x = sx + 8.0;
-        let text_y = sy + sh / 2.0 - font_size / 2.0;
+        if is_editing {
+            // The text being typed, in the toolkit's field over the node with
+            // the caret after it. The caret was a `|` appended to the text --
+            // a character, measured and cut with the rest of it, the colour of
+            // the node's own text -- and there was no box.
+            self.render_node_editor(cmds, Rect::new(sx, sy, sw, sh), size, weight);
+        } else {
+            // Centred on its line: the line is the zoomed size's, where it was
+            // centred on the unzoomed size's half height.
+            let text_y = sy + (sh - text::line_height(size, weight)) / 2.0;
 
-        // Determine text color (dark on light backgrounds, light on dark)
-        let text_color = node_text_color(fill_color);
+            // Determine text color (dark on light backgrounds, light on dark)
+            let text_color = node_text_color(fill_color);
 
-        cmds.push(RenderCommand::Text {
-            x: text_x,
-            y: text_y,
-            text: display_text,
-            font_size: font_size * self.zoom,
-            color: text_color,
-            font_weight: if is_root {
-                FontWeightHint::Bold
-            } else {
-                FontWeightHint::Regular
-            },
-            max_width: Some(sw - 16.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+            cmds.push(RenderCommand::Text {
+                x: sx + 8.0,
+                y: text_y,
+                text: node.text.clone(),
+                font_size: size,
+                color: text_color,
+                font_weight: weight,
+                max_width: Some(sw - 16.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
 
         // Collapse indicator for nodes with children
         if !node.children.is_empty() {
@@ -3961,34 +3974,108 @@ impl MindMapApp {
         }
     }
 
+    /// The box a node's text is typed into, over the node whose screen
+    /// rectangle is `node`: as wide as the node less a margin, a line high.
+    fn node_editor_rect(node: Rect, size: f32, weight: FontWeightHint) -> Rect {
+        let h = (text::line_height(size, weight) + 8.0).min(node.h);
+        Rect::new(
+            node.x + 4.0,
+            node.y + (node.h - h) / 2.0,
+            (node.w - 8.0).max(0.0),
+            h,
+        )
+    }
+
+    /// The node being renamed: the toolkit's field over it, with the
+    /// keyboard unless the shortcut list is over it, holding the typing with
+    /// the caret after it -- scrolled so the end being typed stays in view.
+    fn render_node_editor(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        node: Rect,
+        size: f32,
+        weight: FontWeightHint,
+    ) {
+        let r = Self::node_editor_rect(node, size, weight);
+        let state = field::State {
+            hovered: false,
+            focused: !self.show_help,
+            disabled: false,
+            invalid: false,
+        };
+        field::draw(cmds, &self.palette, r, state, self.focus_ring_width);
+        let line = text::line_height(size, weight);
+        let mut typed = RenderTree::new();
+        textedit::draw(
+            &mut typed,
+            &textedit::SingleLine {
+                text: &self.edit_buffer,
+                // Typed and erased at its end, so the end is where the caret
+                // is.
+                cursor: text::TextCursor::from(self.edit_buffer.len()),
+                selection_anchor: None,
+                focused: state.focused,
+                x: r.x + 4.0,
+                y: r.y + (r.h - line) / 2.0,
+                width: (r.w - 8.0).max(0.0),
+                line_height: line,
+                font_size: size,
+                weight,
+                color: self.palette.text,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+        cmds.extend(typed.commands);
+    }
+
     // ------ Search bar ------
 
+    /// The find bar, centred over the canvas's top.
+    fn search_bar_rect(&self) -> Rect {
+        let (w, h) = (300.0, 36.0);
+        Rect::new(
+            self.canvas_x() + (self.canvas_width() - w) / 2.0,
+            self.canvas_y() + 8.0,
+            w,
+            h,
+        )
+    }
+
+    /// The box the find bar's query is typed into: between "Search:" and the
+    /// result count.
+    fn search_box_rect(bar: Rect) -> Rect {
+        Rect::new(
+            bar.x + 64.0,
+            bar.y + 4.0,
+            (bar.w - 64.0 - 66.0).max(0.0),
+            bar.h - 8.0,
+        )
+    }
+
+    /// How the query's box is drawn now: with the keyboard while the bar is
+    /// up and no node is being renamed -- every key that types goes to it --
+    /// neither under the shortcut list, and red while the query finds
+    /// nothing. Never lit under the pointer: it has no press of its own.
+    fn search_box_state(&self) -> field::State {
+        field::State {
+            hovered: false,
+            focused: self.show_search && self.editing_node.is_none() && !self.show_help,
+            disabled: false,
+            invalid: !self.search_query.is_empty() && self.search_results.is_empty(),
+        }
+    }
+
     fn render_search_bar(&self, cmds: &mut Vec<RenderCommand>) {
-        let bar_width = 300.0f32;
-        let bar_height = 36.0f32;
-        let bx = self.canvas_x() + (self.canvas_width() - bar_width) / 2.0;
-        let by = self.canvas_y() + 8.0;
+        let bar = self.search_bar_rect();
+        let (bx, by, bar_width) = (bar.x, bar.y, bar.w);
 
-        // Background
-        cmds.push(RenderCommand::FillRect {
-            x: bx,
-            y: by,
-            width: bar_width,
-            height: bar_height,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(6.0),
-        });
-
-        // Border
-        cmds.push(RenderCommand::StrokeRect {
-            x: bx,
-            y: by,
-            width: bar_width,
-            height: bar_height,
-            color: self.palette.blue,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        // The toolkit's panel, in the theme's look: it was a grey slab with a
+        // blue edge whatever the theme said; the query's box says where the
+        // keyboard is now.
+        self.palette
+            .push_surface(cmds, bar.x, bar.y, bar.w, bar.h, 6.0, Surface::Panel);
 
         // Search icon text
         cmds.push(RenderCommand::Text {
@@ -4002,28 +4089,53 @@ impl MindMapApp {
             overflow: TextOverflow::Clip,
         });
 
-        // Query text
-        let display = if self.search_query.is_empty() {
-            "type to search...".to_string()
-        } else {
-            self.search_query.clone()
-        };
-        let query_color = if self.search_query.is_empty() {
-            self.palette.overlay0
-        } else {
-            self.palette.text
-        };
-
-        cmds.push(RenderCommand::Text {
-            x: bx + 70.0,
-            y: by + 10.0,
-            text: display,
-            font_size: 12.0,
-            color: query_color,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(bar_width - 110.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        // The query, in the toolkit's field, with the caret after it --
+        // scrolled so the end being typed stays in view -- or, empty, what
+        // it is for.
+        let search = Self::search_box_rect(bar);
+        let state = self.search_box_state();
+        field::draw(cmds, &self.palette, search, state, self.focus_ring_width);
+        let line = text::line_height(12.0, FontWeightHint::Regular);
+        let (tx, ty, tw) = (
+            search.x + 6.0,
+            search.y + (search.h - line) / 2.0,
+            (search.w - 12.0).max(0.0),
+        );
+        if self.search_query.is_empty() {
+            cmds.push(RenderCommand::Text {
+                x: tx,
+                y: ty,
+                text: "type to search...".to_string(),
+                font_size: 12.0,
+                color: self.palette.subtext0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(tw),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+        let mut typed = RenderTree::new();
+        textedit::draw(
+            &mut typed,
+            &textedit::SingleLine {
+                text: &self.search_query,
+                // Typed and erased at its end, so the end is where the caret
+                // is.
+                cursor: text::TextCursor::from(self.search_query.len()),
+                selection_anchor: None,
+                focused: state.focused,
+                x: tx,
+                y: ty,
+                width: tw,
+                line_height: line,
+                font_size: 12.0,
+                weight: FontWeightHint::Regular,
+                color: self.palette.text,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+        cmds.extend(typed.commands);
 
         // Result count
         if !self.search_query.is_empty() {
@@ -4163,6 +4275,10 @@ fn node_text_color(bg: Color) -> Color {
 // ============================================================================
 
 impl App for MindMapApp {
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
+    }
+
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
     }
@@ -7548,5 +7664,159 @@ mod tests {
         assert_eq!(click(&mut app, (600.0, status_line)), EventResult::Ignored);
         assert_eq!(app.selected_node, Some(root));
         assert!(matches!(app.drag, DragState::None));
+    }
+    // -- The node being renamed and the find bar's query are typed into the
+    //    toolkit's field (lane C, c-e-a-theme-can-shape-the-controls)
+
+    /// A window whose theme marks a field with the keyboard by a ring, at
+    /// two and a half times the toolkit's focus width.
+    fn ringed() -> (MindMapApp, Palette) {
+        let mut app = MindMapApp::new();
+        let mut p = app.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        app.theme_changed(&p);
+        app.appearance_changed(&appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..appearance::AppearanceSettings::default()
+        });
+        assert!(
+            app.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        (app, p)
+    }
+
+    /// Whether `app` draws exactly the toolkit's field for `rect` in `state`
+    /// -- and, unless `state` has the keyboard, not the focused one as well.
+    fn draws_box(app: &MindMapApp, p: &Palette, rect: Rect, state: field::State) -> bool {
+        let seq = |s: field::State| {
+            let mut v: Vec<RenderCommand> = Vec::new();
+            field::draw(&mut v, p, rect, s, app.focus_ring_width);
+            v
+        };
+        let cmds = app.render_commands();
+        let has = |want: &[RenderCommand]| cmds.windows(want.len()).any(|w| w == want);
+        has(&seq(state))
+            && (state.focused
+                || !has(&seq(field::State {
+                    focused: true,
+                    ..state
+                })))
+    }
+
+    /// The box the root's text is typed into, as the window draws it.
+    fn root_editor(app: &MindMapApp) -> Rect {
+        let root = app.active_map_ref().root_id;
+        let (bx, by, bw, bh) = app.active_map_ref().node(root).expect("the root").bounds();
+        let (sx, sy) = app.canvas_to_screen(bx, by);
+        MindMapApp::node_editor_rect(
+            Rect::new(sx, sy, bw * app.zoom, bh * app.zoom),
+            ROOT_FONT_SIZE * app.zoom,
+            FontWeightHint::Bold,
+        )
+    }
+
+    /// **A node is renamed in the toolkit's field, with a caret.** The caret
+    /// was a `|` appended to the text -- a character, measured and cut with
+    /// the rest -- and there was no box.
+    #[test]
+    fn a_node_is_renamed_in_the_toolkits_field_with_a_caret() {
+        let (mut app, p) = ringed();
+        let root = app.active_map_ref().root_id;
+        app.selected_node = Some(root);
+        app.start_editing();
+        let rect = root_editor(&app);
+        let focused = field::State {
+            focused: true,
+            ..field::State::default()
+        };
+        assert!(
+            draws_box(&app, &p, rect, focused),
+            "the node being renamed is not the toolkit's field"
+        );
+        let cmds = app.render_commands();
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.ends_with('|'))),
+            "the caret is still a character"
+        );
+        let at = cmds
+            .iter()
+            .position(
+                |c| matches!(c, RenderCommand::RichText { text, .. } if text == "Central Idea"),
+            )
+            .expect("the name being typed is not drawn in its box");
+        let caret = match cmds.get(at + 1) {
+            Some(RenderCommand::Line { x1, x2, .. }) if (x1 - x2).abs() < 0.01 => *x1,
+            other => panic!("no caret after the name: {other:?}"),
+        };
+        // The name fits its box, so nothing is scrolled and the caret is the
+        // name's width in from where the text starts: at the end being typed.
+        let size = ROOT_FONT_SIZE * app.zoom;
+        let name = text::measure("Central Idea", size, FontWeightHint::Bold);
+        assert!(name < rect.w - 8.0, "the name does not fit its box");
+        let end = rect.x + 4.0 + name;
+        assert!(
+            (caret - end).abs() < 0.5,
+            "the caret is at {caret}, not after the name at {end}"
+        );
+
+        app.show_help = true;
+        assert!(
+            draws_box(&app, &p, rect, field::State::default()),
+            "the box keeps the keyboard's mark under the shortcut list"
+        );
+    }
+
+    /// **The find bar's query is typed into the toolkit's field**: with the
+    /// keyboard while the bar is up and no node is being renamed, and red
+    /// while the query finds nothing. The query was written straight onto a
+    /// grey bar with a blue edge, with no box and no caret.
+    #[test]
+    fn the_find_bars_box_is_the_toolkits_field() {
+        let (mut app, p) = ringed();
+        app.show_search = true;
+        let rect = MindMapApp::search_box_rect(app.search_bar_rect());
+        let focused = field::State {
+            focused: true,
+            ..field::State::default()
+        };
+        assert!(
+            draws_box(&app, &p, rect, focused),
+            "the query's box does not have the keyboard"
+        );
+        for c in "zzqqxx".chars() {
+            app.handle_event(&Event::Key(KeyEvent {
+                key: Key::Unknown(0),
+                pressed: true,
+                modifiers: guitk::event::Modifiers::NONE,
+                text: c.to_string(),
+            }));
+        }
+        assert!(app.search_results.is_empty());
+        let red = field::State {
+            invalid: true,
+            ..focused
+        };
+        assert!(
+            draws_box(&app, &p, rect, red),
+            "a query that finds nothing does not turn the box red"
+        );
+        let root = app.active_map_ref().root_id;
+        app.selected_node = Some(root);
+        app.start_editing();
+        assert!(
+            draws_box(
+                &app,
+                &p,
+                rect,
+                field::State {
+                    focused: false,
+                    ..red
+                }
+            ),
+            "the find bar keeps the keyboard's mark while a node is renamed"
+        );
     }
 }

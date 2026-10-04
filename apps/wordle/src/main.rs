@@ -1205,11 +1205,15 @@ impl Wordle {
             self.show_help = !self.show_help;
             return EventResult::Consumed;
         }
-        // Escape closes the card before it deals a new word. A reader who
-        // opened the list and wants out should not find they have thrown away
-        // the finished board behind it.
-        if plain && self.show_help && ev.key == Key::Escape {
-            self.show_help = false;
+        // The card is modal. A plain Escape puts it away -- before it could
+        // deal a new word: a reader who opened the list and wants out should
+        // not find they have thrown away the finished board behind it -- and
+        // no other key reaches the board it covers. It took only Escape, so
+        // a letter was typed into the guess under it and Enter submitted it.
+        if self.show_help {
+            if plain && ev.key == Key::Escape {
+                self.show_help = false;
+            }
             return EventResult::Consumed;
         }
 
@@ -1248,6 +1252,19 @@ impl Wordle {
     }
 
     pub fn handle_mouse(&mut self, ev: &MouseEvent) -> EventResult {
+        // The card is modal for the pointer as it is for the keys, and drawn
+        // over everything, the end-of-game panel included: a press with any
+        // button puts it away and does nothing else, where it used to press
+        // the on-screen key or button under it.
+        if self.show_help
+            && matches!(
+                ev.kind,
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_)
+            )
+        {
+            self.show_help = false;
+            return EventResult::Consumed;
+        }
         if !matches!(ev.kind, MouseEventKind::Press(MouseButton::Left)) {
             return EventResult::Ignored;
         }
@@ -3284,6 +3301,56 @@ mod tests {
             probe::key(&mut g, &chord(Key::Escape, m));
             assert!(g.show_help, "{m:?}+Escape put it away");
         }
+    }
+
+    /// **The shortcut list is modal for the keys and the pointer alike.** It
+    /// took only Escape: with it up, a letter was typed into the guess under
+    /// it and a digit changed the difficulty; a press typed the on-screen key
+    /// under it. The controls are the same press and key with the list down.
+    #[test]
+    fn the_shortcut_card_takes_the_keys_and_a_press_rather_than_passing_them_on() {
+        let mut g = game();
+        let level = g.difficulty;
+        let f1 = probe::press(Key::F1);
+
+        probe::key(&mut g, &f1);
+        assert!(g.show_help);
+        probe::key(&mut g, &probe::press(Key::A));
+        probe::key(&mut g, &probe::press(Key::Num3));
+        assert!(
+            g.show_help,
+            "a key other than F1, ? or Escape put the list away"
+        );
+        assert!(
+            g.current_input.is_empty(),
+            "a letter was typed under the list"
+        );
+        assert_eq!(
+            g.difficulty, level,
+            "a digit changed the difficulty under it"
+        );
+        probe::key(&mut g, &probe::press(Key::Escape));
+        assert!(!g.show_help, "Escape left the list up");
+
+        probe::key(&mut g, &f1);
+        assert_eq!(
+            probe::click(&mut g, Target::Key('A')),
+            EventResult::Consumed
+        );
+        assert!(!g.show_help, "the press did not put the list away");
+        assert!(
+            g.current_input.is_empty(),
+            "the press typed a letter under the list"
+        );
+        probe::key(&mut g, &f1);
+        probe::click_with(&mut g, Target::Key('A'), MouseButton::Right);
+        assert!(!g.show_help, "a right-button press left the list up");
+
+        // The controls.
+        probe::click(&mut g, Target::Key('A'));
+        assert_eq!(g.current_input.len(), 1, "control: the press types nothing");
+        probe::key(&mut g, &probe::press(Key::B));
+        assert_eq!(g.current_input.len(), 2, "control: a letter types nothing");
     }
 
     /// A key that is not a letter and not one of the shortcuts is not ours.

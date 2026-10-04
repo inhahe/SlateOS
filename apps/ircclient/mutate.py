@@ -169,9 +169,63 @@ MAIN = [
     ),
     (
         "Escape does not put the card away",
-        "            let closes = matches!(event.key, Key::F1 | Key::Escape);\n",
-        "            let closes = matches!(event.key, Key::F1);\n",
+        "                textline::is_plain(event.modifiers) && matches!(event.key, Key::F1 | Key::Escape);\n",
+        "                textline::is_plain(event.modifiers) && matches!(event.key, Key::F1);\n",
         ["the_shortcut_card_takes_every_key_and_press_while_it_is_up"],
+    ),
+    # -- a chord is neither typing nor one of the line's keys (2026-10-04)
+    (
+        "a chord puts the card away",
+        "                textline::is_plain(event.modifiers) && matches!(event.key, Key::F1 | Key::Escape);\n",
+        "                matches!(event.key, Key::F1 | Key::Escape);\n",
+        ["a_chord_is_neither_typed_into_the_line_nor_one_of_its_keys"],
+    ),
+    (
+        "a command's letter is typed into the line",
+        "        if textline::types_into_field(event) {\n",
+        "        if event.types_text() {\n",
+        ["a_chord_is_neither_typed_into_the_line_nor_one_of_its_keys"],
+    ),
+    (
+        "AltGr's characters are not typed",
+        "        if textline::types_into_field(event) {\n",
+        "        if textline::is_plain(event.modifiers) && event.types_text() {\n",
+        ["a_chord_is_neither_typed_into_the_line_nor_one_of_its_keys"],
+    ),
+    (
+        "a chord is one of the line's keys",
+        "        if !textline::is_plain(event.modifiers) {\n            return false;\n        }\n",
+        "",
+        ["a_chord_is_neither_typed_into_the_line_nor_one_of_its_keys"],
+    ),
+    # -- the message line is the toolkit's field (2026-10-04; lane C,
+    #    c-e-a-theme-can-shape-the-controls)
+    (
+        "the message line never has the keyboard",
+        "            focused: !self.show_help,\n",
+        "            focused: false,\n",
+        [
+            "the_message_line_is_the_toolkits_field",
+            "the_caret_follows_the_typing_and_a_long_line_scrolls",
+        ],
+    ),
+    (
+        "the message line keeps its mark under the key list",
+        "            focused: !self.show_help,\n",
+        "            focused: true,\n",
+        ["the_message_line_is_the_toolkits_field"],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        ["the_message_line_is_the_toolkits_field"],
+    ),
+    (
+        "the caret is at the start of the line",
+        "                cursor: guitk::text::TextCursor::from(self.input_text.len()),\n",
+        "                cursor: guitk::text::TextCursor::from(0),\n",
+        ["the_caret_follows_the_typing_and_a_long_line_scrolls"],
     ),
     (
         "a press goes through the card",

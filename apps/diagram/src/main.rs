@@ -49,9 +49,11 @@ use appearance::Surface;
 use guitk::Color;
 use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::field;
 use guitk::frame::Rect;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::textedit;
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
 use statehistory::StateHistory;
@@ -822,6 +824,10 @@ pub struct DiagramApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// How wide the mark is round the box a label is typed into: the user's
+    /// focus width (`App::appearance_changed`), the toolkit's until it is
+    /// known.
+    focus_ring_width: f32,
     /// Whether the shortcut list is up.
     show_help: bool,
 }
@@ -877,6 +883,7 @@ impl DiagramApp {
 
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             picker: FilePicker::new(),
             last_save: None,
             window_w,
@@ -3697,27 +3704,25 @@ impl DiagramApp {
             }
         }
 
-        // Label text.
-        if !node.label.is_empty() {
-            let cx = x + w / 2.0;
-            let cy = y + h / 2.0;
-            let fs = node.font_size * z;
-            cmds.push(RenderCommand::Text {
-                x: cx - w * 0.4,
-                y: cy - fs / 2.0,
-                // The buffer while this node is being relabelled: the
-                // commit is on the way out, so the node still holds the old
-                // word until then.
-                text: match &self.editing {
-                    Some((LabelTarget::Node(id), buf)) if *id == node.id => buf.clone(),
-                    _ => node.label.clone(),
-                },
+        // The label -- or, while it is being typed, the box it is typed into,
+        // which shows the typing and not the node's word: the commit is on
+        // the way out, so the node still holds the old word until then.
+        let strip = node_label_strip(node, z);
+        match &self.editing {
+            Some((LabelTarget::Node(id), buf)) if *id == node.id => {
+                self.render_label_editor(cmds, strip, buf);
+            }
+            _ if !node.label.is_empty() => cmds.push(RenderCommand::Text {
+                x: strip.x,
+                y: strip.y,
+                text: node.label.clone(),
                 color: self.palette.text,
-                font_size: fs,
+                font_size: strip.font_size,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(w * 0.8),
+                max_width: Some(strip.width),
                 overflow: TextOverflow::Ellipsis,
-            });
+            }),
+            _ => {}
         }
 
         // Selection highlight.
@@ -3738,23 +3743,24 @@ impl DiagramApp {
     // Rendering: individual edge
     // ========================================================================
 
-    fn render_edge(&self, cmds: &mut Vec<RenderCommand>, edge: &DiagramEdge) {
-        let from = self.find_node(edge.from_node);
-        let to = self.find_node(edge.to_node);
-        let (from_node, to_node) = match (from, to) {
-            (Some(f), Some(t)) => (f, t),
-            _ => return,
-        };
-
+    /// Where `edge` is drawn from and to, in the canvas's zoomed
+    /// coordinates: the point on each end's shape facing the other end's
+    /// middle. `None` while either end is missing.
+    fn edge_ends(&self, edge: &DiagramEdge) -> Option<((f32, f32), (f32, f32))> {
+        let from_node = self.find_node(edge.from_node)?;
+        let to_node = self.find_node(edge.to_node)?;
         let z = self.zoom;
         let (fc, tc) = (from_node.center(), to_node.center());
         let (fx, fy) = from_node.connection_point(tc.0, tc.1);
         let (tx, ty) = to_node.connection_point(fc.0, fc.1);
+        Some(((fx * z, fy * z), (tx * z, ty * z)))
+    }
 
-        let sx1 = fx * z;
-        let sy1 = fy * z;
-        let sx2 = tx * z;
-        let sy2 = ty * z;
+    fn render_edge(&self, cmds: &mut Vec<RenderCommand>, edge: &DiagramEdge) {
+        let Some(((sx1, sy1), (sx2, sy2))) = self.edge_ends(edge) else {
+            return;
+        };
+        let z = self.zoom;
 
         let selected = self.selection.has_edge(edge.id);
         let color = if selected {
@@ -3813,24 +3819,73 @@ impl DiagramApp {
             self.render_arrow_head(cmds, sx1, sy1, sx2, sy2, color, edge.line_width);
         }
 
-        // Edge label at midpoint.
-        if !edge.label.is_empty() {
-            let mx = f32::midpoint(sx1, sx2);
-            let my = f32::midpoint(sy1, sy2);
-            cmds.push(RenderCommand::Text {
-                x: mx,
-                y: my - 10.0,
-                text: match &self.editing {
-                    Some((LabelTarget::Edge(id), buf)) if *id == edge.id => buf.clone(),
-                    _ => edge.label.clone(),
-                },
+        // The label at the line's middle, or the box it is being typed into.
+        let strip = edge_label_strip((sx1, sy1), (sx2, sy2), z);
+        match &self.editing {
+            Some((LabelTarget::Edge(id), buf)) if *id == edge.id => {
+                self.render_label_editor(cmds, strip, buf);
+            }
+            _ if !edge.label.is_empty() => cmds.push(RenderCommand::Text {
+                x: strip.x,
+                y: strip.y,
+                text: edge.label.clone(),
                 color: self.palette.subtext0,
-                font_size: 11.0 * z,
+                font_size: strip.font_size,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(120.0 * z),
+                max_width: Some(strip.width),
                 overflow: TextOverflow::Ellipsis,
-            });
+            }),
+            _ => {}
         }
+    }
+
+    /// The box a label is typed into: the toolkit's field round the strip
+    /// the label is written in, with the keyboard, and the typing so far with
+    /// the caret after it -- scrolled, once it is longer than the strip, so
+    /// the end being typed stays in view.
+    ///
+    /// Drawn whatever the thing was called before. The label used to be
+    /// drawn only when the *stored* one was not empty, so a box or a line
+    /// being given its first name showed nothing at all until Enter -- and a
+    /// new one has none. Nor was there a box or a caret: the only sign of the
+    /// mode was a line in the status bar.
+    ///
+    /// Never lit under the pointer: the box is there only while it has the
+    /// keyboard, and the keyboard's mark is the one it shows.
+    fn render_label_editor(&self, cmds: &mut Vec<RenderCommand>, strip: LabelStrip, buf: &str) {
+        field::draw(
+            cmds,
+            &self.palette,
+            strip.field(),
+            field::State {
+                focused: true,
+                ..field::State::default()
+            },
+            self.focus_ring_width,
+        );
+        let mut tree = RenderTree::new();
+        textedit::draw(
+            &mut tree,
+            &textedit::SingleLine {
+                text: buf,
+                // Typed and erased at its end, so the end is where the caret
+                // is.
+                cursor: guitk::text::TextCursor::from(buf.len()),
+                selection_anchor: None,
+                focused: true,
+                x: strip.x,
+                y: strip.y,
+                width: strip.width,
+                line_height: strip.line_height(),
+                font_size: strip.font_size,
+                weight: FontWeightHint::Regular,
+                color: self.palette.text,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+        cmds.extend(tree.commands);
     }
 
     fn render_arrow_head(
@@ -4563,6 +4618,63 @@ fn escape_json(s: &str) -> String {
     guitk::escape::json_string(s)
 }
 
+/// Where a label is written, in the canvas's zoomed coordinates: the strip
+/// its text starts in, how wide that is, and the size it is drawn at. The
+/// finished label and the box it is typed into are both placed by this, so
+/// typing happens where the word will be.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LabelStrip {
+    x: f32,
+    y: f32,
+    width: f32,
+    font_size: f32,
+}
+
+impl LabelStrip {
+    /// The height of one line of the label.
+    fn line_height(self) -> f32 {
+        guitk::text::line_height(self.font_size, FontWeightHint::Regular)
+    }
+
+    /// The box a label is typed into: the toolkit's field, a margin wider
+    /// than the strip all round so the caret and the field's edge do not
+    /// touch the text.
+    fn field(self) -> Rect {
+        let pad = (self.font_size * 0.35).max(3.0);
+        Rect::new(
+            self.x - pad,
+            self.y - pad,
+            self.width + pad * 2.0,
+            self.line_height() + pad * 2.0,
+        )
+    }
+}
+
+/// Where `node`'s label is written at zoom `z`: across the middle of the
+/// shape, four fifths of its width, at the node's own font size.
+fn node_label_strip(node: &DiagramNode, z: f32) -> LabelStrip {
+    let (w, h) = (node.width * z, node.height * z);
+    let (cx, cy) = (node.x * z + w / 2.0, node.y * z + h / 2.0);
+    let font_size = node.font_size * z;
+    LabelStrip {
+        x: cx - w * 0.4,
+        y: cy - font_size / 2.0,
+        width: w * 0.8,
+        font_size,
+    }
+}
+
+/// Where the label of a line drawn from `a` to `b` is written at zoom `z`:
+/// from the line's middle, a little above it.
+fn edge_label_strip(a: (f32, f32), b: (f32, f32), z: f32) -> LabelStrip {
+    LabelStrip {
+        x: f32::midpoint(a.0, b.0),
+        y: f32::midpoint(a.1, b.1) - 10.0,
+        width: 120.0 * z,
+        font_size: 11.0 * z,
+    }
+}
+
 // ============================================================================
 // Entry point
 // ============================================================================
@@ -4570,6 +4682,10 @@ fn escape_json(s: &str) -> String {
 impl App for DiagramApp {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     /// The diagram's name, marked `*` while it has changes not saved.
@@ -5444,21 +5560,203 @@ mod tests {
             app.handle_event(&types(c));
         }
 
-        let shown: Vec<String> = app
-            .render_commands()
-            .iter()
-            .filter_map(|c| match c {
-                RenderCommand::Text { text, .. } => Some(text.clone()),
-                _ => None,
-            })
-            .collect();
+        let strip = node_label_strip(app.find_node(id).expect("the box"), app.zoom);
         assert!(
-            shown.iter().any(|t| t == "New"),
-            "the label being typed is nowhere on the canvas"
+            written_at(&app, "New", strip),
+            "the label being typed is not on the box"
         );
         assert!(
-            !shown.iter().any(|t| t == "Old"),
+            !drawn_words(&app).iter().any(|t| t == "Old"),
             "the old label is still drawn while it is being replaced"
+        );
+    }
+
+    /// Every string the window draws, plain or styled: the typing is drawn
+    /// by the toolkit's single-line editor, which draws it as styled text.
+    fn drawn_words(app: &DiagramApp) -> Vec<String> {
+        app.render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } | RenderCommand::RichText { text, .. } => {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Whether `word` is written where `strip` starts: on the canvas, where
+    /// the label goes -- not anywhere at all, since the properties panel
+    /// shows the typing too, and a test that looked everywhere found it
+    /// there with the canvas showing nothing.
+    fn written_at(app: &DiagramApp, word: &str, strip: LabelStrip) -> bool {
+        app.render_commands().iter().any(|c| match c {
+            RenderCommand::Text { text, x, y, .. } | RenderCommand::RichText { text, x, y, .. } => {
+                text == word && (x - strip.x).abs() < 0.5 && (y - strip.y).abs() < 0.5
+            }
+            _ => false,
+        })
+    }
+
+    /// **A box or a line with no label shows its first label as it is
+    /// typed, where the label goes.** The label was drawn only when the
+    /// *stored* one was not empty, and a new box and a new line have none --
+    /// so naming one showed nothing on the canvas until Enter, as though the
+    /// keyboard were ignored.
+    #[test]
+    fn a_thing_with_no_label_shows_its_first_label_as_it_is_typed() {
+        let mut app = DiagramApp::new(800.0, 600.0);
+        let a = app.add_node(NodeShape::Rectangle, 100.0, 100.0);
+        let b = app.add_node(NodeShape::Rectangle, 400.0, 100.0);
+        let e = app.add_edge(a, b);
+        assert!(app.find_node(a).is_some_and(|n| n.label.is_empty()));
+
+        app.selection.nodes = vec![a];
+        app.handle_event(&press(Key::F2));
+        for c in ["P", "a", "y"] {
+            app.handle_event(&types(c));
+        }
+        let strip = node_label_strip(app.find_node(a).expect("the box"), app.zoom);
+        assert!(
+            written_at(&app, "Pay", strip),
+            "a new box's first label is not drawn on it as it is typed"
+        );
+        app.handle_event(&press(Key::Enter));
+
+        app.selection.nodes.clear();
+        app.selection.edges = vec![e];
+        app.handle_event(&press(Key::F2));
+        for c in ["Y", "e", "s"] {
+            app.handle_event(&types(c));
+        }
+        let edge = app.edges.iter().find(|x| x.id == e).expect("the line");
+        let (from, to) = app.edge_ends(edge).expect("both ends are there");
+        assert!(
+            written_at(&app, "Yes", edge_label_strip(from, to, app.zoom)),
+            "a new line's first label is not drawn on it as it is typed"
+        );
+    }
+
+    /// Whether `cmds` holds, in order, exactly the commands the toolkit's
+    /// field draws for `rect` in `state` at ring width `ring`.
+    fn has_field(
+        cmds: &[RenderCommand],
+        p: &Palette,
+        rect: Rect,
+        state: field::State,
+        ring: f32,
+    ) -> bool {
+        let mut want: Vec<RenderCommand> = Vec::new();
+        field::draw(&mut want, p, rect, state, ring);
+        cmds.windows(want.len()).any(|w| w == want.as_slice())
+    }
+
+    /// **A label is typed into the toolkit's field, with the keyboard and the
+    /// user's focus width** -- round the strip the label is written in, on a
+    /// box and on a line alike, and only while it is being typed (lane C,
+    /// `c-e-a-theme-can-shape-the-controls`). There was no box at all.
+    #[test]
+    fn a_label_is_typed_into_the_toolkits_field() {
+        let mut app = DiagramApp::new(800.0, 600.0);
+        let mut p = app.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut app, &p);
+        App::appearance_changed(
+            &mut app,
+            &appearance::AppearanceSettings {
+                focus_ring_scale: 2.5,
+                ..Default::default()
+            },
+        );
+        let ring = app.focus_ring_width;
+        assert!(
+            ring > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive: {ring}"
+        );
+        let focused = field::State {
+            focused: true,
+            ..field::State::default()
+        };
+        let a = app.add_node(NodeShape::Rectangle, 100.0, 100.0);
+        let b = app.add_node(NodeShape::Rectangle, 400.0, 100.0);
+        let e = app.add_edge(a, b);
+
+        let strip = node_label_strip(app.find_node(a).expect("the box"), app.zoom);
+        assert!(
+            !has_field(&app.render_commands(), &p, strip.field(), focused, ring),
+            "a box not being labelled has a field drawn on it"
+        );
+        app.selection.nodes = vec![a];
+        app.handle_event(&press(Key::F2));
+        app.handle_event(&types("x"));
+        assert!(
+            has_field(&app.render_commands(), &p, strip.field(), focused, ring),
+            "the box's label is not typed into the toolkit's field"
+        );
+        app.handle_event(&press(Key::Enter));
+        assert!(
+            !has_field(&app.render_commands(), &p, strip.field(), focused, ring),
+            "the field outlived the labelling"
+        );
+
+        app.selection.nodes.clear();
+        app.selection.edges = vec![e];
+        app.handle_event(&press(Key::F2));
+        let edge = app.edges.iter().find(|x| x.id == e).expect("the line");
+        let (from, to) = app.edge_ends(edge).expect("both ends are there");
+        let strip = edge_label_strip(from, to, app.zoom);
+        assert!(
+            has_field(&app.render_commands(), &p, strip.field(), focused, ring),
+            "the line's label is not typed into the toolkit's field"
+        );
+    }
+
+    /// Where the caret is drawn after the typing `buf`: the rule the
+    /// single-line editor draws straight after the text.
+    fn caret_after(cmds: &[RenderCommand], buf: &str) -> Option<f32> {
+        let at = cmds
+            .iter()
+            .position(|c| matches!(c, RenderCommand::RichText { text, .. } if text == buf))?;
+        match cmds.get(at.checked_add(1)?)? {
+            RenderCommand::Line { x1, x2, .. } if x1 == x2 => Some(*x1),
+            _ => None,
+        }
+    }
+
+    /// **The caret is after the typing, and stays in the box however long
+    /// the label grows** -- the end being typed scrolls into view rather than
+    /// being cut off with an ellipsis, which hid exactly the letters just
+    /// typed.
+    #[test]
+    fn the_caret_follows_the_typing_and_stays_in_the_box() {
+        let mut app = DiagramApp::new(800.0, 600.0);
+        let id = app.add_node(NodeShape::Rectangle, 100.0, 100.0);
+        app.selection.nodes = vec![id];
+        app.handle_event(&press(Key::F2));
+        let strip = node_label_strip(app.find_node(id).expect("the box"), app.zoom);
+
+        app.handle_event(&types("Pay"));
+        let caret = caret_after(&app.render_commands(), "Pay").expect("no caret after the typing");
+        let end = strip.x + guitk::text::measure("Pay", strip.font_size, FontWeightHint::Regular);
+        assert!(
+            (caret - end).abs() < 0.5,
+            "the caret is at {caret}, not after the typing at {end}"
+        );
+
+        let mut typed = String::from("Pay");
+        for _ in 0..80 {
+            app.handle_event(&types("w"));
+            typed.push('w');
+        }
+        assert!(
+            guitk::text::measure(&typed, strip.font_size, FontWeightHint::Regular) > strip.width,
+            "this test needs a label longer than its strip"
+        );
+        let caret =
+            caret_after(&app.render_commands(), &typed).expect("no caret after a long label");
+        assert!(
+            caret >= strip.x && caret <= strip.x + strip.width,
+            "the caret is at {caret}, outside the strip {strip:?}"
         );
     }
 

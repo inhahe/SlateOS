@@ -10,7 +10,9 @@ becoming Connected on the server's handshake and filing its outcome then, the
 remote screen kept opaque and uploaded, CopyRect reading the old pixels, and
 keys and the pointer going to the remote machine -- the escape hotkey not
 (`main.rs`); and the protocol itself (`rfb.rs`): the handshake's messages, the
-bound on a rectangle, and the frame asked for next.
+bound on a rectangle, and the frame asked for next.  Since 2026-10-04 it also
+covers the list of keys over a remote screen: while it is up, no key, press or
+turn of the wheel reaches the remote machine.
 
 Deliberately absent: `on_wake` and `attach_waker`.  The window's event loop
 calls them, which no test runs; the tests call `pump` directly, which is all
@@ -58,8 +60,45 @@ BARS = "the_bars_pan_the_screen_and_the_pointer_follows"
 Z_SCALE = "z_chooses_the_scale_and_q_leaves_it_alone"
 WHEEL = "the_wheel_over_the_screen_scrolls_the_remote_machine"
 WHEEL_CARRY = "the_wheel_keeps_what_is_not_yet_a_notch"
+CARD = "the_shortcut_card_keeps_keys_and_presses_from_the_remote_machine"
 
 MAIN = [
+    # The list of keys is modal over the remote screen (known-issues
+    # E-a-press-goes-through-the-shortcut-card-to-the-control-drawn-under-it).
+    (
+        "a key reaches the remote machine through the list of keys",
+        "                Event::Key(key) if key.pressed => return self.handle_key(key),\n",
+        "",
+        [CARD],
+    ),
+    (
+        "a press goes through the list of keys",
+        "                    MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n"
+        "                        self.show_help = false;\n"
+        "                        return EventResult::Consumed;\n"
+        "                    }\n",
+        "",
+        [CARD],
+    ),
+    (
+        "only the left button puts the list of keys away",
+        "                    MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n",
+        "                    MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_) => {\n",
+        [CARD],
+    ),
+    (
+        "a press under the list of keys leaves it up",
+        "                        self.show_help = false;\n"
+        "                        return EventResult::Consumed;\n",
+        "                        return EventResult::Consumed;\n",
+        [CARD],
+    ),
+    (
+        "the wheel reaches the remote machine through the list of keys",
+        "                    MouseEventKind::Scroll { .. } => return EventResult::Ignored,\n",
+        "",
+        [CARD],
+    ),
     (
         "RDP is let through to VNC",
         "        if profile.protocol != Protocol::Vnc {",

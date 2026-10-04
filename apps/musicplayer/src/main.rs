@@ -20,11 +20,14 @@ use guitk::color::Color;
 use guitk::dialog::{FilePicker, Picked};
 #[allow(unused_imports)]
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
+use guitk::field;
+use guitk::frame::Rect;
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::textedit;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
@@ -373,6 +376,10 @@ pub struct PlayerState {
     pub active_tab: Tab,
     pub search_query: String,
     pub searching: bool,
+    /// How wide the mark is round the search box while it has the keyboard:
+    /// the user's focus width (`App::appearance_changed`), the toolkit's
+    /// until it is known.
+    pub focus_ring_width: f32,
     pub selected_index: Option<usize>,
     pub scroll_offset: f32,
 
@@ -447,6 +454,7 @@ impl PlayerState {
             active_tab: Tab::NowPlaying,
             search_query: String::new(),
             searching: false,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             selected_index: None,
             scroll_offset: 0.0,
             dragging_progress: false,
@@ -1146,19 +1154,77 @@ fn render_tab_bar(state: &PlayerState, tree: &mut RenderTree) {
         x += tab_width + 8.0;
     }
 
-    // Search indicator (if searching)
+    // The search box, while a search is open: the toolkit's field, holding
+    // the query with the caret after it. It was a line of yellow text --
+    // "Search: " and the query -- whose caret was an `_` typed onto its end,
+    // and the end of a long query went under an ellipsis.
     if state.searching {
-        let search_text = format!("Search: {}_", state.search_query);
-        tree.push(RenderCommand::Text {
-            x: state.width - 250.0,
-            y: 16.0,
-            text: search_text,
-            color: state.palette.ink(state.palette.yellow),
-            font_size: 12.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(240.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        let search = search_box_rect(state.width);
+        let field_state = search_box_state(state);
+        field::draw(
+            tree,
+            &state.palette,
+            search,
+            field_state,
+            state.focus_ring_width,
+        );
+        let line = guitk::text::line_height(12.0, FontWeightHint::Regular);
+        let (tx, ty, tw) = (
+            search.x + 8.0,
+            search.y + (search.h - line) / 2.0,
+            (search.w - 16.0).max(0.0),
+        );
+        if state.search_query.is_empty() {
+            tree.push(RenderCommand::Text {
+                x: tx,
+                y: ty,
+                text: "Search the library".to_string(),
+                color: state.palette.subtext0,
+                font_size: 12.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(tw),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+        textedit::draw(
+            tree,
+            &textedit::SingleLine {
+                text: &state.search_query,
+                // Typed and erased at its end, so the end is where the caret
+                // is.
+                cursor: guitk::text::TextCursor::from(state.search_query.len()),
+                selection_anchor: None,
+                focused: field_state.focused,
+                x: tx,
+                y: ty,
+                width: tw,
+                line_height: line,
+                font_size: 12.0,
+                weight: FontWeightHint::Regular,
+                color: state.palette.text,
+                selection_bg: state.palette.accent,
+                selection_fg: state.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+    }
+}
+
+/// The search box at the tab bar's right, in a window `width` wide.
+fn search_box_rect(width: f32) -> Rect {
+    Rect::new(width - 250.0, 8.0, 240.0, TAB_BAR_HEIGHT - 16.0)
+}
+
+/// How the search box is drawn: with the keyboard while the search is open
+/// -- every key that types goes to it -- unless the shortcut card is over
+/// it; red while the query finds nothing in the library. Never lit under the
+/// pointer: it has no press of its own.
+fn search_box_state(state: &PlayerState) -> field::State {
+    field::State {
+        hovered: false,
+        focused: state.searching && !state.show_help,
+        disabled: false,
+        invalid: !state.search_query.is_empty() && state.filtered_library().is_empty(),
     }
 }
 
@@ -2676,6 +2742,10 @@ impl App for PlayerState {
     /// Adopt the user's colours (§822).
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -4658,5 +4728,125 @@ mod tests {
             });
             assert!(!crowded, "{line:?} shares its row with other text");
         }
+    }
+    // -- The search box is the toolkit's field (lane C,
+    //    c-e-a-theme-can-shape-the-controls)
+
+    /// A key that typed `text`.
+    fn typing(text: &str) -> KeyEvent {
+        KeyEvent {
+            key: Key::Unknown(0),
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: text.to_string(),
+        }
+    }
+
+    /// **The search box is the toolkit's field**: drawn while a search is
+    /// open, with the keyboard in the theme's mark and the user's width, red
+    /// while the query finds nothing in the library, and giving up its mark
+    /// under the shortcut card. It was a line of yellow text.
+    #[test]
+    fn the_search_box_is_the_toolkits_field() {
+        let mut state = PlayerState::new();
+        load_demo_library(&mut state);
+        let mut p = state.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        state.theme_changed(&p);
+        state.appearance_changed(&appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..appearance::AppearanceSettings::default()
+        });
+        let ring = state.focus_ring_width;
+        assert!(
+            ring > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        let rect = search_box_rect(state.width);
+        let draws = |state: &PlayerState, s: field::State| {
+            let seq = |s: field::State| {
+                let mut v: Vec<RenderCommand> = Vec::new();
+                field::draw(&mut v, &p, rect, s, ring);
+                v
+            };
+            let cmds = render(state).commands;
+            let has = |want: &[RenderCommand]| cmds.windows(want.len()).any(|w| w == want);
+            has(&seq(s)) && (s.focused || !has(&seq(field::State { focused: true, ..s })))
+        };
+        let focused = field::State {
+            focused: true,
+            ..field::State::default()
+        };
+        // Neither with the keyboard nor without it: there is no box at all.
+        assert!(
+            !draws(&state, focused) && !draws(&state, field::State::default()),
+            "a search box is drawn with no search open"
+        );
+        handle_key(
+            &mut state,
+            &KeyEvent {
+                key: Key::F,
+                pressed: true,
+                modifiers: Modifiers::ctrl(),
+                text: String::new(),
+            },
+        );
+        assert!(state.searching);
+        assert!(
+            draws(&state, focused),
+            "an open search's box does not have the keyboard"
+        );
+
+        handle_key(&mut state, &typing("zzqqxxww"));
+        assert!(state.filtered_library().is_empty());
+        let red = field::State {
+            invalid: true,
+            ..focused
+        };
+        assert!(
+            draws(&state, red),
+            "a query that finds nothing does not turn the box red"
+        );
+        state.show_help = true;
+        assert!(
+            draws(
+                &state,
+                field::State {
+                    focused: false,
+                    ..red
+                }
+            ),
+            "the box keeps the keyboard's mark under the shortcut card"
+        );
+    }
+
+    /// **The caret is a caret, after the query**, not an `_` typed onto its
+    /// end.
+    #[test]
+    fn the_search_caret_is_a_caret_after_the_query() {
+        let mut state = PlayerState::new();
+        state.searching = true;
+        state.search_query = String::from("jazz");
+        let cmds = render(&state).commands;
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.ends_with('_'))),
+            "the caret is still a character"
+        );
+        let at = cmds
+            .iter()
+            .position(|c| matches!(c, RenderCommand::RichText { text, .. } if text == "jazz"))
+            .expect("the query is not drawn in its box");
+        let caret = match cmds.get(at + 1) {
+            Some(RenderCommand::Line { x1, x2, .. }) if (x1 - x2).abs() < 0.01 => *x1,
+            other => panic!("no caret after the query: {other:?}"),
+        };
+        let rect = search_box_rect(state.width);
+        let end = rect.x + 8.0 + guitk::text::measure("jazz", 12.0, FontWeightHint::Regular);
+        assert!(
+            (caret - end).abs() < 0.5,
+            "the caret is at {caret}, not after the query at {end}"
+        );
     }
 }

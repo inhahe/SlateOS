@@ -83,6 +83,50 @@ MUTATIONS = [
     ),
 ]
 
+FIELD = "the_search_box_is_the_toolkits_field"
+CARET = "the_search_caret_is_a_caret_after_the_query"
+
+MUTATIONS += [
+    # The search box is the toolkit's field (2026-10-04; lane C,
+    # c-e-a-theme-can-shape-the-controls).
+    (
+        "the search box never has the keyboard",
+        "        focused: state.searching && !state.show_help,\n",
+        "        focused: false,\n",
+        [FIELD, CARET],
+    ),
+    (
+        "the search box keeps its mark under the card",
+        "        focused: state.searching && !state.show_help,\n",
+        "        focused: state.searching,\n",
+        [FIELD],
+    ),
+    (
+        "a query that finds nothing is not red",
+        "        invalid: !state.search_query.is_empty() && state.filtered_library().is_empty(),\n",
+        "        invalid: false,\n",
+        [FIELD],
+    ),
+    (
+        "the search box is drawn with no search open",
+        "    if state.searching {\n        let search = search_box_rect(state.width);\n",
+        "    if true {\n        let search = search_box_rect(state.width);\n",
+        [FIELD],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [FIELD],
+    ),
+    (
+        "the caret is at the start of the query",
+        "                cursor: guitk::text::TextCursor::from(state.search_query.len()),\n",
+        "                cursor: guitk::text::TextCursor::from(0),\n",
+        [CARET],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "musicplayer", timeout=600, only=only))

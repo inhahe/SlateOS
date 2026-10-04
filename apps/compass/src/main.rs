@@ -502,6 +502,11 @@ struct CompassApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// The entry box the pointer is over, if any, so it is drawn lit (lane
+    /// C, c-e-a-theme-can-shape-the-controls).
+    hover: Option<CoordField>,
+    /// How wide the focus mark is drawn, from the user's appearance settings.
+    focus_ring_width: f32,
 }
 
 impl CompassApp {
@@ -524,7 +529,26 @@ impl CompassApp {
             // the first `render`, which happens before any event can arrive.
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
+            hover: None,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
         }
+    }
+
+    /// Whether what is typed in an entry box is a value it cannot take: the
+    /// same rules [`Self::entry_coordinate`] refuses with, so the box turns
+    /// red before Enter has to say so. An empty box is unfinished, not wrong;
+    /// a name is never wrong.
+    fn entry_is_wrong(&self, field: CoordField) -> bool {
+        let (typed, limit) = match field {
+            CoordField::Latitude => (&self.entry_lat_buf, 90.0),
+            CoordField::Longitude => (&self.entry_lon_buf, 180.0),
+            CoordField::Name => return false,
+        };
+        let typed = typed.trim();
+        !typed.is_empty()
+            && !typed
+                .parse::<f64>()
+                .is_ok_and(|v| (-limit..=limit).contains(&v))
     }
 
     /// True heading = magnetic heading + declination.
@@ -676,6 +700,22 @@ impl CompassApp {
     /// clipped away was still clickable at the coordinates it no longer
     /// occupied.
     fn handle_mouse(&mut self, event: &MouseEvent, size: (f32, f32)) {
+        // Which entry box the pointer is over, from the same frame a press is
+        // answered against, so the box under it is drawn lit.
+        match event.kind {
+            MouseEventKind::Move => {
+                self.hover = match self.frame(size.0, size.1).hit_test(event.x, event.y) {
+                    Some(Target::Field(field)) => Some(field),
+                    _ => None,
+                };
+                return;
+            }
+            MouseEventKind::Leave => {
+                self.hover = None;
+                return;
+            }
+            _ => {}
+        }
         let MouseEventKind::Press(MouseButton::Left) = event.kind else {
             return;
         };
@@ -1647,10 +1687,21 @@ impl CompassApp {
                 FontWeightHint::Regular,
             );
             let entry = Rect::new(area.x, y + caption_h, area.w.min(l.font * 22.0), l.row);
-            f.push(fill(entry, self.palette.surface1, 6.0));
-            if self.active_coord_field == field {
-                f.push(stroke(entry, self.palette.blue, 6.0, 2.0));
-            }
+            // The toolkit's field (lane C, c-e-a-theme-can-shape-the-
+            // controls): lit under the pointer, marked while the keys type
+            // into it, red while what is in it is a value it cannot take.
+            guitk::field::draw(
+                f,
+                &self.palette,
+                entry,
+                guitk::field::State {
+                    hovered: self.hover == Some(field),
+                    focused: self.active_coord_field == field,
+                    disabled: false,
+                    invalid: self.entry_is_wrong(field),
+                },
+                self.focus_ring_width,
+            );
             let typed = self.buffer_of(field);
             let (shown, color) = if typed.is_empty() {
                 (placeholder(field), self.palette.overlay0)
@@ -1954,6 +2005,11 @@ fn accepts_char(field: CoordField, c: char) -> bool {
 impl App for CompassApp {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    /// The focus mark is drawn at the width the user asked for.
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -3560,6 +3616,117 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **The entry boxes are the toolkit's fields** (lane C,
+    /// c-e-a-theme-can-shape-the-controls): lit under the pointer and out when
+    /// it goes, marked at the user's focus width while the keys type into
+    /// them, and red while what is in them is a value they cannot take -- the
+    /// rules Enter refuses with.
+    #[test]
+    fn the_entry_boxes_are_the_toolkits_fields() {
+        use guitk::field::State;
+        let size = <CompassApp as Probe>::SIZE;
+        let mut app = CompassApp::new();
+        let mut palette = app.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut app, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        App::appearance_changed(&mut app, &settings);
+        app.set_view(View::CoordinateEntry);
+        let draws = |app: &CompassApp, rect: Rect, s: State| {
+            let mut want: Vec<RenderCommand> = Vec::new();
+            guitk::field::draw(&mut want, &palette, rect, s, width);
+            let mut mark: Vec<RenderCommand> = Vec::new();
+            guitk::field::draw(
+                &mut mark,
+                &palette,
+                rect,
+                State { focused: true, ..s },
+                width,
+            );
+            let frame = app.frame(size.0, size.1);
+            let cmds = frame.commands();
+            let has = |w: &[RenderCommand]| !w.is_empty() && cmds.windows(w.len()).any(|c| c == w);
+            has(&want) && (s.focused || !has(&mark))
+        };
+        let pointer = |app: &mut CompassApp, rect: Rect, kind: MouseEventKind| {
+            let (x, y) = rect.centre();
+            app.handle_event(&Event::Mouse(MouseEvent { x, y, kind }), size);
+        };
+        let keyed = State {
+            focused: true,
+            ..State::default()
+        };
+        let lit = State {
+            hovered: true,
+            ..State::default()
+        };
+        let lat =
+            guitk::probe::rect_of(&app, Target::Field(CoordField::Latitude)).expect("latitude");
+        let lon =
+            guitk::probe::rect_of(&app, Target::Field(CoordField::Longitude)).expect("longitude");
+
+        assert!(
+            draws(&app, lat, keyed),
+            "the latitude box is not marked with the keys"
+        );
+        assert!(
+            draws(&app, lon, State::default()),
+            "the longitude box is not the field"
+        );
+        pointer(&mut app, lon, MouseEventKind::Move);
+        assert!(
+            draws(&app, lon, lit),
+            "the longitude box does not light under the pointer"
+        );
+        pointer(&mut app, lon, MouseEventKind::Leave);
+        assert!(
+            draws(&app, lon, State::default()),
+            "the light stayed when the pointer left"
+        );
+
+        // A latitude past the pole is no latitude: the box says so as it is
+        // typed; a number in range is not wrong, and nor is an empty box.
+        app.entry_lat_buf = String::from("91");
+        assert!(
+            draws(
+                &app,
+                lat,
+                State {
+                    invalid: true,
+                    ..keyed
+                }
+            ),
+            "the box does not say 91 is no latitude"
+        );
+        app.entry_lat_buf = String::from("-45.5");
+        assert!(
+            draws(&app, lat, keyed),
+            "a latitude in range is drawn as wrong"
+        );
+        app.entry_lon_buf = String::from("east");
+        assert!(
+            draws(
+                &app,
+                lon,
+                State {
+                    invalid: true,
+                    ..State::default()
+                }
+            ),
+            "the box does not say 'east' is no longitude"
+        );
+        app.entry_lon_buf = String::from("-180");
+        assert!(
+            draws(&app, lon, State::default()),
+            "a longitude in range is drawn as wrong"
+        );
     }
 
     #[test]

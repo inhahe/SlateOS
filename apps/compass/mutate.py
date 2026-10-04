@@ -314,6 +314,49 @@ MUTATIONS = [
     ),
 ]
 
+FIELDS = 'the_entry_boxes_are_the_toolkits_fields'
+
+MUTATIONS += [
+    # The entry boxes are the toolkit's fields (2026-10-04; lane C,
+    # c-e-a-theme-can-shape-the-controls).
+    (
+        'an entry box never lights',
+        '                    hovered: self.hover == Some(field),\n',
+        '                    hovered: false,\n',
+        [FIELDS],
+    ),
+    (
+        'every entry box is marked',
+        '                    focused: self.active_coord_field == field,\n',
+        '                    focused: true,\n',
+        [FIELDS],
+    ),
+    (
+        'an entry box never says its value is wrong',
+        '                    invalid: self.entry_is_wrong(field),\n',
+        '                    invalid: false,\n',
+        [FIELDS],
+    ),
+    (
+        'any number is taken for a coordinate',
+        '                .is_ok_and(|v| (-limit..=limit).contains(&v))\n',
+        '                .is_ok()\n',
+        [FIELDS],
+    ),
+    (
+        'the light stays after the pointer leaves',
+        '                self.hover = None;\n',
+        '',
+        [FIELDS],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        '        self.focus_ring_width = settings.focus_ring_width();\n',
+        '        let _ = settings;\n',
+        [FIELDS],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "compass", timeout=300, only=only))

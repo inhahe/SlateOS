@@ -1,6 +1,9 @@
 """Mutation test for startupmanager.
 
-The keys: which are plain, which are Ctrl chords, and which are typing.
+The keys: which are plain, which are Ctrl chords, and which are typing.  And,
+since 2026-10-04, the list of keys' hold on the pointer: a press with it up
+puts it away and reaches nothing under it, and the wheel scrolls nothing it
+covers.
 
 Breaks one piece of production code at a time and checks that the test which
 claims to cover it is the one that fails.  A test that passes against a broken
@@ -110,6 +113,129 @@ MUTATIONS = [
         '            && textline::is_ctrl_chord(key.modifiers)\n        {',
         '            && key.modifiers.ctrl\n        {',
         ['a_chord_is_neither_a_manager_key_nor_typing_and_altgr_types'],
+    ),
+]
+
+CARD = 'the_shortcut_card_takes_a_press_rather_than_passing_it_on'
+TOUCHPAD = 'a_touchpads_small_turns_add_up_to_rows'
+FRACTION = 'a_fraction_of_a_notch_does_not_outlive_the_rows'
+FIELDS = 'the_text_boxes_are_the_toolkits_fields'
+
+MUTATIONS += [
+    # The text boxes are the toolkit's fields (2026-10-04; lane C,
+    # c-e-a-theme-can-shape-the-controls).
+    (
+        'the search box is drawn in no state',
+        '            self.field_state(Target::Search),\n',
+        '            guitk::field::State::default(),\n',
+        [FIELDS],
+    ),
+    (
+        "the dialog's boxes are drawn in no state",
+        '                self.field_state(Target::DialogField(i)),\n',
+        '                guitk::field::State::default(),\n',
+        [FIELDS],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        '        self.focus_ring_width = settings.focus_ring_width();\n',
+        '        let _ = settings;\n',
+        [FIELDS],
+    ),
+    (
+        'a box shows through the list of keys',
+        '        let open = open && !self.show_help;\n',
+        '        let open = open || self.show_help;\n',
+        [FIELDS],
+    ),
+    (
+        'the search box shows through a dialog',
+        '            (Target::Search, DialogState::Closed) => (true, self.search_focused),\n',
+        '            (Target::Search, _) => (true, self.search_focused),\n',
+        [FIELDS],
+    ),
+    (
+        "every one of the dialog's boxes is marked",
+        '            (Target::DialogField(i), DialogState::AddEdit(dlg)) => (true, dlg.focused_field == i),\n',
+        '            (Target::DialogField(_), DialogState::AddEdit(_)) => (true, true),\n',
+        [FIELDS],
+    ),
+    (
+        'the pointer is never followed',
+        '        self.hover = over;\n',
+        '        let _ = over;\n',
+        [FIELDS],
+    ),
+    (
+        'the light stays after the pointer leaves',
+        '            MouseEventKind::Leave => Option::None,\n',
+        '            MouseEventKind::Leave => self.hover,\n',
+        [FIELDS],
+    ),
+]
+
+MUTATIONS += [
+    # The table's wheel adds a touchpad's small turns up (2026-10-04).
+    (
+        "each event's rows are rounded on their own",
+        '                let rows = self.table_wheel.rows(dy);\n',
+        '                let rows = wheel::rows_f(dy).round() as isize;\n',
+        [TOUCHPAD],
+    ),
+    (
+        'a turn that moves nothing says it moved',
+        '                if self.scroll_offset == before {\n',
+        '                if false {\n',
+        [TOUCHPAD],
+    ),
+    (
+        'a fraction of a notch outlives the rows',
+        '        self.table_wheel.reset();\n',
+        '',
+        [FRACTION],
+    ),
+]
+
+MUTATIONS += [
+    # The list of keys takes the pointer (2026-10-04; known-issues
+    # E-a-press-goes-through-the-shortcut-card-to-the-control-drawn-under-it).
+    (
+        'a press goes through the list of keys',
+        '            Event::Mouse(mouse) if self.show_help => match mouse.kind {\n'
+        '                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n'
+        '                    self.show_help = false;\n'
+        '                    EventResult::Consumed\n'
+        '                }\n'
+        '                _ => EventResult::Ignored,\n'
+        '            },\n',
+        '',
+        [CARD],
+    ),
+    (
+        'only the left button puts the list of keys away',
+        '                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n'
+        '                    self.show_help = false;\n',
+        '                MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_) => {\n'
+        '                    self.show_help = false;\n',
+        [CARD],
+    ),
+    (
+        'a press under the list of keys leaves it up',
+        '                    self.show_help = false;\n'
+        '                    EventResult::Consumed\n',
+        '                    EventResult::Consumed\n',
+        [CARD],
+    ),
+    (
+        'the wheel scrolls what the list of keys covers',
+        '                _ => EventResult::Ignored,\n'
+        '            },\n'
+        '            Event::Mouse(mouse) => {\n',
+        '                MouseEventKind::Scroll { dy, .. } => self.handle_scroll(mouse.x, mouse.y, dy),\n'
+        '                _ => EventResult::Ignored,\n'
+        '            },\n'
+        '            Event::Mouse(mouse) => {\n',
+        [CARD],
     ),
 ]
 

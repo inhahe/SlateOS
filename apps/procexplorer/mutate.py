@@ -13,7 +13,9 @@ hands the program's path to the file manager.
 
 And, from 2026-09-27, the machine's totals: `read_system`'s doc said a figure
 `/proc/meminfo` does not carry keeps the value last read, and the code zeroed
-it.
+it.  And, from 2026-10-04, the list of keys' hold on the pointer: a press with
+it up puts it away and reaches nothing under it, and the wheel scrolls nothing
+it covers.
 
 What is deliberately not here: where the box and its buttons are drawn.  The
 pointer tests click the middle of the rectangles `run_box_layout` returns, so
@@ -45,8 +47,39 @@ MENU = "the_context_menus_open_file_location_looks_for_the_program"
 HAND_OFF = "show_in_folder_hands_the_path_to_the_file_manager"
 READ_SYSTEM = "the_system_figures_are_read_and_not_invented"
 KEEP = "a_figure_the_file_stops_carrying_keeps_its_last_value"
+CARD = "the_shortcut_card_takes_a_press_rather_than_passing_it_on"
 
 MUTATIONS = [
+    # --- The list of keys takes the pointer (known-issues
+    # E-a-press-goes-through-the-shortcut-card-to-the-control-drawn-under-it) ---
+    (
+        "a press goes through the list of keys",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n"
+        "                    self.show_help = false;\n"
+        "                    return EventResult::Consumed;\n"
+        "                }\n",
+        "",
+        [CARD],
+    ),
+    (
+        "only the left button puts the list of keys away",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n",
+        "                MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_) => {\n",
+        [CARD],
+    ),
+    (
+        "a press under the list of keys leaves it up",
+        "                    self.show_help = false;\n"
+        "                    return EventResult::Consumed;\n",
+        "                    return EventResult::Consumed;\n",
+        [CARD],
+    ),
+    (
+        "the wheel scrolls what the list of keys covers",
+        "                MouseEventKind::Scroll { .. } => return EventResult::Ignored,\n",
+        "",
+        [CARD],
+    ),
     # --- Splitting a command line ---
     (
         "white space does not end a word",
@@ -291,6 +324,75 @@ MUTATIONS = [
         "            set_kib(&mut info.swap_used, mem.swap_used_kib());\n",
         "",
         [READ_SYSTEM, KEEP],
+    ),
+]
+
+ASK = "the_identify_button_and_ctrl_i_ask_for_a_window_pick"
+NAMED = "a_picked_window_names_and_selects_its_program"
+BUTTONS = "every_toolbar_button_is_pressed_where_it_is_drawn"
+
+MUTATIONS += [
+    # The window pick, through lane F's `App::take_pick` (2026-10-04), and
+    # the toolbar pressed where it is drawn.
+    (
+        "the Identify button asks for nothing",
+        "                ToolbarAction::IdentifyWindow => self.toggle_window_pick(),\n",
+        "                ToolbarAction::IdentifyWindow => {}\n",
+        [ASK],
+    ),
+    (
+        "pressing Identify again does not give the pick up",
+        "        if self.window_picker.active {\n            self.cancel_window_pick();\n        } else {\n",
+        "        if false {\n            self.cancel_window_pick();\n        } else {\n",
+        [ASK],
+    ),
+    (
+        "one press asks for a pick at every turn",
+        "        self.pick_request.take()\n",
+        "        self.pick_request\n",
+        [ASK],
+    ),
+    (
+        "Escape does not give the pick up",
+        "        if key.key == Key::Escape && self.window_picker.active {\n            self.cancel_window_pick();\n            return EventResult::Consumed;\n        }\n",
+        "",
+        [ASK],
+    ),
+    (
+        "AltGr+I picks",
+        "        if key.key == Key::I && key.modifiers.ctrl && !key.modifiers.alt && !key.modifiers.super_key\n",
+        "        if key.key == Key::I && key.modifiers.ctrl && !key.modifiers.super_key\n",
+        [ASK],
+    ),
+    (
+        "nothing says the next click is a pick",
+        "        if self.window_picker.active {\n            tree.commands.extend(self.window_picker.render(\n",
+        "        if false {\n            tree.commands.extend(self.window_picker.render(\n",
+        [ASK],
+    ),
+    (
+        "the picked window's process is not selected",
+        "                        self.select_row(row);\n",
+        "",
+        [NAMED],
+    ),
+    (
+        "the list the process is selected in is not shown",
+        "                            self.set_tab(Tab::Processes);\n",
+        "",
+        [NAMED],
+    ),
+    (
+        "a pick that came to nothing leaves the banner up",
+        "        // Whatever the answer, the pick is over.\n        self.window_picker.cancel();\n",
+        "",
+        [NAMED],
+    ),
+    (
+        "a press beside a button presses it",
+        "        .find(|(r, _)| r.contains(x, y))\n",
+        "        .find(|(r, _)| x < r.right() + 6.0 && y >= r.y && y < r.bottom())\n",
+        [BUTTONS],
     ),
 ]
 

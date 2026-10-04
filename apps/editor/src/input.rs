@@ -1116,6 +1116,38 @@ impl EditorState {
     // Mouse
     // ======================================================================
 
+    /// The find bar's share of the pointer. It is drawn over the text, so a
+    /// press on it is its own: on a box it gives that box the keys, and
+    /// anywhere else on the bar it does nothing -- it went through to the text
+    /// and moved the caret under the bar. Where the pointer is, is followed,
+    /// so the box under it is drawn lit; a move that changes which box that
+    /// is, is a redraw. `None` for what is not the bar's.
+    fn find_bar_mouse(&mut self, mouse: &MouseEvent) -> Option<Response> {
+        match mouse.kind {
+            MouseEventKind::Move | MouseEventKind::Leave => {
+                let before = self.find_box_under_pointer();
+                self.pointer =
+                    matches!(mouse.kind, MouseEventKind::Move).then_some((mouse.x, mouse.y));
+                (self.find_box_under_pointer() != before).then_some(Response::Redraw)
+            }
+            MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_)
+                if self.find_visible && self.find_panel_rect().contains(mouse.x, mouse.y) =>
+            {
+                let on = [FindField::Query, FindField::Replace]
+                    .into_iter()
+                    .find(|&f| self.find_box(f).contains(mouse.x, mouse.y));
+                match on {
+                    Some(field) if field != self.find_field => {
+                        self.find_field = field;
+                        Some(Response::Redraw)
+                    }
+                    _ => Some(Response::Idle),
+                }
+            }
+            _ => None,
+        }
+    }
+
     fn handle_mouse(&mut self, mouse: &MouseEvent) -> Response {
         // The bar gets first refusal -- except during a drag that began in the
         // text, which owns the pointer until it is released: a selection being
@@ -1128,6 +1160,14 @@ impl EditorState {
         if !self.dragging
             && self.external_prompt.is_none()
             && let Some(response) = self.menu_bar_mouse(mouse)
+        {
+            return response;
+        }
+        // Then the find bar, which is drawn over the text -- unless a drag
+        // that began in the text holds the pointer.
+        if !self.dragging
+            && self.external_prompt.is_none()
+            && let Some(response) = self.find_bar_mouse(mouse)
         {
             return response;
         }
@@ -1802,6 +1842,147 @@ mod tests {
         assert!(
             !editor.menu_bar.is_open(),
             "the menu stayed open after running a row"
+        );
+    }
+
+    /// **The find bar takes the pointer over itself, and its boxes are the
+    /// toolkit's fields** (lane C, c-e-a-theme-can-shape-the-controls). They
+    /// were bare fills -- nothing said which one the keys typed into -- and a
+    /// press on the bar went through to the text and moved the caret under it.
+    /// Now a press on a box gives it the keys, a press elsewhere on the bar
+    /// does nothing, the box under the pointer is lit, and the one the keys
+    /// type into is marked at the user's focus width -- neither while a menu
+    /// holds the keys.
+    #[test]
+    fn the_find_bar_takes_the_pointer_and_its_boxes_are_the_toolkits_fields() {
+        use guitk::field::State;
+        use oswindow::app::App;
+        let mut editor = editor_with("alpha\nbeta\ngamma\ndelta\nepsilon\nzeta");
+        editor.resize(900, 600);
+        let mut palette = editor.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut editor, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        App::appearance_changed(&mut editor, &settings);
+        let draws = |editor: &mut EditorState, rect: guitk::frame::Rect, s: State| {
+            let mut want: Vec<guitk::render::RenderCommand> = Vec::new();
+            guitk::field::draw(&mut want, &palette, rect, s, width);
+            let mut mark: Vec<guitk::render::RenderCommand> = Vec::new();
+            guitk::field::draw(
+                &mut mark,
+                &palette,
+                rect,
+                State { focused: true, ..s },
+                width,
+            );
+            let cmds = editor.render_tree().commands;
+            let has = |w: &[guitk::render::RenderCommand]| {
+                !w.is_empty() && cmds.windows(w.len()).any(|c| c == w)
+            };
+            has(&want) && (s.focused || !has(&mark))
+        };
+        let pointer = |editor: &mut EditorState, x: f32, y: f32, kind: MouseEventKind| {
+            editor.handle_event(&Event::Mouse(MouseEvent { x, y, kind }))
+        };
+        let keyed = State {
+            focused: true,
+            ..State::default()
+        };
+        let lit = State {
+            hovered: true,
+            ..State::default()
+        };
+        let both = State {
+            hovered: true,
+            ..keyed
+        };
+
+        editor.handle_event(&ctrl(Key::F));
+        assert!(editor.find_visible);
+        let query = editor.find_box(FindField::Query);
+        let replace = editor.find_box(FindField::Replace);
+        assert!(
+            draws(&mut editor, query, keyed),
+            "the Find box is not marked with the keys"
+        );
+        assert!(
+            draws(&mut editor, replace, State::default()),
+            "the Replace box is not the field"
+        );
+
+        let (rx, ry) = replace.centre();
+        assert_eq!(
+            pointer(&mut editor, rx, ry, MouseEventKind::Move),
+            Response::Redraw,
+            "the light came on without a redraw"
+        );
+        assert!(
+            draws(&mut editor, replace, lit),
+            "the Replace box does not light under the pointer"
+        );
+        pointer(
+            &mut editor,
+            rx,
+            ry,
+            MouseEventKind::Press(MouseButton::Left),
+        );
+        assert_eq!(
+            editor.find_field,
+            FindField::Replace,
+            "a press gave the box no keys"
+        );
+        assert!(
+            draws(&mut editor, replace, both),
+            "the Replace box is not marked with the keys"
+        );
+        assert!(
+            draws(&mut editor, query, State::default()),
+            "the Find box kept its mark"
+        );
+        pointer(&mut editor, rx, ry, MouseEventKind::Leave);
+        assert!(
+            draws(&mut editor, replace, keyed),
+            "the light stayed when the pointer left"
+        );
+
+        // A press on the bar between its boxes moves no caret under it.
+        let panel = editor.find_panel_rect();
+        let caret = (
+            editor.active_document().cursor_line,
+            editor.active_document().cursor_col,
+        );
+        pointer(
+            &mut editor,
+            panel.x + 4.0,
+            panel.bottom() - 4.0,
+            MouseEventKind::Press(MouseButton::Left),
+        );
+        assert_eq!(
+            (
+                editor.active_document().cursor_line,
+                editor.active_document().cursor_col
+            ),
+            caret,
+            "a press on the find bar moved the caret under it"
+        );
+        assert!(editor.find_visible, "a press on the bar put it away");
+
+        // An open menu holds the keys: no mark.
+        pointer(
+            &mut editor,
+            20.0,
+            guitk::menubar::BAR_HEIGHT / 2.0,
+            MouseEventKind::Press(MouseButton::Left),
+        );
+        assert!(editor.menu_bar.is_open());
+        assert!(
+            draws(&mut editor, replace, State::default()),
+            "the box shows the keys under an open menu"
         );
     }
 

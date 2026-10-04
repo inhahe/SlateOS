@@ -14,9 +14,12 @@ use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::field;
+use guitk::frame::Rect;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::textedit;
 use oswindow::app::Response;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -544,6 +547,10 @@ pub struct LauncherState {
     /// exists because `theme_changed` hands over a `Palette`, and a palette is
     /// colours. See `design-decisions.md` 839.
     caret_width: f32,
+    /// How wide the mark is round the search box while it has the keyboard:
+    /// the user's focus width (`App::appearance_changed`), the toolkit's
+    /// until it is known.
+    focus_ring_width: f32,
     /// Current search query text.
     query: String,
     /// Cursor position within the query (byte offset).
@@ -612,6 +619,7 @@ impl LauncherState {
         let mut state = Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             caret_width: guitk::textedit::CARET_WIDTH,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             query: String::new(),
             cursor: 0,
             results: Vec::new(),
@@ -1013,6 +1021,18 @@ impl LauncherState {
     /// Render the launcher dialog into a vector of render commands.
     ///
     /// The caller should only render this when `self.visible` is true.
+    /// How the search box is drawn: with the keyboard -- every key that
+    /// types goes to it -- and red while what is typed finds nothing. Never
+    /// lit under the pointer: it has no press of its own.
+    fn search_box_state(&self) -> field::State {
+        field::State {
+            hovered: false,
+            focused: true,
+            disabled: false,
+            invalid: !self.query.trim().is_empty() && self.results.is_empty(),
+        }
+    }
+
     pub fn render(&self) -> Vec<RenderCommand> {
         if !self.visible {
             return Vec::new();
@@ -1077,82 +1097,69 @@ impl LauncherState {
 
         // --- Search input area ---
         let input_width = layout.inner_width;
-        let input_radii = CornerRadii::all(8.0);
 
-        // Input background
-        self.palette.push_surface_radii(
+        // The toolkit's field, in the theme's shape: it was a card with a
+        // grey outline whatever the theme said, the same with the keyboard
+        // as without. It has the keyboard while nothing covers it -- every key
+        // that types goes to it -- and is red while a query finds nothing.
+        let input = Rect::new(0.0, 0.0, input_width, INPUT_HEIGHT - PADDING);
+        let state = self.search_box_state();
+        field::draw(
             &mut cmds,
-            0.0,
-            0.0,
-            input_width,
-            INPUT_HEIGHT - PADDING,
-            input_radii,
-            Surface::Card,
+            &self.palette,
+            input,
+            state,
+            self.focus_ring_width,
         );
 
-        // Input border
-        cmds.push(RenderCommand::StrokeRect {
-            x: 0.0,
-            y: 0.0,
-            width: input_width,
-            height: INPUT_HEIGHT - PADDING,
-            color: self.palette.surface2,
-            line_width: 1.0,
-            corner_radii: input_radii,
-        });
-
-        // Search icon placeholder text
-        cmds.push(RenderCommand::Text {
-            x: 12.0,
-            y: (INPUT_HEIGHT - PADDING) / 2.0 - INPUT_FONT_SIZE / 2.0 + 2.0,
-            text: "Search...".to_string(),
-            color: if self.query.is_empty() {
-                self.palette.subtext0
-            } else {
-                Color::TRANSPARENT
-            },
-            font_size: INPUT_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Query text
-        if !self.query.is_empty() {
+        let line = text::line_height(INPUT_FONT_SIZE, FontWeightHint::Regular);
+        let (tx, ty, tw) = (12.0, (input.h - line) / 2.0, (input_width - 24.0).max(0.0));
+        if self.query.is_empty() {
             cmds.push(RenderCommand::Text {
-                x: 12.0,
-                y: (INPUT_HEIGHT - PADDING) / 2.0 - INPUT_FONT_SIZE / 2.0 + 2.0,
-                text: self.query.clone(),
-                color: self.palette.text,
+                x: tx,
+                y: ty,
+                text: "Search...".to_string(),
+                color: self.palette.subtext0,
                 font_size: INPUT_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(input_width - 24.0),
+                max_width: Some(tw),
                 overflow: TextOverflow::Ellipsis,
             });
         }
 
-        // Where the text before the caret actually ends, in the face it is
-        // drawn in. This was `chars * (INPUT_FONT_SIZE * 0.55)`: a guessed
-        // average advance applied to *proportional* text, so the caret sat left
-        // of the query after any run of wide letters and right of it after a
-        // run of narrow ones — visibly wrong on a word as ordinary as "will".
-        // `0.55` is not a fixable constant, because no single number is right
-        // for a face whose whole purpose is that its characters differ.
-        //
-        // `get` rather than `[..cursor]`: the caret is a byte offset, and
-        // slicing a `str` off a character boundary aborts the process. A caret
-        // that is momentarily inconsistent should draw at the left edge, not
-        // take the desktop's launcher down.
-        let before = self.query.get(..self.cursor).unwrap_or("");
-        let cursor_x = 12.0 + text::measure(before, INPUT_FONT_SIZE, FontWeightHint::Regular);
-        cmds.push(RenderCommand::Line {
-            x1: cursor_x,
-            y1: (INPUT_HEIGHT - PADDING) / 2.0 - INPUT_FONT_SIZE / 2.0 + 2.0,
-            x2: cursor_x,
-            y2: (INPUT_HEIGHT - PADDING) / 2.0 + INPUT_FONT_SIZE / 2.0 + 2.0,
-            color: self.palette.blue,
-            width: self.caret_width,
-        });
+        // The query and its caret, by `guitk::textedit`: the caret where the
+        // text before it actually ends, in the face it is drawn in -- it was
+        // once placed at `chars * (INPUT_FONT_SIZE * 0.55)`, a guessed average
+        // advance that no proportional face can honour -- in the user's caret
+        // width, and the query scrolled so the caret stays in view rather than
+        // cut off with an ellipsis. A caret momentarily off a character
+        // boundary draws at the left edge rather than anywhere it cannot be.
+        let cursor = if self.query.is_char_boundary(self.cursor) {
+            self.cursor
+        } else {
+            0
+        };
+        let mut typed = RenderTree::new();
+        textedit::draw(
+            &mut typed,
+            &textedit::SingleLine {
+                text: &self.query,
+                cursor: text::TextCursor::from(cursor),
+                selection_anchor: None,
+                focused: state.focused,
+                x: tx,
+                y: ty,
+                width: tw,
+                line_height: line,
+                font_size: INPUT_FONT_SIZE,
+                weight: FontWeightHint::Regular,
+                color: self.palette.text,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: self.caret_width,
+            },
+        );
+        cmds.extend(typed.commands);
 
         // --- Launch failure banner ---
         if let (Some(error_top), Some(message)) = (layout.error_top, self.error.as_ref()) {
@@ -1557,6 +1564,7 @@ fn spawn_program(command: &LaunchCommand) -> Result<(), String> {
 impl oswindow::app::App for LauncherState {
     fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
         self.caret_width = settings.caret_width();
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn theme_changed(&mut self, palette: &Palette) {
@@ -1719,24 +1727,22 @@ mod tests {
 
     #[test]
     fn the_caret_sits_where_the_query_text_ends() {
-        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        // The caret is the rule the toolkit's single-line editor draws
+        // straight after the query's text.
         let caret_x = |query: &str| {
             let mut state = LauncherState::new(1280.0, 800.0);
             state.visible = true;
             state.query = query.to_owned();
             state.cursor = query.len();
-            state
-                .render()
-                .into_iter()
-                .find_map(|cmd| match cmd {
-                    RenderCommand::Line { x1, x2, color, .. }
-                        if (x1 - x2).abs() < f32::EPSILON && color == pal.blue =>
-                    {
-                        Some(x1)
-                    }
-                    _ => None,
-                })
-                .expect("the launcher draws a caret")
+            let cmds = state.render();
+            let at = cmds
+                .iter()
+                .position(|c| matches!(c, RenderCommand::RichText { text, .. } if text == query))
+                .expect("the query is not drawn");
+            match cmds.get(at + 1) {
+                Some(RenderCommand::Line { x1, x2, .. }) if (x1 - x2).abs() < f32::EPSILON => *x1,
+                other => panic!("the launcher draws no caret after the query: {other:?}"),
+            }
         };
 
         for query in ["WWW", "iii", "will", "Wii", "documents"] {
@@ -3226,5 +3232,90 @@ mod tests {
         assert_eq!(names(&LauncherState::new(1280.0, 800.0)), builtin_names());
         let dir = installed(&[]);
         assert_eq!(names(&launcher_over(&dir, None)), builtin_names());
+    }
+    // -- The search box is the toolkit's field (lane C,
+    //    c-e-a-theme-can-shape-the-controls)
+
+    /// **The search box is the toolkit's field**: it has the keyboard --
+    /// every key that types goes to it -- marked as the theme marks a field
+    /// in the user's width, and is red while what is typed finds nothing.
+    /// It was a card with a grey outline whatever the theme said.
+    #[test]
+    fn the_search_box_is_the_toolkits_field() {
+        use oswindow::app::App as _;
+
+        let mut app = LauncherState::new(1280.0, 800.0);
+        app.visible = true;
+        let mut p = app.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        app.theme_changed(&p);
+        app.appearance_changed(&appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..appearance::AppearanceSettings::default()
+        });
+        let ring = app.focus_ring_width;
+        assert!(
+            ring > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        let rect = Rect::new(
+            0.0,
+            0.0,
+            Layout::of(&app).inner_width,
+            INPUT_HEIGHT - PADDING,
+        );
+        let draws = |app: &LauncherState, s: field::State| {
+            let mut want: Vec<RenderCommand> = Vec::new();
+            field::draw(&mut want, &p, rect, s, ring);
+            let cmds = app.render();
+            cmds.windows(want.len()).any(|w| w == want.as_slice())
+        };
+        let focused = field::State {
+            focused: true,
+            ..field::State::default()
+        };
+        assert!(
+            draws(&app, focused),
+            "the search box does not have the keyboard"
+        );
+
+        app.query = String::from("zzqqxxww");
+        app.cursor = app.query.len();
+        app.update_results();
+        assert!(app.results.is_empty());
+        assert!(
+            draws(
+                &app,
+                field::State {
+                    invalid: true,
+                    ..focused
+                }
+            ),
+            "a query that finds nothing does not turn the box red"
+        );
+    }
+
+    /// **A long query scrolls under the caret** rather than being cut off
+    /// with an ellipsis at the letters being typed.
+    #[test]
+    fn a_long_query_scrolls_and_its_caret_stays_in_the_box() {
+        let mut app = LauncherState::new(1280.0, 800.0);
+        app.visible = true;
+        app.query = "w".repeat(200);
+        app.cursor = app.query.len();
+        let cmds = app.render();
+        let at = cmds
+            .iter()
+            .position(|c| matches!(c, RenderCommand::RichText { text, .. } if *text == app.query))
+            .expect("the query is not drawn");
+        let caret = match cmds.get(at + 1) {
+            Some(RenderCommand::Line { x1, x2, .. }) if (x1 - x2).abs() < f32::EPSILON => *x1,
+            other => panic!("no caret after the query: {other:?}"),
+        };
+        let width = Layout::of(&app).inner_width;
+        assert!(
+            caret > 0.0 && caret < width,
+            "the caret of a long query is at {caret}, outside the box 0..{width}"
+        );
     }
 }

@@ -1829,12 +1829,19 @@ pub struct SchedulerUI {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// How wide the focus mark is drawn, from the user's appearance settings.
+    focus_ring_width: f32,
+    /// The text box the pointer is over, if any, so it is drawn lit (lane C,
+    /// c-e-a-theme-can-shape-the-controls).
+    hover: Option<Target>,
 }
 
 impl SchedulerUI {
     pub fn new() -> Self {
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
+            hover: None,
             tab: UiTab::Tasks,
             dialog: UiDialog::None,
             scheduler: TaskScheduler::new(),
@@ -2259,6 +2266,18 @@ impl SchedulerUI {
     pub fn target_at(&self, x: f32, y: f32) -> Option<Target> {
         self.frame(self.window_width, self.window_height)
             .hit_test(x, y)
+    }
+
+    /// Follow the pointer over the text boxes: `Some` where it has moved to,
+    /// `None` when it has left the window. Answers whether the box under it
+    /// changed.
+    fn point_at(&mut self, at: Option<(f32, f32)>) -> bool {
+        let over = at
+            .and_then(|(x, y)| self.target_at(x, y))
+            .filter(|t| matches!(t, Target::Field(_)));
+        let changed = over != self.hover;
+        self.hover = over;
+        changed
     }
 
     fn render_header(&self, frame: &mut Frame, layout: &Layout) {
@@ -3098,7 +3117,19 @@ impl SchedulerUI {
         // a row cut down to nothing would have moved it to the window's corner;
         // `cut` is applied where the rectangle is drawn from. An empty
         // rectangle draws nothing -- see `render_text_field`.
-        let cut = |r: Rect| r.intersect(dialog).unwrap_or(Rect::EMPTY);
+        //
+        // Cut to the dialog less the focus mark's width, which the toolkit's
+        // field draws outside its box: a box run up to the dialog's edge
+        // would have its mark painted over the edge -- and past the window,
+        // in a window the dialog fills.
+        let ring = self.focus_ring_width.max(0.0).ceil();
+        let room = Rect::new(
+            dialog.x + ring,
+            dialog.y + ring,
+            (dialog.w - 2.0 * ring).max(0.0),
+            (dialog.h - 2.0 * ring).max(0.0),
+        );
+        let cut = |r: Rect| r.intersect(room).unwrap_or(Rect::EMPTY);
         let mut label = |frame: &mut Frame, text: &str| {
             let y = field_y;
             if let Some(band) = Rect::new(dialog.x, y, dialog.w, FONT_SIZE).intersect(dialog) {
@@ -3383,27 +3414,21 @@ impl SchedulerUI {
         }
         let focused = matches!(target, Target::Field(f) if self.focus == Some(f));
 
-        frame.push(RenderCommand::FillRect {
-            x: rect.x,
-            y: rect.y,
-            width: rect.w,
-            height: rect.h,
-            color: self.palette.base,
-            corner_radii: CornerRadii::all(4.0),
-        });
-        frame.push(RenderCommand::StrokeRect {
-            x: rect.x,
-            y: rect.y,
-            width: rect.w,
-            height: rect.h,
-            color: if focused {
-                self.palette.blue
-            } else {
-                self.palette.surface2
+        // The toolkit's field, in the theme's shape (lane C,
+        // c-e-a-theme-can-shape-the-controls): lit under the pointer, marked
+        // at the user's focus width while the keys type into it.
+        guitk::field::draw(
+            frame,
+            &self.palette,
+            rect,
+            guitk::field::State {
+                hovered: self.hover == Some(target),
+                focused,
+                disabled: false,
+                invalid: false,
             },
-            line_width: if focused { 2.0 } else { 1.0 },
-            corner_radii: CornerRadii::all(4.0),
-        });
+            self.focus_ring_width,
+        );
 
         let text_y = centre_line(rect, FONT_SIZE);
         let text_span = span(rect, rect.x + 6.0, rect.w - 12.0);
@@ -3931,6 +3956,10 @@ fn handle_event(ui: &mut SchedulerUI, event: &Event) -> EventResult {
         Event::Mouse(m) => match m.kind {
             MouseEventKind::Press(MouseButton::Left) => result(ui.handle_click(m.x, m.y)),
             MouseEventKind::Scroll { dy, .. } => result(ui.handle_scroll(dy)),
+            // Which text box the pointer is over, so it is drawn lit. Only a
+            // change is a repaint.
+            MouseEventKind::Move => result(ui.point_at(Some((m.x, m.y)))),
+            MouseEventKind::Leave => result(ui.point_at(None)),
             _ => EventResult::Ignored,
         },
         Event::Key(k) => result(ui.handle_key(k)),
@@ -3953,6 +3982,11 @@ fn handle_event(ui: &mut SchedulerUI, event: &Event) -> EventResult {
 impl App for SchedulerUI {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    /// The focus mark is drawn at the width the user asked for.
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -5592,6 +5626,90 @@ mod tests {
         assert!(ui.scheduler.list_tasks().is_empty());
     }
 
+    /// **The dialog's boxes are the toolkit's fields** (lane C,
+    /// c-e-a-theme-can-shape-the-controls): lit under the pointer and out when
+    /// it goes, marked at the user's focus width while the keys type into
+    /// them.
+    #[test]
+    fn the_text_boxes_are_the_toolkits_fields() {
+        use guitk::field::State;
+        let size = <SchedulerUI as Probe>::SIZE;
+        let mut ui = SchedulerUI::new();
+        let mut palette = ui.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut ui, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        App::appearance_changed(&mut ui, &settings);
+        let seq = |rect: Rect, s: State| {
+            let mut want: Vec<RenderCommand> = Vec::new();
+            guitk::field::draw(&mut want, &palette, rect, s, width);
+            want
+        };
+        let draws = |ui: &SchedulerUI, rect: Rect, s: State| {
+            let frame = ui.frame(size.0, size.1);
+            let cmds = frame.commands();
+            let has = |want: &[RenderCommand]| {
+                !want.is_empty() && cmds.windows(want.len()).any(|w| w == want)
+            };
+            has(&seq(rect, s)) && (s.focused || !has(&seq(rect, State { focused: true, ..s })))
+        };
+        let pointer = |ui: &mut SchedulerUI, rect: Rect, kind: MouseEventKind| {
+            let (x, y) = rect.centre();
+            handle_event(ui, &Event::Mouse(MouseEvent { x, y, kind }));
+        };
+        let idle = State::default();
+        let lit = State {
+            hovered: true,
+            ..idle
+        };
+        let keyed = State {
+            focused: true,
+            ..idle
+        };
+        let both = State {
+            hovered: true,
+            ..keyed
+        };
+
+        probe::click(&mut ui, Target::Add);
+        let name = probe::rect_of(&ui, Target::Field(FormField::Name)).expect("the Name box");
+        let command =
+            probe::rect_of(&ui, Target::Field(FormField::Command)).expect("the Command box");
+        assert!(
+            draws(&ui, name, keyed),
+            "the Name box is not marked with the keys"
+        );
+        assert!(
+            draws(&ui, command, idle),
+            "the Command box is marked without the keys"
+        );
+        pointer(&mut ui, command, MouseEventKind::Move);
+        assert!(
+            draws(&ui, command, lit),
+            "the Command box does not light under the pointer"
+        );
+        assert!(
+            draws(&ui, name, keyed),
+            "the Name box lit with the pointer elsewhere"
+        );
+        pointer(&mut ui, command, MouseEventKind::Press(MouseButton::Left));
+        assert!(
+            draws(&ui, command, both),
+            "a press did not give the Command box the keys"
+        );
+        assert!(draws(&ui, name, idle), "the Name box kept its mark");
+        pointer(&mut ui, command, MouseEventKind::Leave);
+        assert!(
+            draws(&ui, command, keyed),
+            "the light stayed after the pointer left"
+        );
+    }
+
     /// The whole path a user actually takes, through the hit boxes rather than
     /// the methods behind them.
     #[test]
@@ -6145,10 +6263,20 @@ mod tests {
         // from fills, which is why the top-level test above can only ask about
         // fills. Here each pass is handed an *unclipped* frame, so all three
         // witnesses are available.
-        fn check(state: &str, pass: &str, region: Rect, f: &Frame) {
+        /// `margin` is how far a pass may fill outside its box, and only a
+        /// text field has one: the toolkit's field draws its focus mark that
+        /// far outside the box it is given (`guitk::field::draw`). Its text,
+        /// its caret and its hit box are still held to the box itself.
+        fn check(state: &str, pass: &str, region: Rect, margin: f32, f: &Frame) {
+            let ink = Rect::new(
+                region.x - margin,
+                region.y - margin,
+                region.w + 2.0 * margin,
+                region.h + 2.0 * margin,
+            );
             for r in rects(f) {
                 assert!(
-                    inside(region, r),
+                    inside(ink, r),
                     "{state}: the {pass} pass, given {region:?}, filled {r:?}"
                 );
             }
@@ -6261,7 +6389,7 @@ mod tests {
                 for (pass, region, draw) in panels {
                     let mut f = Frame::new(w, h);
                     draw(&ui, &mut f);
-                    check(&state, pass, region, &f);
+                    check(&state, pass, region, 0.0, &f);
                 }
             }
 
@@ -6304,10 +6432,15 @@ mod tests {
                 }),
             ];
             for (pass, draw) in controls {
+                let margin = if pass.ends_with("text field") {
+                    ui.focus_ring_width.max(0.0).ceil()
+                } else {
+                    0.0
+                };
                 for region in squeezes(Rect::new(40.0, 60.0, FIELD_WIDTH, FIELD_HEIGHT)) {
                     let mut f = Frame::new(800.0, 600.0);
                     draw(&ui, &mut f, region);
-                    check(name, pass, region, &f);
+                    check(name, pass, region, margin, &f);
 
                     // "No area means no ink and no hit box" is what each
                     // control's opening guard promises, and containment alone

@@ -16,13 +16,15 @@ mod features;
 use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
+use guitk::frame::Rect;
 use guitk::history::SampleHistory;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::scroll_window;
 use guitk::table::{Column, Fit, Table};
 use guitk::text;
 use guitk::wheel;
-use oswindow::app::{self, App, Response};
+use oswindow::app::{self, App, PickRefused, PickRequest, Response};
+use oswindow::{PickOutcome, PickedWindow};
 use pathtext::ShowPath;
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
@@ -582,7 +584,65 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+F", "Jump to the filter box"),
     ("Delete", "Kill the selected process"),
     ("Ctrl+N", "Run a new task"),
+    ("Ctrl+I", "Pick a window to find its program"),
 ];
+
+/// What a toolbar button does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ToolbarAction {
+    EndProcess,
+    NewTask,
+    Refresh,
+    ToggleView,
+    IdentifyWindow,
+}
+
+/// How tall the toolbar's buttons are.
+const TOOLBAR_BUTTON_H: f32 = 26.0;
+
+/// The toolbar's buttons, left to right, where each is drawn -- and so where
+/// it is pressed: one list, read by both.
+///
+/// The press used to be tested against thresholds of its own -- 90, 170,
+/// 240 and 300 -- that did not match the buttons drawn at 8, 104, 190 and
+/// 266, so the right-hand part of a button pressed the next one, and a press
+/// in the eight pixels left of End Process ended the selected process.
+fn toolbar_buttons() -> [(Rect, ToolbarAction); 5] {
+    let y = (TOOLBAR_HEIGHT - TOOLBAR_BUTTON_H) / 2.0;
+    let mut x = 8.0;
+    [
+        (90.0, ToolbarAction::EndProcess),
+        (80.0, ToolbarAction::NewTask),
+        (70.0, ToolbarAction::Refresh),
+        (60.0, ToolbarAction::ToggleView),
+        (70.0, ToolbarAction::IdentifyWindow),
+    ]
+    .map(|(w, action)| {
+        let r = Rect::new(x, y, w, TOOLBAR_BUTTON_H);
+        x += w + 6.0;
+        (r, action)
+    })
+}
+
+/// The toolbar button at `(x, y)`, if a button is drawn there.
+fn toolbar_action_at(x: f32, y: f32) -> Option<ToolbarAction> {
+    toolbar_buttons()
+        .into_iter()
+        .find(|(r, _)| r.contains(x, y))
+        .map(|(_, action)| action)
+}
+
+/// The filter box in a window `width` wide: right-aligned in the toolbar,
+/// drawn and pressed here.
+fn filter_rect(width: f32) -> Rect {
+    let w = 200.0;
+    Rect::new(
+        width - w - 8.0,
+        (TOOLBAR_HEIGHT - TOOLBAR_BUTTON_H) / 2.0,
+        w,
+        TOOLBAR_BUTTON_H,
+    )
+}
 
 /// Why a priority cannot be changed, in the words the status bar uses.
 const CANNOT_RENICE: &str = "this system cannot yet change another program's priority";
@@ -759,7 +819,6 @@ pub struct ProcessExplorerState {
     // -- Search / filter -----------------------------------------------------
     /// Filter text (search box content).
     pub filter_text: String,
-    /// Whether the search box is focused.
     /// Whether the shortcut card is up.
     pub show_help: bool,
     /// The New Task box while it is up.
@@ -772,7 +831,14 @@ pub struct ProcessExplorerState {
     clipboard: String,
     /// How programs are started; see [`Spawner`].
     spawner: Spawner,
+    /// Whether the search box is focused.
     pub filter_focused: bool,
+    /// The "which program owns this window?" pick: whether one is open, and
+    /// what the last one found.
+    window_picker: features::WindowPicker,
+    /// What to ask of the desktop's window pick at the next turn of the loop
+    /// (`App::take_pick`): to start one, or to give up the open one.
+    pick_request: Option<PickRequest>,
 
     // -- Context menu --------------------------------------------------------
     /// Active context menu, if any.
@@ -855,6 +921,8 @@ impl ProcessExplorerState {
             clipboard: String::new(),
             spawner: spawn_program,
             filter_focused: false,
+            window_picker: features::WindowPicker::new(),
+            pick_request: None,
             context_menu: None,
             system_info,
             cpu_history: GraphHistory::new(GRAPH_HISTORY_LEN),
@@ -1381,6 +1449,19 @@ impl ProcessExplorerState {
             self.open_run_box();
             return EventResult::Consumed;
         }
+        // Ctrl+I picks a window, or gives up the open pick, from anywhere --
+        // the filter box included, which types no Ctrl chord. Ctrl alone:
+        // Ctrl+Alt is AltGr, which types, and the Windows key's chords are
+        // the desktop's.
+        if key.key == Key::I && key.modifiers.ctrl && !key.modifiers.alt && !key.modifiers.super_key
+        {
+            self.toggle_window_pick();
+            return EventResult::Consumed;
+        }
+        if key.key == Key::Escape && self.window_picker.active {
+            self.cancel_window_pick();
+            return EventResult::Consumed;
+        }
 
         // If filter box is focused, route text input there.
         if self.filter_focused {
@@ -1521,6 +1602,23 @@ impl ProcessExplorerState {
         let mx = mouse.x;
         let my = mouse.y;
 
+        // The list of keys is modal for the pointer as it is for the keys, and
+        // drawn over everything, the New Task box and the context menu
+        // included: a press with any button puts it away and does nothing
+        // else, and the wheel scrolls nothing it covers. A right press used
+        // to raise the context menu -- Kill is on it -- over a process the
+        // reader could not see for the list.
+        if self.show_help {
+            match mouse.kind {
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                    self.show_help = false;
+                    return EventResult::Consumed;
+                }
+                MouseEventKind::Scroll { .. } => return EventResult::Ignored,
+                _ => {}
+            }
+        }
+
         if self.run_box.is_some() {
             return match mouse.kind {
                 MouseEventKind::Press(MouseButton::Left) => self.run_box_press(mx, my),
@@ -1569,9 +1667,9 @@ impl ProcessExplorerState {
                     return EventResult::Consumed;
                 }
 
-                // Toolbar buttons (simplified hit regions)
+                // Toolbar buttons, where they are drawn.
                 if my < TOOLBAR_HEIGHT {
-                    return self.handle_toolbar_click(mx);
+                    return self.handle_toolbar_click(mx, my);
                 }
 
                 // Column header click (process tab only)
@@ -1676,21 +1774,106 @@ impl ProcessExplorerState {
         }
     }
 
-    /// Handle a click in the toolbar region.
-    fn handle_toolbar_click(&mut self, mx: f32) -> EventResult {
-        // Button layout: [End Process 90px][New Task 80px][Refresh 70px][View 60px][gap][filter box]
-        if mx < 90.0 {
-            self.kill_selected();
-        } else if mx < 170.0 {
-            self.open_run_box();
-        } else if mx < 240.0 {
-            self.refresh();
-        } else if mx < 300.0 {
-            self.toggle_view_mode();
-        } else if mx >= self.window_width as f32 - 210.0 {
+    /// Handle a click in the toolbar region: the button drawn under it, or
+    /// the filter box -- and nothing in the gaps.
+    fn handle_toolbar_click(&mut self, mx: f32, my: f32) -> EventResult {
+        if let Some(action) = toolbar_action_at(mx, my) {
+            match action {
+                ToolbarAction::EndProcess => self.kill_selected(),
+                ToolbarAction::NewTask => self.open_run_box(),
+                ToolbarAction::Refresh => self.refresh(),
+                ToolbarAction::ToggleView => self.toggle_view_mode(),
+                ToolbarAction::IdentifyWindow => self.toggle_window_pick(),
+            }
+        } else if filter_rect(self.window_width as f32).contains(mx, my) {
             self.filter_focused = true;
         }
         EventResult::Consumed
+    }
+
+    /// Start a window pick -- the user's next click, on any window, names the
+    /// program that owns it -- or give up the one that is open: the
+    /// toolbar's Identify button and Ctrl+I.
+    fn toggle_window_pick(&mut self) {
+        if self.window_picker.active {
+            self.cancel_window_pick();
+        } else {
+            self.window_picker.activate();
+            self.pick_request = Some(PickRequest::Start);
+            self.status_message =
+                "Click any window to find the program it belongs to -- Escape gives up".to_string();
+        }
+    }
+
+    /// Give up the open window pick.
+    fn cancel_window_pick(&mut self) {
+        self.window_picker.cancel();
+        self.pick_request = Some(PickRequest::Cancel);
+        self.status_message = "Gave up picking a window".to_string();
+    }
+
+    /// What a window pick came to (`App::window_picked`).
+    fn window_pick_answered(&mut self, outcome: Result<PickOutcome, PickRefused>) {
+        // Whatever the answer, the pick is over.
+        self.window_picker.cancel();
+        match outcome {
+            Ok(PickOutcome::Window(window)) => self.identify(&window),
+            Ok(PickOutcome::Nothing) => {
+                self.status_message = "No window was picked".to_string();
+            }
+            // A refusal, not a failure: no window of this program had the
+            // keyboard, or another program's pick was open. Said, so the user
+            // can try again rather than wait for a crosshair that never came.
+            Err(refused) => {
+                self.status_message = format!("The window pick was refused: {}", refused.reason);
+            }
+        }
+    }
+
+    /// Name the program that owns `window`, and show it: select its process
+    /// in the list.
+    fn identify(&mut self, window: &PickedWindow) {
+        let name = window
+            .pid
+            .and_then(|pid| self.processes.iter().find(|p| p.pid == pid))
+            .map(|p| p.name.clone());
+        self.window_picker.pick(features::PickResult {
+            window_id: window.window,
+            pid: window.pid,
+            process_name: name.clone().unwrap_or_default(),
+            window_title: window.title.clone(),
+            app_id: window.app_id.clone(),
+        });
+        let what = if window.title.is_empty() {
+            format!("Window {:#x}", window.window)
+        } else {
+            format!("\"{}\"", window.title)
+        };
+        self.status_message = match (window.pid, name) {
+            (None, _) => format!(
+                "{what} belongs to a program that reached the desktop over the network: \
+                 its process cannot be named"
+            ),
+            (Some(pid), None) => format!("{what} belongs to PID {pid}, which is not in the list"),
+            (Some(pid), Some(name)) => {
+                let row = self
+                    .visible_indices
+                    .iter()
+                    .position(|&i| self.processes.get(i).is_some_and(|p| p.pid == pid));
+                match row {
+                    Some(row) => {
+                        if !matches!(self.active_tab, Tab::Processes)
+                            && !self.active_tab.is_process_view()
+                        {
+                            self.set_tab(Tab::Processes);
+                        }
+                        self.select_row(row);
+                        format!("{what} belongs to {name} (PID {pid})")
+                    }
+                    None => format!("{what} belongs to {name} (PID {pid}), hidden by the filter"),
+                }
+            }
+        };
     }
 
     /// Put the New Task box up, empty.
@@ -1912,16 +2095,21 @@ impl ProcessExplorerState {
         // overflowed is not a number the clamp can rescue.
         #[allow(clippy::cast_sign_loss)]
         let new_idx = current.saturating_add(delta).clamp(0, max_idx) as usize;
-        self.selected_index = Some(new_idx);
+        self.select_row(new_idx);
+    }
+
+    /// Select the row at `idx` and scroll it into view.
+    fn select_row(&mut self, idx: usize) {
+        self.selected_index = Some(idx);
         // A process view follows the selection.
         self.load_views(&procinfo::ProcFs::new(), false);
 
         // Ensure the selection is visible by adjusting scroll.
         let visible_rows = self.visible_row_count();
-        if new_idx < self.scroll_offset {
-            self.scroll_offset = new_idx;
-        } else if new_idx >= self.scroll_offset.saturating_add(visible_rows) {
-            self.scroll_offset = new_idx.saturating_sub(visible_rows.saturating_sub(1));
+        if idx < self.scroll_offset {
+            self.scroll_offset = idx;
+        } else if idx >= self.scroll_offset.saturating_add(visible_rows) {
+            self.scroll_offset = idx.saturating_sub(visible_rows.saturating_sub(1));
         }
     }
 
@@ -2135,6 +2323,17 @@ impl ProcessExplorerState {
             Tab::Environment | Tab::Memory => self.render_process_view(&mut tree),
         }
 
+        // While a pick is open, say so across the top of the content: the
+        // next click goes to the pick, wherever it lands.
+        if self.window_picker.active {
+            tree.commands.extend(self.window_picker.render(
+                &self.palette,
+                8.0,
+                TOOLBAR_HEIGHT + TAB_BAR_HEIGHT + 4.0,
+                (w - 16.0).max(0.0),
+            ));
+        }
+
         // Status bar
         self.render_status_bar(&mut tree);
 
@@ -2165,58 +2364,63 @@ impl ProcessExplorerState {
         let w = self.window_width as f32;
         tree.fill_rect(0.0, 0.0, w, TOOLBAR_HEIGHT, self.palette.mantle);
 
-        let btn_h = 26.0;
-        let btn_y = (TOOLBAR_HEIGHT - btn_h) / 2.0;
-        let mut bx = 8.0;
-
-        // End Process button
-        let end_w = 90.0;
-        tree.fill_rect(bx, btn_y, end_w, btn_h, self.palette.red);
-        self.render_bold_text(
-            tree,
-            bx + 8.0,
-            btn_y + 6.0,
-            "End Process",
-            // Derived from the fill under it, not guessed. White happens to
-            // work on this red and would not on a paler one -- and the user
-            // can choose the palette, so "happens to work" is not a property
-            // this can rely on.
-            appearance::readable_on(self.palette.red),
-            11.0,
-        );
-        bx += end_w + 6.0;
-
-        // New Task button
-        let new_w = 80.0;
-        tree.fill_rect(bx, btn_y, new_w, btn_h, self.palette.accent);
-        self.render_bold_text(
-            tree,
-            bx + 10.0,
-            btn_y + 6.0,
-            "New Task",
-            self.palette.on_accent(),
-            11.0,
-        );
-        bx += new_w + 6.0;
-
-        // Refresh button
-        let ref_w = 70.0;
-        tree.fill_rect(bx, btn_y, ref_w, btn_h, self.palette.surface1);
-        tree.text(bx + 12.0, btn_y + 6.0, "Refresh", self.palette.text, 11.0);
-        bx += ref_w + 6.0;
-
-        // View mode toggle
-        let view_w = 60.0;
-        let view_label = match self.view_mode {
-            ViewMode::List => "List",
-            ViewMode::Tree => "Tree",
-        };
-        tree.fill_rect(bx, btn_y, view_w, btn_h, self.palette.surface1);
-        tree.text(bx + 12.0, btn_y + 6.0, view_label, self.palette.text, 11.0);
+        for (r, action) in toolbar_buttons() {
+            match action {
+                ToolbarAction::EndProcess => {
+                    tree.fill_rect(r.x, r.y, r.w, r.h, self.palette.red);
+                    self.render_bold_text(
+                        tree,
+                        r.x + 8.0,
+                        r.y + 6.0,
+                        "End Process",
+                        // Derived from the fill under it, not guessed. White
+                        // happens to work on this red and would not on a
+                        // paler one -- and the user can choose the palette, so
+                        // "happens to work" is not a property this can rely on.
+                        appearance::readable_on(self.palette.red),
+                        11.0,
+                    );
+                }
+                ToolbarAction::NewTask => {
+                    tree.fill_rect(r.x, r.y, r.w, r.h, self.palette.accent);
+                    self.render_bold_text(
+                        tree,
+                        r.x + 10.0,
+                        r.y + 6.0,
+                        "New Task",
+                        self.palette.on_accent(),
+                        11.0,
+                    );
+                }
+                ToolbarAction::Refresh => {
+                    tree.fill_rect(r.x, r.y, r.w, r.h, self.palette.surface1);
+                    tree.text(r.x + 12.0, r.y + 6.0, "Refresh", self.palette.text, 11.0);
+                }
+                ToolbarAction::ToggleView => {
+                    let label = match self.view_mode {
+                        ViewMode::List => "List",
+                        ViewMode::Tree => "Tree",
+                    };
+                    tree.fill_rect(r.x, r.y, r.w, r.h, self.palette.surface1);
+                    tree.text(r.x + 12.0, r.y + 6.0, label, self.palette.text, 11.0);
+                }
+                // In the accent while a pick is open, when pressing it again
+                // gives the pick up.
+                ToolbarAction::IdentifyWindow => {
+                    let (fill, ink, label) = if self.window_picker.active {
+                        (self.palette.accent, self.palette.on_accent(), "Cancel")
+                    } else {
+                        (self.palette.surface1, self.palette.text, "Identify")
+                    };
+                    tree.fill_rect(r.x, r.y, r.w, r.h, fill);
+                    tree.text(r.x + 12.0, r.y + 6.0, label, ink, 11.0);
+                }
+            }
+        }
 
         // Filter / search box (right-aligned)
-        let filter_w = 200.0;
-        let filter_x = w - filter_w - 8.0;
+        let filter = filter_rect(w);
+        let (filter_x, btn_y, filter_w, btn_h) = (filter.x, filter.y, filter.w, filter.h);
         let filter_border = if self.filter_focused {
             self.palette.accent
         } else {
@@ -3786,6 +3990,18 @@ impl App for ProcessExplorerState {
         Some(Duration::from_millis(self.refresh_interval.ms()))
     }
 
+    /// A window pick to start or give up, asked for by the Identify button
+    /// or Ctrl+I, or by Escape.
+    fn take_pick(&mut self) -> Option<PickRequest> {
+        self.pick_request.take()
+    }
+
+    /// What the pick came to: the window's program is named, and selected.
+    fn window_picked(&mut self, outcome: Result<PickOutcome, PickRefused>) -> Response {
+        self.window_pick_answered(outcome);
+        Response::Redraw
+    }
+
     fn on_event(&mut self, event: &Event) -> Response {
         if matches!(event, Event::CloseRequested) {
             return Response::Exit;
@@ -3954,7 +4170,7 @@ mod tests {
         SPAWNED.with(|s| s.borrow_mut().clear());
         let mut app = app_with_processes(1);
         app.spawner = recording_spawner;
-        app.handle_toolbar_click(120.0);
+        app.handle_toolbar_click(120.0, TOOLBAR_HEIGHT / 2.0);
         assert!(app.run_box.is_some(), "the New Task button did nothing");
         let l = app.run_box_layout();
         let middle = |(x, y, w, h): (f32, f32, f32, f32)| (x + w / 2.0, y + h / 2.0);
@@ -4391,6 +4607,70 @@ mod tests {
             y: 300.0,
             kind: MouseEventKind::Scroll { dx: 0.0, dy },
         });
+    }
+
+    /// **A press with the list of keys up puts it away and does nothing
+    /// else, and the wheel scrolls nothing under it.** A left press selected
+    /// the process drawn under the list, and a right press raised the context
+    /// menu -- Kill is on it -- over a process the reader could not see. The
+    /// controls are the same press and turn with the list down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let mut app = app_with_processes(500);
+        let row_zero = ProcessExplorerState::rows_top() + ROW_HEIGHT / 2.0;
+        let mouse = |kind| {
+            Event::Mouse(MouseEvent {
+                x: 100.0,
+                y: row_zero,
+                kind,
+            })
+        };
+        app.selected_index = None;
+
+        app.handle_event(&Event::Key(key_of(Key::F1, Modifiers::NONE)));
+        assert!(app.show_help);
+        assert_eq!(
+            app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Left))),
+            EventResult::Consumed
+        );
+        assert!(!app.show_help, "the press did not put the list away");
+        assert_eq!(
+            app.selected_index, None,
+            "the press selected a process under the list"
+        );
+
+        app.handle_event(&Event::Key(key_of(Key::F1, Modifiers::NONE)));
+        app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Right)));
+        assert!(!app.show_help, "a right-button press left the list up");
+        assert!(
+            app.context_menu.is_none(),
+            "a menu was raised under the list"
+        );
+
+        app.handle_event(&Event::Key(key_of(Key::F1, Modifiers::NONE)));
+        app.handle_event(&mouse(MouseEventKind::Scroll { dx: 0.0, dy: -1.0 }));
+        assert_eq!(app.scroll_offset, 0, "the wheel scrolled the list under it");
+        assert!(app.show_help, "the wheel put the list away");
+        app.handle_event(&Event::Key(key_of(Key::Escape, Modifiers::NONE)));
+
+        // The controls.
+        app.handle_event(&mouse(MouseEventKind::Scroll { dx: 0.0, dy: -1.0 }));
+        assert!(
+            app.scroll_offset > 0,
+            "control: the wheel scrolls nothing at all"
+        );
+        app.handle_event(&mouse(MouseEventKind::Scroll { dx: 0.0, dy: 1.0 }));
+        app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Left)));
+        assert_eq!(
+            app.selected_index,
+            Some(0),
+            "control: the press selects nothing"
+        );
+        app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Right)));
+        assert!(
+            app.context_menu.is_some(),
+            "control: the right button raises no menu"
+        );
     }
 
     /// One detent is three rows, in the direction the delta reports.
@@ -5767,5 +6047,258 @@ mod tests {
         assert_eq!(p.command_line, "/bin/shell -i");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    // --- The window pick ---
+
+    /// A key held with `modifiers`.
+    fn chord_key(key: Key, modifiers: Modifiers) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        }
+    }
+
+    /// A press of the left button at `(x, y)`.
+    fn press_at(app: &mut ProcessExplorerState, (x, y): (f32, f32)) -> EventResult {
+        app.handle_mouse(&MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        })
+    }
+
+    /// The middle of the toolbar button that does `action`.
+    fn button_centre(action: ToolbarAction) -> (f32, f32) {
+        toolbar_buttons()
+            .into_iter()
+            .find(|(_, a)| *a == action)
+            .map(|(r, _)| r.centre())
+            .expect("the toolbar has that button")
+    }
+
+    /// Every string the window draws.
+    fn words(app: &ProcessExplorerState) -> Vec<String> {
+        app.render_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **The Identify button and Ctrl+I ask the desktop for a window pick,
+    /// and pressing it again or Escape gives the pick up.** The crosshair was
+    /// a mock reachable from nothing: the compositor could not name the
+    /// window under the pointer (lane F's `take_pick`, 2026-10-04).
+    #[test]
+    fn the_identify_button_and_ctrl_i_ask_for_a_window_pick() {
+        let mut app = app_with_processes(3);
+        assert_eq!(app.take_pick(), None, "a pick was asked for unprompted");
+
+        press_at(&mut app, button_centre(ToolbarAction::IdentifyWindow));
+        assert_eq!(app.take_pick(), Some(PickRequest::Start));
+        assert_eq!(app.take_pick(), None, "one press asked twice");
+        assert!(
+            words(&app).iter().any(|w| w == "Crosshair mode active"),
+            "nothing says the next click is a pick"
+        );
+        assert!(
+            words(&app).iter().any(|w| w == "Cancel"),
+            "the button does not say it now gives the pick up"
+        );
+        press_at(&mut app, button_centre(ToolbarAction::IdentifyWindow));
+        assert_eq!(app.take_pick(), Some(PickRequest::Cancel));
+        assert!(
+            !words(&app).iter().any(|w| w == "Crosshair mode active"),
+            "the pick was given up and the banner stayed"
+        );
+
+        let ctrl = Modifiers {
+            ctrl: true,
+            ..Modifiers::NONE
+        };
+        app.handle_key(&chord_key(Key::I, ctrl));
+        assert_eq!(app.take_pick(), Some(PickRequest::Start), "Ctrl+I");
+        app.handle_key(&chord_key(Key::Escape, Modifiers::NONE));
+        assert_eq!(app.take_pick(), Some(PickRequest::Cancel), "Escape");
+
+        // AltGr -- Ctrl+Alt -- is not Ctrl, and the Windows key's chords are
+        // the desktop's.
+        let altgr = Modifiers {
+            ctrl: true,
+            alt: true,
+            ..Modifiers::NONE
+        };
+        let ctrl_win = Modifiers {
+            ctrl: true,
+            super_key: true,
+            ..Modifiers::NONE
+        };
+        app.handle_key(&chord_key(Key::I, altgr));
+        app.handle_key(&chord_key(Key::I, ctrl_win));
+        assert_eq!(app.take_pick(), None, "a chord that is not Ctrl+I picked");
+    }
+
+    /// The window a pick names.
+    fn picked(title: &str, pid: Option<u32>) -> PickOutcome {
+        PickOutcome::Window(PickedWindow {
+            window: 0x2A,
+            title: title.to_string(),
+            app_id: "notes".to_string(),
+            pid,
+        })
+    }
+
+    /// **A picked window's program is named and selected**, and whatever the
+    /// pick came to -- a window whose process the desktop cannot name, one
+    /// whose process is not in the list, nothing, a refusal -- is said, and
+    /// the pick is over.
+    #[test]
+    fn a_picked_window_names_and_selects_its_program() {
+        let mut app = app_with_processes(5);
+        app.set_tab(Tab::System);
+        app.toggle_window_pick();
+        assert_eq!(
+            app.window_picked(Ok(picked("Shopping list", Some(4)))),
+            Response::Redraw
+        );
+        assert!(!app.window_picker.active, "the pick did not end");
+        assert_eq!(
+            app.selected_process().map(|p| p.pid),
+            Some(4),
+            "the window's process is not selected"
+        );
+        assert!(
+            matches!(app.active_tab, Tab::Processes),
+            "the list it was selected in is not shown"
+        );
+        assert!(
+            app.status_message.contains("Shopping list")
+                && app.status_message.contains("proc3")
+                && app.status_message.contains("PID 4"),
+            "{}",
+            app.status_message
+        );
+        let result = app
+            .window_picker
+            .result
+            .clone()
+            .expect("the pick is recorded");
+        assert_eq!(
+            (
+                result.pid,
+                result.window_title.as_str(),
+                result.app_id.as_str()
+            ),
+            (Some(4), "Shopping list", "notes")
+        );
+
+        // Over the network: there is no process to name.
+        app.toggle_window_pick();
+        app.window_picked(Ok(picked("Remote", None)));
+        assert!(
+            app.status_message.contains("cannot be named"),
+            "{}",
+            app.status_message
+        );
+        assert!(!app.window_picker.active);
+
+        // A process the list does not hold.
+        app.toggle_window_pick();
+        app.window_picked(Ok(picked("Gone", Some(999))));
+        assert!(
+            app.status_message.contains("PID 999")
+                && app.status_message.contains("not in the list"),
+            "{}",
+            app.status_message
+        );
+
+        // Hidden by the filter.
+        app.filter_text = "proc0".to_string();
+        app.rebuild_visible_list();
+        app.toggle_window_pick();
+        app.window_picked(Ok(picked("Hidden", Some(4))));
+        assert!(
+            app.status_message.contains("hidden by the filter"),
+            "{}",
+            app.status_message
+        );
+
+        app.toggle_window_pick();
+        app.window_picked(Ok(PickOutcome::Nothing));
+        assert_eq!(app.status_message, "No window was picked");
+        assert!(!app.window_picker.active);
+
+        app.toggle_window_pick();
+        app.window_picked(Err(PickRefused {
+            reason: "another program is picking".to_string(),
+        }));
+        assert!(
+            app.status_message.contains("refused")
+                && app.status_message.contains("another program is picking"),
+            "{}",
+            app.status_message
+        );
+        assert!(
+            !app.window_picker.active,
+            "a refused pick left the banner up"
+        );
+    }
+
+    /// **A toolbar button is pressed where it is drawn, and nowhere else.**
+    /// The press was tested against thresholds of its own that did not match
+    /// the drawing, so the right-hand part of a button pressed the next one,
+    /// and the eight pixels left of End Process ended the selected process.
+    #[test]
+    fn every_toolbar_button_is_pressed_where_it_is_drawn() {
+        let app = app_with_processes(1);
+        let fills: Vec<(f32, f32, f32, f32)> = app
+            .render_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match *c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => Some((x, y, width, height)),
+                _ => None,
+            })
+            .collect();
+        for (r, action) in toolbar_buttons() {
+            assert!(
+                fills.contains(&(r.x, r.y, r.w, r.h)),
+                "{action:?} is not drawn where it is pressed: {r:?}"
+            );
+            let y = r.y + r.h / 2.0;
+            for x in [r.x + 0.5, r.x + r.w / 2.0, r.right() - 0.5] {
+                assert_eq!(
+                    toolbar_action_at(x, y),
+                    Some(action),
+                    "a press at {x} on {action:?} did something else"
+                );
+            }
+        }
+        let first = toolbar_buttons()[0].0;
+        assert_eq!(
+            toolbar_action_at(first.x - 4.0, first.y + first.h / 2.0),
+            None,
+            "the margin left of End Process presses it"
+        );
+        for pair in toolbar_buttons().windows(2) {
+            let gap = f32::midpoint(pair[0].0.right(), pair[1].0.x);
+            assert_eq!(
+                toolbar_action_at(gap, pair[0].0.y + pair[0].0.h / 2.0),
+                None,
+                "the gap after {:?} presses something",
+                pair[0].1
+            );
+        }
     }
 }

@@ -53,12 +53,14 @@ use appearance::Surface;
 use guitk::Color;
 use guitk::dialog::{FileDialog, FilePicker, Picked};
 use guitk::event::{Event, EventResult, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::field;
 use guitk::frame::{Frame, Rect};
 use guitk::palette::Tone;
 use guitk::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 use guitk::text;
+use guitk::textedit;
 use guitk::treeview::{TreeEvent, TreeHit, TreeItem, TreeMetrics, TreeSource, TreeView};
 use guitk::wheel;
 use oswindow::app::{self, Response};
@@ -95,6 +97,11 @@ const TREE_INDENT: f32 = 20.0;
 /// The find bar's height, and its "Aa" (match case) button's left edge and
 /// width -- read by the drawing and the click alike.
 const SEARCH_BAR_HEIGHT: f32 = 36.0;
+
+/// The find bar's box, in a bar whose top is `bar_y`.
+fn search_box_rect(bar_y: f32) -> Rect {
+    Rect::new(50.0, bar_y + 4.0, 300.0, 28.0)
+}
 const CASE_BUTTON_X: f32 = 500.0;
 const CASE_BUTTON_W: f32 = 28.0;
 
@@ -2188,6 +2195,10 @@ struct App {
     search_visible: bool,
     /// Whether the shortcut list is up.
     show_help: bool,
+    /// How wide the mark is round a box while it has the keyboard: the
+    /// user's focus width (`App::appearance_changed`), the toolkit's until it
+    /// is known.
+    focus_ring_width: f32,
     /// Edit mode flag.
     edit_mode: bool,
     /// Edit buffer for value editing.
@@ -2511,6 +2522,7 @@ impl App {
             search_index: 0,
             search_visible: false,
             show_help: false,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             edit_mode: false,
             edit_buffer: String::new(),
             editing_path: None,
@@ -4292,15 +4304,31 @@ impl App {
     /// the next character goes. It was drawn nowhere, so a value was typed
     /// over blind.
     fn render_tree_edit(&self, cmds: &mut Vec<RenderCommand>, doc: &Document) {
-        let Some(editing) = self.editing_path.as_ref() else {
+        let Some(editor) = self.tree_edit_rect(doc) else {
             return;
         };
+        // The toolkit's field, as the find bar's is, with the keyboard
+        // unless the key list is over it. Its text was drawn at 70% of the
+        // row's height, so the value hung out of the bottom of its box into
+        // the row below.
+        let state = field::State {
+            hovered: false,
+            focused: !self.show_help,
+            disabled: false,
+            invalid: false,
+        };
+        field::draw(cmds, &self.palette, editor, state, self.focus_ring_width);
+        self.render_box_text(cmds, editor, &self.edit_buffer, "", state.focused);
+    }
+
+    /// The box the value being edited is typed into, over its row: `None`
+    /// when no value is being edited or its row is scrolled out of view.
+    fn tree_edit_rect(&self, doc: &Document) -> Option<Rect> {
+        let editing = self.editing_path.as_ref()?;
         let tree = &doc.tree;
-        let Some(index) = tree.index_of(&tree_path(editing)) else {
-            return;
-        };
+        let index = tree.index_of(&tree_path(editing))?;
         if !tree.visible_range().contains(&index) {
-            return;
+            return None;
         }
         let bounds = tree.bounds();
         let row_height = tree.metrics().row_height;
@@ -4313,31 +4341,75 @@ impl App {
         // Over the right of the row, where the tree draws the value.
         let x = bounds.x + bounds.w * 0.45;
         let w = (bounds.right() - x - PADDING).max(0.0);
-        // The find bar's field is drawn the same way.
-        self.palette
-            .push_surface(cmds, x, y + 1.0, w, row_height - 2.0, 3.0, Surface::Card);
-        let text_x = x + 6.0;
-        cmds.push(RenderCommand::Text {
-            x: text_x,
-            y: y + row_height * 0.7,
-            text: self.edit_buffer.clone(),
-            color: self.palette.text,
-            font_size: NORMAL_TEXT,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some((w - 12.0).max(0.0)),
-            overflow: TextOverflow::Ellipsis,
-        });
-        let caret = (text_x
-            + text::measure(&self.edit_buffer, NORMAL_TEXT, FontWeightHint::Regular))
-        .min(x + w - 4.0);
-        cmds.push(RenderCommand::Line {
-            x1: caret,
-            y1: y + 4.0,
-            x2: caret,
-            y2: y + row_height - 4.0,
-            color: self.palette.text,
-            width: 1.5,
-        });
+        Some(Rect::new(x, y + 1.0, w, (row_height - 2.0).max(0.0)))
+    }
+
+    /// How the find bar's box is drawn now: with the keyboard while the bar
+    /// is up and nothing else takes the keys -- a value or the source being
+    /// edited does, and so does the key list -- and red while the query
+    /// finds nothing. Never lit under the pointer: it has no press of its
+    /// own.
+    fn search_box_state(&self) -> field::State {
+        field::State {
+            hovered: false,
+            focused: self.search_visible
+                && !self.show_help
+                && self.editing_path.is_none()
+                && !self.source_is_open(),
+            disabled: false,
+            invalid: !self.search_query.is_empty() && self.search_results.is_empty(),
+        }
+    }
+
+    /// A box's typing, centred on its line, with the caret after it while
+    /// the box has the keyboard -- scrolled so the end being typed stays in
+    /// view rather than cut off with an ellipsis -- or, empty, what it is
+    /// for.
+    fn render_box_text(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        r: Rect,
+        typed: &str,
+        placeholder: &str,
+        focused: bool,
+    ) {
+        let line = text::line_height(NORMAL_TEXT, FontWeightHint::Regular);
+        let (x, y, w) = (r.x + 6.0, r.y + (r.h - line) / 2.0, (r.w - 12.0).max(0.0));
+        if typed.is_empty() && !placeholder.is_empty() {
+            cmds.push(RenderCommand::Text {
+                x,
+                y,
+                text: placeholder.to_string(),
+                color: self.palette.subtext0,
+                font_size: NORMAL_TEXT,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(w),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+        let mut tree = RenderTree::new();
+        textedit::draw(
+            &mut tree,
+            &textedit::SingleLine {
+                text: typed,
+                // Typed and erased at its end, so the end is where the caret
+                // is.
+                cursor: text::TextCursor::from(typed.len()),
+                selection_anchor: None,
+                focused,
+                x,
+                y,
+                width: w,
+                line_height: line,
+                font_size: NORMAL_TEXT,
+                weight: FontWeightHint::Regular,
+                color: self.palette.text,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+        cmds.extend(tree.commands);
     }
 
     fn render_raw_view(
@@ -5454,27 +5526,17 @@ impl App {
             overflow: TextOverflow::Clip,
         });
 
-        // Search input
-        self.palette
-            .push_surface(cmds, 50.0, bar_y + 4.0, 300.0, 28.0, 4.0, Surface::Card);
-        cmds.push(RenderCommand::Text {
-            x: 58.0,
-            y: bar_y + 18.0,
-            text: if self.search_query.is_empty() {
-                String::from("Search keys and values...")
-            } else {
-                self.search_query.clone()
-            },
-            color: if self.search_query.is_empty() {
-                self.palette.subtext0
-            } else {
-                self.palette.text
-            },
-            font_size: NORMAL_TEXT,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(284.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        // Search input: the toolkit's field, holding the query with its caret.
+        let search = search_box_rect(bar_y);
+        let state = self.search_box_state();
+        field::draw(cmds, &self.palette, search, state, self.focus_ring_width);
+        self.render_box_text(
+            cmds,
+            search,
+            &self.search_query,
+            "Search keys and values...",
+            state.focused,
+        );
 
         // Result count
         if !self.search_results.is_empty() {
@@ -5699,6 +5761,10 @@ const SAMPLE_JSON: &str = r#"{
 impl oswindow::app::App for App {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -7808,11 +7874,15 @@ mod tests {
         app.handle_event(&press(Key::Enter));
         app.handle_event(&press(Key::Backspace));
         app.handle_event(&typed('7'));
+        // Plain or styled: the value being typed is drawn by the toolkit's
+        // single-line editor, which draws styled text.
         let drawn: Vec<String> = app
             .render_commands()
             .into_iter()
             .filter_map(|c| match c {
-                RenderCommand::Text { text, .. } => Some(text),
+                RenderCommand::Text { text, .. } | RenderCommand::RichText { text, .. } => {
+                    Some(text)
+                }
                 _ => None,
             })
             .collect();
@@ -9074,6 +9144,155 @@ mod tests {
             byte_at(text, 9, 1),
             text.len(),
             "past the last line is the end"
+        );
+    }
+    // -- The find bar's box and the value editor are the toolkit's fields
+    //    (lane C, c-e-a-theme-can-shape-the-controls)
+
+    /// A window over `{"a": 1}` whose theme marks a field with the keyboard
+    /// by a ring, at two and a half times the toolkit's focus width.
+    fn ringed() -> (App, Palette) {
+        let mut app = holding(r#"{"a": 1}"#);
+        let mut p = app.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        app.theme_changed(&p);
+        app.appearance_changed(&appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        });
+        assert!(
+            app.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        (app, p)
+    }
+
+    /// Whether `app` draws exactly the toolkit's field for `rect` in
+    /// `state` -- and, unless `state` has the keyboard, not the focused one
+    /// as well.
+    fn draws_box(app: &mut App, p: &Palette, rect: Rect, state: field::State) -> bool {
+        let ring = app.focus_ring_width;
+        let seq = |s: field::State| {
+            let mut v: Vec<RenderCommand> = Vec::new();
+            field::draw(&mut v, p, rect, s, ring);
+            v
+        };
+        let cmds = app.render_commands();
+        let has = |want: &[RenderCommand]| cmds.windows(want.len()).any(|w| w == want);
+        has(&seq(state))
+            && (state.focused
+                || !has(&seq(field::State {
+                    focused: true,
+                    ..state
+                })))
+    }
+
+    /// The find bar's box, wherever the bar is.
+    fn find_box() -> Rect {
+        search_box_rect(TOOLBAR_HEIGHT + TAB_BAR_HEIGHT + 30.0)
+    }
+
+    /// **The find bar's box is the toolkit's field**: it has the keyboard
+    /// while the bar is up and nothing else takes the keys, marked as the
+    /// theme marks a field in the user's width; red while the query finds
+    /// nothing; and it gives up the mark to a value being edited and to the
+    /// key list. It was a card with no caret.
+    #[test]
+    fn the_find_bars_box_is_the_toolkits_field() {
+        let (mut app, p) = ringed();
+        app.handle_event(&press_ctrl(Key::F));
+        assert!(app.search_visible);
+        let focused = field::State {
+            focused: true,
+            ..field::State::default()
+        };
+        assert!(
+            draws_box(&mut app, &p, find_box(), focused),
+            "the box of an open find bar does not have the keyboard"
+        );
+        for c in "zzzz".chars() {
+            app.handle_event(&typed(c));
+        }
+        assert!(app.search_results.is_empty());
+        let red = field::State {
+            invalid: true,
+            ..focused
+        };
+        assert!(
+            draws_box(&mut app, &p, find_box(), red),
+            "a query that finds nothing does not turn the box red"
+        );
+        app.show_help = true;
+        assert!(
+            draws_box(
+                &mut app,
+                &p,
+                find_box(),
+                field::State {
+                    focused: false,
+                    ..red
+                }
+            ),
+            "the box keeps the keyboard's mark under the key list"
+        );
+        app.show_help = false;
+        app.editing_path = Some(vec![PathSegment::Key("a".to_string())]);
+        assert!(
+            draws_box(
+                &mut app,
+                &p,
+                find_box(),
+                field::State {
+                    focused: false,
+                    ..red
+                }
+            ),
+            "the find bar keeps the keyboard's mark while a value takes the keys"
+        );
+    }
+
+    /// **The value being edited is typed into the toolkit's field, inside
+    /// its row**, with the caret after it. Its text was drawn at 70% of the
+    /// row's height and hung out of the bottom of its box into the next row.
+    #[test]
+    fn the_value_editor_is_the_toolkits_field_and_its_text_sits_in_its_box() {
+        let (mut app, p) = ringed();
+        app.handle_event(&press_ctrl(Key::E));
+        app.render_commands();
+        app.with_tree(|tree, _| tree.select(Some(&member(&["a"]))));
+        app.handle_event(&press(Key::Enter));
+        app.handle_event(&press(Key::Backspace));
+        app.handle_event(&typed('7'));
+        app.render_commands();
+        let rect = app
+            .active_doc()
+            .and_then(|doc| app.tree_edit_rect(doc))
+            .expect("the value is being edited on screen");
+        let focused = field::State {
+            focused: true,
+            ..field::State::default()
+        };
+        assert!(
+            draws_box(&mut app, &p, rect, focused),
+            "the value is not typed into the toolkit's field"
+        );
+        let cmds = app.render_commands();
+        let at = cmds
+            .iter()
+            .position(|c| matches!(c, RenderCommand::RichText { text, .. } if text == "7"))
+            .expect("the value is not drawn in its box");
+        let RenderCommand::RichText { y, font_size, .. } = cmds[at] else {
+            unreachable!("matched above")
+        };
+        let line = text::line_height(font_size, FontWeightHint::Regular);
+        assert!(
+            y >= rect.y - 0.5 && y + line <= rect.bottom() + 0.5,
+            "the value runs from {y} to {}, outside its box {rect:?}",
+            y + line
+        );
+        assert!(
+            matches!(cmds.get(at + 1), Some(RenderCommand::Line { .. })),
+            "no caret after the value"
         );
     }
 }

@@ -187,6 +187,40 @@ MAIN = [
     ),
 ]
 
+# The list of keys takes the pointer as well as the keys (2026-10-04,
+# known-issues/E-a-press-goes-through-the-shortcut-card-to-the-control-drawn-under-it.md).
+CARD = "the_shortcut_card_takes_a_press_rather_than_passing_it_on"
+
+MAIN += [
+    (
+        "a press goes through the list of keys",
+        "            Event::Mouse(mouse_event) if self.show_help => match mouse_event.kind {\n",
+        "            Event::Mouse(mouse_event) if false => match mouse_event.kind {\n",
+        [CARD],
+    ),
+    (
+        "only the left button puts the list away",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n"
+        "                    self.show_help = false;\n",
+        "                MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_) => {\n"
+        "                    self.show_help = false;\n",
+        [CARD],
+    ),
+    (
+        "the wheel scrolls what the list covers",
+        "            Event::Mouse(mouse_event) if self.show_help => match mouse_event.kind {\n",
+        "            Event::Mouse(mouse_event) if self.show_help && !matches!(mouse_event.kind, MouseEventKind::Scroll { .. }) => match mouse_event.kind {\n",
+        [CARD],
+    ),
+    (
+        "a row under the list is lit",
+        "                _ => self.set_hover(None),\n            },\n",
+        "                MouseEventKind::Move => self.handle_mouse_move(mouse_event.x, mouse_event.y),\n"
+        "                _ => self.set_hover(None),\n            },\n",
+        [CARD],
+    ),
+]
+
 TABLES = {
     "net.rs": NET,
     "main.rs": MAIN,

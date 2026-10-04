@@ -491,6 +491,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]
@@ -1233,6 +1234,7 @@ dependencies = [
  "oswindow",
  "pathtext",
  "settingsfile",
+ "textline",
  "yamldoc",
 ]
 
@@ -1520,6 +1522,7 @@ dependencies = [
  "oswindow",
  "pathtext",
  "settingsfile",
+ "textline",
  "tzrules",
  "yamldoc",
 ]
@@ -1576,6 +1579,7 @@ dependencies = [
  "oswindow",
  "pathtext",
  "safeio",
+ "textline",
  "unsaved",
 ]
 
@@ -1769,6 +1773,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]
@@ -1974,6 +1979,8 @@ dependencies = [
 name = "life"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -2034,6 +2041,7 @@ dependencies = [
  "scratchdir",
  "settingsfile",
  "sha2",
+ "textline",
  "tzrules",
  "userdb",
  "yamldoc",
@@ -2529,6 +2537,7 @@ dependencies = [
  "offloop",
  "oswindow",
  "scratchdir",
+ "textline",
 ]
 
 [[package]]

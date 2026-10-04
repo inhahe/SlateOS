@@ -30,6 +30,7 @@ use appearance::Palette;
 use guitk::color::Color;
 use guitk::dialog::FileDialog;
 use guitk::event::Event;
+use guitk::frame::Rect;
 use guitk::menubar;
 use guitk::render::{FontWeightHint, RenderTree, TextSpan};
 use guitk::tabs::Tabs;
@@ -1719,6 +1720,11 @@ pub struct EditorState {
     pub clipboard: String,
     /// Which of the find bar's two fields the keyboard is typing into.
     pub find_field: FindField,
+    /// Where the pointer is, while it is over the window: the find bar's box
+    /// under it is drawn lit.
+    pub pointer: Option<(f32, f32)>,
+    /// How wide the focus mark is drawn, from the user's appearance settings.
+    focus_ring_width: f32,
     /// The user's colours, replaced whenever the theme changes.
     ///
     /// Seeded from the defaults so the field is never absent; the framework
@@ -1815,6 +1821,8 @@ impl EditorState {
             modifiers: oswindow::Modifiers::NONE,
             clipboard: String::new(),
             find_field: FindField::Query,
+            pointer: None,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             dialog: None,
             dialog_purpose: DialogPurpose::Open,
             menu_bar: menubar::MenuBar::new(Vec::new()),
@@ -2688,11 +2696,63 @@ impl EditorState {
         tree.text(w - 100.0, bar_y + 5.0, &lc, self.palette.subtext0, 11.0);
     }
 
+    /// The find bar's frame, over the top right of the text. One rectangle
+    /// for the drawing and the pointer.
+    pub(crate) fn find_panel_rect(&self) -> Rect {
+        let w = 350.0;
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a window's width is exact in f32"
+        )]
+        let x = self.window_width as f32 - w - 16.0;
+        Rect::new(x, TEXT_TOP, w, 80.0)
+    }
+
+    /// One of the find bar's two boxes, inside [`Self::find_panel_rect`].
+    pub(crate) fn find_box(&self, field: FindField) -> Rect {
+        let panel = self.find_panel_rect();
+        let dy = match field {
+            FindField::Query => 6.0,
+            FindField::Replace => 36.0,
+        };
+        Rect::new(panel.x + 50.0, panel.y + dy, panel.w - 60.0, 22.0)
+    }
+
+    /// The find bar's box under the pointer, if it is up and the pointer is
+    /// on one.
+    pub(crate) fn find_box_under_pointer(&self) -> Option<FindField> {
+        let (x, y) = self.pointer?;
+        if !self.find_visible {
+            return None;
+        }
+        [FindField::Query, FindField::Replace]
+            .into_iter()
+            .find(|&f| self.find_box(f).contains(x, y))
+    }
+
+    /// Whether something takes the keys and presses ahead of the find bar:
+    /// the external-change prompt, the unsaved-changes question, or an open
+    /// menu.
+    fn find_covered(&self) -> bool {
+        self.external_prompt.is_some() || self.question.is_some() || self.menu_bar.is_open()
+    }
+
+    /// How one of the find bar's boxes is drawn now: lit under the pointer,
+    /// marked while the keys type into it -- neither while something takes
+    /// them ahead of the bar.
+    fn find_box_state(&self, field: FindField) -> guitk::field::State {
+        let open = !self.find_covered();
+        guitk::field::State {
+            hovered: open && self.find_box_under_pointer() == Some(field),
+            focused: open && self.find_field == field,
+            disabled: false,
+            invalid: false,
+        }
+    }
+
     fn render_find_panel(&self, tree: &mut RenderTree) {
-        let panel_y = TEXT_TOP;
-        let panel_w = 350.0;
-        let panel_h = 80.0;
-        let panel_x = self.window_width as f32 - panel_w - 16.0;
+        let panel = self.find_panel_rect();
+        let (panel_x, panel_y, panel_w, panel_h) = (panel.x, panel.y, panel.w, panel.h);
 
         tree.fill_rect(panel_x, panel_y, panel_w, panel_h, self.palette.surface0);
         tree.stroke_rect(
@@ -2712,16 +2772,20 @@ impl EditorState {
             self.palette.subtext0,
             11.0,
         );
-        tree.fill_rect(
-            panel_x + 50.0,
-            panel_y + 6.0,
-            panel_w - 60.0,
-            22.0,
-            self.palette.base,
+        // The toolkit's fields (lane C, c-e-a-theme-can-shape-the-controls):
+        // they were bare fills, and nothing said which of the two the keys
+        // typed into.
+        let query = self.find_box(FindField::Query);
+        guitk::field::draw(
+            tree,
+            &self.palette,
+            query,
+            self.find_box_state(FindField::Query),
+            self.focus_ring_width,
         );
         tree.text(
-            panel_x + 54.0,
-            panel_y + 10.0,
+            query.x + 4.0,
+            query.y + 4.0,
             &self.find.query,
             self.palette.text,
             12.0,
@@ -2735,16 +2799,17 @@ impl EditorState {
             self.palette.subtext0,
             11.0,
         );
-        tree.fill_rect(
-            panel_x + 50.0,
-            panel_y + 36.0,
-            panel_w - 60.0,
-            22.0,
-            self.palette.base,
+        let replace = self.find_box(FindField::Replace);
+        guitk::field::draw(
+            tree,
+            &self.palette,
+            replace,
+            self.find_box_state(FindField::Replace),
+            self.focus_ring_width,
         );
         tree.text(
-            panel_x + 54.0,
-            panel_y + 40.0,
+            replace.x + 4.0,
+            replace.y + 4.0,
             &self.find.replace_text,
             self.palette.text,
             12.0,
@@ -2966,6 +3031,11 @@ impl EditorState {
 impl oswindow::app::App for EditorState {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    /// The focus mark is drawn at the width the user asked for.
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {

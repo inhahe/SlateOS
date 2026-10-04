@@ -1920,6 +1920,20 @@ fn handle_picker_key(state: &mut WorldClockApp, key: &KeyEvent) -> EventResult {
 }
 
 fn handle_mouse(state: &mut WorldClockApp, mouse: &MouseEvent) -> EventResult {
+    // The list of keys is modal for the pointer as it is for the keys, and
+    // drawn over everything, the city picker included: a press with any button
+    // puts it away and does nothing else -- it used to press the button under
+    // it, removing a clock the reader could not see among them -- and the
+    // wheel scrolls nothing it covers.
+    if state.show_help {
+        return match mouse.kind {
+            MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                state.show_help = false;
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        };
+    }
     match mouse.kind {
         MouseEventKind::Press(MouseButton::Left) => {
             let Some(target) = state.target_at(mouse.x, mouse.y) else {
@@ -3057,6 +3071,66 @@ mod tests {
         assert!(
             !app.clocks.iter().any(|c| c.tz_idx == paris),
             "the one that was clicked is the one that went"
+        );
+    }
+
+    /// **A press with the list of keys up puts it away and does nothing
+    /// else, and the wheel scrolls nothing under it.** A press on a clock's
+    /// remove button under the list removed a clock the reader could not see.
+    /// The controls are the same turn and press with the list down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let f1 = Event::Key(KeyEvent {
+            key: Key::F1,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        });
+        let mut app = sample_app();
+        let before = app.clocks.len();
+
+        handle_event(&mut app, &f1);
+        assert!(app.show_help);
+        assert_eq!(
+            probe::click(&mut app, Target::Remove(2)),
+            EventResult::Consumed
+        );
+        assert!(!app.show_help, "the press did not put the list away");
+        assert_eq!(
+            app.clocks.len(),
+            before,
+            "the press removed a clock under the list"
+        );
+        handle_event(&mut app, &f1);
+        probe::click_with(&mut app, Target::Remove(2), MouseButton::Right);
+        assert!(!app.show_help, "a right-button press left the list up");
+
+        // The wheel, in a window too short for the clocks.
+        app.view_mode = ViewMode::List;
+        app.resize(900.0, 400.0);
+        handle_event(&mut app, &f1);
+        handle_event(&mut app, &scroll_at(450.0, 200.0, -3.0));
+        assert_eq!(
+            app.scroll_offset, 0.0,
+            "the wheel scrolled the clocks under the list"
+        );
+        assert!(app.show_help, "the wheel put the list away");
+        handle_event(&mut app, &f1);
+
+        // The controls.
+        handle_event(&mut app, &scroll_at(450.0, 200.0, -3.0));
+        assert!(
+            app.scroll_offset > 0.0,
+            "control: the wheel scrolls nothing at all"
+        );
+        app.resize(DEFAULT_WIDTH, DEFAULT_HEIGHT);
+        app.view_mode = ViewMode::Grid;
+        app.scroll_offset = 0.0;
+        probe::click(&mut app, Target::Remove(2));
+        assert_eq!(
+            app.clocks.len(),
+            before - 1,
+            "control: the press removes nothing even with the list down"
         );
     }
 

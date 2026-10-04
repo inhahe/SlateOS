@@ -157,6 +157,64 @@ MUTATIONS = [
     ),
 ]
 
+FIELD = "the_find_bars_box_is_the_toolkits_field"
+LAYOUT = "the_find_bars_parts_never_overlap_at_any_width"
+CARET = "the_find_bars_caret_follows_the_typing"
+
+MUTATIONS += [
+    # The find bar's box is the toolkit's field, and its parts are laid out
+    # so none is written over another (2026-10-04; lane C,
+    # c-e-a-theme-can-shape-the-controls).
+    (
+        "the box never has the keyboard",
+        "            focused: self.search.visible && !self.show_help && !self.picker.is_open(),\n",
+        "            focused: false,\n",
+        [FIELD],
+    ),
+    (
+        "the box keeps the keyboard's mark under the card",
+        "            focused: self.search.visible && !self.show_help && !self.picker.is_open(),\n",
+        "            focused: self.search.visible && !self.picker.is_open(),\n",
+        [FIELD],
+    ),
+    (
+        "a query that finds nothing is not red",
+        "            invalid: !self.search.query.is_empty() && self.search.matches.is_empty(),\n",
+        "            invalid: false,\n",
+        [FIELD],
+    ),
+    (
+        "an empty query is red",
+        "            invalid: !self.search.query.is_empty() && self.search.matches.is_empty(),\n",
+        "            invalid: self.search.matches.is_empty(),\n",
+        [FIELD],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [FIELD],
+    ),
+    (
+        "the case setting keeps its room and squeezes the query",
+        "        let case_w = (room - Self::QUERY_MIN - Self::GAP).clamp(0.0, Self::CASE_W);\n",
+        "        let case_w = Self::CASE_W.min(room);\n",
+        [LAYOUT],
+    ),
+    (
+        "the query's box runs under the case setting",
+        "        let query_right = if case_w > 0.0 {\n            case.x - Self::GAP\n",
+        "        let query_right = if case_w > 0.0 {\n            count.x - Self::GAP\n",
+        [LAYOUT],
+    ),
+    (
+        "the caret is at the start of the query",
+        "                cursor: text::TextCursor::from(self.search.query.len()),\n",
+        "                cursor: text::TextCursor::from(0),\n",
+        [CARET],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "filediff", timeout=900, only=only))

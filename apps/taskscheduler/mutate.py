@@ -541,6 +541,44 @@ MUTATIONS = [
     ),
 ]
 
+FIELDS = 'the_text_boxes_are_the_toolkits_fields'
+BOUNDS = 'nothing_is_painted_outside_the_window'
+
+MUTATIONS += [
+    # The dialog's boxes are the toolkit's fields (2026-10-04; lane C,
+    # c-e-a-theme-can-shape-the-controls).
+    (
+        'a box never lights',
+        '                hovered: self.hover == Some(target),\n',
+        '                hovered: false,\n',
+        [FIELDS],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        '        self.focus_ring_width = settings.focus_ring_width();\n',
+        '        let _ = settings;\n',
+        [FIELDS],
+    ),
+    (
+        'the pointer is never followed',
+        '        self.hover = over;\n',
+        '        let _ = over;\n',
+        [FIELDS],
+    ),
+    (
+        'the light stays after the pointer leaves',
+        '            MouseEventKind::Leave => result(ui.point_at(None)),\n',
+        '',
+        [FIELDS],
+    ),
+    (
+        "the dialog's boxes leave the mark no room at the dialog's edge",
+        '        let ring = self.focus_ring_width.max(0.0).ceil();\n',
+        '        let ring = 0.0_f32;\n',
+        [BOUNDS],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "taskscheduler", timeout=600, only=only))

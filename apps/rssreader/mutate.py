@@ -400,6 +400,50 @@ MUTATIONS = [
     ),
 ]
 
+MODAL = "the_list_of_keys_takes_every_key_while_it_is_up"
+
+MUTATIONS += [
+    # The list of keys is modal for the keys (2026-10-04; known-issues
+    # E-a-press-goes-through-the-shortcut-card-to-the-control-drawn-under-it).
+    (
+        "a key reaches what the list of keys covers",
+        "        if self.show_help {\n"
+        "            let plain = textline::is_plain(key.modifiers);\n"
+        "            if plain\n"
+        "                && (matches!(key.key, Key::F1 | Key::Escape)\n"
+        "                    || key.key == Key::Slash && key.modifiers.shift)\n"
+        "            {\n"
+        "                self.show_help = false;\n"
+        "            }\n"
+        "            return EventResult::Consumed;\n"
+        "        }\n",
+        "",
+        [MODAL],
+    ),
+    (
+        "F1 does not put the list of keys away",
+        "                && (matches!(key.key, Key::F1 | Key::Escape)\n",
+        "                && (matches!(key.key, Key::Escape)\n",
+        [MODAL],
+    ),
+    (
+        "Escape does not put the list of keys away",
+        "                && (matches!(key.key, Key::F1 | Key::Escape)\n",
+        "                && (matches!(key.key, Key::F1)\n",
+        [MODAL],
+    ),
+    (
+        "? does not put the list of keys away",
+        "                    || key.key == Key::Slash && key.modifiers.shift)\n"
+        "            {\n"
+        "                self.show_help = false;\n",
+        ")\n"
+        "            {\n"
+        "                self.show_help = false;\n",
+        [MODAL],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "rssreader", timeout=900, only=only))

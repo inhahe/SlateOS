@@ -96,6 +96,49 @@ MUTATIONS = [
     ),
 ]
 
+FIELD = 'the_exclude_box_is_the_toolkits_field'
+
+MUTATIONS += [
+    # The exclude pattern's box is the toolkit's field (2026-10-04; lane C,
+    # c-e-a-theme-can-shape-the-controls).
+    (
+        'the box never lights',
+        '            hovered: open && self.exclude_input_hovered,\n',
+        '            hovered: false,\n',
+        [FIELD],
+    ),
+    (
+        'the box is never marked',
+        '            focused: open && self.show_exclude_editor,\n',
+        '            focused: false,\n',
+        [FIELD],
+    ),
+    (
+        'the box shows through the list of keys and the SSD question',
+        '        let open = !self.show_help && !self.show_ssd_warning;\n',
+        '        let open = true;\n',
+        [FIELD],
+    ),
+    (
+        'the light stays after the pointer leaves',
+        '            MouseEventKind::Leave => ui.point_at(None),\n',
+        '',
+        [FIELD],
+    ),
+    (
+        'a change in the light asks for no repaint',
+        '        if over == self.exclude_input_hovered {\n',
+        '        if true {\n',
+        [FIELD],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        '        self.focus_ring_width = settings.focus_ring_width();\n',
+        '        let _ = settings;\n',
+        [FIELD],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "defrag", timeout=600, only=only))

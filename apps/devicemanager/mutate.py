@@ -365,6 +365,55 @@ MAIN = [
     ),
 ]
 
+SEARCH = 'the_search_box_is_the_toolkits_field'
+
+MAIN += [
+    # The search box is the toolkit's field, in the user's colours
+    # (2026-10-04; lane C, c-e-a-theme-can-shape-the-controls).
+    (
+        'the search box never lights',
+        '        hovered: open && state.hovered_search,\n',
+        '        hovered: false,\n',
+        [SEARCH],
+    ),
+    (
+        'the search box is never marked',
+        '        focused: open && state.search_focused,\n',
+        '        focused: false,\n',
+        [SEARCH],
+    ),
+    (
+        'the search box shows through the list of keys',
+        '    let open = !state.show_help && !state.picker.is_open();\n',
+        '    let open = !state.picker.is_open();\n',
+        [SEARCH],
+    ),
+    (
+        'the pointer over the search box is not followed',
+        '            state.hovered_search = search_box().contains(mx, my);\n',
+        '',
+        [SEARCH],
+    ),
+    (
+        'the light stays after the pointer leaves',
+        '            state.hovered_search = false;\n',
+        '',
+        [SEARCH],
+    ),
+    (
+        "the window keeps the default colours whatever the theme",
+        '        self.palette = *palette;\n',
+        '        let _ = palette;\n',
+        [SEARCH],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        '        self.focus_ring_width = settings.focus_ring_width();\n',
+        '        let _ = settings;\n',
+        [SEARCH],
+    ),
+]
+
 TABLES = {
     "inventory.rs": INVENTORY,
     "main.rs": MAIN,

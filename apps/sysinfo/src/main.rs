@@ -1865,6 +1865,21 @@ impl SysInfoState {
     }
 
     fn handle_mouse(&mut self, mouse: &guitk::event::MouseEvent) -> EventResult {
+        // The list of keys is modal for the pointer as it is for the keys, and
+        // drawn over everything but the save dialog (which has the event
+        // first): a press with any button puts it away and does nothing else
+        // -- it used to open the export dialog, pick a category or fold a
+        // branch under it -- and the wheel scrolls nothing it covers.
+        if self.show_help {
+            match mouse.kind {
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                    self.show_help = false;
+                    return EventResult::Consumed;
+                }
+                MouseEventKind::Scroll { .. } => return EventResult::Ignored,
+                _ => {}
+            }
+        }
         // The toolbar buttons, which were drawn and never hit-tested. Tested
         // ahead of the sidebar branch below: they sit well clear of
         // `SIDEBAR_WIDTH`, but putting the specific region before the general
@@ -4087,6 +4102,60 @@ mod tests {
         assert_eq!(
             app.status_message, CLIPBOARD_UNAVAILABLE,
             "the Copy button did nothing"
+        );
+    }
+
+    /// **A press with the list of keys up puts it away and does nothing
+    /// else, and the wheel scrolls nothing under it.** A press on Export under
+    /// the list opened the save dialog behind it. The controls are the same
+    /// turn and press with the list down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let layout = SysInfoState::toolbar_layout();
+        let export = click_at(
+            layout.export.x + layout.export.w / 2.0,
+            layout.export.y + layout.export.h / 2.0,
+        );
+        let f1 = Event::Key(KeyEvent {
+            key: Key::F1,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        });
+        let mut app = overflowing_app();
+
+        app.handle_event(&f1);
+        assert!(app.show_help);
+        app.handle_event(&scroll_at(DETAIL_X, -1.0));
+        assert_eq!(
+            app.detail_scroll, 0,
+            "the wheel scrolled the table under the list"
+        );
+        assert!(app.show_help, "the wheel put the list away");
+        assert_eq!(app.handle_event(&export), EventResult::Consumed);
+        assert!(!app.show_help, "the press did not put the list away");
+        assert!(
+            !app.picker.is_open(),
+            "the press opened the save dialog behind the list"
+        );
+        app.handle_event(&f1);
+        app.handle_event(&Event::Mouse(guitk::event::MouseEvent {
+            x: layout.export.x + layout.export.w / 2.0,
+            y: layout.export.y + layout.export.h / 2.0,
+            kind: MouseEventKind::Press(MouseButton::Right),
+        }));
+        assert!(!app.show_help, "a right-button press left the list up");
+
+        // The controls.
+        app.handle_event(&scroll_at(DETAIL_X, -1.0));
+        assert!(
+            app.detail_scroll > 0,
+            "control: the wheel scrolls nothing at all"
+        );
+        app.handle_event(&export);
+        assert!(
+            app.picker.is_open(),
+            "control: Export opens nothing even with the list down"
         );
     }
 

@@ -146,6 +146,74 @@ MUTATIONS = [
     ),
 ]
 
+SEARCH = "the_search_box_is_the_toolkits_field"
+DIALOG = "the_add_dialogs_boxes_are_the_toolkits_fields"
+
+MUTATIONS += [
+    # The text boxes are the toolkit's fields (2026-10-04; lane C,
+    # c-e-a-theme-can-shape-the-controls).
+    (
+        "no box ever lights",
+        "            hovered: open && self.hover == Some(target),\n",
+        "            hovered: false,\n",
+        [SEARCH, DIALOG],
+    ),
+    (
+        "no box is ever marked",
+        "            focused: open && keyboard,\n",
+        "            focused: false,\n",
+        [SEARCH, DIALOG],
+    ),
+    (
+        "a box shows through the card",
+        "        let open = shown && !self.show_help && !self.picker.is_open();\n",
+        "        let open = shown && !self.picker.is_open();\n",
+        [SEARCH],
+    ),
+    (
+        "the search box shows through the add dialog",
+        "            Target::Search => (\n                self.active_dialog == ActiveDialog::None,\n",
+        "            Target::Search => (\n                true,\n",
+        [SEARCH],
+    ),
+    (
+        "the mark stays on the extension after Tab",
+        "                self.new_field == f,\n",
+        "                f == NewField::Extension,\n",
+        [DIALOG],
+    ),
+    (
+        "the light stays after the pointer leaves",
+        "            MouseEventKind::Leave => self.point_at(None),\n",
+        "",
+        [SEARCH],
+    ),
+    (
+        "moving within a box asks for a repaint",
+        "        if over == self.hover {\n            return EventResult::Ignored;\n        }\n",
+        "",
+        [SEARCH],
+    ),
+    (
+        "a registered extension is not red",
+        "            invalid: target == Target::DialogField(NewField::Extension) && self.extension_taken(),\n",
+        "            invalid: false,\n",
+        [DIALOG],
+    ),
+    (
+        "every extension is red",
+        "        !ext.is_empty() && self.registry.get_file_type(ext).is_some()\n",
+        "        !ext.is_empty()\n",
+        [DIALOG],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [SEARCH, DIALOG],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "fileassoc", timeout=900, only=only))

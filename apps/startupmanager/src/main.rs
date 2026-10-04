@@ -31,6 +31,7 @@ use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, M
 use guitk::frame::Rect;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
+use guitk::scroll_window;
 use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::wheel;
@@ -1503,6 +1504,9 @@ pub struct StartupUI {
     pub dialog: DialogState,
     /// First visible row of the table, as an index into the filtered list.
     pub scroll_offset: usize,
+    /// The wheel's unspent fraction of a table row: `scroll_offset` is a
+    /// whole row, so a touchpad's small turns are added up here.
+    table_wheel: wheel::Accumulator,
     pub window_width: f32,
     pub window_height: f32,
     /// Whether typing goes to the search box. A click puts the caret there and
@@ -1519,6 +1523,11 @@ pub struct StartupUI {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// How wide the focus mark is drawn, from the user's appearance settings.
+    focus_ring_width: f32,
+    /// What the pointer is over, so a text box is drawn lit under it (lane C,
+    /// c-e-a-theme-can-shape-the-controls).
+    hover: Option<Target>,
 }
 
 impl StartupUI {
@@ -1535,10 +1544,13 @@ impl StartupUI {
             show_help: false,
             dialog: DialogState::Closed,
             scroll_offset: 0,
+            table_wheel: wheel::Accumulator::default(),
             window_width: WINDOW_WIDTH,
             window_height: WINDOW_HEIGHT,
             search_focused: false,
             status: String::new(),
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
+            hover: Option::None,
         }
     }
 
@@ -1846,12 +1858,79 @@ impl StartupUI {
 
     /// Handle a UI event (keyboard or mouse).
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // Which text box the pointer is over, followed whatever is up: a box
+        // is drawn lit only while nothing covers it, but which one is under
+        // the pointer is known all the same, so the light is right the moment
+        // the cover goes. A change is a redraw.
+        let relit = self.track_pointer(event);
+        let answered = self.answer_event(event);
+        if relit {
+            EventResult::Consumed
+        } else {
+            answered
+        }
+    }
+
+    /// Follow the pointer over the text boxes. Answers whether the box under
+    /// it changed.
+    fn track_pointer(&mut self, event: &Event) -> bool {
+        let Event::Mouse(mouse) = event else {
+            return false;
+        };
+        let over = match mouse.kind {
+            MouseEventKind::Move => self
+                .target_at(mouse.x, mouse.y)
+                .filter(|t| matches!(t, Target::Search | Target::DialogField(_))),
+            MouseEventKind::Leave => Option::None,
+            _ => return false,
+        };
+        let changed = over != self.hover;
+        self.hover = over;
+        changed
+    }
+
+    /// How a text box is drawn now: lit under the pointer, and marked while
+    /// the keys type into it -- neither while something is drawn over it.
+    ///
+    /// The search box is covered by a dialog as well as by the list of keys;
+    /// a dialog's own boxes only by the list.
+    fn field_state(&self, target: Target) -> guitk::field::State {
+        let (open, typing) = match (target, &self.dialog) {
+            (Target::Search, DialogState::Closed) => (true, self.search_focused),
+            (Target::DialogField(i), DialogState::AddEdit(dlg)) => (true, dlg.focused_field == i),
+            _ => (false, false),
+        };
+        let open = open && !self.show_help;
+        guitk::field::State {
+            hovered: open && self.hover == Some(target),
+            focused: open && typing,
+            disabled: false,
+            invalid: false,
+        }
+    }
+
+    /// What an event does to the window, as distinct from the light the
+    /// pointer moves.
+    fn answer_event(&mut self, event: &Event) -> EventResult {
         match event {
             Event::Key(key) if key.pressed => self.handle_key(key),
             Event::Resize { width, height } => {
                 self.resize(*width as f32, *height as f32);
                 EventResult::Consumed
             }
+            // The list of keys is modal for the pointer as it is for the keys,
+            // and drawn over everything, the dialogs included: a press with
+            // any button puts it away and does nothing else -- it used to
+            // reach the button under it, "Remove" in the question about
+            // removing an entry among them -- and the wheel scrolls nothing
+            // it covers.
+            Event::Mouse(mouse) if self.show_help => match mouse.kind {
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                    self.show_help = false;
+                    EventResult::Consumed
+                }
+                _ => EventResult::Ignored,
+            },
             Event::Mouse(mouse) => {
                 let (x, y) = (mouse.x, mouse.y);
                 match mouse.kind {
@@ -1867,22 +1946,35 @@ impl StartupUI {
 
     fn handle_scroll(&mut self, x: f32, y: f32, dy: f32) -> EventResult {
         match self.target_at(x, y) {
+            // Through an accumulator: each event's rows were rounded on their
+            // own, so a fifth of a notch -- 0.6 of a row -- moved a whole row,
+            // five times what was turned, and a sixth of one moved nothing.
             Some(Target::Table | Target::Row(_)) => {
-                self.scroll_rows(wheel::rows_f(dy));
-                EventResult::Consumed
+                let rows = self.table_wheel.rows(dy);
+                let before = self.scroll_offset;
+                self.scroll_rows(rows);
+                if self.scroll_offset == before {
+                    EventResult::Ignored
+                } else {
+                    EventResult::Consumed
+                }
             }
             _ => EventResult::Ignored,
         }
     }
 
     /// Move the viewport by `rows`, positive towards the end of the list.
-    fn scroll_rows(&mut self, rows: f32) {
-        if !rows.is_finite() {
-            return;
-        }
-        let current = isize::try_from(self.scroll_offset).unwrap_or(isize::MAX);
-        let moved = current.saturating_add(rows.round() as isize).max(0);
-        self.scroll_offset = usize::try_from(moved).unwrap_or(0);
+    fn scroll_rows(&mut self, rows: isize) {
+        self.scroll_offset = scroll_window::shift(self.scroll_offset, rows);
+        self.clamp_scroll();
+    }
+
+    /// Back to the top of a table whose rows have just been replaced -- the
+    /// search changed what it holds -- forgetting with the old position any
+    /// fraction of a notch the wheel had banked over the old rows.
+    fn restart_table(&mut self) {
+        self.scroll_offset = 0;
+        self.table_wheel.reset();
         self.clamp_scroll();
     }
 
@@ -2058,8 +2150,7 @@ impl StartupUI {
         // refused them, and took the letter a Windows-key chord carries.
         if self.search_focused && textline::types_into_field(key) {
             self.search_query.extend(key.typed());
-            self.scroll_offset = 0;
-            self.clamp_scroll();
+            self.restart_table();
             return EventResult::Consumed;
         }
         // Every other key is taken plain, nothing held but Shift; but
@@ -2069,8 +2160,7 @@ impl StartupUI {
             && !textline::is_alt_or_windows_chord(key.modifiers)
         {
             self.search_query.pop();
-            self.scroll_offset = 0;
-            self.clamp_scroll();
+            self.restart_table();
             return EventResult::Consumed;
         }
         if !textline::is_plain(key.modifiers) {
@@ -2130,7 +2220,7 @@ impl StartupUI {
             self.search_focused = false;
         } else if !self.search_query.is_empty() {
             self.search_query.clear();
-            self.scroll_offset = 0;
+            self.restart_table();
         } else if self.selected_id.is_some() {
             self.selected_id = Option::None;
         } else if !self.status.is_empty() {
@@ -2351,26 +2441,15 @@ impl StartupUI {
         if l.search.is_empty() {
             return;
         }
-        self.palette.push_surface(
+        // The toolkit's field, in the theme's shape (lane C,
+        // c-e-a-theme-can-shape-the-controls).
+        guitk::field::draw(
             frame,
-            l.search.x,
-            l.search.y,
-            l.search.w,
-            l.search.h,
-            4.0,
-            Surface::Card,
+            &self.palette,
+            l.search,
+            self.field_state(Target::Search),
+            self.focus_ring_width,
         );
-        if self.search_focused {
-            frame.push(RenderCommand::StrokeRect {
-                x: l.search.x,
-                y: l.search.y,
-                width: l.search.w,
-                height: l.search.h,
-                color: self.palette.blue,
-                line_width: 1.0,
-                corner_radii: CornerRadii::all(4.0),
-            });
-        }
 
         let empty = self.search_query.is_empty();
         let display = if empty {
@@ -2881,9 +2960,9 @@ impl StartupUI {
                 Target::DialogField(i),
                 l.dialog_field(i),
                 l.dialog_field_top(i),
-                label,
-                value,
-                dlg.focused_field == i,
+                (label, value),
+                self.field_state(Target::DialogField(i)),
+                self.focus_ring_width,
             );
         }
 
@@ -2932,16 +3011,21 @@ impl StartupUI {
     }
 
     /// A labelled text input. `label_y` is where the caption goes; `input` is
-    /// the box, which is also the hit box.
+    /// the box, which is also the hit box, drawn as the toolkit's field in
+    /// `state`.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one call site, and each argument is a different fact about one box"
+    )]
     fn draw_form_field(
         frame: &mut Frame,
         pal: &Palette,
         target: Target,
         input: Rect,
         label_y: f32,
-        label: &str,
-        value: &str,
-        focused: bool,
+        (label, value): (&str, &str),
+        state: guitk::field::State,
+        focus_ring_width: f32,
     ) {
         if input.is_empty() {
             return;
@@ -2956,23 +3040,7 @@ impl StartupUI {
             max_width: Some(input.w),
             overflow: TextOverflow::Ellipsis,
         });
-        frame.push(RenderCommand::FillRect {
-            x: input.x,
-            y: input.y,
-            width: input.w,
-            height: input.h,
-            color: pal.base,
-            corner_radii: CornerRadii::all(4.0),
-        });
-        frame.push(RenderCommand::StrokeRect {
-            x: input.x,
-            y: input.y,
-            width: input.w,
-            height: input.h,
-            color: if focused { pal.blue } else { pal.surface1 },
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        guitk::field::draw(frame, pal, input, state, focus_ring_width);
 
         let empty = value.is_empty();
         frame.push(RenderCommand::Text {
@@ -3093,6 +3161,11 @@ impl Default for StartupUI {
 impl App for StartupUI {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    /// The focus mark is drawn at the width the user asked for.
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -5187,6 +5260,71 @@ mod tests {
         assert!(ui.selected_id.is_none(), "the selection outlived its entry");
     }
 
+    /// **A press with the list of keys up puts it away and does nothing
+    /// else, and the wheel scrolls nothing under it.** A press reached the
+    /// button drawn under the list -- "Remove", in the question about
+    /// removing an entry, among them. The controls are the same turn and
+    /// press with the list down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let mut ui = StartupUI::with_sample_entries();
+        let before = ui.manager.entry_count();
+        let f1 = |ui: &mut StartupUI| probe::key(ui, &probe::press(Key::F1));
+
+        // A press, on the question's Remove.
+        let id = select_first_row(&mut ui);
+        probe::key(&mut ui, &probe::press(Key::Delete));
+        assert_eq!(ui.dialog, DialogState::ConfirmDelete(id));
+        f1(&mut ui);
+        assert!(ui.show_help);
+        assert_eq!(
+            probe::click(&mut ui, Target::DeleteConfirm),
+            EventResult::Consumed
+        );
+        assert!(!ui.show_help, "the press did not put the list away");
+        assert_eq!(
+            ui.manager.entry_count(),
+            before,
+            "the press removed the entry under the list"
+        );
+        assert_eq!(ui.dialog, DialogState::ConfirmDelete(id));
+        f1(&mut ui);
+        probe::click_with(&mut ui, Target::DeleteConfirm, MouseButton::Right);
+        assert!(!ui.show_help, "a right-button press left the list up");
+        probe::click(&mut ui, Target::DeleteConfirm);
+        assert_eq!(
+            ui.manager.entry_count(),
+            before - 1,
+            "control: the press removes nothing even with the list down"
+        );
+
+        // The wheel, in a window short enough for the table to scroll.
+        let mut ui = StartupUI::with_sample_entries();
+        ui.resize(SHORT.0, SHORT.1);
+        let (x, y) = probe::rect_of_sized(&ui, Target::Table, SHORT)
+            .unwrap()
+            .centre();
+        let wheel = Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -1.0 },
+        });
+        ui.key_at(&probe::press(Key::F1), SHORT);
+        assert!(ui.show_help);
+        ui.handle_event(&wheel);
+        assert_eq!(
+            ui.scroll_offset, 0,
+            "the wheel scrolled the table under the list"
+        );
+        assert!(ui.show_help, "the wheel put the list away");
+        ui.key_at(&probe::press(Key::Escape), SHORT);
+        ui.handle_event(&wheel);
+        assert_eq!(
+            ui.scroll_offset, 3,
+            "control: the wheel scrolls nothing at all"
+        );
+    }
+
     #[test]
     fn remove_with_nothing_selected_says_so_instead_of_opening_a_dialog() {
         let mut ui = StartupUI::with_sample_entries();
@@ -5255,6 +5393,65 @@ mod tests {
         assert_eq!(ui.scroll_offset, 0, "the wheel scrolled past the top");
     }
 
+    /// A turn of the wheel over the middle of the table, at `SHORT`.
+    fn turn(ui: &mut StartupUI, dy: f32) -> EventResult {
+        let (x, y) = probe::rect_of_sized(ui, Target::Table, SHORT)
+            .unwrap()
+            .centre();
+        ui.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy },
+        }))
+    }
+
+    /// **A touchpad's small turns add up to rows.** Each event's rows were
+    /// rounded on their own: a fifth of a notch -- 0.6 of a row -- moved a
+    /// whole row, five times what was turned, and a sixth of one moved
+    /// nothing at all.
+    #[test]
+    fn a_touchpads_small_turns_add_up_to_rows() {
+        let mut ui = StartupUI::with_sample_entries();
+        ui.resize(SHORT.0, SHORT.1);
+        assert_eq!(
+            turn(&mut ui, -0.25),
+            EventResult::Ignored,
+            "three quarters of a row moved a whole one"
+        );
+        assert_eq!(ui.scroll_offset, 0);
+        for _ in 0..3 {
+            turn(&mut ui, -0.25);
+        }
+        assert_eq!(
+            ui.scroll_offset, 3,
+            "four quarter notches are one notch, three rows"
+        );
+    }
+
+    /// **A fraction of a notch belongs to the rows it was turned over.** A
+    /// quarter notch, a search cleared -- which replaces the rows -- and a
+    /// quarter notch again: the second is not the first's other half.
+    #[test]
+    fn a_fraction_of_a_notch_does_not_outlive_the_rows() {
+        let mut ui = StartupUI::with_sample_entries();
+        ui.resize(SHORT.0, SHORT.1);
+        turn(&mut ui, -0.25);
+        turn(&mut ui, -0.25);
+        assert_eq!(ui.scroll_offset, 1, "half a notch is a row and a half");
+        ui.search_query = String::from("a");
+        ui.key_at(&probe::press(Key::Escape), SHORT);
+        assert!(
+            ui.search_query.is_empty(),
+            "Escape did not clear the search"
+        );
+        assert_eq!(ui.scroll_offset, 0);
+        turn(&mut ui, -0.25);
+        assert_eq!(
+            ui.scroll_offset, 0,
+            "a fraction turned over the old rows moved the new ones"
+        );
+    }
+
     #[test]
     fn the_wheel_over_the_toolbar_leaves_the_table_alone() {
         let mut ui = StartupUI::with_sample_entries();
@@ -5314,13 +5511,122 @@ mod tests {
         let id = ui.visible_entries().first().map(|e| e.id).unwrap();
         probe::click_sized(&mut ui, Target::Row(id), MouseButton::Left, SHORT);
         assert_eq!(ui.selected_id, Some(id));
-        ui.scroll_rows(3.0);
+        ui.scroll_rows(3);
         assert_eq!(ui.scroll_offset, 3);
         assert_eq!(ui.selected_id, Some(id));
         assert!(
             probe::rect_of_sized(&ui, Target::Row(id), SHORT).is_none(),
             "the row is off screen but still drawn"
         );
+    }
+
+    /// **The search box and the dialog's boxes are the toolkit's fields**
+    /// (lane C, c-e-a-theme-can-shape-the-controls): lit under the pointer
+    /// and out when it goes, marked at the user's focus width while the keys
+    /// type into them -- the search box neither under a dialog nor under the
+    /// list of keys.
+    #[test]
+    fn the_text_boxes_are_the_toolkits_fields() {
+        use guitk::field::State;
+        let size = <StartupUI as Probe>::SIZE;
+        let mut ui = StartupUI::with_sample_entries();
+        let mut palette = ui.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut ui, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        App::appearance_changed(&mut ui, &settings);
+        let seq = |rect: Rect, s: State| {
+            let mut want: Vec<RenderCommand> = Vec::new();
+            guitk::field::draw(&mut want, &palette, rect, s, width);
+            want
+        };
+        let draws = |ui: &StartupUI, rect: Rect, s: State| {
+            let frame = ui.frame(size.0, size.1);
+            let cmds = frame.commands();
+            let has = |want: &[RenderCommand]| {
+                !want.is_empty() && cmds.windows(want.len()).any(|w| w == want)
+            };
+            has(&seq(rect, s)) && (s.focused || !has(&seq(rect, State { focused: true, ..s })))
+        };
+        let pointer = |ui: &mut StartupUI, rect: Rect, kind: MouseEventKind| {
+            let (x, y) = rect.centre();
+            ui.handle_event(&Event::Mouse(MouseEvent { x, y, kind }));
+        };
+        let idle = State::default();
+        let lit = State {
+            hovered: true,
+            ..idle
+        };
+        let keyed = State {
+            focused: true,
+            ..idle
+        };
+        let both = State {
+            hovered: true,
+            ..keyed
+        };
+
+        // The search box.
+        let search = probe::rect_of(&ui, Target::Search).expect("the search box is drawn");
+        assert!(
+            draws(&ui, search, idle),
+            "the search box is not the toolkit's field"
+        );
+        pointer(&mut ui, search, MouseEventKind::Move);
+        assert!(
+            draws(&ui, search, lit),
+            "the search box does not light under the pointer"
+        );
+        pointer(&mut ui, search, MouseEventKind::Press(MouseButton::Left));
+        assert!(
+            draws(&ui, search, both),
+            "the search box is not marked with the keys"
+        );
+        probe::key(&mut ui, &probe::press(Key::F1));
+        assert!(
+            draws(&ui, search, idle),
+            "the search box shows through the list of keys"
+        );
+        probe::key(&mut ui, &probe::press(Key::Escape));
+        pointer(&mut ui, search, MouseEventKind::Leave);
+        assert!(
+            draws(&ui, search, keyed),
+            "the light stayed after the pointer left"
+        );
+
+        // The add dialog's boxes, over the search box.
+        probe::key(&mut ui, &probe::ctrl(Key::N));
+        assert!(matches!(ui.dialog, DialogState::AddEdit(_)));
+        assert!(
+            draws(&ui, search, idle),
+            "the search box shows through the dialog"
+        );
+        let first = probe::rect_of(&ui, Target::DialogField(0)).expect("the first box");
+        let second = probe::rect_of(&ui, Target::DialogField(1)).expect("the second box");
+        assert!(
+            draws(&ui, first, keyed),
+            "the dialog's first box is not marked with the keys"
+        );
+        assert!(
+            draws(&ui, second, idle),
+            "the second box is marked without the keys"
+        );
+        pointer(&mut ui, second, MouseEventKind::Move);
+        assert!(
+            draws(&ui, second, lit),
+            "the second box does not light under the pointer"
+        );
+        pointer(&mut ui, second, MouseEventKind::Press(MouseButton::Left));
+        assert!(
+            draws(&ui, second, both),
+            "a press did not give the second box the keys"
+        );
+        assert!(draws(&ui, first, idle), "the first box kept its mark");
     }
 
     #[test]

@@ -338,6 +338,10 @@ pub struct StopwatchApp {
     elapsed_ms: u64,
     laps: Vec<Lap>,
     lap_scroll: usize,
+    /// The wheel's unspent fraction of a lap row. `lap_scroll` is a whole row,
+    /// so a touchpad's small turns are added up here rather than each
+    /// truncated to nothing.
+    lap_wheel: wheel::Accumulator,
 
     // Countdown-specific
     countdown_target_ms: u64,
@@ -350,6 +354,8 @@ pub struct StopwatchApp {
     // History
     history: Vec<SessionRecord>,
     history_scroll: usize,
+    /// The same for the history table, which scrolls on its own.
+    history_wheel: wheel::Accumulator,
 
     running: bool,
     // No `last_tick_ms`: `Event::Tick` already carries the interval since
@@ -381,6 +387,7 @@ impl StopwatchApp {
             elapsed_ms: 0,
             laps: Vec::new(),
             lap_scroll: 0,
+            lap_wheel: wheel::Accumulator::default(),
             countdown_target_ms: 300_000, // 5 minutes default
             countdown_remaining_ms: 300_000,
             countdown_setup_field: 0,
@@ -388,6 +395,7 @@ impl StopwatchApp {
             countdown_finished: false,
             history: Vec::new(),
             history_scroll: 0,
+            history_wheel: wheel::Accumulator::default(),
             running: true,
         }
     }
@@ -498,6 +506,9 @@ impl StopwatchApp {
         self.elapsed_ms = 0;
         self.laps.clear();
         self.lap_scroll = 0;
+        // A fraction of a notch turned over the old run's laps is not the
+        // new run's.
+        self.lap_wheel.reset();
         self.countdown_remaining_ms = self.countdown_target_ms;
         self.countdown_finished = false;
     }
@@ -1460,26 +1471,50 @@ fn handle_setup_key(state: &mut StopwatchApp, event: &KeyEvent) -> EventResult {
 }
 
 fn handle_mouse(state: &mut StopwatchApp, mouse: &MouseEvent) -> EventResult {
+    // The list of keys is modal for the pointer as it is for the keys, and
+    // drawn over everything: a press with any button puts it away and does
+    // nothing else -- it used to reach the button under it and start, lap or
+    // reset a run the reader could not see -- and the wheel scrolls nothing
+    // it covers.
+    if state.show_help {
+        return match mouse.kind {
+            MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                state.show_help = false;
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        };
+    }
     match mouse.kind {
         MouseEventKind::Press(MouseButton::Left) => match state.target_at(mouse.x, mouse.y) {
             Some(target) => state.activate(target),
             None => EventResult::Ignored,
         },
-        // `wheel::rows_f` already answers in offset space -- positive means
-        // "towards the end of the list" -- so the result is added as it comes.
-        // Negating it here would scroll the table backwards.
+        // The wheel answers in offset space already -- positive means
+        // "towards the end of the list" -- so the rows are added as they come.
+        // Negating them here would scroll the table backwards.
+        //
+        // Through each table's own accumulator, not `rows_f(dy) as isize`:
+        // that truncated a touchpad's fifth of a notch -- 0.6 of a row -- to
+        // nothing, every time, so neither table scrolled from a touchpad.
         MouseEventKind::Scroll { dy, .. } => {
-            let rows = wheel::rows_f(dy);
-            if rows == 0.0 {
-                return EventResult::Ignored;
-            }
-            let rows = rows as isize;
+            let before = (state.lap_scroll, state.history_scroll);
             match state.view {
-                AppView::History => state.scroll_history(rows),
-                AppView::Main => state.scroll_laps(rows),
+                AppView::History => {
+                    let rows = state.history_wheel.rows(dy);
+                    state.scroll_history(rows);
+                }
+                AppView::Main => {
+                    let rows = state.lap_wheel.rows(dy);
+                    state.scroll_laps(rows);
+                }
                 AppView::CountdownSetup => return EventResult::Ignored,
             }
-            EventResult::Consumed
+            if (state.lap_scroll, state.history_scroll) == before {
+                EventResult::Ignored
+            } else {
+                EventResult::Consumed
+            }
         }
         _ => EventResult::Ignored,
     }
@@ -2751,6 +2786,136 @@ mod tests {
             y: DEFAULT_HEIGHT * 0.75,
             kind: MouseEventKind::Scroll { dx: 0.0, dy },
         })
+    }
+
+    /// **A press with the list of keys up puts it away and does nothing
+    /// else, and the wheel scrolls nothing under it.** A press reached the
+    /// button drawn under the list, and started, lapped or reset a run the
+    /// reader could not see. The controls are the same press and turn with
+    /// the list down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let mut app = sample();
+        app.start();
+        for i in 1..=60 {
+            app.elapsed_ms = i * 1000;
+            app.lap();
+        }
+        app.lap_scroll = 0;
+        let laps = app.laps.len();
+        let f1 = probe::press(Key::F1);
+
+        probe::key(&mut app, &f1);
+        assert!(app.show_help);
+        assert_eq!(probe::click(&mut app, Target::Lap), EventResult::Consumed);
+        assert!(!app.show_help, "the press did not put the list away");
+        assert_eq!(app.laps.len(), laps, "the press took a lap under the list");
+        probe::key(&mut app, &f1);
+        probe::click_with(&mut app, Target::Lap, MouseButton::Right);
+        assert!(!app.show_help, "a right-button press left the list up");
+        probe::key(&mut app, &f1);
+        handle_event(&mut app, &scroll(-1.0));
+        assert_eq!(
+            app.lap_scroll, 0,
+            "the wheel scrolled the laps under the list"
+        );
+        assert!(app.show_help, "the wheel put the list away");
+        probe::key(&mut app, &probe::press(Key::Escape));
+
+        // The controls.
+        handle_event(&mut app, &scroll(-1.0));
+        assert!(
+            app.lap_scroll > 0,
+            "control: the wheel scrolls nothing at all"
+        );
+        probe::click(&mut app, Target::Lap);
+        assert_eq!(
+            app.laps.len(),
+            laps + 1,
+            "control: the press takes no lap even with the list down"
+        );
+    }
+
+    /// **A touchpad's small turns add up to rows, in both tables.** Each was
+    /// truncated to a whole row on its own -- a quarter notch is three
+    /// quarters of a row, and `0.75 as isize` is nothing -- so neither the
+    /// laps nor the history could be scrolled from a touchpad at all.
+    #[test]
+    fn a_touchpads_small_turns_add_up_to_rows() {
+        let mut app = sample();
+        app.start();
+        for i in 1..=60 {
+            app.elapsed_ms = i * 1000;
+            app.lap();
+        }
+        app.lap_scroll = 0;
+        assert_eq!(
+            handle_event(&mut app, &scroll(-0.25)),
+            EventResult::Ignored,
+            "three quarters of a row moved a whole one"
+        );
+        assert_eq!(app.lap_scroll, 0);
+        for _ in 0..3 {
+            handle_event(&mut app, &scroll(-0.25));
+        }
+        assert_eq!(
+            app.lap_scroll, 3,
+            "four quarter notches are one notch, three rows"
+        );
+        // Three quarters of a row left banked over the laps, which are not the
+        // history's to spend.
+        handle_event(&mut app, &scroll(-0.25));
+        assert_eq!(app.lap_scroll, 3);
+
+        app.view = AppView::History;
+        for _ in 0..40 {
+            app.history.push(SessionRecord {
+                mode: AppMode::Stopwatch,
+                total_ms: 5000,
+                lap_count: 0,
+                best_lap_ms: None,
+                worst_lap_ms: None,
+            });
+        }
+        handle_event(&mut app, &scroll(-0.25));
+        assert_eq!(
+            app.history_scroll, 0,
+            "a fraction turned over the laps moved the history"
+        );
+        for _ in 0..3 {
+            handle_event(&mut app, &scroll(-0.25));
+        }
+        assert_eq!(
+            app.history_scroll, 3,
+            "the history's quarter notches did not add up"
+        );
+        assert_eq!(app.lap_scroll, 3, "the history's wheel scrolled the laps");
+    }
+
+    /// **A fraction of a notch belongs to the run it was turned over.** Half
+    /// a notch over one run's laps, the run stopped, and a quarter notch over
+    /// the next run's: the quarter is not added to what was left of the half.
+    #[test]
+    fn a_fraction_of_a_notch_does_not_outlive_the_run() {
+        let mut app = sample();
+        let sixty_laps = |app: &mut StopwatchApp| {
+            app.start();
+            for i in 1..=60 {
+                app.elapsed_ms = i * 1000;
+                app.lap();
+            }
+            app.lap_scroll = 0;
+        };
+        sixty_laps(&mut app);
+        handle_event(&mut app, &scroll(-0.5));
+        assert_eq!(app.lap_scroll, 1, "half a notch is a row and a half");
+        app.stop();
+        sixty_laps(&mut app);
+        handle_event(&mut app, &scroll(-0.25));
+        assert_eq!(
+            app.lap_scroll, 0,
+            "a fraction turned over the last run's laps moved this run's"
+        );
     }
 
     /// The wheel scrolls the lap table, and stops at both ends.

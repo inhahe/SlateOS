@@ -1546,6 +1546,24 @@ impl SudokuApp {
         if !key.pressed {
             return EventResult::Ignored;
         }
+        // The shortcut list before anything else, because it is drawn over
+        // everything else, and modal: a plain F1, `?` or Escape puts it away
+        // and no other key reaches the board it covers. It took only those
+        // three, so a digit was written into the square under it, F2 dealt a
+        // new game behind it, and Alt+Z walked the board back through its
+        // history. Held with Ctrl, Alt or the Windows key, they are a chord.
+        if self.show_help {
+            let held = key.modifiers;
+            let closes = !held.ctrl
+                && !held.alt
+                && !held.super_key
+                && (matches!(key.key, Key::F1 | Key::Escape)
+                    || key.key == Key::Slash && held.shift);
+            if closes {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
         // Alt+Z and Alt+Shift+Z: every board there has been, in the order
         // each was reached -- the way back to a branch undone out of. Alt
         // without Ctrl: Ctrl+Alt is AltGr.
@@ -1563,12 +1581,9 @@ impl SudokuApp {
         // The shortcut list, before the chords: `F1` carries no modifier and
         // `?` is Shift and the slash key, so neither reaches the Ctrl block
         // below, and nothing in this program turns a keystroke into text.
+        // Only ever raises it: with the list up, the keys never get here.
         if key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift) {
-            self.show_help = !self.show_help;
-            return EventResult::Consumed;
-        }
-        if key.key == Key::Escape && self.show_help {
-            self.show_help = false;
+            self.show_help = true;
             return EventResult::Consumed;
         }
         if key.modifiers.ctrl {
@@ -1609,6 +1624,19 @@ impl SudokuApp {
     }
 
     fn handle_mouse(&mut self, event: &MouseEvent) -> EventResult {
+        // The list of keys is modal for the pointer as it is for the keys, and
+        // drawn over the board: a press with any button puts it away and does
+        // nothing else, where it used to pick the square or press the button
+        // under it -- New game among them.
+        if self.show_help
+            && matches!(
+                event.kind,
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_)
+            )
+        {
+            self.show_help = false;
+            return EventResult::Consumed;
+        }
         let MouseEventKind::Press(MouseButton::Left) = event.kind else {
             return EventResult::Ignored;
         };
@@ -5537,6 +5565,85 @@ mod tests {
             values_array(&a.cells),
             "the new chip dealt the same game"
         );
+    }
+
+    /// **The shortcut list is modal for the keys and the pointer alike.** It
+    /// took only F1, `?` and Escape: with it up, a digit was written into the
+    /// square under it, an arrow moved the selection and Alt+Z walked the
+    /// board's history; a press picked the square under it. The controls are
+    /// the same digit and press with the list down.
+    #[test]
+    fn the_shortcut_card_takes_the_keys_and_a_press_rather_than_passing_them_on() {
+        let mut a = board(&[0, 1]);
+        select(&mut a, 0, 0);
+        let digit = KNOWN_SOLUTION[0];
+        let digit_key = [
+            Key::Num1,
+            Key::Num2,
+            Key::Num3,
+            Key::Num4,
+            Key::Num5,
+            Key::Num6,
+            Key::Num7,
+            Key::Num8,
+            Key::Num9,
+        ][usize::from(digit) - 1];
+        let (x, y) = cell_point(&a, 0, 1);
+
+        // The keys.
+        key(&mut a, Key::F1);
+        assert!(a.show_help);
+        key(&mut a, digit_key);
+        key(&mut a, Key::Right);
+        handle_event(&mut a, &Event::Key(press_with(Key::Z, Modifiers::alt())));
+        assert!(
+            a.show_help,
+            "a key other than F1, ? or Escape put the list away"
+        );
+        assert_eq!(a.value(0, 0), 0, "a digit was written under the list");
+        assert_eq!(
+            a.selected(),
+            (0, 0),
+            "an arrow moved the selection under it"
+        );
+        handle_event(
+            &mut a,
+            &Event::Key(press_with(Key::Escape, Modifiers::alt())),
+        );
+        assert!(a.show_help, "Alt+Escape, a chord, put the list away");
+        key(&mut a, Key::Escape);
+        assert!(!a.show_help, "Escape left the list up");
+        key(&mut a, Key::F1);
+        key(&mut a, Key::F1);
+        assert!(!a.show_help, "F1 left the list up");
+        key(&mut a, Key::F1);
+        handle_event(
+            &mut a,
+            &Event::Key(press_with(Key::Slash, Modifiers::shift())),
+        );
+        assert!(!a.show_help, "? left the list up");
+
+        // The pointer.
+        key(&mut a, Key::F1);
+        assert_eq!(
+            mouse(&mut a, x, y, MouseEventKind::Press(MouseButton::Left)),
+            EventResult::Consumed
+        );
+        assert!(!a.show_help, "the press did not put the list away");
+        assert_eq!(
+            a.selected(),
+            (0, 0),
+            "the press picked a square under the list"
+        );
+        key(&mut a, Key::F1);
+        mouse(&mut a, x, y, MouseEventKind::Press(MouseButton::Right));
+        assert!(!a.show_help, "a right-button press left the list up");
+
+        // The controls.
+        key(&mut a, digit_key);
+        assert_eq!(a.value(0, 0), digit, "control: a digit writes nothing");
+        mouse(&mut a, x, y, MouseEventKind::Press(MouseButton::Left));
+        assert_eq!(a.selected(), (0, 1), "control: the press picks nothing");
     }
 
     #[test]

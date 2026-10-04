@@ -82,6 +82,85 @@ MUTATIONS = [
     ),
 ]
 
+ADVERTISED = "every_advertised_key_does_something"
+REACHES = "the_shortcut_list_reaches_the_window"
+FILTER_Q = "a_question_mark_is_typed_into_the_filter_and_f1_still_raises_the_list"
+MODAL = "the_shortcut_list_takes_the_keys_and_a_press"
+
+MUTATIONS += [
+    # The list of keys, which the window did not have (2026-10-04).
+    (
+        "the list of keys is never drawn",
+        "        if self.show_help {\n"
+        "            guitk::shortcut::render_card(\n",
+        "        if false {\n"
+        "            guitk::shortcut::render_card(\n",
+        [REACHES],
+    ),
+    (
+        "F1 raises nothing",
+        "        if plain && (key.key == Key::F1 || question && !self.filter_focused) {\n",
+        "        if plain && question && !self.filter_focused {\n",
+        [ADVERTISED, REACHES, FILTER_Q, MODAL],
+    ),
+    (
+        "? raises nothing",
+        "        if plain && (key.key == Key::F1 || question && !self.filter_focused) {\n",
+        "        if plain && key.key == Key::F1 {\n",
+        [ADVERTISED, REACHES],
+    ),
+    (
+        "? is taken from the filter box",
+        "        if plain && (key.key == Key::F1 || question && !self.filter_focused) {\n",
+        "        if plain && (key.key == Key::F1 || question) {\n",
+        [FILTER_Q],
+    ),
+    (
+        "a chord raises the list of keys",
+        "        if plain && (key.key == Key::F1 || question && !self.filter_focused) {\n",
+        "        if key.key == Key::F1 || question && !self.filter_focused {\n",
+        [REACHES],
+    ),
+    (
+        "a key reaches what the list of keys covers",
+        "        if self.show_help {\n"
+        "            if plain && (matches!(key.key, Key::F1 | Key::Escape) || question) {\n"
+        "                self.show_help = false;\n"
+        "            }\n"
+        "            return EventResult::Consumed;\n"
+        "        }\n",
+        "",
+        [MODAL, REACHES],
+    ),
+    (
+        "a chorded Escape puts the list of keys away",
+        "            if plain && (matches!(key.key, Key::F1 | Key::Escape) || question) {\n",
+        "            if matches!(key.key, Key::F1 | Key::Escape) || question {\n",
+        [REACHES],
+    ),
+    (
+        "a press goes through the list of keys",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n"
+        "                    self.show_help = false;\n"
+        "                    return EventResult::Consumed;\n"
+        "                }\n",
+        "",
+        [MODAL],
+    ),
+    (
+        "only the left button puts the list of keys away",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n",
+        "                MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_) => {\n",
+        [MODAL],
+    ),
+    (
+        "the wheel scrolls what the list of keys covers",
+        "                MouseEventKind::Scroll { .. } => return EventResult::Ignored,\n",
+        "",
+        [MODAL],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "sysmonitor", timeout=600, only=only))

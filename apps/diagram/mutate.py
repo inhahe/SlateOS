@@ -350,6 +350,58 @@ MUTATIONS = [
     ),
 ]
 
+FIELD = "a_label_is_typed_into_the_toolkits_field"
+FIRST = "a_thing_with_no_label_shows_its_first_label_as_it_is_typed"
+CARET = "the_caret_follows_the_typing_and_stays_in_the_box"
+
+MUTATIONS += [
+    # A label is typed into the toolkit's field (2026-10-04; lane C,
+    # c-e-a-theme-can-shape-the-controls). There was no box and no caret, and
+    # a thing with no label showed none of its first one until Enter.
+    (
+        "a box's first label is not drawn as it is typed",
+        "            Some((LabelTarget::Node(id), buf)) if *id == node.id => {",
+        "            Some((LabelTarget::Node(id), buf)) if *id == node.id && !node.label.is_empty() => {",
+        [FIRST, FIELD],
+    ),
+    (
+        "a line's first label is not drawn as it is typed",
+        "            Some((LabelTarget::Edge(id), buf)) if *id == edge.id => {",
+        "            Some((LabelTarget::Edge(id), buf)) if *id == edge.id && !edge.label.is_empty() => {",
+        [FIRST, FIELD],
+    ),
+    (
+        "a label is typed into no box",
+        "        field::draw(\n"
+        "            cmds,\n"
+        "            &self.palette,\n"
+        "            strip.field(),\n",
+        "        let _ = (\n"
+        "            cmds.len(),\n"
+        "            &self.palette,\n"
+        "            strip.field(),\n",
+        [FIELD],
+    ),
+    (
+        "the label's box does not have the keyboard",
+        "                focused: true,\n                ..field::State::default()",
+        "                focused: false,\n                ..field::State::default()",
+        [FIELD],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [FIELD],
+    ),
+    (
+        "the caret is at the start of the typing",
+        "                cursor: guitk::text::TextCursor::from(buf.len()),",
+        "                cursor: guitk::text::TextCursor::from(0),",
+        [CARET],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "diagram", timeout=900, only=only))

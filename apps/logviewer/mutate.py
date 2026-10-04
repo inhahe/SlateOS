@@ -467,6 +467,79 @@ MUTATIONS = [
     ),
 ]
 
+MODAL = "the_shortcut_list_takes_every_key_while_it_is_up"
+
+MUTATIONS += [
+    # The shortcut list is modal for the keys (2026-10-04; known-issues
+    # E-a-press-goes-through-the-shortcut-card-to-the-control-drawn-under-it).
+    (
+        "a key reaches the log under the list of keys",
+        "        if self.show_help {\n"
+        "            if key.key == Key::Escape {\n"
+        "                self.show_help = false;\n"
+        "            }\n"
+        "            return EventResult::Consumed;\n"
+        "        }\n",
+        "        if key.key == Key::Escape && self.show_help {\n"
+        "            self.show_help = false;\n"
+        "            return EventResult::Consumed;\n"
+        "        }\n",
+        [MODAL],
+    ),
+    (
+        "Escape does not put the list of keys away",
+        "            if key.key == Key::Escape {\n"
+        "                self.show_help = false;\n"
+        "            }\n",
+        "",
+        [MODAL],
+    ),
+]
+
+FIELD = "the_search_box_is_the_toolkits_field"
+CARET = "the_search_caret_follows_the_query"
+
+MUTATIONS += [
+    # The search box is the toolkit's field (2026-10-04; lane C,
+    # c-e-a-theme-can-shape-the-controls).
+    (
+        "the search box never lights",
+        "            hovered: open && self.hover == Some(Target::SearchBox),\n",
+        "            hovered: false,\n",
+        [FIELD],
+    ),
+    (
+        "the search box is never marked",
+        "            focused: open && self.search_focused,\n",
+        "            focused: false,\n",
+        [FIELD, CARET],
+    ),
+    (
+        "the search box shows through the shortcut list",
+        "        let open = !self.show_help && !self.picker.is_open();\n        field::State {\n",
+        "        let open = !self.picker.is_open();\n        field::State {\n",
+        [FIELD],
+    ),
+    (
+        "a pattern that does not compile is not red",
+        "            invalid: matches!(self.filter.pattern(), Some(Err(_))),\n",
+        "            invalid: false,\n",
+        [FIELD],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [FIELD],
+    ),
+    (
+        "the caret is at the start of the query",
+        "                cursor: text::TextCursor::from(self.filter.search_query.len()),\n",
+        "                cursor: text::TextCursor::from(0),\n",
+        [CARET],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "logviewer", timeout=900, only=only))

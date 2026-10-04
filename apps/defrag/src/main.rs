@@ -1498,6 +1498,11 @@ pub struct DefragUI {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// Whether the pointer is over the exclude pattern's box, so it is drawn
+    /// lit (lane C, c-e-a-theme-can-shape-the-controls).
+    exclude_input_hovered: bool,
+    /// How wide the focus mark is drawn, from the user's appearance settings.
+    focus_ring_width: f32,
 }
 
 /// Reads a drive's block layout and per-file fragmentation.
@@ -1539,6 +1544,8 @@ impl DefragUI {
             show_ssd_warning: false,
             show_exclude_editor: false,
             exclude_input: String::new(),
+            exclude_input_hovered: false,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
             wheel: wheel::Accumulator::default(),
@@ -1966,6 +1973,8 @@ fn handle_event(ui: &mut DefragUI, event: &Event) -> EventResult {
             MouseEventKind::Scroll { .. } if ui.show_help => EventResult::Ignored,
             MouseEventKind::Press(MouseButton::Left) => ui.handle_click(m.x, m.y),
             MouseEventKind::Scroll { dy, .. } => ui.handle_scroll(m.x, m.y, dy),
+            MouseEventKind::Move => ui.point_at(Some((m.x, m.y))),
+            MouseEventKind::Leave => ui.point_at(None),
             _ => EventResult::Ignored,
         },
         Event::Key(k) => ui.handle_key(k),
@@ -1991,6 +2000,11 @@ fn handle_event(ui: &mut DefragUI, event: &Event) -> EventResult {
 impl App for DefragUI {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    /// The focus mark is drawn at the width the user asked for.
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -2138,6 +2152,31 @@ impl DefragUI {
     /// unable to disagree with what the user saw.
     fn target_at(&self, x: f32, y: f32) -> Option<Target> {
         self.frame(self.width, self.height).hit_test(x, y)
+    }
+
+    /// Follow the pointer: `Some` where it has moved to, `None` when it has
+    /// left the window. Only whether it is over the exclude pattern's box is
+    /// kept, and only a change in that is a repaint.
+    fn point_at(&mut self, at: Option<(f32, f32)>) -> EventResult {
+        let over = at.is_some_and(|(x, y)| self.target_at(x, y) == Some(Target::ExcludeInput));
+        if over == self.exclude_input_hovered {
+            return EventResult::Ignored;
+        }
+        self.exclude_input_hovered = over;
+        EventResult::Consumed
+    }
+
+    /// How the exclude pattern's box is drawn now: lit under the pointer and
+    /// marked while the keys type into it -- neither while the list of keys
+    /// or the SSD question takes them first.
+    fn exclude_input_state(&self) -> guitk::field::State {
+        let open = !self.show_help && !self.show_ssd_warning;
+        guitk::field::State {
+            hovered: open && self.exclude_input_hovered,
+            focused: open && self.show_exclude_editor,
+            disabled: false,
+            invalid: false,
+        }
     }
 
     /// Remember a new window size, for the benefit of the event path.
@@ -3521,25 +3560,26 @@ impl DefragUI {
                 Target::ExcludeInput,
                 Rect::new(card_x + PADDING, ey, field_w, 22.0),
             );
-            self.palette.push_surface(
+            // The toolkit's field (lane C, c-e-a-theme-can-shape-the-
+            // controls), marked while the keys type into it.
+            let state = self.exclude_input_state();
+            guitk::field::draw(
                 frame,
-                card_x + PADDING,
-                ey,
-                field_w,
-                22.0,
-                4.0,
-                Surface::Card,
+                &self.palette,
+                Rect::new(card_x + PADDING, ey, field_w, 22.0),
+                state,
+                self.focus_ring_width,
             );
-            // A caret, so an empty field does not look like a dead box: this
-            // is the only place in the window that takes typed text, and with
-            // nothing in it there is otherwise no sign it is listening.
+            // A caret while it has the keys, so an empty field does not look
+            // like a dead box: this is the only place in the window that
+            // takes typed text.
             frame.push(RenderCommand::Text {
                 x: card_x + PADDING + 6.0,
                 y: ey + 4.0,
-                text: if self.exclude_input.is_empty() {
-                    "|".to_string()
-                } else {
+                text: if state.focused {
                     format!("{}|", self.exclude_input)
+                } else {
+                    self.exclude_input.clone()
                 },
                 color: if self.exclude_input.is_empty() {
                     self.palette.subtext0
@@ -4627,6 +4667,81 @@ mod tests {
             .expect("no cross drawn for the first exclude");
         let (cx, cy) = cross.centre();
         assert_eq!(ui.target_at(cx, cy), Some(Target::ExcludeRemove(0)));
+    }
+
+    /// **The exclude pattern's box is the toolkit's field** (lane C,
+    /// c-e-a-theme-can-shape-the-controls): lit under the pointer and out when
+    /// it goes, marked at the user's focus width while the keys type into it
+    /// -- and neither while the list of keys or the SSD question takes them
+    /// first.
+    #[test]
+    fn the_exclude_box_is_the_toolkits_field() {
+        use guitk::field::State;
+        let size = <DefragUI as Probe>::SIZE;
+        let mut ui = populated_ui();
+        let mut palette = ui.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut ui, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        App::appearance_changed(&mut ui, &settings);
+        ui.set_view_tab(ViewTab::Schedule);
+        probe::click(&mut ui, Target::ExcludeAdd);
+        let rect = probe::rect_of(&ui, Target::ExcludeInput).expect("the box is drawn");
+        let draws = |ui: &DefragUI, s: State| {
+            let mut want: Vec<RenderCommand> = Vec::new();
+            guitk::field::draw(&mut want, &palette, rect, s, width);
+            let mut mark: Vec<RenderCommand> = Vec::new();
+            guitk::field::draw(
+                &mut mark,
+                &palette,
+                rect,
+                State { focused: true, ..s },
+                width,
+            );
+            let frame = ui.frame(size.0, size.1);
+            let cmds = frame.commands();
+            let has = |w: &[RenderCommand]| !w.is_empty() && cmds.windows(w.len()).any(|c| c == w);
+            has(&want) && (s.focused || !has(&mark))
+        };
+        let pointer = |ui: &mut DefragUI, kind: MouseEventKind| {
+            let (x, y) = rect.centre();
+            handle_event(ui, &Event::Mouse(MouseEvent { x, y, kind }))
+        };
+        let keyed = State {
+            focused: true,
+            ..State::default()
+        };
+        let both = State {
+            hovered: true,
+            ..keyed
+        };
+
+        assert!(draws(&ui, keyed), "the box is not marked with the keys");
+        assert_eq!(
+            pointer(&mut ui, MouseEventKind::Move),
+            EventResult::Consumed,
+            "the light came on without a repaint"
+        );
+        assert!(draws(&ui, both), "the box does not light under the pointer");
+        probe::key(&mut ui, &probe::press(Key::F1));
+        assert!(
+            draws(&ui, State::default()),
+            "the box shows through the list of keys"
+        );
+        probe::key(&mut ui, &probe::press(Key::Escape));
+        ui.show_ssd_warning = true;
+        assert!(
+            draws(&ui, State::default()),
+            "the box shows through the SSD question"
+        );
+        ui.show_ssd_warning = false;
+        pointer(&mut ui, MouseEventKind::Leave);
+        assert!(draws(&ui, keyed), "the light stayed when the pointer left");
     }
 
     #[test]

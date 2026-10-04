@@ -6809,6 +6809,23 @@ impl SettingsState {
     }
 
     fn handle_mouse(&mut self, evt: &MouseEvent) -> EventResult {
+        // The list of keys is modal for the pointer as it is for the keys, and
+        // drawn over everything: a press with any button puts it away and does
+        // nothing else -- on this window a press under it flipped a setting
+        // the reader could not see, and the snapshot bracket around this saved
+        // it -- and the wheel scrolls no dropdown it covers. A move, a release
+        // or the pointer leaving is not a press, and passes, so a slider drag
+        // still ends where it is let go.
+        if self.show_help {
+            match evt.kind {
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                    self.show_help = false;
+                    return EventResult::Consumed;
+                }
+                MouseEventKind::Scroll { .. } => return EventResult::Ignored,
+                _ => {}
+            }
+        }
         match &evt.kind {
             MouseEventKind::Press(MouseButton::Left) => self.handle_click(evt.x, evt.y),
             MouseEventKind::Move => self.handle_hover(evt.x, evt.y),
@@ -13250,6 +13267,81 @@ mod tests {
                 "choice {index} ({label}) was not drawn"
             );
         }
+    }
+
+    /// **A press with the list of keys up puts it away and does nothing
+    /// else, and the wheel scrolls nothing under it.** A press flipped the
+    /// switch drawn under the list -- and `handle_event` saved it -- and the
+    /// wheel scrolled an open dropdown there. Through `dispatch_event`, which
+    /// writes nothing. The controls are the same press and turn with the list
+    /// down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let f1 = Event::Key(KeyEvent {
+            key: Key::F1,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        });
+        let mut app = SettingsState::new();
+        app.current_page = SettingsPage::Notifications;
+        assert!(
+            !app.notif.settings.quiet_hours.enabled,
+            "quiet hours ship off"
+        );
+        let (cx, cy) = center_of(&app, RowHit::Toggle(ToggleId::QuietHours))
+            .expect("the page draws no switch for quiet hours");
+        let press = |button| {
+            Event::Mouse(MouseEvent {
+                x: cx,
+                y: cy,
+                kind: MouseEventKind::Press(button),
+            })
+        };
+
+        app.dispatch_event(&f1);
+        assert!(app.show_help);
+        assert_eq!(
+            app.dispatch_event(&press(MouseButton::Left)),
+            EventResult::Consumed
+        );
+        assert!(!app.show_help, "the press did not put the list away");
+        assert!(
+            !app.notif.settings.quiet_hours.enabled,
+            "the press flipped the switch under the list"
+        );
+        app.dispatch_event(&f1);
+        app.dispatch_event(&press(MouseButton::Right));
+        assert!(!app.show_help, "a right-button press left the list up");
+        app.dispatch_event(&press(MouseButton::Left));
+        assert!(
+            app.notif.settings.quiet_hours.enabled,
+            "control: the press flips nothing even with the list down"
+        );
+
+        // The wheel over an open dropdown.
+        let mut app = SettingsState::new();
+        app.window_height = 200.0;
+        app.show_dropdown(DropdownId::Resolution);
+        app.dropdown_scroll = 0;
+        let wheel = Event::Mouse(MouseEvent {
+            x: 700.0,
+            y: 300.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -1.0 },
+        });
+        app.dispatch_event(&f1);
+        app.dispatch_event(&wheel);
+        assert_eq!(
+            app.dropdown_scroll, 0,
+            "the wheel scrolled the dropdown under the list"
+        );
+        assert!(app.show_help, "the wheel put the list away");
+        app.dispatch_event(&f1);
+        app.dispatch_event(&wheel);
+        assert_eq!(
+            app.dropdown_scroll, 3,
+            "control: the wheel scrolls nothing at all"
+        );
     }
 
     #[test]

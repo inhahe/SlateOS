@@ -208,6 +208,58 @@ MAIN = [
     ),
 ]
 
+CARD = 'the_shortcut_card_takes_a_press_rather_than_passing_it_on'
+
+MAIN += [
+    # The list of keys takes the pointer (2026-10-04; known-issues
+    # E-a-press-goes-through-the-shortcut-card-to-the-control-drawn-under-it).
+    (
+        'a press goes through the list of keys',
+        '        if self.show_help {\n'
+        '            return match mouse.kind {\n'
+        '                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n'
+        '                    self.show_help = false;\n'
+        '                    EventResult::Consumed\n'
+        '                }\n'
+        '                _ => EventResult::Ignored,\n'
+        '            };\n'
+        '        }\n',
+        '',
+        [CARD],
+    ),
+    (
+        'only the left button puts the list of keys away',
+        '                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n'
+        '                    self.show_help = false;\n'
+        '                    EventResult::Consumed\n',
+        '                MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_) => {\n'
+        '                    self.show_help = false;\n'
+        '                    EventResult::Consumed\n',
+        [CARD],
+    ),
+    (
+        'a press under the list of keys leaves it up',
+        '                    self.show_help = false;\n'
+        '                    EventResult::Consumed\n'
+        '                }\n'
+        '                _ => EventResult::Ignored,\n'
+        '            };\n',
+        '                    EventResult::Consumed\n'
+        '                }\n'
+        '                _ => EventResult::Ignored,\n'
+        '            };\n',
+        [CARD],
+    ),
+    (
+        'the wheel scrolls what the list of keys covers',
+        '        if self.show_help {\n'
+        '            return match mouse.kind {\n',
+        '        if self.show_help && !matches!(mouse.kind, MouseEventKind::Scroll { .. }) {\n'
+        '            return match mouse.kind {\n',
+        [CARD],
+    ),
+]
+
 TABLES = {
     "points.rs": POINTS,
     "main.rs": MAIN,

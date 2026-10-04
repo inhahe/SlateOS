@@ -11,7 +11,10 @@ used to draw an empty pane, and the one-value categories named
 `/sys/hardware/...` paths nothing reads any more.  And a value nothing
 reports -- a cache, the memory's speed and slots, the adapter's memory, a
 refresh rate with no primary output -- is drawn as not reported, where it was
-"0 KiB", "0 MHz", "0 / 0", "0 MiB" and "0 Hz".
+"0 KiB", "0 MHz", "0 / 0", "0 MiB" and "0 Hz".  The last rows, added
+2026-10-04, cover the list of keys' hold on the pointer: a press with it up
+puts it away and reaches nothing under it, and the wheel scrolls nothing it
+covers.
 
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
@@ -120,6 +123,41 @@ MUTATIONS = [
         '|hz| format!("{hz} Hz")',
         '|hz| format!("{hz}")',
         [ZERO],
+    ),
+]
+
+CARD = "the_shortcut_card_takes_a_press_rather_than_passing_it_on"
+
+MUTATIONS += [
+    # The list of keys takes the pointer (2026-10-04; known-issues
+    # E-a-press-goes-through-the-shortcut-card-to-the-control-drawn-under-it).
+    (
+        "a press goes through the list of keys",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n"
+        "                    self.show_help = false;\n"
+        "                    return EventResult::Consumed;\n"
+        "                }\n",
+        "",
+        [CARD],
+    ),
+    (
+        "only the left button puts the list of keys away",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n",
+        "                MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_) => {\n",
+        [CARD],
+    ),
+    (
+        "a press under the list of keys leaves it up",
+        "                    self.show_help = false;\n"
+        "                    return EventResult::Consumed;\n",
+        "                    return EventResult::Consumed;\n",
+        [CARD],
+    ),
+    (
+        "the wheel scrolls what the list of keys covers",
+        "                MouseEventKind::Scroll { .. } => return EventResult::Ignored,\n",
+        "",
+        [CARD],
     ),
 ]
 

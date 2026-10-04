@@ -1813,6 +1813,19 @@ impl SpeedTestUI {
                 self.resize(*width as f32, *height as f32);
                 EventResult::Consumed
             }
+            // The list of keys is drawn over everything, so it takes the
+            // pointer as well as the keys: a press with any button puts it
+            // away and reaches nothing under it, and the wheel scrolls
+            // nothing it covers. A move passes, and lights nothing under it.
+            // (A press went through the list to the control drawn under it:
+            // Start began a test the reader could not see for the list.)
+            Event::Mouse(mouse_event) if self.show_help => match mouse_event.kind {
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                    self.show_help = false;
+                    EventResult::Consumed
+                }
+                _ => self.set_hover(None),
+            },
             Event::Mouse(mouse_event) => {
                 let x = mouse_event.x;
                 let y = mouse_event.y;
@@ -1963,6 +1976,11 @@ impl SpeedTestUI {
 
     fn handle_mouse_move(&mut self, x: f32, y: f32) -> EventResult {
         let target = self.target_at(x, y);
+        self.set_hover(target)
+    }
+
+    /// Light what is under the pointer -- `target`, or nothing.
+    fn set_hover(&mut self, target: Option<Target>) -> EventResult {
         let start = target == Some(Target::Start);
         let export = target == Some(Target::Export);
         let row = match target {
@@ -3167,6 +3185,49 @@ mod tests {
             ui.phase, phase,
             "control: Enter does nothing even with the card down"
         );
+    }
+
+    /// **The list of keys takes a press rather than passing it on**, with
+    /// any button: it goes, and Start, drawn under it, starts nothing. The
+    /// wheel scrolls nothing it covers, and nothing under it is lit. The
+    /// control: with the list down, the same wheel scrolls and the same
+    /// press starts a test.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        for button in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
+            let mut ui = SpeedTestUI::new();
+            ui.handle_key(&probe::press(Key::F1));
+            let phase = ui.phase.clone();
+            probe::click_with(&mut ui, Target::Start, button);
+            assert!(!ui.show_help, "{button:?} did not put the list away");
+            assert_eq!(
+                ui.phase, phase,
+                "{button:?} started a test through the list"
+            );
+        }
+
+        let mut ui = ui_with_history(MAX_HISTORY);
+        ui.handle_key(&probe::press(Key::F1));
+        wheel_over_history(&mut ui, -1.0);
+        assert_eq!(
+            ui.history_scroll, 0.0,
+            "the wheel scrolled the history under the list"
+        );
+        assert!(ui.show_help, "the wheel put the list away");
+        hover(&mut ui, layout().history_list.y + 1.0);
+        assert_eq!(ui.history_hover, None, "a row under the list is lit");
+
+        ui.handle_key(&probe::press(Key::F1));
+        hover(&mut ui, layout().history_list.y + 1.0);
+        assert!(ui.history_hover.is_some(), "control: no row is lit");
+        wheel_over_history(&mut ui, -1.0);
+        assert!(
+            ui.history_scroll > 0.0,
+            "control: the wheel scrolls nothing"
+        );
+        let phase = ui.phase.clone();
+        probe::click(&mut ui, Target::Start);
+        assert_ne!(ui.phase, phase, "control: Start starts nothing");
     }
 
     /// A frame at roughly 60 Hz, the interval `oswindow` would hand us.

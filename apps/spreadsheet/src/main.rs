@@ -3217,6 +3217,21 @@ pub struct SpreadsheetApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// How wide the focus mark is drawn, from the user's appearance settings.
+    focus_ring_width: f32,
+    /// The box text is typed into that the pointer is over, if any, so the
+    /// box is drawn lit (lane C, c-e-a-theme-can-shape-the-controls).
+    hovered_box: Option<TextBox>,
+}
+
+/// A box text is typed into, for the pointer's light and the keyboard's mark.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TextBox {
+    /// The formula bar's value: the active cell's input, shown -- and typed,
+    /// while the cell is being edited.
+    Formula,
+    /// One of the find panel's two boxes.
+    Find(FindField),
 }
 
 impl SpreadsheetApp {
@@ -3224,6 +3239,8 @@ impl SpreadsheetApp {
     pub fn new(width: f32, height: f32) -> Self {
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
+            hovered_box: None,
             picker: FilePicker::new(),
             last_file_action: None,
             document_path: None,
@@ -4427,6 +4444,23 @@ impl SpreadsheetApp {
         if !event.pressed {
             return EventResult::Ignored;
         }
+        // The shortcut list before anything else, because it is drawn over
+        // everything else, and modal: F1 or Escape puts it away and no other
+        // key reaches what it covers. It took only those two, so Delete
+        // cleared the selection under it, a letter began editing the cell
+        // there, and Ctrl+O opened a file dialog behind it. Held with Ctrl,
+        // Alt or the Windows key, F1 and Escape are a chord, not the list's.
+        if self.show_help {
+            let held = event.modifiers;
+            if matches!(event.key, Key::F1 | Key::Escape)
+                && !held.ctrl
+                && !held.alt
+                && !held.super_key
+            {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
         // Any keystroke dismisses a notice. Cleared before dispatch, so an
         // operation below is free to set a new one.
         self.notice = None;
@@ -4629,14 +4663,9 @@ impl SpreadsheetApp {
             }
             // The shortcut list. `F1` rather than `?`, which this program has
             // to be able to type into a cell.
+            // Only ever raises it: with the list up, the keys never get here.
             Key::F1 => {
-                self.show_help = !self.show_help;
-                EventResult::Consumed
-            }
-            // Before the unguarded `Key::Escape` below, which would otherwise
-            // take this and cancel an edit while the list stayed up.
-            Key::Escape if self.show_help => {
-                self.show_help = false;
+                self.show_help = true;
                 EventResult::Consumed
             }
             Key::Delete => {
@@ -4750,6 +4779,51 @@ impl SpreadsheetApp {
 
     /// Handle mouse events.
     pub fn handle_mouse_event(&mut self, event: &MouseEvent) -> EventResult {
+        // Which box the pointer is over, followed whatever is up: a box is
+        // drawn lit only while nothing covers the window, but which one is
+        // under the pointer is known all the same, so the light is right the
+        // moment the cover goes. A change is a redraw.
+        let relit = self.track_pointer(event);
+        let answered = self.answer_pointer(event);
+        if relit {
+            EventResult::Consumed
+        } else {
+            answered
+        }
+    }
+
+    /// Follow the pointer over the boxes text is typed into. Answers whether
+    /// the box under it changed.
+    fn track_pointer(&mut self, event: &MouseEvent) -> bool {
+        let over = match event.kind {
+            MouseEventKind::Move => self.text_box_at(event.x, event.y),
+            MouseEventKind::Leave => None,
+            _ => return false,
+        };
+        let changed = over != self.hovered_box;
+        self.hovered_box = over;
+        changed
+    }
+
+    /// What the pointer does to the window, as distinct from the light it
+    /// moves.
+    fn answer_pointer(&mut self, event: &MouseEvent) -> EventResult {
+        // The list of keys is modal for the pointer as it is for the keys: a
+        // press with any button puts it away and does nothing else -- it used
+        // to pick the cell under it, or with a double click begin editing
+        // there -- and the wheel scrolls nothing it covers. A move or a
+        // release is not a press, and passes, so a drag begun before the list
+        // came up still ends.
+        if self.show_help {
+            match event.kind {
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                    self.show_help = false;
+                    return EventResult::Consumed;
+                }
+                MouseEventKind::Scroll { .. } => return EventResult::Ignored,
+                _ => {}
+            }
+        }
         match &event.kind {
             MouseEventKind::Press(MouseButton::Left) => {
                 self.handle_left_click(event.x, event.y, false)
@@ -4806,6 +4880,16 @@ impl SpreadsheetApp {
             // as the ordinary cell click it looks like.
             self.mode = InteractionMode::Normal;
             self.find_replace.active = false;
+        }
+
+        // The formula bar's value box: a press there edits the active cell,
+        // as a press in the box does in every spreadsheet -- it is drawn as a
+        // field, and lights as one under the pointer, so it answers as one.
+        if self.formula_box().is_some_and(|r| r.contains(x, y)) {
+            if !matches!(self.mode, InteractionMode::Editing { .. }) {
+                self.begin_editing();
+            }
+            return EventResult::Consumed;
         }
 
         // The toolbar, because it is the topmost thing drawn in the window. The whole
@@ -5710,6 +5794,68 @@ impl SpreadsheetApp {
     }
 
     /// Render the formula bar.
+    /// The formula bar's value box: where the active cell's input is shown,
+    /// and typed while the cell is being edited. `None` while the bar is
+    /// hidden.
+    ///
+    /// One rectangle for the drawing, the pointer's light and the press that
+    /// begins an edit.
+    fn formula_box(&self) -> Option<Rect> {
+        self.show_formula_bar.then(|| {
+            let top = if self.show_toolbar {
+                TOOLBAR_HEIGHT
+            } else {
+                0.0
+            };
+            Rect::new(
+                96.0,
+                top + 3.0,
+                (self.window_width - 100.0).max(0.0),
+                FORMULA_BAR_HEIGHT - 6.0,
+            )
+        })
+    }
+
+    /// The box text is typed into under `(x, y)`, if any: the find panel's
+    /// first, because the panel is drawn over the sheet, and none at all
+    /// elsewhere in the panel.
+    fn text_box_at(&self, x: f32, y: f32) -> Option<TextBox> {
+        if self.find_replace.active && self.find_panel().frame.contains(x, y) {
+            return match self.find_control_at(x, y) {
+                Some(FindControl::Field(field)) => Some(TextBox::Find(field)),
+                _ => None,
+            };
+        }
+        self.formula_box()
+            .filter(|r| r.contains(x, y))
+            .map(|_| TextBox::Formula)
+    }
+
+    /// Whether something drawn over the window takes its keys and presses --
+    /// the unsaved-changes question, the file dialog or the list of keys --
+    /// so that no box under it lights or shows the keyboard.
+    fn covered(&self) -> bool {
+        self.question.is_some() || self.picker.is_open() || self.show_help
+    }
+
+    /// How a text box is drawn now: lit under the pointer, and marked while
+    /// the keys type into it -- neither while something covers the window.
+    fn box_state(&self, which: TextBox) -> guitk::field::State {
+        let open = !self.covered();
+        let typing = match which {
+            TextBox::Formula => matches!(self.mode, InteractionMode::Editing { .. }),
+            TextBox::Find(field) => {
+                self.mode == InteractionMode::FindReplace && self.find_replace.field == field
+            }
+        };
+        guitk::field::State {
+            hovered: open && self.hovered_box == Some(which),
+            focused: open && typing,
+            disabled: false,
+            invalid: false,
+        }
+    }
+
     fn render_formula_bar(&self, cmds: &mut Vec<RenderCommand>, y: f32) {
         // Background
         self.palette.push_surface(
@@ -5756,16 +5902,18 @@ impl SpreadsheetApp {
             overflow: TextOverflow::Clip,
         });
 
-        // Formula/value text area
-        self.palette.push_surface(
-            cmds,
-            96.0,
-            y + 3.0,
-            self.window_width - 100.0,
-            FORMULA_BAR_HEIGHT - 6.0,
-            3.0,
-            Surface::Card,
-        );
+        // Formula/value text area: the toolkit's field, in the theme's shape
+        // (lane C, c-e-a-theme-can-shape-the-controls), marked while the cell
+        // is being edited.
+        if let Some(rect) = self.formula_box() {
+            guitk::field::draw(
+                cmds,
+                &self.palette,
+                rect,
+                self.box_state(TextBox::Formula),
+                self.focus_ring_width,
+            );
+        }
 
         let formula_text = if let InteractionMode::Editing { ref buffer } = self.mode {
             buffer.text().to_owned()
@@ -6827,7 +6975,6 @@ impl SpreadsheetApp {
                         FindField::Search => &self.find_replace.search_text,
                         FindField::Replace => &self.find_replace.replace_text,
                     };
-                    let focused = self.find_replace.field == field;
 
                     cmds.push(RenderCommand::Text {
                         x: dlg_x + 12.0,
@@ -6839,29 +6986,17 @@ impl SpreadsheetApp {
                         max_width: None,
                         overflow: TextOverflow::Clip,
                     });
-                    self.palette.push_surface(
+                    // The toolkit's field, marked while the next keystroke
+                    // goes into it: two identical boxes with a mark on
+                    // neither is a dialog that cannot be used without typing
+                    // something to find out.
+                    guitk::field::draw(
                         cmds,
-                        rect.x,
-                        rect.y,
-                        rect.w,
-                        rect.h,
-                        3.0,
-                        Surface::Card,
+                        &self.palette,
+                        *rect,
+                        self.box_state(TextBox::Find(field)),
+                        self.focus_ring_width,
                     );
-                    // Which field the next keystroke goes into. Two identical
-                    // boxes with a caret in neither is a dialog that cannot be
-                    // used without typing something to find out.
-                    if focused {
-                        cmds.push(RenderCommand::StrokeRect {
-                            x: rect.x,
-                            y: rect.y,
-                            width: rect.w,
-                            height: rect.h,
-                            color: self.palette.blue,
-                            line_width: 1.0,
-                            corner_radii: CornerRadii::all(3.0),
-                        });
-                    }
                     cmds.push(RenderCommand::Text {
                         x: rect.x + 4.0,
                         y: rect.y + 4.0,
@@ -6990,6 +7125,11 @@ fn handle_editing_key(buffer: &mut EditBuffer, event: &KeyEvent) -> EventResult 
 impl App for SpreadsheetApp {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    /// The focus mark is drawn at the width the user asked for.
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -10439,6 +10579,266 @@ mod tests {
             !drawn_text(&app).contains("F1 closes this"),
             "Escape did not close it"
         );
+    }
+
+    /// **The shortcut list is modal for the keys and the pointer alike.** It
+    /// took only F1 and Escape: with it up, Delete cleared the cell under it, a
+    /// letter began editing there, Ctrl+O opened a file dialog behind it and
+    /// an arrow moved the selection; a press picked the cell under it, a
+    /// double click began editing it, and the wheel scrolled the sheet. The
+    /// controls are the same key, presses and turn with the list down.
+    #[test]
+    fn the_shortcut_card_takes_the_keys_and_a_press_rather_than_passing_them_on() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        let home = CellAddr::new(0, 0);
+        app.set_cell_input(home, "42");
+        let f1 = Event::Key(key(Key::F1, None));
+        let escape = Event::Key(key(Key::Escape, None));
+        let top = app.grid_top();
+        let (x, y) = (0..400)
+            .flat_map(|i| (0..200).map(move |j| (i, j)))
+            .map(|(i, j)| (ROW_HEADER_WIDTH + i as f32 * 2.0, top + j as f32 * 2.0))
+            .find(|&(x, y)| app.cell_at_position(x, y) == Some((2, 3)))
+            .expect("cell C4 on screen");
+        let mouse = |kind| Event::Mouse(MouseEvent { x, y, kind });
+
+        // The keys.
+        app.handle_event(&f1);
+        assert!(app.show_help);
+        app.handle_event(&Event::Key(key(Key::Delete, None)));
+        app.handle_event(&Event::Key(key(Key::Right, None)));
+        app.handle_event(&Event::Key(key(Key::X, Some('x'))));
+        app.handle_event(&ctrl(Key::O));
+        assert!(
+            app.show_help,
+            "a key other than F1 or Escape put the list away"
+        );
+        assert_eq!(
+            app.active_sheet().get_cell(home).raw_input,
+            "42",
+            "Delete cleared the cell under the list"
+        );
+        assert_eq!(
+            app.selection().active,
+            home,
+            "an arrow moved the selection under it"
+        );
+        assert!(
+            !matches!(app.mode, InteractionMode::Editing { .. }),
+            "a letter began editing under the list"
+        );
+        assert!(
+            !app.picker.is_open(),
+            "Ctrl+O opened a file dialog behind it"
+        );
+        app.handle_event(&Event::Key(KeyEvent {
+            modifiers: Modifiers::alt(),
+            ..key(Key::Escape, None)
+        }));
+        assert!(
+            app.show_help,
+            "Alt+Escape, the desktop's chord, put the list away"
+        );
+        app.handle_event(&escape);
+        assert!(!app.show_help, "Escape left the list up");
+        app.handle_event(&f1);
+        app.handle_event(&f1);
+        assert!(!app.show_help, "F1 left the list up");
+
+        // The pointer.
+        app.handle_event(&f1);
+        assert_eq!(
+            app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Left))),
+            EventResult::Consumed
+        );
+        assert!(!app.show_help, "the press did not put the list away");
+        assert_eq!(
+            app.selection().active,
+            home,
+            "the press picked a cell under the list"
+        );
+        app.handle_event(&f1);
+        app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Right)));
+        assert!(!app.show_help, "a right-button press left the list up");
+        app.handle_event(&f1);
+        app.handle_event(&mouse(MouseEventKind::DoubleClick(MouseButton::Left)));
+        assert!(!app.show_help, "a double click left the list up");
+        assert!(
+            !matches!(app.mode, InteractionMode::Editing { .. }),
+            "a double click began editing under the list"
+        );
+        app.handle_event(&f1);
+        app.handle_event(&mouse(MouseEventKind::Scroll { dx: 0.0, dy: -1.0 }));
+        assert_eq!(
+            app.scroll().y,
+            0.0,
+            "the wheel scrolled the sheet under the list"
+        );
+        assert!(app.show_help, "the wheel put the list away");
+        app.handle_event(&escape);
+
+        // The controls.
+        app.handle_event(&mouse(MouseEventKind::Scroll { dx: 0.0, dy: -1.0 }));
+        assert!(
+            app.scroll().y > 0.0,
+            "control: the wheel scrolls nothing at all"
+        );
+        app.handle_event(&mouse(MouseEventKind::Scroll { dx: 0.0, dy: 1.0 }));
+        app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Left)));
+        assert_eq!(
+            app.selection().active,
+            CellAddr::new(2, 3),
+            "control: the press picks nothing even with the list down"
+        );
+        app.handle_event(&Event::Key(key(Key::Left, None)));
+        assert_eq!(
+            app.selection().active,
+            CellAddr::new(1, 3),
+            "control: an arrow moves nothing"
+        );
+    }
+
+    /// **The formula bar's box and the find panel's boxes are the toolkit's
+    /// fields** (lane C, c-e-a-theme-can-shape-the-controls): lit under the
+    /// pointer and out when it goes, marked at the user's focus width while
+    /// the keys type into them -- and neither while the list of keys covers
+    /// the window. A press in the formula bar's box edits the active cell, as
+    /// a box drawn as a field should.
+    #[test]
+    fn the_text_boxes_are_the_toolkits_fields() {
+        use guitk::field::State;
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        let mut palette = app.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut app, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        App::appearance_changed(&mut app, &settings);
+        let seq = |rect: Rect, s: State| {
+            let mut want: Vec<RenderCommand> = Vec::new();
+            guitk::field::draw(&mut want, &palette, rect, s, width);
+            want
+        };
+        let draws = |app: &SpreadsheetApp, rect: Rect, s: State| {
+            let cmds = app.render_commands();
+            let has = |want: &[RenderCommand]| {
+                !want.is_empty() && cmds.windows(want.len()).any(|w| w == want)
+            };
+            // Not focused means no focus mark either: an unfocused box's
+            // commands begin a focused one's.
+            has(&seq(rect, s)) && (s.focused || !has(&seq(rect, State { focused: true, ..s })))
+        };
+        let pointer = |app: &mut SpreadsheetApp, x: f32, y: f32, kind: MouseEventKind| {
+            app.handle_event(&Event::Mouse(MouseEvent { x, y, kind }));
+        };
+        let idle = State::default();
+        let lit = State {
+            hovered: true,
+            ..idle
+        };
+        let keyed = State {
+            focused: true,
+            ..idle
+        };
+        let both = State {
+            hovered: true,
+            ..keyed
+        };
+
+        // The formula bar's box: lit under the pointer, out when it leaves;
+        // a press there edits the cell, and the box is marked while it does.
+        let formula = app.formula_box().expect("the formula bar is shown");
+        let (fx, fy) = (formula.x + 20.0, formula.y + formula.h / 2.0);
+        assert!(
+            draws(&app, formula, idle),
+            "the formula box is not the toolkit's field"
+        );
+        pointer(&mut app, fx, fy, MouseEventKind::Move);
+        assert!(
+            draws(&app, formula, lit),
+            "the formula box does not light under the pointer"
+        );
+        // Covered by the list of keys, it neither lights nor shows the keys.
+        app.handle_event(&Event::Key(key(Key::F1, None)));
+        assert!(
+            draws(&app, formula, idle),
+            "the box lights under the list of keys"
+        );
+        app.handle_event(&Event::Key(key(Key::Escape, None)));
+        assert!(
+            draws(&app, formula, lit),
+            "the light did not come back with the list gone"
+        );
+        pointer(&mut app, fx, fy, MouseEventKind::Press(MouseButton::Left));
+        assert!(
+            matches!(app.mode, InteractionMode::Editing { .. }),
+            "a press in the formula box edits nothing"
+        );
+        assert!(
+            draws(&app, formula, both),
+            "the box is not marked while the cell is edited"
+        );
+        pointer(&mut app, fx, fy, MouseEventKind::Leave);
+        assert!(
+            draws(&app, formula, keyed),
+            "the light stayed after the pointer left"
+        );
+        app.handle_event(&Event::Key(key(Key::Escape, None)));
+        assert!(
+            draws(&app, formula, idle),
+            "the mark stayed after the edit was put away"
+        );
+
+        // The find panel's boxes: the one the keys type into is marked.
+        app.handle_event(&ctrl(Key::F));
+        assert_eq!(app.mode, InteractionMode::FindReplace);
+        let field_rect = |app: &SpreadsheetApp, field: FindField| {
+            app.find_panel()
+                .controls
+                .iter()
+                .find(|(_, c)| *c == FindControl::Field(field))
+                .map(|(r, _)| *r)
+                .expect("the panel draws both boxes")
+        };
+        let search = field_rect(&app, FindField::Search);
+        let replace = field_rect(&app, FindField::Replace);
+        assert!(
+            draws(&app, search, keyed),
+            "the search box is not marked while it has the keys"
+        );
+        assert!(
+            draws(&app, replace, idle),
+            "the replace box is marked without the keys"
+        );
+        pointer(
+            &mut app,
+            replace.x + 10.0,
+            replace.y + replace.h / 2.0,
+            MouseEventKind::Move,
+        );
+        assert!(
+            draws(&app, replace, lit),
+            "the replace box does not light under the pointer"
+        );
+        assert!(
+            draws(&app, search, keyed),
+            "the search box lit with the pointer elsewhere"
+        );
+        pointer(
+            &mut app,
+            replace.x + 10.0,
+            replace.y + replace.h / 2.0,
+            MouseEventKind::Press(MouseButton::Left),
+        );
+        assert!(
+            draws(&app, replace, both),
+            "a press did not give the replace box the keys"
+        );
+        assert!(draws(&app, search, idle), "the search box kept its mark");
     }
 
     /// `?` stays a character, because a spreadsheet has to be able to hold one.

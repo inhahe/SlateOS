@@ -237,40 +237,29 @@ MAIN = [
         "",
         [BUTTONS_ON_ENTRY],
     ),
-    (
-        "a command's letter is typed into an entry",
-        '    if textline::types_into_field(key) {\n        let typed: String = key.typed().collect();',
-        '    if key.types_text() {\n        let typed: String = key.typed().collect();',
-        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
-    ),
+    # No rows for a command's letter typed into an entry, the new master
+    # password, the master password, the search or a backup's password:
+    # since 2026-10-04 every box's typing is textline's (apply_key, or
+    # apply_masked_key for a secret), which tells a command from AltGr
+    # itself, in its own crate and with its own tests;
+    # a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types still holds
+    # the boxes to it.
     (
         "a chord works the entry form's keys",
-        '    if !textline::is_plain(key.modifiers) {\n        return EventResult::Ignored;\n    }\n    match key.key {\n        Key::Escape => {',
-        '    match key.key {\n        Key::Escape => {',
+        "    let own = textline::is_plain(key.modifiers)\n",
+        "    let own = true\n",
         ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
     ),
     (
-        "a command's letter is typed into a new master password",
-        '            Gate::Create(form) if textline::types_into_field(key) => {',
-        '            Gate::Create(form) if key.types_text() => {',
+        "a chord works the new-vault form",
+        "            Gate::Create(form) if textline::is_plain(key.modifiers) => match key.key {\n",
+        "            Gate::Create(form) if true => match key.key {\n",
         ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
     ),
     (
-        'a chord works the new-vault form',
-        '            Gate::Create(_) if !textline::is_plain(key.modifiers) => {',
-        '            Gate::Create(_) if false => {',
-        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
-    ),
-    (
-        "a command's letter is typed into the master password",
-        '        if textline::types_into_field(key) {\n            state.master_input.extend(key.typed());',
-        '        if key.types_text() {\n            state.master_input.extend(key.typed());',
-        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
-    ),
-    (
-        'a chord works the lock screen',
-        '        if !textline::is_plain(key.modifiers) {\n            return EventResult::Ignored;\n        }\n        match key.key {\n            Key::Enter => attempt_unlock(state),',
-        '        match key.key {\n            Key::Enter => attempt_unlock(state),',
+        "a chord works the lock screen",
+        "        if matches!(state.gate, Gate::Unlock) && textline::is_plain(key.modifiers) {\n",
+        "        if matches!(state.gate, Gate::Unlock) {\n",
         ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
     ),
     (
@@ -280,15 +269,9 @@ MAIN = [
         ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
     ),
     (
-        "a command's letter is typed into the search",
-        '        _ if textline::types_into_field(key) => {',
-        '        _ if key.types_text() => {',
-        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
-    ),
-    (
-        'a chord works the list',
-        '        _ if !textline::is_plain(key.modifiers) => EventResult::Ignored,\n',
-        '',
+        "a chord works the list",
+        "        Key::Escape if plain => {\n",
+        "        Key::Escape => {\n",
         ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
     ),
     (
@@ -304,15 +287,9 @@ MAIN = [
         ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
     ),
     (
-        "a command's letter is typed into a backup's password",
-        '            if textline::types_into_field(key) =>',
-        '            if key.types_text() =>',
-        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
-    ),
-    (
-        'a chord answers a vault dialog',
-        '        _ if !textline::is_plain(key.modifiers) => Then::Nothing,\n',
-        '',
+        "a chord answers a vault dialog",
+        "        _ if !plain => Then::Nothing,\n",
+        "",
         ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
     ),
     (
@@ -471,27 +448,17 @@ MAIN = [
         [FIRST_RUN_BOXES],
     ),
     (
-        'typing leaves the box red',
-        '                field.extend(key.typed());\n'
-        '                form.error = None;\n'
-        '                form.wrong = None;\n',
-        '                field.extend(key.typed());\n'
-        '                form.error = None;\n',
+        "typing leaves the box red",
+        "                if let Gate::Create(form) = &mut state.gate {\n                    form.error = None;\n                    form.wrong = None;\n                }\n",
+        "                if let Gate::Create(form) = &mut state.gate {\n                    form.error = None;\n                }\n",
         [FIRST_RUN_BOXES],
     ),
+    # "a Backspace leaves the box red" is "typing leaves the box red" now:
+    # one line puts the refusal away for every key the box answers.
     (
-        'a Backspace leaves the box red',
-        '                    field.pop();\n'
-        '                    form.error = None;\n'
-        '                    form.wrong = None;\n',
-        '                    field.pop();\n'
-        '                    form.error = None;\n',
-        [FIRST_RUN_BOXES],
-    ),
-    (
-        'a refused master password is not shown red',
-        '        state.field_state(Target::MasterInput, state.unlock_failed),\n',
-        '        state.field_state(Target::MasterInput, false),\n',
+        "a refused master password is not shown red",
+        "        state.unlock_failed,\n        Target::MasterInput,\n",
+        "        false,\n        Target::MasterInput,\n",
         [LOCK_BOX],
     ),
     (
@@ -714,6 +681,95 @@ MAIN += [
         "        Target::LockVault => {\n            state.lock_vault();\n",
         "        Target::LockVault => {\n            state.vault.lock();\n",
         [BUTTON],
+    ),
+]
+
+# The boxes edit at a caret (2026-10-04,
+# known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box): every
+# box took typing at its end and Backspace from it, and nothing else, and drew
+# no caret; the master password drew a mask for each byte.
+SEARCH = "the_search_edits_at_a_caret"
+DELETE = "delete_with_an_entry_selected_asks_to_delete_it"
+MASTER = "the_master_password_edits_at_a_caret"
+NEW_VAULT = "the_new_vaults_boxes_edit_at_a_caret"
+FORM = "a_forms_fields_edit_at_a_caret"
+RESTORE = "the_restore_password_edits_at_a_caret"
+SHOWN = "a_box_edits_the_text_it_shows"
+
+MAIN += [
+    (
+        "a secret box is not masked",
+        "        let edit = if self.box_masked(target) {\n",
+        "        let edit = if false {\n",
+        [MASTER, FORM],
+    ),
+    (
+        "a shown secret is still masked",
+        "                !self.show_password\n",
+        "                true\n",
+        [FORM],
+    ),
+    (
+        "a cut or a copy takes nothing to the clipboard",
+        "            self.clipboard = copied;\n",
+        "            let _ = copied;\n",
+        [SEARCH, FORM],
+    ),
+    (
+        "the editor is kept for the box the keyboard moved to",
+        "        if self.editor_for != Some(target) || self.editor.text() != held {\n",
+        "        if self.editor.text() != held {\n",
+        [FORM],
+    ),
+    (
+        "a key finds the editor holding another text",
+        "        if self.editor_for != Some(target) || self.editor.text() != held {\n",
+        "        if self.editor_for != Some(target) {\n",
+        [SHOWN],
+    ),
+    (
+        "the caret is drawn at the start",
+        "        let (cursor, anchor) = if focused {\n            state.box_caret(target)\n",
+        "        let (cursor, anchor) = if false {\n            state.box_caret(target)\n",
+        [SEARCH, MASTER],
+    ),
+    (
+        "the selection is not drawn",
+        "                selection_anchor,\n                focused,\n",
+        "                selection_anchor: None,\n                focused,\n",
+        [SEARCH],
+    ),
+    (
+        "a press puts the caret at the start",
+        "                x - area.x,\n            )\n        };\n",
+        "                0.0,\n            )\n        };\n",
+        [SEARCH],
+    ),
+    (
+        "a press in a box does not place the caret",
+        "        state.press_box(target, rect, x);\n",
+        "        let _ = (rect, x);\n",
+        [SEARCH, MASTER, FORM],
+    ),
+    (
+        "Delete with an entry selected is the search's",
+        "        Key::Delete if plain && state.selected_entry_id.is_some() => {\n",
+        "        Key::Delete if false => {\n",
+        [DELETE],
+    ),
+    (
+        "an edit of the search is not filtered by",
+        "                    if state.search_query != before {\n"
+        "                        state.refresh_filter();\n",
+        "                    if false {\n"
+        "                        state.refresh_filter();\n",
+        ["an_edit_of_the_search_filters_the_list"],
+    ),
+    (
+        "an edit leaves the restore dialog's error up",
+        "            said = error.take().is_some();\n",
+        "            said = error.is_some();\n",
+        [RESTORE],
     ),
 ]
 

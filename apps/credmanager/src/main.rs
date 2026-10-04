@@ -64,6 +64,9 @@ use guitk::rng::SeededRng;
 use guitk::rng::{RandomSource, SecretSource, SystemRandom};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::text::TextCursor;
+use guitk::textedit;
+use guitk::textinput::TextInput;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 
@@ -100,6 +103,11 @@ const DEFAULT_WINDOW_WIDTH: f32 = 1280.0;
 const DEFAULT_WINDOW_HEIGHT: f32 = 800.0;
 const ICON_SIZE: f32 = 20.0;
 const DEFAULT_FONT_SIZE: f32 = 14.0;
+/// The most a box holds, in characters: a password, a passphrase, a
+/// note -- and a paste of a page is none of them.
+const BOX_CAPACITY: usize = 4096;
+/// What a masked box draws for each character of a secret.
+const MASK: char = '*';
 const HEADING_FONT_SIZE: f32 = 18.0;
 const SMALL_FONT_SIZE: f32 = 12.0;
 const CORNER_RADIUS: f32 = 6.0;
@@ -3051,19 +3059,6 @@ impl NewEntryForm {
         self.focused = self.focused.saturating_add(1).checked_rem(len).unwrap_or(0);
     }
 
-    fn type_text(&mut self, text: &str) {
-        if let Some(v) = self.values.get_mut(self.focused) {
-            v.push_str(text);
-        }
-    }
-
-    fn backspace(&mut self) -> bool {
-        self.values
-            .get_mut(self.focused)
-            .and_then(String::pop)
-            .is_some()
-    }
-
     /// The first field, which every kind uses as its display name.
     ///
     /// A credential with no name is one the list cannot show and the user
@@ -3361,6 +3356,15 @@ struct AppState {
     audit_issues: Vec<AuditIssue>,
     /// Master password input buffer (for unlock screen).
     master_input: String,
+    /// The editor of the box a key types into (`typing_into`) -- its caret
+    /// and selection over that box's text -- reloaded when the keyboard
+    /// moved to another box or the text changed under it.
+    editor: TextInput,
+    /// Which box `editor` holds, by the target it is drawn as.
+    editor_for: Option<Target>,
+    /// What the boxes' Ctrl+C and Ctrl+X took, for their Ctrl+V. Nothing is
+    /// taken from a masked box.
+    clipboard: String,
     /// Whether the unlock attempt failed.
     unlock_failed: bool,
     /// Scroll offset for the entry list.
@@ -3457,6 +3461,9 @@ impl AppState {
             filtered_ids: Vec::new(),
             audit_issues: Vec::new(),
             master_input: String::new(),
+            editor: TextInput::new(),
+            editor_for: None,
+            clipboard: String::new(),
             unlock_failed: false,
             list_scroll: 0.0,
             detail_scroll: 0.0,
@@ -3509,6 +3516,172 @@ impl AppState {
             return Some(Target::NewField(form.focused));
         }
         Some(Target::Search)
+    }
+
+    /// What the box drawn as `target` holds, while it is drawn.
+    fn box_value(&self, target: Target) -> Option<&str> {
+        match (target, &self.gate, &self.dialog) {
+            (Target::NewPassword, Gate::Create(form), _) => Some(&form.password),
+            (Target::ConfirmPassword, Gate::Create(form), _) => Some(&form.confirm),
+            (Target::MasterInput, _, _) => Some(&self.master_input),
+            (Target::Search, _, _) => Some(&self.search_query),
+            (Target::NewField(index), _, _) => self
+                .new_entry
+                .as_ref()
+                .and_then(|form| form.values.get(index))
+                .map(String::as_str),
+            (Target::RestoreInput, _, Some(VaultDialog::RestorePassword { input, .. })) => {
+                Some(input)
+            }
+            _ => None,
+        }
+    }
+
+    /// The box drawn as `target`'s text, to change.
+    fn box_value_mut(&mut self, target: Target) -> Option<&mut String> {
+        match (target, &mut self.gate, &mut self.dialog) {
+            (Target::NewPassword, Gate::Create(form), _) => Some(&mut form.password),
+            (Target::ConfirmPassword, Gate::Create(form), _) => Some(&mut form.confirm),
+            (Target::MasterInput, _, _) => Some(&mut self.master_input),
+            (Target::Search, _, _) => Some(&mut self.search_query),
+            (Target::NewField(index), _, _) => self
+                .new_entry
+                .as_mut()
+                .and_then(|form| form.values.get_mut(index)),
+            (Target::RestoreInput, _, Some(VaultDialog::RestorePassword { input, .. })) => {
+                Some(input)
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether the box drawn as `target` holds a secret, drawn masked: the
+    /// master passwords and a backup's always, a form's secret field until
+    /// it is shown.
+    fn box_masked(&self, target: Target) -> bool {
+        match target {
+            Target::NewPassword
+            | Target::ConfirmPassword
+            | Target::MasterInput
+            | Target::RestoreInput => true,
+            Target::NewField(index) => {
+                !self.show_password
+                    && self
+                        .new_entry
+                        .as_ref()
+                        .is_some_and(|form| field_is_secret(form.kind, index))
+            }
+            _ => false,
+        }
+    }
+
+    /// Load the box drawn as `target` into the editor unless it holds it
+    /// already, the caret after its text.
+    fn load_box(&mut self, target: Target) {
+        let held = self.box_value(target).unwrap_or_default().to_owned();
+        if self.editor_for != Some(target) || self.editor.text() != held {
+            self.editor.set_text(&held);
+            self.editor_for = Some(target);
+        }
+    }
+
+    /// A key for the box drawn as `target`: the caret keys, Backspace and
+    /// Delete at the caret, Ctrl+A, C, X and V, and typing -- what AltGr
+    /// types among it (Polish `ł` is AltGr+L), and no command's letter,
+    /// which a chord carries as text (Ctrl+V typed a `v` into the master
+    /// password). A masked box is a masked field
+    /// (`textline::apply_masked_key`): its arrows step a character at a
+    /// time and nothing is copied or cut from it. `None` for a key the box
+    /// does not answer, or a box not drawn; else whether the key changed
+    /// its text, caret or selection. The boxes took typing at their end and
+    /// Backspace from it, and nothing else.
+    fn box_key(&mut self, target: Target, key: &KeyEvent) -> Option<bool> {
+        self.box_value(target)?;
+        self.load_box(target);
+        let editor = &self.editor;
+        let before = (
+            editor.text().to_owned(),
+            editor.cursor(),
+            editor.selection_anchor(),
+        );
+        let edit = if self.box_masked(target) {
+            textline::apply_masked_key(&mut self.editor, key, BOX_CAPACITY, &self.clipboard)
+        } else {
+            textline::apply_key(
+                &mut self.editor,
+                key,
+                BOX_CAPACITY,
+                &self.clipboard,
+                DEFAULT_FONT_SIZE,
+            )
+        };
+        if let Some(copied) = edit.copied {
+            self.clipboard = copied;
+        }
+        if !edit.handled {
+            return None;
+        }
+        let typed = self.editor.text().to_owned();
+        if let Some(value) = self.box_value_mut(target)
+            && *value != typed
+        {
+            *value = typed;
+        }
+        let editor = &self.editor;
+        let after = (
+            editor.text().to_owned(),
+            editor.cursor(),
+            editor.selection_anchor(),
+        );
+        Some(after != before)
+    }
+
+    /// Where the caret and the selection anchor of the box drawn as
+    /// `target` are in its text: the editor's while it holds the box, after
+    /// the text and none otherwise.
+    fn box_caret(&self, target: Target) -> (TextCursor, Option<usize>) {
+        let held = self.box_value(target).unwrap_or_default();
+        if self.editor_for == Some(target) && self.editor.text() == held {
+            (self.editor.cursor(), self.editor.selection_anchor())
+        } else {
+            (TextCursor::from(held.len()), None)
+        }
+    }
+
+    /// A press at `x` in the box drawn as `target` at `rect`: the caret
+    /// under the pointer, measured against the box -- its mask, for a secret
+    /// -- as it was drawn.
+    fn press_box(&mut self, target: Target, rect: Rect, x: f32) {
+        let Some(held) = self.box_value(target).map(str::to_owned) else {
+            return;
+        };
+        let (cursor, anchor) = self.box_caret(target);
+        let masked = self.box_masked(target);
+        self.load_box(target);
+        let area = box_text_area(target, rect);
+        let at = if masked {
+            let (shown, drawn, _) = textline::masked(&held, cursor.byte(), anchor, MASK);
+            let on_mask = textedit::cursor_at_click(
+                &shown,
+                TextCursor::from(drawn),
+                area.w,
+                DEFAULT_FONT_SIZE,
+                FontWeightHint::Regular,
+                x - area.x,
+            );
+            TextCursor::from(textline::unmasked(&held, on_mask.byte(), MASK))
+        } else {
+            textedit::cursor_at_click(
+                &held,
+                cursor,
+                area.w,
+                DEFAULT_FONT_SIZE,
+                FontWeightHint::Regular,
+                x - area.x,
+            )
+        };
+        self.editor.set_selection_anchor(None);
+        self.editor.set_cursor(at);
     }
 
     /// How the text box `target` is drawn now: lit under the pointer, marked
@@ -4324,26 +4497,7 @@ fn render_toolbar(frame: &mut Frame, state: &AppState, layout: &Layout) {
         state.field_state(Target::Search, false),
         state.focus_ring_width,
     );
-    let search_text = if state.search_query.is_empty() {
-        "Search..."
-    } else {
-        &state.search_query
-    };
-    let search_color = if state.search_query.is_empty() {
-        state.palette.overlay0
-    } else {
-        state.palette.text
-    };
-    draw_text(
-        frame,
-        search.x + 10.0,
-        search.y + 8.0,
-        search_text,
-        search_color,
-        DEFAULT_FONT_SIZE,
-        FontWeightHint::Regular,
-        Some(search.w - 20.0),
-    );
+    draw_box_text(frame, state, Target::Search, search, "Search...");
     frame.hit(Target::Search, search);
 
     // Sort button
@@ -5686,31 +5840,7 @@ fn render_new_entry_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
 
         // A secret is drawn masked while it is typed, because a password
         // manager is used in front of other people.
-        let raw = form.value(index);
-        let shown = if field_is_secret(form.kind, index) && !state.show_password {
-            "*".repeat(raw.chars().count())
-        } else {
-            raw.to_string()
-        };
-        let text_color = if raw.is_empty() {
-            state.palette.overlay0
-        } else {
-            state.palette.text
-        };
-        draw_text(
-            frame,
-            rect.x + 10.0,
-            rect.y + 8.0,
-            if shown.is_empty() {
-                "-"
-            } else {
-                shown.as_str()
-            },
-            text_color,
-            DEFAULT_FONT_SIZE,
-            FontWeightHint::Regular,
-            Some(inner - 20.0),
-        );
+        draw_box_text(frame, state, Target::NewField(index), rect, "-");
         frame.hit(Target::NewField(index), rect);
         y += 38.0;
     }
@@ -6627,11 +6757,105 @@ fn centred_lines(
 /// A masked password field, with its hit box: the toolkit's field, drawn
 /// from what [`AppState::field_state`] says of `target` and red when
 /// `wrong`.
+/// Where the text of the box drawn as `target` sits in its box at `rect`:
+/// inside its inset, a line high and centred. One answer for the drawing and
+/// for a press.
+fn box_text_area(target: Target, rect: Rect) -> Rect {
+    let inset = match target {
+        Target::Search | Target::NewField(_) => 10.0,
+        _ => 12.0,
+    };
+    let line = text::line_height(DEFAULT_FONT_SIZE, FontWeightHint::Regular).min(rect.h);
+    Rect::new(
+        rect.x + inset,
+        rect.y + (rect.h - line) / 2.0,
+        (rect.w - 2.0 * inset).max(0.0),
+        line,
+    )
+}
+
+/// The text of the box drawn as `target` in its box at `rect`: what it
+/// holds -- a mask for each character of a secret -- with its caret and
+/// selection where they are while it has the keyboard, scrolled so the
+/// caret stays in view; or, empty, `placeholder`, with the caret before it
+/// while it has the keyboard. The boxes drew their text with no caret at
+/// all, cut with an ellipsis at the characters being typed -- and the master
+/// password a mask for each *byte* of it.
+fn draw_box_text(
+    frame: &mut Frame,
+    state: &AppState,
+    target: Target,
+    rect: Rect,
+    placeholder: &str,
+) {
+    let Some(held) = state.box_value(target) else {
+        return;
+    };
+    let area = box_text_area(target, rect);
+    let focused = state.typing_into() == Some(target);
+    let mut tree = RenderTree::new();
+    if held.is_empty() {
+        tree.push(RenderCommand::Text {
+            x: area.x,
+            y: area.y,
+            text: placeholder.to_owned(),
+            color: state.palette.subtext0,
+            font_size: DEFAULT_FONT_SIZE,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(area.w),
+            overflow: TextOverflow::Ellipsis,
+        });
+        if focused {
+            textedit::push_caret(
+                &mut tree,
+                area.x,
+                area.y,
+                area.h,
+                state.palette.text,
+                textedit::CARET_WIDTH,
+            );
+        }
+    } else {
+        // A box without the keyboard reads from its start.
+        let (cursor, anchor) = if focused {
+            state.box_caret(target)
+        } else {
+            (TextCursor::default(), None)
+        };
+        let (shown, cursor, selection_anchor) = if state.box_masked(target) {
+            let (mask, at, anchor) = textline::masked(held, cursor.byte(), anchor, MASK);
+            (mask, TextCursor::from(at), anchor)
+        } else {
+            (held.to_owned(), cursor, anchor)
+        };
+        textedit::draw(
+            &mut tree,
+            &textedit::SingleLine {
+                text: &shown,
+                cursor,
+                selection_anchor,
+                focused,
+                x: area.x,
+                y: area.y,
+                width: area.w,
+                line_height: area.h,
+                font_size: DEFAULT_FONT_SIZE,
+                weight: FontWeightHint::Regular,
+                color: state.palette.text,
+                selection_bg: state.palette.accent,
+                selection_fg: state.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+    }
+    frame.extend(tree.commands);
+}
+
 fn masked_field(
     frame: &mut Frame,
     state: &AppState,
     rect: Rect,
-    (value, placeholder): (&str, &str),
+    placeholder: &str,
     wrong: bool,
     target: Target,
 ) {
@@ -6642,22 +6866,7 @@ fn masked_field(
         state.field_state(target, wrong),
         state.focus_ring_width,
     );
-    let masked = "*".repeat(value.chars().count());
-    let (shown, color) = if masked.is_empty() {
-        (placeholder.to_string(), state.palette.subtext0)
-    } else {
-        (masked, state.palette.text)
-    };
-    draw_text(
-        frame,
-        rect.x + 12.0,
-        rect.y + 12.0,
-        &shown,
-        color,
-        DEFAULT_FONT_SIZE,
-        FontWeightHint::Regular,
-        Some(rect.w - 24.0),
-    );
+    draw_box_text(frame, state, target, rect, placeholder);
     frame.hit(target, rect);
 }
 
@@ -6700,9 +6909,9 @@ fn render_create_panel(
     );
     y += 8.0;
     let field_w = w - 60.0;
-    for (label, value, target) in [
-        ("Master password", &form.password, Target::NewPassword),
-        ("Type it again", &form.confirm, Target::ConfirmPassword),
+    for (label, target) in [
+        ("Master password", Target::NewPassword),
+        ("Type it again", Target::ConfirmPassword),
     ] {
         draw_text(
             frame,
@@ -6719,7 +6928,7 @@ fn render_create_panel(
             frame,
             state,
             Rect::new(px + 30.0, y, field_w, 40.0),
-            (value, ""),
+            "",
             form.wrong == Some(target),
             target,
         );
@@ -6974,12 +7183,12 @@ fn render_vault_dialog(
         );
         y += SMALL_FONT_SIZE + 8.0;
     }
-    if let VaultDialog::RestorePassword { input, error, .. } = dialog {
+    if let VaultDialog::RestorePassword { error, .. } = dialog {
         masked_field(
             frame,
             state,
             Rect::new(px + 24.0, py + h - 100.0, w - 48.0, 36.0),
-            (input, ""),
+            "",
             error.is_some(),
             Target::RestoreInput,
         );
@@ -7090,39 +7299,13 @@ fn render_unlock_panel(frame: &mut Frame, state: &AppState, width: f32, height: 
     let input_w = panel_w - 60.0;
     let input_h = 40.0;
 
-    guitk::field::draw(
+    masked_field(
         frame,
-        &state.palette,
+        state,
         Rect::new(input_x, input_y, input_w, input_h),
-        state.field_state(Target::MasterInput, state.unlock_failed),
-        state.focus_ring_width,
-    );
-
-    // Masked input display
-    let masked: String = "*".repeat(state.master_input.len());
-    let display = if masked.is_empty() {
-        "Password..."
-    } else {
-        &masked
-    };
-    let display_color = if masked.is_empty() {
-        state.palette.overlay0
-    } else {
-        state.palette.text
-    };
-    draw_text(
-        frame,
-        input_x + 12.0,
-        input_y + 12.0,
-        display,
-        display_color,
-        DEFAULT_FONT_SIZE,
-        FontWeightHint::Regular,
-        Some(input_w - 24.0),
-    );
-    frame.hit(
+        "Password...",
+        state.unlock_failed,
         Target::MasterInput,
-        Rect::new(input_x, input_y, input_w, input_h),
     );
 
     // Why it did not open. The usual reason is long -- "that is not its
@@ -7290,18 +7473,21 @@ fn build_render_tree(state: &AppState) -> RenderTree {
 
 /// Keys while the new-entry form is up.
 fn handle_new_entry_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
-    // What a key typed goes into the field -- AltGr's characters among it,
-    // and not a command's letter, which a chord carries as text: Ctrl+L
-    // typed an `l` into a password. The form's own keys are taken plain.
-    if textline::types_into_field(key) {
-        let typed: String = key.typed().collect();
-        if let Some(form) = state.new_entry.as_mut() {
-            form.type_text(&typed);
-        }
-        return EventResult::Consumed;
-    }
-    if !textline::is_plain(key.modifiers) {
-        return EventResult::Ignored;
+    // The form's own keys, taken plain: Escape, Enter, Tab and Down.
+    // Every other key is the field's (`box_key`) -- AltGr's characters
+    // among it, and not a command's letter, which a chord carries as text:
+    // Ctrl+L typed an `l` into a password.
+    let own = textline::is_plain(key.modifiers)
+        && matches!(key.key, Key::Escape | Key::Enter | Key::Tab | Key::Down);
+    if !own {
+        let Some(target) = state.typing_into() else {
+            return EventResult::Ignored;
+        };
+        return if state.box_key(target, key) == Some(true) {
+            EventResult::Consumed
+        } else {
+            EventResult::Ignored
+        };
     }
     match key.key {
         Key::Escape => {
@@ -7323,17 +7509,6 @@ fn handle_new_entry_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
                 form.focus_next();
             }
             EventResult::Consumed
-        }
-        Key::Backspace => {
-            let changed = state
-                .new_entry
-                .as_mut()
-                .is_some_and(NewEntryForm::backspace);
-            if changed {
-                EventResult::Consumed
-            } else {
-                EventResult::Ignored
-            }
         }
         _ => EventResult::Ignored,
     }
@@ -7538,47 +7713,21 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
             Gate::Unlock => None,
             // Nothing to type into and nothing to do: the file is left alone.
             Gate::Unreadable(_) => return EventResult::Consumed,
-            // What a key typed goes into the password -- AltGr's characters
-            // among it (Polish `ł` is AltGr+L), and not a command's letter,
-            // which a chord carries as text: Ctrl+V typed a `v` into the
-            // master password. The form's own keys are taken plain.
-            Gate::Create(form) if textline::types_into_field(key) => {
-                let field = if form.confirming {
-                    &mut form.confirm
-                } else {
-                    &mut form.password
-                };
-                field.extend(key.typed());
-                form.error = None;
-                form.wrong = None;
-                Some(false)
-            }
-            Gate::Create(_) if !textline::is_plain(key.modifiers) => {
-                return EventResult::Ignored;
-            }
-            Gate::Create(form) => Some(match key.key {
-                Key::Enter if form.confirming => true,
+            // The form's own keys, taken plain; every other key is its
+            // boxes' (`box_key`).
+            Gate::Create(form) if textline::is_plain(key.modifiers) => match key.key {
+                Key::Enter if form.confirming => Some(true),
                 Key::Enter | Key::Tab => {
                     form.confirming = true;
-                    false
-                }
-                Key::Backspace => {
-                    let field = if form.confirming {
-                        &mut form.confirm
-                    } else {
-                        &mut form.password
-                    };
-                    field.pop();
-                    form.error = None;
-                    form.wrong = None;
-                    false
+                    Some(false)
                 }
                 Key::Escape => {
                     *form = NewVault::default();
-                    false
+                    Some(false)
                 }
-                _ => return EventResult::Ignored,
-            }),
+                _ => None,
+            },
+            Gate::Create(_) => None,
         };
         if let Some(create) = create {
             if create {
@@ -7586,28 +7735,47 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
             }
             return EventResult::Consumed;
         }
-        // The master password, as the new vault's is typed.
-        if textline::types_into_field(key) {
-            state.master_input.extend(key.typed());
-            state.unlock_failed = false;
-            return EventResult::Consumed;
+        if matches!(state.gate, Gate::Unlock) && textline::is_plain(key.modifiers) {
+            match key.key {
+                Key::Enter => {
+                    attempt_unlock(state);
+                    return EventResult::Consumed;
+                }
+                Key::Escape => {
+                    state.master_input.clear();
+                    state.unlock_failed = false;
+                    return EventResult::Consumed;
+                }
+                _ => {}
+            }
         }
-        if !textline::is_plain(key.modifiers) {
+        // Every other key is the box with the keyboard's: the master
+        // password, or the new vault's two. An edit puts away what was
+        // said of the last attempt.
+        let Some(target) = state.typing_into() else {
             return EventResult::Ignored;
-        }
-        match key.key {
-            Key::Enter => attempt_unlock(state),
-            Key::Backspace => {
-                state.master_input.pop();
+        };
+        return match state.box_key(target, key) {
+            Some(changed) => {
+                // Any key the box answers puts away what was said of the last
+                // attempt, as typing and Backspace did -- a Backspace in a box
+                // emptied for the retyping among them.
+                let said = state.unlock_failed
+                    || matches!(&state.gate, Gate::Create(form)
+                        if form.error.is_some() || form.wrong.is_some());
                 state.unlock_failed = false;
+                if let Gate::Create(form) = &mut state.gate {
+                    form.error = None;
+                    form.wrong = None;
+                }
+                if changed || said {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
             }
-            Key::Escape => {
-                state.master_input.clear();
-                state.unlock_failed = false;
-            }
-            _ => return EventResult::Ignored,
-        }
-        return EventResult::Consumed;
+            None => EventResult::Ignored,
+        };
     }
 
     // F1 raises the list of keys over the open vault, from a dialog, the
@@ -7652,6 +7820,7 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
     // search, and not a command's letter; the list's keys are taken plain,
     // so Alt+Delete does not ask to delete an entry.
     let chord = textline::is_ctrl_chord(key.modifiers);
+    let plain = textline::is_plain(key.modifiers);
     let result = match key.key {
         Key::L if chord => {
             state.lock_vault();
@@ -7674,33 +7843,29 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
             open_edit_entry(state);
             EventResult::Consumed
         }
-        _ if textline::types_into_field(key) => {
-            state.search_query.extend(key.typed());
-            state.refresh_filter();
-            state.clamp_scroll();
-            EventResult::Consumed
-        }
-        _ if !textline::is_plain(key.modifiers) => EventResult::Ignored,
-        Key::Delete if state.selected_entry_id.is_some() => {
+        // The list's keys, taken plain -- Alt+Delete asked to delete an
+        // entry -- and ahead of the search's: Delete asks to delete the
+        // selected entry, Up and Down move through the entries.
+        Key::Delete if plain && state.selected_entry_id.is_some() => {
             ask_delete(state);
             EventResult::Consumed
         }
-        Key::Escape => {
+        Key::Escape if plain => {
             state.search_query.clear();
             state.detail_view = DetailView::EntryDetail;
             state.refresh_filter();
             state.clamp_scroll();
             EventResult::Consumed
         }
-        Key::Up => {
+        Key::Up if plain => {
             navigate_entry_list(state, -1);
             EventResult::Consumed
         }
-        Key::Down => {
+        Key::Down if plain => {
             navigate_entry_list(state, 1);
             EventResult::Consumed
         }
-        Key::Enter => {
+        Key::Enter if plain => {
             if state.detail_view == DetailView::PasswordGenerator {
                 regenerate_password(state);
                 EventResult::Consumed
@@ -7708,13 +7873,28 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
                 EventResult::Ignored
             }
         }
-        Key::Backspace if !state.search_query.is_empty() => {
-            state.search_query.pop();
-            state.refresh_filter();
-            state.clamp_scroll();
-            EventResult::Consumed
+        // Every other key is the search's (`box_key`): the caret keys,
+        // Backspace and Delete at the caret -- Delete with no entry selected
+        // -- Ctrl+A, C, X and V, and typing, AltGr's among it and no
+        // command's letter. The search took typing at its end and Backspace
+        // from it, and nothing else.
+        _ => {
+            let before = state.search_query.clone();
+            match state.box_key(Target::Search, key) {
+                Some(changed) => {
+                    if state.search_query != before {
+                        state.refresh_filter();
+                        state.clamp_scroll();
+                    }
+                    if changed {
+                        EventResult::Consumed
+                    } else {
+                        EventResult::Ignored
+                    }
+                }
+                None => EventResult::Ignored,
+            }
         }
-        _ => EventResult::Ignored,
     };
 
     // Only a keystroke the app acted on postpones the auto-lock. A modifier
@@ -7843,10 +8023,31 @@ fn handle_mouse(state: &mut AppState, mouse: &MouseEvent) -> EventResult {
 /// offsets -- and one of them, the detail panel's, was an empty stub. That the
 /// numbers agreed with the renderer's was a coincidence maintained by hand.
 fn handle_click(state: &mut AppState, x: f32, y: f32) -> EventResult {
-    let Some(target) = state.target_at(x, y) else {
+    let frame = state.frame(state.width, state.height);
+    let Some(target) = frame.hit_test(x, y) else {
         return EventResult::Ignored;
     };
-    act_on(state, target)
+    // A press in a box: what the box was, and where it was drawn, before
+    // the press gives it the keyboard.
+    let rect = frame.rect_of(|t| *t == target);
+    let drawn_focused = state.typing_into() == Some(target);
+    let result = act_on(state, target);
+    // The box the press gave the keyboard to: the caret under the pointer.
+    // One without the keyboard was drawn from its start, so its caret is
+    // measured from there.
+    if let Some(rect) = rect
+        && state.typing_into() == Some(target)
+        && state.box_value(target).is_some()
+    {
+        if !drawn_focused {
+            state.load_box(target);
+            state.editor.set_cursor(TextCursor::default());
+            state.editor.set_selection_anchor(None);
+        }
+        state.press_box(target, rect, x);
+        return EventResult::Consumed;
+    }
+    result
 }
 
 /// What pressing a target does.
@@ -8095,25 +8296,30 @@ fn dialog_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
     // What a key types goes into the password being asked for -- not a
     // command's letter -- and the dialog's own keys are taken plain: Alt+Enter
     // answered "delete this entry?" with yes.
-    let then = match (&mut state.dialog, key.key) {
-        (Some(VaultDialog::RestorePassword { input, error, .. }), _)
-            if textline::types_into_field(key) =>
+    let plain = textline::is_plain(key.modifiers);
+    let dialog_key = plain && matches!(key.key, Key::Escape | Key::Enter);
+    if !dialog_key && matches!(state.dialog, Some(VaultDialog::RestorePassword { .. })) {
+        let changed = state.box_key(Target::RestoreInput, key);
+        // Any key the box answers puts away what was said of the last try.
+        let mut said = false;
+        if changed.is_some()
+            && let Some(VaultDialog::RestorePassword { error, .. }) = &mut state.dialog
         {
-            input.extend(key.typed());
-            *error = None;
-            Then::Nothing
+            said = error.take().is_some();
         }
-        _ if !textline::is_plain(key.modifiers) => Then::Nothing,
+        return if changed == Some(true) || said {
+            EventResult::Consumed
+        } else {
+            EventResult::Ignored
+        };
+    }
+    let then = match (&mut state.dialog, key.key) {
+        _ if !plain => Then::Nothing,
         (_, Key::Escape) => Then::Close,
         (Some(VaultDialog::ExportWarning), Key::Enter) => Then::Export,
         (Some(VaultDialog::RestorePassword { .. }), Key::Enter) => Then::Open,
         (Some(VaultDialog::RestoreConfirm { .. }), Key::Enter) => Then::Replace,
         (Some(VaultDialog::DeleteConfirm { id }), Key::Enter) => Then::Delete(*id),
-        (Some(VaultDialog::RestorePassword { input, error, .. }), Key::Backspace) => {
-            input.pop();
-            *error = None;
-            Then::Nothing
-        }
         _ => Then::Nothing,
     };
     match then {
@@ -11515,6 +11721,9 @@ mod tests {
             state.search_query, "ł",
             "the search typed a command or lost AltGr's ł"
         );
+        // The list's keys are taken plain: Alt+Escape is no Escape.
+        handle_event(&mut state, &key(Key::Escape, "", Modifiers::alt()));
+        assert_eq!(state.search_query, "ł", "Alt+Escape cleared the search");
         assert!(
             !matches!(state.on_event(&key(Key::Q, "@", altgr)), Response::Exit),
             "AltGr+Q closed the window"
@@ -12369,9 +12578,7 @@ mod tests {
             "old-password",
             "the form did not open on the entry"
         );
-        form.focus(2);
-        while form.backspace() {}
-        form.type_text("new-password");
+        form.values[2] = String::from("new-password");
         assert!(save_new_entry(&mut state));
 
         assert_eq!(state.vault.entries.len(), 1, "an edit added an entry");
@@ -12419,9 +12626,7 @@ mod tests {
         state.selected_entry_id = Some(id);
         open_edit_entry(&mut state);
         let form = state.new_entry.as_mut().unwrap();
-        form.focus(2);
-        while form.backspace() {}
-        form.type_text("01/31");
+        form.values[2] = String::from("01/31");
         assert!(save_new_entry(&mut state));
         let EntryData::CreditCard(card) = &state.vault.get_entry(id).unwrap().data else {
             panic!()
@@ -13147,5 +13352,291 @@ mod tests {
         let mut again = reopen(&scratch);
         assert!(again.vault.unlock(MASTER, again.now));
         assert_eq!(again.vault.entries.len(), 1, "the login was not kept");
+    }
+
+    // -- The boxes edit at a caret ---------------------------------------------------
+
+    fn ctrl_key(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::ctrl(),
+            text: String::new(),
+        })
+    }
+
+    /// The x of every caret drawn inside `area`.
+    fn carets_in(state: &AppState, area: Rect) -> Vec<f32> {
+        state
+            .frame(state.width, state.height)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Line {
+                    x1, x2, y1, width, ..
+                } if (x1 - x2).abs() < f32::EPSILON
+                    && (width - textedit::CARET_WIDTH).abs() < f32::EPSILON
+                    && area.contains(*x1, *y1 + 1.0) =>
+                {
+                    Some(*x1)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Whether `text` is drawn with some of it selected.
+    fn drawn_selected(state: &AppState, text: &str) -> bool {
+        state
+            .frame(state.width, state.height)
+            .commands()
+            .iter()
+            .any(|c| matches!(c, RenderCommand::RichText { text: t, spans, .. } if t == text && !spans.is_empty()))
+    }
+
+    /// Where the caret of `target`'s box, showing `shown`, is drawn after
+    /// `chars` characters, and whether it is drawn there and only there.
+    fn caret_after(state: &AppState, target: Target, shown: &str, byte: usize) -> bool {
+        let rect = probe::rect_of(state, target).expect("the box");
+        let area = box_text_area(target, rect);
+        let at = area.x
+            + text::caret_x(
+                shown,
+                TextCursor::from(byte),
+                DEFAULT_FONT_SIZE,
+                FontWeightHint::Regular,
+            );
+        let carets = carets_in(state, rect);
+        carets.len() == 1 && carets.iter().all(|x| (x - at).abs() < 0.5)
+    }
+
+    /// **The search edits at a caret**: the arrows, Home and End move it,
+    /// typing goes where it is, Delete deletes at it with no entry
+    /// selected, Ctrl+A, C, X and V select, copy, cut and paste, a press
+    /// puts it where it lands -- and it and the selection are drawn where
+    /// they are. It took typing at its end and Backspace from it, and
+    /// nothing else, and drew no caret.
+    #[test]
+    fn the_search_edits_at_a_caret() {
+        let mut state = unlocked_app();
+        state.selected_entry_id = None;
+        type_in(&mut state, "bnk");
+        handle_event(&mut state, &key(Key::Left));
+        handle_event(&mut state, &key(Key::Left));
+        type_in(&mut state, "a");
+        assert_eq!(state.search_query, "bank", "the caret did not move");
+        assert!(
+            caret_after(&state, Target::Search, "bank", 2),
+            "the caret is not drawn after the `ba`"
+        );
+        handle_event(&mut state, &key(Key::Home));
+        handle_event(&mut state, &key(Key::Delete));
+        assert_eq!(state.search_query, "ank", "Delete at the caret");
+        type_in(&mut state, "b");
+        handle_event(&mut state, &ctrl_key(Key::A));
+        assert!(drawn_selected(&state, "bank"), "the selection is not drawn");
+        handle_event(&mut state, &ctrl_key(Key::C));
+        handle_event(&mut state, &ctrl_key(Key::X));
+        assert_eq!(state.search_query, "", "Ctrl+A and Ctrl+X");
+        handle_event(&mut state, &ctrl_key(Key::V));
+        assert_eq!(state.search_query, "bank", "Ctrl+C or Ctrl+V");
+
+        let rect = probe::rect_of(&state, Target::Search).expect("the search box");
+        let area = box_text_area(Target::Search, rect);
+        let mid = area.y + area.h / 2.0;
+        handle_event(&mut state, &key(Key::End));
+        press_at(&mut state, area.x + 0.5, mid);
+        type_in(&mut state, "<");
+        press_at(&mut state, area.right() - 1.0, mid);
+        type_in(&mut state, ">");
+        assert_eq!(
+            state.search_query, "<bank>",
+            "a press did not put the caret where it landed"
+        );
+    }
+
+    /// **Delete with an entry selected is the list's**: it asks to delete
+    /// the entry, whatever the search holds.
+    #[test]
+    fn delete_with_an_entry_selected_asks_to_delete_it() {
+        let (mut state, id) = app_with_a_login();
+        // Used now, or the first key finds it idle since time 100 and locks it.
+        state.vault.touch(state.now);
+        type_in(&mut state, "ba");
+        assert_eq!(
+            (
+                state.search_query.as_str(),
+                state.selected_entry_id,
+                state.vault.is_unlocked()
+            ),
+            ("ba", Some(id), true),
+            "control: the search took the typing and the entry stayed selected"
+        );
+        handle_event(&mut state, &key(Key::Home));
+        handle_event(&mut state, &key(Key::Delete));
+        assert!(
+            matches!(state.dialog, Some(VaultDialog::DeleteConfirm { id: d }) if d == id),
+            "Delete did not ask to delete the entry"
+        );
+        assert_eq!(state.search_query, "ba", "Delete edited the search");
+    }
+
+    /// **The master password edits at a caret**, a masked field: the
+    /// arrows step a mask at a time, the caret is drawn where it stands on
+    /// the characters -- one mask for each character, where it was one for
+    /// each byte -- nothing is copied or cut from it, and a press puts the
+    /// caret where it lands.
+    #[test]
+    fn the_master_password_edits_at_a_caret() {
+        let mut state = AppState::for_test();
+        assert!(!state.vault.is_unlocked());
+        type_in(&mut state, "s\u{e9}crt");
+        handle_event(&mut state, &key(Key::Left));
+        type_in(&mut state, "e");
+        assert_eq!(state.master_input, "s\u{e9}cret", "the caret did not move");
+        assert!(
+            caret_after(&state, Target::MasterInput, "******", 5),
+            "the caret is not drawn after the fifth mask, one mask a character"
+        );
+        handle_event(&mut state, &ctrl_key(Key::A));
+        handle_event(&mut state, &ctrl_key(Key::C));
+        handle_event(&mut state, &ctrl_key(Key::X));
+        assert_eq!(
+            (state.master_input.as_str(), state.clipboard.as_str()),
+            ("s\u{e9}cret", ""),
+            "a hidden password was copied or cut"
+        );
+        let rect = probe::rect_of(&state, Target::MasterInput).expect("the box");
+        let area = box_text_area(Target::MasterInput, rect);
+        press_at(&mut state, area.x + 0.5, area.y + area.h / 2.0);
+        type_in(&mut state, "<");
+        assert_eq!(
+            state.master_input, "<s\u{e9}cret",
+            "the press did not put the caret there"
+        );
+    }
+
+    /// **The new vault's two boxes edit at a caret**, each its own.
+    #[test]
+    fn the_new_vaults_boxes_edit_at_a_caret() {
+        let (_scratch, mut state) = first_run("caret_create");
+        assert!(matches!(state.gate, Gate::Create(_)));
+        type_in(&mut state, "pasword");
+        for _ in 0..4 {
+            handle_event(&mut state, &key(Key::Left));
+        }
+        type_in(&mut state, "s");
+        handle_event(&mut state, &key(Key::Tab));
+        type_in(&mut state, "password");
+        let Gate::Create(form) = &state.gate else {
+            panic!("the form went away");
+        };
+        assert_eq!(
+            (form.password.as_str(), form.confirm.as_str()),
+            ("password", "password"),
+            "the caret did not move, or Tab took it to the second box"
+        );
+    }
+
+    /// **A form's fields edit at a caret, and a secret one is a masked
+    /// field until it is shown**: nothing is copied from it hidden, and
+    /// shown it copies as any box does.
+    #[test]
+    fn a_forms_fields_edit_at_a_caret() {
+        let mut state = unlocked_app();
+        press(&mut state, Target::Add);
+        assert_eq!(state.typing_into(), Some(Target::NewField(0)));
+        type_in(&mut state, "bnk");
+        handle_event(&mut state, &key(Key::Left));
+        handle_event(&mut state, &key(Key::Left));
+        type_in(&mut state, "a");
+        assert_eq!(state.new_entry.as_ref().unwrap().value(0), "bank");
+        assert!(
+            caret_after(&state, Target::NewField(0), "bank", 2),
+            "the caret is not drawn after the `ba`"
+        );
+
+        handle_event(&mut state, &key(Key::Tab));
+        handle_event(&mut state, &key(Key::Tab));
+        assert_eq!(state.typing_into(), Some(Target::NewField(2)));
+        type_in(&mut state, "hunter2");
+        handle_event(&mut state, &ctrl_key(Key::A));
+        handle_event(&mut state, &ctrl_key(Key::C));
+        assert_eq!(state.clipboard, "", "a hidden password was copied");
+        state.show_password = true;
+        handle_event(&mut state, &ctrl_key(Key::A));
+        handle_event(&mut state, &ctrl_key(Key::C));
+        assert_eq!(state.clipboard, "hunter2", "a shown password did not copy");
+
+        // A press in another field puts the keyboard there, and the caret
+        // where it landed -- at the end here, not the start a field the
+        // keyboard moves to begins with.
+        let rect = probe::rect_of(&state, Target::NewField(0)).expect("the first field");
+        let area = box_text_area(Target::NewField(0), rect);
+        press_at(&mut state, area.right() - 1.0, area.y + area.h / 2.0);
+        type_in(&mut state, ">");
+        assert_eq!(state.new_entry.as_ref().unwrap().value(0), "bank>");
+    }
+
+    /// **Every edit of the search filters the list by it**: a Backspace, a
+    /// cut and a paste as much as a letter typed.
+    #[test]
+    fn an_edit_of_the_search_filters_the_list() {
+        let (mut state, id) = app_with_a_login();
+        state.vault.touch(state.now);
+        state.selected_entry_id = None;
+        type_in(&mut state, "bankx");
+        assert!(state.filtered_ids.is_empty(), "nothing is called bankx");
+        handle_event(&mut state, &key(Key::Backspace));
+        assert_eq!(state.filtered_ids, [id], "a Backspace did not filter again");
+        handle_event(&mut state, &ctrl_key(Key::A));
+        handle_event(&mut state, &ctrl_key(Key::X));
+        assert_eq!(
+            state.filtered_ids,
+            [id],
+            "the empty search lists everything"
+        );
+        type_in(&mut state, "zz");
+        handle_event(&mut state, &ctrl_key(Key::A));
+        handle_event(&mut state, &ctrl_key(Key::V));
+        assert_eq!(state.search_query, "bank");
+        assert_eq!(state.filtered_ids, [id], "a paste did not filter again");
+    }
+
+    /// **The restore dialog's password edits at a caret**, a masked field,
+    /// and any key it answers puts away what was said of the last try.
+    #[test]
+    fn the_restore_password_edits_at_a_caret() {
+        let mut state = unlocked_app();
+        state.dialog = Some(VaultDialog::RestorePassword {
+            path: PathBuf::from("backup.vault"),
+            backup: Box::new(Vault::for_test("Backup", TEST_MASTER_PASSWORD)),
+            input: String::new(),
+            error: Some(String::from("that is not its password")),
+        });
+        type_in(&mut state, "ac");
+        handle_event(&mut state, &key(Key::Left));
+        type_in(&mut state, "b");
+        let Some(VaultDialog::RestorePassword { input, error, .. }) = &state.dialog else {
+            panic!("the dialog went away");
+        };
+        assert_eq!(input, "abc", "the caret did not move");
+        assert!(error.is_none(), "an edit left the last try's error up");
+    }
+
+    /// **A box edits the text it shows**, however that text came to be in
+    /// it.
+    #[test]
+    fn a_box_edits_the_text_it_shows() {
+        let mut state = unlocked_app();
+        state.selected_entry_id = None;
+        type_in(&mut state, "ab");
+        handle_event(&mut state, &key(Key::Home));
+        state.search_query = String::from("cd");
+        type_in(&mut state, "!");
+        assert_eq!(
+            state.search_query, "cd!",
+            "the key edited the search the editor held"
+        );
     }
 }

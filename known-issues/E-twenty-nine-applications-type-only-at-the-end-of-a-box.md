@@ -1,6 +1,8 @@
 ### [E] Twenty-nine applications' text boxes type only at the end -- 2026-10-04
 
-**Status:** OPEN
+**Status:** FIXED on lane E's branch, 2026-10-04 -- every one of the
+twenty-nine edits at a caret. Moves to `known-issues-resolved/` once it is
+on `main` and boot-tested.
 
 **In short:** in twenty-nine applications a text box takes typing only at
 its end. There is no caret to move: the arrow keys, Home and End do nothing
@@ -18,8 +20,7 @@ and Backspace `pop`s it.
 **Found** 2026-10-04, adding vpnmanager's list of keys
 (`known-issues-resolved/E-thirty-applications-answer-f1-with-nothing.md`).
 
-**The twenty-nine:** credmanager (the entry form, the master password,
-search).
+**The twenty-nine:** none left -- every one is done (below).
 
 Not among them: `terminal`, whose typing goes to the shell's own line
 editor; `typingtutor`, where a line typed straight through is the exercise;
@@ -102,4 +103,7 @@ dictionary (2026-10-04: the query edits at a caret; AltGr types into it;
 Ctrl+Home and Ctrl+End take the list to its ends); lockscreen (2026-10-04:
 the password edits at a caret between its dots, a masked field's);
 passwordgen (2026-10-04: the analyser's box edits at a caret, a masked
-field's while hidden).
+field's while hidden); credmanager (2026-10-04: the master password, the new
+vault's two, the entry form's fields, the search and a backup's password
+edit at a caret -- a secret one between its asterisks, a masked field's; a
+key the box answers puts the last refusal away).

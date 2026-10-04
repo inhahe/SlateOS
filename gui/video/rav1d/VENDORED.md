@@ -54,7 +54,11 @@ paths are held to the same results by its test suite.
    calls (`src/wrap_fn_ptr.rs`, allowed on the item), a struct nothing
    constructs (`src/internal.rs`, allowed on the item), and -- in a release
    build only -- a method only the debug build's overlap checks call
-   (`Bounds::overlaps`, `src/disjoint_mut.rs`, now compiled with them). Its
+   (`Bounds::overlaps`, `src/disjoint_mut.rs`, now compiled with them, as
+   is its test, `test_range_overlap`, so the crate's tests build in release
+   too), and in the release build's own test, `test_pointer_write_release`,
+   three `unsafe` blocks around `DisjointMut::index`, which this release
+   made safe (removed). Its
    clippy also asks for a safety comment on four `unsafe impl Send`/`Sync`
    (`src/internal.rs`) that upstream marks with a TODO to remove once the
    types are thread-safe; those are allowed on the item as upstream wrote

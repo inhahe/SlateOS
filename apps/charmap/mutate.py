@@ -106,18 +106,11 @@ MUTATIONS += [
         "        if false {\n            let mut tree = RenderTree::new();\n",
         [TYPED, CLOSE],
     ),
-    (
-        "AltGr's characters are refused",
-        "                if self.search_active && textline::types_into_field(event) {\n",
-        "                if self.search_active && !event.modifiers.ctrl && textline::types_into_field(event) {\n",
-        [ALTGR],
-    ),
-    (
-        "a command's letter is typed",
-        "                if self.search_active && textline::types_into_field(event) {\n",
-        "                if self.search_active && event.types_text() {\n",
-        [ALTGR],
-    ),
+    # No rows for "AltGr's characters are refused" or "a command's letter is
+    # typed": since 2026-10-04 the search's typing is textline::apply_key's,
+    # which makes both distinctions itself, in its own crate and with its own
+    # tests; altgr_types_into_the_search_and_a_command_does_not still holds the
+    # search to them.
     (
         "AltGr+C copies",
         "        let ctrl = textline::is_ctrl_chord(event.modifiers);\n",
@@ -135,6 +128,96 @@ MUTATIONS += [
         "            Target::SearchClose => self.set_search_active(false),\n",
         "            Target::SearchClose => {}\n",
         [CLOSE],
+    ),
+]
+
+# The search edits at a caret (2026-10-04,
+# known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box): it
+# took typing at its end and Backspace from it, and nothing else.
+EDITS = "the_search_edits_at_a_caret"
+COPY = "ctrl_c_copies_the_character_unless_the_query_is_selected"
+GRID = "the_grid_keeps_its_keys_beside_the_search"
+CTRL_F = "ctrl_f_with_the_search_open_selects_the_query"
+SHOWN = "the_search_edits_what_it_shows"
+
+MUTATIONS += [
+    (
+        "the open search's keys are the grid's",
+        "        if self.search_active && self.search_takes(event) {\n",
+        "        if false {\n",
+        [EDITS, GRID],
+    ),
+    (
+        "Ctrl+C copies the query with none of it selected",
+        "                self.search_editor.text() == self.search_query && self.search_editor.has_selection()\n",
+        "                self.search_editor.text() == self.search_query\n",
+        [COPY],
+    ),
+    (
+        "Ctrl+C never copies the query",
+        "                self.search_editor.text() == self.search_query && self.search_editor.has_selection()\n",
+        "                false\n",
+        [EDITS],
+    ),
+    (
+        "a cut or a copy takes nothing to the clipboard",
+        "            self.clipboard = Some(copied);\n",
+        "            let _ = copied;\n",
+        [EDITS],
+    ),
+    (
+        "a paste pastes nothing",
+        "            self.clipboard.as_deref().unwrap_or(\"\"),\n",
+        "            \"\",\n",
+        [EDITS, COPY],
+    ),
+    (
+        "an edit of the query is not searched for",
+        "            self.search_query = self.search_editor.text().to_owned();\n"
+        "            self.perform_search();\n",
+        "            self.search_query = self.search_editor.text().to_owned();\n",
+        [EDITS],
+    ),
+    (
+        "every key the search answers is a redraw",
+        "            ) != before,\n",
+        "            ) != before || true,\n",
+        [GRID],
+    ),
+    (
+        "a key finds the editor holding another query",
+        "        if self.search_editor.text() != self.search_query {\n"
+        "            self.search_editor.set_text(&self.search_query);",
+        "        if false {\n"
+        "            self.search_editor.set_text(&self.search_query);",
+        [SHOWN],
+    ),
+    (
+        "Ctrl+F with the search open does not select the query",
+        "                self.search_editor.select_all();\n",
+        "",
+        [CTRL_F],
+    ),
+    (
+        "the query's caret is drawn at its end",
+        "            let (cursor, selection_anchor) = self.search_caret();\n",
+        "            let (cursor, selection_anchor) = (\n"
+        "                guitk::text::TextCursor::from(self.search_query.len()),\n"
+        "                None,\n"
+        "            );\n",
+        [EDITS],
+    ),
+    (
+        "a press puts the caret at the start",
+        "            x - area.x,\n",
+        "            0.0,\n",
+        [EDITS],
+    ),
+    (
+        "a press in the box does not place the caret",
+        "                self.press_search(self.layout().search, x);\n",
+        "",
+        [EDITS],
     ),
 ]
 

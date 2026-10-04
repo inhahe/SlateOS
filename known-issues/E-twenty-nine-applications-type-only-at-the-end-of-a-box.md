@@ -18,10 +18,10 @@ and Backspace `pop`s it.
 **Found** 2026-10-04, adding vpnmanager's list of keys
 (`known-issues-resolved/E-thirty-applications-answer-f1-with-nothing.md`).
 
-**The twenty-nine:** charmap (search), clipmanager (its form), credmanager
-(the entry form, the master password, search), dbviewer (cell editing),
-dictionary (the query), filesearch (the query), lockscreen (the password),
-passwordgen (its input).
+**The twenty-nine:** clipmanager (its form), credmanager (the entry form,
+the master password, search), dbviewer (cell editing), dictionary (the
+query), filesearch (the query), lockscreen (the password), passwordgen (its
+input).
 
 Not among them: `terminal`, whose typing goes to the shell's own line
 editor; `typingtutor`, where a line typed straight through is the exercise;
@@ -92,4 +92,6 @@ contact); diagram (2026-10-04: a shape's or a line's label edits at a caret,
 pressed where it is drawn); mindmap (2026-10-04: a node's text and the find
 bar's query edit at a caret; the search reads the outline's order and
 follows changes); undelete (2026-10-04: the results' search edits at a
-caret; Ctrl+Home and Ctrl+End take the files to their ends).
+caret; Ctrl+Home and Ctrl+End take the files to their ends); charmap
+(2026-10-04: the search edits at a caret; Ctrl+C still copies the character
+unless some of the query is selected).

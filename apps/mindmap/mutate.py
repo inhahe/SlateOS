@@ -30,6 +30,7 @@ from mutation_harness import sweep  # noqa: E402  (path set above)
 SRC = Path(__file__).parent / "src" / "main.rs"
 
 ROUND = "a_map_saved_and_opened_again_is_the_same_map"
+CARD = "the_shortcut_card_takes_every_key_and_press_while_it_is_up"
 NUMBERS = "a_node_added_after_opening_takes_a_number_of_its_own"
 CTRL_S = "ctrl_s_saves_over_the_maps_own_file_and_asks_only_when_it_has_none"
 MARK = "a_change_marks_the_map_and_the_title_and_tab_say_so"
@@ -524,6 +525,55 @@ MUTATIONS = [
         "                    return EventResult::Ignored;\n                }\n"
         "                let mut q = self.search_query.clone();",
         ["a_node_and_the_search_box_take_altgr_letters_and_no_commands_letter"],
+    ),
+    # -- the shortcut card is modal, for the keys and the pointer
+    (
+        "the card is modal for nothing",
+        "        if self.show_help {\n            match event {\n",
+        "        if false && self.show_help {\n            match event {\n",
+        [CARD],
+    ),
+    (
+        "a key that is not the card's acts behind it",
+        "                        return EventResult::Consumed;\n"
+        "                    }\n"
+        "                    return EventResult::Ignored;\n",
+        "                        return EventResult::Consumed;\n"
+        "                    }\n",
+        [CARD],
+    ),
+    (
+        "? does not put the card away",
+        "                        || key_ev.key == Key::Slash && key_ev.modifiers.shift;\n",
+        "                        || false;\n",
+        [CARD],
+    ),
+    (
+        "Escape does not put the card away",
+        "                    let closes = matches!(key_ev.key, Key::F1 | Key::Escape)\n",
+        "                    let closes = matches!(key_ev.key, Key::F1)\n",
+        [CARD],
+    ),
+    (
+        "a press goes through the card",
+        "                    MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n"
+        "                        self.show_help = false;\n"
+        "                        return EventResult::Consumed;\n"
+        "                    }\n",
+        "",
+        [CARD],
+    ),
+    (
+        "only the left button puts the card away",
+        "                    MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n",
+        "                    MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_) => {\n",
+        [CARD],
+    ),
+    (
+        "the wheel zooms what the card covers",
+        "                    MouseEventKind::Scroll { .. } => return EventResult::Ignored,\n",
+        "",
+        [CARD],
     ),
 ]
 

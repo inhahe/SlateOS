@@ -278,6 +278,23 @@ pub struct Plane<T> {
 /// A decoded picture.
 pub struct Picture(Rav1dPicture);
 
+// SAFETY: a picture the decoder has handed out is finished. dav1d -- and so
+// rav1d -- outputs a frame only once every row of it is decoded (with frame
+// threads, after waiting on the frame's condition variable under the task
+// lock, which also orders the worker's writes before this thread's reads);
+// film grain is applied into a copy; and from then on the decoder only reads
+// the frame, as a reference for the frames after it, perhaps on its worker
+// threads. So for as long as this holds it, the picture's pixels are
+// immutable, its buffers live as long as the `Arc` this holds (whose count is
+// atomic), and they are freed through rav1d's picture allocator, which any
+// thread may call. Moving a picture to another thread, and reading it there
+// while decoder threads read it too, is reading immutable memory from two
+// threads. What keeps the compiler from seeing this is the raw pointer in
+// `Rav1dPictureDataComponentInner` behind the picture's `DisjointMut` -- the
+// same pointer upstream's own threads reach through the `unsafe impl Send`s
+// of `src/internal.rs`.
+unsafe impl Send for Picture {}
+
 impl Picture {
     /// The frame's size in pixels.
     pub fn size(&self) -> (u32, u32) {

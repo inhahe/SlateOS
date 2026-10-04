@@ -4093,7 +4093,7 @@ impl NotesApp {
                         y: y + 6.0,
                         text: "*".to_owned(),
                         color: if self.show_favorites_only {
-                            self.palette.yellow
+                            self.palette.ink(self.palette.yellow)
                         } else {
                             self.palette.overlay0
                         },
@@ -4112,9 +4112,9 @@ impl NotesApp {
                         y: y + 6.0,
                         text: template_button_label(template).to_owned(),
                         color: match template {
-                            NoteTemplate::MeetingNotes => self.palette.teal,
-                            NoteTemplate::TodoList => self.palette.green,
-                            NoteTemplate::Journal => self.palette.mauve,
+                            NoteTemplate::MeetingNotes => self.palette.ink(self.palette.teal),
+                            NoteTemplate::TodoList => self.palette.ink(self.palette.green),
+                            NoteTemplate::Journal => self.palette.ink(self.palette.mauve),
                             _ => self.palette.overlay0,
                         },
                         font_size: 11.0,

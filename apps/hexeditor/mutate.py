@@ -229,6 +229,103 @@ MUTATIONS += [
     ),
 ]
 
+FIND = "the_find_bars_box_is_the_toolkits_field"
+LAYOUT = "the_find_bars_parts_never_overlap_at_any_width"
+PRESS = "a_press_on_a_bar_does_not_reach_the_byte_under_it"
+GOTO = "the_go_to_box_is_red_while_it_is_not_an_offset_and_enter_leaves_it_up"
+
+MUTATIONS += [
+    # The find bar's box and the go-to box are the toolkit's fields; the bar
+    # has two rows; a press on either is theirs (2026-10-04; lane C,
+    # c-e-a-theme-can-shape-the-controls).
+    (
+        "the find bar's box never lights",
+        "            hovered: open && self.query_hovered,\n",
+        "            hovered: false,\n",
+        [FIND],
+    ),
+    (
+        "the find bar's box is never marked",
+        "            focused: open && self.focused_panel == FocusedPanel::SearchBar,\n",
+        "            focused: false,\n",
+        [FIND],
+    ),
+    (
+        "the boxes show through the card",
+        "        !self.show_help && self.question.is_none() && !self.picker.is_open()\n",
+        "        self.question.is_none() && !self.picker.is_open()\n",
+        [FIND],
+    ),
+    (
+        "a search that found nothing is not red",
+        "            invalid: self.search.match_count == 0\n"
+        "                && self.search.searched.as_deref() == Some(self.search.input_text.as_str()),\n",
+        "            invalid: false,\n",
+        [FIND],
+    ),
+    (
+        "the box is red before its text is searched for",
+        "            invalid: self.search.match_count == 0\n"
+        "                && self.search.searched.as_deref() == Some(self.search.input_text.as_str()),\n",
+        "            invalid: self.search.match_count == 0,\n",
+        [FIND],
+    ),
+    (
+        "the light stays after the pointer leaves",
+        "        let inside = |r: Rect| ev.kind != MouseEventKind::Leave && r.contains(ev.x, ev.y);\n",
+        "        let inside = |r: Rect| r.contains(ev.x, ev.y);\n",
+        [FIND],
+    ),
+    (
+        "moving within a box asks for a repaint",
+        "        if (query, goto) == (self.query_hovered, self.goto_hovered) {\n            return EventResult::Ignored;\n        }\n",
+        "",
+        [FIND],
+    ),
+    (
+        "a press on the find bar's box does not give it the keyboard",
+        "                if l.query.contains(x, y) {\n                    self.focused_panel = FocusedPanel::SearchBar;\n                }\n",
+        "",
+        [FIND],
+    ),
+    (
+        "a press on the find bar reaches the byte under it",
+        "            if l.bar.contains(x, y) {\n",
+        "            if l.query.contains(x, y) {\n",
+        [PRESS],
+    ),
+    (
+        "a press on the go-to dialog reaches the byte under it",
+        "            if dialog.contains(x, y) {\n",
+        "            if input.contains(x, y) {\n",
+        [PRESS],
+    ),
+    (
+        "the options line shares the query's row",
+        "            y + Self::ROW + 6.0,\n",
+        "            y,\n",
+        [LAYOUT],
+    ),
+    (
+        "the go-to box is not red for what is not an offset",
+        "            invalid: self.goto_text_is_wrong(),\n",
+        "            invalid: false,\n",
+        [GOTO],
+    ),
+    (
+        "Enter on what is not an offset closes the box",
+        "            self.status_message = format!(\"Not an offset: {}\", self.goto_text.trim());\n            return;\n",
+        "            self.status_message = format!(\"Not an offset: {}\", self.goto_text.trim());\n            self.goto_visible = false;\n            return;\n",
+        [GOTO],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [FIND, GOTO],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "hexeditor", timeout=900, only=only))

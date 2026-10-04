@@ -28,8 +28,7 @@ hexeditor (search and Go To), ircclient (the message line), kanban (its
 input), lockscreen (the password), logviewer (search), mindmap
 (a node's text and its search), musicplayer (search), passwordgen (its
 input), startupmanager (the dialog and search), taskscheduler (the task
-dialog), tmux (its command prompt), undelete (search), vpnmanager (the
-profile form, search and the split-tunnel range).
+dialog), tmux (its command prompt), undelete (search).
 
 Not among them: `terminal`, whose typing goes to the shell's own line
 editor; `typingtutor`, where a line typed straight through is the exercise;
@@ -77,4 +76,6 @@ Four more applications append typed text but also have an editor
 somewhere -- calendar, email, systemrestore and torrent -- and are worth a
 look for a box that was missed.
 
-**Done:** emojipicker (2026-10-04, with its list of keys and the grid's keyboard).
+**Done:** emojipicker (2026-10-04, with its list of keys and the grid's
+keyboard); vpnmanager (2026-10-04: the profile form, its port and MTU as
+digits, the search and the split-tunnel range).

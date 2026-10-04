@@ -209,6 +209,97 @@ MUTATIONS += [
     ),
 ]
 
+# The boxes edit at a caret (2026-10-04,
+# known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box): they
+# took typing at their end and Backspace from it, with a `|` for a caret.
+CARET = "a_box_edits_at_a_caret"
+NUMBER = "a_number_box_edits_its_digits_and_refuses_the_rest"
+MOVES_TO = "a_box_the_keyboard_moves_to_types_after_what_it_holds"
+DIGITS = "the_port_box_takes_digits_and_ignores_everything_else"
+SATURATES = "the_port_box_saturates_rather_than_wrapping_back_to_a_working_port"
+QUESTION_MARK = "a_question_mark_is_typed_into_the_search_and_f1_still_raises_the_list"
+
+MUTATIONS += [
+    (
+        "what a box's editor holds is never written back",
+        "            self.set_field_text(field, &typed);\n",
+        "            let _ = &typed;\n",
+        [CARET, NUMBER],
+    ),
+    (
+        "a number box takes a letter",
+        "            && !self.editor.text().chars().all(|c| c.is_ascii_digit())\n",
+        "            && false\n",
+        [DIGITS, NUMBER],
+    ),
+    (
+        "a refused edit stays in the editor",
+        "            self.editor = kept;\n",
+        "            let _ = kept;\n",
+        [NUMBER],
+    ),
+    (
+        "a number too big for its box wraps",
+        "                text.parse().unwrap_or(u16::MAX)\n",
+        "                text.parse().unwrap_or(0)\n",
+        [SATURATES],
+    ),
+    (
+        "an emptied number box shows a 0",
+        "        let digits = |n: u16| if n == 0 { String::new() } else { n.to_string() };\n",
+        "        let digits = |n: u16| n.to_string();\n",
+        [NUMBER],
+    ),
+    (
+        "a cut takes nothing to the clipboard",
+        "            self.clipboard = copied;\n",
+        "            let _ = copied;\n",
+        [CARET],
+    ),
+    (
+        "a press puts the caret at the start",
+        "            x - rect.x - FIELD_TEXT_INSET,\n",
+        "            0.0,\n",
+        [CARET],
+    ),
+    (
+        "a press on a box does not place the caret",
+        "        if let Target::Focus(field) = target {\n            return self.press_field(field, x, size);\n        }\n",
+        "",
+        [CARET],
+    ),
+    (
+        "the caret is drawn at the start",
+        "                cursor: app.field_cursor(field, &text),\n",
+        "                cursor: TextCursor::default(),\n",
+        [CARET],
+    ),
+    (
+        "an empty box with the keyboard has no caret",
+        "        if focused {\n            textedit::push_caret(\n",
+        "        if false {\n            textedit::push_caret(\n",
+        [CARET],
+    ),
+    (
+        "the caret is drawn under the list of keys",
+        "    let focused = app.focus == Some(field) && !app.show_help;\n",
+        "    let focused = app.focus == Some(field);\n",
+        [QUESTION_MARK],
+    ),
+    (
+        "Tab leaves the last box's caret",
+        "                self.load_editor(next);\n",
+        "",
+        [MOVES_TO],
+    ),
+    (
+        "a box given the keyboard keeps the last box's caret",
+        "        self.focus = Some(field);\n        self.load_editor(field);\n",
+        "        self.focus = Some(field);\n",
+        [MOVES_TO],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "vpnmanager", timeout=600, only=only))

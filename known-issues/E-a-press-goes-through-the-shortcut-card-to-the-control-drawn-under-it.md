@@ -17,17 +17,19 @@ press.
 field. Fixed the same day in colorpicker, contacts and dbviewer; then in
 alarmclock, archivemanager, benchmark, calendar, camera, charmap,
 clipmanager, defrag, devicemanager, diagram, diskanalyzer, diskcleanup,
-diskimager, ebook, explorer, fileassoc, filediff, fontmanager and
-hexeditor (2026-10-04). Calendar's, diagram's, diskimager's, explorer's,
-filediff's and hexeditor's cards were modal for the keys no more than for
-the pointer -- hexeditor's let a hex digit typed with the card up be written
-into the file under it -- so each application's card is checked for both.
+diskimager, ebook, explorer, fileassoc, filediff, fontmanager, hexeditor
+and imageviewer (2026-10-04). Calendar's, diagram's, diskimager's,
+explorer's, filediff's, hexeditor's and imageviewer's cards were modal for
+the keys no more than for the pointer -- hexeditor's let a hex digit typed
+with the card up be written into the file under it, imageviewer's let Delete
+send the picture under it to the bin -- so each application's card is
+checked for both.
 
 **Still to do.** A scan the same day found 66 more applications whose
 production code draws `guitk::shortcut::render_card` and has no function
 handling a mouse event that reads the card's flag. Those not yet fixed:
 
-imageviewer, ircclient, jsonviewer, kanban, mindmap,
+ircclient, jsonviewer, kanban, mindmap,
 musicplayer, notes, paint, partmanager, passwordgen, pdfviewer,
 photomanager, podcast, pomodoro, procexplorer, radio, reminders,
 remotedesktop, screenrecorder, screenshot, settings, spreadsheet,

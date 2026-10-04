@@ -3885,12 +3885,20 @@ lane C's `guitk`.
       8251 vectors when present, and its parsers and filters over millions
       of made-up inputs. design-decisions §1350.
     - `[ ]` Vorbis.
-    - `[ ]` In `videocodec`, and out to the speakers: a file's sound decoded
-      beside its pictures. Its seek owes Opus a pre-roll: start
-      `matroska::Track::seek_pre_roll` (80 ms) before the time and drop
-      what decodes before it -- the demuxer's seek, like FFmpeg's, leaves
-      that to its caller (`tests/beyond_ffprobe.rs`); and the `OpusHead`'s
-      pre-skip is the caller's to drop too.
+    - `[-]` In `videocodec`, and out to the speakers: a file's sound decoded
+      beside its pictures.
+      - `[x]` `videocodec::Sound`: a Matroska or WebM file's Opus track,
+        block by block on the pictures' clock -- the codec delay and the
+        discard padding dropped and every block timed as FFmpeg does, four
+        fixtures held to ffprobe's blocks and libopus's samples; a damaged
+        packet concealed; a seek pre-rolled by `SeekPreRoll`.
+        design-decisions §1351.
+      - `[ ]` Out to the speakers: the kernel's PCM interface
+        (`kernel/src/audio_alsa.rs`) reachable from a program, which is
+        lane A's; then the video player plays its sound, which is lane E's.
+      - `[ ]` MP4's sound: Opus in MP4 (its `dOps` box, the edit list and the
+        pre-skip together, as FFmpeg's `mov.c` reads them); AAC, which most
+        MP4 files carry, is a decoder of its own.
 
 - `[-]` `[F]` **A display transport over channel IPC** for local clients,
   beside the TCP one. The point is the peer's identity: the kernel attests a

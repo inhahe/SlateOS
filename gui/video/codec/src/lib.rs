@@ -32,8 +32,18 @@
 //! asks to be turned or mirrored -- MP4's display matrix, Matroska's
 //! projection -- comes out turned, as ffmpeg's autorotate turns it
 //! ([`Orientation`]). Not yet: H.264 and
-//! HEVC, which most MP4 files hold, and sound (`roadmap.md`, "Video
-//! files").
+//! HEVC, which most MP4 files hold (`roadmap.md`, "Video files").
+//!
+//! # Sound
+//!
+//! [`Sound`] is a file's sound, as [`Video`] is its pictures: opened on the
+//! same file (a second handle to it), it gives back each packet's samples
+//! decoded, with their time on the same clock, for the program to play and
+//! to show the pictures by. Opus, in Matroska and WebM -- WebM's sound,
+//! besides Vorbis -- through `gui/video/opus`, libopus's decoder ported and
+//! held to it sample for sample; the codec delay and each packet's discard
+//! padding dropped, and the blocks timed, as FFmpeg drops and times them
+//! (`tests/sound.rs`).
 //!
 //! # Colour
 //!
@@ -69,6 +79,7 @@ mod container;
 mod decoder;
 mod orientation;
 mod picture;
+mod sound;
 mod time;
 mod video;
 
@@ -76,6 +87,7 @@ pub use colour::Colour;
 pub use decoder::{Decoder, Packet};
 pub use orientation::Orientation;
 pub use picture::Picture;
+pub use sound::{Block, Sound, SoundInfo};
 pub use video::{SeekMode, Video, VideoInfo};
 
 use core::fmt;
@@ -196,8 +208,35 @@ impl From<mp4::Error> for ContainerError {
     }
 }
 
-/// Why a file, a packet or a picture could not be read.
+/// A sound codec: those decoded here, and the commonest of the rest, so that
+/// a file in one is refused by its name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SoundCodec {
+    Opus,
+    /// Not decoded here yet.
+    Vorbis,
+    /// Not decoded here yet.
+    Aac,
+    /// Any other.
+    Other,
+}
+
+impl fmt::Display for SoundCodec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Opus => "Opus",
+            Self::Vorbis => "Vorbis",
+            Self::Aac => "AAC",
+            Self::Other => "a codec this does not know",
+        })
+    }
+}
+
+/// Why a file, a packet or a picture could not be read. More reasons may
+/// come, as more is decoded: match the ones that matter, and the rest as a
+/// whole.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Error {
     /// The file could not be read: the source failed, the file is neither
     /// Matroska (WebM) nor MP4, or its headers are damaged.
@@ -218,6 +257,13 @@ pub enum Error {
     Colour(yuv::reformat::Error),
     /// A picture larger than [`Limits::max_pixels`].
     TooLarge,
+    /// The file has no sound track, or not the one asked for.
+    NoSound,
+    /// The sound is in a codec this does not decode.
+    SoundCodec(SoundCodec),
+    /// An Opus track's setup (its `OpusHead`) is not one, or a packet did not
+    /// decode.
+    Opus(opus::Error),
 }
 
 impl fmt::Display for Error {
@@ -237,6 +283,12 @@ impl fmt::Display for Error {
                 f.write_str("a decoded picture's planes do not match its size")
             }
             Self::TooLarge => f.write_str("the video's pictures are larger than allowed"),
+            Self::NoSound => f.write_str("the file has no sound that can be played"),
+            Self::SoundCodec(SoundCodec::Other) => {
+                f.write_str("the sound's codec is not one decoded here")
+            }
+            Self::SoundCodec(c) => write!(f, "the sound is {c}, which is not decoded here yet"),
+            Self::Opus(e) => write!(f, "the sound could not be decoded: {e}"),
         }
     }
 }

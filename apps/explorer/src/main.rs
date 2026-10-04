@@ -6483,6 +6483,36 @@ impl ExplorerState {
             // fade already said there is something to draw.
             return consumed | self.tick_work();
         }
+        // The shortcut card is modal: while it is up, F1, `?` and Escape put
+        // it away and every other key is its own; a press, with any button,
+        // puts it away rather than reaching the file or control drawn under
+        // it; and the wheel scrolls nothing it covers. It was modal for none
+        // of it -- Delete, Ctrl+V and F2 acted on the folder under it, typing
+        // went on into the address bar, and a click opened whatever it
+        // covered. A move and a release still go through, so the light stays
+        // right and a drag begun before it still ends.
+        if self.show_help {
+            match event {
+                Event::Key(k) if k.pressed => {
+                    let closes = textline::is_plain(k.modifiers)
+                        && (matches!(k.key, Key::F1 | Key::Escape)
+                            || k.key == Key::Slash && k.modifiers.shift);
+                    if closes {
+                        self.show_help = false;
+                    }
+                    return closes;
+                }
+                Event::Mouse(m) => match m.kind {
+                    MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                        self.show_help = false;
+                        return true;
+                    }
+                    MouseEventKind::Scroll { .. } => return false,
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
         // The bin's scroll must know how many rows fit before a key or the
         // wheel moves it; the pane may have been resized since the last frame.
         self.fit_scroll();
@@ -6795,10 +6825,8 @@ impl ExplorerState {
                 self.show_help = !self.show_help;
                 return true;
             }
-            if k.key == Key::Escape && self.show_help {
-                self.show_help = false;
-                return true;
-            }
+            // (While the list is up its own keys never get here:
+            // `handle_event` takes every key the card is up for.)
         }
         // The bin's keys, and none of the folder's: Ctrl+V or F2 here would
         // act on a folder that is not on screen.
@@ -8739,10 +8767,99 @@ mod tests {
             assert!(shown.contains(what), "{what:?} never reached the window");
         }
 
-        state.handle_key(&key_press(Key::Escape));
+        // Through the window's own way in: while the card is up its keys are
+        // taken there, before any key handler.
+        let _ = state.handle_event(&Event::Key(key_press(Key::Escape)));
         assert!(
             !help_text(&mut state).contains("F1 or ? closes this"),
             "Escape did not close it"
+        );
+    }
+
+    /// **The card is modal for the keys and the pointer**: while it is up,
+    /// F1, `?` and Escape put it away and nothing else does or acts; a press
+    /// puts it away and does nothing else; the wheel scrolls nothing under it.
+    /// It was modal for none of it. The controls at the end are the same
+    /// key, press and turn with the card down.
+    #[test]
+    fn the_shortcut_card_takes_every_key_and_press_while_it_is_up() {
+        let dir = crate::guarded_scratch("explorer-help-modal");
+        dir_with_files(&dir.path(""), 60);
+        let mut state = state_at(&dir.path(""));
+        let selected = |state: &ExplorerState| state.entries.iter().filter(|e| e.selected).count();
+        let key = |k: Key, modifiers: guitk::event::Modifiers| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: String::new(),
+            })
+        };
+        let plain = guitk::event::Modifiers::NONE;
+        // Whether a repaint was asked for is not what this test is about.
+        let send = |state: &mut ExplorerState, event: &Event| {
+            let _ = state.handle_event(event);
+        };
+        // The drop zones that find a row are laid out by a frame.
+        let _ = state.render();
+        let (rx, ry) = row_centre(&state, "file003.txt");
+        let at = |x: f32, y: f32, kind: MouseEventKind| Event::Mouse(MouseEvent { x, y, kind });
+        let notch = at(400.0, 300.0, MouseEventKind::Scroll { dx: 0.0, dy: -1.0 });
+
+        send(&mut state, &key(Key::F1, plain));
+        assert!(state.show_help);
+        send(&mut state, &key(Key::A, guitk::event::Modifiers::ctrl()));
+        assert_eq!(
+            selected(&state),
+            0,
+            "Ctrl+A selected the folder under the card"
+        );
+        send(&mut state, &notch);
+        assert_eq!(
+            state.viewport.first_visible(),
+            0,
+            "the wheel scrolled the list under the card"
+        );
+        assert!(
+            state.show_help,
+            "a key or turn that is not the card's put it away"
+        );
+
+        assert!(state.handle_event(&at(rx, ry, MouseEventKind::Press(MouseButton::Left))));
+        assert!(!state.show_help, "the press did not put the card away");
+        assert_eq!(
+            selected(&state),
+            0,
+            "the press went through the card to a file"
+        );
+
+        // Any button, and the card's own keys.
+        send(&mut state, &key(Key::F1, plain));
+        send(
+            &mut state,
+            &at(rx, ry, MouseEventKind::Press(MouseButton::Right)),
+        );
+        assert!(!state.show_help, "a right-button press left the card up");
+        state.menu = None;
+        send(&mut state, &key(Key::F1, plain));
+        send(
+            &mut state,
+            &key(Key::Slash, guitk::event::Modifiers::shift()),
+        );
+        assert!(!state.show_help, "? did not put the card away");
+        send(&mut state, &key(Key::F1, plain));
+        send(&mut state, &key(Key::Escape, plain));
+        assert!(!state.show_help, "Escape did not put the card away");
+
+        send(&mut state, &notch);
+        assert!(
+            state.viewport.first_visible() > 0,
+            "control: the wheel scrolls nothing at all"
+        );
+        send(&mut state, &key(Key::A, guitk::event::Modifiers::ctrl()));
+        assert!(
+            selected(&state) > 0,
+            "control: Ctrl+A does nothing with the card down"
         );
     }
 

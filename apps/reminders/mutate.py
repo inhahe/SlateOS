@@ -302,6 +302,38 @@ MUTATIONS = [
         '',
         ['a_chord_is_not_a_reminders_key_and_altgr_is_not_ctrl'],
     ),
+    # -- the shortcut card is modal for the keys
+    (
+        "the card is modal for nothing",
+        '        if self.show_help\n            && let Event::Key(key_ev) = event\n',
+        '        if false\n            && let Event::Key(key_ev) = event\n',
+        ['the_shortcut_card_takes_every_key_while_it_is_up'],
+    ),
+    (
+        "a key that is not the card's acts behind it",
+        '                return EventResult::Consumed;\n'
+        '            }\n'
+        '            return EventResult::Ignored;\n'
+        '        }\n'
+        '        match event {\n',
+        '                return EventResult::Consumed;\n'
+        '            }\n'
+        '        }\n'
+        '        match event {\n',
+        ['the_shortcut_card_takes_every_key_while_it_is_up'],
+    ),
+    (
+        "Escape does not put the card away",
+        '            let closes = matches!(key_ev.key, Key::F1 | Key::Escape)\n',
+        '            let closes = matches!(key_ev.key, Key::F1)\n',
+        ['the_shortcut_card_takes_every_key_while_it_is_up'],
+    ),
+    (
+        "? does not put the card away",
+        '                || key_ev.key == Key::Slash && key_ev.modifiers.shift;\n',
+        '                || false;\n',
+        ['the_shortcut_card_takes_every_key_while_it_is_up'],
+    ),
 ]
 
 if __name__ == "__main__":

@@ -1500,6 +1500,19 @@ impl ViewerState {
             return false;
         }
 
+        // The shortcut card is modal: while it is up, F1, `?` and Escape put
+        // it away and every other key is its own. It was not -- Delete sent
+        // the picture it covered to the bin, the arrows moved to another and
+        // F5 started a slideshow under it.
+        if self.show_help {
+            let closes = matches!(event.key, Key::F1 | Key::Escape)
+                || event.key == Key::Slash && event.modifiers.shift;
+            if closes {
+                self.show_help = false;
+            }
+            return closes;
+        }
+
         let ctrl = event.modifiers.ctrl;
         let shift = event.modifiers.shift;
 
@@ -1633,12 +1646,8 @@ impl ViewerState {
                 self.show_help = !self.show_help;
                 true
             }
-            // Before the plain `Escape` arm below, which would otherwise take
-            // this and leave the list up while exiting fullscreen.
-            Key::Escape if self.show_help => {
-                self.show_help = false;
-                true
-            }
+            // (While the list is up its own keys never get here: the top of
+            // this function takes every key the card is up for.)
 
             // Escape exits fullscreen or slideshow
             Key::Escape => {
@@ -1659,6 +1668,20 @@ impl ViewerState {
 
     /// Handle a mouse event. Returns true if the event was consumed.
     pub fn handle_mouse_event(&mut self, event: &MouseEvent) -> bool {
+        // The card is modal for the pointer as it is for the keys: a press,
+        // with any button, puts it away rather than reaching the button or
+        // picture drawn under it, and the wheel zooms nothing it covers. A
+        // move and a release still go through, so a pan begun before it ends.
+        if self.show_help {
+            match event.kind {
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                    self.show_help = false;
+                    return true;
+                }
+                MouseEventKind::Scroll { .. } => return false,
+                _ => {}
+            }
+        }
         match &event.kind {
             MouseEventKind::Scroll { dx: _, dy } => {
                 // One notch is one zoom step -- `rows_at(.., 1.0)` rather than
@@ -5218,6 +5241,68 @@ the picture at once, which reads as D advancing the slideshow"
             recyclebin::RecycleBin::new(dir.join(".bin"), std::time::Duration::from_mins(1));
         assert_eq!(state.open_file(&dir.join("b.png")), Opened::Shown);
         state
+    }
+
+    /// **The card is modal for the keys and the pointer**: while it is up,
+    /// F1, `?` and Escape put it away and nothing else does or acts; a press
+    /// puts it away and does nothing else; the wheel zooms nothing under it.
+    /// Delete sent the picture under the card to the bin. The controls at
+    /// the end are the same key and turn with the card down.
+    #[test]
+    fn the_shortcut_card_takes_every_key_and_press_while_it_is_up() {
+        let guard = scratch("card");
+        let dir = guard.dir().to_path_buf();
+        let mut state = on_b_with_a_bin(&guard);
+        let at = |kind| {
+            Event::Mouse(MouseEvent {
+                x: 512.0,
+                y: 384.0,
+                kind,
+            })
+        };
+        let zoom = state.transform.zoom;
+
+        assert!(state.handle_event(&Event::Key(plain(Key::F1))));
+        assert!(state.show_help);
+        state.handle_event(&Event::Key(plain(Key::Delete)));
+        assert!(
+            dir.join("b.png").exists(),
+            "Delete sent the picture under the card to the bin"
+        );
+        state.handle_event(&Event::Key(plain(Key::Right)));
+        assert_eq!(
+            state.image_info.filename, "b.png",
+            "Right moved on under the card"
+        );
+        state.handle_event(&at(MouseEventKind::Scroll { dx: 0.0, dy: 1.0 }));
+        assert!(
+            (state.transform.zoom - zoom).abs() < f32::EPSILON,
+            "the wheel zoomed the picture under the card"
+        );
+        assert!(
+            state.show_help,
+            "a key or turn that is not the card's put it away"
+        );
+
+        assert!(state.handle_event(&at(MouseEventKind::Press(MouseButton::Left))));
+        assert!(!state.show_help, "the press did not put the card away");
+        state.handle_event(&Event::Key(plain(Key::F1)));
+        state.handle_event(&at(MouseEventKind::Press(MouseButton::Right)));
+        assert!(!state.show_help, "a right-button press left the card up");
+        state.handle_event(&Event::Key(plain(Key::F1)));
+        state.handle_event(&Event::Key(plain(Key::Escape)));
+        assert!(!state.show_help, "Escape did not put the card away");
+
+        state.handle_event(&at(MouseEventKind::Scroll { dx: 0.0, dy: 1.0 }));
+        assert!(
+            (state.transform.zoom - zoom).abs() > f32::EPSILON,
+            "control: the wheel zooms nothing at all"
+        );
+        state.handle_event(&Event::Key(plain(Key::Right)));
+        assert_eq!(
+            state.image_info.filename, "c.png",
+            "control: Right moves on to nothing with the card down"
+        );
     }
 
     /// **Delete moves the picture to the recycle bin and shows the next.**

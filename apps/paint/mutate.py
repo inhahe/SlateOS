@@ -438,6 +438,37 @@ MUTATIONS = [
         '        if self.show_help && key.key == Key::Escape {',
         ['a_key_held_with_alt_or_the_windows_key_is_not_a_tool'],
     ),
+    # -- the shortcut card is modal, for the keys and the pointer
+    (
+        "a key that is not the card's acts behind it",
+        '        if self.show_help {\n'
+        '            // Modal: every other key is the card\'s while it is up. It was\n',
+        '        if false {\n'
+        '            // Modal: every other key is the card\'s while it is up. It was\n',
+        ['the_shortcut_card_takes_every_key_and_press_while_it_is_up'],
+    ),
+    (
+        "a press goes through the card",
+        '        if self.show_help\n'
+        '            && matches!(\n'
+        '                mouse.kind,\n',
+        '        if false\n'
+        '            && matches!(\n'
+        '                mouse.kind,\n',
+        ['the_shortcut_card_takes_every_key_and_press_while_it_is_up'],
+    ),
+    (
+        "only the left button puts the card away",
+        '                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_)\n'
+        '            )\n'
+        '        {\n'
+        '            self.show_help = false;\n',
+        '                MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_)\n'
+        '            )\n'
+        '        {\n'
+        '            self.show_help = false;\n',
+        ['the_shortcut_card_takes_every_key_and_press_while_it_is_up'],
+    ),
 ]
 
 if __name__ == "__main__":

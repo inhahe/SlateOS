@@ -902,6 +902,16 @@ impl FontManagerState {
     /// known-issues.md -> `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR`, whose whole
     /// point is that an app nothing drives is an app whose gaps nobody meets.
     fn handle_mouse(&mut self, mouse: &MouseEvent) -> EventResult {
+        if self.show_help {
+            // The card is modal for the pointer as it is for the keys: a
+            // press, with any button, puts it away rather than reaching the
+            // filter or font drawn under it.
+            if matches!(mouse.kind, MouseEventKind::Press(_)) {
+                self.show_help = false;
+                return EventResult::Consumed;
+            }
+            return EventResult::Ignored;
+        }
         if !matches!(mouse.kind, MouseEventKind::Press(MouseButton::Left)) {
             return EventResult::Ignored;
         }
@@ -2671,6 +2681,51 @@ test to be about anything -- it drew {} text command(s)",
         );
         assert_eq!(state.filter_mode, FilterMode::System);
         assert_eq!(state.selected_category, None);
+    }
+
+    /// **A press while the card is up puts it away and does nothing else.**
+    /// It used to go straight through the card to the filter drawn under it.
+    /// The control at the end is the same press with the card down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let mut state = FontManagerState::new();
+        let (y, _) = FontManagerState::sidebar_rows()
+            .into_iter()
+            .find(|(_, r)| matches!(r, SidebarRow::Filter(FilterMode::System)))
+            .expect("a System row is drawn");
+        let f1 = Event::Key(KeyEvent {
+            key: Key::F1,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        });
+
+        state.handle_event(&f1);
+        assert!(state.show_help);
+        assert_eq!(click(&mut state, 40.0, y + 4.0), EventResult::Consumed);
+        assert!(!state.show_help, "the press did not put the card away");
+        assert_eq!(
+            state.filter_mode,
+            FilterMode::All,
+            "the press went through the card to a filter"
+        );
+
+        // Any button: the right one does nothing to a filter, but it is
+        // still a press on the card.
+        state.handle_event(&f1);
+        state.handle_event(&Event::Mouse(MouseEvent {
+            x: 40.0,
+            y: y + 4.0,
+            kind: MouseEventKind::Press(MouseButton::Right),
+        }));
+        assert!(!state.show_help, "a right-button press left the card up");
+
+        click(&mut state, 40.0, y + 4.0);
+        assert_eq!(
+            state.filter_mode,
+            FilterMode::System,
+            "control: the press does nothing even with the card down"
+        );
     }
 
     /// A click on a category row selects the category *and* switches the mode.

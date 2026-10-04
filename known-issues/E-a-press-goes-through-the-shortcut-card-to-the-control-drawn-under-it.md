@@ -16,29 +16,41 @@ press.
 **Found** 2026-10-03, converting colorpicker's value box to the toolkit's
 field. Fixed the same day in colorpicker, contacts and dbviewer; then in
 alarmclock, archivemanager, benchmark, calendar, camera, charmap,
-clipmanager, defrag, devicemanager, diagram, diskanalyzer, diskcleanup
-diskimager and ebook (2026-10-04) -- calendar's, diagram's and diskimager's
-cards were modal for the keys no more than for the pointer,
-so each application's card is checked for both.
+clipmanager, defrag, devicemanager, diagram, diskanalyzer, diskcleanup,
+diskimager, ebook, explorer, fileassoc, filediff, fontmanager, hexeditor,
+imageviewer, ircclient, jsonviewer, reminders, mindmap, musicplayer, notes,
+paint, partmanager, pdfviewer, photomanager, podcast and pomodoro
+(2026-10-04).
+Calendar's, diagram's, diskimager's, explorer's, filediff's, hexeditor's,
+imageviewer's, ircclient's, jsonviewer's, reminders', mindmap's and
+pdfviewer's cards were modal for
+the keys no more than for the pointer -- hexeditor's let a hex digit typed
+with the card up be written into the file under it, imageviewer's let
+Delete send the picture under it to the bin, ircclient's let Enter send the
+line under it to the channel, pdfviewer's let Ctrl+W close the tab under
+it -- so each application's card is checked for both. (Reminders takes no press at all; its card was modal for no key.)
 
 **Still to do.** A scan the same day found 66 more applications whose
 production code draws `guitk::shortcut::render_card` and has no function
-handling a mouse event that reads the card's flag:
+handling a mouse event that reads the card's flag. Those not yet fixed:
 
-explorer, fileassoc, filediff, finance, flashcards,
-fontmanager, habits, hexeditor, imageviewer, ircclient, jsonviewer, kanban,
-logviewer, markdowneditor, metronome, mindmap, musicplayer, notes, paint,
-partmanager, passwordgen, pdfviewer, photomanager, pinball, podcast,
-pomodoro, procexplorer, qrcode, radio, regextester, reminders, remotedesktop,
-rssreader, screenrecorder, screenshot, settings, slides, soundrecorder,
-spreadsheet, startupmanager, stopwatch, sudoku, sysinfo, sysmonitor,
-systemrestore, tmux, torrent, undelete, whiteboard, wordle, worldclock.
+procexplorer, radio, remotedesktop, screenrecorder,
+screenshot, settings, spreadsheet, startupmanager, stopwatch, sudoku,
+sysinfo, sysmonitor, systemrestore, undelete, whiteboard, wordle,
+worldclock.
 
 A scan is a lead, not a verdict: an application may guard its card some way
 the scan does not see, and each is confirmed by a test before it is changed.
-Email was one: its card records a hit box over the whole window, last, so
-every press, move and turn of the wheel finds the card -- a guard worth
-copying wherever an application hit-tests its frame.
+Fifteen were struck off unchanged on 2026-10-04 for one such way: email,
+finance, flashcards, habits, logviewer, markdowneditor, metronome, pinball,
+qrcode, regextester, rssreader, slides, soundrecorder, tmux and torrent each
+record a hit box over the whole window, last, while the card is up, so
+every press, move and turn of the wheel resolves to the card -- a guard
+worth copying wherever an application hit-tests its frame. (The scan below
+does not know it; read an application's drawing before trusting its name.)
+Kanban and passwordgen were struck off for another: neither takes a press on
+its window at all -- only their file dialogs do -- and both cards were
+already modal for the keys.
 Delete each name as it is fixed; to see what is left, run from the tree's
 root:
 

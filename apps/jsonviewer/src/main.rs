@@ -2721,10 +2721,8 @@ impl App {
                 self.show_help = !self.show_help;
                 return;
             }
-            if key == Key::Escape && self.show_help {
-                self.show_help = false;
-                return;
-            }
+            // (While the list is up its own keys never get here:
+            // `handle_event` takes every key the card is up for.)
         }
 
         // Global shortcuts: Ctrl chords, not Ctrl held -- AltGr arrives as
@@ -3744,6 +3742,37 @@ impl App {
             // state of its own that could go stale.
             Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
             Picked::Ignored => {}
+        }
+        // The shortcut card is modal: while it is up, F1, `?` and Escape put
+        // it away and every other key is its own; a press, with any button,
+        // puts it away rather than reaching the tab or node drawn under it;
+        // and the wheel scrolls nothing it covers. It was modal for none of
+        // it -- Ctrl+N and Ctrl+O opened a tab or a dialog under it, a click
+        // chose a tab or a node, and the wheel scrolled the tree. A move and a
+        // release still go through.
+        if self.show_help {
+            match event {
+                Event::Key(key_ev) if key_ev.pressed => {
+                    use guitk::event::Key;
+                    let closes = textline::is_plain(key_ev.modifiers)
+                        && (matches!(key_ev.key, Key::F1 | Key::Escape)
+                            || key_ev.key == Key::Slash && key_ev.modifiers.shift);
+                    if closes {
+                        self.show_help = false;
+                        return EventResult::Consumed;
+                    }
+                    return EventResult::Ignored;
+                }
+                Event::Mouse(mouse_ev) => match mouse_ev.kind {
+                    MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                        self.show_help = false;
+                        return EventResult::Consumed;
+                    }
+                    MouseEventKind::Scroll { .. } => return EventResult::Ignored,
+                    _ => {}
+                },
+                _ => {}
+            }
         }
         match event {
             Event::Key(key_ev) => {
@@ -6276,6 +6305,98 @@ mod tests {
         assert_eq!(
             app.active_tab, 1,
             "the click did not reach handle_tab_click"
+        );
+    }
+
+    /// **The card is modal for the keys and the pointer**: while it is up,
+    /// F1, `?` and Escape put it away and nothing else does or acts, and a
+    /// press puts it away and does nothing else. It was modal for none of
+    /// it. The controls at the end are the same press and chord with the
+    /// card down.
+    #[test]
+    fn the_shortcut_card_takes_every_key_and_press_while_it_is_up() {
+        let mut app = two_tabs();
+        let first_width = app.documents.first().map(tab_width).unwrap_or(0.0);
+        let tab = |button| {
+            Event::Mouse(MouseEvent {
+                x: PADDING + first_width + 4.0 + 2.0,
+                y: TOOLBAR_HEIGHT + 2.0,
+                kind: MouseEventKind::Press(button),
+            })
+        };
+        let tabs = app.documents.len();
+
+        let _ = app.handle_event(&press(Key::F1));
+        assert!(app.show_help);
+        let _ = app.handle_event(&press_ctrl(Key::N));
+        assert_eq!(
+            app.documents.len(),
+            tabs,
+            "Ctrl+N opened a tab under the card"
+        );
+        assert!(app.show_help, "a key that is not the card's put it away");
+
+        assert_eq!(
+            app.handle_event(&tab(MouseButton::Left)),
+            EventResult::Consumed
+        );
+        assert!(!app.show_help, "the press did not put the card away");
+        assert_eq!(
+            app.active_tab, 0,
+            "the press went through the card to a tab"
+        );
+
+        // Any button, and the card's own keys.
+        let _ = app.handle_event(&press(Key::F1));
+        let _ = app.handle_event(&tab(MouseButton::Right));
+        assert!(!app.show_help, "a right-button press left the card up");
+        let _ = app.handle_event(&press(Key::F1));
+        let _ = app.handle_event(&Event::Key(KeyEvent {
+            key: Key::Slash,
+            pressed: true,
+            modifiers: Modifiers::shift(),
+            text: String::from("?"),
+        }));
+        assert!(!app.show_help, "? did not put the card away");
+        let _ = app.handle_event(&press(Key::F1));
+        let _ = app.handle_event(&press(Key::Escape));
+        assert!(!app.show_help, "Escape did not put the card away");
+
+        let _ = app.handle_event(&tab(MouseButton::Left));
+        assert_eq!(
+            app.active_tab, 1,
+            "control: the press does nothing with the card down"
+        );
+        let _ = app.handle_event(&press_ctrl(Key::N));
+        assert_eq!(
+            app.documents.len(),
+            tabs + 1,
+            "control: Ctrl+N does nothing"
+        );
+    }
+
+    /// **The wheel scrolls no tree under the card**; the control is the
+    /// same turn with the card down.
+    #[test]
+    fn the_wheel_scrolls_no_tree_under_the_card() {
+        let mut app = holding(&format!("[{}]", vec!["1"; 100].join(",\n")));
+        let notch = Event::Mouse(MouseEvent {
+            x: 100.0,
+            y: 300.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -1.0 },
+        });
+        let _ = app.handle_event(&press(Key::F1));
+        let _ = app.handle_event(&notch);
+        assert_eq!(
+            app.documents[0].tree.first_visible(),
+            0,
+            "the wheel scrolled the tree under the card"
+        );
+        let _ = app.handle_event(&press(Key::F1));
+        let _ = app.handle_event(&notch);
+        assert!(
+            app.documents[0].tree.first_visible() >= 1,
+            "control: the wheel scrolls nothing at all"
         );
     }
 

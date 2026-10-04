@@ -2885,6 +2885,35 @@ impl MindMapApp {
             Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
             Picked::Ignored => {}
         }
+        // The shortcut card is modal: while it is up, F1, `?` and Escape put
+        // it away and every other key is its own; a press, with any button,
+        // puts it away rather than reaching the node drawn under it; and the
+        // wheel zooms nothing it covers. It was modal for none of it -- Tab
+        // added a node under it and Delete took one, a click chose or moved
+        // a node, and the wheel zoomed. A move and a release still go
+        // through, so a drag begun before it ends.
+        if self.show_help {
+            match event {
+                Event::Key(key_ev) if key_ev.pressed => {
+                    let closes = matches!(key_ev.key, Key::F1 | Key::Escape)
+                        || key_ev.key == Key::Slash && key_ev.modifiers.shift;
+                    if closes {
+                        self.show_help = false;
+                        return EventResult::Consumed;
+                    }
+                    return EventResult::Ignored;
+                }
+                Event::Mouse(mouse_ev) => match mouse_ev.kind {
+                    MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                        self.show_help = false;
+                        return EventResult::Consumed;
+                    }
+                    MouseEventKind::Scroll { .. } => return EventResult::Ignored,
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
         match event {
             Event::Key(key_ev) => self.handle_key(key_ev),
             Event::Mouse(mouse_ev) => self.handle_mouse(mouse_ev),
@@ -3031,10 +3060,8 @@ impl MindMapApp {
                 self.show_help = !self.show_help;
                 EventResult::Consumed
             }
-            Key::Escape if self.show_help => {
-                self.show_help = false;
-                EventResult::Consumed
-            }
+            // (While the list is up its own keys never get here:
+            // `handle_event` takes every key the card is up for.)
             // Files. Save As before Save: the one with Shift is the more
             // particular, and would never be reached after.
             Key::S if ctrl && key.modifiers.shift => {
@@ -4299,6 +4326,78 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **The card is modal for the keys and the pointer**: while it is up,
+    /// F1, `?` and Escape put it away and nothing else does or acts; a press
+    /// puts it away and does nothing else; the wheel zooms nothing under it.
+    /// Tab added a node under the card. The controls at the end are the same
+    /// key and turn with the card down.
+    #[test]
+    fn the_shortcut_card_takes_every_key_and_press_while_it_is_up() {
+        let mut app = MindMapApp::new();
+        let nodes = app.active_map_ref().node_count();
+        let selected = app.selected_node;
+        let zoom = app.zoom;
+        let wheel = mouse(MouseEventKind::Scroll { dx: 0.0, dy: 1.0 }, 0.0, 0.0);
+
+        app.handle_event(&press(Key::F1));
+        assert!(app.show_help);
+        app.handle_event(&press(Key::Tab));
+        assert_eq!(
+            app.active_map_ref().node_count(),
+            nodes,
+            "Tab added a node under the card"
+        );
+        app.handle_event(&wheel);
+        assert!(
+            (app.zoom - zoom).abs() < f32::EPSILON,
+            "the wheel zoomed under the card"
+        );
+        assert!(
+            app.show_help,
+            "a key or turn that is not the card's put it away"
+        );
+
+        app.handle_event(&mouse(
+            MouseEventKind::Press(MouseButton::Left),
+            20.0,
+            300.0,
+        ));
+        assert!(!app.show_help, "the press did not put the card away");
+        assert_eq!(
+            app.selected_node, selected,
+            "the press went through the card"
+        );
+
+        // Any button, and the card's own keys.
+        app.handle_event(&press(Key::F1));
+        app.handle_event(&mouse(
+            MouseEventKind::Press(MouseButton::Right),
+            20.0,
+            300.0,
+        ));
+        assert!(!app.show_help, "a right-button press left the card up");
+        app.handle_event(&press(Key::F1));
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::Slash,
+            pressed: true,
+            modifiers: Modifiers::shift(),
+            text: String::from("?"),
+        }));
+        assert!(!app.show_help, "? did not put the card away");
+        app.handle_event(&press(Key::F1));
+        app.handle_event(&press(Key::Escape));
+        assert!(!app.show_help, "Escape did not put the card away");
+
+        app.handle_event(&wheel);
+        assert!(app.zoom > zoom, "control: the wheel zooms nothing at all");
+        app.handle_event(&press(Key::Tab));
+        assert_eq!(
+            app.active_map_ref().node_count(),
+            nodes + 1,
+            "control: Tab adds nothing with the card down"
+        );
     }
 
     /// Maps chosen so that between them every advertised key has work to do.

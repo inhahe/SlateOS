@@ -8,7 +8,10 @@ The table covers what changed on 2026-09-26: the selected photograph was
 decoded inside `render`, freezing the window for as long as that took; it is
 decoded on `offloop`'s worker now, and put up when the worker wakes the
 window.  `offloop`'s own rule -- only the newest request is answered -- is
-swept by `apps/offloop/mutate.py`.
+swept by `apps/offloop/mutate.py`.  The first rows, added 2026-10-04, cover
+the list of keys' hold on the pointer -- a press with it up puts it away and
+reaches nothing under it, and the wheel scrolls nothing it covers -- and the
+grid's wheel, which it did not have before that day.
 
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
@@ -28,8 +31,91 @@ GONE = "a_photograph_deselected_while_decoding_is_not_put_up"
 FAILS = "a_photograph_that_fails_off_the_window_says_why"
 NOT_A_PICTURE = "a_file_that_is_not_a_picture_says_why_instead_of_staying_blank"
 THUMBS = "the_grids_thumbnails_are_made_off_the_window"
+CARD = "the_shortcut_card_takes_a_press_rather_than_passing_it_on"
+WHEEL = "the_wheel_scrolls_the_grid_a_row_a_notch"
+NOTHING_ELSE = "the_wheel_scrolls_the_grid_and_nothing_else"
+PAST_THE_END = "turning_the_wheel_on_past_the_end_banks_nothing"
+FRACTION = "a_fraction_of_a_notch_does_not_outlive_the_grid"
 
 MUTATIONS = [
+    # The list of keys takes a press rather than letting it reach the
+    # photograph under it (known-issues
+    # E-a-press-goes-through-the-shortcut-card-to-the-control-drawn-under-it).
+    (
+        "a press goes through the list of keys",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n"
+        "                    self.show_help = false;\n"
+        "                    return true;\n"
+        "                }\n",
+        "",
+        [CARD],
+    ),
+    (
+        "only the left button puts the list of keys away",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n",
+        "                MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_) => {\n",
+        [CARD],
+    ),
+    (
+        "a press under the list of keys leaves it up",
+        "                    self.show_help = false;\n"
+        "                    return true;\n",
+        "                    return true;\n",
+        [CARD],
+    ),
+    (
+        "the wheel scrolls what the list of keys covers",
+        "                MouseEventKind::Scroll { .. } => return false,\n",
+        "",
+        [CARD],
+    ),
+    # The grid's wheel, which it did not have.
+    (
+        "the grid has no wheel",
+        "        if let MouseEventKind::Scroll { dy, .. } = event.kind {\n"
+        "            return self.scroll_grid(event.x, event.y, dy);\n"
+        "        }\n",
+        "",
+        [WHEEL, NOTHING_ELSE, PAST_THE_END, FRACTION, CARD],
+    ),
+    (
+        "a notch is three rows of thumbnails",
+        "        let rows = self.grid_wheel.rows_at(dy, 1.0);\n",
+        "        let rows = self.grid_wheel.rows(dy);\n",
+        [WHEEL],
+    ),
+    (
+        "the wheel scrolls a grid that is not shown",
+        "        if self.view_mode != ViewMode::Grid\n"
+        "            || self.photo_menu.is_some()\n",
+        "        if self.photo_menu.is_some()\n",
+        [NOTHING_ELSE],
+    ),
+    (
+        "the wheel scrolls the grid under an open menu",
+        "            || self.photo_menu.is_some()\n",
+        "",
+        [NOTHING_ELSE],
+    ),
+    (
+        "the wheel over the sidebar scrolls the grid",
+        "            || !self.content_rect().contains(x, y)\n",
+        "",
+        [NOTHING_ELSE],
+    ),
+    (
+        "a wheel turned on past the end banks rows",
+        "        self.grid_scroll = self.grid_window().start;\n"
+        "        self.grid_scroll != before\n",
+        "        self.grid_scroll != before\n",
+        [PAST_THE_END],
+    ),
+    (
+        "a fraction of a notch outlives the grid",
+        "        self.grid_wheel.reset();\n",
+        "",
+        [FRACTION],
+    ),
     (
         "the photograph is decoded on the window even with a loader",
         "            Some(loader) => loader.ask((pid, path)),",

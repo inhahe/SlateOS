@@ -1921,6 +1921,19 @@ impl PaintApp {
     /// the palette ignored clicks, and the colour dialog was opened only by a
     /// test. The option bar and the layers panel are still drawn only.
     fn handle_mouse(&mut self, mouse: &MouseEvent) -> bool {
+        // The card is modal for the pointer as it is for the keys, and drawn
+        // over everything: a press, with any button, puts it away rather than
+        // landing a stroke on the picture drawn under it. A move and a
+        // release still go through, so a stroke begun before it ends.
+        if self.show_help
+            && matches!(
+                mouse.kind,
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_)
+            )
+        {
+            self.show_help = false;
+            return true;
+        }
         if self.color_picker.is_open {
             return self.picker_mouse(mouse);
         }
@@ -2012,6 +2025,12 @@ impl PaintApp {
         if plain && self.show_help && key.key == Key::Escape {
             self.show_help = false;
             return true;
+        }
+        if self.show_help {
+            // Modal: every other key is the card's while it is up. It was
+            // not -- a tool's letter changed the tool under it and Ctrl+Z
+            // undid a stroke on the picture it covered.
+            return false;
         }
 
         // Alt+Z and Alt+Shift+Z: every picture there has been, in the order
@@ -5297,6 +5316,62 @@ mod tests {
     fn dot(app: &mut PaintApp, x: i32, y: i32) {
         app.on_canvas_press(x, y);
         app.on_canvas_release(x, y);
+    }
+
+    /// **The card is modal for the keys and the pointer**: while it is up,
+    /// keys that are not its own change nothing and a press puts it away and
+    /// lands no stroke. A tool's letter changed the tool under it, and a
+    /// press drew on the picture it covered. The controls at the end are the
+    /// same key and press with the card down.
+    #[test]
+    fn the_shortcut_card_takes_every_key_and_press_while_it_is_up() {
+        let mut app = PaintApp::new(800.0, 600.0);
+        let (x, y) = (400.0, 300.0);
+        assert!(
+            app.in_canvas_viewport(x, y),
+            "the fixture must press the canvas"
+        );
+        let press = |button| {
+            Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            })
+        };
+        let tool = app.current_tool;
+
+        app.handle_event(&key(Key::F1, false, false));
+        assert!(app.show_help);
+        app.handle_event(&key(Key::E, false, false));
+        assert_eq!(
+            app.current_tool, tool,
+            "a tool's letter changed the tool under the card"
+        );
+        assert!(app.show_help, "a key that is not the card's put it away");
+
+        assert!(app.handle_event(&press(MouseButton::Left)));
+        assert!(!app.show_help, "the press did not put the card away");
+        assert!(!app.dirty, "the press drew on the picture under the card");
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Release(MouseButton::Left),
+        }));
+
+        app.handle_event(&key(Key::F1, false, false));
+        app.handle_event(&press(MouseButton::Right));
+        assert!(!app.show_help, "a right-button press left the card up");
+
+        app.handle_event(&key(Key::E, false, false));
+        assert_ne!(
+            app.current_tool, tool,
+            "control: E does nothing with the card down"
+        );
+        app.handle_event(&press(MouseButton::Left));
+        assert!(
+            app.dirty,
+            "control: a press draws nothing even with the card down"
+        );
     }
 
     /// A picture saved to `path` and then changed again.

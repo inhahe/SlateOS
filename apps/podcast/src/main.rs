@@ -2132,6 +2132,20 @@ impl PodcastApp {
     }
 
     fn handle_mouse(&mut self, event: &MouseEvent) -> bool {
+        // The list of keys is modal for the pointer as it is for the keys, and
+        // drawn over everything but the file dialog (which has the event
+        // first): a press with any button puts it away and does nothing else,
+        // rather than reaching the player control, show or episode drawn
+        // under it.
+        if self.show_help
+            && matches!(
+                event.kind,
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_)
+            )
+        {
+            self.show_help = false;
+            return true;
+        }
         if !matches!(event.kind, MouseEventKind::Press(MouseButton::Left)) {
             return false;
         }
@@ -7199,6 +7213,45 @@ mod tests {
         assert!(app.handle_event(&click_at(20.0, y)));
         assert_eq!(app.main_view, MainView::Downloads);
         assert_eq!(app.sidebar_selection, SidebarSelection::Downloads);
+    }
+
+    /// **A press with the list of keys up puts it away and does nothing
+    /// else.** It reached the row drawn under the list, and went where the row
+    /// points. The control is the same press with the list down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let mut app = PodcastApp::with_sample_data(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let y = sidebar_row_y(&app, 3);
+        assert_eq!(
+            app.sidebar_target_at(20.0, y),
+            Some(SidebarTarget::Downloads)
+        );
+        let view = app.main_view;
+        assert_ne!(view, MainView::Downloads, "the fixture starts there");
+
+        app.handle_event(&key(Key::F1));
+        assert!(app.show_help);
+        assert!(app.handle_event(&click_at(20.0, y)));
+        assert!(!app.show_help, "the press did not put the list away");
+        assert_eq!(
+            app.main_view, view,
+            "the press went through the list to a row"
+        );
+
+        app.handle_event(&key(Key::F1));
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x: 20.0,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Right),
+        }));
+        assert!(!app.show_help, "a right-button press left the list up");
+
+        app.handle_event(&click_at(20.0, y));
+        assert_eq!(
+            app.main_view,
+            MainView::Downloads,
+            "control: the press goes nowhere even with the list down"
+        );
     }
 
     #[test]

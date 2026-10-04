@@ -59,6 +59,28 @@ MUTATIONS = [
         '    // Global keyboard shortcuts',
         ['f1_raises_the_keys_and_a_chord_is_neither_a_player_key_nor_typing'],
     ),
+    # -- the shortcut card's hold on the pointer
+    (
+        'a press goes through the shortcut card',
+        '            MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n'
+        '                state.show_help = false;\n'
+        '                return true;\n'
+        '            }\n',
+        '',
+        ['the_shortcut_card_takes_a_press_rather_than_passing_it_on'],
+    ),
+    (
+        'only the left button puts the card away',
+        '            MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n',
+        '            MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_) => {\n',
+        ['the_shortcut_card_takes_a_press_rather_than_passing_it_on'],
+    ),
+    (
+        'the wheel scrolls what the card covers',
+        '            MouseEventKind::Scroll { .. } => return false,\n',
+        '',
+        ['the_shortcut_card_takes_a_press_rather_than_passing_it_on'],
+    ),
 ]
 
 if __name__ == "__main__":

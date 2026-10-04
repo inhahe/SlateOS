@@ -381,6 +381,28 @@ MUTATIONS = [
         "                if !key.types_text() {",
         ["a_command_types_nothing_and_alt_or_windows_is_no_shortcut"],
     ),
+    # -- the shortcut card's hold on the pointer
+    (
+        "a press goes through the shortcut card",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n"
+        "                    self.show_help = false;\n"
+        "                    return EventResult::Consumed;\n"
+        "                }\n",
+        "",
+        ["the_shortcut_card_takes_a_press_rather_than_passing_it_on"],
+    ),
+    (
+        "only the left button puts the card away",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n",
+        "                MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_) => {\n",
+        ["the_shortcut_card_takes_a_press_rather_than_passing_it_on"],
+    ),
+    (
+        "the wheel scrolls the note the card covers",
+        "                MouseEventKind::Scroll { .. } => return EventResult::Ignored,\n",
+        "",
+        ["the_wheel_scrolls_no_note_under_the_card"],
+    ),
 ]
 
 if __name__ == "__main__":

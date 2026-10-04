@@ -154,6 +154,46 @@ MAIN = [
         "                if let Some(p) = words.next() {\n                    self.server_config.password = Some(p.to_string());\n                }",
         ["a_connect_without_a_password_clears_the_last_one"],
     ),
+    # -- the shortcut card is modal, for the keys and the pointer
+    (
+        "a key that is not the card's types or sends behind it",
+        "            if closes {\n"
+        "                self.show_help = false;\n"
+        "            }\n"
+        "            return closes;\n",
+        "            if closes {\n"
+        "                self.show_help = false;\n"
+        "                return true;\n"
+        "            }\n",
+        ["the_shortcut_card_takes_every_key_and_press_while_it_is_up"],
+    ),
+    (
+        "Escape does not put the card away",
+        "            let closes = matches!(event.key, Key::F1 | Key::Escape);\n",
+        "            let closes = matches!(event.key, Key::F1);\n",
+        ["the_shortcut_card_takes_every_key_and_press_while_it_is_up"],
+    ),
+    (
+        "a press goes through the card",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n"
+        "                    self.show_help = false;\n"
+        "                    return true;\n"
+        "                }\n",
+        "",
+        ["the_shortcut_card_takes_every_key_and_press_while_it_is_up"],
+    ),
+    (
+        "only the left button puts the card away",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n",
+        "                MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_) => {\n",
+        ["the_shortcut_card_takes_every_key_and_press_while_it_is_up"],
+    ),
+    (
+        "the wheel scrolls the chat the card covers",
+        "                MouseEventKind::Scroll { .. } => return false,\n",
+        "",
+        ["the_wheel_scrolls_no_chat_under_the_card"],
+    ),
 ]
 
 TABLES = {

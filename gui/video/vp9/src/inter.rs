@@ -148,6 +148,22 @@ pub(crate) fn build_inter_predictors_sb<P: Pixel>(
     bit_depth: u8,
     scratch: &mut McScratch<P>,
 ) -> Result<(), Error> {
+    build_inter_predictors(frame, x0, refs, mi, pos, bit_depth, scratch, 0..3)
+}
+
+/// [`build_inter_predictors_sb`] for the planes in `planes` only: libvpx's
+/// `vp9_build_inter_predictors_sby` (0..1), `_sbuv` (1..3) and `_sbp`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_inter_predictors<P: Pixel>(
+    frame: &mut FrameBuf<P>,
+    x0: usize,
+    refs: &[Option<(&FrameBuf<P>, ScaleFactors)>; 3],
+    mi: &ModeInfo,
+    pos: &BlockPos,
+    bit_depth: u8,
+    scratch: &mut McScratch<P>,
+    planes: core::ops::Range<usize>,
+) -> Result<(), Error> {
     let k = kernel(mi.interp_filter);
     let max = (1i32 << bit_depth.clamp(8, 12)) - 1;
     let mi_x = (pos.mi_col * 8) as i32;
@@ -165,7 +181,7 @@ pub(crate) fn build_inter_predictors_sb<P: Pixel>(
                 "a reference frame has invalid dimensions",
             ));
         }
-        for plane in 0..3usize {
+        for plane in planes.clone() {
             let (ss_x, ss_y) = if plane == 0 {
                 (0, 0)
             } else {

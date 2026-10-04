@@ -139,10 +139,52 @@ fn block_error_fp(coeff: &[i32], dqcoeff: &[i32]) -> i64 {
         .sum()
 }
 
+/// A block's estimated luma rate and distortion from its transform: libvpx's
+/// `block_yrd` past its simple-model shortcut, the residual against `pred`
+/// Hadamard-transformed (or 4x4 DCT'd) per transform block and fast
+/// quantised; the rate the levels' magnitudes, the distortion the
+/// quantisation error. `place` is the whole block's, whose edge distances
+/// libvpx applies here too. With `sse` (the block's sum of squared
+/// differences, as the search measured it): scaled to the transform's units,
+/// and the distortion of a block that quantises to nothing, at no rate.
+/// Returns the rate, the distortion and whether every transform block
+/// quantised to nothing.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn block_yrd_full(
+    src: &[u8],
+    src_stride: usize,
+    pred: &[u8],
+    pred_stride: usize,
+    bsize: BlockSize,
+    tx_size: TxSize,
+    place: &Placement,
+    qs: &QuantSet,
+    sse: Option<&mut i64>,
+) -> (i32, i64, bool) {
+    let (rate, dist, skippable) = block_yrd(
+        src,
+        src_stride,
+        pred,
+        pred_stride,
+        bsize,
+        tx_size,
+        place,
+        qs,
+    );
+    if let Some(sse) = sse {
+        *sse = (*sse << 6) >> 2;
+        if skippable {
+            return (0, *sse, true);
+        }
+    }
+    (rate, dist, skippable)
+}
+
 /// A transform block's estimated rate and distortion: libvpx's `block_yrd`
 /// for one intra transform block (`bsize` its own size), on a key frame.
 /// `place` is the whole block's, whose edge distances libvpx applies here
 /// too.
+#[allow(clippy::too_many_arguments)]
 fn block_yrd(
     src: &[u8],
     src_stride: usize,

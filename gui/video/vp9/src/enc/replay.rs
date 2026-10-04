@@ -108,6 +108,53 @@ fn reference_input() -> Option<Vec<Picture>> {
     Some(out)
 }
 
+/// The encoder's own decisions on the reference input, traced: every frame
+/// is coded with [`Encoder::encode`], its decisions logged in the format of
+/// the instrumented libvpx (`crate::enc::trace`) to the file `VP9_TRACE`
+/// names (or `vp9-rust.trace` in the temporary directory), and each frame
+/// compared with libvpx's. The trace is for finding the first decision
+/// that differs, against libvpx's own: `tools/trace/README.md`.
+#[test]
+#[ignore = "needs the full vector suite: python gui/video/vp9/tools/fetch_vectors.py"]
+fn own_decisions_traced() {
+    let input = reference_input()
+        .expect("the full suite is not fetched: python gui/video/vp9/tools/fetch_vectors.py");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/encoder/rt8.ivf");
+    let reference = common::read_ivf(&std::fs::read(path).unwrap()).unwrap();
+    let frames: usize = std::env::var("VP9_TRACE_FRAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30);
+    let mut enc = Encoder::new(EncoderConfig::realtime(1280, 720, 1000)).unwrap();
+    crate::enc::trace::start();
+    let mut first_bad = None;
+    for (i, (picture, want)) in input
+        .iter()
+        .zip(&reference.packets)
+        .take(frames)
+        .enumerate()
+    {
+        let planes = [0, 1, 2].map(|p| picture.plane8(p).unwrap());
+        let got = enc.encode(planes).unwrap();
+        if &got != want && first_bad.is_none() {
+            first_bad = Some((i, got.len(), want.len()));
+        }
+    }
+    let lines = crate::enc::trace::take();
+    let out = std::env::var("VP9_TRACE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir().join("vp9-rust.trace"));
+    std::fs::write(&out, lines.join("\n") + "\n").unwrap();
+    assert!(
+        first_bad.is_none(),
+        "frame {} differs from libvpx's ({} bytes against {}); the trace is in {}",
+        first_bad.map_or(0, |b| b.0),
+        first_bad.map_or(0, |b| b.1),
+        first_bad.map_or(0, |b| b.2),
+        out.display()
+    );
+}
+
 /// Every frame of libvpx's reference encode, coded again from libvpx's own
 /// decisions, is libvpx's frame byte for byte.
 #[test]

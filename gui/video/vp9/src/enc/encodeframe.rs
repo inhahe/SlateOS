@@ -663,6 +663,97 @@ impl<'a> FrameEncoder<'a> {
         (x0, y0)
     }
 
+    /// Predict a luma transform block of the mode search's intra candidate
+    /// into the reconstruction: [`Self::predict_intra`], with the
+    /// neighbours read from the source picture where libvpx's search skips
+    /// the encode (`x->skip_encode`) -- its estimate of what the
+    /// reconstruction will be.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn predict_intra_search(
+        &mut self,
+        place: &Placement,
+        bsize: BlockSize,
+        row: usize,
+        col: usize,
+        tx_size: TxSize,
+        mode: PredictionMode,
+        from_source: bool,
+    ) {
+        if !from_source {
+            self.predict_intra(place, bsize, 0, row, col, tx_size, mode);
+            return;
+        }
+        let bwl = u32::from(
+            tables::B_WIDTH_LOG2
+                .get(usize::from(bsize))
+                .copied()
+                .unwrap_or(0),
+        );
+        let txw = 1usize << tx_size;
+        let x0 = place.mi_col * 8 + 4 * col;
+        let y0 = place.mi_row * 8 + 4 * row;
+        let p = &mut self.recon.planes[0];
+        let s = &self.src.planes[0];
+        let edges = Edges {
+            have_top: row != 0 || place.mi_row != 0,
+            have_left: col != 0 || place.mi_col > self.tile_mi_col_start,
+            have_right: col + txw < (1usize << bwl),
+            past_right: place.mb_to_right_edge < 0,
+            past_bottom: place.mb_to_bottom_edge < 0,
+            frame_width: p.width,
+            frame_height: p.height,
+        };
+        intra::predict_from(
+            &s.data,
+            s.stride,
+            &mut p.data,
+            p.stride,
+            x0,
+            y0,
+            mode,
+            tx_size,
+            &edges,
+            8,
+            &mut self.intra_out,
+        );
+    }
+
+    /// Predict block `bsize` at (`mi_row`, `mi_col`) as `mi` says -- the
+    /// planes in `planes` -- into the reconstruction: what libvpx's mode
+    /// search builds with `vp9_build_inter_predictors_sby`, `_sbuv` and
+    /// `_sbp`, and its partitioning with `_sb`. The block's own coding
+    /// predicts it again.
+    pub(crate) fn predict_inter(
+        &mut self,
+        mi_row: usize,
+        mi_col: usize,
+        bsize: BlockSize,
+        mi: &ModeInfo,
+        planes: core::ops::Range<usize>,
+    ) {
+        let pos = self.block_pos(mi_row, mi_col, bsize);
+        let mut m = *mi;
+        m.sb_type = bsize;
+        m.mi_row = mi_row;
+        m.mi_col = mi_col;
+        m.bw = pos.bw;
+        m.bh = pos.bh;
+        let predicted = inter::build_inter_predictors(
+            self.recon,
+            0,
+            &self.pred_refs,
+            &m,
+            &pos,
+            8,
+            &mut self.mc,
+            planes,
+        );
+        // The searches name only references the frame was given; were one
+        // missing, the search would read stale pixels and choose worse, but
+        // the block's coding predicts again and could not code it.
+        debug_assert!(predicted.is_ok(), "a search names a reference not given");
+    }
+
     /// The blocks above and to the left of a cell, as the contexts see them:
     /// none off the top of the frame or left of the tile.
     pub(crate) fn neighbours(

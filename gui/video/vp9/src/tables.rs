@@ -158,6 +158,17 @@ pub const TXSIZE_TO_BSIZE: [u8; 4] = [0, 3, 6, 9];
 /// Log2 of a block size's width in 4x4 units: libvpx's `b_width_log2_lookup`.
 pub const B_WIDTH_LOG2: [u8; 13] = [0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4];
 
+/// Log2 of a block size's height in 4x4 units: libvpx's
+/// `b_height_log2_lookup`.
+pub const B_HEIGHT_LOG2: [u8; 13] = [0, 1, 0, 1, 2, 1, 2, 3, 2, 3, 4, 3, 4];
+
+/// Log2 of a block size's width in 8x8 cells (0 below 8x8): libvpx's
+/// `mi_width_log2_lookup`.
+pub const MI_WIDTH_LOG2: [u8; 13] = [0, 0, 0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3];
+
+/// Log2 of a block size's pixel count: libvpx's `num_pels_log2_lookup`.
+pub const NUM_PELS_LOG2: [u8; 13] = [4, 5, 5, 6, 7, 7, 8, 9, 9, 10, 11, 11, 12];
+
 /// The partition that cuts a square of each size (4x4 to 64x64) into a block size (4 = none can): libvpx's `partition_lookup`.
 pub const PARTITION_LOOKUP: [[u8; 13]; 5] = [
     [0, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4],

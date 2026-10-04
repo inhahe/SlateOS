@@ -135,6 +135,66 @@ pub fn predict<P: Pixel>(
     bit_depth: u8,
     out: &mut Prediction,
 ) {
+    predict_kernel(plane, stride, x0, y0, mode, tx_size, e, bit_depth, out);
+    store(plane, stride, x0, y0, tx_size, out);
+}
+
+/// [`predict`] with the neighbours read from `src` (rows `src_stride`
+/// apart) and the prediction written to `dst`: libvpx's
+/// `vp9_predict_intra_block` given a different reference buffer, as its
+/// realtime mode search does when it predicts from the source picture
+/// (`x->skip_encode`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn predict_from<P: Pixel>(
+    src: &[P],
+    src_stride: usize,
+    dst: &mut [P],
+    dst_stride: usize,
+    x0: usize,
+    y0: usize,
+    mode: PredictionMode,
+    tx_size: TxSize,
+    e: &Edges,
+    bit_depth: u8,
+    out: &mut Prediction,
+) {
+    predict_kernel(src, src_stride, x0, y0, mode, tx_size, e, bit_depth, out);
+    store(dst, dst_stride, x0, y0, tx_size, out);
+}
+
+/// Write a predicted block into `plane`.
+fn store<P: Pixel>(
+    plane: &mut [P],
+    stride: usize,
+    x0: usize,
+    y0: usize,
+    tx_size: TxSize,
+    out: &Prediction,
+) {
+    let bs = 4usize << tx_size.min(3);
+    for (r, row) in out.iter().enumerate().take(bs) {
+        let start = (y0 + r) * stride + x0;
+        if let Some(dst) = plane.get_mut(start..start + bs) {
+            for (d, &v) in dst.iter_mut().zip(row) {
+                *d = P::from_int(v);
+            }
+        }
+    }
+}
+
+/// Predict into `out` from the neighbours in `plane`.
+#[allow(clippy::too_many_arguments)]
+fn predict_kernel<P: Pixel>(
+    plane: &[P],
+    stride: usize,
+    x0: usize,
+    y0: usize,
+    mode: PredictionMode,
+    tx_size: TxSize,
+    e: &Edges,
+    bit_depth: u8,
+    out: &mut Prediction,
+) {
     let bs = 4usize << tx_size.min(3);
     let base = 128i32 << (bit_depth.clamp(8, 12) - 8);
     let mut edge = Edge {
@@ -221,15 +281,6 @@ pub fn predict<P: Pixel>(
 
     let max = (1i32 << bit_depth.clamp(8, 12)) - 1;
     kernel(mode, bs, &edge, e.have_left, e.have_top, base, max, out);
-
-    for (r, row) in out.iter().enumerate().take(bs) {
-        let start = (y0 + r) * stride + x0;
-        if let Some(dst) = plane.get_mut(start..start + bs) {
-            for (d, &v) in dst.iter_mut().zip(row) {
-                *d = P::from_int(v);
-            }
-        }
-    }
 }
 
 /// Run `mode`'s predictor for a `bs`-pixel block over `edge`, writing every

@@ -156,8 +156,10 @@ fn frames_match_vpxenc_realtime() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/encoder/rt8.ivf");
     let reference = common::read_ivf(&std::fs::read(path).unwrap()).unwrap();
     let mut encoder = Encoder::new(EncoderConfig::realtime(1280, 720, 1000)).unwrap();
-    // Only key frames so far: the first frame.
-    for (i, (picture, want)) in input.iter().zip(&reference.packets).enumerate().take(1) {
+    assert_eq!((input.len(), reference.packets.len()), (30, 30));
+    // Every frame: the key frame, then 29 inter frames of libvpx's own
+    // decisions, made by the encoder.
+    for (i, (picture, want)) in input.iter().zip(&reference.packets).enumerate() {
         let planes = [0, 1, 2].map(|p| picture.plane8(p).unwrap());
         let got = encoder.encode(planes).unwrap();
         let first = got.iter().zip(want.iter()).position(|(a, b)| a != b);

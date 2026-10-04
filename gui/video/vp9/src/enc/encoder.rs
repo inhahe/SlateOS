@@ -1,22 +1,27 @@
 //! The encoder: pictures in, compressed frames out.
 //!
-//! This is libvpx's realtime frame loop being ported: `vp9_cx_iface.c`'s
+//! This is libvpx's realtime frame loop: `vp9_cx_iface.c`'s
 //! `encoder_encode` (timestamps), `vp9_encoder.c`'s
 //! `vp9_get_compressed_data`, `Pass0Encode`, `encode_frame_to_data_rate`
-//! and `encode_without_recode_loop` -- the frame rate tracked from the
-//! timestamps, the rate control's target and quantiser, the cyclic refresh
-//! set up, the blocks encoded and reconstructed (`encodeframe`), the
-//! reconstruction loop-filtered at the level libvpx's realtime speeds pick
-//! from the quantiser (`vp9_pick_filter_level`) and its edges extended for
-//! the next frame's prediction, the frame written (`bitstream`), the
-//! reference slots refreshed and the rate control told what it cost.
+//! and `encode_without_recode_loop`, in libvpx's order -- the frame rate
+//! tracked from the timestamps; scene detection and the noise estimate from
+//! the source; the rate control's target and quantiser; the cyclic refresh
+//! set up; the blocks decided (`nonrd`) and encoded and reconstructed
+//! (`encodeframe`); the reconstruction loop-filtered at the level libvpx's
+//! realtime speeds pick from the quantiser (`vp9_pick_filter_level`) and its
+//! edges extended for the next frame's prediction; the frame written
+//! (`bitstream`); the reference slots refreshed and the rate control told
+//! what it cost.
 //!
-//! Key frames take libvpx's own decisions. Inter frames are coded -- the
-//! references, their vectors and the inter frame's headers -- but their
-//! decisions are still a caller's (the tests'); until the encoder makes its
-//! own, [`Encoder::encode`] codes every frame as a key frame. What a decoder
-//! makes of each frame is exactly [`Encoder::reconstruction`]: the tests
-//! decode every frame written and compare.
+//! Every frame takes libvpx's own decisions, as `vpxenc --rt --cpu-used=8`
+//! makes them: a key frame first, inter frames after it. Above 352x288 the
+//! frames are `vpxenc`'s byte for byte; at and below it libvpx cuts inter
+//! frames' blocks with a learned partitioning that is not ported yet
+//! (`known-issues/F-the-vp9-encoder-is-libvpxs-only-above-352x288.md`), so
+//! the frames there are valid but not `vpxenc`'s. Tests may hand the frame
+//! loop decisions of their own instead. What a decoder makes of each frame
+//! is exactly [`Encoder::reconstruction`]: the tests decode every frame
+//! written and compare.
 //!
 //! Translated in part into Rust from libvpx v1.17.0's `vp9/vp9_cx_iface.c`,
 //! `vp9/encoder/vp9_encoder.c`, `vp9_picklpf.c`, `vp9_extend.c`,
@@ -33,16 +38,22 @@
 use std::sync::Arc;
 
 use crate::Error;
+use crate::block::MiGrid;
 use crate::block::MvRef;
 use crate::common::{
     ALLOW_16X16, MAX_REF_FRAMES, ONLY_4X4, REF_FRAMES, SWITCHABLE, TX_MODE_SELECT, TxMode,
 };
+use crate::common::{BLOCK_SIZES, LAST_FRAME};
 use crate::decoder::{Picture, PlaneView};
 use crate::enc::bitstream::{self, CoefUpdates, Frame, FrameHeader, UpdateSearch};
+use crate::enc::content;
 use crate::enc::cpi::{Cpi, Oxcf, quantizer_to_qindex};
 use crate::enc::encodeframe::{Decide, FrameEncoder, InterFrame};
-use crate::enc::nonrd::RtDecisions;
-use crate::enc::rd::{RdFrame, compute_rd_mult};
+use crate::enc::mcomp::LumaRef;
+use crate::enc::nonrd::{InterDecisions, InterSettings, RtDecisions};
+use crate::enc::partition::NoiseLevel;
+use crate::enc::pickinter::{ALT_FLAG, GOLD_FLAG, LAST_FLAG, SearchFrame};
+use crate::enc::rd::{MAX_MODES, RdFrame, compute_rd_mult};
 use crate::enc::tokenize;
 use crate::frame::{AnyFrame, Buffers, FrameBuf, Pixel};
 use crate::header::{self, Quantization, Segmentation};
@@ -62,6 +73,12 @@ pub struct EncoderConfig {
     pub height: u32,
     /// Frames per second, as numerator and denominator.
     pub fps: (u32, u32),
+    /// The unit of the pictures' timestamps, in seconds (numerator,
+    /// denominator): `vpxenc`'s `--timebase`. Each picture is stamped with
+    /// its start in these units, rounded down, as `vpxenc` stamps it -- so a
+    /// coarse unit makes the frames' durations uneven, and the rate control
+    /// follows them. `vpxenc`'s, given a frame rate, is a millisecond.
+    pub timebase: (u32, u32),
     /// The bitrate to hold, in kilobits per second.
     pub bitrate_kbps: u32,
     /// The quantiser's bounds on libvpx's 0-to-63 scale (`vpxenc`'s
@@ -93,6 +110,7 @@ impl EncoderConfig {
             width,
             height,
             fps: (30, 1),
+            timebase: (1, 1000),
             bitrate_kbps,
             min_quantizer: 2,
             max_quantizer: 52,
@@ -108,9 +126,10 @@ impl EncoderConfig {
     /// The configuration as libvpx keeps it: `vp9_cx_iface.c`'s
     /// `set_encoder_config` for `vpxenc`'s realtime options.
     pub(crate) fn oxcf(&self) -> Oxcf {
-        let (fps_num, fps_den) = self.fps;
-        // The timebase is one frame: libvpx's g_timebase = 1 / fps.
-        let mut init_framerate = f64::from(fps_num) / f64::from(fps_den);
+        // The frame rate libvpx assumes before it has seen a timestamp:
+        // the timebase's units per second, or 30 if that is implausible.
+        let (tb_num, tb_den) = self.timebase;
+        let mut init_framerate = f64::from(tb_den) / f64::from(tb_num.max(1));
         if init_framerate > 180.0 {
             init_framerate = 30.0;
         }
@@ -125,7 +144,8 @@ impl EncoderConfig {
             width: self.width,
             height: self.height,
             init_framerate,
-            timebase: (fps_den, fps_num),
+            timebase: self.timebase,
+            fps: self.fps,
             target_bandwidth: 1000 * i64::try_from(kbps).unwrap_or(1_000_000),
             starting_buffer_level_ms: i64::from(self.buffer_initial_ms),
             optimal_buffer_level_ms: i64::from(self.buffer_optimal_ms),
@@ -213,6 +233,15 @@ pub struct Encoder {
     /// The segment map an inter frame's may be predicted from: libvpx's
     /// `last_frame_seg_map`.
     last_seg_map: Vec<u8>,
+    /// Each reference slot's luma with its edges repeated outward, for the
+    /// motion searches.
+    ref_luma: [Option<Arc<LumaRef>>; REF_FRAMES],
+    /// The last source picture, edges repeated to whole superblocks:
+    /// libvpx's `Last_Source`.
+    last_src: Option<FrameBuf<u8>>,
+    /// The key frame's 8x8 partitioning threshold, which libvpx's inter
+    /// frames leave in place (`vbp_thresholds[3]`).
+    vbp_threshold_8x8: i64,
     /// The loop filter's buffers, kept from frame to frame.
     scratch: Buffers<u8>,
     threads: usize,
@@ -230,8 +259,8 @@ impl Encoder {
     /// # Errors
     ///
     /// [`Error::Unsupported`] if a dimension is 0 or above 65536, the frame
-    /// rate has a zero term, the bitrate is zero, or the quantiser bounds
-    /// are out of order or past 63.
+    /// rate or the timebase has a zero term, the bitrate is zero, or the
+    /// quantiser bounds are out of order or past 63.
     pub fn new(config: EncoderConfig) -> Result<Self, Error> {
         let max = crate::frame::MAX_DIMENSION;
         if config.width == 0 || config.height == 0 || config.width > max || config.height > max {
@@ -239,6 +268,9 @@ impl Encoder {
         }
         if config.fps.0 == 0 || config.fps.1 == 0 {
             return Err(Error::Unsupported("the frame rate has a zero term"));
+        }
+        if config.timebase.0 == 0 || config.timebase.1 == 0 {
+            return Err(Error::Unsupported("the timebase has a zero term"));
         }
         if config.bitrate_kbps == 0 {
             return Err(Error::Unsupported("the bitrate is zero"));
@@ -260,6 +292,9 @@ impl Encoder {
             last: None,
             prev_mvs: vec![MvRef::default(); cells],
             last_seg_map: vec![0; cells],
+            ref_luma: Default::default(),
+            last_src: None,
+            vbp_threshold_8x8: 0,
             scratch: Buffers::default(),
             threads: std::thread::available_parallelism().map_or(1, usize::from),
             #[cfg(test)]
@@ -304,16 +339,24 @@ impl Encoder {
         let src = copy_and_extend(&planes, width, height)?;
         let mut recon = FrameBuf::<u8>::new(width, height, 1, 1, 8)?;
 
-        // encoder_encode: the frame's start and end in 1/10,000,000 s, as
-        // libvpx converts a timestamp from the timebase.
+        // vpxenc's stamps: each picture's start in the timebase's units,
+        // rounded down; then encoder_encode's conversion to 1/10,000,000 s.
         let (tb_num, tb_den) = self.cpi.oxcf.timebase;
-        let ticks = |n: i64| -> i64 {
+        let (fps_num, fps_den) = self.cpi.oxcf.fps;
+        let pts = |n: i64| -> i64 {
+            (i64::from(tb_den)
+                .saturating_mul(n)
+                .saturating_mul(i64::from(fps_den))
+                / i64::from(tb_num).max(1))
+                / i64::from(fps_num).max(1)
+        };
+        let ticks = |p: i64| -> i64 {
             let num = i64::from(tb_num) * 10_000_000;
             let den = i64::from(tb_den);
             let g = gcd(num, den).max(1);
-            n.saturating_mul(num / g) / (den / g).max(1)
+            p.saturating_mul(num / g) / (den / g).max(1)
         };
-        let (ts_start, ts_end) = (ticks(self.frames), ticks(self.frames + 1));
+        let (ts_start, ts_end) = (ticks(pts(self.frames)), ticks(pts(self.frames + 1)));
         self.frames += 1;
 
         let cpi = &mut self.cpi;
@@ -326,9 +369,9 @@ impl Encoder {
         cpi.common.show_frame = true;
         cpi.common.intra_only = false;
         cpi.adjust_frame_rate(ts_start, ts_end);
-        // Until the encoder decides inter blocks itself, a frame is a key
-        // frame unless the caller decides them.
-        cpi.force_key_frame = !opts.inter;
+        // A caller deciding blocks itself may ask for intra-only frames;
+        // otherwise the rate control decides, as libvpx's does.
+        cpi.force_key_frame = d.is_some() && !opts.inter;
 
         // Pass0Encode.
         cpi.rc_get_one_pass_cbr_params();
@@ -355,25 +398,115 @@ impl Encoder {
         }
         let key_frame = cpi.common.key_frame;
         let intra_only = cpi.common.frame_is_intra_only();
+        let (mi_rows, mi_cols) = (cpi.common.mi_rows, cpi.common.mi_cols);
 
-        // encode_without_recode_loop: the quantiser, the frame set up.
+        // encode_without_recode_loop: what the source says. The last
+        // source picture (Last_Source) exists from the second frame on.
+        let last_src = self
+            .last_src
+            .as_ref()
+            .filter(|l| l.width == width && l.height == height);
+        if intra_only {
+            cpi.consec_zero_mv.fill(0);
+        }
+        cpi.rc.high_source_sad = false;
+        if let Some(last) = last_src {
+            // vp9_scene_detection_onepass (realtime, CBR, speed 5 and up).
+            let mut scene = content::SceneState {
+                avg_source_sad: cpi.rc.avg_source_sad,
+            };
+            let (high, motion) = content::scene_detection(
+                &src.planes[0],
+                &last.planes[0],
+                mi_rows,
+                mi_cols,
+                cpi.rc.frames_since_key,
+                &mut scene,
+            );
+            cpi.rc.avg_source_sad = scene.avg_source_sad;
+            cpi.rc.high_source_sad = high;
+            cpi.rc.high_num_blocks_with_motion = motion;
+            if !cpi.oxcf.screen_content {
+                cpi.scene_change_rate_reset();
+            }
+        }
+        // vp9_update_noise_estimate: realtime CBR with cyclic refresh at
+        // 640x360 and up.
+        let noise_enable = cpi.oxcf.cyclic_refresh
+            && cpi.oxcf.speed >= 5
+            && !cpi.oxcf.screen_content
+            && u64::from(width) * u64::from(height) >= 640 * 360;
+        let (frame_counter, encoded) = (cpi.common.current_video_frame, cpi.frames_encoded);
+        let (fsk, afl) = (cpi.rc.frames_since_key, cpi.rc.avg_frame_low_motion);
+        let use_skin = cpi.use_skin_detection;
+        let scene_change = cpi.rc.high_source_sad;
+        cpi.noise.update(
+            noise_enable,
+            frame_counter,
+            [&src.planes[0], &src.planes[1], &src.planes[2]],
+            last_src.map(|l| &l.planes[0]),
+            width,
+            height,
+            mi_rows,
+            mi_cols,
+            &cpi.consec_zero_mv,
+            scene_change,
+            use_skin,
+            encoded,
+            fsk,
+            afl,
+        );
+        // The speed features that change frame to frame: speed 8 short-
+        // circuits low-variance blocks harder unless the source is noisy.
+        let short_circuit_low_temp_var = if cpi.noise.enabled
+            && width >= 1280
+            && height >= 720
+            && cpi.noise.extract_level() >= NoiseLevel::Medium
+        {
+            2
+        } else {
+            3
+        };
+
+        // The quantiser, and the frame set up.
         let (q, _bottom, _top) = cpi.rc_pick_q_and_bounds_one_pass_cbr();
-        let q = if cpi.rc.force_max_q {
+        let mut q = if cpi.rc.force_max_q {
             cpi.rc.force_max_q = false;
             cpi.rc.worst_quality
         } else {
             q
         };
-        let q = opts.fixed.map_or(q, |f| f.base_qindex.clamp(0, 255));
+        if let Some(f) = opts.fixed {
+            q = f.base_qindex.clamp(0, 255);
+        }
         // vp9_set_high_precision_mv: always at the frame's start, then by
         // the quantiser on an inter frame (set_size_dependent_vars).
         cpi.common.allow_high_precision_mv = intra_only || q < HIGH_PRECISION_MV_QTHRESH;
+        cpi.mv_costs
+            .set_high_precision(cpi.common.allow_high_precision_mv);
+        // Skin detection, from here on (8-bit, speed 5 and up, CBR, video,
+        // cyclic refresh).
+        cpi.use_skin_detection =
+            cpi.oxcf.speed >= 5 && !cpi.oxcf.screen_content && cpi.oxcf.cyclic_refresh;
         // vp9_set_quantizer.
         cpi.common.quant = Quantization {
             base_qindex: q,
             ..Quantization::default()
         };
         cpi.setup_frame();
+        if key_frame {
+            cpi.rt.clear_prev_mi();
+        }
+        // A scene change at a low quantiser is coded at a high one
+        // (FAST_DETECTION_MAXQ, inter frames).
+        if !intra_only
+            && opts.fixed.is_none()
+            && cpi.rc.high_source_sad
+            && let Some(nq) = cpi.encodedframe_overshoot_fast(q)
+        {
+            q = nq;
+            cpi.common.quant.base_qindex = q;
+        }
         if let Some(f) = opts.fixed {
             let seg = &mut cpi.common.seg;
             *seg = Segmentation {
@@ -385,7 +518,10 @@ impl Encoder {
                 seg.temporal_update = false;
             }
         } else if cpi.oxcf.cyclic_refresh {
-            cpi.cyclic_refresh_setup();
+            let rd_frame = rd_frame_of(cpi);
+            let czm = core::mem::take(&mut cpi.consec_zero_mv);
+            cpi.cyclic_refresh_setup(&czm, rd_frame);
+            cpi.consec_zero_mv = czm;
         }
 
         // vp9_encode_frame: the transform mode (select_tx_mode), the
@@ -403,6 +539,8 @@ impl Encoder {
         let (lst, gld, alt) = (cpi.lst_fb_idx, cpi.gld_fb_idx, cpi.alt_fb_idx);
         let refs: [Option<Arc<AnyFrame>>; 3] =
             [lst, gld, alt].map(|i| self.ref_frame_map.get(i).cloned().flatten());
+        let ref_luma: [Option<Arc<LumaRef>>; 3] =
+            [lst, gld, alt].map(|i| self.ref_luma.get(i).cloned().flatten());
         let same_size = |r: &Option<Arc<AnyFrame>>| {
             r.as_ref()
                 .is_some_and(|f| f.width() == width && f.height() == height)
@@ -426,7 +564,9 @@ impl Encoder {
             refresh_frame_context: cm.refresh_frame_context,
             frame_parallel_decoding_mode: cm.frame_parallel_decoding_mode,
             frame_context_idx: u8::try_from(cm.frame_context_idx).unwrap_or(0),
-            refresh_frame_flags: cpi.refresh_mask(),
+            // Set once the frame is coded: the cyclic refresh may cancel a
+            // golden refresh.
+            refresh_frame_flags: 0,
             ref_slots: [lst, gld, alt].map(|i| u8::try_from(i).unwrap_or(0)),
             ref_sign_bias: [false; 3],
             ref_same_size: [
@@ -448,16 +588,23 @@ impl Encoder {
             .get(cm.frame_context_idx)
             .cloned()
             .unwrap_or_else(FrameContext::defaults);
-        // vp9_initialize_rd_consts and the variance partitioning's
-        // thresholds, for the realtime decisions.
-        let mut rt = RtDecisions::key_frame(
-            compute_rd_mult(q + cm.quant.y_dc_delta_q, RdFrame::Key),
-            i32::from(cpi.quants.get(0, usize::try_from(q).unwrap_or(0)).dequant[1]),
-        );
-        let d: &mut dyn Decide = match d {
-            Some(d) => d,
-            None => &mut rt,
-        };
+        // vp9_initialize_rd_consts: the multiplier, and on libvpx's schedule
+        // (key frames, and every eighth frame from the first) the mode and
+        // vector costs from this frame's probabilities.
+        let rd_frame = rd_frame_of(cpi);
+        let rdmult = compute_rd_mult(q + cm.quant.y_dc_delta_q, rd_frame);
+        if key_frame || (cm.current_video_frame & 7) == 1 {
+            cpi.mode_costs.fill(&fc);
+            if !intra_only {
+                cpi.mv_costs.build(&fc.nmvc, cm.allow_high_precision_mv);
+                cpi.mode_costs.build_inter_mode_cost(&fc);
+            }
+        }
+        // encode_frame_internal: no golden reference just after a golden
+        // refresh.
+        if !key_frame && cpi.rc.frames_since_golden == 0 {
+            cpi.ref_frame_flags &= !GOLD_FLAG;
+        }
         let costing = fc.clone();
         let ref_bufs: [Option<&FrameBuf<u8>>; 3] = [0, 1, 2].map(|i| {
             refs.get(i)
@@ -465,6 +612,7 @@ impl Encoder {
                 .and_then(<u8 as Pixel>::from_any)
         });
         // encode_frame_internal's use_prev_frame_mvs.
+        let cm = &cpi.common;
         let use_prev_frame_mvs = !cm.error_resilient_mode
             && width == cpi.last_width
             && height == cpi.last_height
@@ -477,11 +625,155 @@ impl Encoder {
             allow_hp: h.allow_high_precision_mv,
             interp_filter: SWITCHABLE,
         });
-        let mut fe = FrameEncoder::new(&h, &costing, &cm.seg, &cpi.quants, &src, &mut recon, inter);
-        fe.encode_tiles(d);
+        // set_block_thresholds: each segment's mode thresholds.
+        let thresh_mult = crate::enc::rd::thresh_mult(true);
+        let threshes: Box<[[[i32; MAX_MODES]; BLOCK_SIZES]; 8]> =
+            Box::new(core::array::from_fn(|s| {
+                let qi = cpi.common.seg.qindex(s as u8, q) + cpi.common.quant.y_dc_delta_q;
+                crate::enc::rd::block_thresholds(qi.clamp(0, 255), &thresh_mult)
+            }));
+        let y_ac_q = i32::from(cpi.quants.get(0, usize::try_from(q).unwrap_or(0)).dequant[1]);
+        let frame_vbp = if intra_only {
+            (
+                crate::enc::partition::key_frame_thresholds(y_ac_q),
+                0i64,
+                0i64,
+            )
+        } else {
+            let thresholds = crate::enc::partition::inter_thresholds(
+                y_ac_q,
+                1,
+                cpi.noise.enabled.then(|| cpi.noise.extract_level()),
+                crate::enc::partition::ContentState::Invalid,
+                width,
+                height,
+                8,
+                false,
+                cpi.rc.avg_frame_qindex[crate::enc::ratectrl::INTER_FRAME],
+                self.vbp_threshold_8x8,
+            );
+            let (sad, copy) = if cpi.rc.high_source_sad {
+                (0, 0)
+            } else {
+                let ac = i64::from(y_ac_q);
+                let sad = if width <= 352 && height <= 288 {
+                    10
+                } else {
+                    (ac << 1).max(1000)
+                };
+                let copy = if width <= 352 && height <= 288 {
+                    4000
+                } else if width <= 640 && height <= 360 {
+                    8000
+                } else {
+                    (ac << 3).max(8000)
+                };
+                (sad, copy)
+            };
+            (thresholds, sad, copy)
+        };
+        #[cfg(test)]
+        trace_frame(cpi, rdmult, short_circuit_low_temp_var, tx_mode, &frame_vbp);
+        let ref_frame_flags = cpi.ref_frame_flags;
+        let skip_encode_frame = cpi.skip_encode_frame;
+        let vbp_threshold_8x8 = self.vbp_threshold_8x8;
+
+        // The decisions: the caller's, or libvpx's.
+        let Cpi {
+            common,
+            quants,
+            cr,
+            rt,
+            mv_costs,
+            mode_costs,
+            consec_zero_mv,
+            rc,
+            noise,
+            ..
+        } = &mut *cpi;
+        let mut rt_own;
+        let decide: &mut dyn Decide = if let Some(d) = d {
+            d
+        } else if intra_only {
+            rt_own = RtDecisions::key_frame(rdmult, y_ac_q, rt, last_src);
+            &mut rt_own
+        } else {
+            let (_, vbp_threshold_sad, vbp_threshold_copy) = frame_vbp;
+            rt_own = RtDecisions::inter(InterDecisions {
+                search: SearchFrame {
+                    mv_costs,
+                    mode_costs,
+                    threshes: &threshes,
+                    luma: [0, 1, 2].map(|i| ref_luma.get(i).and_then(Option::as_deref)),
+                    ref_frame_flags,
+                    frames_since_golden: rc.frames_since_golden,
+                    avg_frame_low_motion: rc.avg_frame_low_motion,
+                    scene_change: rc.high_source_sad,
+                    high_num_blocks_with_motion: rc.high_num_blocks_with_motion,
+                    noise_enabled: noise.enabled,
+                    noise_level: noise.level,
+                    rdmult,
+                    cr_rdmult: cr.rdmult,
+                    cyclic_refresh: common.seg.enabled && opts.fixed.is_none(),
+                    current_video_frame: common.current_video_frame,
+                    skip_encode_frame,
+                    short_circuit_low_temp_var,
+                    rd_frame,
+                    adaptive_rd_thresh: crate::enc::pickinter::speed8_adaptive_rd_thresh(
+                        width, height,
+                    ),
+                    base_qindex: q,
+                    frame_width: width,
+                    frame_height: height,
+                },
+                settings: InterSettings {
+                    base_qindex: q,
+                    vbp_threshold_sad,
+                    vbp_threshold_copy,
+                    vbp_threshold_8x8,
+                    noise_extracted: noise.enabled.then(|| noise.extract_level()),
+                    avg_inter_qindex: rc.avg_frame_qindex[crate::enc::ratectrl::INTER_FRAME],
+                    copy_partition: true,
+                    max_copied_frame: 4,
+                    frames_since_key: rc.frames_since_key,
+                    use_skin_detection: true,
+                    use_source_sad: last_src.is_some(),
+                    cyclic_refresh: common.seg.enabled && opts.fixed.is_none(),
+                },
+                state: rt,
+                cr,
+                consec_zero_mv,
+                last_src: last_src.unwrap_or(&src),
+                sb: crate::enc::pickinter::SbState::default(),
+                part: None,
+            });
+            &mut rt_own
+        };
+        let mut fe = FrameEncoder::new(&h, &costing, &common.seg, quants, &src, &mut recon, inter);
+        fe.encode_tiles(decide);
         let mut encoded = fe.finish();
         // fix_interp_filter: a frame of one filter codes it once.
         h.interp_filter = bitstream::fix_interp_filter(SWITCHABLE, &encoded.counts.counts);
+        // sf.skip_encode_frame for the next frame: this one predicted
+        // mostly from other frames.
+        let ii = &encoded.counts.counts.intra_inter;
+        let (intra_count, inter_count) = ii.iter().fold((0u32, 0u32), |(a, b), c| {
+            (a.wrapping_add(c[0]), b.wrapping_add(c[1]))
+        });
+        let cpi = &mut self.cpi;
+        cpi.skip_encode_frame = !key_frame && (intra_count << 2) < inter_count;
+        // The cyclic refresh's account of the frame, which may cancel a
+        // golden refresh due now.
+        if cpi.oxcf.cyclic_refresh && cpi.common.seg.enabled && !intra_only && cpi.cr.content_mode {
+            cpi.cyclic_refresh_postencode(&encoded.mi);
+        }
+        h.refresh_frame_flags = cpi.refresh_mask();
+        if key_frame {
+            // The 8x8 threshold an inter frame leaves in place.
+            self.vbp_threshold_8x8 = crate::enc::partition::key_frame_thresholds(i32::from(
+                cpi.quants.get(0, usize::try_from(q).unwrap_or(0)).dequant[1],
+            ))[3];
+        }
 
         // loopfilter_frame: the level, the filter, and the edges extended
         // for the next frame's prediction.
@@ -551,11 +843,16 @@ impl Encoder {
                     .map_or(0, |b| b.segment_id);
             }
         }
-        // vp9_update_reference_frames.
+        // vp9_update_reference_frames, each with its padded luma for the
+        // next frames' searches.
+        let luma = Arc::new(LumaRef::new(&recon.planes[0]));
         let frame = Arc::new(AnyFrame::Eight(recon));
         let mut refresh = |slot: usize| {
             if let Some(s) = self.ref_frame_map.get_mut(slot) {
                 *s = Some(Arc::clone(&frame));
+            }
+            if let Some(s) = self.ref_luma.get_mut(slot) {
+                *s = Some(Arc::clone(&luma));
             }
         };
         if key_frame {
@@ -597,7 +894,49 @@ impl Encoder {
             }
         }
         cm.last_key_frame = key_frame;
+        // get_ref_frame_flags: the next frame's references, those not the
+        // same picture as LAST.
+        let same = |a: usize, b: usize| match (self.ref_frame_map.get(a), self.ref_frame_map.get(b))
+        {
+            (Some(Some(x)), Some(Some(y))) => Arc::ptr_eq(x, y),
+            (Some(None), Some(None)) => true,
+            _ => false,
+        };
+        let mut flags = LAST_FLAG | GOLD_FLAG | ALT_FLAG;
+        if same(gld, lst) {
+            flags &= !GOLD_FLAG;
+        }
+        if same(alt, lst) || same(gld, alt) {
+            flags &= !ALT_FLAG;
+        }
+        cpi.ref_frame_flags = flags;
         cpi.rc_postencode_update(u64::try_from(out.len()).unwrap_or(u64::MAX));
+        if !intra_only {
+            cpi.compute_frame_low_motion(&encoded.mi);
+        }
+        // What each block's coding updates in libvpx as it goes, done here
+        // for the frame: the quantisers the cells were coded at
+        // (vp9_cyclic_refresh_update_sb_postencode) and the cells' runs of
+        // zero motion (update_zeromv_cnt).
+        if cpi.oxcf.cyclic_refresh && cpi.common.seg.enabled && cpi.cr.content_mode {
+            let base = cpi.common.quant.base_qindex;
+            cpi.cr.update_sb_postencode(&encoded.mi, base);
+        }
+        update_zeromv_cnt(&mut cpi.consec_zero_mv, &encoded.mi);
+        #[cfg(test)]
+        crate::enc::trace::line(|| {
+            format!(
+                "E {} size={} seg1={} seg2={} lca={} rgf={} alm={} bl={}",
+                cpi.common.current_video_frame,
+                out.len(),
+                cpi.cr.actual_num_seg1_blocks,
+                cpi.cr.actual_num_seg2_blocks,
+                cpi.cr.low_content_avg,
+                u8::from(cpi.refresh_golden_frame),
+                cpi.rc.avg_frame_low_motion,
+                cpi.rc.buffer_level
+            )
+        });
         let cm = &mut cpi.common;
         cm.seg.update_map = false;
         cm.seg.update_data = false;
@@ -608,7 +947,9 @@ impl Encoder {
         self.prev_mvs = encoded.mvs;
         if cm.show_frame {
             cm.current_video_frame = cm.current_video_frame.wrapping_add(1);
+            cpi.rt.swap_mi();
         }
+        cpi.frames_encoded = cpi.frames_encoded.wrapping_add(1);
         if cm.refresh_frame_context
             && let Some(slot) = cm.frame_contexts.get_mut(cm.frame_context_idx)
         {
@@ -620,6 +961,7 @@ impl Encoder {
             self.last_mi = Some(encoded.mi.clone());
         }
         self.last = Some(frame);
+        self.last_src = Some(src);
         Ok(out)
     }
 
@@ -638,6 +980,84 @@ fn gcd(a: i64, b: i64) -> i64 {
         (a, b) = (b, a % b);
     }
     a
+}
+
+/// What kind of frame the rate-distortion multipliers are for: libvpx's
+/// `vp9_compute_rd_mult_based_on_qindex`'s branches (no alt-ref source in
+/// a one-pass encode).
+fn rd_frame_of(cpi: &Cpi) -> RdFrame {
+    if cpi.common.key_frame {
+        RdFrame::Key
+    } else if cpi.refresh_golden_frame || cpi.refresh_alt_ref_frame {
+        RdFrame::GoldenOrAltRef
+    } else {
+        RdFrame::Inter
+    }
+}
+
+/// Each cell's run of frames of near-zero motion from the last frame,
+/// after a frame: libvpx's `update_zeromv_cnt` for every block (blocks of
+/// the cyclic refresh's three segments only).
+fn update_zeromv_cnt(consec_zero_mv: &mut [u8], mi: &MiGrid) {
+    let cols = mi.mi_cols;
+    for b in &mi.blocks {
+        if !(b.is_inter() && b.ref_frame[0] == LAST_FRAME && b.segment_id <= 2) {
+            continue;
+        }
+        let small = |v: i16| i32::from(v).abs() < 8;
+        let still = small(b.mv[0].row) && small(b.mv[0].col);
+        let xmis = b.bw.min(cols - b.mi_col);
+        let ymis = b.bh.min(mi.mi_rows - b.mi_row);
+        for y in 0..ymis {
+            let start = (b.mi_row + y) * cols + b.mi_col;
+            if let Some(cells) = consec_zero_mv.get_mut(start..start + xmis) {
+                for c in cells {
+                    *c = if still { c.saturating_add(1) } else { 0 };
+                }
+            }
+        }
+    }
+}
+
+/// The trace line libvpx's instrumented build writes per frame, before its
+/// blocks are coded.
+#[cfg(test)]
+fn trace_frame(cpi: &Cpi, rdmult: i32, scl: i32, tx_mode: TxMode, vbp: &([i64; 4], i64, i64)) {
+    crate::enc::trace::line(|| {
+        let cm = &cpi.common;
+        let cr = &cpi.cr;
+        let q = cm.quant.base_qindex;
+        format!(
+            "F {} q={q} kf={} rdm={rdmult} epb={} spb={} rff={} fsg={} ne={},{},{} hss={} scl={scl} sef={} seg={} crd={},{} crrd={} trs={} tds={} sbi={} tfg={} vbp={},{},{},{} vsad={} vcopy={} alm={} hp={} ifl=4 txm={tx_mode}",
+            cm.current_video_frame,
+            u8::from(cm.key_frame),
+            crate::enc::rd::error_per_bit(rdmult),
+            crate::enc::rd::sad_per_bit16(q),
+            cpi.ref_frame_flags,
+            cpi.rc.frames_since_golden,
+            u8::from(cpi.noise.enabled),
+            cpi.noise.value,
+            cpi.noise.level as i32,
+            u8::from(cpi.rc.high_source_sad),
+            u8::from(cpi.skip_encode_frame),
+            u8::from(cm.seg.enabled),
+            cr.qindex_delta[1],
+            cr.qindex_delta[2],
+            cr.rdmult,
+            cr.thresh_rate_sb,
+            cr.thresh_dist_sb,
+            cr.sb_index,
+            cpi.rc.frames_till_gf_update_due,
+            vbp.0[0],
+            vbp.0[1],
+            vbp.0[2],
+            vbp.0[3],
+            vbp.1,
+            vbp.2,
+            cpi.rc.avg_frame_low_motion,
+            u8::from(cm.allow_high_precision_mv)
+        )
+    });
 }
 
 impl Cpi {
@@ -1310,6 +1730,16 @@ mod tests {
             })
             .is_err()
         );
+        for timebase in [(0, 1000), (1, 0)] {
+            assert!(Encoder::new(EncoderConfig { timebase, ..config }).is_err());
+        }
+        assert!(
+            Encoder::new(EncoderConfig {
+                timebase: (1, 30),
+                ..config
+            })
+            .is_ok()
+        );
         let backwards = EncoderConfig {
             min_quantizer: 9,
             max_quantizer: 8,
@@ -1339,13 +1769,41 @@ mod tests {
         let info = crate::peek_stream_info(&frame).unwrap();
         assert_eq!((info.width, info.height), (1280, 720));
         assert!(crate::Decoder::new().decode(&frame).unwrap().is_some());
-        // The rate control's state after it, as libvpx leaves it.
+        // The rate control's state after it, as libvpx leaves it. The first
+        // frame lasts 33 ms by vpxenc's millisecond stamps (0 to 1000 / 30,
+        // rounded down): 30.3 frames a second, 33,000 bits each -- libvpx's
+        // buffer after the frame is 500,000 + 33,000 less the frame's bits.
         let rc = &enc.cpi.rc;
-        assert_eq!(rc.avg_frame_bandwidth, 33_333);
+        assert_eq!(rc.avg_frame_bandwidth, 33_000);
+        assert_eq!(rc.buffer_level, 500_000 + 33_000 - 8 * frame.len() as i64);
         assert_eq!(rc.this_frame_target, 250_000);
         assert_eq!(rc.last_q[crate::enc::ratectrl::KEY_FRAME], 161);
         assert_eq!(rc.baseline_gf_interval, 40);
         assert_eq!(rc.frames_till_gf_update_due, 39);
+    }
+
+    /// The timebase sets the frames' durations, as `vpxenc`'s stamps do: in
+    /// milliseconds the first of 30 frames a second lasts 33 ms, so its
+    /// share of 1000 kbit/s is 33,000 bits; in thirtieths of a second it
+    /// lasts one tick, which libvpx's ten-million-a-second clock holds as
+    /// 333,333, and its share is 33,333.
+    #[test]
+    fn the_timebase_sets_a_frames_share() {
+        let (w, h) = (64usize, 64usize);
+        let pic = [
+            vec![90u8; w * h],
+            vec![128u8; w * h / 4],
+            vec![128u8; w * h / 4],
+        ];
+        for (timebase, share) in [((1, 1000), 33_000), ((1, 30), 33_333)] {
+            let mut enc = Encoder::new(EncoderConfig {
+                timebase,
+                ..EncoderConfig::realtime(64, 64, 1000)
+            })
+            .unwrap();
+            enc.encode(views(&pic, w, h)).unwrap();
+            assert_eq!(enc.cpi.rc.avg_frame_bandwidth, share, "{timebase:?}");
+        }
     }
 
     /// libvpx's fit at its ends: q index 0 (AC step 4) and 255 (1828); and

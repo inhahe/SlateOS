@@ -205,6 +205,13 @@ pub(crate) struct RateControl {
     pub high_source_sad: bool,
     pub reset_high_source_sad: bool,
     pub force_max_q: bool,
+    /// The frame's target bits per 64x64 superblock: libvpx's
+    /// `sb64_target_rate`.
+    pub sb64_target_rate: i32,
+    /// The scene detection's running average of the source's change
+    /// (`avg_source_sad[0]`), and whether many blocks moved.
+    pub avg_source_sad: u64,
+    pub high_num_blocks_with_motion: bool,
 }
 
 /// libvpx's `vp9_rc_get_default_min_gf_interval`.
@@ -283,6 +290,9 @@ impl RateControl {
             high_source_sad: false,
             reset_high_source_sad: false,
             force_max_q: false,
+            sb64_target_rate: 0,
+            avg_source_sad: 0,
+            high_num_blocks_with_motion: false,
         }
     }
 }
@@ -482,11 +492,14 @@ impl Cpi {
         target.min(rc.max_frame_bandwidth)
     }
 
-    /// libvpx's `vp9_rc_set_frame_target`, without dynamic resizing. (Its
-    /// per-superblock rate is what cyclic refresh's band reads, and comes
-    /// with it.)
+    /// libvpx's `vp9_rc_set_frame_target`, without dynamic resizing: the
+    /// frame's target, and its share per 64x64 superblock (what the cyclic
+    /// refresh weighs a block's rate against).
     fn rc_set_frame_target(&mut self, target: i32) {
         self.rc.this_frame_target = target;
+        let pels = i64::from(self.common.width) * i64::from(self.common.height);
+        let sb64 = (i64::from(target) * 64 * 64) / pels.max(1);
+        self.rc.sb64_target_rate = sb64.min(i64::from(i32::MAX)) as i32;
     }
 
     /// The rate correction factor this frame's model uses: libvpx's
@@ -830,6 +843,94 @@ impl Cpi {
             q
         };
         (q, bottom_index, top_index)
+    }
+
+    /// A scene change at low quantisers resets the rate control, and a frame
+    /// after such a reset targets the average: the part of libvpx's
+    /// `vp9_scene_detection_onepass` that steers the rate (CBR, not screen
+    /// content, one layer).
+    pub(crate) fn scene_change_rate_reset(&mut self) {
+        let rc = &mut self.rc;
+        if rc.high_source_sad
+            && rc.last_q[INTER_FRAME] == rc.best_quality
+            && rc.avg_frame_qindex[INTER_FRAME] < (rc.best_quality << 1)
+            && rc.rate_correction_factors[INTER_NORMAL] == MIN_BPB_FACTOR
+        {
+            rc.rate_correction_factors[INTER_NORMAL] = 0.5;
+            rc.avg_frame_qindex[INTER_FRAME] = rc.worst_quality;
+            rc.buffer_level = rc.optimal_buffer_level;
+            rc.bits_off_target = rc.optimal_buffer_level;
+            rc.reset_high_source_sad = true;
+        }
+        if !self.common.key_frame && rc.reset_high_source_sad {
+            rc.this_frame_target = rc.avg_frame_bandwidth;
+        }
+    }
+
+    /// On a scene change at a low quantiser, code the frame at a high one
+    /// and reset the rate control's state to it: libvpx's
+    /// `vp9_encodedframe_overshoot` for `FAST_DETECTION_MAXQ` (before the
+    /// frame is coded, video content, one layer). Returns the new
+    /// quantiser, or `None` where libvpx leaves the frame's.
+    pub(crate) fn encodedframe_overshoot_fast(&mut self, q: i32) -> Option<i32> {
+        let rc = &mut self.rc;
+        let thresh_qp = 3 * (rc.worst_quality >> 2);
+        if self.common.quant.base_qindex >= thresh_qp {
+            return None;
+        }
+        let mut rate_correction_factor = rc.rate_correction_factors[INTER_NORMAL];
+        let target_size = rc.avg_frame_bandwidth;
+        let sad_thr: u64 = 64 * 64 * 32;
+        let q = if !self.oxcf.screen_content
+            && rc.buffer_level > (3 * rc.optimal_buffer_level) >> 2
+            && rc.avg_source_sad < sad_thr
+        {
+            (q + rc.worst_quality) >> 1
+        } else {
+            rc.worst_quality
+        };
+        self.cr.counter_encode_maxq_scene_change = 0;
+        rc.avg_frame_qindex[INTER_FRAME] = q;
+        rc.buffer_level = rc.optimal_buffer_level;
+        rc.bits_off_target = rc.optimal_buffer_level;
+        rc.rc_1_frame = 0;
+        rc.rc_2_frame = 0;
+        let mbs = u64::try_from(self.common.mbs.max(1)).unwrap_or(1);
+        let target_bits_per_mb =
+            ((u64::try_from(target_size).unwrap_or(0) << BPER_MB_NORMBITS) / mbs) as i32;
+        let q2 = qindex_to_q(q);
+        let mut enumerator = 1_800_000i32;
+        enumerator += ((f64::from(enumerator) * q2) as i32) >> 12;
+        let new_correction_factor = f64::from(target_bits_per_mb) * q2 / f64::from(enumerator);
+        if new_correction_factor > rate_correction_factor {
+            rate_correction_factor = (2.0 * rate_correction_factor).min(new_correction_factor);
+            if rate_correction_factor > MAX_BPB_FACTOR {
+                rate_correction_factor = MAX_BPB_FACTOR;
+            }
+            rc.rate_correction_factors[INTER_NORMAL] = rate_correction_factor;
+        }
+        Some(q)
+    }
+
+    /// After an inter frame: the running share of its cells that are still
+    /// against the last frame: libvpx's `vp9_compute_frame_low_motion`.
+    pub(crate) fn compute_frame_low_motion(&mut self, mi: &crate::block::MiGrid) {
+        let (rows, cols) = (mi.mi_rows, mi.mi_cols);
+        let mut cnt_zeromv = 0i64;
+        for row in 0..rows {
+            for col in 0..cols {
+                if let Some(b) = mi.at(row, col)
+                    && b.ref_frame[0] == crate::common::LAST_FRAME
+                    && i32::from(b.mv[0].row).abs() < 16
+                    && i32::from(b.mv[0].col).abs() < 16
+                {
+                    cnt_zeromv += 1;
+                }
+            }
+        }
+        let cells = (rows * cols).max(1) as i64;
+        let pct = (100 * cnt_zeromv / cells) as i32;
+        self.rc.avg_frame_low_motion = (3 * self.rc.avg_frame_low_motion + pct) >> 2;
     }
 
     /// After a frame: the model's correction, the averages and the buffer.

@@ -433,13 +433,6 @@ impl Segmentation {
     /// Turn `feature` on for `segment_id` with value `data`: libvpx's
     /// `vp9_enable_segfeature` and `vp9_set_segdata`. The value is held to
     /// what the feature's syntax can code.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the cyclic refresh sets its segments' quantisers with it once it codes inter frames; the tests' segmentations use it now"
-        )
-    )]
     pub(crate) fn set_feature(&mut self, segment_id: u8, feature: usize, data: i32) {
         let max = i32::try_from(seg_feature_data_max(feature)).unwrap_or(0);
         let min = if seg_feature_signed(feature) {

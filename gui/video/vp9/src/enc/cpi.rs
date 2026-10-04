@@ -16,8 +16,12 @@
 
 use crate::enc::aq_cyclicrefresh::CyclicRefresh;
 use crate::enc::bitstream::LoopFilterState;
+use crate::enc::content::NoiseEstimate;
+use crate::enc::mcomp::MvCosts;
+use crate::enc::nonrd::RtState;
 use crate::enc::quantize::{Deltas, Quants};
 use crate::enc::ratectrl::RateControl;
+use crate::enc::rd::ModeCosts;
 use crate::header::{Quantization, Segmentation};
 use crate::probs::FrameContext;
 
@@ -55,6 +59,9 @@ pub(crate) struct Oxcf {
     pub init_framerate: f64,
     /// The timebase, seconds per unit: numerator and denominator.
     pub timebase: (u32, u32),
+    /// The rate the pictures come at, frames per second as numerator and
+    /// denominator: `vpxenc`'s `--fps`, from which it stamps each picture.
+    pub fps: (u32, u32),
     /// Bits per second.
     pub target_bandwidth: i64,
     pub starting_buffer_level_ms: i64,
@@ -163,6 +170,26 @@ pub(crate) struct Cpi {
     pub first_time_stamp_ever: i64,
     pub last_time_stamp_seen: i64,
     pub last_end_time_stamp_seen: i64,
+    /// The source's estimated noise: libvpx's `noise_estimate`.
+    pub noise: NoiseEstimate,
+    /// Per 8x8 cell, for how many frames in a row its block was still
+    /// against the last frame: libvpx's `consec_zero_mv`.
+    pub consec_zero_mv: Vec<u8>,
+    /// Which references the frame may use: libvpx's `ref_frame_flags`.
+    pub ref_frame_flags: u8,
+    /// The last frame mostly predicted from other frames, so this one's
+    /// search predicts intra modes from the source (`sf.skip_encode_frame`).
+    pub skip_encode_frame: bool,
+    /// What vectors and modes cost the searches, rebuilt on libvpx's
+    /// schedule.
+    pub mv_costs: MvCosts,
+    pub mode_costs: ModeCosts,
+    /// The realtime decisions' state from frame to frame.
+    pub rt: RtState,
+    /// How many frames were encoded: libvpx's `num_encoded_top_layer`.
+    pub frames_encoded: u32,
+    /// libvpx's `use_skin_detection`, set from the first frame on.
+    pub use_skin_detection: bool,
 }
 
 impl Cpi {
@@ -214,7 +241,7 @@ impl Cpi {
             oxcf,
             common,
             rc: RateControl::new(&oxcf),
-            cr: CyclicRefresh::new(),
+            cr: CyclicRefresh::new(mi_rows.saturating_mul(mi_cols)),
             quants: Quants::new(Deltas::default(), 0),
             framerate: oxcf.init_framerate,
             refresh_last_frame: true,
@@ -230,6 +257,15 @@ impl Cpi {
             first_time_stamp_ever: i64::MAX,
             last_time_stamp_seen: 0,
             last_end_time_stamp_seen: 0,
+            noise: NoiseEstimate::new(oxcf.width, oxcf.height),
+            consec_zero_mv: vec![0; mi_rows.saturating_mul(mi_cols)],
+            ref_frame_flags: 0,
+            skip_encode_frame: false,
+            mv_costs: MvCosts::new(),
+            mode_costs: ModeCosts::default(),
+            rt: RtState::new(mi_rows, mi_cols),
+            frames_encoded: 0,
+            use_skin_detection: false,
         };
         // vp9_change_config: the buffer sizes, the frame rate's share of the
         // bitrate, the quality bounds.

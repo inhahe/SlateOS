@@ -1,18 +1,24 @@
 //! Variance-based partitioning: how libvpx's realtime speeds cut each
 //! superblock into blocks without trying the cuts.
 //!
-//! Each 64x64 superblock gets a tree of variances -- of 4x4 averages on a
-//! key frame, measured against a flat grey -- and is cut wherever a
+//! Each 64x64 superblock gets a tree of variances and is cut wherever a
 //! block's variance is above a threshold that grows with the quantiser:
 //! smooth regions stay in large blocks, detailed ones split. On a key frame
-//! nothing is kept larger than 32x32, and nothing cut below 8x8.
+//! the variances are of 4x4 averages against a flat grey, nothing is kept
+//! larger than 32x32, and nothing cut below 8x8. On an inter frame they are
+//! of 8x8 averages against the superblock's prediction from the last frame
+//! -- what moves or changes splits -- and below 16x16 a block goes straight
+//! to 8x8. An inter superblock may also skip the tree: kept whole when it
+//! barely differs from the last frame, or given the last frame's partition
+//! again for a few frames (the copy, kept here between frames).
 //!
 //! Translated into Rust from libvpx v1.17.0's `vp9/encoder/vp9_encodeframe.c`
 //! (`choose_partitioning`, `set_vt_partitioning`, `set_vbp_thresholds`,
-//! `fill_variance_4x4avg` and the variance tree) and `vpx_dsp/avg.c`
-//! (`vpx_avg_4x4_c`) (copyright the WebM project authors), used under
-//! libvpx's BSD licence and patent grant (`licenses/libvpx-LICENSE`,
-//! `licenses/libvpx-PATENTS`).
+//! `fill_variance_4x4avg`, `fill_variance_8x8avg`, `set_low_temp_var_flag`,
+//! `copy_partitioning_helper`, `update_prev_partition_helper` and the
+//! variance tree) and `vpx_dsp/avg.c` (`vpx_avg_4x4_c`) (copyright the WebM
+//! project authors), used under libvpx's BSD licence and patent grant
+//! (`licenses/libvpx-LICENSE`, `licenses/libvpx-PATENTS`).
 
 #![allow(
     clippy::arithmetic_side_effects,
@@ -115,16 +121,7 @@ impl Default for Tree {
 
 /// libvpx's `vpx_avg_4x4_c`: the rounded mean of a 4x4 block.
 fn avg_4x4(p: &Plane<u8>, x: usize, y: usize) -> i32 {
-    let mut sum = 0i32;
-    for r in 0..4 {
-        if let Some(row) = p
-            .data
-            .get((y + r) * p.stride + x..(y + r) * p.stride + x + 4)
-        {
-            sum += row.iter().map(|&v| i32::from(v)).sum::<i32>();
-        }
-    }
-    (sum + 8) >> 4
+    crate::enc::variance::avg_4x4(p.data.get(y * p.stride + x..).unwrap_or(&[]), p.stride)
 }
 
 /// The partitioning thresholds for a quantiser: libvpx's
@@ -429,6 +426,640 @@ pub(crate) fn choose_key_frame_partitioning(
         }
     }
     c.part
+}
+
+/// A superblock's temporal content, from its sum of differences against
+/// the last source picture: libvpx's `CONTENT_STATE_SB`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum ContentState {
+    #[default]
+    Invalid = 0,
+    LowSadLowSumdiff = 1,
+    LowSadHighSumdiff = 2,
+    HighSadLowSumdiff = 3,
+    HighSadHighSumdiff = 4,
+    LowVarHighSumdiff = 5,
+    VeryHighSad = 6,
+}
+
+/// How noisy the source is estimated to be: libvpx's `NOISE_LEVEL`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum NoiseLevel {
+    #[default]
+    LowLow = 0,
+    Low = 1,
+    Medium = 2,
+    High = 3,
+}
+
+/// The partitioning thresholds of an inter frame at 8 bits per sample, by
+/// level (64x64, 32x32, 16x16; 8x8 is a key frame's): libvpx's
+/// `set_vbp_thresholds` for a frame of `width` x `height` at `speed`.
+/// `y_ac_dequant` is the luma AC step of the quantiser, `noise` the
+/// estimated noise level if libvpx estimates it here, `key_thresholds_8x8`
+/// the 8x8 threshold libvpx leaves from the last key frame (an inter frame
+/// does not set it).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "libvpx's set_vbp_thresholds reads all of these"
+)]
+pub(crate) fn inter_thresholds(
+    y_ac_dequant: i32,
+    thresh_mult: i32,
+    noise: Option<NoiseLevel>,
+    content_state: ContentState,
+    width: u32,
+    height: u32,
+    speed: i32,
+    disable_16x16: bool,
+    avg_inter_qindex: i32,
+    key_thresholds_8x8: i64,
+) -> [i64; 4] {
+    let mut base = i64::from(thresh_mult) * i64::from(y_ac_dequant);
+    if let Some(level) = noise
+        && width >= 640
+        && height >= 480
+    {
+        match level {
+            NoiseLevel::High => base *= 3,
+            NoiseLevel::Medium => base <<= 1,
+            NoiseLevel::LowLow => base = (7 * base) >> 3,
+            NoiseLevel::Low => {}
+        }
+    }
+    // scale_part_thresh_sumdiff.
+    let low_sumdiff = matches!(
+        content_state,
+        ContentState::LowSadLowSumdiff
+            | ContentState::HighSadLowSumdiff
+            | ContentState::LowVarHighSumdiff
+    );
+    if (speed >= 8 && ((width <= 640 && height <= 480) || low_sumdiff))
+        || (speed == 7 && low_sumdiff)
+    {
+        base = (5 * base) >> 2;
+    }
+    let mut t = [base, 0, base << speed.clamp(0, 31), key_thresholds_8x8];
+    if width >= 1280 && height >= 720 && speed < 7 {
+        t[2] <<= 1;
+    }
+    if width <= 352 && height <= 288 {
+        t[0] = base >> 3;
+        t[1] = base >> 1;
+        t[2] = base << 3;
+        if avg_inter_qindex > 220 {
+            t[2] <<= 2;
+        } else if avg_inter_qindex > 200 {
+            t[2] <<= 1;
+        }
+    } else if width < 1280 && height < 720 {
+        t[1] = (5 * base) >> 2;
+    } else if width < 1920 && height < 1080 {
+        t[1] = base << 1;
+    } else {
+        t[1] = (5 * base) >> 1;
+    }
+    if disable_16x16 {
+        t[2] = i64::MAX;
+    }
+    t
+}
+
+/// libvpx's `vpx_avg_8x8_c` at (`x`, `y`) of a plane.
+fn avg_8x8(p: &Plane<u8>, x: usize, y: usize) -> i32 {
+    crate::enc::variance::avg_8x8(p.data.get(y * p.stride + x..).unwrap_or(&[]), p.stride)
+}
+
+/// What an inter frame's partitioning of one superblock reads.
+pub(crate) struct InterSb<'a> {
+    /// The source's luma, and the superblock's prediction from the last
+    /// frame (libvpx's `xd->plane[0].dst`, where it was built).
+    pub src: &'a Plane<u8>,
+    pub pred: &'a Plane<u8>,
+    pub mi_rows: usize,
+    pub mi_cols: usize,
+    pub mi_row: usize,
+    pub mi_col: usize,
+    /// The frame's thresholds, by level ([`inter_thresholds`]).
+    pub thresholds: [i64; 4],
+    /// Split the superblock whatever its variance: a scene change, or a
+    /// superblock that is mostly skin.
+    pub force_split_64: bool,
+    /// libvpx's estimated noise level (`vp9_noise_estimate_extract_level`);
+    /// `Low` where it does not estimate, as `choose_partitioning` starts it.
+    pub noise_level: NoiseLevel,
+}
+
+/// One inter superblock's partitioning: the sizes, every `set_block_size`
+/// in the order libvpx made it (whose last one leaves libvpx's `xd->mi`
+/// there), and the variance tree the low-variance flags read.
+pub(crate) struct InterPartition {
+    pub part: SbPartition,
+    pub set_calls: Vec<(usize, usize, BlockSize)>,
+    tree: Tree,
+}
+
+impl InterPartition {
+    /// The 64x64, halves and quadrants' variances libvpx's
+    /// `set_low_temp_var_flag` reads, by its indices: (64x64), (64x32 top,
+    /// bottom), (32x64 left, right), (32x32 by quadrant), (16x16 by
+    /// quadrant, then raster within it).
+    fn var64(&self) -> i32 {
+        self.tree.v64.none.variance
+    }
+}
+
+/// Partition an inter frame's superblock: libvpx's `choose_partitioning`
+/// from its variance tree on, at the realtime speeds of 8 and up (no
+/// minimum-maximum check, no 4x4 averages above 352x288): 8x8 averages of
+/// the source against the prediction from the last frame, cut where a
+/// block's variance is above its level's threshold, never below 16x16 by
+/// variance and then straight to 8x8.
+#[allow(
+    clippy::too_many_lines,
+    reason = "libvpx's choose_partitioning, kept whole so that it ports line for line"
+)]
+pub(crate) fn choose_inter_partitioning(s: &InterSb<'_>) -> InterPartition {
+    let f = Frame {
+        luma: s.src,
+        mi_rows: s.mi_rows,
+        mi_cols: s.mi_cols,
+    };
+    let mut c = Chooser {
+        f: &f,
+        part: SbPartition {
+            mi_row: s.mi_row,
+            mi_col: s.mi_col,
+            sizes: [[BLOCK_4X4; 8]; 8],
+        },
+    };
+    let (mi_row, mi_col) = (s.mi_row, s.mi_col);
+    let thresholds = s.thresholds;
+    let mut vt = Tree::default();
+    let mb_to_right = (s.mi_cols as i64 - 8 - mi_col as i64) * 8;
+    let mb_to_bottom = (s.mi_rows as i64 - 8 - mi_row as i64) * 8;
+    let pixels_wide = 64 + mb_to_right.min(0);
+    let pixels_high = 64 + mb_to_bottom.min(0);
+    let (sx, sy) = (mi_col * 8, mi_row * 8);
+    let mut force_split = [false; 21];
+    force_split[0] = s.force_split_64;
+    let mut avg_16x16 = [0i32; 4];
+    let mut maxvar_16x16 = [0i32; 4];
+    let mut minvar_16x16 = [i32::MAX; 4];
+
+    for i in 0..4 {
+        let x32 = (i & 1) << 5;
+        let y32 = (i >> 1) << 5;
+        for j in 0..4 {
+            let x16 = x32 + ((j & 1) << 4);
+            let y16 = y32 + ((j >> 1) << 4);
+            let n16 = i * 4 + j;
+            // fill_variance_8x8avg: each 8x8's average, source less
+            // prediction.
+            for k in 0..4 {
+                let x8 = x16 + ((k & 1) << 3);
+                let y8 = y16 + ((k >> 1) << 3);
+                let (sum, sse) = if (x8 as i64) < pixels_wide && (y8 as i64) < pixels_high {
+                    let s_avg = avg_8x8(s.src, sx + x8, sy + y8);
+                    let d_avg = avg_8x8(s.pred, sx + x8, sy + y8);
+                    let sum = s_avg - d_avg;
+                    (sum, (sum * sum) as u32)
+                } else {
+                    (0, 0)
+                };
+                vt.v8[n16 * 4 + k].none = Var {
+                    sum_square_error: sse,
+                    sum_error: sum,
+                    log2_count: 0,
+                    variance: 0,
+                };
+            }
+            let ch = n16 * 4;
+            vt.v16[n16] = PartVar::fill([
+                &vt.v8[ch].none,
+                &vt.v8[ch + 1].none,
+                &vt.v8[ch + 2].none,
+                &vt.v8[ch + 3].none,
+            ]);
+            vt.v16[n16].none.compute();
+            let v = vt.v16[n16].none.variance;
+            avg_16x16[i] += v;
+            minvar_16x16[i] = minvar_16x16[i].min(v);
+            maxvar_16x16[i] = maxvar_16x16[i].max(v);
+            if i64::from(v) > thresholds[2] {
+                force_split[5 + n16] = true;
+                force_split[i + 1] = true;
+                force_split[0] = true;
+            }
+        }
+    }
+    let mut avg_32x32 = 0i32;
+    let mut max_var_32x32 = 0i32;
+    let mut min_var_32x32 = i32::MAX;
+    for i in 0..4 {
+        let ch = i * 4;
+        vt.v32[i] = PartVar::fill([
+            &vt.v16[ch].none,
+            &vt.v16[ch + 1].none,
+            &vt.v16[ch + 2].none,
+            &vt.v16[ch + 3].none,
+        ]);
+        if !force_split[i + 1] {
+            vt.v32[i].none.compute();
+            let var_32x32 = vt.v32[i].none.variance;
+            max_var_32x32 = max_var_32x32.max(var_32x32);
+            min_var_32x32 = min_var_32x32.min(var_32x32);
+            let v = i64::from(var_32x32);
+            let busy =
+                v > thresholds[1] || (v > (thresholds[1] >> 1) && v > i64::from(avg_16x16[i] >> 1));
+            // A clean low-resolution source whose 16x16s vary a lot
+            // (libvpx's cm->height <= 360: the same test on whole cells).
+            let uneven = s.noise_level < NoiseLevel::Low
+                && s.mi_rows * 8 <= 360
+                && i64::from(maxvar_16x16[i] - minvar_16x16[i]) > (thresholds[1] >> 1)
+                && i64::from(maxvar_16x16[i]) > thresholds[1];
+            if busy || uneven {
+                force_split[i + 1] = true;
+                force_split[0] = true;
+            }
+            avg_32x32 += var_32x32;
+        }
+    }
+    if !force_split[0] {
+        vt.v64 = PartVar::fill([
+            &vt.v32[0].none,
+            &vt.v32[1].none,
+            &vt.v32[2].none,
+            &vt.v32[3].none,
+        ]);
+        vt.v64.none.compute();
+        let v = i64::from(vt.v64.none.variance);
+        if s.noise_level >= NoiseLevel::Medium {
+            if v > i64::from((9 * avg_32x32) >> 5) {
+                force_split[0] = true;
+            }
+        } else if i64::from(max_var_32x32 - min_var_32x32) > 3 * (thresholds[0] >> 3)
+            && i64::from(max_var_32x32) > thresholds[0] >> 1
+        {
+            force_split[0] = true;
+        }
+    }
+
+    let mut calls = Vec::new();
+    let mut v64 = vt.v64;
+    if mi_col + 8 > s.mi_cols
+        || mi_row + 8 > s.mi_rows
+        || !c.set_vt_partitioning_inter(
+            &mut v64,
+            BLOCK_64X64,
+            mi_row,
+            mi_col,
+            thresholds[0],
+            BLOCK_16X16,
+            force_split[0],
+            &mut calls,
+        )
+    {
+        for i in 0..4 {
+            let x32 = (i & 1) << 2;
+            let y32 = (i >> 1) << 2;
+            let mut v32 = vt.v32[i];
+            let kept = c.set_vt_partitioning_inter(
+                &mut v32,
+                BLOCK_32X32,
+                mi_row + y32,
+                mi_col + x32,
+                thresholds[1],
+                BLOCK_16X16,
+                force_split[i + 1],
+                &mut calls,
+            );
+            vt.v32[i] = v32;
+            if !kept {
+                for j in 0..4 {
+                    let x16 = (j & 1) << 1;
+                    let y16 = (j >> 1) << 1;
+                    let mut v16 = vt.v16[i * 4 + j];
+                    if !c.set_vt_partitioning_inter(
+                        &mut v16,
+                        BLOCK_16X16,
+                        mi_row + y32 + y16,
+                        mi_col + x32 + x16,
+                        thresholds[2],
+                        BLOCK_16X16,
+                        force_split[5 + i * 4 + j],
+                        &mut calls,
+                    ) {
+                        for k in 0..4 {
+                            let (r, cc) =
+                                (mi_row + y32 + y16 + (k >> 1), mi_col + x32 + x16 + (k & 1));
+                            c.set_block_size_logged(r, cc, BLOCK_8X8, &mut calls);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    vt.v64 = v64;
+    InterPartition {
+        part: c.part,
+        set_calls: calls,
+        tree: vt,
+    }
+}
+
+impl Chooser<'_> {
+    /// [`Self::set_block_size`], noting the call.
+    fn set_block_size_logged(
+        &mut self,
+        mi_row: usize,
+        mi_col: usize,
+        bsize: BlockSize,
+        calls: &mut Vec<(usize, usize, BlockSize)>,
+    ) {
+        calls.push((mi_row, mi_col, bsize));
+        self.set_block_size(mi_row, mi_col, bsize);
+    }
+
+    /// libvpx's `set_vt_partitioning` on an inter frame: the variances were
+    /// computed where the forced splits were decided, the vertical and
+    /// horizontal halves are computed here.
+    #[allow(clippy::too_many_arguments)]
+    fn set_vt_partitioning_inter(
+        &mut self,
+        node: &mut PartVar,
+        bsize: BlockSize,
+        mi_row: usize,
+        mi_col: usize,
+        threshold: i64,
+        bsize_min: BlockSize,
+        force_split: bool,
+        calls: &mut Vec<(usize, usize, BlockSize)>,
+    ) -> bool {
+        let n = usize::from(tables::NUM_8X8_WIDE[usize::from(bsize)]);
+        if force_split {
+            return false;
+        }
+        let fits = mi_col + n / 2 < self.f.mi_cols && mi_row + n / 2 < self.f.mi_rows;
+        if bsize == bsize_min {
+            if fits && i64::from(node.none.variance) < threshold {
+                self.set_block_size_logged(mi_row, mi_col, bsize, calls);
+                return true;
+            }
+            return false;
+        }
+        if bsize < bsize_min {
+            return false;
+        }
+        if fits && i64::from(node.none.variance) < threshold {
+            self.set_block_size_logged(mi_row, mi_col, bsize, calls);
+            return true;
+        }
+        if mi_row + n / 2 < self.f.mi_rows {
+            let subsize = tables::SUBSIZE[usize::from(PARTITION_VERT)][usize::from(bsize)];
+            node.vert[0].compute();
+            node.vert[1].compute();
+            if i64::from(node.vert[0].variance) < threshold
+                && i64::from(node.vert[1].variance) < threshold
+                && chroma_size_valid(subsize)
+            {
+                self.set_block_size_logged(mi_row, mi_col, subsize, calls);
+                self.set_block_size_logged(mi_row, mi_col + n / 2, subsize, calls);
+                return true;
+            }
+        }
+        if mi_col + n / 2 < self.f.mi_cols {
+            let subsize = tables::SUBSIZE[usize::from(PARTITION_HORZ)][usize::from(bsize)];
+            node.horz[0].compute();
+            node.horz[1].compute();
+            if i64::from(node.horz[0].variance) < threshold
+                && i64::from(node.horz[1].variance) < threshold
+                && chroma_size_valid(subsize)
+            {
+                self.set_block_size_logged(mi_row, mi_col, subsize, calls);
+                self.set_block_size_logged(mi_row + n / 2, mi_col, subsize, calls);
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// The 64x64 early exit's and the copy's partitions are set the same way:
+/// one 64x64 block (libvpx's `set_block_size` of the whole superblock).
+pub(crate) fn whole_superblock(mi_row: usize, mi_col: usize) -> SbPartition {
+    let mut part = SbPartition {
+        mi_row,
+        mi_col,
+        sizes: [[BLOCK_4X4; 8]; 8],
+    };
+    part.sizes[0][0] = BLOCK_64X64;
+    part
+}
+
+/// The partition libvpx copies from the last frame's: its
+/// `copy_partitioning_helper` over `prev_partition` (the sizes
+/// `update_prev_partition` stored), with the `set_block_size` calls in
+/// order. `prev(mi_row, mi_col)` reads the stored size of a cell.
+pub(crate) fn copy_partition(
+    mi_row: usize,
+    mi_col: usize,
+    mi_rows: usize,
+    mi_cols: usize,
+    prev: &dyn Fn(usize, usize) -> BlockSize,
+) -> (SbPartition, Vec<(usize, usize, BlockSize)>) {
+    let f = Frame {
+        luma: &EMPTY_PLANE,
+        mi_rows,
+        mi_cols,
+    };
+    let mut c = Chooser {
+        f: &f,
+        part: SbPartition {
+            mi_row,
+            mi_col,
+            sizes: [[BLOCK_4X4; 8]; 8],
+        },
+    };
+    let mut calls = Vec::new();
+    copy_helper(&mut c, &mut calls, prev, BLOCK_64X64, mi_row, mi_col);
+    (c.part, calls)
+}
+
+/// An empty plane for a [`Frame`] that reads no samples.
+static EMPTY_PLANE: Plane<u8> = Plane {
+    data: Vec::new(),
+    stride: 0,
+    alloc_height: 0,
+    width: 0,
+    height: 0,
+    crop_width: 0,
+    crop_height: 0,
+};
+
+fn copy_helper(
+    c: &mut Chooser<'_>,
+    calls: &mut Vec<(usize, usize, BlockSize)>,
+    prev: &dyn Fn(usize, usize) -> BlockSize,
+    bsize: BlockSize,
+    mi_row: usize,
+    mi_col: usize,
+) {
+    if mi_row >= c.f.mi_rows || mi_col >= c.f.mi_cols {
+        return;
+    }
+    let bsl = usize::from(tables::B_WIDTH_LOG2[usize::from(bsize)]);
+    let bs = (1usize << bsl) >> 2;
+    let partition = tables::PARTITION_LOOKUP[bsl][usize::from(prev(mi_row, mi_col))];
+    let subsize = tables::SUBSIZE[usize::from(partition)][usize::from(bsize)];
+    if subsize < BLOCK_8X8 {
+        c.set_block_size_logged(mi_row, mi_col, bsize, calls);
+        return;
+    }
+    match partition {
+        crate::common::PARTITION_NONE => c.set_block_size_logged(mi_row, mi_col, bsize, calls),
+        PARTITION_HORZ => {
+            c.set_block_size_logged(mi_row, mi_col, subsize, calls);
+            c.set_block_size_logged(mi_row + bs, mi_col, subsize, calls);
+        }
+        PARTITION_VERT => {
+            c.set_block_size_logged(mi_row, mi_col, subsize, calls);
+            c.set_block_size_logged(mi_row, mi_col + bs, subsize, calls);
+        }
+        _ => {
+            copy_helper(c, calls, prev, subsize, mi_row, mi_col);
+            copy_helper(c, calls, prev, subsize, mi_row + bs, mi_col);
+            copy_helper(c, calls, prev, subsize, mi_row, mi_col + bs);
+            copy_helper(c, calls, prev, subsize, mi_row + bs, mi_col + bs);
+        }
+    }
+}
+
+/// The sizes to store for the next frame's copy: libvpx's
+/// `update_prev_partition_helper`, walking this frame's partition (`size`
+/// reads the mode info grid's block size at a cell) and writing `store`.
+pub(crate) fn store_partition(
+    mi_row: usize,
+    mi_col: usize,
+    mi_rows: usize,
+    mi_cols: usize,
+    bsize: BlockSize,
+    size: &dyn Fn(usize, usize) -> BlockSize,
+    store: &mut dyn FnMut(usize, usize, BlockSize),
+) {
+    if mi_row >= mi_rows || mi_col >= mi_cols {
+        return;
+    }
+    let bsl = usize::from(tables::B_WIDTH_LOG2[usize::from(bsize)]);
+    let bs = (1usize << bsl) >> 2;
+    let partition = tables::PARTITION_LOOKUP[bsl][usize::from(size(mi_row, mi_col))];
+    let subsize = tables::SUBSIZE[usize::from(partition)][usize::from(bsize)];
+    if subsize < BLOCK_8X8 {
+        store(mi_row, mi_col, bsize);
+        return;
+    }
+    match partition {
+        crate::common::PARTITION_NONE => store(mi_row, mi_col, bsize),
+        PARTITION_HORZ => {
+            store(mi_row, mi_col, subsize);
+            if mi_row + bs < mi_rows {
+                store(mi_row + bs, mi_col, subsize);
+            }
+        }
+        PARTITION_VERT => {
+            store(mi_row, mi_col, subsize);
+            if mi_col + bs < mi_cols {
+                store(mi_row, mi_col + bs, subsize);
+            }
+        }
+        _ => {
+            store_partition(mi_row, mi_col, mi_rows, mi_cols, subsize, size, store);
+            store_partition(mi_row + bs, mi_col, mi_rows, mi_cols, subsize, size, store);
+            store_partition(mi_row, mi_col + bs, mi_rows, mi_cols, subsize, size, store);
+            store_partition(
+                mi_row + bs,
+                mi_col + bs,
+                mi_rows,
+                mi_cols,
+                subsize,
+                size,
+                store,
+            );
+        }
+    }
+}
+
+/// Which blocks of the superblock change too little since the last frame
+/// to be worth searching hard: libvpx's `set_low_temp_var_flag` for the
+/// last frame's partitioning reference. `last` is libvpx's `xd->mi[0]` as
+/// the partitioning left it -- the block size and vector of the cell its
+/// last `set_block_size` wrote -- and `size_at` this frame's sizes.
+/// `short_circuit` is the speed feature's level, `wide` whether the frame is
+/// over 640 wide.
+pub(crate) fn low_temp_var_flags(
+    p: &InterPartition,
+    thresholds: [i64; 4],
+    last: (BlockSize, crate::common::Mv),
+    short_circuit: i32,
+    wide: bool,
+    mi_rows: usize,
+    mi_cols: usize,
+) -> [bool; 25] {
+    let mut low = [false; 25];
+    let mv_thr = if wide { 8 } else { 4 };
+    let (sb_type, mv) = last;
+    let (r, c) = (i32::from(mv.row), i32::from(mv.col));
+    if !(short_circuit == 1 || (c < mv_thr && c > -mv_thr && r < mv_thr && r > -mv_thr)) {
+        return low;
+    }
+    let tree = &p.tree;
+    if sb_type == BLOCK_64X64 {
+        if i64::from(p.var64()) < (thresholds[0] >> 1) {
+            low[0] = true;
+        }
+    } else if sb_type == crate::common::BLOCK_64X32 {
+        for i in 0..2 {
+            if i64::from(tree.v64.horz[i].variance) < (thresholds[0] >> 2) {
+                low[i + 1] = true;
+            }
+        }
+    } else if sb_type == crate::common::BLOCK_32X64 {
+        for i in 0..2 {
+            if i64::from(tree.v64.vert[i].variance) < (thresholds[0] >> 2) {
+                low[i + 3] = true;
+            }
+        }
+    } else {
+        let idx = [(0, 0), (0, 4), (4, 0), (4, 4)];
+        for (i, &(dr, dc)) in idx.iter().enumerate() {
+            let (row, col) = (p.part.mi_row + dr, p.part.mi_col + dc);
+            if mi_cols <= col || mi_rows <= row {
+                continue;
+            }
+            let this = p.part.size_at(row, col);
+            if this == BLOCK_32X32 {
+                let threshold_32x32 = if short_circuit == 1 || short_circuit == 3 {
+                    (5 * thresholds[1]) >> 3
+                } else {
+                    thresholds[1] >> 1
+                };
+                if i64::from(tree.v32[i].none.variance) < threshold_32x32 {
+                    low[i + 5] = true;
+                }
+            } else if short_circuit >= 2
+                && (this == BLOCK_16X16
+                    || this == crate::common::BLOCK_32X16
+                    || this == crate::common::BLOCK_16X32)
+            {
+                for j in 0..4 {
+                    if i64::from(tree.v16[i * 4 + j].none.variance) < (thresholds[2] >> 8) {
+                        low[(i << 2) + j + 9] = true;
+                    }
+                }
+            }
+        }
+    }
+    low
 }
 
 #[cfg(test)]

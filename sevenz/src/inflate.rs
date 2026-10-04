@@ -1061,27 +1061,59 @@ mod tests {
         assert!(!decode(&s, n, false).ok);
     }
 
-    /// A code-length repeat (16) with no length before it to repeat.
+    /// A code-length repeat (16) with no length before it to repeat is
+    /// refused -- not read as repeating a zero. The same lengths with the
+    /// first three spelled out decode, so it is the repeat alone that fails.
     #[test]
     fn a_repeat_with_nothing_before_it_is_refused() {
-        let mut w = Writer::default();
-        w.put(1, 1);
-        w.put(2, 2);
-        w.put(0, 5);
-        w.put(0, 5);
-        w.put(15, 4);
-        // The code-length code: 16 in one bit ("0"), 0 and 1 in two.
-        let mut lens = [0u32; 19];
-        lens[16] = 1;
-        lens[0] = 2;
-        lens[1] = 2;
-        for &k in &LEVEL_ORDER {
-            w.put(lens[k], 3);
-        }
-        // A 16 first, repeating 3 times.
-        w.code(0, 1);
-        w.put(0, 2);
-        assert!(!decode(&w.finish(), 1, false).ok);
+        // `dynamic_block`'s block -- 'A' as "0", the end of block as "1",
+        // one distance code of one bit -- with a code-length code of four
+        // symbols in two bits each: 0 "00", 1 "01", 16 "10", 18 "11".
+        let stream = |first_three: &dyn Fn(&mut Writer)| {
+            let mut w = Writer::default();
+            w.put(1, 1);
+            w.put(2, 2);
+            w.put(0, 5);
+            w.put(0, 5);
+            w.put(15, 4);
+            let mut lens = [0u32; 19];
+            for k in [0, 1, 16, 18] {
+                lens[k] = 2;
+            }
+            for &k in &LEVEL_ORDER {
+                w.put(lens[k], 3);
+            }
+            first_three(&mut w);
+            let zeros = |w: &mut Writer, n: u32| {
+                w.code(3, 2);
+                w.put(n - 11, 7);
+            };
+            zeros(&mut w, 62); // 3 to 64
+            w.code(1, 2); // 'A', 65
+            zeros(&mut w, 138); // 66 to 203
+            zeros(&mut w, 52); // 204 to 255
+            w.code(1, 2); // the end of block, 256
+            w.code(1, 2); // the one distance code
+            w.code(0, 1); // 'A'
+            w.code(1, 1); // the end of block
+            w.finish()
+        };
+        let spelled = decode(
+            &stream(&|w| {
+                for _ in 0..3 {
+                    w.code(0, 2);
+                }
+            }),
+            1,
+            false,
+        );
+        assert!(spelled.ok, "the lengths spelled out do not decode");
+        assert_eq!(spelled.out, b"A");
+        let repeated = stream(&|w| {
+            w.code(2, 2);
+            w.put(0, 2);
+        });
+        assert!(!decode(&repeated, 1, false).ok);
     }
 
     /// The end of each megabyte of output is a check for a bit used past the

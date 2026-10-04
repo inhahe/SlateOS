@@ -7,7 +7,8 @@ the release the port's LZMA SDK 26.00 sources are from. Run from Windows:
 
     python sevenz/tests/data/generate.py
 
-(`generate.py crafted` remakes only the crafted archives, below.)
+(`generate.py crafted` remakes only the crafted archives, below, and
+`generate.py single` only the one-file archives.)
 
 What it writes, beside itself:
 
@@ -29,6 +30,11 @@ What it writes, beside itself:
   from the small archives by rewriting a packed stream and the header with
   it -- bytes after a coder's stream, two BZip2 streams in one coder, and
   Deflate streams zlib would refuse -- with `7z t`'s verdict on each.
+- `made/<name>.7z` for each of `SINGLE`, and `single.txt`: archives of one
+  file each, made for what the tree has too little of -- RISC-V code whose
+  AUIPC pairs 7-Zip's encoder escapes, an LZMA coder with a property other
+  than lc changed -- with the file's size and hash, which every one gives
+  back whole (`7z t` says OK of each, or nothing is written).
 
 7-Zip 26.00 sometimes crashes -- an access violation -- testing a damaged
 LZMA2 archive of several dictionary-reset blocks with several threads; on the
@@ -95,6 +101,39 @@ def code(n: int, seed: int) -> bytes:
             out += bytes([0x90]) * (1 + r.next() % 4)
         else:
             out += snippets[r.next() % len(snippets)]
+    return bytes(out[:n])
+
+
+def riscv_code(n: int, seed: int) -> bytes:
+    """RISC-V-like code for the RISC-V converter: AUIPC pairs -- an AUIPC,
+    then an instruction that may read the register it set -- with x0 and x2
+    for that register as often as all the others together, JALs, 16-bit
+    instructions between them to move the alignment, and noise."""
+    r = Rng(seed)
+    out = bytearray()
+
+    def word(w: int) -> None:
+        out.extend((w & 0xFFFF_FFFF).to_bytes(4, "little"))
+
+    while len(out) < n:
+        k = r.next() % 8
+        if k <= 2:
+            rd = (0, 2, r.next() % 32)[k]
+            word(((r.next() & 0xFFFFF) << 12) | (rd << 7) | 0x17)  # AUIPC
+            rs1 = rd if r.next() % 2 else r.next() % 32
+            # ADDI, LW, JALR, LD
+            op, f3 = ((0x13, 0), (0x03, 2), (0x67, 0), (0x03, 3))[r.next() % 4]
+            imm = r.next() & 0xFFF
+            word((imm << 20) | (rs1 << 15) | (f3 << 12) | ((r.next() % 32) << 7) | op)
+        elif k == 3:
+            word(((r.next() & 0xFFFFF) << 12) | ((r.next() % 32) << 7) | 0x6F)  # JAL
+        elif k == 4:
+            c = r.next() & 0xFFFF
+            if c & 3 == 3:
+                c ^= 1
+            out.extend(c.to_bytes(2, "little"))  # a 16-bit instruction
+        else:
+            word(r.next() | (r.next() << 16))
     return bytes(out[:n])
 
 
@@ -173,6 +212,21 @@ SMALL_TREE = [
     ("b.bin", random_bytes(40, 7)),
     ("c.bin", code(240, 8)),
     ("e.txt", b""),
+]
+
+# Archives of one file each, made for something the input tree has too little
+# of: (archive name, 7z arguments, file name, bytes). Listed in `single.txt`
+# with the file's size and hash, which the reader must give back.
+SINGLE = [
+    # An AUIPC that sets x0 or x2 is rare in real code and next to absent
+    # from text, noise and bytes made for x86. 7-Zip's encoder escapes such a
+    # pair -- it would read as one the encoder converted -- and only this
+    # file's decoding undoes the escape. Over Copy, so every byte the encoder
+    # wrote is in the archive as it stands.
+    ("riscv-pairs", ["-mf=RISCV", "-m0=Copy"], "pairs.bin", riscv_code(16_384, 31)),
+    # LZMA with one property other than lc changed: 7-Zip names each
+    # property that differs from the defaults, and lc only when it does.
+    ("lzma-pb0", ["-m0=LZMA:pb=0"], "a.txt", text(3_000, 32)),
 ]
 
 
@@ -464,6 +518,22 @@ def write_crafted(made: pathlib.Path) -> None:
     (HERE / "crafted.txt").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
 
 
+def write_single(made: pathlib.Path) -> None:
+    """The SINGLE archives into `made`, and `single.txt`: each archive's one
+    file, by size and hash -- and 7-Zip's verdict, which must be OK."""
+    lines = ["# archive size fnv64 file -- one file each, as it went in"]
+    src = HERE / "single-input"
+    for name, args, file, data in SINGLE:
+        write_tree(src, [(file, data)])
+        archive = make(name, args, src, made)
+        v = verdict(archive)
+        if v != "OK":
+            sys.exit(f"7z t {archive.name}: {v}")
+        lines.append(f"{archive.name} {len(data)} {fnv(data):016x} {file}")
+    shutil.rmtree(src)
+    (HERE / "single.txt").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+
+
 def sevenzip(*args: str, cwd: pathlib.Path | None = None) -> subprocess.CompletedProcess:
     return subprocess.run([str(SEVENZIP), *args], capture_output=True, cwd=cwd)
 
@@ -616,6 +686,7 @@ def main() -> None:
     shutil.rmtree(src)
     (HERE / "made.txt").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     write_crafted(made)
+    write_single(made)
 
     header = "# == archive, then: position xor verdict -- 7z t's"
     out = {False: [header], True: [header + " -mmt=off"]}
@@ -654,5 +725,10 @@ if __name__ == "__main__":
     # archives already in made/ -- seconds, where everything is an hour.
     if sys.argv[1:] == ["crafted"]:
         write_crafted(HERE / "made")
+    # `generate.py single`: the one-file archives alone, likewise.
+    elif sys.argv[1:] == ["single"]:
+        if "7-Zip 26.00" not in sevenzip("i").stdout.decode("utf-8", "replace"):
+            sys.exit("expected 7-Zip 26.00")
+        write_single(HERE / "made")
     else:
         main()

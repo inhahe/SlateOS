@@ -35,6 +35,7 @@ MADE = "archives_7zip_made_are_read"
 CHUNKY = "lzma2_of_many_chunks_and_blocks_is_read"
 CRAFTED = "crafted_archives_fail_where_7zip_says"
 METHODS = "methods_are_named_as_7zip_names_them"
+SINGLE = "single_file_archives_give_back_their_file"
 
 # (name, old, new, [tests that must fail])
 LZMA_DEC = [
@@ -197,14 +198,15 @@ PPMD7 = [
         "a PPMd stream need not use its packed bytes up",
         "let ok = ok && ppmd.pos == input.len();",
         "let ok = ok;",
-        [PPMD_RC, CORPUS],
+        # Not the corpus: none of its one-byte corruptions trips this check
+        # alone. `crafted-after-end-ppmd.7z` -- two bytes after the stream,
+        # a data error to 7-Zip -- is refused by nothing else.
+        [PPMD_RC, CRAFTED],
     ),
-    (
-        "reading past a PPMd stream's end is not damage",
-        "    if ppmd.extra {\n        // CHECK_EXTRA_ERROR",
-        "    if false {\n        // CHECK_EXTRA_ERROR",
-        [PPMD_RC, CORPUS],
-    ),
+    # Not a row: "reading past a PPMd stream's end is not damage". A
+    # symbol decoded from past the end is never output and ends the loop
+    # short of the size, which every arm of `ok` refuses, so a separate
+    # check for it was equivalent at the verdict level and is gone.
     (
         "free blocks are never glued together",
         "if self.rd16(node2) != 0 || nu >= 0x10000 || self.broken {",
@@ -227,7 +229,9 @@ PPMD7 = [
         "rescaling keeps the symbols it halved to nothing",
         "        if self.freq(s) == 0 {",
         "        if false {",
-        [MADE, PPMD_RESTARTS],
+        # Not the small model's test, whose input never has a symbol halved
+        # to nothing; the made archives and the corpus do.
+        [MADE, CORPUS, CORPUS_ONE],
     ),
     (
         "a binary context's probability does not learn from a hit",
@@ -262,12 +266,11 @@ BCJ2 = [
         "\n",
         [CORPUS],
     ),
-    (
-        "bytes left over of a CALL or JUMP word are not damage",
-        "            if extra.get(state).copied().unwrap_or(0) != 0 {\n                crit_ok = false;",
-        "            if extra.get(state).copied().unwrap_or(0) != 0 && false {\n                crit_ok = false;",
-        [CORPUS],
-    ),
+    # Not a row: "bytes left over of a CALL or JUMP word are not damage".
+    # Bytes past a CALL or JUMP stream's last four are never read, so a
+    # stream that has them cannot end `ok`, which wants every input used
+    # to its last byte; the flag 7-Zip raises for them was equivalent at
+    # the verdict level and is gone.
     (
         "E8 is not a candidate opcode",
         "                if ((b + (0x100 - 0xE8)) & 0xFE) == 0",
@@ -462,7 +465,9 @@ BRANCH = [
         "RISC-V AUIPC pairs are left as encoded",
         "            if riscv_check_1(v, b) {",
         "            if false {",
-        [MADE],
+        # The pairs 7-Zip's encoder escapes -- an AUIPC setting x0 or x2 --
+        # are in `riscv-pairs.7z` alone: the input tree has none.
+        [SINGLE],
     ),
 ]
 

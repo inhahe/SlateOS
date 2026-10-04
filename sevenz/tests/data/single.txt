@@ -1,0 +1,3 @@
+# archive size fnv64 file -- one file each, as it went in
+riscv-pairs.7z 16384 7753fb494768abd9 pairs.bin
+lzma-pb0.7z 3000 526e5f925a9ca17d a.txt

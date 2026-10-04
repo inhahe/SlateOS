@@ -3855,9 +3855,9 @@ lane C's `guitk`.
       files hold: `known-issues/F-mp4-plays-only-in-the-codecs-webm-has.md`.
   - `[ ]` H.264 and HEVC video, which phones, cameras and most of the web
     write into MP4: `videocodec` refuses them by name today. A decoder for
-    each, held to its reference as VP8's and VP9's are; which code to start
-    from is the first question (FFmpeg's, LGPL; OpenH264, BSD; the
-    specification).
+    each, held to its reference as VP8's and VP9's are. Whether to include
+    one, and which code to start from, is the operator's:
+    `open-questions/F-Q8.md` (H.264), F-Q1 (HEVC).
   - `[ ]` Sound needs Opus and Vorbis decoders, which nothing has yet (the
     music player has none either). When it comes, its seek owes Opus a
     pre-roll: start `matroska::Track::seek_pre_roll` (80 ms) before the

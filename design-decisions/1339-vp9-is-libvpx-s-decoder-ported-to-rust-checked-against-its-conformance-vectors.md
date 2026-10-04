@@ -182,10 +182,27 @@ blocks hanging over the picture's edges. Its trace found one difference,
 at the first cut: the port capped an intra block's transform at 16x16 when
 the frame coded no segments, where libvpx asks only whether the encode runs
 cyclic refresh at all. With that fixed, all 150 frames are `vpxenc`'s and
-the traces agree on all 867,893 lines. At 352x288 and below libvpx
-partitions inter frames by a learned search the port does not have yet
-(`known-issues/F-the-vp9-encoder-is-libvpxs-only-above-352x288.md`). How
-the encoder keeps time is §1340.
+the traces agree on all 867,893 lines. How the encoder keeps time is §1340.
+
+**At every size, 2026-10-04.** At 352x288 and below libvpx partitions inter
+frames differently: it searches each superblock's square partitions before
+coding any of it, a small network deciding which of whole and cut to try
+(`nonrd_pick_partition`, `ml_predict_var_partitioning`). That is ported, and
+a third reference encode at 350x286 (`tests/data/encoder/rt8small.ivf`) is
+byte-identical for all 90 frames, its traces agreeing on all 152,823 lines.
+What it took, beyond the search itself:
+
+- **The network's logarithm is glibc's FMA build** (§1341).
+- **More of libvpx's state between blocks.** Searching a whole superblock
+  before coding it exposes state the variance path never let anyone read:
+  each search leaves its prediction in the reconstruction, which the next
+  block's intra search reads as its neighbour, and leaves the winner's when
+  it kept its predictions aside to reuse them; each block's mode
+  information carries the "codes nothing" flag its buffer cell held two
+  frames ago, which the next block's skip context reads; the cyclic refresh
+  judges a block by `x->skip` as the block before it left it; and a block
+  smaller than `x->max_partition_size` -- 64x64 here, 32x32 on the variance
+  path -- also starts its motion search from the vector it found last.
 
 **Alternatives.**
 

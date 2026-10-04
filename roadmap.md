@@ -3726,8 +3726,12 @@ lane C's `guitk`.
     a fade, blocks over the picture's right and bottom edges. All 150 frames
     are byte-identical from the encoder's own decisions and from libvpx's
     replayed; the decision traces agree on all 867,893 lines.
-    `[ ]` The learned partitioning libvpx uses at 352x288 and below
-    (`known-issues/F-the-vp9-encoder-is-libvpxs-only-above-352x288.md`).
+    `[x]` The learned partitioning libvpx uses at 352x288 and below
+    (`nonrd_pick_partition` trimmed by `ml_predict_var_partitioning`'s
+    networks, with glibc's `logf` as x86-64 runs it, §1341): a third
+    reference encode at 350x286 (`tests/data/encoder/rt8small.ivf`) is
+    byte-identical for all 90 frames, the traces agreeing on all 152,823
+    lines. Every frame size now makes `vpxenc`'s frames.
     `[ ]` Threads.
 
 - `[-]` `[F]` **AVIF pictures**, decided 2026-09-27 (§1333): a HEIF container reader

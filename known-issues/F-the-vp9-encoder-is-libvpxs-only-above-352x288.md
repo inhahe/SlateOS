@@ -1,6 +1,15 @@
 ### [F] The VP9 encoder makes libvpx's decisions only above 352x288 -- 2026-10-04
 
-**Status:** OPEN — lane F's.
+**Status:** OPEN — answered on lane-f 2026-10-04, and moves to
+`known-issues-resolved/` once that has had a boot test on `main`. The
+learned partitioning is ported (`enc/mlpart.rs`, `enc/nonrd.rs`'s
+`pick_partition`), with glibc's `logf` as the reference machine runs it
+(`enc/glibcmath.rs`). A third reference encode at 350x286,
+`tests/data/encoder/rt8small.ivf`, is byte-identical for all 90 frames from
+the encoder's own decisions and from libvpx's replayed, and the decision
+traces agree on all 152,823 lines. The 320x240 `disable_16x16part_nonkey`
+note below needs nothing: it changes only variance thresholds, which a
+frame partitioned by search never reads.
 
 **In short:** the encoder reproduces libvpx's realtime encoder byte for byte
 on a 1280x720 clip, but for a picture of 352x288 pixels or fewer (a small

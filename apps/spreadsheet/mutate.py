@@ -226,6 +226,63 @@ MUTATIONS = [
 ]
 
 CARD = "the_shortcut_card_takes_the_keys_and_a_press_rather_than_passing_them_on"
+FIELDS = "the_text_boxes_are_the_toolkits_fields"
+
+MUTATIONS += [
+    # -- The text boxes are the toolkit's fields (2026-10-04; lane C,
+    # c-e-a-theme-can-shape-the-controls).
+    (
+        "the formula box is drawn in no state",
+        "                self.box_state(TextBox::Formula),\n",
+        "                guitk::field::State::default(),\n",
+        [FIELDS],
+    ),
+    (
+        "the find boxes are drawn in no state",
+        "                        self.box_state(TextBox::Find(field)),\n",
+        "                        guitk::field::State::default(),\n",
+        [FIELDS],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [FIELDS],
+    ),
+    (
+        "a box lights under the list of keys",
+        "        let open = !self.covered();\n",
+        "        let open = true;\n",
+        [FIELDS],
+    ),
+    (
+        "the pointer is never followed",
+        "        self.hovered_box = over;\n",
+        "        let _ = over;\n",
+        [FIELDS],
+    ),
+    (
+        "the light stays after the pointer leaves",
+        "            MouseEventKind::Leave => None,\n",
+        "            MouseEventKind::Leave => self.hovered_box,\n",
+        [FIELDS],
+    ),
+    (
+        "a press in the formula box edits nothing",
+        "            if !matches!(self.mode, InteractionMode::Editing { .. }) {\n"
+        "                self.begin_editing();\n"
+        "            }\n"
+        "            return EventResult::Consumed;\n",
+        "            return EventResult::Consumed;\n",
+        [FIELDS],
+    ),
+    (
+        "both find boxes are marked while either has the keys",
+        "                self.mode == InteractionMode::FindReplace && self.find_replace.field == field\n",
+        "                self.mode == InteractionMode::FindReplace\n",
+        [FIELDS],
+    ),
+]
 
 MUTATIONS += [
     # -- The shortcut list is modal for the keys and the pointer (2026-10-04;

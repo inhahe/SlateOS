@@ -2299,6 +2299,15 @@ fn handle_event(app: &mut CharMapApp, event: &Event) -> EventResult {
     }
     match event {
         Event::Mouse(m) => match m.kind {
+            // The card is modal for the pointer as it is for the keys: a
+            // press, with any button, puts it away rather than reaching the
+            // character drawn under it, and the wheel scrolls nothing it
+            // covers.
+            MouseEventKind::Press(_) if app.show_help => {
+                app.show_help = false;
+                EventResult::Consumed
+            }
+            MouseEventKind::Scroll { .. } if app.show_help => EventResult::Ignored,
             MouseEventKind::Press(MouseButton::Left) => result(app.handle_click(m.x, m.y)),
             MouseEventKind::Scroll { dy, .. } => result(app.handle_scroll(m.x, m.y, dy)),
             _ => EventResult::Ignored,
@@ -2433,6 +2442,66 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **A press while the card is up puts it away and does nothing else,
+    /// and the wheel scrolls nothing under it.** A press used to go straight
+    /// through the card to the control drawn under it. The controls at the
+    /// end are the same press and turn with the card down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let mut app = CharMapApp::new();
+        let size = <CharMapApp as Probe>::SIZE;
+        // Over the block list, which has hundreds of rows to scroll through.
+        let cell = probe::rect_of(&app, Target::Block(0))
+            .expect("a block row")
+            .centre();
+        let wheel = |app: &mut CharMapApp| {
+            app.resize(size.0, size.1);
+            handle_event(
+                app,
+                &Event::Mouse(MouseEvent {
+                    x: cell.0,
+                    y: cell.1,
+                    kind: MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+                }),
+            )
+        };
+        let preview = app.preview_size;
+
+        probe::key(&mut app, &probe::press(Key::F1));
+        assert!(app.show_help);
+        wheel(&mut app);
+        assert_eq!(
+            app.block_scroll, 0,
+            "the wheel scrolled the block list under the card"
+        );
+        assert_eq!(
+            probe::click(&mut app, Target::PreviewSize),
+            EventResult::Consumed
+        );
+        assert!(!app.show_help, "the press did not put the card away");
+        assert_eq!(
+            app.preview_size, preview,
+            "the press went through the card to the preview button"
+        );
+
+        // Any button: the right one does nothing to a control, but it is
+        // still a press on the card.
+        probe::key(&mut app, &probe::press(Key::F1));
+        probe::click_with(&mut app, Target::PreviewSize, MouseButton::Right);
+        assert!(!app.show_help, "a right-button press left the card up");
+
+        wheel(&mut app);
+        assert!(
+            app.block_scroll > 0,
+            "control: the wheel scrolls nothing at all"
+        );
+        probe::click(&mut app, Target::PreviewSize);
+        assert_ne!(
+            app.preview_size, preview,
+            "control: the press does nothing even with the card down"
+        );
     }
 
     /// **The card reaches the window, and nothing copies behind it.**

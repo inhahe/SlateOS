@@ -70,7 +70,7 @@ impl Codec {
 }
 
 /// A video track's picture: `Video`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Video {
     pub pixel_width: u64,
     pub pixel_height: u64,
@@ -87,6 +87,91 @@ pub struct Video {
     /// channel: WebM's transparency for VP8 and VP9.
     pub alpha_mode: u64,
     pub colour: Option<Colour>,
+    /// `Projection`, where the file has one.
+    pub projection: Option<Projection>,
+}
+
+impl Video {
+    /// The display matrix FFmpeg makes of the track's projection
+    /// (`mkv_parse_video_projection`, `mkv_create_display_matrix`) -- the
+    /// turn and mirror a rectangular projection's pose asks of the picture,
+    /// as MP4's display matrix asks them -- row by row, its first two columns
+    /// 16.16 fixed point and its third 2.30. `None` where it asks none: no
+    /// projection, a spherical one (360-degree video, which nothing here
+    /// shows), spherical metadata of a version FFmpeg does not know, a pose
+    /// of no turn, or one that turns the picture out of its plane (a pitch,
+    /// or a yaw but a mirror's).
+    pub fn display_matrix(&self) -> Option<[i32; 9]> {
+        let p = self.projection?;
+        if p.kind != 0 || p.version.is_some_and(|v| v != 0) {
+            return None;
+        }
+        let (yaw, pitch, roll) = (p.yaw, p.pitch, p.roll);
+        #[allow(
+            clippy::float_cmp,
+            reason = "FFmpeg's tests are for exactly these values, which a file states exactly"
+        )]
+        let (still, flat) = (
+            pitch == 0.0 && yaw == 0.0 && roll == 0.0,
+            pitch == 0.0 && (yaw == 0.0 || yaw == 180.0 || yaw == -180.0),
+        );
+        if still || !flat || roll.is_nan() {
+            return None;
+        }
+        // The roll turns the picture anticlockwise, and FFmpeg's matrix
+        // takes a clockwise angle: negated -- and negated again when the
+        // yaw mirrors the picture, which the specification has applied
+        // first (av_display_rotation_set, then av_display_matrix_flip).
+        #[allow(
+            clippy::float_cmp,
+            reason = "a yaw of exactly 0 is no mirror, as FFmpeg tests it"
+        )]
+        let mirror = yaw != 0.0;
+        let turn = if mirror { roll } else { -roll };
+        let (sin, cos) = (-turn * core::f64::consts::PI / 180.0).sin_cos();
+        // CONV_DB: C's truncation of a double in [-65536, 65536] to an int.
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "C's conversion, of a value within [-65536, 65536]"
+        )]
+        let fixed = |v: f64| (v * 65536.0) as i32;
+        let mut m = [
+            fixed(cos),
+            fixed(-sin),
+            0,
+            fixed(sin),
+            fixed(cos),
+            0,
+            0,
+            0,
+            1 << 30,
+        ];
+        if mirror {
+            // The first column negated: the picture mirrored left for right.
+            for v in m.iter_mut().step_by(3) {
+                *v = v.wrapping_neg();
+            }
+        }
+        Some(m)
+    }
+}
+
+/// A video track's `Projection`: how its pictures map onto what is shown. A
+/// rectangular one (type 0) may turn and mirror the picture by its pose
+/// ([`Video::display_matrix`]); the others are 360-degree video.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Projection {
+    /// `ProjectionType`: 0 rectangular (the default), 1 equirectangular, 2
+    /// cubemap, 3 mesh.
+    pub kind: u64,
+    /// The first byte of `ProjectionPrivate` -- the version of the spherical
+    /// metadata it carries -- where it has any.
+    pub version: Option<u8>,
+    /// `ProjectionPoseYaw`, `ProjectionPosePitch` and `ProjectionPoseRoll`,
+    /// in degrees.
+    pub yaw: f64,
+    pub pitch: f64,
+    pub roll: f64,
 }
 
 /// A video track's colour: `Colour`, as far as converting its pictures to
@@ -174,6 +259,11 @@ pub struct Track {
     pub name: Option<Vec<u8>>,
     /// Its language, ISO 639-2 as written: `eng` unless the file says.
     pub language: Vec<u8>,
+    /// Its language as a BCP 47 tag (`LanguageBCP47`: `de-CH`, `zh-Hant`),
+    /// as written, where the file gives one -- which the specification says
+    /// a reader is to prefer to [`Track::language`]. Nothing here acts on
+    /// it; it is kept for what shows a file to a person.
+    pub language_bcp47: Option<Vec<u8>>,
     pub enabled: bool,
     pub default: bool,
     pub forced: bool,
@@ -222,7 +312,8 @@ struct RawEncoding {
 /// # Errors
 ///
 /// When the entry is damaged; or -- each of which FFmpeg refuses the whole
-/// file for -- a video track's crop leaves nothing of its picture, or an
+/// file for -- a video track's crop leaves nothing of its picture, its
+/// spherical projection's private data is not what its type has, or an
 /// audio track claims more channels than an `int` holds.
 pub(crate) fn read_track<R: Read + Seek>(
     r: &mut Reader<R>,
@@ -235,12 +326,13 @@ pub(crate) fn read_track<R: Read + Seek>(
     let mut codec_private = Vec::new();
     let mut name = None;
     let mut language = None;
+    let mut language_bcp47 = None;
     let (mut enabled, mut default, mut forced) = (true, true, false);
     let mut default_duration = 0u64;
     let mut codec_delay = 0;
     let mut seek_pre_roll = 0;
     let mut time_scale = 1.0;
-    let mut video: Option<(Video, f64)> = None;
+    let mut video: Option<(Video, f64, Option<&'static str>)> = None;
     let mut audio = None;
     let mut encodings: Vec<RawEncoding> = Vec::new();
     r.children(entry, |r, c| {
@@ -255,6 +347,7 @@ pub(crate) fn read_track<R: Read + Seek>(
             ids::TRACK_TIMESTAMP_SCALE => time_scale = r.float(c.size, 1.0)?,
             ids::NAME => name = r.string(c.size)?,
             ids::LANGUAGE => language = r.string(c.size)?,
+            ids::LANGUAGE_BCP47 => language_bcp47 = r.string(c.size)?,
             ids::CODEC_ID => codec_id = r.string(c.size)?,
             ids::CODEC_PRIVATE => codec_private = r.binary(c.size, MAX_BINARY)?,
             ids::CODEC_DELAY => codec_delay = r.uint(c.size, 0)?,
@@ -298,11 +391,15 @@ pub(crate) fn read_track<R: Read + Seek>(
         a
     });
     let video = match video.filter(|_| kind == TrackKind::Video) {
-        Some((v, frame_rate)) => {
+        Some((v, frame_rate, projection_fault)) => {
             if default_duration == 0 {
                 default_duration = duration_of_frame_rate(frame_rate);
             }
-            Some(checked_video(v)?)
+            let v = checked_video(v)?;
+            if let Some(why) = projection_fault {
+                return Err(Error::Invalid(why));
+            }
+            Some(v)
         }
         None => None,
     };
@@ -337,6 +434,7 @@ pub(crate) fn read_track<R: Read + Seek>(
             codec_private,
             name,
             language: language.unwrap_or_else(|| b"eng".to_vec()),
+            language_bcp47,
             enabled,
             default,
             forced,
@@ -460,8 +558,13 @@ fn read_encodings<R: Read + Seek>(
 /// `FrameRate`, deprecated in RFC 9559 and still read by FFmpeg.
 const FRAME_RATE: Id = 0x23_83E3;
 
-/// A `Video` element, and its deprecated `FrameRate`.
-fn read_video<R: Read + Seek>(r: &mut Reader<R>, parent: &Header) -> Result<(Video, f64), Error> {
+/// A `Video` element, its deprecated `FrameRate`, and what FFmpeg would
+/// refuse the file for in its projection, should the track be video.
+fn read_video<R: Read + Seek>(
+    r: &mut Reader<R>,
+    parent: &Header,
+) -> Result<(Video, f64, Option<&'static str>), Error> {
+    let mut fault = None;
     let mut v = Video {
         pixel_width: 0,
         pixel_height: 0,
@@ -471,6 +574,7 @@ fn read_video<R: Read + Seek>(r: &mut Reader<R>, parent: &Header) -> Result<(Vid
         display_unit: 0,
         alpha_mode: 0,
         colour: None,
+        projection: None,
     };
     let mut frame_rate = 0.0;
     r.children(parent, |r, c| {
@@ -493,12 +597,69 @@ fn read_video<R: Read + Seek>(r: &mut Reader<R>, parent: &Header) -> Result<(Vid
             }
             ids::ALPHA_MODE => v.alpha_mode = r.uint(c.size, 0)?,
             ids::COLOUR => v.colour = Some(read_colour(r, c)?),
+            ids::PROJECTION => {
+                let (p, why) = read_projection(r, c)?;
+                v.projection = Some(p);
+                fault = why;
+            }
             FRAME_RATE => frame_rate = r.float(c.size, 0.0)?,
             _ => {}
         }
         Ok(())
     })?;
-    Ok((v, frame_rate))
+    Ok((v, frame_rate, fault))
+}
+
+/// A `Projection` element, and what FFmpeg would refuse the file for in it
+/// (`mkv_parse_video_projection`): an equirectangular projection's private
+/// data neither empty nor its 20 bytes, or bounds that overflow; a cubemap's
+/// shorter than 4 bytes, or of a size but 12. Spherical metadata of a version
+/// FFmpeg does not know (a first private byte but 0) is passed over unread,
+/// as are a cubemap's layouts it does not know.
+fn read_projection<R: Read + Seek>(
+    r: &mut Reader<R>,
+    parent: &Header,
+) -> Result<(Projection, Option<&'static str>), Error> {
+    let mut p = Projection {
+        kind: 0,
+        version: None,
+        yaw: 0.0,
+        pitch: 0.0,
+        roll: 0.0,
+    };
+    let mut private = Vec::new();
+    r.children(parent, |r, c| {
+        match c.id {
+            ids::PROJECTION_TYPE => p.kind = r.uint(c.size, 0)?,
+            ids::PROJECTION_PRIVATE => private = r.binary(c.size, MAX_BINARY)?,
+            ids::PROJECTION_POSE_YAW => p.yaw = r.float(c.size, 0.0)?,
+            ids::PROJECTION_POSE_PITCH => p.pitch = r.float(c.size, 0.0)?,
+            ids::PROJECTION_POSE_ROLL => p.roll = r.float(c.size, 0.0)?,
+            _ => {}
+        }
+        Ok(())
+    })?;
+    p.version = private.first().copied();
+    let word = |at: usize| {
+        private
+            .get(at..at.saturating_add(4))
+            .and_then(|b| b.try_into().ok())
+            .map_or(0, u32::from_be_bytes)
+    };
+    let fault = match (p.version, p.kind, private.len()) {
+        (Some(v), ..) if v != 0 => None,
+        (_, 1, 0 | 20) => {
+            let (top, bottom, left, right) = (word(4), word(8), word(12), word(16));
+            (bottom >= u32::MAX.wrapping_sub(top) || right >= u32::MAX.wrapping_sub(left))
+                .then_some("an equirectangular projection's bounds")
+        }
+        (_, 1, _) => Some("an equirectangular projection's private data"),
+        (_, 2, 0..=3) => Some("a cubemap projection without its private data"),
+        (_, 2, 12) => None,
+        (_, 2, _) => Some("a cubemap projection's private data"),
+        _ => None,
+    };
+    Ok((p, fault))
 }
 
 fn read_colour<R: Read + Seek>(r: &mut Reader<R>, parent: &Header) -> Result<Colour, Error> {

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Generate videocodec's fixtures and their answers.
 
-Each fixture NAME.webm or NAME.mkv gets NAME.txt: its video as a player
-should be given it -- the track's description as `VideoInfo` says it, then
+Each fixture NAME.webm, NAME.mkv or NAME.mp4 gets NAME.txt: its video as a
+player should be given it -- the track's description as `VideoInfo` says it, then
 each frame's time and duration (nanoseconds), key-frame flag, size, and the
 MD5 of its pixels (0xAARRGGBB words, little-endian: the bytes B G R A).
 `tests/frames.rs` holds videocodec's frames to those lines.
@@ -31,6 +31,28 @@ Where the answers come from -- none of it from the crate itself:
   aspect and a `Colour` element (the bitstream says nothing of its colour, so
   the file's word is what decides it). Its answer is the whole picture's
   pixels with the crop cut away.
+- **MP4**, as ffmpeg's muxer writes it: VP9 and AV1; a fragmented file; a
+  pixel 4:3 wide (`pasp`); and two files cut from longer ones with `-ss` and
+  stream copy, whose edit lists start between key frames -- the frames before
+  the cut are decoded and not shown, which ffprobe and ffmpeg (whose decoders
+  drop them) agree on. Two are then changed here, in place: `vp9_colr.mp4`'s
+  `colr` box is made to say BT.2020 where the bitstream says nothing, so the
+  file's word decides the matrix and primaries (and the bitstream's the
+  range); and `vp9_clap.mp4` has a clean aperture (`clap`) put in its sample
+  entry, whose crop the answer cuts away as for `vp9_cropped.mkv`.
+  `VideoInfo`'s numbers for MP4: the frame rate's reciprocal where FFmpeg's
+  demuxer finds one rate (none for a fragmented file), and the duration of
+  the longest track, from ffprobe's `duration_ts`.
+- **Turned and mirrored**, by `ffmpeg -display_rotation` and
+  `-display_hflip` over stream copies: MP4's display matrix, and Matroska's
+  projection pose, for a quarter turn each way, a half turn, a mirror, a
+  quarter turn mirrored, and a quarter turn of a 4:3 pixel. The answer is
+  the converted frame turned the way the table says, the eight ways being
+  ffmpeg's `transpose` directions, `hflip` and `vflip` -- and the table is
+  checked against ffmpeg itself: the luma ffmpeg's autorotate gives must be
+  the luma it gives unturned, turned the table's way here. The display size
+  is the turned frame's, its pixel's shape turned with it (as ffmpeg's
+  `transpose` turns the sample aspect ratio).
 
 Every fixture is 8 frames at 25 a second, a key frame every 3, encoded with
 one thread and `-fflags +bitexact`, so a run makes the same bytes as the last.
@@ -181,7 +203,8 @@ class Tools:
         self.ffprobe = os.path.join(ffdir, "ffprobe" + exe)
         self.harness = harness
 
-    def encode(self, name, source, args, fmt="webm"):
+    def encode(self, name, source, args, fmt=None):
+        fmt = fmt or ("mp4" if name.endswith(".mp4") else "webm")
         run([self.ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
              "-f", "lavfi", "-i", source, *args, "-fflags", "+bitexact",
              "-f", fmt, name])
@@ -196,8 +219,12 @@ class Tools:
         return json.loads(out.decode("utf-8"))
 
     def raw(self, name, decoder, pix_fmt):
+        """Every frame's planes, whole and unturned: a crop or a turn the
+        file asks for is the answer's to apply, after the conversion, not
+        ffmpeg's before it."""
         dec = ["-c:v", decoder] if decoder else []
-        return run([self.ffmpeg, "-hide_banner", "-loglevel", "error", *dec, "-i", name,
+        return run([self.ffmpeg, "-hide_banner", "-loglevel", "error", *dec, "-apply_cropping", "none",
+                    "-noautorotate", "-i", name,
                     "-map", "0:v:0", "-fps_mode", "passthrough", "-f", "rawvideo",
                     "-pix_fmt", pix_fmt, "-"])
 
@@ -256,8 +283,57 @@ def to_444(frame, width, height, bps):
     return luma + doubled_rows(u, width, height, bps) + doubled_rows(v, width, height, bps)
 
 
-def pixels_md5(tools, raw, count, width, height, fmt, depth, alpha, colour, crop=None):
-    """Each frame of `raw` converted by libavif, cropped if asked, hashed."""
+# The eight ways a picture turns, as the pixel at (x, y) of the result is
+# taken from the picture's: ffmpeg's four `transpose` directions, `hflip`,
+# `vflip`, both, and none.
+TURNS = {
+    "upright": lambda x, y, lx, ly: (x, y),
+    "clockwise": lambda x, y, lx, ly: (y, ly - x),
+    "halfturn": lambda x, y, lx, ly: (lx - x, ly - y),
+    "anticlockwise": lambda x, y, lx, ly: (lx - y, x),
+    "mirrored": lambda x, y, lx, ly: (lx - x, y),
+    "flipped": lambda x, y, lx, ly: (x, ly - y),
+    "transposed": lambda x, y, lx, ly: (y, x),
+    "antitransposed": lambda x, y, lx, ly: (lx - y, ly - x),
+}
+SWAPS = {"clockwise", "anticlockwise", "transposed", "antitransposed"}
+
+
+def turned(px, w, h, size, how):
+    """`w` x `h` pixels of `size` bytes each, turned `how`: the bytes, and
+    the new width and height."""
+    if how == "upright":
+        return px, w, h
+    ow, oh = (h, w) if how in SWAPS else (w, h)
+    take = TURNS[how]
+    out = bytearray()
+    for y in range(oh):
+        for x in range(ow):
+            sx, sy = take(x, y, w - 1, h - 1)
+            at = (sy * w + sx) * size
+            out += px[at:at + size]
+    return bytes(out), ow, oh
+
+
+def check_turn(tools, name, how, decoder):
+    """The table's turn must be ffmpeg's: the first frame's luma as its
+    autorotate gives it is the luma it gives unturned, turned `how`."""
+    dec = ["-c:v", decoder] if decoder else []
+
+    def luma(autorotate):
+        return run([tools.ffmpeg, "-hide_banner", "-loglevel", "error", *dec, "-apply_cropping", "none",
+                    "-autorotate" if autorotate else "-noautorotate", "-i", name, "-frames:v", "1",
+                    "-f", "rawvideo", "-pix_fmt", "gray", "-"])
+
+    st = tools.frames(name, decoder)["streams"][0]
+    mine, _, _ = turned(luma(False), st["width"], st["height"], 1, how)
+    if mine != luma(True):
+        raise SystemExit(f"{name}: ffmpeg does not turn it {how}")
+
+
+def pixels_md5(tools, raw, count, width, height, fmt, depth, alpha, colour, crop=None, turn="upright"):
+    """Each frame of `raw` converted by libavif, cropped and turned if
+    asked, hashed."""
     size = frame_bytes(fmt, width, height, depth, alpha)
     if len(raw) != size * count:
         raise SystemExit(f"{len(raw)} raw bytes, not {count} frames of {size}")
@@ -279,6 +355,7 @@ def pixels_md5(tools, raw, count, width, height, fmt, depth, alpha, colour, crop
                     for r in range(height - top - bottom)]
             px = b"".join(rows)
             w, h = width - left - right, height - top - bottom
+        px, w, h = turned(px, w, h, 4, turn)
         out.append((w, h, hashlib.md5(px).hexdigest()))
     return out
 
@@ -431,6 +508,201 @@ def write_cropped(tools):
     })
 
 
+# --- MP4 --------------------------------------------------------------------
+
+# Boxes whose children follow their header directly, and how far into a
+# visual sample entry its children begin.
+MP4_CONTAINERS = {b"moov", b"trak", b"mdia", b"minf", b"stbl"}
+VISUAL_ENTRY_FIELDS = 78
+
+
+def insert_in_entry(data, box):
+    """`box` put at the end of the first video sample entry's children, and
+    every box around it grown to hold it. The moov must follow the media, as
+    ffmpeg writes it by default, so that no chunk offset moves."""
+    chain = []
+
+    def walk(start, end):
+        at = start
+        while at + 8 <= end:
+            size, kind = struct.unpack_from(">I4s", data, at)
+            if size < 8:
+                return None
+            if kind in MP4_CONTAINERS:
+                chain.append(at)
+                found = walk(at + 8, at + size)
+                if found is not None:
+                    return found
+                chain.pop()
+            elif kind == b"stsd":
+                chain.append(at)
+                entry = at + 16
+                entry_size = struct.unpack_from(">I", data, entry)[0]
+                chain.append(entry)
+                return entry + entry_size
+            at += size
+        return None
+
+    end = walk(0, len(data))
+    if end is None or data.index(b"moov") < data.index(b"mdat"):
+        raise SystemExit("no sample entry, or a moov before the media")
+    out = bytearray(data[:end] + box + data[end:])
+    for at in chain:
+        size = struct.unpack_from(">I", out, at)[0]
+        struct.pack_into(">I", out, at, size + len(box))
+    return bytes(out)
+
+
+def patch_colr(data, primaries, transfer, matrix, full_range):
+    """The `colr` box's `nclx` words, rewritten in place."""
+    at = data.index(b"colrnclx") + 8
+    return data[:at] + struct.pack(">HHHB", primaries, transfer, matrix,
+                                   0x80 if full_range else 0) + data[at + 7:]
+
+
+def clap_box(width, height, offset_x, offset_y):
+    """A clean aperture: four fractions, each (numerator, denominator)."""
+    body = b"".join(struct.pack(">i", v) for q in (width, height, offset_x, offset_y) for v in q)
+    return struct.pack(">I", 8 + len(body)) + b"clap" + body
+
+
+def mp4_info(tools, name, decoder, codec, width, height, crop, fragmented, turn="upright"):
+    """`VideoInfo` for an MP4 fixture, from ffprobe: the size less the crop,
+    turned; the display width the pixel's shape -- turned with it -- gives
+    that size, rounded half up; the frame rate's reciprocal, exactly, where
+    FFmpeg's demuxer finds one rate (not in a fragmented file, whose moov
+    lists no samples); and the longest track's duration."""
+    probe = tools.frames(name, decoder)
+    st = probe["streams"][0]
+    w, h = width - crop[0] - crop[2], height - crop[1] - crop[3]
+    n, d = (int(x) for x in st.get("sample_aspect_ratio", "0:1").split(":"))
+    if turn in SWAPS:
+        w, h, n, d = h, w, d, n
+    shown = (2 * w * n + d) // (2 * d) if n > 0 and d > 0 else w
+    num, den = (int(x) for x in st["r_frame_rate"].split("/"))
+    tb_num, tb_den = (int(x) for x in st["time_base"].split("/"))
+    return {
+        "track": 1,
+        "codec": codec,
+        "size": f"{w}x{h}",
+        "display": f"{max(shown, 1)}x{h}",
+        "frame_duration": "none" if fragmented else 10**9 * den // num,
+        "duration": int(st["duration_ts"]) * 10**9 * tb_num // tb_den,
+        "alpha": 0,
+    }
+
+
+def mp4_fixture(tools, name, source, args, pix_fmt, planes, colour, decoder, *,
+                cut=None, change=None, crop=(0, 0, 0, 0), fragmented=False, said_by_file=False,
+                turn="upright", display=()):
+    """One MP4 or Matroska fixture: encoded (from `cut` seconds into a longer
+    encode, by stream copy, if asked; or with `display` options, ffmpeg's
+    -display_rotation and -display_hflip, by stream copy), `change`d in
+    place if asked, and answered."""
+    if display:
+        whole = name.rsplit(".", 1)[0] + ".unturned." + name.rsplit(".", 1)[1]
+        unturned_fmt = "mp4" if name.endswith(".mp4") else "webm"
+        tools.encode(whole, source, args, unturned_fmt)
+        out_fmt = "mp4" if name.endswith(".mp4") else "matroska"
+        run([tools.ffmpeg, "-hide_banner", "-loglevel", "error", "-y", *display, "-i", whole,
+             "-c", "copy", "-fflags", "+bitexact", "-f", out_fmt, name])
+        os.remove(whole)
+    elif cut is not None:
+        whole = name.replace(".mp4", ".whole.mp4")
+        tools.encode(whole, source, args)
+        run([tools.ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-ss", str(cut), "-i", whole,
+             "-c", "copy", "-fflags", "+bitexact", "-f", "mp4", name])
+        os.remove(whole)
+    else:
+        tools.encode(name, source, args)
+    if change:
+        with open(name, "rb") as f:
+            data = change(f.read())
+        with open(name, "wb") as f:
+            f.write(data)
+    own = None if decoder in ("libvpx", "libvpx-vp9") else decoder
+    if not said_by_file:
+        check_colour(name, colour, tools.frames(name, own))
+    probe = tools.frames(name, decoder)
+    # The crop the table states must be the one FFmpeg's demuxer works out
+    # of the file's clean aperture (left, top, right, bottom).
+    said = (0, 0, 0, 0)
+    for sd in probe["streams"][0].get("side_data_list", []):
+        if sd.get("side_data_type") == "Frame Cropping":
+            said = (sd["crop_left"], sd["crop_top"], sd["crop_right"], sd["crop_bottom"])
+    if said != tuple(crop):
+        raise SystemExit(f"{name}: the table crops {crop}, FFmpeg {said}")
+    width, height = probe["streams"][0]["width"], probe["streams"][0]["height"]
+    check_turn(tools, name, turn, decoder)
+    fmt, depth, alpha = planes
+    raw = tools.raw(name, decoder, pix_fmt)
+    pixels = pixels_md5(tools, raw, len(probe["frames"]), width, height, fmt, depth, alpha, colour,
+                        crop=crop if crop != (0, 0, 0, 0) else None, turn=turn)
+    codec = name.split("_", 1)[0].split(".", 1)[0]
+    if name.endswith(".mp4"):
+        info = mp4_info(tools, name, decoder, codec, width, height, crop, fragmented, turn)
+    else:
+        info = stream_info(tools, name, decoder, codec, width, height, alpha)
+        if turn in SWAPS:
+            # Square pixels, so the turned frame is shown as it is.
+            info["size"] = info["display"] = f"{height}x{width}"
+    answer(tools, name, own, pixels, info)
+
+
+# The crop vp9_clap.mp4's clean aperture makes (left, top, right, bottom):
+# 160x136 of the 176x144 picture, its centre 4 left and 2 up of the
+# picture's.
+CLAP = ((160, 1), (136, 1), (-4, 1), (-2, 1))
+CLAP_CROP = (4, 2, 12, 6)
+
+
+def write_mp4s(tools):
+    small = SRC.format("176x144")
+    longer = f"testsrc2=size=176x144:rate={RATE}:duration={(FRAMES + 2) / RATE}"
+    yuv420 = ["-pix_fmt", "yuv420p"]
+    bt709 = ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
+             "-color_range", "tv"]
+    plain = ("yuv420p", ("420", 8, 0))
+    # VP9 and AV1 as a player meets them in MP4.
+    mp4_fixture(tools, "vp9.mp4", small, VP9 + yuv420, *plain, (6, 1, "limited"), None)
+    mp4_fixture(tools, "av1.mp4", small, AV1 + yuv420 + bt709, *plain, (1, 1, "limited"), "libdav1d")
+    # Fragmented, as a live stream writes it.
+    mp4_fixture(tools, "av1_fragmented.mp4", small,
+                AV1 + yuv420 + bt709 + ["-movflags", "frag_keyframe+empty_moov"], *plain,
+                (1, 1, "limited"), "libdav1d", fragmented=True)
+    # A pixel 4:3 wide: shown 235 wide.
+    mp4_fixture(tools, "vp9_pasp.mp4", small + ",setsar=4/3", VP9 + yuv420, *plain,
+                (6, 1, "limited"), None)
+    # Cut 0.05 s in, between key frames: the edit list starts in the second
+    # frame, and the first two are decoded for the third and not shown.
+    mp4_fixture(tools, "vp9_cut.mp4", longer, VP9 + yuv420, *plain, (6, 1, "limited"), None, cut=0.05)
+    mp4_fixture(tools, "av1_cut.mp4", longer, AV1 + yuv420 + bt709, *plain, (1, 1, "limited"),
+                "libdav1d", cut=0.05)
+    # The file's colr says BT.2020, full range, where the bitstream says
+    # nothing of the matrix: the file's matrix and primaries, the
+    # bitstream's studio range.
+    mp4_fixture(tools, "vp9_colr.mp4", small, VP9 + yuv420 + ["-movflags", "+write_colr"], *plain,
+                (9, 9, "limited"), None, change=lambda d: patch_colr(d, 9, 1, 9, True),
+                said_by_file=True)
+    # A clean aperture.
+    mp4_fixture(tools, "vp9_clap.mp4", small, VP9 + yuv420, *plain, (6, 1, "limited"), None,
+                change=lambda d: insert_in_entry(d, clap_box(*CLAP)), crop=CLAP_CROP)
+    # Turned and mirrored: MP4's display matrix, and Matroska's projection.
+    vp9 = (VP9 + yuv420, *plain, (6, 1, "limited"), None)
+    for name, display, turn in [
+        ("vp9_rotate_90.mp4", ["-display_rotation", "90"], "anticlockwise"),
+        ("vp9_mirror_rotate.mp4", ["-display_rotation", "90", "-display_hflip"], "antitransposed"),
+        ("vp9_rotate_180.mkv", ["-display_rotation", "180"], "halfturn"),
+        ("vp9_rotate_270.mkv", ["-display_rotation", "-90"], "clockwise"),
+        ("vp9_mirror.mkv", ["-display_hflip"], "mirrored"),
+        ("vp9_mirror_turn.mkv", ["-display_rotation", "90", "-display_hflip"], "antitransposed"),
+    ]:
+        mp4_fixture(tools, name, small, *vp9, display=display, turn=turn)
+    # A 4:3 pixel turned a quarter: 144 wide, its pixel 3:4, shown 108 wide.
+    mp4_fixture(tools, "vp9_pasp_rotate.mp4", small + ",setsar=4/3", *vp9,
+                display=["-display_rotation", "-90"], turn="clockwise")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ffmpeg", default="D:/utils")
@@ -455,6 +727,7 @@ def main():
         answer(tools, name, own, pixels,
                stream_info(tools, name, decoder, codec, width, height, alpha))
     write_cropped(tools)
+    write_mp4s(tools)
 
 
 if __name__ == "__main__":

@@ -18158,6 +18158,7 @@ mod tests {
                         time: 0,
                         duration: 0,
                         keyframe: false,
+                        discard: false,
                     })
                     .unwrap();
                 while let Some(picture) = decoder.receive() {

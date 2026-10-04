@@ -153,6 +153,20 @@ impl Data {
         Ok(data)
     }
 
+    /// [`Data::with_time`], and a byte of the caller's that travels with the
+    /// data to the picture it decodes to ([`Picture::tag`]): dav1d's user
+    /// data. For what a caller must know of a picture that its time does not
+    /// tell -- that the file marks it not to be shown, say.
+    ///
+    /// # Errors
+    ///
+    /// As [`Data::new`].
+    pub fn with_tag(bytes: &[u8], timestamp: i64, duration: i64, tag: u8) -> Result<Self, Error> {
+        let mut data = Self::with_time(bytes, timestamp, duration)?;
+        data.0.m.user_data = Some(CArc::wrap(CBox::from_box(Box::new(tag)))?);
+        Ok(data)
+    }
+
     /// Whether the decoder has taken it all.
     pub fn is_consumed(&self) -> bool {
         self.0.data.is_none()
@@ -358,6 +372,12 @@ impl Picture {
         self.0.m.duration
     }
 
+    /// The tag of the data the picture was decoded from ([`Data::with_tag`]);
+    /// `None` for data that carried none.
+    pub fn tag(&self) -> Option<u8> {
+        self.0.m.user_data.as_deref().copied()
+    }
+
     /// The size of plane `index`: 0 luma, 1 and 2 chroma.
     fn plane_size(&self, index: usize) -> Option<(usize, usize)> {
         let (w, h) = self.size();
@@ -489,8 +509,21 @@ mod tests {
         let picture = decoder.picture().unwrap();
         assert_eq!((picture.timestamp(), picture.duration()), (Some(42), 7));
         assert!(picture.is_key_frame());
+        assert_eq!(picture.tag(), None);
         let untimed = decode(&WHITE_1X1, 1).unwrap();
         assert_eq!((untimed.timestamp(), untimed.duration()), (None, 0));
+    }
+
+    /// A tag reaches the picture with the time, through frame threads too.
+    #[test]
+    fn a_picture_carries_its_datas_tag() {
+        for threads in [1, 4] {
+            let mut decoder = Decoder::new(&still(threads)).unwrap();
+            let mut data = Data::with_tag(&WHITE_1X1, 9, 1, 0xA5).unwrap();
+            decoder.send(&mut data).unwrap();
+            let picture = decoder.picture().unwrap();
+            assert_eq!((picture.timestamp(), picture.tag()), (Some(9), Some(0xA5)));
+        }
     }
 
     /// A flush drops a picture not yet taken, and the sequence header: the

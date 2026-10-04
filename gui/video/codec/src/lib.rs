@@ -15,17 +15,25 @@
 //! ```
 //!
 //! [`Video`] is the one thing a player calls: it reads the file
-//! (`gui/video/matroska`), picks its video track, decodes each packet
-//! ([`Decoder`]), and converts each picture ([`Picture::to_frame`]). Seeking
-//! is [`Video::seek`], to the exact frame or to the key frame before it.
+//! (`gui/video/matroska` or `gui/video/mp4`, by what the file turns out to
+//! be), picks its video track, decodes each packet ([`Decoder`]), and
+//! converts each picture ([`Picture::to_frame`]). Seeking is
+//! [`Video::seek`], to the exact frame or to the key frame before it.
 //! [`Decoder`] is the layer beneath, for a program whose packets come from
 //! somewhere else.
 //!
 //! # What plays
 //!
-//! Matroska and WebM files; VP8, and VP9 in every profile (8-, 10- and
-//! 12-bit; 4:2:0, 4:2:2, 4:4:0, 4:4:4; RGB), each with WebM's alpha channel;
-//! and AV1. Not yet: MP4, and sound (`roadmap.md`, "Video files").
+//! Matroska, WebM and MP4 files, told apart by their first bytes as FFmpeg
+//! tells them; VP8, and VP9 in every profile (8-, 10- and 12-bit; 4:2:0,
+//! 4:2:2, 4:4:0, 4:4:4; RGB), each with WebM's alpha channel; and AV1. An
+//! MP4 file's edit list is obeyed as FFmpeg obeys it: the frames it leaves
+//! out are decoded, for those after them, and not shown. A picture the file
+//! asks to be turned or mirrored -- MP4's display matrix, Matroska's
+//! projection -- comes out turned, as ffmpeg's autorotate turns it
+//! ([`Orientation`]). Not yet: H.264 and
+//! HEVC, which most MP4 files hold, and sound (`roadmap.md`, "Video
+//! files").
 //!
 //! # Colour
 //!
@@ -57,25 +65,35 @@
 //! [`Limits::max_pixels`] are refused before anything is allocated for them.
 
 mod colour;
+mod container;
 mod decoder;
+mod orientation;
 mod picture;
 mod time;
 mod video;
 
 pub use colour::Colour;
 pub use decoder::{Decoder, Packet};
+pub use orientation::Orientation;
 pub use picture::Picture;
 pub use video::{SeekMode, Video, VideoInfo};
 
 use core::fmt;
 
-/// A video codec.
+/// A video codec: those decoded here, and the commonest of the rest, so
+/// that a file in one is refused by its name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Codec {
     Vp8,
     Vp9,
     Av1,
-    /// Any other: one WebM does not allow.
+    /// Not decoded here yet.
+    H264,
+    /// Not decoded here yet.
+    Hevc,
+    /// MPEG-4 Part 2 (DivX, Xvid). Not decoded here.
+    Mpeg4,
+    /// Any other.
     Other,
 }
 
@@ -85,7 +103,10 @@ impl fmt::Display for Codec {
             Self::Vp8 => "VP8",
             Self::Vp9 => "VP9",
             Self::Av1 => "AV1",
-            Self::Other => "a codec WebM does not allow",
+            Self::H264 => "H.264",
+            Self::Hevc => "HEVC",
+            Self::Mpeg4 => "MPEG-4 Part 2",
+            Self::Other => "a codec this does not know",
         })
     }
 }
@@ -137,12 +158,50 @@ pub struct Frame {
     pub pixels: Vec<u32>,
 }
 
+/// Why a file's container could not be read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContainerError {
+    /// Neither a Matroska (or WebM) file nor an MP4 one.
+    Unknown,
+    /// The source failed before the file's kind was known.
+    Io(std::io::ErrorKind),
+    /// A Matroska or WebM file that could not be read.
+    Matroska(matroska::Error),
+    /// An MP4 file that could not be read.
+    Mp4(mp4::Error),
+}
+
+impl fmt::Display for ContainerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unknown => f.write_str("the file is not a Matroska, WebM or MP4 file"),
+            Self::Io(kind) => write!(f, "the file cannot be read: {kind}"),
+            Self::Matroska(e) => write!(f, "{e}"),
+            Self::Mp4(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for ContainerError {}
+
+impl From<matroska::Error> for ContainerError {
+    fn from(e: matroska::Error) -> Self {
+        Self::Matroska(e)
+    }
+}
+
+impl From<mp4::Error> for ContainerError {
+    fn from(e: mp4::Error) -> Self {
+        Self::Mp4(e)
+    }
+}
+
 /// Why a file, a packet or a picture could not be read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// The file could not be read: the source failed, the file is not a
-    /// Matroska or WebM file, or its headers are damaged.
-    Container(matroska::Error),
+    /// The file could not be read: the source failed, the file is neither
+    /// Matroska (WebM) nor MP4, or its headers are damaged.
+    Container(ContainerError),
     /// The file has no video track, or not the one asked for.
     NoVideo,
     /// The video is in a codec this does not decode.
@@ -166,6 +225,7 @@ impl fmt::Display for Error {
         match self {
             Self::Container(e) => write!(f, "the video file could not be read: {e}"),
             Self::NoVideo => f.write_str("the file has no video that can be played"),
+            Self::Codec(Codec::Other) => f.write_str("the video's codec is not one decoded here"),
             Self::Codec(c) => write!(f, "the video is {c}, which is not decoded here yet"),
             Self::Vp8(e) => write!(f, "{e}"),
             Self::Vp9(e) => write!(f, "{e}"),
@@ -183,8 +243,20 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+impl From<ContainerError> for Error {
+    fn from(e: ContainerError) -> Self {
+        Self::Container(e)
+    }
+}
+
 impl From<matroska::Error> for Error {
     fn from(e: matroska::Error) -> Self {
-        Self::Container(e)
+        Self::Container(ContainerError::Matroska(e))
+    }
+}
+
+impl From<mp4::Error> for Error {
+    fn from(e: mp4::Error) -> Self {
+        Self::Container(ContainerError::Mp4(e))
     }
 }

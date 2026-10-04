@@ -44,9 +44,11 @@
 //! # Held to FFmpeg
 //!
 //! Every packet of 37 files, and the packets after 78 seeks, are ffprobe's
-//! (`tests/fixtures.rs`, `tests/data/generate_fixtures.py`); what ffprobe
-//! cannot show is in `tests/beyond_ffprobe.rs`; and `mutate.py` breaks the
-//! code one rule at a time and checks the tests notice.
+//! (`tests/fixtures.rs`, `tests/data/generate_fixtures.py`), and so is the
+//! display matrix -- or the refusal -- of 22 files' video projections
+//! ([`Video::display_matrix`], `tests/projection.rs`); what ffprobe cannot
+//! show is in `tests/beyond_ffprobe.rs`; and `mutate.py` breaks the code one
+//! rule at a time and checks the tests notice.
 
 mod block;
 mod cues;
@@ -56,7 +58,7 @@ mod ids;
 mod track;
 
 pub use demux::{Demuxer, Packet, SegmentInfo};
-pub use track::{Audio, Codec, Colour, Track, TrackKind, Video};
+pub use track::{Audio, Codec, Colour, Projection, Track, TrackKind, Video};
 
 /// Why a file could not be read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -29,6 +29,9 @@ from mutation_harness import sweep  # noqa: E402  (path set above)
 
 SRC = Path(__file__).parent / "src"
 
+# A video track's projection, as ffprobe reads it (`tests/projection.rs`).
+PROJECTIONS = "every_projection_is_read_as_ffmpeg_reads_it"
+
 # The fixtures' tests: every packet, and the packets after each seek, as
 # ffprobe gives them.
 ORDER = "packets_of_order"
@@ -240,6 +243,60 @@ TRACK = [
         "let Some(codec_id) = codec_id.filter(|id| kind.fits(id)) else {",
         "let Some(codec_id) = codec_id.or(Some(b\"V_\".to_vec())).filter(|id| kind.fits(id)) else {",
         [IGNORED_TRACKS],
+    ),
+    (
+        "a mirror's roll is not turned back",
+        "let turn = if mirror { roll } else { -roll };",
+        "let turn = -roll;",
+        [PROJECTIONS],
+    ),
+    (
+        "a mirroring yaw does not mirror",
+        "                *v = v.wrapping_neg();",
+        "                *v = *v;",
+        [PROJECTIONS],
+    ),
+    (
+        "a pitch is turned like a roll",
+        "pitch == 0.0 && (yaw == 0.0 || yaw == 180.0 || yaw == -180.0),",
+        "yaw == 0.0 || yaw == 180.0 || yaw == -180.0,",
+        [PROJECTIONS],
+    ),
+    (
+        "spherical metadata of an unknown version is read",
+        "if p.kind != 0 || p.version.is_some_and(|v| v != 0) {",
+        "if p.kind != 0 {",
+        [PROJECTIONS],
+    ),
+    (
+        "a projection's fault refuses nothing",
+        "                return Err(Error::Invalid(why));",
+        "                let _ = why;",
+        [PROJECTIONS],
+    ),
+    (
+        "an equirectangular private of another size is taken",
+        "(_, 1, _) => Some(\"an equirectangular projection's private data\"),",
+        "(_, 1, _) => None,",
+        [PROJECTIONS],
+    ),
+    (
+        "an equirectangular projection's bounds are not checked",
+        "(bottom >= u32::MAX.wrapping_sub(top) || right >= u32::MAX.wrapping_sub(left))",
+        "(bottom == top && right == left && top == 1)",
+        [PROJECTIONS],
+    ),
+    (
+        "a cubemap's missing private data is taken",
+        "(_, 2, 0..=3) => Some(\"a cubemap projection without its private data\"),",
+        "(_, 2, 0..=3) => None,",
+        [PROJECTIONS],
+    ),
+    (
+        "a cubemap private of another size is taken",
+        "(_, 2, _) => Some(\"a cubemap projection's private data\"),",
+        "(_, 2, _) => None,",
+        [PROJECTIONS],
     ),
 ]
 

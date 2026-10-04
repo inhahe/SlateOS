@@ -49,6 +49,7 @@ pub const DEFAULT_DURATION: Id = 0x23_E383;
 pub const TRACK_TIMESTAMP_SCALE: Id = 0x23_314F;
 pub const NAME: Id = 0x536E;
 pub const LANGUAGE: Id = 0x22_B59C;
+pub const LANGUAGE_BCP47: Id = 0x22_B59D;
 pub const CODEC_ID: Id = 0x86;
 pub const CODEC_PRIVATE: Id = 0x63A2;
 pub const CODEC_DELAY: Id = 0x56AA;
@@ -80,6 +81,12 @@ pub const CHROMA_SITING_VERT: Id = 0x55B8;
 pub const RANGE: Id = 0x55B9;
 pub const TRANSFER_CHARACTERISTICS: Id = 0x55BA;
 pub const PRIMARIES: Id = 0x55BB;
+pub const PROJECTION: Id = 0x7670;
+pub const PROJECTION_TYPE: Id = 0x7671;
+pub const PROJECTION_PRIVATE: Id = 0x7672;
+pub const PROJECTION_POSE_YAW: Id = 0x7673;
+pub const PROJECTION_POSE_PITCH: Id = 0x7674;
+pub const PROJECTION_POSE_ROLL: Id = 0x7675;
 
 // Audio.
 pub const SAMPLING_FREQUENCY: Id = 0xB5;

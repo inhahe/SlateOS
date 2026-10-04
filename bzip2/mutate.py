@@ -59,13 +59,19 @@ DECODE_MUTATIONS = [
     ),
     (
         "the output limit is not checked",
-        "if count > limit.saturating_sub(out.len()) {",
-        "if count > limit.saturating_sub(out.len()) && false {",
+        "if count > room {",
+        "if count > room && false {",
         [
             "the_limit_is_checked_before_the_output_grows_past_it",
             "the_limit_holds_across_blocks",
             "the_limit_spans_streams",
         ],
+    ),
+    (
+        "the output stops short of the limit",
+        "            out.resize(out.len().wrapping_add(room), byte);\n            return Err(Error::OutputTooLarge);",
+        "            return Err(Error::OutputTooLarge);",
+        ["seven_zip_reads_one_stream"],
     ),
     (
         "a randomised block is not un-randomised",
@@ -98,10 +104,69 @@ DECODE_MUTATIONS = [
         ["decompress_reads_every_fixture", "round_trips_at_every_level"],
     ),
     (
-        "four equal bytes may end a block",
-        "            if used >= nblock {\n                return Err(Error::InvalidRun);",
-        "            if used >= nblock && false {\n                return Err(Error::InvalidRun);",
-        ["a_run_without_its_count_byte_is_refused"],
+        "four equal bytes may end a block, for libbzip2 too",
+        "                if reader == Reader::SevenZip {\n                    emit(k0, 4)?;",
+        "                if true {\n                    emit(k0, 4)?;",
+        ["a_run_without_its_count_byte_is_refused_by_libbzip2_alone"],
+    ),
+    # 7-Zip's reading (`decompress_as_7zip`).
+    (
+        "7-Zip refuses four equal bytes at a block's end",
+        "                if reader == Reader::SevenZip {\n                    emit(k0, 4)?;",
+        "                if false {\n                    emit(k0, 4)?;",
+        ["a_run_without_its_count_byte_is_refused_by_libbzip2_alone"],
+    ),
+    (
+        "7-Zip builds a table that is no prefix code",
+        "if reader == Reader::SevenZip && !fits_prefix_code(table) {",
+        "if false {",
+        ["an_unused_table_that_is_no_prefix_code_is_refused_by_7zip_alone"],
+    ),
+    (
+        "libbzip2 refuses a table that is no prefix code",
+        "if reader == Reader::SevenZip && !fits_prefix_code(table) {",
+        "if !fits_prefix_code(table) {",
+        ["an_unused_table_that_is_no_prefix_code_is_refused_by_7zip_alone"],
+    ),
+    (
+        "a Kraft sum of exactly 1 is over-full",
+        "    sum <= 1 << MAX_CODE_BITS",
+        "    sum < 1 << MAX_CODE_BITS",
+        [
+            "a_prefix_code_fits_when_its_kraft_sum_is_at_most_one",
+            "seven_zip_reads_one_stream",
+        ],
+    ),
+    (
+        "every code counts as one bit long",
+        "            .checked_sub(u32::from(len))",
+        "            .checked_sub(1)",
+        [
+            "a_prefix_code_fits_when_its_kraft_sum_is_at_most_one",
+            "seven_zip_reads_one_stream",
+        ],
+    ),
+    (
+        "7-Zip's reading is libbzip2's",
+        "    decode_stream(data, out, &mut tt, limit, Reader::SevenZip)",
+        "    decode_stream(data, out, &mut tt, limit, Reader::Bzip2)",
+        [
+            "an_unused_table_that_is_no_prefix_code_is_refused_by_7zip_alone",
+            "a_run_without_its_count_byte_is_refused_by_libbzip2_alone",
+        ],
+    ),
+    (
+        "libbzip2's reading is 7-Zip's",
+        "decode_stream(rest, &mut out, &mut tt, limit, Reader::Bzip2)?;",
+        "decode_stream(rest, &mut out, &mut tt, limit, Reader::SevenZip)?;",
+        # Not libbzip2's corpus of 2,943 corruptions: on all of them the two
+        # readings accept and refuse alike -- an over-full table a corruption
+        # makes fails its CRC too -- so only the streams made to part them
+        # can tell.
+        [
+            "a_run_without_its_count_byte_is_refused_by_libbzip2_alone",
+            "an_unused_table_that_is_no_prefix_code_is_refused_by_7zip_alone",
+        ],
     ),
 ]
 
@@ -159,6 +224,17 @@ ENCODE_MUTATIONS = [
         "z = (z.wrapping_sub(2)) / 2;",
         "z = (z.wrapping_sub(1)) / 2;",
         ["zero_runs_are_bijective_base_two", "compress_writes_libbzip2s_bytes"],
+    ),
+    # The tests' hook for writing tables of other shapes: if it does
+    # nothing, the tests of 7-Zip's table rule test nothing.
+    (
+        "the table hook is ignored",
+        "                if let Some(l) = length_for(t, named, v) {\n                    *slot = l;",
+        "                if let Some(_) = length_for(t, named, v) {",
+        [
+            "an_unused_table_that_is_no_prefix_code_is_refused_by_7zip_alone",
+            "a_table_with_codes_to_spare_is_read_by_both",
+        ],
     ),
 ]
 

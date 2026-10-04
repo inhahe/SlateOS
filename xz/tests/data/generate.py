@@ -23,6 +23,11 @@ What it writes, beside itself:
   FF, and the oracle's verdict on each -- among them a raw LZMA2 stream, which
   has no check to turn a wrong decode into an error, so that the LZMA
   decoder's own refusals are what is judged.
+- `encoded.txt`: what `xz` writes for generated inputs -- every preset and
+  every extreme preset over five kinds of input, the LZMA2 chunk limits,
+  settings no preset uses, `.lzma` and raw LZMA1 -- as the length and FNV-1a
+  hash of its output, which the encoder must match byte for byte
+  (`tests/encode.rs`). `python generate.py --encoded` writes only this.
 """
 
 from __future__ import annotations
@@ -113,6 +118,28 @@ def gen(kind: str, n: int, seed: int) -> bytes:
         return bytes(out[:n])
     if kind == "random":
         return bytes(r.next() & 0xFF for _ in range(n))
+    if kind == "zeros":
+        return bytes(n)
+    if kind == "edge":
+        # A 32-byte marker every 4097 bytes, zeros between: each repeat lies
+        # exactly one byte past a 4 KiB dictionary (cyclic_size), the edge
+        # the match finders stop at.
+        marker = bytes(1 + r.next() % 255 for _ in range(32))
+        period = bytearray(4097)
+        period[:32] = marker
+        return (bytes(period) * (n // 4097 + 1))[:n]
+    if kind == "mixed":
+        third = n // 3
+        return gen("text", third, seed) + gen("random", third, seed + 1) + gen("text", n - 2 * third, seed + 2)
+    if kind == "periodic":
+        # Runs of a short random pattern repeated: work for the repeated
+        # matches and the long-match paths.
+        out = bytearray()
+        while len(out) < n:
+            period = 1 + r.next() % 300
+            pattern = bytes(r.next() & 0xFF for _ in range(period))
+            out += pattern * (1 + r.next() % 50)
+        return bytes(out[:n])
     if kind == "code":
         # Something like machine code: calls (E8) to a few targets, ARM
         # branches (EB atop a little-endian word), fill, and a handful of
@@ -165,6 +192,75 @@ MADE = [
     ("raw-lzma2", "text", 20_000, 6, "--format=raw --lzma2=preset=6"),
 ]
 
+# (name, input kind, size, seed, xz arguments): the encoder held to xz's
+# bytes. Every preset over five kinds of input; then the LZMA2 chunk limits
+# (2 MiB of input, 64 KiB of output, stored chunks), settings no preset
+# uses, a 4 KiB dictionary (the match finder's cycle wraps), `.lzma` and raw
+# LZMA1, and inputs too short to hash.
+ENCODED = [
+    (f"{kind}-{level}{e}", kind, size, seed, f"--format=xz -{level}{e}")
+    for kind, size, seed in [
+        ("text", 100_000, 21),
+        ("random", 60_000, 22),
+        ("code", 100_000, 23),
+        ("periodic", 120_000, 24),
+        ("mixed", 150_000, 25),
+    ]
+    for level in range(10)
+    for e in ("", "e")
+] + [
+    ("zeros-5m-6", "zeros", 5_000_000, 0, "--format=xz -6"),
+    ("zeros-5m-0", "zeros", 5_000_000, 0, "--format=xz -0"),
+    ("zeros-5m-9e", "zeros", 5_000_000, 0, "--format=xz -9e"),
+    ("text-1200k-6", "text", 1_200_000, 26, "--format=xz -6"),
+    ("text-1200k-1", "text", 1_200_000, 26, "--format=xz -1"),
+    ("random-300k-6", "random", 300_000, 27, "--format=xz -6"),
+    ("random-300k-0", "random", 300_000, 27, "--format=xz -0"),
+    ("mixed-3m-6", "mixed", 3_000_000, 28, "--format=xz -6"),
+    ("lclppb-0-2-0", "text", 100_000, 29, "--format=xz --lzma2=preset=6,lc=0,lp=2,pb=0"),
+    ("lclppb-4-0-4", "text", 100_000, 29, "--format=xz --lzma2=preset=6,lc=4,lp=0,pb=4"),
+    ("lclppb-1-3-1", "code", 100_000, 30, "--format=xz --lzma2=preset=6,lc=1,lp=3,pb=1"),
+    ("mf-bt2", "text", 100_000, 31, "--format=xz --lzma2=preset=6,mf=bt2"),
+    ("mf-bt3", "text", 100_000, 31, "--format=xz --lzma2=preset=6,mf=bt3"),
+    ("mf-hc3-normal", "text", 100_000, 31, "--format=xz --lzma2=preset=6,mf=hc3"),
+    ("mf-hc4-normal", "text", 100_000, 31, "--format=xz --lzma2=preset=6,mf=hc4"),
+    ("mf-bt4-fast", "text", 100_000, 31, "--format=xz --lzma2=preset=6,mode=fast"),
+    ("mf-bt2-fast", "periodic", 100_000, 32, "--format=xz --lzma2=preset=1,mf=bt2"),
+    ("nice-4", "periodic", 100_000, 33, "--format=xz --lzma2=preset=6,nice=4"),
+    ("nice-273", "periodic", 100_000, 33, "--format=xz --lzma2=preset=6,nice=273"),
+    ("depth-1", "text", 100_000, 34, "--format=xz --lzma2=preset=6,depth=1"),
+    ("depth-1000", "text", 100_000, 34, "--format=xz --lzma2=preset=6,depth=1000"),
+    ("dict-100000", "mixed", 300_000, 35, "--format=xz --lzma2=preset=6,dict=100000"),
+    ("dict-4096", "text", 100_000, 36, "--format=xz --lzma2=preset=6,dict=4096"),
+    ("dict-4096-fast", "text", 100_000, 36, "--format=xz --lzma2=preset=1,dict=4096"),
+    ("dict-edge-hc4", "edge", 40_000, 44, "--format=xz --lzma2=preset=1,dict=4096"),
+    ("dict-edge-hc3", "edge", 40_000, 44, "--format=xz --lzma2=preset=0,dict=4096"),
+    ("dict-edge-bt4", "edge", 40_000, 44, "--format=xz --lzma2=preset=6,dict=4096"),
+    ("lzma-0", "text", 100_000, 37, "--format=lzma -0"),
+    ("lzma-9e", "periodic", 100_000, 38, "--format=lzma -9e"),
+    ("lzma-random", "random", 50_000, 39, "--format=lzma -6"),
+    ("lzma-dict-100000", "text", 100_000, 43, "--format=lzma --lzma1=preset=6,dict=100000"),
+    ("lzma1-raw-6", "text", 100_000, 40, "--format=raw --lzma1=preset=6"),
+    ("lzma1-raw-1", "code", 100_000, 41, "--format=raw --lzma1=preset=1"),
+    ("tiny-1", "text", 1, 42, "--format=xz -6"),
+    ("tiny-2", "text", 2, 42, "--format=xz -6"),
+    ("tiny-3", "text", 3, 42, "--format=xz -0"),
+    ("tiny-4", "text", 4, 42, "--format=xz -9e"),
+    ("tiny-5", "random", 5, 42, "--format=xz -6"),
+    ("tiny-lzma", "text", 3, 42, "--format=lzma -6"),
+]
+
+
+def encoded() -> None:
+    """`encoded.txt`: xz's output for each of ENCODED, as length and hash."""
+    lines = ["# name kind size seed length fnv64 -- xz 5.2.5's output for: args"]
+    for name, kind, size, seed, args in ENCODED:
+        packed = xz(args, gen(kind, size, seed))
+        lines.append(f"{name} {kind} {size} {seed} {len(packed)} {fnv(packed):016x} -- {args}")
+    (HERE / "encoded.txt").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    print(f"{len(ENCODED)} encoded")
+
+
 # Mutated whole: small files with something in every part of the format.
 MUTATED = ["text-small", "two-blocks-small", "lzma-small", "raw-small"]
 
@@ -184,6 +280,9 @@ def reserved_flag(stream: bytes) -> bytes:
 
 def main() -> None:
     build_oracle()
+    if "--encoded" in sys.argv[1:]:
+        encoded()
+        return
 
     files = HERE / "files"
     if files.exists():
@@ -245,6 +344,8 @@ def main() -> None:
         out.append(f"== {f.name}")
         out.extend(oracle(mode, f).splitlines())
     (HERE / "mutations.txt").write_text("\n".join(out) + "\n", encoding="utf-8", newline="\n")
+
+    encoded()
 
     total = sum(p.stat().st_size for p in HERE.rglob("*") if p.is_file())
     count = sum(1 for line in out if line and line[0].isdigit())

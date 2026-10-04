@@ -221,6 +221,11 @@ members = [
     # accepts what `xz -d` accepts, held to liblzma's own test files and its
     # verdicts. no_std + alloc.
     "xz",
+    # 7z archives, read as 7-Zip reads them: a port of 7-Zip's own 7z reader
+    # from the public-domain LZMA SDK, decoding through `xz`, `bzip2` and
+    # `deflate`. Out of kernel/src/fs/sevenz.rs's place, for the request
+    # `bzip2` and `xz` came from. no_std + alloc.
+    "sevenz",
     # ZIP (APPNOTE 6.3.x) with Zip64, promoted out of `kernel/src/fs/zip.rs`
     # at lane C's request (`requests/c-a-zip-is-trapped-in-the-kernel-binary.md`)
     # -- the third time this same pattern has come up.
@@ -726,5 +731,12 @@ codegen-units = 1
 # decode a 37x19 picture, which makes `imagecodec`'s tests that decode
 # thousands of damaged files take minutes.
 [profile.dev.package.rav1d]
+opt-level = 3
+
+# The same for `xz`, whose tests hold its encoder to XZ Utils' output byte
+# for byte at every preset: unoptimised, the normal-mode parser codes about
+# 0.3 MB a second, and the corpus is tens of megabytes. Overflow checks and
+# debug assertions stay, as for rav1d. Lane E, 2026-10-03.
+[profile.dev.package.xz]
 opt-level = 3
 

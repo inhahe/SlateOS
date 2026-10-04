@@ -23,6 +23,7 @@
 //! | `decompress.c`: `BZ2_decompress`, `makeMaps_d`, `GET_MTF_VAL` | `decompress::decode_stream`, `decompress::decode_block`, `decompress::Coder::symbol` |
 //! | `bzlib.c`: `unRLE_obuf_to_output_FAST`, the CRC checks of `BZ2_bzDecompress` | the end of `decompress::decode_block` |
 //! | `bzip2.c`: `uncompressStream`'s handling of what follows a stream | [`decompress_limited`] |
+//! | 7-Zip's reading of a BZip2 coder in a 7z archive (its rules, not its code) | [`decompress_as_7zip`] |
 //! | `bzlib.c`: `ADD_CHAR_TO_BLOCK`, `add_pair_to_block`, `flush_RL`, `handle_compress` | `compress::Encoder` |
 //! | `compress.c`: `BZ2_compressBlock`, `generateMTFValues`, `sendMTFValues`, `bsW` | `compress::Encoder::compress_block`, `compress::generate_mtf_values`, `compress::send_mtf_values`, `compress::BitWriter` |
 //! | `blocksort.c`: `mainSort`, `mainQSort3`, `mainSimpleSort`, `mainGtU`, `fallbackSort`, `fallbackQSort3`, `fallbackSimpleSort`, `BZ2_blockSort` | `blocksort::Main::{sort, qsort3, simple_sort, gt_u}`, `blocksort::{fallback_sort, fallback_qsort3, fallback_simple_sort}`, `blocksort::Sorter::sort` |
@@ -264,6 +265,29 @@ pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
 /// for a stream that is damaged.
 pub fn decompress_limited(data: &[u8], limit: usize) -> Result<Vec<u8>> {
     decompress::decompress(data, limit)
+}
+
+/// Decompresses the bzip2 stream at the start of `data` onto `out` as 7-Zip
+/// reads a BZip2 coder of a 7z archive, up to `limit` bytes in `out`, and
+/// returns how many bytes of `data` the stream took up.
+///
+/// 7-Zip's decoder is not libbzip2: it refuses a coding table that is not a
+/// prefix code, accepts a block ending in four equal bytes with no count,
+/// and reads one stream only -- the rules are listed in the `decompress`
+/// module. What follows the stream is left to the caller, which 7-Zip calls
+/// data after the end.
+///
+/// On an error `out` keeps what was decompressed before it -- every block
+/// before the damaged one, and that one too when what is wrong is its CRC,
+/// which is checked after its bytes are out -- as 7-Zip gives back the
+/// files of a damaged solid block that lie before the damage.
+///
+/// # Errors
+///
+/// As [`decompress_limited`]; [`Error::OutputTooLarge`] with `out` filled to
+/// `limit`.
+pub fn decompress_as_7zip(data: &[u8], out: &mut Vec<u8>, limit: usize) -> Result<usize> {
+    decompress::decompress_as_7zip(data, out, limit)
 }
 
 #[cfg(test)]

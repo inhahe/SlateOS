@@ -1,7 +1,7 @@
 ### [E] A key held with Alt or the Windows key works a program's bare-key binding -- 2026-09-29
 
-**Status:** pending a boot test on main. Every program on the list below is
-done (2026-09-29 to 10-03), each with a test and mutation rows: stopwatch, hangman, asteroids,
+**Status:** FIXED 2026-10-03, published to main (320f8bb99) after a green
+boot test. Every program on the list below is done (2026-09-29 to 10-03), each with a test and mutation rows: stopwatch, hangman, asteroids,
 battleship, benchmark, calendar, clipmanager, compass, contacts, credmanager,
 crossword, dbviewer, musicplayer, defrag, devicemanager, diskimager, dots,
 ebook, email, explorer, fileassoc, filediff, finance, flashcards, jsonviewer,
@@ -16,8 +16,7 @@ The shared one-line and multi-line fields (`apps/textline`, `apps/textarea`)
 answered Alt's and the Windows key's chords on their editing keys --
 Alt+Backspace deleted, Windows+Left moved the caret -- though their docs
 said those keys were the application's; fixed (bca1a40d6), all 73 programs
-using them tested. **Fixed on lane E, pending a boot test on main; then it
-moves to `known-issues-resolved/`.**
+using them tested.
 
 Most programs had the AltGr fault too -- a Ctrl shortcut matched on Ctrl
 held, so AltGr+S, a Polish `ś`, saved -- and many typed a command's letter

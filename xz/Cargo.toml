@@ -2,7 +2,7 @@
 name = "xz"
 version = "0.1.0"
 edition = "2024"
-description = "The .xz and .lzma formats and raw LZMA/LZMA2, ported from liblzma 5.2.5: accepts what xz -d accepts and refuses what it refuses."
+description = "The .xz and .lzma formats and raw LZMA/LZMA2, ported from liblzma 5.2.5: accepts what xz -d accepts and refuses what it refuses, and writes what xz writes, byte for byte."
 # liblzma 5.2.5 is in the public domain; `licenses/notices.yaml` names it for
 # the image's notices, which its COPYING asks for as a courtesy.
 license-file = "licenses/liblzma-COPYING"
@@ -19,6 +19,11 @@ path = "src/lib.rs"
 crc32 = { path = "../crc32" }
 # The SHA-256 check (`xz --check=sha256`).
 sha2 = { path = "../sha2" }
+
+# Compression and decompression speed, preset by preset (`cargo bench -p xz`).
+[[bench]]
+name = "rate"
+harness = false
 
 [lints]
 workspace = true

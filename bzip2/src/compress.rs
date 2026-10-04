@@ -105,11 +105,27 @@ struct Encoder {
     w: BitWriter,
     sorter: Sorter,
     mtfv: Vec<u16>,
-    /// Selectors written beyond those the block needs, as some encoders
-    /// round the count up. Always 0 here; the tests set it to make such a
-    /// stream, which libbzip2 1.0.8 reads and the kernel's old copy refused.
-    pad_selectors: usize,
+    /// Always the default here; the tests bend it to make the streams other
+    /// encoders, or damage, make.
+    shape: Shape,
 }
+
+/// Ways a block can be written other than as `bzip2` writes it.
+#[derive(Clone, Copy, Debug, Default)]
+struct Shape {
+    /// Selectors written beyond those the block needs, as some encoders
+    /// round the count up -- which libbzip2 1.0.8 reads, and the kernel's
+    /// old copy refused.
+    pad_selectors: usize,
+    /// Lengths to write in place of the ones the encoder chose. To write a
+    /// table that is not a prefix code (which only an unused table can be
+    /// and still decode), or one with codes to spare.
+    table_lengths: Option<LengthFor>,
+}
+
+/// Given a table's index, whether any selector names it, and a symbol: the
+/// symbol's length in that table, or `None` to leave it.
+type LengthFor = fn(usize, bool, usize) -> Option<u8>;
 
 /// Compresses `data` as `bzip2 -<level>` does.
 pub(crate) fn compress(data: &[u8], level: Level) -> Vec<u8> {
@@ -144,7 +160,7 @@ impl Encoder {
             w,
             sorter: Sorter::default(),
             mtfv: Vec::new(),
-            pad_selectors: 0,
+            shape: Shape::default(),
         }
     }
 
@@ -265,7 +281,7 @@ impl Encoder {
                 &mtf_freq,
                 &self.in_use,
                 n_in_use,
-                self.pad_selectors,
+                self.shape,
             );
         }
 
@@ -377,7 +393,7 @@ fn send_mtf_values(
     mtf_freq: &[i32; MAX_ALPHA_SIZE],
     in_use: &[bool; 256],
     n_in_use: usize,
-    pad_selectors: usize,
+    shape: Shape,
 ) {
     let alpha_size = n_in_use + 2;
     let n_mtf = mtfv.len();
@@ -478,6 +494,16 @@ fn send_mtf_values(
             huffman::make_code_lengths(table, freqs, alpha_size, MAX_CODE_LEN_OUT);
         }
     }
+    if let Some(length_for) = shape.table_lengths {
+        for (t, table) in len.iter_mut().enumerate().take(n_groups) {
+            let named = selectors.iter().any(|&s| usize::from(s) == t);
+            for (v, slot) in table.iter_mut().enumerate().take(alpha_size) {
+                if let Some(l) = length_for(t, named, v) {
+                    *slot = l;
+                }
+            }
+        }
+    }
 
     // The selectors, move-to-front coded.
     let mut pos = [0u8, 1, 2, 3, 4, 5];
@@ -521,7 +547,7 @@ fn send_mtf_values(
     // The selectors, in unary.
     w.put(3, n_groups as u32);
     // Fifteen bits hold at most 32 767.
-    let pad = pad_selectors.min(0x7fff - selectors.len());
+    let pad = shape.pad_selectors.min(0x7fff - selectors.len());
     w.put(15, (selectors.len() + pad) as u32);
     for &j in &selector_mtf {
         for _ in 0..j {
@@ -623,8 +649,20 @@ mod tests {
     /// on the way in -- claiming `crc`, with `pad` selectors more than it
     /// needs.
     fn raw_stream(block: &[u8], crc: u32, pad: usize) -> Vec<u8> {
+        shaped_stream(
+            block,
+            crc,
+            Shape {
+                pad_selectors: pad,
+                ..Shape::default()
+            },
+        )
+    }
+
+    /// As [`raw_stream`], written in `shape`.
+    fn shaped_stream(block: &[u8], crc: u32, shape: Shape) -> Vec<u8> {
         let mut e = Encoder::new(Level::BEST, 0);
-        e.pad_selectors = pad;
+        e.shape = shape;
         e.block = block.to_vec();
         for &b in block {
             e.mark_in_use(b);
@@ -634,14 +672,79 @@ mod tests {
         e.w.finish()
     }
 
+    /// The stream as 7-Zip reads it: its bytes, or its error and the bytes
+    /// before it.
+    fn as_7zip(packed: &[u8]) -> (Result<usize, crate::Error>, Vec<u8>) {
+        let mut out = Vec::new();
+        let r = crate::decompress_as_7zip(packed, &mut out, 1000);
+        (r, out)
+    }
+
     /// libbzip2's output stage calls a block corrupt when four equal bytes
-    /// end it with no count after them, whatever its CRC says.
+    /// end it with no count after them, whatever its CRC says; 7-Zip writes
+    /// the four, and the CRC decides.
     #[test]
-    fn a_run_without_its_count_byte_is_refused() {
+    fn a_run_without_its_count_byte_is_refused_by_libbzip2_alone() {
         let whole = raw_stream(b"xyzAAAA\x00", crc_of(b"xyzAAAA"), 0);
         assert_eq!(crate::decompress(&whole).unwrap(), b"xyzAAAA");
+        assert_eq!(as_7zip(&whole), (Ok(whole.len()), b"xyzAAAA".to_vec()));
         let cut = raw_stream(b"xyzAAAA", crc_of(b"xyzAAAA"), 0);
         assert_eq!(crate::decompress(&cut), Err(crate::Error::InvalidRun));
+        assert_eq!(as_7zip(&cut), (Ok(cut.len()), b"xyzAAAA".to_vec()));
+        // Four bytes alone, and four after a run that had its count.
+        for (block, want) in [
+            (&b"AAAA"[..], &b"AAAA"[..]),
+            (b"AAAA\x02BBBB", b"AAAAAABBBB"),
+        ] {
+            let cut = raw_stream(block, crc_of(want), 0);
+            assert_eq!(crate::decompress(&cut), Err(crate::Error::InvalidRun));
+            assert_eq!(as_7zip(&cut), (Ok(cut.len()), want.to_vec()));
+        }
+        // The CRC is still checked, after the bytes are out.
+        let wrong = raw_stream(b"xyzAAAA", crc_of(b"xyzAAAB"), 0);
+        let (r, out) = as_7zip(&wrong);
+        assert!(matches!(r, Err(crate::Error::BlockCrcMismatch { .. })));
+        assert_eq!(out, b"xyzAAAA");
+    }
+
+    /// A table no selector names whose lengths -- 1, 1, 2, 2: a Kraft sum
+    /// of 3/2 -- are no prefix code: libbzip2 never uses it and decodes the
+    /// block; 7-Zip builds every table and refuses it.
+    #[test]
+    fn an_unused_table_that_is_no_prefix_code_is_refused_by_7zip_alone() {
+        let data = b"abababababab";
+        let shape = Shape {
+            table_lengths: Some(|_, named, v| (!named).then_some([1, 1, 2, 2][v])),
+            ..Shape::default()
+        };
+        let packed = shaped_stream(data, crc_of(data), shape);
+        assert_eq!(crate::decompress(&packed).unwrap(), data);
+        assert_eq!(
+            as_7zip(&packed),
+            (Err(crate::Error::InvalidTables), Vec::new())
+        );
+        // The same table as a prefix code is read by both.
+        let shape = Shape {
+            table_lengths: Some(|_, named, v| (!named).then_some([1, 2, 3, 3][v])),
+            ..Shape::default()
+        };
+        let packed = shaped_stream(data, crc_of(data), shape);
+        assert_eq!(as_7zip(&packed), (Ok(packed.len()), data.to_vec()));
+    }
+
+    /// A table with codes to spare -- four symbols of three bits, a Kraft sum
+    /// of 1/2 -- in use: lbzip2 writes such tables, and both read them.
+    #[test]
+    fn a_table_with_codes_to_spare_is_read_by_both() {
+        let data = b"abababababab";
+        let shape = Shape {
+            table_lengths: Some(|_, named, _| named.then_some(3)),
+            ..Shape::default()
+        };
+        let packed = shaped_stream(data, crc_of(data), shape);
+        assert_ne!(packed, raw_stream(data, crc_of(data), 0));
+        assert_eq!(crate::decompress(&packed).unwrap(), data);
+        assert_eq!(as_7zip(&packed), (Ok(packed.len()), data.to_vec()));
     }
 
     /// libbzip2 1.0.8 reads up to 32 767 selectors and uses the first 18 002

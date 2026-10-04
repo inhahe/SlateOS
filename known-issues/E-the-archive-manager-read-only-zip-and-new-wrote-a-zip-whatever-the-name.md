@@ -1,5 +1,5 @@
 ### [E] The archive manager read only ZIP, and "New" wrote a ZIP whatever the name -- 2026-09-26
-**Status:** FIXED for TAR and TAR.GZ (lane E, 2026-09-26), and for TAR.BZ2 (2026-10-03: read and written through the new `bzip2` crate, a port of libbzip2 1.0.8). TAR.XZ is read (2026-10-03, through the new `xz` crate, a port of liblzma 5.2.5's decoder) but not yet written: New and Save refuse it by name until `xz` has liblzma's encoder, lane E's next task. OPEN for 7z -- refused by name, and by its bytes when the name says TAR. Lane A agreed lane E would port the codecs out of the kernel (`requests/e-a-bzip2-xz-and-7z-are-trapped-in-the-kernel-binary.md`); `sevenz` follows `bzip2` and `xz`.
+**Status:** FIXED for every format the program knows. TAR and TAR.GZ (lane E, 2026-09-26), TAR.BZ2 (2026-10-03: read and written through the new `bzip2` crate, a port of libbzip2 1.0.8), TAR.XZ (2026-10-03, through the new `xz` crate, a port of liblzma 5.2.5; it writes what `xz -6` writes, byte for byte), and 7z (2026-10-03, through the new `sevenz` crate, 7-Zip 26.00's own reader ported: listed, extracted and tested, each file given 7-Zip's verdict). 7z is read-only: Add and Delete are greyed out on a 7z and say why, and New does not offer it -- a 7z writer would be new work (`xz` has the LZMA2 encoder; the 7z header writer does not exist). An encrypted 7z is listed and its files refused until the program asks for a password. What remains open is the TAR-parser note at the end.
 
 **Also fixed 2026-09-26: the Open dialog showed only ZIP files.** Its filter
 was `*.zip` alone, written when ZIP was all the program read, so once TAR and
@@ -7,7 +7,8 @@ TAR.GZ opened, the dialog still hid every one of them. The filter and the
 program's own name detection now read one table, `ArchiveFormat::patterns`,
 so a name the program recognises is always one the dialog shows. A `.tar.xz`
 was not recognised at all ("does not end in an archive extension I know");
-it is now named, and refused as TAR.XZ.
+it was then named and refused as TAR.XZ, until it could be read and written
+(2026-10-03).
 
 **In short:** the archive manager opened ZIP files and nothing else: a `.tar`
 or `.tar.gz` -- the commonest archives on a Unix-like system -- was refused

@@ -2865,7 +2865,8 @@ word; text inside them that says "lane C" is history.
   text and test Ctrl somewhere without Alt (notes' body, and every field on
   `TextInput::edit_key`, wait on the request above). *The Alt/Super guard:*
   done 2026-10-03 for all sixty programs of the 2026-09-29 survey, each with
-  a test and mutation rows (`known-issues/E-a-key-held-with-alt-or-the-windows-key-works-a-programs-bare-key-binding.md`
+  a test and mutation rows, published to main 2026-10-03
+  (`known-issues-resolved/E-a-key-held-with-alt-or-the-windows-key-works-a-programs-bare-key-binding.md`
   lists them); most had the AltGr-as-Ctrl fault too and many typed a
   command's letter, both fixed alongside; and `textline::apply_key` and
   `TextArea::apply_key` themselves now refuse Alt's and the Windows key's
@@ -3149,11 +3150,28 @@ word; text inside them that says "lane C" is history.
   to lane A (`requests/e-a-the-bzip2-crate-is-ready-for-the-kernel-shim.md`,
   `requests/e-a-the-xz-crate-is-ready-and-xz-compress-loses-files.md` --
   the second reports that the kernel's `xz_compress` writes unreadable
-  streams past 64 KiB compressed). **Next:** liblzma's encoder (match
-  finders, the fast and normal optimizers, presets 0-9 and extreme),
-  byte-identical to `xz`, then TAR.XZ written; `sevenz/` (7z: LZMA, LZMA2,
-  BZip2, Deflate, BCJ, Delta; names kept as UTF-16 units), then the
-  archive manager opens 7z.
+  streams past 64 KiB compressed). Then liblzma's encoder in `xz/`: every
+  match finder, the fast and normal choosers, every preset and extreme
+  preset, `.xz`, `.lzma` and raw -- held to `xz` 5.2.5's bytes for 136
+  settings and inputs -- and the archive manager writes TAR.XZ through it.
+  Then `sevenz/` (7z: 7-Zip 26.00's own reader, ported from the
+  public-domain LZMA SDK; names kept as UTF-16 units), which reads every
+  method 7-Zip writes: LZMA and LZMA2 by 7-Zip's own decoders, ported
+  (`LzmaDec.c`, `Lzma2Dec.c` and the multi-threaded driver, decision 1230,
+  because liblzma's part from them on damaged data); PPMd, BCJ2, every
+  branch filter (ARM64 and RISC-V included), Delta and Copy; BZip2 and
+  Deflate by 7-Zip's rules rather than libbzip2's and zlib's, and Deflate64,
+  through a decoder of its own (decision 1231, 7-Zip's being LGPL); and
+  AES-256 with a password. Every one-byte corruption of ten small archives
+  and the chunk headers and edges of two multi-chunk LZMA2 archives
+  (18,198 mutants), and 12 crafted archives, get 7-Zip's own verdict, file
+  by file, as 7-Zip with several threads and with one gives it. The archive
+  manager lists, extracts and tests 7z through it -- read-only, an
+  encrypted one listed and its files refused until it asks for a password
+  -- and `sevenz` is handed to lane A
+  (`requests/e-a-the-sevenz-crate-is-ready-for-the-kernel-shim.md`: the
+  kernel's copy checks no CRC). **Remaining, lane A's:** the three kernel
+  shims.
 
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;
 bug-hunt sweeps over it are standing work between features (this was lane

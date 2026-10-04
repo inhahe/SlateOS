@@ -23,49 +23,49 @@ use alloc::vec::Vec;
 use crate::{Error, Result};
 
 /// `RC_TOP_VALUE`: below this the range is renormalised by a byte.
-const RC_TOP: u32 = 1 << 24;
+pub(crate) const RC_TOP: u32 = 1 << 24;
 /// `RC_BIT_MODEL_TOTAL_BITS`
-const BIT_MODEL_TOTAL_BITS: u32 = 11;
-const BIT_MODEL_TOTAL: u32 = 1 << BIT_MODEL_TOTAL_BITS;
+pub(crate) const BIT_MODEL_TOTAL_BITS: u32 = 11;
+pub(crate) const BIT_MODEL_TOTAL: u32 = 1 << BIT_MODEL_TOTAL_BITS;
 /// `RC_MOVE_BITS`
-const MOVE_BITS: u32 = 5;
+pub(crate) const MOVE_BITS: u32 = 5;
 /// `bit_reset`: an even probability.
-const PROB_INIT: u16 = (BIT_MODEL_TOTAL >> 1) as u16;
+pub(crate) const PROB_INIT: u16 = (BIT_MODEL_TOTAL >> 1) as u16;
 
 /// `STATES`, `LIT_STATES`
-const STATES: usize = 12;
-const LIT_STATES: u32 = 7;
+pub(crate) const STATES: usize = 12;
+pub(crate) const LIT_STATES: u32 = 7;
 /// `POS_STATES_MAX`: `pb` is at most 4.
-const POS_STATES_MAX: usize = 16;
+pub(crate) const POS_STATES_MAX: usize = 16;
 /// `LITERAL_CODER_SIZE` and `LITERAL_CODERS_MAX` (`lc + lp` is at most 4).
-const LITERAL_CODER_SIZE: usize = 0x300;
-const LITERAL_CODERS_MAX: usize = 16;
+pub(crate) const LITERAL_CODER_SIZE: usize = 0x300;
+pub(crate) const LITERAL_CODERS_MAX: usize = 16;
 /// `MATCH_LEN_MIN`, and the length coder's three symbol counts.
-const MATCH_LEN_MIN: u32 = 2;
-const LEN_LOW_SYMBOLS: u32 = 8;
-const LEN_MID_SYMBOLS: u32 = 8;
-const LEN_HIGH_SYMBOLS: u32 = 256;
+pub(crate) const MATCH_LEN_MIN: u32 = 2;
+pub(crate) const LEN_LOW_SYMBOLS: u32 = 8;
+pub(crate) const LEN_MID_SYMBOLS: u32 = 8;
+pub(crate) const LEN_HIGH_SYMBOLS: u32 = 256;
 /// `DIST_STATES`, `DIST_SLOT_BITS`
-const DIST_STATES: usize = 4;
+pub(crate) const DIST_STATES: usize = 4;
 /// The distance state every length from 5 on shares (`get_dist_state`).
-const LAST_DIST_STATE: u32 = DIST_STATES as u32 - 1;
-const DIST_SLOT_BITS: u32 = 6;
+pub(crate) const LAST_DIST_STATE: u32 = DIST_STATES as u32 - 1;
+pub(crate) const DIST_SLOT_BITS: u32 = 6;
 /// `DIST_MODEL_START`, `DIST_MODEL_END`, `FULL_DISTANCES`
-const DIST_MODEL_START: u32 = 4;
-const DIST_MODEL_END: u32 = 14;
-const FULL_DISTANCES: usize = 128;
+pub(crate) const DIST_MODEL_START: u32 = 4;
+pub(crate) const DIST_MODEL_END: u32 = 14;
+pub(crate) const FULL_DISTANCES: usize = 128;
 /// `ALIGN_BITS`
-const ALIGN_BITS: u32 = 4;
+pub(crate) const ALIGN_BITS: u32 = 4;
 
 /// The literal state after a literal (`next_state[]` in `lzma_decode`).
-const NEXT_STATE_AFTER_LITERAL: [u32; STATES] = [0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 4, 5];
+pub(crate) const NEXT_STATE_AFTER_LITERAL: [u32; STATES] = [0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 4, 5];
 /// `STATE_LIT_MATCH`, `STATE_LIT_LONGREP`, `STATE_LIT_SHORTREP`,
 /// `STATE_NONLIT_MATCH`, `STATE_NONLIT_REP`
-const STATE_LIT_MATCH: u32 = 7;
-const STATE_LIT_LONGREP: u32 = 8;
-const STATE_LIT_SHORTREP: u32 = 9;
-const STATE_NONLIT_MATCH: u32 = 10;
-const STATE_NONLIT_REP: u32 = 11;
+pub(crate) const STATE_LIT_MATCH: u32 = 7;
+pub(crate) const STATE_LIT_LONGREP: u32 = 8;
+pub(crate) const STATE_LIT_SHORTREP: u32 = 9;
+pub(crate) const STATE_NONLIT_MATCH: u32 = 10;
+pub(crate) const STATE_NONLIT_REP: u32 = 11;
 
 /// `lc`, `lp` and `pb`: the literal context bits, literal position bits and
 /// position bits, as one properties byte packs them.
@@ -95,7 +95,6 @@ impl Props {
     }
 
     /// The properties byte (`lzma_lzma_lclppb_encode`).
-    #[cfg(test)]
     pub(crate) const fn to_byte(self) -> u8 {
         self.pb
             .wrapping_mul(5)

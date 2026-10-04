@@ -1,7 +1,7 @@
 //! Slate OS Archive Manager
 //!
 //! Graphical archive/compressed file manager supporting multiple formats:
-//! - ZIP, TAR, TAR.GZ and TAR.BZ2, read and written; TAR.XZ read; 7z
+//! - ZIP, TAR, TAR.GZ, TAR.BZ2 and TAR.XZ, read and written; 7z
 //!   recognised -- by name or by its bytes -- and refused by name
 //! - Browse archive contents in a tree view
 //! - Extract all, extract selected, extract to folder
@@ -34,9 +34,9 @@
 //!
 //! Uses the guitk library for UI rendering.
 //!
-//! Reading and writing are real for ZIP, TAR, TAR.GZ and TAR.BZ2, and
-//! reading for TAR.XZ, and live in [`backend`]; 7z is modelled but not
-//! parsed, and says so rather than pretending. Its reader is being ported out
+//! Reading and writing are real for ZIP, TAR, TAR.GZ, TAR.BZ2 and TAR.XZ,
+//! and live in [`backend`]; 7z is modelled but not parsed, and says so
+//! rather than pretending. Its reader is being ported out
 //! of the kernel, where a module of a binary crate cannot be reached by any
 //! program, as bzip2's and xz's were
 //! (`requests/e-a-bzip2-xz-and-7z-are-trapped-in-the-kernel-binary.md`).
@@ -105,20 +105,11 @@ impl ArchiveFormat {
         }
     }
 
-    /// Whether this build can read an archive in this format. 7z is
-    /// recognised and refused by name: its reader is still in the kernel,
-    /// where no program can reach it.
-    pub fn readable(self) -> bool {
-        matches!(
-            self,
-            Self::Zip | Self::Tar | Self::TarGz | Self::TarBz2 | Self::TarXz
-        )
-    }
-
-    /// Whether this build can write an archive in this format: the ones it
-    /// reads, less TAR.XZ until the `xz` crate has its compressor.
+    /// Whether this build can write an archive in this format. It reads
+    /// every format it knows, and writes all of them but 7z, which it reads
+    /// through a port of 7-Zip's reader and has no writer for.
     pub fn writable(self) -> bool {
-        matches!(self, Self::Zip | Self::Tar | Self::TarGz | Self::TarBz2)
+        self != Self::SevenZip
     }
 
     /// Whether this is a TAR inside one compressed stream: decompressed
@@ -1758,10 +1749,15 @@ pub fn toolbar_enabled(state: &AppState, action: ToolbarAction) -> bool {
     let has_selection = has_selection(state);
     // Writing rebuilds the archive out of the bytes it was read from, so a
     // model built by hand — the tests do that, and so does an empty model —
-    // has rows but nothing to rebuild from. Disabled rather than left to fail
-    // at the end: the two write actions are the only ones that could destroy
-    // something, and a button that cannot do its job should not look ready.
-    let can_write = state.archive.as_ref().is_some_and(|a| a.source.is_some());
+    // has rows but nothing to rebuild from; and it writes the archive's own
+    // format, which for a 7z this build does not. Disabled rather than left
+    // to fail at the end: the two write actions are the only ones that could
+    // destroy something, and a button that cannot do its job should not look
+    // ready.
+    let can_write = state
+        .archive
+        .as_ref()
+        .is_some_and(|a| a.source.is_some() && a.format.writable());
     match action {
         ToolbarAction::Open | ToolbarAction::New => true,
         ToolbarAction::ExtractAll | ToolbarAction::Test => has_archive,
@@ -2819,21 +2815,28 @@ impl AppState {
             // Saying *why* it did nothing beats a click that vanishes: the
             // difference between "this button is not for now" and "this
             // program has stopped responding" is otherwise invisible.
-            self.status_message = format!(
-                "{} is unavailable — {}",
-                action.label(),
-                match action {
-                    ToolbarAction::ExtractSelected => "nothing is selected",
-                    ToolbarAction::Delete if !has_selection(self) => "nothing is selected",
-                    // Both write actions land here for the same reason, and it
-                    // is not "no archive is open" — one may well be, just not
-                    // one read from a file.
-                    ToolbarAction::Add | ToolbarAction::Delete if self.archive.is_some() => {
-                        "this archive was not read from a file"
-                    }
-                    _ => "no archive is open",
+            let format = self.archive.as_ref().map(|a| a.format);
+            let why = match action {
+                ToolbarAction::ExtractSelected => String::from("nothing is selected"),
+                ToolbarAction::Delete if !has_selection(self) => {
+                    String::from("nothing is selected")
                 }
-            );
+                // Both write actions land here for the same reasons, and
+                // neither is "no archive is open" — one is: in a format this
+                // build reads and does not write, or not read from a file.
+                ToolbarAction::Add | ToolbarAction::Delete => match format {
+                    Some(f) if !f.writable() => {
+                        format!(
+                            "this build reads {} files and does not write them",
+                            f.extension()
+                        )
+                    }
+                    Some(_) => String::from("this archive was not read from a file"),
+                    None => String::from("no archive is open"),
+                },
+                _ => String::from("no archive is open"),
+            };
+            self.status_message = format!("{} is unavailable — {why}", action.label());
             return Action::Redraw;
         }
         match action {
@@ -2935,9 +2938,8 @@ impl AppState {
     pub fn open_dialog(&mut self, purpose: DialogPurpose) {
         let start = self.last_directory.clone();
         let mut dialog = match purpose {
-            // Every name the program recognises, the ones it refuses among
-            // them: a `.7z` hidden from the list reads as a file that is not
-            // there, while one chosen is told why it cannot be opened.
+            // Every name the program recognises -- which is every name it
+            // opens; a 7z among them, read-only.
             DialogPurpose::OpenArchive => FileDialog::open()
                 .with_filter("Archives", &ArchiveFormat::patterns_where(|_| true))
                 .with_initial_path(&start),
@@ -3951,18 +3953,16 @@ mod tests {
         }
         assert!(!shows(open, "notes.txt"), "control: the filter filters");
         let new = DialogPurpose::NewArchive;
-        for name in ["old.tar.gz", "old.tar.bz2"] {
+        for name in ["old.tar.gz", "old.tar.bz2", "old.tar.xz"] {
             assert!(
                 shows(new, name),
                 "the New dialog hides {name}, which it writes"
             );
         }
-        for name in ["old.7z", "old.tar.xz"] {
-            assert!(
-                !shows(new, name),
-                "the New dialog offers {name}, which it cannot write"
-            );
-        }
+        assert!(
+            !shows(new, "old.7z"),
+            "the New dialog offers a 7z, which it cannot write"
+        );
     }
 
     #[test]
@@ -6156,6 +6156,43 @@ mod tests {
             "status was {:?}",
             state.status_message
         );
+    }
+
+    /// A 7z opens and can be extracted and tested, but this build does not
+    /// write one: Add and Delete are dead, say why, and leave the file and
+    /// its rows alone.
+    #[test]
+    fn a_7z_opens_read_only() {
+        let dir = write_scratch("7z-read-only");
+        let path = dir.join("real.7z");
+        std::fs::write(&path, include_bytes!("../tests/data/real.7z")).expect("write the fixture");
+        let mut state = AppState::default();
+        assert!(state.open_path(&path), "{}", state.status_message);
+        let rows = state.archive.as_ref().expect("archive").entries.len();
+        for entry in &mut state.archive.as_mut().expect("archive").entries {
+            entry.selected = true;
+        }
+        for action in [
+            ToolbarAction::ExtractAll,
+            ToolbarAction::ExtractSelected,
+            ToolbarAction::Test,
+        ] {
+            assert!(toolbar_enabled(&state, action), "{action:?}");
+        }
+        assert!(!toolbar_enabled(&state, ToolbarAction::Add));
+        assert!(!toolbar_enabled(&state, ToolbarAction::Delete));
+        let before = std::fs::read(&path).expect("read the fixture");
+        state.run_toolbar(ToolbarAction::Delete);
+        assert!(
+            state
+                .status_message
+                .contains("reads .7z files and does not write them"),
+            "status was {:?}",
+            state.status_message
+        );
+        assert_eq!(std::fs::read(&path).expect("read it back"), before);
+        assert_eq!(state.archive.as_ref().expect("archive").entries.len(), rows);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The file manager opens an archive here by naming it on the command

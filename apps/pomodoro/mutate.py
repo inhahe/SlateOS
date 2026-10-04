@@ -10,7 +10,8 @@ because nothing here plays a sound.  The settings say so beneath their rows
 now, and the rows leave room for it at any height they fit in.  The first
 rows, added 2026-10-04, cover the list of keys' hold on the pointer: a press
 with it up puts it away and reaches nothing under it, and the wheel scrolls
-nothing it covers.
+nothing it covers -- and the log's wheel, which truncated a touchpad's small
+turns to nothing.
 
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
@@ -27,8 +28,23 @@ SRC = Path(__file__).parent / "src" / "main.rs"
 
 SOUND = "the_sound_row_says_nothing_plays_it"
 CARD = "the_shortcut_card_takes_a_press_rather_than_passing_it_on"
+TOUCHPAD = "a_touchpads_small_turns_add_up_to_rows"
 
 MUTATIONS = [
+    # The log's wheel adds a touchpad's small turns up rather than truncating
+    # each to nothing.
+    (
+        "a fraction of a notch is truncated to nothing",
+        "                let rows = self.log_wheel.rows(dy);\n",
+        "                let rows = wheel::rows_f(dy) as isize;\n",
+        [TOUCHPAD],
+    ),
+    (
+        "a turn that moves nothing says it moved",
+        "                if self.log_scroll == before {\n",
+        "                if false {\n",
+        [TOUCHPAD],
+    ),
     # The list of keys takes a press rather than letting it reach the button
     # under it, and the wheel scrolls nothing it covers (known-issues
     # E-a-press-goes-through-the-shortcut-card-to-the-control-drawn-under-it).

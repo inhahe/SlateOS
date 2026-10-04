@@ -544,6 +544,10 @@ pub struct PomodoroApp {
 
     pub log_entries: Vec<LogEntry>,
     pub log_scroll: usize,
+    /// The wheel's unspent fraction of a row of the log. `log_scroll` is a
+    /// whole row, so a touchpad's small turns have to be added up somewhere
+    /// or each rounds to nothing.
+    log_wheel: wheel::Accumulator,
 
     pub daily_stats: Vec<DayStats>,
     /// The day the clock says it is — recomputed on every tick, so a session
@@ -597,6 +601,7 @@ impl PomodoroApp {
             ambient_sound: AmbientSound::None,
             log_entries: Vec::new(),
             log_scroll: 0,
+            log_wheel: wheel::Accumulator::default(),
             daily_stats: Vec::new(),
             today: day_of(now_ms),
             streak_days: 0,
@@ -1220,12 +1225,19 @@ impl PomodoroApp {
                 // `wheel` answers in offset space already — one notch down is
                 // a *larger* offset — so the result is added as it comes.
                 // Negating it here is the trap its own docs warn about.
-                let rows = wheel::rows_f(dy);
-                if rows == 0.0 {
-                    return EventResult::Ignored;
+                //
+                // Through an accumulator, not `rows_f(dy) as isize`: that
+                // truncated a touchpad's fifth of a notch -- 0.6 of a row -- to
+                // nothing, every time, so the log could not be scrolled from
+                // a touchpad at all.
+                let rows = self.log_wheel.rows(dy);
+                let before = self.log_scroll;
+                self.scroll_log(rows);
+                if self.log_scroll == before {
+                    EventResult::Ignored
+                } else {
+                    EventResult::Consumed
                 }
-                self.scroll_log(rows as isize);
-                EventResult::Consumed
             }
             _ => EventResult::Ignored,
         }
@@ -3255,6 +3267,28 @@ mod tests {
             handle_event(&mut app, &scroll(1.0));
         }
         assert_eq!(app.log_scroll, 0, "the wheel ran past the top");
+    }
+
+    /// **A touchpad's small turns add up to rows.** Each was truncated to a
+    /// whole row on its own -- a quarter notch is three quarters of a row, and
+    /// `0.75 as isize` is nothing -- so the log could not be scrolled from a
+    /// touchpad at all.
+    #[test]
+    fn a_touchpads_small_turns_add_up_to_rows() {
+        let mut app = with_log(40);
+        assert_eq!(
+            handle_event(&mut app, &scroll(-0.25)),
+            EventResult::Ignored,
+            "three quarters of a row moved a whole one"
+        );
+        assert_eq!(app.log_scroll, 0);
+        for _ in 0..3 {
+            handle_event(&mut app, &scroll(-0.25));
+        }
+        assert_eq!(
+            app.log_scroll, 3,
+            "four quarter notches are one notch, three rows"
+        );
     }
 
     /// The old clamp was `len - 1`, which let a full table be scrolled into a

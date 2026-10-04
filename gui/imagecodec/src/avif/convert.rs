@@ -8,7 +8,7 @@
 //! libavif tries libyuv first: when libyuv has constants for the picture's
 //! matrix and range (BT.601, BT.709 and BT.2020, and the chromaticity-derived
 //! matrix over those primaries), the conversion is libyuv's fixed-point
-//! arithmetic ([`super::libyuv`]), bilinear for 4:2:0, linear for 4:2:2 --
+//! arithmetic (`yuv::convert`), bilinear for 4:2:0, linear for 4:2:2 --
 //! except 12-bit 4:2:0, which libyuv only converts nearest-neighbour, and
 //! 12-bit 4:2:2 and 4:4:4 and deep grey, which libavif first cuts to 8 bits.
 //! Every other matrix goes to libavif's own floating-point code: a fast path
@@ -29,8 +29,8 @@ use alloc::vec::Vec;
 
 use super::Error;
 use super::decode::{Decoded, Plane, Sample, Yuv};
-use super::libyuv::{self, Constants, Eight, Planes, Ten};
 use super::setup::YuvFormat;
+use yuv::convert::{self as libyuv, Constants, Eight, Planes, Ten};
 
 /// Why a picture cannot be converted: `AVIF_RESULT_REFORMAT_FAILED`.
 const UNSUPPORTED: Error = Error::Unsupported("AVIF colour matrix");
@@ -283,11 +283,11 @@ fn planes<T>(image: &Yuv<T>, with_alpha: bool) -> Option<Planes<'_, T>> {
         return None;
     };
     Some(Planes {
-        y,
-        u,
-        v,
+        y: y.view(),
+        u: u.view(),
+        v: v.view(),
         a: if with_alpha {
-            image.alpha.as_ref()
+            image.alpha.as_ref().map(Plane::view)
         } else {
             None
         },
@@ -303,7 +303,7 @@ fn libyuv_eight(image: &Yuv<u8>, k: &Constants, width: usize, out: &mut [u32]) -
         let Some(y) = image.planes[0].as_ref() else {
             return NOT_IMPLEMENTED;
         };
-        libyuv::i400(k, y, width, out);
+        libyuv::i400(k, y.view(), width, out);
         return Libyuv {
             converted: true,
             alpha_done,
@@ -380,7 +380,7 @@ fn downshift(image: &Yuv<u16>, with_alpha: bool) -> Yuv<u8> {
     let cut = |plane: &Option<Plane<u16>>| {
         plane
             .as_ref()
-            .map(|p| libyuv::convert_16_to_8(p, image.depth))
+            .map(|p| libyuv::convert_16_to_8(p.view(), image.depth))
     };
     let [y, u, v] = &image.planes;
     Yuv {

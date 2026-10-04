@@ -30,7 +30,7 @@ path = "src/lib.rs"
 # default; `osfont`, which decodes only PNG glyphs, turns it off, so that a
 # font renderer does not build a video decoder.
 default = ["avif"]
-avif = ["dep:rav1d"]
+avif = ["dep:rav1d", "dep:yuv"]
 
 [dependencies]
 crc32 = { path = "../../crc32" }
@@ -38,6 +38,9 @@ deflate = { path = "../../deflate" }
 # dav1d in Rust, vendored in lane F's `gui/video/` (see its VENDORED.md). The
 # one dependency here that is not `no_std`: it runs its own threads.
 rav1d = { path = "../video/rav1d", optional = true }
+# libyuv's conversions and scaling, ported (lane F's `gui/video/yuv`): what a
+# decoded AVIF is turned into pixels and brought to its size with.
+yuv = { path = "../video/yuv", optional = true }
 
 [lints]
 workspace = true

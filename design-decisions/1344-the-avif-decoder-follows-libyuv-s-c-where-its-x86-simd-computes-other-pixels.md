@@ -30,7 +30,8 @@ ported.)
 **What was decided.** Port the C as an x86-64 build compiles it, which
 includes the forms libyuv's C keeps for x86 only (the scaler's 7-bit
 horizontal blend, the conversions' constant tables read in the x86 order):
-`gui/imagecodec/src/avif/libyuv.rs`, `gui/imagecodec/src/avif/scale.rs`.
+`gui/video/yuv/src/convert.rs`, `gui/video/yuv/src/scale.rs` (moved there
+from `gui/imagecodec/src/avif/` on 2026-10-04, so that video uses them too).
 
 **Alternatives.**
 

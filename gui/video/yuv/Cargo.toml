@@ -1,0 +1,12 @@
+[package]
+name = "yuv"
+version = "0.1.0"
+edition = "2024"
+description = "libyuv's YUV-to-RGB conversions and plane scaling, ported: what AVIF pictures and video frames are drawn with."
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true

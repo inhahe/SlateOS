@@ -3775,7 +3775,7 @@ lane C's `guitk`.
     out of it, bit-exact against Pillow. Playing them in the viewer is lane
     E's (`requests/f-bce-avif-pictures-open-and-animate.md`).
   - `[x]` Frames coded at another size than their `ispe`, rescaled as libavif
-    rescales them (`src/avif/scale.rs`): libyuv's `ScalePlane` and
+    rescales them (`gui/video/yuv/src/scale.rs`): libyuv's `ScalePlane` and
     `ScalePlane_12` with `kFilterBox`, every method they choose by the sizes,
     as libyuv's C computes it (design-decisions §1344). Held to libyuv 1924
     built with its x86 code off on 62,208 size combinations and 57 larger

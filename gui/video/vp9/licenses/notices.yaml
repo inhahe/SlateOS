@@ -21,8 +21,8 @@ Arm optimized-routines:
   texts:
     - arm-optimized-routines-LICENSE
 
-# src/rgb.rs takes ARGBToI420's arithmetic from libyuv, at the revision
-# libavif 1.3.0 pins (4db2af62dab48895226be6b52737247e898ebe36, version
-# 1909): the libyuv gui/imagecodec carries, whose manifest names it -- once,
+# src/rgb.rs takes ARGBToI420's arithmetic from libyuv 1924
+# (644251f252a84bf8ce91ff0aca86a9b16b069ab8, the revision libavif 1.4.2
+# pins): the libyuv gui/video/yuv carries, whose manifest names it -- once,
 # as gather-notices.py requires. Its texts are beside this file too, for the
 # source that cites them.

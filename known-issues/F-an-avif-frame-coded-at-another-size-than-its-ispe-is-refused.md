@@ -3,7 +3,8 @@
 **Status:** OPEN — answered on lane-f 2026-10-04, and moves to
 `known-issues-resolved/` once that has had a boot test on `main`.
 
-**The answer:** `gui/imagecodec/src/avif/scale.rs`, called from `decode.rs`'s
+**The answer:** `gui/video/yuv/src/scale.rs` (first written as
+`gui/imagecodec/src/avif/scale.rs`), called from `decode.rs`'s
 `scale_tile` where the refusal was: libyuv 1924's `ScalePlane` and
 `ScalePlane_12` with `kFilterBox`, every method they pick by the sizes, as
 libyuv's C computes them (design-decisions §1344 for why the C and not the

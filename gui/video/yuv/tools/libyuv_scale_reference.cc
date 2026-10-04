@@ -1,5 +1,5 @@
 // libyuv's ScalePlane and ScalePlane_12 with kFilterBox on seeded planes,
-// hashed: the reference `src/avif/scale.rs`'s tests compare against.
+// hashed: the reference `src/scale.rs`'s tests compare against.
 //
 // Each case fills a source plane of 8-, 10- or 12-bit samples -- from
 // xorshift32 seeded by the case, all at the depth's maximum, or a ramp (the

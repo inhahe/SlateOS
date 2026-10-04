@@ -1,8 +1,7 @@
-//! Bringing a decoded AV1 frame to the size its container declares: what
-//! libavif does when a frame was coded at another size than its `ispe` (or
-//! its track's) -- `avifImageScaleWithLimit` (`src/scale.c`), which scales
-//! each plane with libyuv's `ScalePlane`, or `ScalePlane_12` for deeper
-//! samples, asking for `kFilterBox`.
+//! Planes scaled to another size as libyuv's `ScalePlane` (8-bit samples)
+//! and `ScalePlane_12` (deeper ones) scale them with `kFilterBox` -- what
+//! libavif's `avifImageScaleWithLimit` (`src/scale.c`) asks for when an AVIF
+//! frame was coded at another size than its `ispe`.
 //!
 //! libyuv takes `kFilterBox` as a ceiling, not an order (`ScaleFilterReduce`):
 //! the box filter -- each sample the mean of the source samples its box
@@ -41,12 +40,11 @@
 
 use alloc::vec;
 
-use super::Error;
-use super::decode::{Plane, Sample};
+use crate::{Plane, PlaneBuf, Sample};
 
 /// A sample libyuv scales: 8-bit through `ScalePlane`, 16-bit through
 /// `ScalePlane_12`. The two differ only here.
-pub(crate) trait Scaled: Sample {
+pub trait Scaled: Sample {
     /// `ScaleFilterCols`' `BLENDER`: `a` moved towards `b` by `f` / 65536.
     fn blend(a: u32, b: u32, f: u32) -> Self;
     /// `ScaleAddRow`: `sample` added to a column's box sum, held as libyuv
@@ -240,22 +238,27 @@ fn method(sw: usize, sh: usize, dw: usize, dh: usize) -> Method {
 /// `src` scaled to `width` x `height` as libyuv's `ScalePlane` (8-bit) or
 /// `ScalePlane_12` (16-bit) does with `kFilterBox`.
 ///
-/// # Errors
-///
-/// When the new plane's size overflows. Both sizes must be at least 1;
-/// libavif checks them before it gets here, and refuses a source over
-/// 16384 on a side, which libyuv's fixed point would overflow.
-pub(crate) fn scale_plane<T: Scaled>(
-    src: &Plane<T>,
+/// `None` when the new plane's size overflows. Both sizes should be at
+/// least 1 -- an empty plane comes back empty -- and a source over 16384 on
+/// a side may overflow libyuv's fixed point, which is why libavif refuses
+/// one before it gets here.
+pub fn scale_plane<T: Scaled>(
+    src: Plane<'_, T>,
     width: usize,
     height: usize,
-) -> Result<Plane<T>, Error> {
-    let mut dst = Plane::new(width, height)?;
+) -> Option<PlaneBuf<T>> {
+    let mut dst = PlaneBuf::new(width, height)?;
     if src.width == 0 || src.height == 0 || width == 0 || height == 0 {
-        return Ok(dst);
+        return Some(dst);
     }
     match method(src.width, src.height, width, height) {
-        Method::Copy => dst.samples.clone_from(&src.samples),
+        Method::Copy => {
+            for y in 0..height {
+                for (d, &s) in dst.row_mut(y).iter_mut().zip(src.row(y)) {
+                    *d = s;
+                }
+            }
+        }
         Method::Vertical(filter) => vertical(src, &mut dst, filter),
         Method::Down34 => down34(src, &mut dst),
         Method::Down2 => down2(src, &mut dst),
@@ -268,7 +271,7 @@ pub(crate) fn scale_plane<T: Scaled>(
         Method::BilinearDown(filter) => bilinear_down(src, &mut dst, filter),
         Method::Simple => simple(src, &mut dst),
     }
-    Ok(dst)
+    Some(dst)
 }
 
 /// `FixedDiv`: `num / div` in 16.16 fixed point. `div` is not 0.
@@ -366,7 +369,7 @@ fn slope(sw: usize, sh: usize, dw: usize, dh: usize, filter: Filter) -> Slope {
 }
 
 /// The destination's rows, top to bottom.
-fn rows_mut<T>(dst: &mut Plane<T>) -> core::slice::ChunksExactMut<'_, T> {
+fn rows_mut<T>(dst: &mut PlaneBuf<T>) -> core::slice::ChunksExactMut<'_, T> {
     dst.samples.chunks_exact_mut(dst.width.max(1))
 }
 
@@ -437,7 +440,7 @@ fn cols<T: Scaled>(out: &mut [T], s: &[T], x: i32, dx: i32) {
     clippy::cast_sign_loss,
     reason = "sizes are at most 32768, so positions stay under 2^31; the fraction is 8 bits"
 )]
-fn vertical<T: Scaled>(src: &Plane<T>, dst: &mut Plane<T>, filter: Filter) {
+fn vertical<T: Scaled>(src: Plane<'_, T>, dst: &mut PlaneBuf<T>, filter: Filter) {
     let (sh, dh) = (src.height, dst.height);
     let (mut y, dy) = if dh <= sh {
         let dy = fixed_div(sh, dh);
@@ -472,7 +475,7 @@ fn vertical<T: Scaled>(src: &Plane<T>, dst: &mut Plane<T>, filter: Filter) {
     clippy::arithmetic_side_effects,
     reason = "four 16-bit samples sum under 2^18"
 )]
-fn down2<T: Scaled>(src: &Plane<T>, dst: &mut Plane<T>) {
+fn down2<T: Scaled>(src: Plane<'_, T>, dst: &mut PlaneBuf<T>) {
     for (j, out) in rows_mut(dst).enumerate() {
         let (s, t) = (src.row(2 * j), src.row(2 * j + 1));
         for ((o, s2), t2) in out.iter_mut().zip(s.chunks_exact(2)).zip(t.chunks_exact(2)) {
@@ -489,7 +492,7 @@ fn down2<T: Scaled>(src: &Plane<T>, dst: &mut Plane<T>) {
     clippy::arithmetic_side_effects,
     reason = "sixteen 16-bit samples sum under 2^20"
 )]
-fn down4<T: Scaled>(src: &Plane<T>, dst: &mut Plane<T>) {
+fn down4<T: Scaled>(src: Plane<'_, T>, dst: &mut PlaneBuf<T>) {
     for (j, out) in rows_mut(dst).enumerate() {
         let block_rows = [0, 1, 2, 3].map(|k| src.row(4 * j + k));
         for (i, o) in out.iter_mut().enumerate() {
@@ -509,7 +512,7 @@ fn down4<T: Scaled>(src: &Plane<T>, dst: &mut Plane<T>) {
 ///
 /// The sizes are 3/4 on both sides, so the destination is whole groups of
 /// three rows and three columns, and libyuv's remainder code never runs.
-fn down34<T: Scaled>(src: &Plane<T>, dst: &mut Plane<T>) {
+fn down34<T: Scaled>(src: Plane<'_, T>, dst: &mut PlaneBuf<T>) {
     let width = dst.width;
     for (g, group) in dst
         .samples
@@ -566,7 +569,7 @@ fn box34<T: Scaled>(out: &mut [T], s: &[T], t: &[T], three_to_one: bool) {
 ///
 /// The sizes are 3/8 on both sides, so the destination is whole groups of
 /// three rows and three columns, and libyuv's remainder code never runs.
-fn down38<T: Scaled>(src: &Plane<T>, dst: &mut Plane<T>) {
+fn down38<T: Scaled>(src: Plane<'_, T>, dst: &mut PlaneBuf<T>) {
     let width = dst.width;
     for (g, group) in dst
         .samples
@@ -623,7 +626,7 @@ fn box38<T: Scaled>(out: &mut [T], rows: &[&[T]]) {
     clippy::arithmetic_side_effects,
     reason = "sizes are at most 32768, positions under 2^31 and counts at least 1; the sums and products wrap as the C's unsigned ones do"
 )]
-fn box_filter<T: Scaled>(src: &Plane<T>, dst: &mut Plane<T>) {
+fn box_filter<T: Scaled>(src: Plane<'_, T>, dst: &mut PlaneBuf<T>) {
     let (sw, sh) = (src.width, src.height);
     let s = slope(sw, sh, dst.width, dst.height, Filter::Box);
     let max_y = i32::try_from(sh).unwrap_or(0) << 16;
@@ -713,7 +716,7 @@ fn up2_row<T: Scaled>(out: &mut [T], near: &[T], far: &[T]) {
     clippy::arithmetic_side_effects,
     reason = "sizes are at most 32768, so positions stay under 2^31"
 )]
-fn up2_linear<T: Scaled>(src: &Plane<T>, dst: &mut Plane<T>) {
+fn up2_linear<T: Scaled>(src: Plane<'_, T>, dst: &mut PlaneBuf<T>) {
     let (sh, dh) = (src.height, dst.height);
     if dh == 1 {
         let s = src.row((sh - 1) / 2);
@@ -736,7 +739,7 @@ fn up2_linear<T: Scaled>(src: &Plane<T>, dst: &mut Plane<T>) {
 /// pair of source rows makes two, 3:1 and 1:3; and an even height ends with
 /// the last source row's alone.
 #[allow(clippy::arithmetic_side_effects, reason = "sizes are at most 32768")]
-fn up2_bilinear<T: Scaled>(src: &Plane<T>, dst: &mut Plane<T>) {
+fn up2_bilinear<T: Scaled>(src: Plane<'_, T>, dst: &mut PlaneBuf<T>) {
     let (sh, dh) = (src.height, dst.height);
     let mut rows = rows_mut(dst);
     if let Some(out) = rows.next() {
@@ -769,7 +772,7 @@ fn up2_bilinear<T: Scaled>(src: &Plane<T>, dst: &mut Plane<T>) {
     clippy::cast_sign_loss,
     reason = "sizes are at most 32768, so positions stay under 2^31; the fraction is 8 bits"
 )]
-fn bilinear_up<T: Scaled>(src: &Plane<T>, dst: &mut Plane<T>, filter: Filter) {
+fn bilinear_up<T: Scaled>(src: Plane<'_, T>, dst: &mut PlaneBuf<T>, filter: Filter) {
     let (sw, sh, dw, dh) = (src.width, src.height, dst.width, dst.height);
     let s = slope(sw, sh, dw, dh, filter);
     let max_y = i32::try_from(sh - 1).unwrap_or(0) << 16;
@@ -829,7 +832,7 @@ fn bilinear_up<T: Scaled>(src: &Plane<T>, dst: &mut Plane<T>, filter: Filter) {
     clippy::cast_sign_loss,
     reason = "sizes are at most 32768, so positions stay under 2^31; the fraction is 8 bits"
 )]
-fn bilinear_down<T: Scaled>(src: &Plane<T>, dst: &mut Plane<T>, filter: Filter) {
+fn bilinear_down<T: Scaled>(src: Plane<'_, T>, dst: &mut PlaneBuf<T>, filter: Filter) {
     let (sw, sh, dw, dh) = (src.width, src.height, dst.width, dst.height);
     let s = slope(sw, sh, dw, dh, filter);
     let max_y = i32::try_from(sh - 1).unwrap_or(0) << 16;
@@ -858,7 +861,7 @@ fn bilinear_down<T: Scaled>(src: &Plane<T>, dst: &mut Plane<T>, filter: Filter) 
     clippy::arithmetic_side_effects,
     reason = "sizes are at most 32768, so positions stay under 2^31"
 )]
-fn simple<T: Scaled>(src: &Plane<T>, dst: &mut Plane<T>) {
+fn simple<T: Scaled>(src: Plane<'_, T>, dst: &mut PlaneBuf<T>) {
     let s = slope(
         src.width,
         src.height,
@@ -921,10 +924,10 @@ mod tests {
         depth: u32,
         (sw, sh, dw, dh): (usize, usize, usize, usize),
         fill: Fill,
-    ) -> Plane<T> {
+    ) -> PlaneBuf<T> {
         let mut x = seed(depth, sw, sh, dw, dh);
         let top = (1u32 << depth) - 1;
-        let mut plane = Plane::new(sw, sh).unwrap();
+        let mut plane = PlaneBuf::new(sw, sh).unwrap();
         for (i, s) in plane.samples.iter_mut().enumerate() {
             let (col, row) = ((i % sw) as u32, (i / sw) as u32);
             let v = match fill {
@@ -952,7 +955,7 @@ mod tests {
 
         /// A plane's samples: a byte each at 8 bits, two (little-endian)
         /// deeper.
-        fn plane<T: Scaled>(&mut self, plane: &Plane<T>, depth: u32) {
+        fn plane<T: Scaled>(&mut self, plane: &PlaneBuf<T>, depth: u32) {
             let width = if depth == 8 { 1 } else { 2 };
             for &s in &plane.samples {
                 let v: u32 = s.into();
@@ -967,10 +970,10 @@ mod tests {
     fn scale_case(fnv: &mut Fnv, depth: u32, size: (usize, usize, usize, usize), fill: Fill) {
         let (_, _, dw, dh) = size;
         if depth == 8 {
-            let out = scale_plane(&source::<u8>(depth, size, fill), dw, dh).unwrap();
+            let out = scale_plane(source::<u8>(depth, size, fill).view(), dw, dh).unwrap();
             fnv.plane(&out, depth);
         } else {
-            let out = scale_plane(&source::<u16>(depth, size, fill), dw, dh).unwrap();
+            let out = scale_plane(source::<u16>(depth, size, fill).view(), dw, dh).unwrap();
             fnv.plane(&out, depth);
         }
     }
@@ -1127,13 +1130,13 @@ mod tests {
     /// Half the size: the rounded mean of each 2x2 block.
     #[test]
     fn half_the_size_is_each_block_s_rounded_mean() {
-        let src = Plane {
+        let src = PlaneBuf {
             width: 4,
             height: 2,
             samples: vec![1u8, 2, 10, 10, 3, 5, 10, 11],
         };
         // (1 + 2 + 3 + 5 + 2) >> 2 = 3; (10 + 10 + 10 + 11 + 2) >> 2 = 10.
-        assert_eq!(scale_plane(&src, 2, 1).unwrap().samples, [3, 10]);
+        assert_eq!(scale_plane(src.view(), 2, 1).unwrap().samples, [3, 10]);
     }
 
     /// The box filter divides by multiplying by `65536 / count`, truncated,
@@ -1144,19 +1147,19 @@ mod tests {
     /// 4095.
     #[test]
     fn a_tall_box_wraps_at_eight_bits_and_darkens_at_any() {
-        let white = Plane {
+        let white = PlaneBuf {
             width: 64,
             height: 3000,
             samples: vec![255u8; 64 * 3000],
         };
-        let out = scale_plane(&white, 2, 5).unwrap();
+        let out = scale_plane(white.view(), 2, 5).unwrap();
         assert!(out.samples.iter().all(|&s| s == 32), "{:?}", out.samples);
-        let deep = Plane {
+        let deep = PlaneBuf {
             width: 64,
             height: 3000,
             samples: vec![4095u16; 64 * 3000],
         };
-        let out = scale_plane(&deep, 2, 5).unwrap();
+        let out = scale_plane(deep.view(), 2, 5).unwrap();
         assert!(out.samples.iter().all(|&s| s == 3599), "{:?}", out.samples);
     }
 
@@ -1164,12 +1167,12 @@ mod tests {
     /// column alone, the rest 3:1 between neighbours on both sides.
     #[test]
     fn twice_the_size_interpolates_between_neighbours() {
-        let src = Plane {
+        let src = PlaneBuf {
             width: 2,
             height: 2,
             samples: vec![0u8, 64, 128, 192],
         };
-        let out = scale_plane(&src, 4, 4).unwrap();
+        let out = scale_plane(src.view(), 4, 4).unwrap();
         // Row 0 is source row 0 alone: 0, (3*0 + 64 + 2) >> 2 = 16,
         // (0 + 3*64 + 2) >> 2 = 48, 64. Row 1 is 3:1 rows 0 and 1, so its
         // first sample is (3*0 + 128 + 2) >> 2 = 32.

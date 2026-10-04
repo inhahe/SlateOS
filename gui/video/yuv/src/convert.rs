@@ -1,7 +1,8 @@
-//! libyuv's conversions from YUV to ARGB -- the ones libavif 1.3.0 calls
-//! (`src/reformat_libyuv.c`) to turn a decoded AVIF into pixels, at the
-//! libyuv revision libavif pins (`4db2af62dab48895226be6b52737247e898ebe36`,
-//! version 1909; unchanged in 1924, `644251f2`, which libavif 1.4.2 pins).
+//! libyuv's conversions from YUV to ARGB: the ones libavif calls
+//! (`src/reformat_libyuv.c`) to turn a decoded AVIF into pixels, and which a
+//! video frame is drawn with. Ported at the revision libavif 1.3.0 pins
+//! (`4db2af62`, version 1909), and unchanged in 1924 (`644251f2`, libavif
+//! 1.4.2's).
 //!
 //! Ported: the row conversions (`source/row_common.cc`: `YuvPixel`,
 //! `YuvPixel10`, `YuvPixel12`, `YPixel` and the `I444`, `I410`, `I212` and
@@ -18,7 +19,7 @@
 //! ported. The one function whose C does not match the x86 SIMD is
 //! `ARGBUnattenuate` (see [`unattenuate`]).
 //!
-//! Pixels come out as this crate's `0xAARRGGBB`: libyuv's "ARGB" names a
+//! Pixels come out as `0xAARRGGBB` words: libyuv's "ARGB" names a
 //! 32-bit word, B, G, R, A in memory, which is that word on a little-endian
 //! machine. libavif's `AVIF_RGB_FORMAT_BGRA` is the same layout, and is what
 //! reaches these functions with the `kYuv*` constants; its RGBA (Pillow's) gets
@@ -31,12 +32,12 @@
 
 use alloc::vec;
 
-use super::decode::Plane;
+use crate::{Plane, PlaneBuf};
 
 /// A `YuvConstants` table, as the x86 code reads it: the Y scale and bias and
 /// the four chroma weights, each weight in 1/64ths.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Constants {
+pub struct Constants {
     /// `kYToRgb`: luma's scale, in 1/65536ths of 64/257ths.
     yg: u32,
     /// `kYBiasToRgb`: luma's offset, with the rounding for the final `>> 6`.
@@ -70,17 +71,17 @@ impl Constants {
 // unless it is built with `LIBYUV_UNLIMITED_DATA`, which libavif's copy is not.
 
 /// `kYuvI601Constants`: BT.601, limited range.
-pub(crate) const I601: Constants = Constants::new(18997, -1160, 128, 25, 52, 102);
+pub const I601: Constants = Constants::new(18997, -1160, 128, 25, 52, 102);
 /// `kYuvJPEGConstants`: BT.601, full range.
-pub(crate) const JPEG: Constants = Constants::new(16320, 32, 113, 22, 46, 90);
+pub const JPEG: Constants = Constants::new(16320, 32, 113, 22, 46, 90);
 /// `kYuvH709Constants`: BT.709, limited range.
-pub(crate) const H709: Constants = Constants::new(18997, -1160, 128, 14, 34, 115);
+pub const H709: Constants = Constants::new(18997, -1160, 128, 14, 34, 115);
 /// `kYuvF709Constants`: BT.709, full range.
-pub(crate) const F709: Constants = Constants::new(16320, 32, 119, 12, 30, 101);
+pub const F709: Constants = Constants::new(16320, 32, 119, 12, 30, 101);
 /// `kYuv2020Constants`: BT.2020, limited range.
-pub(crate) const BT2020: Constants = Constants::new(19003, -1160, 128, 12, 42, 107);
+pub const BT2020: Constants = Constants::new(19003, -1160, 128, 12, 42, 107);
 /// `kYuvV2020Constants`: BT.2020, full range.
-pub(crate) const V2020: Constants = Constants::new(16320, 32, 120, 11, 37, 94);
+pub const V2020: Constants = Constants::new(16320, 32, 120, 11, 37, 94);
 
 /// libyuv's `Clamp`: a value to a byte.
 const fn clamp(v: i32) -> u32 {
@@ -122,7 +123,7 @@ fn yuv_pixel(k: &Constants, y32: u32, u: u32, v: u32) -> u32 {
 
 /// A sample size, and how libyuv brings its samples to the 16-bit luma and
 /// 8-bit chroma and alpha that [`yuv_pixel`] takes.
-pub(crate) trait Depth {
+pub trait Depth {
     /// The sample: `u8` or `u16`.
     type Sample: Copy + Default + Into<u32>;
 
@@ -141,13 +142,13 @@ pub(crate) trait Depth {
 }
 
 /// 8-bit samples: `YuvPixel`.
-pub(crate) struct Eight;
+pub struct Eight;
 
 /// 10-bit samples: `YuvPixel10`.
-pub(crate) struct Ten;
+pub struct Ten;
 
 /// 12-bit samples: `YuvPixel12`.
-pub(crate) struct Twelve;
+pub struct Twelve;
 
 impl Depth for Eight {
     type Sample = u8;
@@ -349,13 +350,22 @@ fn up2_bilinear<D: Depth>(
 }
 
 /// A picture's planes, as a libyuv driver takes them.
-pub(crate) struct Planes<'a, T> {
-    pub(crate) y: &'a Plane<T>,
-    pub(crate) u: &'a Plane<T>,
-    pub(crate) v: &'a Plane<T>,
+#[derive(Debug)]
+pub struct Planes<'a, T> {
+    pub y: Plane<'a, T>,
+    pub u: Plane<'a, T>,
+    pub v: Plane<'a, T>,
     /// Present for the `*Alpha*` drivers, which carry it into the pixels.
-    pub(crate) a: Option<&'a Plane<T>>,
+    pub a: Option<Plane<'a, T>>,
 }
+
+impl<T> Clone for Planes<'_, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for Planes<'_, T> {}
 
 impl<T> Planes<'_, T> {
     fn alpha_row(&self, row: usize) -> Option<&[T]> {
@@ -370,7 +380,7 @@ impl<T> Planes<'_, T> {
 /// The first row takes the first chroma row alone; every later pair of rows
 /// takes the two chroma rows around it, 3:1 and 1:3; and a last row left over
 /// (an even height) takes the last chroma row alone again.
-pub(crate) fn i420_bilinear<D: Depth>(
+pub fn i420_bilinear<D: Depth>(
     k: &Constants,
     planes: &Planes<'_, D::Sample>,
     width: usize,
@@ -413,7 +423,7 @@ pub(crate) fn i420_bilinear<D: Depth>(
 /// `I422ToARGBMatrixLinear` / `I422AlphaToARGBMatrixLinear` (8-bit) and
 /// `I210ToARGBMatrixLinear` / `I210AlphaToARGBMatrixLinear` (10-bit): 4:2:2,
 /// each chroma row upsampled across.
-pub(crate) fn i422_linear<D: Depth>(
+pub fn i422_linear<D: Depth>(
     k: &Constants,
     planes: &Planes<'_, D::Sample>,
     width: usize,
@@ -430,7 +440,7 @@ pub(crate) fn i422_linear<D: Depth>(
 
 /// `I444ToARGBMatrix` / `I444AlphaToARGBMatrix` (8-bit) and
 /// `I410ToARGBMatrix` / `I410AlphaToARGBMatrix` (10-bit): 4:4:4.
-pub(crate) fn i444<D: Depth>(
+pub fn i444<D: Depth>(
     k: &Constants,
     planes: &Planes<'_, D::Sample>,
     width: usize,
@@ -451,7 +461,7 @@ pub(crate) fn i444<D: Depth>(
 /// `I012ToARGBMatrix`: 12-bit 4:2:0, each chroma sample used for the 2x2
 /// pixels over it. Never with alpha: libyuv has no such function, so libavif
 /// adds the alpha itself.
-pub(crate) fn i012(k: &Constants, planes: &Planes<'_, u16>, width: usize, out: &mut [u32]) {
+pub fn i012(k: &Constants, planes: &Planes<'_, u16>, width: usize, out: &mut [u32]) {
     for (row, out) in out.chunks_exact_mut(width.max(1)).enumerate() {
         let chroma = row / 2;
         row_212(
@@ -465,7 +475,7 @@ pub(crate) fn i012(k: &Constants, planes: &Planes<'_, u16>, width: usize, out: &
 }
 
 /// `I400ToARGBMatrix`: grey. Never with alpha: libavif adds it.
-pub(crate) fn i400(k: &Constants, y: &Plane<u8>, width: usize, out: &mut [u32]) {
+pub fn i400(k: &Constants, y: Plane<'_, u8>, width: usize, out: &mut [u32]) {
     for (row, out) in out.chunks_exact_mut(width.max(1)).enumerate() {
         row_400(k, y.row(row), out);
     }
@@ -478,14 +488,13 @@ pub(crate) fn i400(k: &Constants, y: &Plane<u8>, width: usize, out: &mut [u32]) 
     clippy::arithmetic_side_effects,
     reason = "depth is 10 or 12, so the scale is 2^14 or 2^12 and a 16-bit sample times it is under 2^31"
 )]
-pub(crate) fn convert_16_to_8(plane: &Plane<u16>, depth: u8) -> Plane<u8> {
+pub fn convert_16_to_8(plane: Plane<'_, u16>, depth: u8) -> PlaneBuf<u8> {
     let scale = 1u32 << 24u32.saturating_sub(u32::from(depth)).min(16);
-    Plane {
+    PlaneBuf {
         width: plane.width,
         height: plane.height,
-        samples: plane
-            .samples
-            .iter()
+        samples: (0..plane.height)
+            .flat_map(|y| plane.row(y))
             .map(|&s| Eight::narrow(clamp255((u32::from(s) * scale) >> 16)))
             .collect(),
     }
@@ -522,7 +531,7 @@ const fn inverse(a: u32) -> u32 {
     clippy::arithmetic_side_effects,
     reason = "a channel is a byte and the inverse at most 0xffff, so the product is under 2^24"
 )]
-pub(crate) fn unattenuate(pixels: &mut [u32]) {
+pub fn unattenuate(pixels: &mut [u32]) {
     for pixel in pixels {
         let a = *pixel >> 24;
         let ia = inverse(a);
@@ -540,8 +549,8 @@ pub(crate) fn unattenuate(pixels: &mut [u32]) {
 mod tests {
     use super::*;
 
-    fn plane<T: Clone>(width: usize, samples: &[T]) -> Plane<T> {
-        Plane {
+    fn plane<T: Clone>(width: usize, samples: &[T]) -> PlaneBuf<T> {
+        PlaneBuf {
             width,
             height: samples.len() / width,
             samples: samples.to_vec(),
@@ -619,9 +628,9 @@ mod tests {
         let u = plane(1, &[128u8, 128]);
         let v = plane(1, &[0u8, 255]);
         let planes = Planes {
-            y: &y,
-            u: &u,
-            v: &v,
+            y: y.view(),
+            u: u.view(),
+            v: v.view(),
             a: None,
         };
         let mut out = vec![0u32; 8];
@@ -643,9 +652,9 @@ mod tests {
         let u = plane(1, &[128u8, 128]);
         let v = plane(1, &[0u8, 255]);
         let planes = Planes {
-            y: &y,
-            u: &u,
-            v: &v,
+            y: y.view(),
+            u: u.view(),
+            v: v.view(),
             a: None,
         };
         let mut out = vec![0u32; 3];
@@ -661,10 +670,10 @@ mod tests {
         let c = plane(2, &[512u16, 512]);
         let a = plane(2, &[1023u16, 4]);
         let planes = Planes {
-            y: &y,
-            u: &c,
-            v: &c,
-            a: Some(&a),
+            y: y.view(),
+            u: c.view(),
+            v: c.view(),
+            a: Some(a.view()),
         };
         let mut out = vec![0u32; 2];
         i444::<Ten>(&V2020, &planes, 2, &mut out);
@@ -678,9 +687,9 @@ mod tests {
         let u = plane(2, &[2048u16, 2048, 2048, 2048]);
         let v = plane(2, &[0u16, 4095, 0, 4095]);
         let planes = Planes {
-            y: &y,
-            u: &u,
-            v: &v,
+            y: y.view(),
+            u: u.view(),
+            v: v.view(),
             a: None,
         };
         let mut out = vec![0u32; 6];
@@ -694,16 +703,16 @@ mod tests {
     fn grey_is_ypixel() {
         let y = plane(3, &[0u8, 128, 255]);
         let mut out = vec![0u32; 3];
-        i400(&JPEG, &y, 3, &mut out);
+        i400(&JPEG, y.view(), 3, &mut out);
         assert_eq!(out, [0xff00_0000, 0xff80_8080, 0xffff_ffff]);
     }
 
     #[test]
     fn deep_planes_cut_to_eight_bits_by_shifting() {
         let ten = plane(3, &[0u16, 513, 1023]);
-        assert_eq!(convert_16_to_8(&ten, 10).samples, [0, 128, 255]);
+        assert_eq!(convert_16_to_8(ten.view(), 10).samples, [0, 128, 255]);
         let twelve = plane(2, &[4095u16, 4096]);
-        assert_eq!(convert_16_to_8(&twelve, 12).samples, [255, 255]);
+        assert_eq!(convert_16_to_8(twelve.view(), 12).samples, [255, 255]);
     }
 
     #[test]

@@ -1,0 +1,15 @@
+# The third-party code gui/video/yuv carries (design-decisions 1433), read by
+# scripts/gather-notices.py: one entry per upstream project, with the texts
+# that must travel with any binary built from the crate.
+
+# libyuv, at the revision libavif 1.4.2 pins,
+# 644251f252a84bf8ce91ff0aca86a9b16b069ab8, whose include/libyuv/version.h
+# says 1924: src/convert.rs and src/scale.rs. This entry also covers
+# gui/video/vp9's src/rgb.rs (ARGBToI420), whose manifest does not name
+# libyuv again, as gather-notices.py requires each project named once.
+libyuv:
+  version: 1924
+  licence: BSD-3-Clause
+  texts:
+    - libyuv-LICENSE
+    - libyuv-PATENTS

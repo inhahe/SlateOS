@@ -3287,6 +3287,21 @@ fn handle_mouse(app: &mut PartitionManagerApp, mouse: &guitk::event::MouseEvent)
     let x = mouse.x;
     let y = mouse.y;
 
+    // The card is modal for the pointer as it is for the keys, and drawn
+    // over everything: a press, with any button, puts it away rather than
+    // reaching the disk, partition or button drawn under it, and the wheel
+    // scrolls nothing it covers.
+    if app.show_help {
+        match mouse.kind {
+            MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                app.show_help = false;
+                return EventResult::Consumed;
+            }
+            MouseEventKind::Scroll { .. } => return EventResult::Ignored,
+            _ => {}
+        }
+    }
+
     // If a dialog is open, route all mouse events to it
     if app.dialog.is_open() {
         return handle_dialog_mouse(app, mouse);
@@ -4226,6 +4241,80 @@ mod tests {
     /// list — the wheel accepted the header and the hover did not, so this
     /// point exercised a region no other consumer agreed was part of the list.
     const QUEUE_POINT: (f32, f32) = (400.0, 650.0);
+
+    /// **A press while the card is up puts it away and does nothing else,
+    /// and the wheel scrolls nothing under it.** A press used to go straight
+    /// through the card to the disk or partition drawn under it. The
+    /// controls at the end are the same press and turn with the card down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let mut app = app_with_long_lists();
+        assert!(app.disks.len() > 1, "the fixture needs a second disk");
+        let sidebar = DiskSidebar::of(&app);
+        let x = SIDEBAR_WIDTH / 2.0;
+        let y = (0..2000)
+            .map(|y| y as f32 / 2.0)
+            .find(|&y| {
+                sidebar.contains_column(x, y) && sidebar.row_at(y, app.disks.len()) == Some(1)
+            })
+            .expect("the second disk's row");
+        let mouse = |kind| guitk::event::MouseEvent { x, y, kind };
+        let wheel = guitk::event::MouseEvent {
+            x: LIST_POINT.0,
+            y: LIST_POINT.1,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -1.0 },
+        };
+        let f1 = Event::Key(KeyEvent {
+            key: Key::F1,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        });
+        let disk = app.selected_disk;
+
+        handle_event(&mut app, &f1);
+        assert!(app.show_help);
+        handle_event(&mut app, &Event::Mouse(wheel.clone()));
+        assert_eq!(
+            app.partition_scroll, 0.0,
+            "the wheel scrolled the list under the card"
+        );
+        assert_eq!(
+            handle_event(
+                &mut app,
+                &Event::Mouse(mouse(MouseEventKind::Press(MouseButton::Left)))
+            ),
+            EventResult::Consumed
+        );
+        assert!(!app.show_help, "the press did not put the card away");
+        assert_eq!(
+            app.selected_disk, disk,
+            "the press went through the card to a disk"
+        );
+
+        // Any button: the right one does nothing to a disk, but it is still a
+        // press on the card.
+        handle_event(&mut app, &f1);
+        handle_event(
+            &mut app,
+            &Event::Mouse(mouse(MouseEventKind::Press(MouseButton::Right))),
+        );
+        assert!(!app.show_help, "a right-button press left the card up");
+
+        handle_event(&mut app, &Event::Mouse(wheel));
+        assert!(
+            app.partition_scroll > 0.0,
+            "control: the wheel scrolls nothing at all"
+        );
+        handle_event(
+            &mut app,
+            &Event::Mouse(mouse(MouseEventKind::Press(MouseButton::Left))),
+        );
+        assert_eq!(
+            app.selected_disk, 1,
+            "control: the press does nothing even with the card down"
+        );
+    }
 
     #[test]
     fn one_notch_crosses_three_rows_of_whichever_list_is_under_the_pointer() {

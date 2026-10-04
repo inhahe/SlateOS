@@ -18,8 +18,8 @@ field. Fixed the same day in colorpicker, contacts and dbviewer; then in
 alarmclock, archivemanager, benchmark, calendar, camera, charmap,
 clipmanager, defrag, devicemanager, diagram, diskanalyzer, diskcleanup,
 diskimager, ebook, explorer, fileassoc, filediff, fontmanager, hexeditor,
-imageviewer, ircclient, jsonviewer, reminders, mindmap, musicplayer, notes
-and paint (2026-10-04).
+imageviewer, ircclient, jsonviewer, reminders, mindmap, musicplayer, notes,
+paint and partmanager (2026-10-04).
 Calendar's, diagram's, diskimager's, explorer's, filediff's, hexeditor's,
 imageviewer's, ircclient's, jsonviewer's, reminders' and mindmap's cards were
 modal for
@@ -33,8 +33,7 @@ both. (Reminders takes no press at all; its card was modal for no key.)
 production code draws `guitk::shortcut::render_card` and has no function
 handling a mouse event that reads the card's flag. Those not yet fixed:
 
-partmanager, pdfviewer, photomanager,
-podcast, pomodoro, procexplorer, radio, remotedesktop, screenrecorder,
+pdfviewer, photomanager, podcast, pomodoro, procexplorer, radio, remotedesktop, screenrecorder,
 screenshot, settings, spreadsheet, startupmanager, stopwatch, sudoku,
 sysinfo, sysmonitor, systemrestore, undelete, whiteboard, wordle,
 worldclock.

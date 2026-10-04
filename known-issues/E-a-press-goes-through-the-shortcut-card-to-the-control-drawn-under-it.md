@@ -17,14 +17,15 @@ press.
 field. Fixed the same day in colorpicker, contacts and dbviewer; then in
 alarmclock, archivemanager, benchmark, calendar, camera, charmap,
 clipmanager, defrag, devicemanager, diagram, diskanalyzer, diskcleanup
-and diskimager (2026-10-04) -- calendar's, diagram's and diskimager's cards were modal for the keys no more than for the pointer,
+diskimager and ebook (2026-10-04) -- calendar's, diagram's and diskimager's
+cards were modal for the keys no more than for the pointer,
 so each application's card is checked for both.
 
 **Still to do.** A scan the same day found 66 more applications whose
 production code draws `guitk::shortcut::render_card` and has no function
 handling a mouse event that reads the card's flag:
 
-ebook, email, explorer, fileassoc, filediff, finance, flashcards,
+explorer, fileassoc, filediff, finance, flashcards,
 fontmanager, habits, hexeditor, imageviewer, ircclient, jsonviewer, kanban,
 logviewer, markdowneditor, metronome, mindmap, musicplayer, notes, paint,
 partmanager, passwordgen, pdfviewer, photomanager, pinball, podcast,
@@ -35,6 +36,9 @@ systemrestore, tmux, torrent, undelete, whiteboard, wordle, worldclock.
 
 A scan is a lead, not a verdict: an application may guard its card some way
 the scan does not see, and each is confirmed by a test before it is changed.
+Email was one: its card records a hit box over the whole window, last, so
+every press, move and turn of the wheel finds the card -- a guard worth
+copying wherever an application hit-tests its frame.
 Delete each name as it is fixed; to see what is left, run from the tree's
 root:
 

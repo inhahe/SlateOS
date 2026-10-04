@@ -2510,6 +2510,16 @@ impl EbookApp {
 
     /// Handle a mouse click. Returns true if consumed.
     pub fn handle_mouse_event(&mut self, event: &MouseEvent) -> bool {
+        if self.show_help {
+            // The card is modal for the pointer as it is for the keys: a
+            // press, with any button, puts it away rather than opening the
+            // book or turning the page drawn under it.
+            if matches!(event.kind, MouseEventKind::Press(_)) {
+                self.show_help = false;
+                return true;
+            }
+            return false;
+        }
         if let MouseEventKind::Press(MouseButton::Left) = &event.kind {
             if self.confirm_remove.is_some() {
                 return self.click_confirm(event.x, event.y);
@@ -4790,6 +4800,46 @@ mod tests {
     // ================================================================
     // Mouse event tests
     // ================================================================
+
+    #[test]
+    fn test_mouse_click_library_under_the_card() {
+        // **A press while the card is up puts it away and does nothing
+        // else.** It used to go straight through the card and open the book
+        // drawn under it. The control is the same press with the card down.
+        let mut app = make_app();
+        let f1 = KeyEvent {
+            key: Key::F1,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        };
+        let press = |button| MouseEvent {
+            x: 100.0,
+            y: TOOLBAR_HEIGHT + 10.0,
+            kind: MouseEventKind::Press(button),
+        };
+        app.handle_key_event(&f1);
+        assert!(app.show_help);
+        assert!(app.handle_mouse_event(&press(MouseButton::Left)));
+        assert!(!app.show_help, "the press did not put the card away");
+        assert_eq!(
+            app.view,
+            AppView::Library,
+            "the press went through the card and opened the book"
+        );
+        // Any button: the right one does nothing to a book, but it is still
+        // a press on the card.
+        app.handle_key_event(&f1);
+        app.handle_mouse_event(&press(MouseButton::Right));
+        assert!(!app.show_help, "a right-button press left the card up");
+
+        app.handle_mouse_event(&press(MouseButton::Left));
+        assert_eq!(
+            app.view,
+            AppView::Reading,
+            "control: the press does nothing even with the card down"
+        );
+    }
 
     #[test]
     fn test_mouse_click_library() {

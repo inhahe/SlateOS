@@ -1,9 +1,6 @@
 ### [E] A press goes through the shortcut card to the control drawn under it -- 2026-10-03
 
-**Status:** OPEN until the last of the fixes has had a boot test on `main`:
-every application the scan below found has its fix on lane E's branch (done
-2026-10-04), and this moves to `known-issues-resolved/` once they are all on
-`main`.
+**Status:** FIXED -- every application the scan found has its fix -- and on `main` since 0b04798c2, whose boot test passed on 2026-10-04.
 
 **In short:** in most applications the F1 shortcut card was modal for the
 keys but not for the pointer. With the card up, a click landed on whatever

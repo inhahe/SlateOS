@@ -1,9 +1,6 @@
 ### [E] Thirty applications answer F1 with nothing -- 2026-10-04
 
-**Status:** OPEN until the fixes have had a boot test on `main`: every one
-of the thirty is settled on lane E's branch (2026-10-04) -- nine given a
-list, twenty-one found to print their keys -- and this moves to
-`known-issues-resolved/` once they are all on `main`.
+**Status:** FIXED -- every one of the thirty is settled -- nine given a list, twenty-one found to print their keys -- and on `main` since 0b04798c2, whose boot test passed on 2026-10-04.
 
 **In short:** design-decisions §863 makes "press F1 to see the keys" true of
 the whole suite: every application shows a list of its keys on F1 (and on

@@ -1,10 +1,6 @@
 ### [E] The screenshot tool's text annotation cannot take a digit, and Escape there throws the picture away -- 2026-10-03
 
-**Status:** OPEN until the fix -- lane E, 2026-10-04: the text tool's box
-has the keyboard from choosing the tool, Escape empties it and then gives the
-keyboard back (design-decisions §1232) -- has had a boot test on `main`; then
-this moves to `known-issues-resolved/`. Found during the Alt/Windows-key pass;
-not caused by it.
+**Status:** FIXED -- lane E's 528a3b14e: the text tool's box has the keyboard from choosing the tool, and Escape empties it and then gives the keyboard back (design-decisions §1232) -- and on `main` since 0b04798c2, whose boot test passed on 2026-10-04.
 
 **In short:** on a captured picture, the digits 1-4 choose the annotation
 tool (rectangle, arrow, text, highlight) whatever is happening, so a text

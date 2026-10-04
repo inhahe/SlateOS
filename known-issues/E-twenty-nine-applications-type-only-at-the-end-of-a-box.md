@@ -16,7 +16,7 @@ look like boxes that can do all of this.
 and Backspace `pop`s it.
 
 **Found** 2026-10-04, adding vpnmanager's list of keys
-(`known-issues/E-thirty-applications-answer-f1-with-nothing.md`).
+(`known-issues-resolved/E-thirty-applications-answer-f1-with-nothing.md`).
 
 **The twenty-nine:** alarmclock (an alarm's label), charmap (search),
 clipmanager (its form), colorpicker (the hex value), contacts (search and

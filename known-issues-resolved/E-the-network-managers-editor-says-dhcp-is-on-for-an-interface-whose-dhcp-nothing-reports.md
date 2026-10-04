@@ -1,5 +1,5 @@
 ### [E] The network manager's editor says DHCP is on for an interface whose DHCP nothing reports -- 2026-10-04
-**Status:** OPEN until the fix -- lane E's a3089416c, 2026-10-04: the editor's DHCP state is an `Option<bool>`, `None` for an interface the kernel lists -- has had a boot test on `main`; then this moves to `known-issues-resolved/`.
+**Status:** FIXED -- lane E's a3089416c: the editor's DHCP state is an `Option<bool>`, `None` for an interface the kernel lists -- and on `main` since 0b04798c2, whose boot test passed on 2026-10-04.
 
 **In short:** for every interface read from the kernel, the IP
 Configuration tab shows "DHCP: Enabled", and its editor opens with the

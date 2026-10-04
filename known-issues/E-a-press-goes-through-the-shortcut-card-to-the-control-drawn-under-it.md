@@ -22,7 +22,7 @@ imageviewer, ircclient, jsonviewer, reminders, mindmap, musicplayer, notes,
 paint, partmanager, pdfviewer, photomanager, podcast, pomodoro,
 procexplorer, radio, remotedesktop, screenrecorder, screenshot, settings,
 spreadsheet, startupmanager, stopwatch, sudoku, sysinfo, systemrestore,
-undelete, whiteboard and wordle (2026-10-04).
+undelete, whiteboard, wordle and worldclock (2026-10-04).
 Calendar's, diagram's, diskimager's, explorer's, filediff's, hexeditor's,
 imageviewer's, ircclient's, jsonviewer's, reminders', mindmap's,
 pdfviewer's, remotedesktop's, spreadsheet's, sudoku's and wordle's cards were

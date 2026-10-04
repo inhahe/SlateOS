@@ -5264,6 +5264,15 @@ impl DbViewerApp {
     /// the toolbar button that ran off the right-hand edge of a narrow window
     /// cannot be pressed from off the edge.
     fn handle_mouse(&mut self, event: &MouseEvent, size: (f32, f32)) {
+        if self.show_help {
+            // The card is modal for the pointer as it is for the keys: a
+            // press, with any button, puts it away rather than reaching the
+            // control drawn under it.
+            if matches!(event.kind, MouseEventKind::Press(_)) {
+                self.show_help = false;
+            }
+            return;
+        }
         let MouseEventKind::Press(MouseButton::Left) = event.kind else {
             return;
         };
@@ -5895,6 +5904,63 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **A press while the card is up puts it away, and does nothing else.**
+    /// It used to go straight through the card to the control drawn under
+    /// it. The control at the end is the same press with the card down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let size = (WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = DbViewerApp::new();
+        let filters = app.show_filter_builder;
+        let (x, y) = probe::rect_of(&app, Target::ToggleFilterBuilder)
+            .expect("the Filters button")
+            .centre();
+        let press = |app: &mut DbViewerApp, button: MouseButton| {
+            app.handle_event(
+                &Event::Mouse(MouseEvent {
+                    x,
+                    y,
+                    kind: MouseEventKind::Press(button),
+                }),
+                size,
+            );
+        };
+
+        app.handle_event(&Event::Key(probe::press(Key::F1)), size);
+        assert!(app.show_help);
+        press(&mut app, MouseButton::Left);
+        assert!(!app.show_help, "the press did not put the card away");
+        assert_eq!(
+            app.show_filter_builder, filters,
+            "the press went through the card to the Filters button"
+        );
+
+        // Any button: the right one does nothing to a control, but it is
+        // still a press on the card.
+        app.handle_event(&Event::Key(probe::press(Key::F1)), size);
+        press(&mut app, MouseButton::Right);
+        assert!(!app.show_help, "a right-button press left the card up");
+
+        // A move under the card is not a press, and leaves it up.
+        app.handle_event(&Event::Key(probe::press(Key::F1)), size);
+        app.handle_event(
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Move,
+            }),
+            size,
+        );
+        assert!(app.show_help, "a move put the card away");
+        app.handle_event(&Event::Key(probe::press(Key::F1)), size);
+
+        press(&mut app, MouseButton::Left);
+        assert_ne!(
+            app.show_filter_builder, filters,
+            "control: the press does nothing even with the card down"
+        );
     }
 
     /// **F1 raises the list of keys, down and up**: its release toggled the

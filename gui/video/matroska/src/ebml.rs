@@ -68,9 +68,16 @@ pub fn vint_len(first: u8) -> Option<u32> {
     (first != 0).then(|| first.leading_zeros() + 1)
 }
 
+/// How much a [`Reader`] reads ahead at first: enough that reading a file
+/// through takes few reads (a frame larger than this is read straight into
+/// its own memory).
+pub const READ_AHEAD: usize = 64 * 1024;
+
 /// Reads EBML from a seekable source, keeping its position.
 pub struct Reader<R> {
-    inner: BufReader<R>,
+    /// The source, read ahead into a buffer. `None` only inside
+    /// [`Reader::set_read_ahead`], while the buffer is changed.
+    inner: Option<BufReader<R>>,
     pos: u64,
     len: u64,
 }
@@ -85,10 +92,40 @@ impl<R: Read + Seek> Reader<R> {
         let len = source.seek(SeekFrom::End(0))?;
         source.seek(SeekFrom::Start(0))?;
         Ok(Self {
-            inner: BufReader::with_capacity(64 * 1024, source),
+            inner: Some(BufReader::with_capacity(READ_AHEAD, source)),
             pos: 0,
             len,
         })
+    }
+
+    fn source(&mut self) -> Result<&mut BufReader<R>, Error> {
+        self.inner.as_mut().ok_or(Error::Io(io::ErrorKind::Other))
+    }
+
+    /// Read ahead `bytes` at a time from here on: little where most of what
+    /// follows is passed over unread -- each read past a skipped block is
+    /// this much -- and much where it is read through.
+    ///
+    /// # Errors
+    ///
+    /// When the source cannot be put back where reading is; reading goes on
+    /// as it was.
+    pub fn set_read_ahead(&mut self, bytes: usize) -> Result<(), Error> {
+        let bytes = bytes.max(1);
+        if self.inner.as_ref().is_some_and(|r| r.capacity() == bytes) {
+            return Ok(());
+        }
+        let Some(mut old) = self.inner.take() else {
+            return Err(Error::Io(io::ErrorKind::Other));
+        };
+        // The source back where reading is -- what was read ahead let go --
+        // before it is taken out of its buffer.
+        if let Err(e) = old.seek(SeekFrom::Start(self.pos)) {
+            self.inner = Some(old);
+            return Err(e.into());
+        }
+        self.inner = Some(BufReader::with_capacity(bytes, old.into_inner()));
+        Ok(())
     }
 
     /// The position of the next byte.
@@ -116,11 +153,12 @@ impl<R: Read + Seek> Reader<R> {
             return Err(Error::Truncated);
         }
         let delta = i64::try_from(pos).ok().zip(i64::try_from(self.pos).ok());
+        let source = self.source()?;
         match delta {
             // Within reach of the buffer: keep it.
-            Some((to, from)) => self.inner.seek_relative(to.wrapping_sub(from))?,
+            Some((to, from)) => source.seek_relative(to.wrapping_sub(from))?,
             None => {
-                self.inner.seek(SeekFrom::Start(pos))?;
+                source.seek(SeekFrom::Start(pos))?;
             }
         }
         self.pos = pos;
@@ -142,7 +180,7 @@ impl<R: Read + Seek> Reader<R> {
         if n > self.remaining() {
             return Err(Error::Truncated);
         }
-        self.inner.read_exact(buf).map_err(|e| match e.kind() {
+        self.source()?.read_exact(buf).map_err(|e| match e.kind() {
             io::ErrorKind::UnexpectedEof => Error::Truncated,
             kind => Error::Io(kind),
         })?;
@@ -177,25 +215,23 @@ impl<R: Read + Seek> Reader<R> {
 
     /// The next element's header, or `None` at the end of the source.
     ///
+    /// An ID may be any value, those the specification reserves (value bits
+    /// all ones or all zeros) too: FFmpeg reads such an element as one it
+    /// does not know and passes over it, rather than taking it for damage.
+    ///
     /// # Errors
     ///
     /// When the header is damaged or cut short.
     #[allow(
         clippy::arithmetic_side_effects,
-        reason = "an ID is 1 to 4 bytes and a size 1 to 8, so the value bits are 7 to 56: every shift is in range and every mask at least 1"
+        reason = "a size is 1 to 8 bytes, so its value bits are 7 to 56: the shift is in range and the mask at least 1"
     )]
     pub fn header(&mut self) -> Result<Option<Header>, Error> {
         if self.remaining() == 0 {
             return Ok(None);
         }
         let start = self.pos;
-        let (id_len, id) = self.vint(4, true)?;
-        // An ID whose value bits are all ones or all zeros is reserved.
-        let value_bits = id_len * 7;
-        let value = id & ((1u64 << value_bits) - 1);
-        if value == 0 || value == (1u64 << value_bits) - 1 {
-            return Err(Error::Invalid("a reserved EBML ID"));
-        }
+        let (_, id) = self.vint(4, true)?;
         let (size_len, size) = self.vint(8, false)?;
         let size = if size == (1u64 << (size_len * 7)) - 1 {
             Size::Unknown
@@ -433,8 +469,21 @@ mod tests {
             reader(&[0x08, 1, 2, 3, 4, 0x81]).header().is_err(),
             "a 5-byte ID"
         );
-        assert!(reader(&[0xff, 0x81]).header().is_err(), "a reserved ID");
         assert!(reader(&[0x1a, 0x45]).header().is_err(), "cut short");
+    }
+
+    #[test]
+    fn a_reserved_id_is_an_id() {
+        // Value bits all ones (0xFF, 0x7FFF) or all zeros (0x80): FFmpeg reads
+        // each as an element it does not know.
+        for (bytes, id) in [
+            (&[0xffu8, 0x81, 0][..], 0xff),
+            (&[0x7f, 0xff, 0x81, 0], 0x7fff),
+            (&[0x80, 0x81, 0], 0x80),
+        ] {
+            let h = reader(bytes).header().unwrap().unwrap();
+            assert_eq!((h.id, h.size), (id, Size::Known(1)), "{bytes:02x?}");
+        }
     }
 
     #[test]

@@ -50,6 +50,18 @@
 //! the blocks timed, as FFmpeg drops and times them (`tests/sound.rs`).
 //! A file whose sound is AAC or MP3 is refused by the codec's name.
 //!
+//! # Subtitles
+//!
+//! [`Subtitles`] is a file's text subtitles, as [`Sound`] is its sound:
+//! opened on the same file, it gives back each cue with its start and end
+//! on the same clock, and its text as SRT markup whatever the track's format
+//! -- SubRip, ASS and SSA, WebVTT, in Matroska and WebM. The markup is
+//! written as `ffmpeg -c:s srt` writes it, and is ffmpeg's text for the
+//! track wherever that says what the format's own renderer shows (libass's
+//! for ASS, the specification's for WebVTT); where it does not, the
+//! renderer is followed (`subtitle.rs`, `tests/subtitles.rs`). A track of
+//! pictures of text (PGS, VobSub, DVB) is refused by its format's name.
+//!
 //! # Colour
 //!
 //! Each picture is converted by its own colour description -- its matrix,
@@ -85,6 +97,7 @@ mod decoder;
 mod orientation;
 mod picture;
 mod sound;
+mod subtitle;
 mod time;
 mod video;
 
@@ -93,6 +106,7 @@ pub use decoder::{Decoder, Packet};
 pub use orientation::Orientation;
 pub use picture::Picture;
 pub use sound::{Block, Sound, SoundInfo};
+pub use subtitle::{Cue, SubtitleInfo, Subtitles};
 pub use video::{SeekMode, Video, VideoInfo};
 
 use core::fmt;
@@ -264,6 +278,50 @@ impl fmt::Display for SoundCodec {
     }
 }
 
+/// A subtitle format: those read here, and the picture formats a film most
+/// often carries, so that a track in one is refused by its name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubtitleFormat {
+    /// SubRip, SRT's own (`S_TEXT/UTF8`).
+    SubRip,
+    /// Advanced SubStation Alpha (`S_TEXT/ASS`).
+    Ass,
+    /// SubStation Alpha (`S_TEXT/SSA`).
+    Ssa,
+    /// WebVTT (`D_WEBVTT/SUBTITLES` in WebM, `S_TEXT/WEBVTT`).
+    WebVtt,
+    /// Blu-ray's pictures of text (`S_HDMV/PGS`). Not read here.
+    Pgs,
+    /// DVD's pictures of text (`S_VOBSUB`). Not read here.
+    VobSub,
+    /// DVB's pictures of text (`S_DVBSUB`). Not read here.
+    Dvb,
+    /// Any other.
+    Other,
+}
+
+impl SubtitleFormat {
+    /// Whether it is text, which [`Subtitles`] reads.
+    pub const fn is_text(self) -> bool {
+        matches!(self, Self::SubRip | Self::Ass | Self::Ssa | Self::WebVtt)
+    }
+}
+
+impl fmt::Display for SubtitleFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::SubRip => "SubRip",
+            Self::Ass => "ASS",
+            Self::Ssa => "SSA",
+            Self::WebVtt => "WebVTT",
+            Self::Pgs => "PGS",
+            Self::VobSub => "VobSub",
+            Self::Dvb => "DVB",
+            Self::Other => "a format this does not know",
+        })
+    }
+}
+
 /// Why a file, a packet or a picture could not be read. More reasons may
 /// come, as more is decoded: match the ones that matter, and the rest as a
 /// whole.
@@ -306,6 +364,11 @@ pub enum Error {
     /// An MPEG audio track's first frame has no header, or a frame did not
     /// decode (minimp3 says no more than that).
     Mp3,
+    /// The file has no subtitle track, or not the one asked for.
+    NoSubtitles,
+    /// The subtitles are in a format this does not read: pictures of text,
+    /// or one it does not know.
+    SubtitleFormat(SubtitleFormat),
 }
 
 impl fmt::Display for Error {
@@ -335,6 +398,19 @@ impl fmt::Display for Error {
             Self::Flac(e) => write!(f, "the sound could not be decoded: {e}"),
             Self::Mp3 => {
                 f.write_str("the sound could not be decoded: an MPEG audio frame is damaged")
+            }
+            Self::NoSubtitles => f.write_str("the file has no subtitles that can be shown"),
+            Self::SubtitleFormat(SubtitleFormat::Other) => {
+                f.write_str("the subtitles' format is not one read here")
+            }
+            Self::SubtitleFormat(s) if s.is_text() => {
+                write!(f, "the subtitles are {s}, and could not be read")
+            }
+            Self::SubtitleFormat(s) => {
+                write!(
+                    f,
+                    "the subtitles are {s}, pictures of text, which are not read here yet"
+                )
             }
         }
     }

@@ -5,7 +5,7 @@ use std::borrow::Cow;
 use std::io::{Read, Seek};
 
 use crate::ebml::{Header, Id, MAX_BINARY, Reader};
-use crate::{Error, ids};
+use crate::{Error, Metadata, ids};
 
 /// What a track carries: RFC 9559's `TrackType`, the kinds FFmpeg reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,6 +89,10 @@ pub struct Video {
     pub colour: Option<Colour>,
     /// `Projection`, where the file has one.
     pub projection: Option<Projection>,
+    /// `StereoMode` as FFmpeg reads it -- 15, which names no layout, when the
+    /// file gives none -- for the track's metadata (`stereo_mode`) alone:
+    /// nothing here shows a stereoscopic picture (design-decisions §856).
+    pub(crate) stereo_mode: u64,
 }
 
 impl Video {
@@ -255,7 +259,8 @@ pub struct Track {
     /// configuration record -- with any encoding that covers it undone.
     pub codec_private: Vec<u8>,
     /// The track's name, as written (UTF-8 by the specification, not
-    /// checked).
+    /// checked): empty for an empty `Name`, none for none, as FFmpeg tells
+    /// them apart.
     pub name: Option<Vec<u8>>,
     /// Its language, ISO 639-2 as written: `eng` unless the file says.
     pub language: Vec<u8>,
@@ -281,10 +286,16 @@ pub struct Track {
     pub seek_pre_roll: u64,
     pub video: Option<Video>,
     pub audio: Option<Audio>,
+    /// The track's metadata as FFmpeg gives it: `enc_key_id`, `language`,
+    /// `title`, `stereo_mode` and `alpha_mode` as the track has them, then
+    /// the tags naming it (see [`crate::Metadata`]).
+    pub metadata: Metadata,
     /// `TrackTimestampScale`, deprecated: what the Cluster's timestamp is
     /// divided by in this track. 1.0 in every file written today.
     pub(crate) time_scale: f64,
     pub(crate) encoding: Encoding,
+    /// The key ID of an encrypted track's one encoding, for its metadata.
+    pub(crate) key_id: Option<Vec<u8>>,
 }
 
 impl Track {
@@ -303,6 +314,8 @@ struct RawEncoding {
     kind: u64,
     algo: u64,
     settings: Vec<u8>,
+    /// `ContentEncKeyID`: which key an encryption needs.
+    key_id: Vec<u8>,
 }
 
 /// A `TrackEntry`: its number, and the track -- `None` for one FFmpeg
@@ -345,7 +358,7 @@ pub(crate) fn read_track<R: Read + Seek>(
             ids::FLAG_FORCED => forced = r.uint(c.size, 0)? != 0,
             ids::DEFAULT_DURATION => default_duration = r.uint(c.size, 0)?,
             ids::TRACK_TIMESTAMP_SCALE => time_scale = r.float(c.size, 1.0)?,
-            ids::NAME => name = r.string(c.size)?,
+            ids::NAME => name = Some(r.string(c.size)?.unwrap_or_default()),
             ids::LANGUAGE => language = r.string(c.size)?,
             ids::LANGUAGE_BCP47 => language_bcp47 = r.string(c.size)?,
             ids::CODEC_ID => codec_id = r.string(c.size)?,
@@ -405,6 +418,11 @@ pub(crate) fn read_track<R: Read + Seek>(
     };
 
     let encoding = encoding_of(&encodings);
+    // An encryption's key ID, which FFmpeg shows (in base64) as metadata.
+    let key_id = match encodings.as_slice() {
+        [e] if e.kind != 0 && !e.key_id.is_empty() => Some(e.key_id.clone()),
+        _ => None,
+    };
     // FFmpeg undoes the codec private data's encoding when the encoding's
     // scope covers it (bit 2), and drops the data if that fails.
     if let [e] = encodings.as_slice()
@@ -443,8 +461,11 @@ pub(crate) fn read_track<R: Read + Seek>(
             seek_pre_roll,
             video,
             audio,
+            // Made once the file's tags are read.
+            metadata: Metadata::default(),
             time_scale,
             encoding,
+            key_id,
         }),
     ))
 }
@@ -530,6 +551,7 @@ fn read_encodings<R: Read + Seek>(
             kind: 0,
             algo: 0,
             settings: Vec::new(),
+            key_id: Vec::new(),
         };
         r.children(child, |r, field| {
             match field.id {
@@ -540,6 +562,17 @@ fn read_encodings<R: Read + Seek>(
                         ids::CONTENT_COMP_ALGO => e.algo = r.uint(c.size, 0)?,
                         ids::CONTENT_COMP_SETTINGS => {
                             e.settings = r.binary(c.size, MAX_BINARY)?;
+                        }
+                        _ => {}
+                    }
+                    Ok(())
+                })?,
+                ids::CONTENT_ENCRYPTION => r.children(field, |r, c| {
+                    match c.id {
+                        ids::CONTENT_ENC_KEY_ID => e.key_id = r.binary(c.size, MAX_BINARY)?,
+                        // Read for its checks, as FFmpeg reads it.
+                        ids::CONTENT_ENC_ALGO => {
+                            r.uint(c.size, 0)?;
                         }
                         _ => {}
                     }
@@ -558,6 +591,10 @@ fn read_encodings<R: Read + Seek>(
 /// `FrameRate`, deprecated in RFC 9559 and still read by FFmpeg.
 const FRAME_RATE: Id = 0x23_83E3;
 
+/// FFmpeg's `StereoMode` when the file gives none: one past the last layout
+/// it names (`MATROSKA_VIDEO_STEREOMODE_TYPE_NB`).
+const STEREO_MODE_NONE: u64 = 15;
+
 /// A `Video` element, its deprecated `FrameRate`, and what FFmpeg would
 /// refuse the file for in its projection, should the track be video.
 fn read_video<R: Read + Seek>(
@@ -575,6 +612,7 @@ fn read_video<R: Read + Seek>(
         alpha_mode: 0,
         colour: None,
         projection: None,
+        stereo_mode: STEREO_MODE_NONE,
     };
     let mut frame_rate = 0.0;
     r.children(parent, |r, c| {
@@ -588,13 +626,13 @@ fn read_video<R: Read + Seek>(
             ids::DISPLAY_WIDTH => v.display_width = Some(r.uint(c.size, 0)?),
             ids::DISPLAY_HEIGHT => v.display_height = Some(r.uint(c.size, 0)?),
             ids::DISPLAY_UNIT => v.display_unit = r.uint(c.size, 0)?,
-            // Read as FFmpeg reads them -- so that a malformed one refuses the
+            // Read as FFmpeg reads it -- so that a malformed one refuses the
             // track as it does there -- and kept by nothing, because nothing
-            // here acts on them (design-decisions §856): no deinterlacing, no
-            // stereoscopic display.
-            ids::FLAG_INTERLACED | ids::STEREO_MODE => {
+            // here deinterlaces (design-decisions §856).
+            ids::FLAG_INTERLACED => {
                 r.uint(c.size, 0)?;
             }
+            ids::STEREO_MODE => v.stereo_mode = r.uint(c.size, STEREO_MODE_NONE)?,
             ids::ALPHA_MODE => v.alpha_mode = r.uint(c.size, 0)?,
             ids::COLOUR => v.colour = Some(read_colour(r, c)?),
             ids::PROJECTION => {

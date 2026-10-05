@@ -298,6 +298,9 @@ impl<R: Read + Seek> Sound<R> {
         .ok_or(Error::NoSound)?;
         let (key, time_base) = (chosen.key, chosen.time_base);
         let chosen = chosen.clone();
+        // The sound's own packets only, the pictures' passed over unread:
+        // a handle of its own does not read the film over again.
+        demuxer.read_only(key, Some(crate::container::PASSING_READ_AHEAD))?;
         // The track's first packet: where the start's skip comes off, and
         // the first frame an MPEG audio track's rate and channels are read
         // from.

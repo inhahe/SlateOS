@@ -143,7 +143,7 @@ impl<R: Read + Seek> Video<R> {
     ///
     /// As [`Self::open_track`].
     pub fn open_with(source: R, track: Option<u64>, limits: Limits) -> Result<Self, Error> {
-        let demuxer = Container::open(source)?;
+        let mut demuxer = Container::open(source)?;
         let videos = demuxer.videos();
         let chosen = match track {
             Some(n) => videos.iter().find(|t| t.number == n),
@@ -177,6 +177,8 @@ impl<R: Read + Seek> Video<R> {
             orientation: chosen.orientation,
         };
         let (key, time_base, crop) = (chosen.key, chosen.time_base, chosen.crop);
+        // The pictures' own packets only; read through, so read far ahead.
+        demuxer.read_only(key, None)?;
         Ok(Self {
             demuxer,
             key,

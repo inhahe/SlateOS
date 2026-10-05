@@ -392,3 +392,166 @@ fn a_seek_in_a_track_without_key_frames_fails_and_reading_goes_on() {
     assert_eq!(next(&mut d), "two");
     assert_eq!(next(&mut d), "three");
 }
+
+// --- One track read alone (`Demuxer::select_tracks`) -----------------------
+
+fn every_packet(d: &mut Demuxer<impl Read + Seek>) -> Vec<matroska::Packet> {
+    let mut all = Vec::new();
+    while let Some(p) = d.next_packet().unwrap() {
+        all.push(p);
+    }
+    all
+}
+
+/// A track read alone gives exactly the packets it gives among the others,
+/// in every fixture but those whose damage is in another track's block --
+/// which, passed over unread, no longer costs this track the packets near
+/// it that a resynchronisation passes by (FFmpeg's too, discarding them).
+#[test]
+fn a_track_selected_alone_gives_the_packets_it_gives_among_the_others() {
+    let mut differ = Vec::new();
+    let mut checked = 0;
+    for entry in std::fs::read_dir(data("")).unwrap() {
+        let name = entry.unwrap().file_name().into_string().unwrap();
+        if !(name.ends_with(".mkv") || name.ends_with(".webm")) {
+            continue;
+        }
+        // The fixtures of files refused whole have nothing to select from.
+        let Ok(mut d) = Demuxer::open(File::open(data(&name)).unwrap()) else {
+            continue;
+        };
+        let all = every_packet(&mut d);
+        // Read ahead a few bytes at a time, the file reads the same.
+        let mut ahead = open(&name);
+        ahead.set_read_ahead(7).unwrap();
+        if every_packet(&mut ahead) != all {
+            differ.push(format!("{name}: read 7 bytes ahead at a time"));
+        }
+        for n in d.tracks().iter().map(|t| t.number) {
+            let mut alone = open(&name);
+            alone.select_tracks(Some(&[n]));
+            alone.set_read_ahead(1024).unwrap();
+            let got = every_packet(&mut alone);
+            let want: Vec<_> = all.iter().filter(|p| p.track == n).cloned().collect();
+            if got != want {
+                differ.push(format!(
+                    "{name} track {n}: {} packets, {} wanted",
+                    got.len(),
+                    want.len()
+                ));
+            }
+            checked += 1;
+        }
+    }
+    assert!(
+        differ.is_empty(),
+        "{} of {checked} differ:\n{}",
+        differ.len(),
+        differ.join("\n")
+    );
+    assert!(checked > 40, "only {checked} tracks checked");
+}
+
+/// A source that counts the bytes read from it, and the reads.
+struct Counted<R> {
+    inner: R,
+    read: Rc<RefCell<(u64, u64)>>,
+}
+
+impl<R: Read> Read for Counted<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        let mut read = self.read.borrow_mut();
+        read.0 += n as u64;
+        read.1 += 1;
+        Ok(n)
+    }
+}
+
+impl<R: Seek> Seek for Counted<R> {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(pos)
+    }
+}
+
+/// A track read alone reads its own blocks and only the headers of the
+/// others: a film's sound, or its subtitles, read through a handle of their
+/// own, do not read the film's pictures over again.
+#[test]
+fn a_track_selected_alone_reads_little_of_the_others() {
+    // A second of video at 24 frames, 30 KiB a frame -- a film's size -- a
+    // frame of sound after each.
+    let clusters: Vec<Vec<u8>> = (0..4u8)
+        .map(|c| {
+            let blocks: Vec<Vec<u8>> = (0..6i16)
+                .flat_map(|f| {
+                    [
+                        block(1, f * 42, f == 0, &vec![c; 30 * 1024]),
+                        block(2, f * 42, true, b"sound"),
+                    ]
+                })
+                .collect();
+            cluster(u64::from(c) * 250, &blocks)
+        })
+        .collect();
+    let bytes = file_of(&[video(), sound()], &clusters);
+    let size = bytes.len() as u64;
+    let read = Rc::new(RefCell::new((0, 0)));
+    let source = Counted {
+        inner: Cursor::new(bytes),
+        read: read.clone(),
+    };
+    let mut d = Demuxer::open(source).unwrap();
+    d.select_tracks(Some(&[2]));
+    // Read ahead little: each block passed over costs a read of this much.
+    // (Opening read the file's start 64 KiB ahead: counted from here.)
+    d.set_read_ahead(1024).unwrap();
+    *read.borrow_mut() = (0, 0);
+    let sound = every_packet(&mut d);
+    assert_eq!(sound.len(), 24);
+    assert!(sound.iter().all(|p| p.track == 2 && p.data == b"sound"));
+    let read = read.borrow().0;
+    assert!(
+        read * 10 < size,
+        "{read} of the file's {size} bytes read for its sound alone"
+    );
+}
+
+/// How much of a real film each track read alone reads, and how long it
+/// takes: `MATROSKA_FILM=film.mkv cargo test --release -p matroska --test
+/// beyond_ffprobe -- --ignored --nocapture film`.
+#[test]
+#[ignore = "a measurement, over a film of the caller's"]
+fn film_read_track_by_track() {
+    let path = std::env::var("MATROSKA_FILM").expect("MATROSKA_FILM names a film");
+    let size = std::fs::metadata(&path).unwrap().len();
+    let tracks: Vec<u64> = Demuxer::open(File::open(&path).unwrap())
+        .unwrap()
+        .tracks()
+        .iter()
+        .map(|t| t.number)
+        .collect();
+    let selections = std::iter::once(None).chain(tracks.into_iter().map(Some));
+    for selection in selections {
+        for ahead in [64 * 1024, 4096, 2048, 1024, 512, 256] {
+            let read = Rc::new(RefCell::new((0, 0)));
+            let source = Counted {
+                inner: File::open(&path).unwrap(),
+                read: read.clone(),
+            };
+            let start = std::time::Instant::now();
+            let mut d = Demuxer::open(source).unwrap();
+            d.set_read_ahead(ahead).unwrap();
+            if let Some(n) = selection {
+                d.select_tracks(Some(&[n]));
+            }
+            let packets = every_packet(&mut d).len();
+            let (bytes, reads) = *read.borrow();
+            println!(
+                "track {selection:?}, {ahead} ahead: {packets} packets, {bytes} of {size} bytes read ({:.1}%) in {reads} reads, {:?}",
+                bytes as f64 * 100.0 / size as f64,
+                start.elapsed()
+            );
+        }
+    }
+}

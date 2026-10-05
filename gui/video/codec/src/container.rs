@@ -32,7 +32,7 @@
 
 use std::io::{Read, Seek, SeekFrom};
 
-use crate::{Codec, ColourHint, ContainerError, Orientation, SoundCodec, time};
+use crate::{Codec, ColourHint, ContainerError, Orientation, SoundCodec, SubtitleFormat, time};
 
 /// How much of a file is read to tell what it is: the most FFmpeg reads to
 /// decide (`PROBE_BUF_MAX`), or the whole of a smaller file.
@@ -40,6 +40,15 @@ const PROBE: u64 = 1 << 20;
 
 /// EBML's magic, with which every Matroska and WebM file begins.
 const EBML: [u8; 4] = [0x1A, 0x45, 0xDF, 0xA3];
+
+/// How far ahead a reader of one small track -- sound, subtitles -- reads a
+/// Matroska file, where it passes over most of the bytes: each block passed
+/// over costs a read of this much past it. Measured on a minute of 1080p
+/// film at 5 Mbit/s (`gui/video/matroska/tests/beyond_ffprobe.rs`,
+/// `film_read_track_by_track`): its sound or its subtitles alone read 82% of
+/// the file 64 KiB ahead, 7.7% 2 KiB ahead and 4.3% 1 KiB ahead, at about a
+/// read a video frame; 512 bytes ahead read no less, in twice the reads.
+pub(crate) const PASSING_READ_AHEAD: usize = 1024;
 
 /// A file being read.
 // Each boxed: the two differ in size by hundreds of bytes, and a `Video`
@@ -169,6 +178,26 @@ pub(crate) struct SoundTrack {
     /// How much sound a decoder needs after a jump before its output is
     /// right, in nanoseconds (Opus: 80 ms).
     pub seek_pre_roll: u64,
+}
+
+/// A subtitle track.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SubtitleTrack {
+    /// Matroska's track number: what a caller names it by.
+    pub number: u64,
+    /// What the container's packets and seeks name it by.
+    pub key: u64,
+    pub format: SubtitleFormat,
+    /// The codec ID as written: WebM's WebVTT (`D_WEBVTT/…`) and Matroska's
+    /// (`S_TEXT/WEBVTT`) frame a cue differently.
+    pub codec_id: Vec<u8>,
+    /// Its setup: an ASS or SSA track's script header (`CodecPrivate`).
+    pub config: Vec<u8>,
+    pub enabled: bool,
+    pub default: bool,
+    pub forced: bool,
+    /// The track's tick: `num / den` seconds.
+    pub time_base: (u64, u64),
 }
 
 impl<R: Read + Seek> Container<R> {
@@ -339,6 +368,58 @@ impl<R: Read + Seek> Container<R> {
         }
     }
 
+    /// From here on, give out only the packets of the track `key` names, and
+    /// read ahead `read_ahead` bytes at a time if given. Matroska's other
+    /// blocks are passed over unread once their header names their track, as
+    /// FFmpeg passes over a discarded stream's (`matroska::Demuxer::
+    /// select_tracks`); MP4's and Ogg's other packets are read as before, for
+    /// the caller to drop.
+    ///
+    /// # Errors
+    ///
+    /// The container's own, when the source cannot be put back where reading
+    /// is.
+    pub(crate) fn read_only(
+        &mut self,
+        key: u64,
+        read_ahead: Option<usize>,
+    ) -> Result<(), ContainerError> {
+        if let Self::Matroska(d) = self {
+            d.select_tracks(Some(&[key]));
+            if let Some(bytes) = read_ahead {
+                d.set_read_ahead(bytes)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The file's subtitle tracks, in the file's order: Matroska's, its
+    /// encrypted ones aside. MP4's text tracks are not read yet; Ogg's
+    /// (Kate) are not read, and the other files have none.
+    pub(crate) fn subtitles(&self) -> Vec<SubtitleTrack> {
+        match self {
+            Self::Matroska(d) => d
+                .tracks()
+                .iter()
+                .filter(|t| t.kind == matroska::TrackKind::Subtitle && t.readable())
+                .filter_map(|t| {
+                    Some(SubtitleTrack {
+                        number: t.number,
+                        key: t.number,
+                        format: subtitle_format(&t.codec_id),
+                        codec_id: t.codec_id.clone(),
+                        config: t.codec_private.clone(),
+                        enabled: t.enabled,
+                        default: t.default,
+                        forced: t.forced,
+                        time_base: d.time_base(t.number)?,
+                    })
+                })
+                .collect(),
+            Self::Mp4(_) | Self::Ogg(_) | Self::Flac(_) | Self::Mp3(_) => Vec::new(),
+        }
+    }
+
     /// How long the file plays, in nanoseconds, if it says: Matroska's
     /// segment duration; for MP4, its longest track's (FFmpeg's duration of
     /// each, from `mdhd`, cut by its edit list or grown by its fragments).
@@ -490,6 +571,22 @@ impl<R: Read + Seek> Container<R> {
             Self::Flac(_) => Ok(()),
             Self::Mp3(r) => r.seek(ticks).map_err(|e| ContainerError::Io(e.kind())),
         }
+    }
+}
+
+/// A Matroska subtitle track's format, by its codec ID as FFmpeg's demuxer
+/// knows them. WebVTT's descriptions and metadata are not for showing, and
+/// are no format read here.
+fn subtitle_format(codec_id: &[u8]) -> SubtitleFormat {
+    match codec_id {
+        b"S_TEXT/UTF8" => SubtitleFormat::SubRip,
+        b"S_TEXT/ASS" | b"S_ASS" => SubtitleFormat::Ass,
+        b"S_TEXT/SSA" | b"S_SSA" => SubtitleFormat::Ssa,
+        b"D_WEBVTT/SUBTITLES" | b"D_WEBVTT/CAPTIONS" | b"S_TEXT/WEBVTT" => SubtitleFormat::WebVtt,
+        b"S_HDMV/PGS" => SubtitleFormat::Pgs,
+        b"S_VOBSUB" => SubtitleFormat::VobSub,
+        b"S_DVBSUB" => SubtitleFormat::Dvb,
+        _ => SubtitleFormat::Other,
     }
 }
 

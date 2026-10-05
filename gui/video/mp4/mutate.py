@@ -110,16 +110,19 @@ INDEX = [
     # once and partway through. The bound itself, SHORT_WALK, has no row:
     # unbounded, the scale tests do not fail, they run for hours, and the
     # harness would wait out its timeout three times to call that caught.
+    # Nor do the step's own bounds go missing in a row: a step to the upper
+    # bound that stays there never narrows the search, and it loops for
+    # ever. Each row below breaks a bound and still ends.
     (
-        "the step over discarded entries ignores the upper bound's time",
+        "the step over discarded entries keeps an upper bound at the time wanted",
         "            m = if stop == b && at(b).is_some_and(|e| e.timestamp >= wanted) {",
-        "            m = if false && stop == b && at(b).is_some_and(|e| e.timestamp >= wanted) {",
+        "            m = if stop == b && at(b).is_some_and(|e| e.timestamp > wanted) {",
         ["the_search_steps_over_discarded_entries_as_ffmpeg_does", SEARCH_IS_FFMPEGS],
     ),
     (
-        "the step over discarded entries does not stop at the last",
+        "the step over discarded entries stops one short of the last",
         "            let stop = kept.min(b).min(nb - 1);",
-        "            let stop = kept.min(b);",
+        "            let stop = kept.min(b).min(nb - 2);",
         [SEARCH_IS_FFMPEGS],
     ),
     (

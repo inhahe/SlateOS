@@ -3179,7 +3179,7 @@ fn search_continues_after(err: i32) -> bool {
 /// The `PATH` a search uses: the variable, or `confstr(_CS_PATH)` without it.
 fn search_path_value() -> &'static [u8] {
     // SAFETY: "PATH\0" is a valid C string.
-    let value = unsafe { crate::environ::getenv(c"PATH".as_ptr().cast::<u8>()) };
+    let value = unsafe { crate::environ::lookup(c"PATH".as_ptr().cast::<u8>()) };
     if value.is_null() {
         return crate::unistd::CS_PATH;
     }

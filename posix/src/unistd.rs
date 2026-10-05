@@ -732,36 +732,12 @@ pub(crate) fn set_cwd_for_test(path: &[u8]) {
 // Functions
 // ---------------------------------------------------------------------------
 
-/// Get the current working directory.
-///
-/// Copies the absolute pathname of the CWD into `buf` (null-terminated).
-/// Returns `buf` on success, null on error with errno set.
-///
-/// # A null `buf` allocates
-///
-/// `getcwd(NULL, size)` is the GNU "allocate for me" form, which glibc, musl
-/// and the BSDs all support, and which bash depends on: `builtins/common.c`
-/// asks for `getcwd (0, PATH_MAX)` and falls back to `getcwd (0, 0)`.  The
-/// result is a fresh `malloc` block that the caller must `free` — `size` bytes
-/// when `size > 0`, otherwise exactly the path's length plus its terminator.
-///
-/// This used to be refused with `EINVAL`, and bash said so on every boot
-/// (`shell-init: error retrieving current directory: getcwd: cannot access
-/// parent directories: Invalid argument`) while the rung that ran it stayed
-/// green, because it asserted bash's output and never its stderr
-/// (`requests/a-b-getcwd-rejects-the-null-buffer-form-that-bash-uses.md`).
-/// The one-branch cause was that a null `buf` and a zero `size` were rejected
-/// together, when only the pair "non-null `buf`, zero `size`" is an error.
-///
-/// # Errors
-///
-/// - `EINVAL` — `buf` is non-null and `size` is 0 (POSIX).
-/// - `ERANGE` — `size` is non-zero and too small for the CWD path plus its
-///   null terminator, in either form.  With a null `buf` this is checked
-///   before allocating, so a refused call allocates nothing.
-/// - `ENOMEM` — `buf` is null and the allocation failed.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn getcwd(buf: *mut u8, size: SizeT) -> *mut u8 {
+/// `getcwd`'s work, which is what this library itself calls --
+/// `get_current_dir_name`, `getwd`, `__getcwd_chk` -- rather than `getcwd`,
+/// as glibc's own callers use an internal name: a program may define
+/// `getcwd` itself, and that changes what the program's calls reach and
+/// nothing else. See `getcwd` for what it does.
+pub(crate) fn copy_cwd(buf: *mut u8, size: SizeT) -> *mut u8 {
     // SAFETY: Single-threaded per-process access to CWD state; the invariant on
     // `cwd_buf_ptr` is that its first `*cwd_len_ptr()` bytes are the path.
     let cwd = unsafe {
@@ -812,6 +788,48 @@ pub extern "C" fn getcwd(buf: *mut u8, size: SizeT) -> *mut u8 {
 
     dst
 }
+
+/// Own archive member -- bash and gnulib's getcwd module define `getcwd`
+/// themselves where they judge ours wanting, and bash, cross-compiled
+/// with no answer to give its configure, did until 2026-10-01. See
+/// string.rs's module header.
+mod gnu_getcwd {
+    use super::*;
+
+    /// Get the current working directory.
+    ///
+    /// Copies the absolute pathname of the CWD into `buf` (null-terminated).
+    /// Returns `buf` on success, null on error with errno set.
+    ///
+    /// # A null `buf` allocates
+    ///
+    /// `getcwd(NULL, size)` is the GNU "allocate for me" form, which glibc, musl
+    /// and the BSDs all support, and which bash depends on: `builtins/common.c`
+    /// asks for `getcwd (0, PATH_MAX)` and falls back to `getcwd (0, 0)`.  The
+    /// result is a fresh `malloc` block that the caller must `free` — `size` bytes
+    /// when `size > 0`, otherwise exactly the path's length plus its terminator.
+    ///
+    /// This used to be refused with `EINVAL`, and bash said so on every boot
+    /// (`shell-init: error retrieving current directory: getcwd: cannot access
+    /// parent directories: Invalid argument`) while the rung that ran it stayed
+    /// green, because it asserted bash's output and never its stderr
+    /// (`requests/a-b-getcwd-rejects-the-null-buffer-form-that-bash-uses.md`).
+    /// The one-branch cause was that a null `buf` and a zero `size` were rejected
+    /// together, when only the pair "non-null `buf`, zero `size`" is an error.
+    ///
+    /// # Errors
+    ///
+    /// - `EINVAL` — `buf` is non-null and `size` is 0 (POSIX).
+    /// - `ERANGE` — `size` is non-zero and too small for the CWD path plus its
+    ///   null terminator, in either form.  With a null `buf` this is checked
+    ///   before allocating, so a refused call allocates nothing.
+    /// - `ENOMEM` — `buf` is null and the allocation failed.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub extern "C" fn getcwd(buf: *mut u8, size: SizeT) -> *mut u8 {
+        copy_cwd(buf, size)
+    }
+}
+pub use gnu_getcwd::getcwd;
 
 /// Change the current working directory.
 ///
@@ -3469,12 +3487,57 @@ pub(crate) fn _test_reset_no_new_privs(value: bool) {
     nnp::set(value);
 }
 
+/// The process's "dumpable" flag, `PR_SET_DUMPABLE`'s: 1 (`SUID_DUMP_USER`)
+/// from the start, as Linux's is, and again after `exec`, which starts a new
+/// image -- as Linux resets it there; inherited across `fork` with the rest of
+/// memory, as Linux's is.
+///
+/// Kept here, as [`nnp`]'s bit is, because no native call reaches the kernel's
+/// copy (`pcb.linux_dumpable`, which the Linux ABI's `prctl` sets):
+/// `requests/d-a-posix-timers-and-the-dumpable-flag-need-native-calls.md`
+/// asks lane A for one. Nothing on SlateOS acts on the flag yet -- it writes
+/// no core files, and neither `/proc` nor `ptrace` consults it -- so reading
+/// it back is all it does, and that is exact here. It was refused `EINVAL`
+/// until 2026-10-05, which made GNU `timeout` warn "disabling core dumps
+/// failed" on every signal death it passed on.
+#[cfg(target_os = "none")]
+mod dumpable {
+    use core::sync::atomic::{AtomicU8, Ordering};
+
+    static DUMPABLE: AtomicU8 = AtomicU8::new(1);
+
+    pub(super) fn get() -> u8 {
+        DUMPABLE.load(Ordering::Relaxed)
+    }
+    pub(super) fn set(v: u8) {
+        DUMPABLE.store(v, Ordering::Relaxed);
+    }
+}
+
+/// Per test thread on the host, for [`nnp`]'s reason.
+#[cfg(not(target_os = "none"))]
+mod dumpable {
+    std::thread_local! {
+        static DUMPABLE: core::cell::Cell<u8> = const { core::cell::Cell::new(1) };
+    }
+
+    pub(super) fn get() -> u8 {
+        DUMPABLE.try_with(core::cell::Cell::get).unwrap_or(1)
+    }
+    pub(super) fn set(v: u8) {
+        // A failed `try_with` means the thread is shutting down and the value
+        // is about to be discarded anyway.
+        let _ = DUMPABLE.try_with(|c| c.set(v));
+    }
+}
+
 /// Process control operations (Linux).
 ///
 /// Stub: implements `PR_SET_NAME` / `PR_GET_NAME` as a name buffer
-/// pass-through and `PR_SET_NO_NEW_PRIVS` / `PR_GET_NO_NEW_PRIVS` as
-/// trivial accept-and-return operations.  All other options return
-/// `-1` with `EINVAL`.
+/// pass-through, `PR_SET_NO_NEW_PRIVS` / `PR_GET_NO_NEW_PRIVS` and
+/// `PR_SET_DUMPABLE` / `PR_GET_DUMPABLE` over flags this library keeps
+/// (`nnp` and `dumpable` in this file), and the seccomp pair.  All other
+/// options return `-1` with `EINVAL`.
 ///
 /// Argument-domain validation matches `kernel/sys.c::sys_prctl` in
 /// Linux:
@@ -3510,6 +3573,7 @@ pub(crate) fn _test_reset_no_new_privs(value: bool) {
 ///     the `NO_NEW_PRIVS` atomic — was always 0 pre-fix).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn prctl(option: i32, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> i32 {
+    use crate::sys_prctl::{PR_GET_DUMPABLE, PR_SET_DUMPABLE};
     match option {
         PR_SET_NAME => {
             // NULL buffer would fault inside Linux's copy_from_user.
@@ -3559,6 +3623,18 @@ pub extern "C" fn prctl(option: i32, arg2: u64, arg3: u64, arg4: u64, arg5: u64)
             // Phase 160: report the persisted bit (was always 0 pre-fix).
             i32::from(nnp::get())
         }
+        PR_SET_DUMPABLE => {
+            // Linux's `prctl`: SUID_DUMP_DISABLE (0) or SUID_DUMP_USER (1);
+            // SUID_DUMP_ROOT (2) is the sysctl's to set, not a program's, and
+            // anything else is EINVAL. The other arguments are not looked at.
+            let Ok(v @ 0..=1) = u8::try_from(arg2) else {
+                crate::errno::set_errno(crate::errno::EINVAL);
+                return -1;
+            };
+            dumpable::set(v);
+            0
+        }
+        PR_GET_DUMPABLE => i32::from(dumpable::get()),
         PR_GET_SECCOMP => {
             // `prctl_get_seccomp`: the thread's seccomp mode.  Nothing here
             // enters strict mode or installs a filter -- seccomp() answers
@@ -4796,7 +4872,7 @@ pub unsafe extern "C" fn tmpnam_r(s: *mut u8) -> *mut u8 {
 /// every stale `$PWD` would match.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn get_current_dir_name() -> *mut u8 {
-    getcwd(core::ptr::null_mut(), 0)
+    copy_cwd(core::ptr::null_mut(), 0)
 }
 
 // ---------------------------------------------------------------------------
@@ -5550,6 +5626,42 @@ mod tests {
     #[test]
     fn test_prctl_unknown_fails() {
         assert_eq!(prctl(-999, 0, 0, 0, 0), -1);
+    }
+
+    /// `PR_GET_DUMPABLE` is 1 until a program says otherwise, and
+    /// `PR_SET_DUMPABLE` takes 0 and 1 and nothing else -- 2 is the
+    /// sysctl's (`SUID_DUMP_ROOT`), and a value past `u8` must not wrap to
+    /// one that is accepted. Refused `EINVAL` until 2026-10-05.
+    #[test]
+    fn test_prctl_dumpable_round_trips_0_and_1_and_refuses_the_rest() {
+        use crate::sys_prctl::{PR_GET_DUMPABLE, PR_SET_DUMPABLE};
+        assert_eq!(prctl(PR_GET_DUMPABLE, 0, 0, 0, 0), 1);
+        assert_eq!(prctl(PR_SET_DUMPABLE, 0, 0, 0, 0), 0);
+        assert_eq!(prctl(PR_GET_DUMPABLE, 0, 0, 0, 0), 0);
+        for bad in [2_u64, 3, 0x100, 0x1_0000_0000, u64::MAX] {
+            crate::errno::set_errno(0);
+            assert_eq!(
+                prctl(PR_SET_DUMPABLE, bad, 0, 0, 0),
+                -1,
+                "{bad:#x} was accepted"
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+            assert_eq!(
+                prctl(PR_GET_DUMPABLE, 0, 0, 0, 0),
+                0,
+                "{bad:#x} changed the flag"
+            );
+        }
+        assert_eq!(prctl(PR_SET_DUMPABLE, 1, 0, 0, 0), 0);
+        assert_eq!(prctl(PR_GET_DUMPABLE, 0, 0, 0, 0), 1);
+    }
+
+    /// Linux's `PR_SET_DUMPABLE` does not look at arguments 3 to 5.
+    #[test]
+    fn test_prctl_set_dumpable_ignores_the_trailing_arguments() {
+        use crate::sys_prctl::{PR_GET_DUMPABLE, PR_SET_DUMPABLE};
+        assert_eq!(prctl(PR_SET_DUMPABLE, 0, 7, 8, 9), 0);
+        assert_eq!(prctl(PR_GET_DUMPABLE, 1, 2, 3, 4), 0);
     }
 
     /// `PR_GET_SECCOMP` is the mode, and nothing here leaves mode 0.  It was

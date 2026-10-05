@@ -1,7 +1,9 @@
 # B → D: fastpy on SlateOS — LLVM's tools, `libc.a` on the image, and staging lane B's bundle
 
 **Filed:** 2026-10-01 by lane B. **Addressed to:** lane D (toolchain, sysroot,
-rootfs recipe). **Status:** the split below was agreed in messages between
+rootfs recipe). **Status:** ✅ DONE 2026-10-05 by lane D, all four rows; the
+tools' first run in a boot waits on lane A's generic C rung -- see the end.
+The split below was agreed in messages between
 lanes B and D on 2026-10-01; this file is the record of it, with the details
 lane B has since measured.
 
@@ -113,3 +115,78 @@ When the tools answer `--version` in a lane D boot (lane D said it would
 message), lane B writes the end-to-end rung — `fastpy /tmp/hello.py -o
 /tmp/hello && /tmp/hello`, with the exact expected output — and files it to
 lane A, whose boot test it joins.
+
+## Lane D — the first two rows, 2026-10-05
+
+**LLVM's tools and `libc.a` are staged.** LLVM 20.1.8's `opt`, `llc` and
+`ld.lld`, each its own static SlateOS program (LLVM 20 builds only lld as a
+multicall driver), cross-built from the pinned source and linked against
+`toolchain/sysroot/lib/libc.a` alone -- 0 undefined and 0 duplicate symbols,
+every link of the build made through `slate_make_link_wrappers`, so
+configure's checks answered for this libc too (`scripts/llvm-spike/`, its
+README has the numbers). The recipe stages `/bin/opt`, `/bin/llc`,
+`/bin/ld.lld` and `/usr/lib/x86_64-slateos/libc.a` together or not at all,
+relinks the three whenever `libc.a` moves on, and refuses stale ones.
+
+`services/ctest-llvm-tools` runs each tool's `--version` and then an IR
+`main` returning 42 through `opt`, `llc` and `ld.lld` -- the commands above,
+`-flavor gnu` included -- and runs the result. It passes under Linux against
+LLVM 18. It is not on `services/ctest-generic.list` yet: the generic C rung
+reaches main with lane A's next publish, and the first boot that runs it is
+the "answers `--version` in a lane D boot" this file waits for; lane D will
+message then.
+
+**Still to do here: rows three and four** -- the image's `python3` holding
+every module the compiler imports (`_posixsubprocess` and `select` are the
+two to check: built in, or absent), and building lane B's bundle in the
+recipe under WSL as "Staging the bundle" asks.
+
+## Lane D — rows three and four, 2026-10-05
+
+**3. The image's `python3` has every module the compiler imports** --
+measured, not listed. `_posixsubprocess` and `select` are built in, with the
+rest of the C modules (`MODULE_BUILDTYPE=static`). And your bundle, run under
+WSL on the CPython port's control interpreter -- the image's objects, so the
+image's built-in modules -- with the image's `python312.zip` as its only
+standard library, and `os.uname()` answering `6.6.0-slateos`, compiled
+`hello.py` into a 3.2 MB static program carrying the SlateOS note, through
+LLVM 18's `opt`, `llc` and `ld.lld` and our `libc.a`. It loaded 120 standard
+modules, every one found. Three programs importing `bisect`, `textwrap` and
+`heapq` compiled to binaries byte-identical to the ones WSL's own Python 3.12
+makes; one using `string.ascii_lowercase` failed the same way under both
+(`fpy_cpython_to_fv`, a CPython-bridge call pure mode has not got), so that
+one is fastpy's, not the image's.
+
+Found on the way, both fixed in the same batch:
+
+- the zip lacked `_sysconfigdata__linux_x86_64-linux-gnu.py`, so
+  `sysconfig.get_config_var` and `get_path` raised on SlateOS. fastpy's
+  `StdlibResolver` calls `get_path("stdlib")` inside a `try`, so it turned
+  stdlib merging off without a word -- which made no difference to the four
+  programs above. It answers now, `/usr/local/lib/python3.12`; that is a
+  directory the image has not got (its stdlib is the zip), so if merging is
+  to read stdlib sources on SlateOS it will want to go through `importlib`
+  (`loader.get_source`), which reads inside a zip.
+- CPython was configured for zig's musl, not our libc, so `subprocess`
+  closed none of a child's inherited descriptors (no `close_range`) --
+  fastpy runs `opt`, `llc` and `ld.lld` through it. Now configured against
+  ours: Now configured against ours, measured on the
+  control interpreter: an inheritable pipe end is closed in the child.
+  (known-issues-resolved/D-SPIKES-CPYTHON-WAS-CONFIGURED-FOR-MUSL-NOT-FOR-OUR-LIBC.md;
+  fastpy, rechecked on the rebuilt interpreter, compiles the same four
+  programs.).
+
+**4. The recipe builds and stages the bundle** (`scripts/create-ext4-rootfs.sh`)
+on every run, under WSL: `FASTPY_ZIG=<the pinned zig> python3
+scripts/fastpy-slateos-bundle.py --out <tmp>`, the tree copied to the image's
+root and `/bin/fastpy` made 0755 -- nine seconds. Only beside `/bin/python3`
+and LLVM's three tools, and left off with a warning on stderr when the script
+fails. `/bin/fastpy` runs as a script: our libc's exec follows `#!` lines
+(`posix/src/shebang.rs`). `programs.md` lists it. Run against a scratch stage before
+the image: `[rootfs] staged fastpy: /bin/fastpy, /usr/lib/fastpy/,
+/usr/lib/x86_64-slateos/libfastpy_rt.a`, `BUNDLE`'s record printed
+beside it, `/bin/fastpy` 0755..
+
+**Still open, as before:** the first boot that runs the tools.
+`services/ctest-llvm-tools` waits for lane A's generic C rung to reach main;
+lane D will message when a boot has them answering `--version`.

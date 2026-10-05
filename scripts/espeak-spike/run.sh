@@ -32,8 +32,8 @@
 # espeak-ng it has just built*. Built with `zig cc --target=x86_64-linux-musl`
 # that binary is a static Linux executable, which runs under WSL, so the data
 # step works as it would natively. The data is architecture-specific binary
-# (little-endian x86-64), which SlateOS is. The program is then relinked
-# `-nostdlib` against our libc.a, which is the part that answers the question.
+# (little-endian x86-64), which SlateOS is. The program is then linked again,
+# against our libc.a alone, which is the part that answers the question.
 #
 # Run it from WSL, with `wsl -d Ubuntu --exec bash scripts/espeak-spike/run.sh`.
 # Everything but the sysroot lives under $SLATE_WORK (durable; /tmp is not).
@@ -105,13 +105,19 @@ if [ ! -f "$DATA/phondata" ] || [ ! -f "$DATA/en_dict" ]; then
 fi
 echo "DATA_BYTES_ALL=$(du -sb "$DATA" | cut -f1)"
 
-# The decisive step. -nostdlib so we get SlateOS's libc, not zig's bundled
-# musl. libc.a twice: it is Rust-built and its intra-archive references are not
-# topologically ordered, so a second pass is cheaper than --start-group.
-# libstubs.a is deliberately not linked — it and libc.a each carry a panic
+# The decisive step: a link against SlateOS's libc and nothing else, through
+# scripts/lib/worktree.sh's link wrapper -- zig's ld.lld itself, given this
+# build's own inputs and then our libc.a, with zig's C++ runtime ahead of it
+# and zig's compiler runtime behind it, which is zig's own order (the
+# wrapper's comment says why the order matters). Not zig's cc driver with
+# -nostdlib, as until 2026-10-01: that puts zig's own musl libc.a behind
+# every link, where it would supply whatever ours lacks instead of a missing
+# symbol being reported (known-issues D-SPIKES-LINK-ZIGS-MUSL-BEHIND-OUR-LIBC).
+# libstubs.a is deliberately not linked -- it and libc.a each carry a panic
 # handler and collide on __rustc::rust_begin_unwind.
 mkdir -p "$SPIKE_LIBS"
 cp "$SYSROOT/libc.a" "$SYSROOT/libunwind.a" "$SPIKE_LIBS/" || exit 1
+slate_make_link_wrappers "$WORK/bin" "$SPIKE_LIBS" || exit 1
 
 # The program's own objects, and the static libraries the build made for it —
 # taken from the build tree rather than guessed, so a library the real link
@@ -127,12 +133,18 @@ fi
 
 # Unquoted on purpose: MAIN_OBJ and LIBS are space-separated lists of paths
 # under bld/, which CMake names without spaces, and each must reach the linker
-# as its own argument.
+# as its own argument. LIBS once: ld.lld takes a symbol from any archive on
+# the line, wherever the reference is (they were named twice until
+# 2026-10-01, for GNU ld's sake; the binary is byte-identical either way).
+#
+# The output is removed first: ld.lld leaves an existing one alone when a
+# link fails, and the check below would then publish the last run's binary
+# as this one's.
+rm -f espeak-ng-slateos
 # shellcheck disable=SC2086
-"$SLATE_CC" -static -nostdlib -o espeak-ng-slateos $MAIN_OBJ $LIBS $LIBS \
-    "$SPIKE_LIBS/libc.a" "$SPIKE_LIBS/libc.a" "$SPIKE_LIBS/libunwind.a" \
-    2>slate-link.log
-echo "SLATE_LINK_EXIT=$?"
+"$SLATE_LINK_CC" -o espeak-ng-slateos $MAIN_OBJ $LIBS 2>slate-link.log
+LINK_RC=$?
+echo "SLATE_LINK_EXIT=$LINK_RC"
 
 MISSING="$SLATE_TMP/espeak_missing.txt"
 grep -oP "undefined symbol: \K.*" slate-link.log | sort -u >"$MISSING"
@@ -144,7 +156,7 @@ grep -oP "duplicate symbol: \K.*" slate-link.log | sort -u >"$DUPES"
 echo "DUPLICATE_COUNT=$(wc -l <"$DUPES")"
 head -20 "$DUPES"
 
-if [ ! -x espeak-ng-slateos ] || [ "$(wc -l <"$MISSING")" -ne 0 ]; then
+if [ "$LINK_RC" -ne 0 ] || [ ! -x espeak-ng-slateos ] || [ "$(wc -l <"$MISSING")" -ne 0 ]; then
     echo "NOT_PUBLISHED — the link did not produce a complete program; nothing"
     echo "                was copied to $SLATE_SPIKE."
     exit 1

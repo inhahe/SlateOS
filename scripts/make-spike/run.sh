@@ -93,13 +93,19 @@ else
     echo "       absence of lines here as 'make made no such decisions'."
 fi
 
-# The decisive step. -nostdlib so we get SlateOS's libc, not zig's bundled musl.
-# libc.a twice: it is Rust-built and its intra-archive references are not
-# topologically ordered, so a second pass is cheaper than --start-group.
-# libstubs.a is deliberately not linked — it and libc.a each carry a panic
+# The decisive step: a link against SlateOS's libc and nothing else, through
+# scripts/lib/worktree.sh's link wrapper -- zig's ld.lld itself, given this
+# build's own inputs and then our libc.a, with zig's C++ runtime ahead of it
+# and zig's compiler runtime behind it, which is zig's own order (the
+# wrapper's comment says why the order matters). Not zig's cc driver with
+# -nostdlib, as until 2026-10-01: that puts zig's own musl libc.a behind
+# every link, where it would supply whatever ours lacks instead of a missing
+# symbol being reported (known-issues D-SPIKES-LINK-ZIGS-MUSL-BEHIND-OUR-LIBC).
+# libstubs.a is deliberately not linked -- it and libc.a each carry a panic
 # handler and collide on __rustc::rust_begin_unwind.
 mkdir -p "$SPIKE_LIBS"
 cp "$SYSROOT/libc.a" "$SYSROOT/libunwind.a" "$SPIKE_LIBS/" || exit 1
+slate_make_link_wrappers "$WORK/bin" "$SPIKE_LIBS" || exit 1
 
 # Take the object list from make's own build rather than globbing *.o: the
 # tarball ships a `lib/` gnulib subdirectory and a `tests/` tree, and a glob
@@ -112,9 +118,7 @@ if [ -z "$OBJS" ]; then
 fi
 
 GLLIB="lib/libgnu.a"
-"$SLATE_CC" -static -nostdlib -o make-slateos $OBJS "$GLLIB" \
-    "$SPIKE_LIBS/libc.a" "$SPIKE_LIBS/libc.a" "$SPIKE_LIBS/libunwind.a" \
-    2>slate-link.log
+"$SLATE_LINK_CC" -o make-slateos $OBJS "$GLLIB" 2>slate-link.log
 echo "SLATE_LINK_EXIT=$?"
 
 MISSING="/tmp/make_missing-$SLATE_LANE.txt"
@@ -149,4 +153,5 @@ if [ -x make-slateos ]; then
     echo "SLATE_MAKE_BUILT"
 else
     echo "NO_SLATE_BINARY"
+    exit 1
 fi

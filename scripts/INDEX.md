@@ -253,6 +253,8 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/lanec_scan.py` | Lane C's per-line scanner for the write-only-field and uncalled-function gates. |
 | `scripts/layout-sweep.py` | Measure how much of a benchmark's movement is caused by code *placement*. |
 | `scripts/lib/worktree.sh` | The directive above is load-bearing rather than decorative. This file has no |
+| `scripts/llvm-spike/run.sh` | Cross-compile LLVM 20's `opt`, `llc` and `ld.lld` for SlateOS, linked against |
+| `scripts/llvm-spike/slatelink.sh` | Link LLVM's opt, llc and ld.lld for SlateOS from the objects |
 | `scripts/lockfile-diff.sh` | Differential test: our `lockfile` against procmail 3.24's, as Ubuntu builds it. |
 | `scripts/logger-diff.sh` | Differential test: our `logger` against util-linux 2.39.3's. |
 | `scripts/logname-diff.sh` | logname-diff.sh — compare our `logname` against the real GNU one, inside WSL. |
@@ -448,6 +450,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/test-hostload.py` | Tests for `hostload.py`, the harness's measurement of how much CPU a process gets. |
 | `scripts/test-lane-claims.py` | Tests for `scripts/lane-claims.py` through its command line. |
 | `scripts/test-layout-sweep.py` | Regression tests for `scripts/layout-sweep.py`. |
+| `scripts/test-link-wrappers.sh` | Self-test for slate_make_link_wrappers in scripts/lib/worktree.sh: the |
 | `scripts/test-msysbash.py` | Tests for `msysbash.py`, the one place that decides which bash runs our scripts. |
 | `scripts/test-mutation_harness.py` | Tests for mutation_harness.check_the_table: where a table's tests are found. |
 | `scripts/test-open-requests.py` | Regression tests for `scripts/open-requests.py`. |
@@ -507,4 +510,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_497 scripts._
+_500 scripts._

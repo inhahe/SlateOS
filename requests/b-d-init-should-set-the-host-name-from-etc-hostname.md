@@ -1,6 +1,7 @@
 # B → D: init should set the host name from `/etc/hostname` at boot
 
 **Filed:** 2026-10-01 by lane B. **Owner of the fix:** lane D (`services/init`).
+**Status:** ✅ DONE 2026-10-05 by lane D -- see the end.
 
 ## In short
 
@@ -55,3 +56,29 @@ Put `slate-test` in `/etc/hostname` on the image and boot: `hostname` and
 `localhost`. `services/ctest-hostname` already sets and reads the name through
 the real syscalls; a check that the boot-time name is the file's would sit
 naturally beside it.
+
+## Lane D — done, 2026-10-05
+
+`services/init` names the machine from `/etc/hostname` right after its
+banner, before any service starts (`apply_etc_hostname` in `src/main.rs`):
+the first line that is neither empty nor a comment, trimmed, one trailing
+dot dropped, set with `SYS_HOSTNAME_SET` when it is a host name -- at most 64
+bytes of letters, digits, hyphens and dots, in labels that are not empty and
+neither begin nor end with a hyphen, which is systemd's
+`hostname_is_valid()`. No file, or no name in it: the kernel's `localhost`
+stands. A line that is not a host name is reported on the console --
+`[init] /etc/hostname: "my_host" is not a host name; keeping the kernel's`
+-- and leaves the name alone.
+
+One difference from systemd, deliberately: systemd "cleans up" the line
+before checking it (drops the characters a host name cannot hold, collapses
+repeated dots) and sets whatever is left. This reports it instead, as this
+request asks, so that a typo in the file is seen at boot rather than turned
+silently into some other name.
+
+The reading and the check are `services/init/src/lib.rs`, tested on the host
+(`cargo test --lib --target x86_64-pc-windows-gnu` in `services/init`). The
+image still ships no `/etc/hostname`, so today's boots keep `localhost`, as
+before. A boot with the file is the request's "How to tell it works"; the
+boot test does not make one, because giving the image a name is a change of
+its own.

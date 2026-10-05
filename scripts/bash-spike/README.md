@@ -96,7 +96,7 @@ Artifacts land in `build/spike/` (gitignored): `bash-musl.elf`,
   both archives are Rust-built and each carries its own panic handler, so
   together they collide on `__rustc::rust_begin_unwind`.
 
-## Two traps worth remembering
+## Three traps worth remembering
 
 **1. `$CC` cannot contain spaces.** autotools word-splits it, and this repo
 lives under `D:\visual studio projects\`. The first attempt died with
@@ -112,6 +112,26 @@ is fatal — musl defines `strtoimax` in the same object as `strtol`, that objec
 gets pulled in for `strtol`, and lld reports a duplicate symbol. Pass
 `bash_cv_func_strtoimax=no` to a fresh configure, or drop it from
 `lib/sh/Makefile`'s `LIBOBJS` as `cross3.sh` does.
+
+**3. bash brings its own copies of six C library functions.**
+`lib/sh/getenv.c` defines `getenv`, `putenv`, `setenv` and `unsetenv` over
+the shell's own variables, as on Linux; and a cross configure, which cannot
+run the tests that would have found ours sound, guesses that `getcwd` and
+`mktime` are broken and compiles `lib/sh/getcwd.c` and `lib/sh/mktime.c`
+too. Linked in bash's own order -- its libraries ahead of the C library --
+those are the ones bash uses. That needs our `libc.a` to let a program decline
+its copies, which it did not until 2026-10-01 (known-issues
+D-POSIX-GETENV-AND-GETCWD-COULD-NOT-BE-REPLACED), and it needs configure told
+the truth about `getcwd` and `mktime`, which `cross2.sh` now does: bash's
+`getcwd` walks `..` matching inode numbers, and names the wrong directory
+under procfs, which reports 0 for every one. Until that day zig's cc driver
+had moved `-lsh` behind our `libc.a`, so ours were taken and bash's never
+were, by accident. The other six guesses are answered too, since
+2026-10-05, each from a measured fact (`cross2.sh`'s comment; known-issues
+D-SPIKES-BASH-CROSS-CONFIGURE-GUESSED-WHAT-IT-COULD-NOT-RUN, resolved). One
+was a live bug: with `shopt -s lastpipe`, `true | false; echo $?` said 129,
+bash reading the status it made for the pipeline's last command as a death
+by signal.
 
 ## If this is ever taken further
 

@@ -93,9 +93,9 @@
 //!   `remque`
 //! - **Resource Limits**: `getrlimit`, `setrlimit`, `getrusage`,
 //!   `prlimit`/`prlimit64`
-//! - **Timers**: `timer_create`, `timer_settime`, `timer_gettime`,
-//!   `timer_delete`, `timer_getoverrun` (stubs — no signal delivery),
-//!   `setitimer`/`getitimer`
+//! - **Timers**: `setitimer`/`getitimer`; `timer_create` (`ENOSYS` until the
+//!   kernel has per-process timers), and `timer_settime`, `timer_gettime`,
+//!   `timer_delete`, `timer_getoverrun` (`EINVAL`: no timer exists)
 //! - **System**: `uname`
 //! - **Logging**: `openlog`, `syslog`, `closelog`, `setlogmask`
 //! - **User/Group**: `getpwnam`, `getpwuid`, `getgrnam`, `getgrgid`,

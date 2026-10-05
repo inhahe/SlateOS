@@ -128,7 +128,7 @@ pub(crate) mod engine {
             Self {
                 // SAFETY: a NUL-terminated name.
                 posixly_correct: || unsafe {
-                    !crate::environ::getenv(c"POSIXLY_CORRECT".as_ptr().cast()).is_null()
+                    !crate::environ::lookup(c"POSIXLY_CORRECT".as_ptr().cast()).is_null()
                 },
                 messages: stdio::stderr_stream(),
             }

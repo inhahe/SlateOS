@@ -233,6 +233,23 @@ SLATE_ESPEAK_SHA256="bb4338102ff3b49a81423da8a1a158b420124b055b60fa76cfb4b186771
 # shellcheck disable=SC2034
 SLATE_ESPEAK_TARBALL="$SLATE_ZIG_CACHE/espeak-ng-$SLATE_ESPEAK_VERSION.tar.gz"
 
+# Upstream LLVM, for scripts/llvm-spike/: opt, llc and ld.lld on SlateOS, the
+# code generator fastpy runs there
+# (requests/b-d-fastpy-on-slateos-needs-llvm-tools.md), and the first step of
+# a Rust toolchain, rustc being an LLVM front end. 20.1.8 is the last LLVM 20
+# release, and llvmlite 0.47 -- fastpy's on Windows and WSL -- carries LLVM 20.
+# The pin is the tarball's sha256, computed over the download. Two packagers
+# attest its sha512 -- a *different function*, each their own computation over
+# the same file -- recomputed here and compared in full, 2026-10-01:
+#
+#   Alpine  main/llvm20/APKBUILD, pkgver=20.1.8, sha512sums f330e72e...470773
+#   Fedora  rpms/llvm f42 `sources`, SHA512 (llvm-project-20.1.8.src.tar.xz)
+#           = f330e72e...470773
+SLATE_LLVM_VERSION="20.1.8"
+SLATE_LLVM_SHA256="6898f963c8e938981e6c4a302e83ec5beb4630147c7311183cf61069af16333d"
+# shellcheck disable=SC2034
+SLATE_LLVM_TARBALL="$SLATE_ZIG_CACHE/llvm-project-$SLATE_LLVM_VERSION.src.tar.xz"
+
 # Scratch, keyed by worktree. The hard-coded paths were only half the problem:
 # these scripts also wrote fixed names like /tmp/libc_syms.txt and
 # /tmp/bash_needs.txt, and they hand results to each other through those files
@@ -548,6 +565,18 @@ slate_ensure_espeak_src() {
         "$SLATE_WORK/espeak-spike" "$SLATE_SPIKE")" || return 1
 }
 
+# The LLVM counterpart, for scripts/llvm-spike/.
+slate_ensure_llvm_src() {
+    # SLATE_LLVM_TARBALL is this function's OUTPUT PARAMETER, read by
+    # scripts/llvm-spike/run.sh (`tar xf "$SLATE_LLVM_TARBALL" ...`). The
+    # linter cannot follow a `source`, so it sees the write and never the read.
+    # shellcheck disable=SC2034
+    SLATE_LLVM_TARBALL="$(slate_ensure_src llvm "$SLATE_LLVM_VERSION" \
+        "$SLATE_LLVM_SHA256" \
+        "https://github.com/llvm/llvm-project/releases/download/llvmorg-$SLATE_LLVM_VERSION/llvm-project-$SLATE_LLVM_VERSION.src.tar.xz" \
+        "$SLATE_WORK/llvm-spike")" || return 1
+}
+
 slate_make_zig_wrappers() {
     slate_ensure_zig || return 1
     if [ ! -x "$SLATE_ZIG" ]; then
@@ -604,4 +633,211 @@ slate_zig_cxx_runtime() {
         return 1
     fi
     printf '%s\n' "$libs"
+}
+
+# Write DIR/cc and DIR/c++, and set SLATE_LINK_CC and SLATE_LINK_CXX to them:
+# zig's cc and c++ for a compile, with posix/include in front of musl's headers
+# (since 2026-10-05), and zig's ld.lld ITSELF for a link, which is made against
+# SlateOS's libc.a, with zig's C++ and compiler runtimes around it.
+#
+#   slate_make_link_wrappers "$WORK/bin"                 # the sysroot's libc.a
+#   slate_make_link_wrappers "$WORK/bin" "$SPIKE_LIBS"   # a copy of it
+#
+# The second argument names a directory holding libc.a and libunwind.a to link
+# instead of the sysroot's, for a port that copies them off the /mnt mount
+# first -- 9p is slow, and a linker reads an archive many times. The copy is
+# the caller's to keep current.
+#
+# WHY NOT `"$SLATE_CC" -static -nostdlib ... libc.a`, as the ports before
+# scripts/llvm-spike/ linked: zig's driver appends its own musl libc.a to every
+# link for this target, whatever it is told -- -nostdlib, -nodefaultlibs,
+# -nostdlib++ (measured with `zig cc -v`, zig 0.13.0, 2026-10-01). Ours comes
+# first, so musl only fills gaps; but a function our libc lacks is then
+# supplied by musl, which calls Linux's system calls, instead of being reported
+# missing (known-issues D-SPIKES-LINK-ZIGS-MUSL-BEHIND-OUR-LIBC). ld.lld links
+# exactly its inputs.
+#
+# THE LIBRARIES GO IN ZIG'S OWN ORDER, with our libc.a where zig puts musl's,
+# and the order is not cosmetic: where two archives define one symbol, ld.lld
+# takes it from the first of them on the line, wherever the reference is.
+# (Which also means no archive needs naming twice, as the ports' links named
+# libc.a until 2026-10-01; once gives a byte-identical binary for all five
+# ported programs.) After the build's own inputs:
+#   1. zig's libc++abi.a, libc++.a and libunwind.a, ahead of our libc.a.
+#      posix/src/crt.rs defines stand-ins for ten C++ ABI entry points and
+#      for _Unwind_Resume, for C++ code linked with no C++ runtime, and they
+#      abort or fail: ahead of the real ones, every `throw` would abort.
+#   2. our libc.a, and our libunwind.a, which is empty: Rust's std asks for it.
+#   3. zig's compiler_rt, LAST. It carries weak copies of memcpy, memset,
+#      memmove, memcmp and some sixty libm functions, all of which ours
+#      defines too; ahead of ours they would be zig's (measured 2026-10-01:
+#      GNU make's sin() was compiler_rt's in a link so ordered, and so were
+#      every port's 128-bit division helpers). Last, it supplies only what
+#      ours lacks, such as __cpu_model and __clear_cache.
+# A C program extracts nothing from 1 unless it calls into it, so a C link and
+# a C++ link are the same link.
+#
+# What a link keeps of what the build gave it: objects, archives, response
+# files, -L, -l, -o, -e, -u, -z, -Wl and -Xlinker. It drops the compiler flags
+# a link line carries, and the -l flags for what is linked anyway: -lc, -lm,
+# -lpthread, -ldl, -lrt, -lutil, -lcrypt, -lresolv and -lxnet, the parts of a
+# C library glibc and musl ship separately, all of them in our libc.a, as
+# -lssp's stack-protector functions are; -lgcc, -lgcc_s, -lgcc_eh and
+# -latomic, the compiler's runtime, which is compiler_rt and libunwind.a here;
+# and -lstdc++, -lsupc++, -lc++, -lc++abi and -lunwind, zig's C++ runtime. It
+# refuses -shared and a linker script (-T): neither has a meaning here, and
+# dropping either would build something other than what was asked for.
+#
+# What goes to zig's driver unchanged: a compile (-c, -S, -E), a relocatable
+# link (-r), and a question about the compiler (its version, its search paths).
+#
+# A call that compiles a source and links it in one step is split: each source
+# is compiled by zig's driver, with the call's compiler flags, into a scratch
+# object, and the objects are linked here like any others. autoconf makes such
+# a call for every link test (AC_LINK_IFELSE, AC_CHECK_FUNC -- `cc -o conftest
+# conftest.c -lfoo`), so this is what lets a configure run through these ask
+# our libc.a what it has. Until 2026-10-05 the whole call went to zig's driver,
+# which linked it against its musl: CPython, configured through these that
+# day, still found none of close_range, sem_clockwait, getwd and tmpnam_r,
+# which ours has and musl has not (known-issues-resolved/
+# D-SPIKES-CPYTHON-WAS-CONFIGURED-FOR-MUSL-NOT-FOR-OUR-LIBC.md). CMake's
+# try_compile compiles, then links, so LLVM's configure never met the gap.
+#
+# The paths are written with printf %q, so the worktree's spaces stay inside
+# them.
+slate_make_link_wrappers() {
+    local dir="${1:-}" libdir="${2:-$SLATE_SYSROOT}"
+    [ -n "$dir" ] || { echo "worktree.sh: slate_make_link_wrappers needs a directory" >&2; return 1; }
+    if [ ! -f "$libdir/libc.a" ] || [ ! -f "$libdir/libunwind.a" ]; then
+        echo "worktree.sh: no libc.a and libunwind.a in $libdir" >&2
+        return 1
+    fi
+    slate_make_zig_wrappers || return 1
+    local runtime lib abi="" cxx="" unwind="" rt=""
+    runtime="$(slate_zig_cxx_runtime)" || return 1
+    # Each archive named, so that a zig whose runtime is not these four stops
+    # here instead of linking in an order nobody chose.
+    while IFS= read -r lib; do
+        case "$lib" in
+            */libc++abi.a) abi="$lib" ;;
+            */libc++.a) cxx="$lib" ;;
+            */libunwind.a) unwind="$lib" ;;
+            */libcompiler_rt.a) rt="$lib" ;;
+            *) abi="" ; break ;;
+        esac
+    done <<<"$runtime"
+    if [ -z "$abi" ] || [ -z "$cxx" ] || [ -z "$unwind" ] || [ -z "$rt" ]; then
+        echo "worktree.sh: zig's runtime is not libc++abi.a, libc++.a, libunwind.a and" >&2
+        echo "             libcompiler_rt.a, the four this link is ordered for. It is:" >&2
+        printf '%s\n' "$runtime" | sed 's/^/                 /' >&2
+        return 1
+    fi
+    mkdir -p "$dir" || return 1
+    SLATE_LINK_CC="$dir/cc"
+    SLATE_LINK_CXX="$dir/c++"
+    local libs=("$abi" "$cxx" "$unwind" "$libdir/libc.a" "$libdir/libunwind.a" "$rt")
+    _slate_write_link_wrapper "$SLATE_LINK_CC" "$SLATE_CC" "${libs[@]}" || return 1
+    _slate_write_link_wrapper "$SLATE_LINK_CXX" "$SLATE_CXX" "${libs[@]}" || return 1
+}
+
+# One wrapper of slate_make_link_wrappers': $1 the file, $2 the zig compiler it
+# wraps, and the rest the libraries a link names after the build's own inputs,
+# in order.
+_slate_write_link_wrapper() {
+    local file="$1" compiler="$2" lib
+    shift 2
+    {
+        printf '#!/bin/bash\n'
+        printf '# Written by scripts/lib/worktree.sh (slate_make_link_wrappers): %s to\n' "$compiler"
+        printf '# compile, ld.lld to link against SlateOS'"'"'s libc. Its comment says why.\n'
+        printf 'cc=%q\n' "$compiler"
+        # posix/include: the headers that declare what our libc.a has beyond
+        # musl's (each stands in front of musl's, design-decisions §1141).
+        # A program built for our libc compiles against them, or what it
+        # links but cannot declare -- close_range, sem_clockwait -- is an
+        # implicit declaration, an error since C99. -I, not -isystem: zig's
+        # driver searches its own libc headers before an -isystem directory.
+        printf 'overlay=%q\n' "$SLATE_ROOT/posix/include"
+        printf 'ld=(%q ld.lld)\n' "$SLATE_ZIG"
+        printf 'libs=('
+        for lib in "$@"; do
+            printf ' %q' "$lib"
+        done
+        printf ' )\n'
+        cat <<'BODY'
+for a in "$@"; do
+    case "$a" in
+        -c|-S|-E|-r|-x*|-|-###|--version|-dumpversion|-dumpfullversion|-dumpmachine|-dumpspecs|-print-*)
+            exec "$cc" -I"$overlay" "$@" ;;
+    esac
+done
+me="${0##*/}"
+# A source on a link line is compiled here, with the line's compiler flags --
+# everything but the output, the inputs and what only a link reads -- and its
+# object linked like any other (worktree.sh's comment says why).
+srcs=() cflags=() skip=0
+for a in "$@"; do
+    if [ "$skip" = 1 ]; then skip=0; continue; fi
+    case "$a" in
+        *.c|*.cc|*.cpp|*.cxx|*.c++|*.C|*.i|*.ii|*.s|*.S) srcs+=("$a") ;;
+        -o|-L|-l|-e|-u|-z|-Xlinker) skip=1 ;;
+        -o?*|-L?*|-l?*|-Wl,*|-static|-static-pie|-pie|-no-pie|-rdynamic|-shared|-s) ;;
+        -nostdlib|-nostartfiles|-nodefaultlibs|-nostdlib++) ;;
+        *.o|*.a|*.so|*.so.*|@?*) ;;
+        *) cflags+=("$a") ;;
+    esac
+done
+objs=() tmp=""
+if [ ${#srcs[@]} -gt 0 ]; then
+    tmp="$(mktemp -d "${TMPDIR:-/tmp}/slate-link.XXXXXX")" || exit 1
+    n=0
+    for s in "${srcs[@]}"; do
+        n=$((n + 1))
+        if ! "$cc" -I"$overlay" "${cflags[@]}" -c "$s" -o "$tmp/$n.o"; then
+            rm -rf "$tmp"
+            exit 1
+        fi
+        objs+=("$tmp/$n.o")
+    done
+fi
+args=()
+while [ $# -gt 0 ]; do
+    a="$1"
+    shift
+    case "$a" in
+        -o|-L|-l|-e|-u|-z|-Xlinker)
+            if [ $# -eq 0 ]; then
+                echo "$me: $a needs an argument" >&2
+                exit 1
+            fi
+            case "$a" in
+                -L|-l) a="$a$1" ;;
+                -Xlinker) args+=("$1") ;;
+                *) args+=("$a" "$1") ;;
+            esac
+            shift
+            case "$a" in -L?*|-l?*) ;; *) continue ;; esac ;;
+        -o?*) a="${a#-o}"; args+=(-o "$a"); continue ;;
+        -shared) echo "$me: SlateOS's libc.a cannot be linked into a shared library" >&2; exit 1 ;;
+        -T*) echo "$me: a linker script ($a) has no place in this link" >&2; exit 1 ;;
+    esac
+    case "$a" in
+        -Wl,*) IFS=, read -r -a w <<<"${a#-Wl,}"; args+=("${w[@]}") ;;
+        -lc|-lm|-lpthread|-ldl|-lrt|-lutil|-lcrypt|-lresolv|-lxnet|-lssp|-lssp_nonshared) ;;
+        -lgcc|-lgcc_s|-lgcc_eh|-latomic) ;;
+        -lstdc++|-lsupc++|-lc++|-lc++abi|-lunwind) ;;
+        -L?*|-l?*|*.o|*.a|@?*) args+=("$a") ;;
+        *) ;;
+    esac
+done
+if [ -z "$tmp" ]; then
+    exec "${ld[@]}" -static --eh-frame-hdr "${args[@]}" "${libs[@]}"
+fi
+"${ld[@]}" -static --eh-frame-hdr "${objs[@]}" "${args[@]}" "${libs[@]}"
+rc=$?
+rm -rf "$tmp"
+exit "$rc"
+BODY
+    } >"$file" || return 1
+    chmod +x "$file"
 }

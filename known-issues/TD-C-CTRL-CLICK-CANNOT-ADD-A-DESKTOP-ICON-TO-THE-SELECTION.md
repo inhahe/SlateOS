@@ -1,10 +1,15 @@
-## TD-C-CTRL-CLICK-CANNOT-ADD-A-DESKTOP-ICON-TO-THE-SELECTION
+## TD-C-CTRL-CLICK-CANNOT-ADD-A-DESKTOP-ICON-TO-THE-SELECTION -- FIXED 2026-10-05
 
-**Status:** OPEN — 2026-09-25. Lane F's field is in (2026-10-03, input
-protocol 9): every pointer event carries the modifiers held, read as
-`oswindow::EventLoop::modifiers()` while handling it. What remains is lane C's
-half, passing `ctrl` to the icon layer; see the reply in
-`requests/c-f-a-pointer-event-cannot-say-ctrl-is-held.md`.
+**Status:** FIXED 2026-10-05 (lane C). Lane F's field came first
+(2026-10-03, input protocol 9): every pointer event carries the modifiers
+held, read as `oswindow::EventLoop::modifiers()` while handling it. Lane C's
+half: `ShellSession::pointer` hands them to the new
+`DesktopShell::handle_mouse_with`, which passes Ctrl to the icon layer on a
+press on the desktop and while a rubber band moves (`handle_mouse` is that
+with none held). Test: `ctrl_click_adds_a_desktop_icon_to_the_selection`,
+through `TestDesktop` -- a plain click selects one icon, a Ctrl+click adds a
+second, a plain click replaces both. Moves to `known-issues-resolved/` once
+boot-tested on main.
 
 **In short:** On the desktop, Ctrl+click replaces the icon selection instead
 of adding to it, and so does a rubber band dragged with Ctrl held. The only

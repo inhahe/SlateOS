@@ -3865,7 +3865,9 @@ impl<T: Transport> ShellSession<T> {
         ) {
             self.refresh_service_menus();
         }
-        let action = self.shell.handle_mouse(event);
+        // With the modifiers the compositor stamped on the event: Ctrl+click
+        // on the desktop, whose surface rarely has the keyboard.
+        let action = self.shell.handle_mouse_with(event, self.events.modifiers());
         self.act(action)?;
         // A tooltip came, went or began waiting to appear, or another tile lit
         // up. What they are drawn on is repainted only when the session is

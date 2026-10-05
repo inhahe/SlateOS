@@ -4862,9 +4862,22 @@ impl DesktopShell {
         Hit::Desktop
     }
 
-    /// Handle a pointer event.
+    /// Handle a pointer event made with no modifier key held -- see
+    /// [`handle_mouse_with`](Self::handle_mouse_with).
+    pub fn handle_mouse(&mut self, event: &MouseEvent) -> ShellAction {
+        self.handle_mouse_with(event, guitk::event::Modifiers::NONE)
+    }
+
+    /// Handle a pointer event, made with `modifiers` held.
     ///
     /// Returns what the caller should do with it — see [`ShellAction`].
+    ///
+    /// The modifiers are the compositor's, stamped on the event when it was
+    /// handled (`oswindow::EventLoop::modifiers`): the desktop's surface
+    /// rarely has the keyboard, so a Ctrl pressed before a click goes to
+    /// whichever window does, and the shell could not know it from keys of
+    /// its own. Ctrl+click on an icon adds it to the selection, and a rubber
+    /// band dragged with Ctrl held adds what it reaches.
     ///
     /// The drain is here, wrapping the whole of the handling, rather than on
     /// the branch that forwards to the pane. *Every* path out of this function
@@ -4876,8 +4889,12 @@ impl DesktopShell {
     /// is the more common of the two.
     ///
     /// [`Closed`]: notif_pane::NotifPaneEvent::Closed
-    pub fn handle_mouse(&mut self, event: &MouseEvent) -> ShellAction {
-        let action = self.handle_mouse_inner(event);
+    pub fn handle_mouse_with(
+        &mut self,
+        event: &MouseEvent,
+        modifiers: guitk::event::Modifiers,
+    ) -> ShellAction {
+        let action = self.handle_mouse_inner(event, modifiers);
         self.settle_switch();
         match (action, self.apply_pane_events()) {
             // A click on a notification card that names a program. The pane
@@ -4892,7 +4909,11 @@ impl DesktopShell {
         }
     }
 
-    fn handle_mouse_inner(&mut self, event: &MouseEvent) -> ShellAction {
+    fn handle_mouse_inner(
+        &mut self,
+        event: &MouseEvent,
+        modifiers: guitk::event::Modifiers,
+    ) -> ShellAction {
         // A text field's menu first of all, ahead of even the rename and the
         // note below: it is opened over the field it is about, and a press on
         // one of its rows must not first put that field down -- keep the
@@ -5298,9 +5319,11 @@ impl DesktopShell {
             // double-click-to-maximize was the only such gesture and belonged
             // to the compositor's title bar. An icon ends it: one click selects
             // it and two open it, which is the whole of what an icon is for.
-            MouseEventKind::Press(button) => self.handle_press(event.x, event.y, button),
+            MouseEventKind::Press(button) => {
+                self.handle_press_with(event.x, event.y, button, modifiers)
+            }
             MouseEventKind::DoubleClick(button) => {
-                self.handle_icon_activate(event.x, event.y, button)
+                self.handle_icon_activate(event.x, event.y, button, modifiers)
             }
             MouseEventKind::Scroll { dy, .. } => self.handle_scroll(event.x, event.y, dy),
             // A release belongs to whoever took the press, so chrome swallows
@@ -5379,7 +5402,10 @@ impl DesktopShell {
                 // area still belongs to it -- that is what makes dragging an
                 // icon to the far edge of the screen work at all.
                 if self.icons.is_interacting() {
-                    self.icons.handle_mouse_move(event.x, event.y, false);
+                    // Ctrl held as a rubber band moves adds what it reaches to
+                    // the selection rather than replacing it.
+                    self.icons
+                        .handle_mouse_move(event.x, event.y, modifiers.ctrl);
                     return ShellAction::Consumed;
                 }
                 // The overview covers the screen, so while it is up nothing
@@ -5720,7 +5746,20 @@ impl DesktopShell {
         )
     }
 
+    /// [`handle_press_with`](Self::handle_press_with), with no modifier key
+    /// held.
     fn handle_press(&mut self, x: f32, y: f32, button: MouseButton) -> ShellAction {
+        self.handle_press_with(x, y, button, guitk::event::Modifiers::NONE)
+    }
+
+    /// A press at `(x, y)` with `button`, made with `modifiers` held.
+    fn handle_press_with(
+        &mut self,
+        x: f32,
+        y: f32,
+        button: MouseButton,
+        modifiers: guitk::event::Modifiers,
+    ) -> ShellAction {
         // Before `hit_test`, and before everything: the overview covers the
         // whole screen, so a press while it is up landed on it whatever the
         // taskbar geometry says. Asking `hit_test` first would let a press over
@@ -6023,8 +6062,9 @@ impl DesktopShell {
             // overwrite.
             Hit::Desktop => {
                 let before = self.icons.selected_ids();
+                // Ctrl+click adds an icon to the selection, or takes it out.
                 self.icons
-                    .handle_mouse_down(x, y, icon_button(button), false);
+                    .handle_mouse_down(x, y, icon_button(button), modifiers.ctrl);
                 if self.icons.selected_ids() == before {
                     // Nothing the user can see changed -- a press on empty
                     // desktop with nothing selected. Still `Pass`, which is the
@@ -13756,9 +13796,15 @@ impl DesktopShell {
     /// [`handle_press`](Self::handle_press), which is what the two used to
     /// share unconditionally: every other surface this shell draws still treats
     /// a second click as another first one.
-    fn handle_icon_activate(&mut self, x: f32, y: f32, button: MouseButton) -> ShellAction {
+    fn handle_icon_activate(
+        &mut self,
+        x: f32,
+        y: f32,
+        button: MouseButton,
+        modifiers: guitk::event::Modifiers,
+    ) -> ShellAction {
         if !matches!(self.hit_test(x, y), Hit::Desktop) || button != MouseButton::Left {
-            return self.handle_press(x, y, button);
+            return self.handle_press_with(x, y, button, modifiers);
         }
         match self.icons.handle_double_click(x, y) {
             icons::IconEvent::Activate(id, action) => self.open_icon(id, &action),

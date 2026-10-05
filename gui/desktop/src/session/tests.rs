@@ -8334,3 +8334,60 @@ fn a_menu_turned_on_elsewhere_is_offered_at_the_next_right_click() {
         );
     });
 }
+
+/// **Ctrl+click on a desktop icon adds it to the selection**, and a plain
+/// click replaces it. The Ctrl arrives stamped on the click's envelope by
+/// the compositor, never as a key: the desktop's surface hardly ever has the
+/// keyboard when a click lands on it.
+#[test]
+fn ctrl_click_adds_a_desktop_icon_to_the_selection() {
+    let (mut session, desktop, _turn) = session();
+    let add = |session: &mut Session, name: &str, y: i32| {
+        session.shell_mut().icons.add_icon(
+            name,
+            crate::icons::IconType::File,
+            crate::icons::IconAction::Custom(name.into()),
+            0,
+            y,
+        )
+    };
+    let first = add(&mut session, "one.txt", 0);
+    let second = add(&mut session, "two.txt", 200);
+    let third = add(&mut session, "three.txt", 400);
+    session.paint_background().expect("paint");
+    let surface = session.background();
+    let centre = |session: &Session, id| {
+        let icon = session.shell().icons.get_icon(id).expect("the icon");
+        (icon.x as f32 + 20.0, icon.y as f32 + 20.0)
+    };
+    let click_with = |session: &mut Session, id, modifiers: Modifiers| {
+        let (x, y) = centre(session, id);
+        let (ox, oy) = surface.origin();
+        desktop.borrow_mut().send_input(&[
+            InputEvent::new(
+                surface.window(),
+                guitk::event::Event::Mouse(click(x - ox, y - oy)),
+            )
+            .with_modifiers(modifiers),
+            InputEvent::new(
+                surface.window(),
+                guitk::event::Event::Mouse(guitk::event::MouseEvent {
+                    x: x - ox,
+                    y: y - oy,
+                    kind: MouseEventKind::Release(MouseButton::Left),
+                }),
+            )
+            .with_modifiers(modifiers),
+        ]);
+        session.pump().expect("pump");
+        let mut selected = session.shell().icons.selected_ids();
+        selected.sort_by_key(|id| id.0);
+        selected
+    };
+    let mut both = vec![first, second];
+    both.sort_by_key(|id| id.0);
+    assert_eq!(click_with(&mut session, first, Modifiers::NONE), [first]);
+    assert_eq!(click_with(&mut session, second, Modifiers::ctrl()), both);
+    // A plain click replaces what was selected.
+    assert_eq!(click_with(&mut session, third, Modifiers::NONE), [third]);
+}

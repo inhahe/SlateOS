@@ -79,6 +79,7 @@ pub mod row_strip;
 pub mod scaling;
 pub mod scroll_window;
 pub mod scrollbar;
+pub mod secretinput;
 pub mod shortcut;
 pub mod slider;
 pub mod splitter;

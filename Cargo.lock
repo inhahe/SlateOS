@@ -721,6 +721,7 @@ dependencies = [
  "msgframe",
  "pwkdf",
  "randrange",
+ "secret",
  "sha2",
  "svcconn",
 ]
@@ -1523,6 +1524,7 @@ dependencies = [
  "pathcodec",
  "randrange",
  "regex",
+ "secret",
  "settingsname",
  "textfind",
  "textfmt",
@@ -3497,6 +3499,10 @@ dependencies = [
  "hex-literal",
  "poly1305",
 ]
+
+[[package]]
+name = "secret"
+version = "0.1.0"
 
 [[package]]
 name = "serde_core"

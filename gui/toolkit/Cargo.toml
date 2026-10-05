@@ -12,6 +12,9 @@ settingsname = { path = "../settingsname" }
 # How a file name that is not text is drawn (`display_os`): one rendering for
 # every widget that shows a name, and the terminal's. No widgets of its own.
 pathcodec = { path = "../pathcodec" }
+# What a password field holds (`secretinput`): kept where it was typed,
+# overwritten when let go, never printed. No dependencies of its own.
+secret = { path = "../secret" }
 textfmt = { path = "../../textfmt" }
 textfind = { path = "../../textfind" }
 

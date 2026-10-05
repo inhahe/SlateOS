@@ -8,10 +8,12 @@
 //! said no, and for a login the user's vault does not hold, alike -- so a
 //! program learns nothing it was not given.
 
-use std::fmt;
-
 pub use msgframe::{Decoded, TooLarge};
 use msgframe::{Protocol, Reader, Writer};
+/// A password: the toolkit's password field's kind of thing, so one typed
+/// into the service's prompt and one sent to a program are handled alike --
+/// overwritten when let go, never printed.
+pub use secret::Secret;
 
 /// The name the credential service registers, and programs connect to.
 pub const SERVICE: &str = "org.slateos.Credentials";
@@ -38,40 +40,6 @@ const KIND_QUERY: u8 = 1;
 const KIND_ANSWER: u8 = 2;
 const OUTCOME_REFUSED: u8 = 0;
 const OUTCOME_LOGIN: u8 = 1;
-
-/// A password: its bytes, overwritten when it is dropped, so it stays in
-/// memory only as long as something holds it -- and never printed.
-#[derive(Clone, PartialEq, Eq)]
-pub struct Secret(Vec<u8>);
-
-impl Secret {
-    /// The secret `bytes`.
-    #[must_use]
-    pub const fn new(bytes: Vec<u8>) -> Self {
-        Self(bytes)
-    }
-
-    /// Its bytes.
-    #[must_use]
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl Drop for Secret {
-    fn drop(&mut self) {
-        self.0.fill(0);
-        // So the overwrite is not taken for a store nothing reads and left
-        // out: the zeros are observed.
-        std::hint::black_box(&self.0);
-    }
-}
-
-impl fmt::Debug for Secret {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Secret(..)")
-    }
-}
 
 /// What a program asks for.
 #[derive(Clone, Debug, PartialEq, Eq)]

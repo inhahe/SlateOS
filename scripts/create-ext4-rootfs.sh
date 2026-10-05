@@ -1145,6 +1145,11 @@ else
     # stdlib.sh stays a manual step, and the gate below still names it.
     spike_rebuild_if_behind "$ROOT_DIR/build/spike/python-slateos.elf" \
         scripts/cpython-spike/slatelink.sh
+    # LLVM's relink is a minute: slatelink.sh links the objects run.sh compiled
+    # against the new libc.a and stages all three tools again. One artifact
+    # stands for the three, which are always linked and staged together.
+    spike_rebuild_if_behind "$ROOT_DIR/build/spike/opt-slateos.elf" \
+        scripts/llvm-spike/slatelink.sh
 fi
 
 # --- GNU bash 5.2, cross-compiled and linked against OUR OWN libc -------------
@@ -1524,6 +1529,57 @@ elif [ -e "$PY_SLATE" ]; then
 else
     echo "[rootfs] NOTE: $PY_SLATE not found — /bin/python3 will be absent"
     echo "[rootfs]       (build it with scripts/cpython-spike/, see its README)"
+fi
+
+# --- LLVM 20.1.8's opt, llc and ld.lld, linked against OUR OWN libc -----------
+# The back half of a compiler, which fastpy needs on SlateOS: it writes LLVM IR
+# and runs these three to make a program of it
+# (requests/b-d-fastpy-on-slateos-needs-llvm-tools.md; scripts/llvm-spike/).
+#
+#   /bin/opt                         the IR optimizer
+#   /bin/llc                         IR to an object file
+#   /bin/ld.lld                      the linker
+#   /usr/lib/x86_64-slateos/libc.a   the C library a program is linked with
+#
+# The three come from one build and are staged together or not at all: an llc
+# without the opt whose output it reads, or a linker without both, is not a
+# toolchain. libc.a is the sysroot's -- the one they and every port on this
+# image were linked against -- and fastpy's link line names
+# -L/usr/lib/x86_64-slateos -lc.
+#
+# Staleness, as for every port: slatelink.sh relinks the three against a newer
+# libc.a (spike_rebuild_if_behind, above), and a stale one is refused below.
+# PROGRAM: /bin/opt -- LLVM 20.1.8's IR optimizer. (scripts/llvm-spike/)
+# PROGRAM: /bin/llc -- LLVM 20.1.8's code generator: LLVM IR to an object file. (scripts/llvm-spike/)
+# PROGRAM: /bin/ld.lld -- LLVM 20.1.8's linker, lld. (scripts/llvm-spike/)
+LLVM_OPT="$ROOT_DIR/build/spike/opt-slateos.elf"
+LLVM_LLC="$ROOT_DIR/build/spike/llc-slateos.elf"
+LLVM_LLD="$ROOT_DIR/build/spike/ld.lld-slateos.elf"
+LLVM_STALE=0
+if [ -e "$LLVM_OPT" ] && [ -e "$LLVM_LLC" ] && [ -e "$LLVM_LLD" ]; then
+    cp -L "$LLVM_OPT" "$STAGE/bin/opt"
+    cp -L "$LLVM_LLC" "$STAGE/bin/llc"
+    cp -L "$LLVM_LLD" "$STAGE/bin/ld.lld"
+    mkdir -p "$STAGE/usr/lib/x86_64-slateos"
+    cp "$SYSROOT_LIBC" "$STAGE/usr/lib/x86_64-slateos/libc.a"
+    echo "[rootfs] staged LLVM 20.1.8 (linked against our libc.a): /bin/opt, /bin/llc," \
+         "/bin/ld.lld + /usr/lib/x86_64-slateos/libc.a"
+    for f in "$LLVM_OPT" "$LLVM_LLC" "$LLVM_LLD"; do
+        if [ -e "$SYSROOT_LIBC" ] && [ "$SYSROOT_LIBC" -nt "$f" ]; then
+            echo "[rootfs] WARNING: $(basename "$f") is OLDER than the sysroot libc.a -- it links"
+            echo "[rootfs]          a stale libc. Relink it, a minute:"
+            echo "[rootfs]            wsl -d Ubuntu -- bash scripts/llvm-spike/slatelink.sh"
+            LLVM_STALE=1
+        fi
+    done
+elif [ -e "$LLVM_OPT" ] || [ -e "$LLVM_LLC" ] || [ -e "$LLVM_LLD" ]; then
+    echo "[rootfs] WARNING: build/spike holds some of LLVM's three tools but not all --"
+    echo "[rootfs]          staging none. Build them together:"
+    echo "[rootfs]            wsl -d Ubuntu -- bash scripts/llvm-spike/run.sh"
+else
+    echo "[rootfs] NOTE: LLVM's tools are not in build/spike -- /bin/opt, /bin/llc and"
+    echo "[rootfs]       /bin/ld.lld will be absent (build them with"
+    echo "[rootfs]       wsl -d Ubuntu -- bash scripts/llvm-spike/run.sh)"
 fi
 
 # --- .pc fixtures for the pkgconf self-test -----------------------------------
@@ -2114,6 +2170,22 @@ if [ "$ESPEAK_STALE" -gt 0 ]; then
         echo "[rootfs]        that is no longer in the build. Relink it:"
         echo "[rootfs]          wsl -d Ubuntu --exec bash scripts/espeak-spike/slatelink.sh"
         echo "[rootfs]        (normally run for you -- this means that relink failed.)"
+        echo "[rootfs]        Or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
+        exit 1
+    fi
+fi
+
+if [ "$LLVM_STALE" -gt 0 ]; then
+    if [ "${ALLOW_STALE_FIXTURES:-0}" = "1" ]; then
+        echo "[rootfs] WARNING: LLVM's tools are stale (see above);" \
+             "continuing because ALLOW_STALE_FIXTURES=1"
+    else
+        echo "[rootfs] ERROR: build/spike's LLVM tools are STALE."
+        echo "[rootfs]        They link an older libc.a than the one in the sysroot, so"
+        echo "[rootfs]        /bin/opt, /bin/llc and /bin/ld.lld on the image would be built"
+        echo "[rootfs]        against a libc that is no longer in the build. Relink them, a"
+        echo "[rootfs]        minute from the objects already compiled:"
+        echo "[rootfs]          wsl -d Ubuntu -- bash scripts/llvm-spike/slatelink.sh"
         echo "[rootfs]        Or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
         exit 1
     fi

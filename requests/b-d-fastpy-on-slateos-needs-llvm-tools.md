@@ -113,3 +113,28 @@ When the tools answer `--version` in a lane D boot (lane D said it would
 message), lane B writes the end-to-end rung — `fastpy /tmp/hello.py -o
 /tmp/hello && /tmp/hello`, with the exact expected output — and files it to
 lane A, whose boot test it joins.
+
+## Lane D — the first two rows, 2026-10-05
+
+**LLVM's tools and `libc.a` are staged.** LLVM 20.1.8's `opt`, `llc` and
+`ld.lld`, each its own static SlateOS program (LLVM 20 builds only lld as a
+multicall driver), cross-built from the pinned source and linked against
+`toolchain/sysroot/lib/libc.a` alone -- 0 undefined and 0 duplicate symbols,
+every link of the build made through `slate_make_link_wrappers`, so
+configure's checks answered for this libc too (`scripts/llvm-spike/`, its
+README has the numbers). The recipe stages `/bin/opt`, `/bin/llc`,
+`/bin/ld.lld` and `/usr/lib/x86_64-slateos/libc.a` together or not at all,
+relinks the three whenever `libc.a` moves on, and refuses stale ones.
+
+`services/ctest-llvm-tools` runs each tool's `--version` and then an IR
+`main` returning 42 through `opt`, `llc` and `ld.lld` -- the commands above,
+`-flavor gnu` included -- and runs the result. It passes under Linux against
+LLVM 18. It is not on `services/ctest-generic.list` yet: the generic C rung
+reaches main with lane A's next publish, and the first boot that runs it is
+the "answers `--version` in a lane D boot" this file waits for; lane D will
+message then.
+
+**Still to do here: rows three and four** -- the image's `python3` holding
+every module the compiler imports (`_posixsubprocess` and `select` are the
+two to check: built in, or absent), and building lane B's bundle in the
+recipe under WSL as "Staging the bundle" asks.

@@ -13,7 +13,7 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**458 programs; 301 on the image, 6 carried inside the kernel.**
+**461 programs; 304 on the image, 6 carried inside the kernel.**
 
 ## Userland utilities and services (`userspace/`, lane B) -- 297
 
@@ -497,7 +497,7 @@ two disagree.
 |---|---|---|---|---|
 | `kernel` | Kernel entry point. |  |  |  |
 
-## Ported programs (`scripts/*-spike/`, lane D) -- 6
+## Ported programs (`scripts/*-spike/`, lane D) -- 9
 
 Upstream C and C++ programs, cross-built against SlateOS's own C library,
 each by its port's scripts. The image carries them when their port has
@@ -508,6 +508,9 @@ been built on the machine that makes it.
 | `bash` | GNU bash 5.2, the shell. | yes | `scripts/bash-spike/` |  |
 | `cmake` | CMake 4.4.3, the build-system generator. | yes | `scripts/cmake-spike/` |  |
 | `espeak-ng` | eSpeak NG 1.52.0, the speech synthesizer. | yes | `scripts/espeak-spike/` |  |
+| `ld.lld` | LLVM 20.1.8's linker, lld. | yes | `scripts/llvm-spike/` |  |
+| `llc` | LLVM 20.1.8's code generator: LLVM IR to an object file. | yes | `scripts/llvm-spike/` |  |
 | `make` | GNU make 4.4.1, the build tool. | yes | `scripts/make-spike/` |  |
+| `opt` | LLVM 20.1.8's IR optimizer. | yes | `scripts/llvm-spike/` |  |
 | `pkgconf` | pkgconf 2.3.0: the compiler and linker flags an installed library needs. | yes | `scripts/pkgconf-spike/` | `pkg-config` |
 | `python3` | CPython 3.12.3, the Python interpreter. | yes | `scripts/cpython-spike/` |  |

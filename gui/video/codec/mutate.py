@@ -534,7 +534,7 @@ DVB_ROWS = [
         "a mode change does not begin afresh",
         "        if state == 1 || state == 2 {",
         "        if state == 1 {",
-        [DVB],
+        [DVB, DVB_VERSION],
     ),
     (
         "a page lists a region twice",

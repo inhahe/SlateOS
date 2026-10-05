@@ -2051,6 +2051,9 @@ def dvb_scenes():
         DvbSet(24000, page(10, 2, [(1, 100, 100), (2, 110, 108), (1, 400, 400)]),
                ("region", 1, 0, 40, 20, 4, 1, 1, [(1, 0, 0)]), ("region", 2, 0, 40, 20, 4, 1, 4, [(1, 0, 0)]),
                ("clut", 1, 0, DVB_FOUR), ("object", DvbObject(1, [[2] * 4] * 2)), ("end",)),
+        # A mode change forgets every region: a page listing one defined
+        # before the change at 24 s -- region 8, at 11 s -- shows nothing.
+        DvbSet(25000, page(10, 0, [(8, 100, 100)]), ("end",)),
     ]
     # A page of the version held changes nothing: the second lists the
     # regions again, and the screen stays clear.
@@ -2186,7 +2189,10 @@ def dvb_damage():
     good = [("region", 1, 0, 200, 24, 4, 1, None, [(1, 0, 0)]), ("clut", 1, 0, DVB_FOUR),
             ("object", DvbObject(1, line))]
     unplaced = DvbObject(9, line).segment()
-    chars = dvb_seg(DVB_OBJECT, struct.pack(">HB", 1, 0x05) + bytes([2]) + b"\x00A\x00B")
+    # An object of characters: none, then bytes that read as pixels would be
+    # a top field of two bytes and no bottom -- damage only as characters,
+    # which FFmpeg does not read, not by any length.
+    chars = dvb_seg(DVB_OBJECT, struct.pack(">HB", 1, 0x05) + bytes([0, 2, 0, 0, 0x10, 0xF0, 0]))
     fields_past = dvb_seg(DVB_OBJECT, struct.pack(">HBHH", 1, 0x01, 400, 400) + bytes(20))
     clut_cut = DvbSet(0, ("clut", 1, 5, DVB_BLUE)).bytes()[:-2]
     clut_cut = clut_cut[:4] + struct.pack(">H", len(clut_cut) - 6) + clut_cut[6:]

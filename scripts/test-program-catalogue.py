@@ -20,7 +20,9 @@ Three checks, cheapest first:
 
 1. The generator's own self-test, so a broken generator is reported as that
    and not as a stale catalogue.
-2. Every binary the workspace builds has a row, and every row is a binary.
+2. Every binary the workspace builds has a row, and so does every program
+   the rootfs recipe's `# PROGRAM:` lines name -- a port, bash or CMake or
+   CPython, which is no cargo target -- and every row is one of the two.
    Implied by 3, and checked first anyway because its failure says *which*
    programs, which is the part the person who added one needs.
 3. The file is exactly what the generator writes now -- descriptions and the
@@ -98,7 +100,10 @@ def main() -> int:
         advise()
         return 1
 
-    built = {p["name"] for p in progs}
+    # The ports are known from the recipe that stages them, not from cargo
+    # (program-catalogue.py's `ports()`); both kinds have rows.
+    ported = catalogue.ports()
+    built = {p["name"] for p in progs} | {p["name"] for p in ported}
     rows = listed(have)
     missing = sorted(built - rows)
     gone = sorted(rows - built)
@@ -113,7 +118,7 @@ def main() -> int:
     else:
         print(f"PASS  every one of the {len(built)} programs has a row, and every row a program")
 
-    if catalogue.render(progs) != have:
+    if catalogue.render(progs, ported) != have:
         failures += 1
         print("FAIL  programs.md is not what the generator writes now -- a "
               "description, a name or the on-image column changed")

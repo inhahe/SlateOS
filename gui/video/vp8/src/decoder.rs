@@ -34,6 +34,7 @@ use crate::Error;
 use crate::decodeframe::{self, Common, FrameError, Refs};
 use crate::frame::Frame;
 use crate::header;
+use crate::threading::{MIN_MACROBLOCKS_PER_THREAD, Threading};
 
 /// The largest picture this decoder accepts by default, in luma samples:
 /// 8192 x 4352, as gui/video/vp9's. libvpx accepts any size VP8 can code
@@ -145,6 +146,8 @@ pub struct Decoder {
     last: usize,
     golden: usize,
     altref: usize,
+    /// How many threads a frame's macroblock rows may decode on.
+    threading: Threading,
 }
 
 impl Default for Decoder {
@@ -168,6 +171,11 @@ impl Decoder {
             last: 1,
             golden: 2,
             altref: 3,
+            threading: Threading {
+                threads: std::thread::available_parallelism()
+                    .map_or(1, std::num::NonZeroUsize::get),
+                min_macroblocks: MIN_MACROBLOCKS_PER_THREAD,
+            },
         }
     }
 
@@ -179,6 +187,36 @@ impl Decoder {
             max_pixels,
             ..Self::new()
         }
+    }
+
+    /// Decode on at most `threads` threads (at least one) from the next
+    /// frame on. A new decoder uses as many as the machine has cores.
+    ///
+    /// A frame's token partitions are what decode in parallel, a row of
+    /// macroblocks to each, so a frame of one partition -- what encoders
+    /// make unless asked for more (`vpxenc --token-parts`) -- decodes on
+    /// one thread whatever this says, as libvpx's do. A small frame decodes
+    /// on fewer than this too: a thread for each 150 macroblocks at most
+    /// (16x16 pixels each; a 640x360 picture has 920), below which starting
+    /// a thread costs more than it saves. The pictures are the same however
+    /// many threads make them.
+    pub fn set_threads(&mut self, threads: usize) {
+        self.threading.threads = threads.max(1);
+    }
+
+    /// How many threads the decoder may use.
+    #[must_use]
+    pub fn threads(&self) -> usize {
+        self.threading.threads
+    }
+
+    /// Give a thread as few as `macroblocks` macroblocks a frame (0: any
+    /// number), rather than the 150 below which threads cost more than they
+    /// save: for tests and measurements, which decode small frames on
+    /// threads to see that they make the same pictures, or what they cost.
+    #[doc(hidden)]
+    pub fn set_min_macroblocks_per_thread(&mut self, macroblocks: usize) {
+        self.threading.min_macroblocks = macroblocks;
     }
 
     /// Decode one frame (one block of a container) and return the picture
@@ -299,6 +337,7 @@ impl Decoder {
                     &mut frame,
                     stale.as_deref(),
                     &refs,
+                    self.threading,
                 )
             }
             _ => Err(FrameError::Error(Error::Corrupt(
@@ -390,6 +429,12 @@ fn ref_cnt_fb(counts: &mut [u8; BUFFERS], idx: &mut usize, new_idx: usize) {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::panic,
+        reason = "a test: a failure should be loud"
+    )]
+
     use super::*;
 
     #[test]
@@ -426,5 +471,196 @@ mod tests {
         let mut idx = 1;
         ref_cnt_fb(&mut counts, &mut idx, 2);
         assert_eq!((counts, idx), ([1, 1, 1, 1], 2));
+    }
+
+    /// The frames of an IVF file.
+    fn ivf_frames(data: &[u8]) -> Vec<Vec<u8>> {
+        let mut frames = Vec::new();
+        let mut at = 32;
+        while let Some(head) = data.get(at..at + 12) {
+            let size = u32::from_le_bytes([head[0], head[1], head[2], head[3]]) as usize;
+            at += 12;
+            let Some(frame) = data.get(at..at + size) else {
+                break;
+            };
+            frames.push(frame.to_vec());
+            at += size;
+        }
+        frames
+    }
+
+    /// The committed test vectors: each one's name and frames.
+    fn committed_vectors() -> Vec<(String, Vec<Vec<u8>>)> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("data");
+        let mut paths: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|e| e == "ivf"))
+            .collect();
+        paths.sort();
+        assert!(!paths.is_empty(), "no vectors in {}", dir.display());
+        paths
+            .iter()
+            .map(|p| {
+                let name = p.file_name().unwrap().to_string_lossy().into_owned();
+                (name, ivf_frames(&std::fs::read(p).unwrap()))
+            })
+            .collect()
+    }
+
+    /// What a decode call returned, with the picture's every byte.
+    type Shown = Result<Option<(bool, Vec<u8>)>, Error>;
+
+    fn shown(result: &Result<Option<Picture>, Error>) -> Shown {
+        result.clone().map(|p| {
+            p.map(|p| {
+                let bytes = p
+                    .frame
+                    .planes
+                    .iter()
+                    .flat_map(|plane| plane.data.iter().copied());
+                (p.corrupted(), bytes.collect())
+            })
+        })
+    }
+
+    /// Assert that two decoders hold the same state: every buffer, borders
+    /// and all, every reference, every count, and what the frame loop keeps
+    /// for the next frame.
+    fn assert_same_state(one: &Decoder, other: &Decoder, what: &str) {
+        assert_eq!(one.slots.len(), other.slots.len(), "{what}");
+        for (i, (a, b)) in one.slots.iter().zip(&other.slots).enumerate() {
+            match (a, b) {
+                (Some(a), Some(b)) => {
+                    for p in 0..3 {
+                        assert!(
+                            a.planes[p].data == b.planes[p].data,
+                            "{what}: buffer {i}, plane {p} differs"
+                        );
+                    }
+                }
+                (None, None) => {}
+                _ => panic!("{what}: buffer {i} is in one decoder only"),
+            }
+        }
+        assert_eq!(one.corrupted, other.corrupted, "{what}");
+        assert_eq!(one.ref_cnt, other.ref_cnt, "{what}");
+        let refs = |d: &Decoder| (d.last, d.golden, d.altref);
+        assert_eq!(refs(one), refs(other), "{what}");
+        let skips = |d: &Decoder| {
+            let cells = d.common.grid.cells.iter();
+            cells.map(|c| c.mb_skip_coeff).collect::<Vec<_>>()
+        };
+        assert!(skips(one) == skips(other), "{what}: skip flags differ");
+        assert_eq!(one.common.above(), other.common.above(), "{what}");
+    }
+
+    /// Decode `frames` on one thread and on several in step, holding each
+    /// picture until the next if `hold` (so frames decode into fresh
+    /// buffers), and assert that every frame leaves the same state.
+    fn decode_alike(name: &str, frames: &[Vec<u8>], hold: bool) {
+        let mut decoders: Vec<Decoder> = [1, 2, 3, 8]
+            .into_iter()
+            .map(|threads| {
+                let mut d = Decoder::new();
+                d.set_threads(threads);
+                // The committed vectors are far too small to be given
+                // threads otherwise.
+                d.set_min_macroblocks_per_thread(0);
+                d
+            })
+            .collect();
+        let mut held: Vec<Option<Picture>> = vec![None; decoders.len()];
+        for (i, frame) in frames.iter().enumerate() {
+            let results: Vec<_> = decoders.iter_mut().map(|d| d.decode(frame)).collect();
+            let what = format!("{name}, frame {i}");
+            for (d, r) in decoders.iter().zip(&results).skip(1) {
+                let threads = d.threads();
+                assert!(
+                    shown(&results[0]) == shown(r),
+                    "{what} on {threads} threads"
+                );
+                assert_same_state(&decoders[0], d, &format!("{what} on {threads} threads"));
+            }
+            if hold {
+                for (h, r) in held.iter_mut().zip(results) {
+                    *h = r.ok().flatten();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_vector_leaves_the_same_buffers_on_any_number_of_threads() {
+        let (threaded, _) = crate::threading::TALLY.get();
+        for (name, frames) in committed_vectors() {
+            decode_alike(&name, &frames, false);
+            decode_alike(&name, &frames, true);
+        }
+        let (now, _) = crate::threading::TALLY.get();
+        // The partitions vectors have two, four and eight partitions.
+        assert!(
+            now - threaded >= 100,
+            "only {} frames decoded on threads",
+            now - threaded
+        );
+    }
+
+    #[test]
+    fn a_small_frame_decodes_on_one_thread_unless_told_otherwise() {
+        let vectors = committed_vectors();
+        let (_, frames) = vectors
+            .iter()
+            .find(|(name, _)| name == "vp80-04-partitions-1406.ivf")
+            .unwrap();
+        let decode = |min_macroblocks| {
+            let (threaded, _) = crate::threading::TALLY.get();
+            let mut d = Decoder::new();
+            d.set_threads(8);
+            d.set_min_macroblocks_per_thread(min_macroblocks);
+            for frame in frames {
+                d.decode(frame).unwrap();
+            }
+            crate::threading::TALLY.get().0 - threaded
+        };
+        // 176x144: 99 macroblocks, too few for a second thread.
+        assert_eq!(decode(MIN_MACROBLOCKS_PER_THREAD), 0);
+        // Eight partitions, nine rows: threads, when allowed any frame.
+        assert_eq!(decode(0), frames.len());
+    }
+
+    #[test]
+    fn damaged_streams_leave_the_same_buffers_on_any_number_of_threads() {
+        // Numerical Recipes' generator.
+        let mut seed = 0x5eed_0f08_u32;
+        let mut next = |n: usize| {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 8) as usize % n.max(1)
+        };
+        for (name, frames) in committed_vectors() {
+            for round in 0..6 {
+                let damaged: Vec<Vec<u8>> = frames
+                    .iter()
+                    .take(12)
+                    .map(|f| {
+                        let mut f = f.clone();
+                        for _ in 0..next(6) {
+                            let at = next(f.len());
+                            if let Some(b) = f.get_mut(at) {
+                                *b ^= (next(255) + 1) as u8;
+                            }
+                        }
+                        if next(5) == 0 {
+                            let len = next(f.len() + 1);
+                            f.truncate(len);
+                        }
+                        f
+                    })
+                    .collect();
+                decode_alike(&format!("{name}, damage {round}"), &damaged, round % 2 == 1);
+            }
+        }
     }
 }

@@ -95,6 +95,40 @@ impl Plane {
     }
 }
 
+/// Where macroblocks are reconstructed and filtered: a frame's three planes
+/// ([`Frame::target`]), or a band of rows of them a thread works on, each
+/// with the index pixel (0, 0) has in its slice -- before the slice's start,
+/// for a band below the top, so signed.
+pub(crate) struct Target<'a> {
+    pub(crate) planes: [&'a mut [u8]; 3],
+    pub(crate) strides: [usize; 3],
+    origins: [isize; 3],
+}
+
+impl<'a> Target<'a> {
+    /// A view of `planes`, rows `strides` apart, in which pixel (0, 0) of
+    /// each would be at `origins`.
+    pub(crate) fn new(planes: [&'a mut [u8]; 3], strides: [usize; 3], origins: [isize; 3]) -> Self {
+        Self {
+            planes,
+            strides,
+            origins,
+        }
+    }
+
+    /// The index of the pixel `x` right and `y` down of (0, 0) in plane `p`,
+    /// which must be one the view holds.
+    #[inline]
+    #[allow(
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss,
+        reason = "positions within planes of at most 16384 pixels a side and their border; a pixel the view holds is at a non-negative index"
+    )]
+    pub(crate) fn at(&self, p: usize, x: usize, y: usize) -> usize {
+        (self.origins[p] + (y * self.strides[p] + x) as isize) as usize
+    }
+}
+
 /// A decoded frame: libvpx's `YV12_BUFFER_CONFIG`, less its `corrupted`
 /// flag, which the decoder keeps beside its buffers.
 #[derive(Clone, Debug)]
@@ -135,6 +169,22 @@ impl Frame {
             display_width: width,
             display_height: height,
         }
+    }
+
+    /// The whole frame as a [`Target`].
+    #[allow(
+        clippy::cast_possible_wrap,
+        reason = "an origin is a border's rows and columns into a plane of at most 16384 pixels a side"
+    )]
+    pub(crate) fn target(&mut self) -> Target<'_> {
+        let [y, u, v] = &mut self.planes;
+        let origins = [
+            y.origin() as isize,
+            u.origin() as isize,
+            v.origin() as isize,
+        ];
+        let strides = [y.stride, u.stride, v.stride];
+        Target::new([&mut y.data, &mut u.data, &mut v.data], strides, origins)
     }
 
     /// Prepare the row above the picture for intra prediction: 127 from the

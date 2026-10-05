@@ -10,6 +10,8 @@
     clippy::float_cmp
 )]
 
+use std::fmt::Write as _;
+
 use super::super::SvgDocument;
 use super::kept;
 
@@ -127,4 +129,56 @@ fn a_mask_and_a_clip_multiply() {
     let a = alphas(svg);
     // Kept: the left half of the top half.
     assert_eq!((a[0], a[2], a[2 * 4], a[2 * 4 + 2]), (255, 0, 0, 0));
+}
+
+/// **Past the drawing's budget for scratch surfaces, a mask keeps nothing**:
+/// with none left, what it masks is not drawn; with enough, it is.
+#[test]
+fn past_the_budget_a_mask_keeps_nothing() {
+    let doc = SvgDocument::parse(&masked(
+        r#"<mask id="m"><rect width="4" height="4" fill="white"/></mask>"#,
+    ))
+    .unwrap();
+    let drawn_with = |budget: usize| {
+        let mut renderer =
+            super::super::SvgRenderer::new(4, 4, &doc.defs, &doc.reused, &doc.clips, &doc.masks);
+        renderer.scratch_budget = budget;
+        let buffer = doc.draw(renderer);
+        buffer.chunks_exact(4).map(|p| p[3]).max().unwrap()
+    };
+    assert_eq!(drawn_with(0), 0);
+    // The mask's region at 4 by 4 is the whole surface: sixteen pixels.
+    assert_eq!(drawn_with(15), 0);
+    assert_eq!(drawn_with(16), 255);
+}
+
+/// **A mask masked by itself many times over is drawn in bounded time**:
+/// ten elements in a mask, each masked by that mask, would draw ten scratch
+/// surfaces at the first level and a hundred million at the eighth -- hours
+/// of work from a document of a dozen lines. The drawing's budget for them
+/// ends it.
+#[test]
+fn a_mask_masked_by_itself_many_times_over_ends() {
+    let mut strips = String::new();
+    for i in 0..10 {
+        write!(
+            strips,
+            r#"<rect x="{i}" width="1" height="10" fill="white" mask="url(#m)"/>"#
+        )
+        .unwrap();
+    }
+    let svg = format!(
+        r#"<svg viewBox="0 0 10 10"><mask id="m" maskUnits="userSpaceOnUse" x="0" y="0" width="10" height="10">{strips}</mask>
+<rect width="10" height="10" fill="red" mask="url(#m)"/></svg>"#
+    );
+    let doc = SvgDocument::parse(&svg).unwrap();
+    let start = std::time::Instant::now();
+    let _ = doc.render(64, 64);
+    // Unbounded, this takes hours; bounded, well under a second in a debug
+    // build. The ceiling is wide for a loaded machine.
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(30),
+        "{:?}",
+        start.elapsed()
+    );
 }

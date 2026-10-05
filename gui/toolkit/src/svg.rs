@@ -1407,19 +1407,25 @@ impl SvgDocument {
     /// a drawing asked for at another shape is not stretched. A view box with
     /// no area draws nothing.
     pub fn render(&self, width: u32, height: u32) -> Vec<u8> {
-        let mut renderer = SvgRenderer::new(
+        self.draw(SvgRenderer::new(
             width,
             height,
             &self.defs,
             &self.reused,
             &self.clips,
             &self.masks,
-        );
+        ))
+    }
+
+    /// The document drawn by `renderer`, its view box fitted to the
+    /// renderer's pixels: [`render`](Self::render)'s work, apart from making
+    /// the renderer -- so a test can draw with one whose budgets it set.
+    fn draw(&self, mut renderer: SvgRenderer<'_>) -> Vec<u8> {
         let aspect = match &self.root {
             SvgNode::Svg { aspect, .. } => *aspect,
             _ => AspectRatio::DEFAULT,
         };
-        let pixels = (0.0, 0.0, width as f32, height as f32);
+        let pixels = (0.0, 0.0, renderer.width as f32, renderer.height as f32);
         if let Some(fit) = fit_view_box(self.viewbox(), aspect, pixels) {
             renderer.render_node(&self.root, fit, &ResolvedStyle::default());
         }
@@ -3931,6 +3937,9 @@ struct SvgRenderer<'d> {
     /// How many masks' content this drawing is inside: a mask whose content
     /// is masked by itself ends at [`MAX_CLIP_DEPTH`].
     mask_depth: usize,
+    /// How many more pixels of scratch surface masks may draw on, in all
+    /// ([`SCRATCH_PER_PIXEL`]).
+    scratch_budget: usize,
     /// What the clips and masks around the node being drawn leave of each
     /// pixel: coverage is multiplied by it. `None` where nothing is clipped.
     mask: Option<Rc<Mask>>,
@@ -3954,6 +3963,20 @@ const MAX_DRAWN_DEPTH: usize = 2 * MAX_NESTING;
 /// repeats, and bounds the time one takes.
 const MAX_REUSED_NODES: usize = 100_000;
 
+/// How many pixels of scratch surface a drawing's masks may draw on, in all,
+/// for each pixel of the drawing -- and at least [`MIN_SCRATCH_PIXELS`].
+///
+/// A mask's content is drawn on a surface of its own, and an element in it
+/// may be masked again. Depth alone does not bound that: ten elements in a
+/// mask, each masked by that mask, is ten surfaces at the first level and a
+/// hundred million at the eighth. Past the budget a mask keeps nothing,
+/// which leaves what it masks undrawn rather than the drawing unfinished.
+const SCRATCH_PER_PIXEL: usize = 16;
+
+/// The least scratch surface a drawing's masks may draw on: a small drawing
+/// may still mask with a surface larger than itself.
+const MIN_SCRATCH_PIXELS: usize = 1 << 20;
+
 impl<'d> SvgRenderer<'d> {
     fn new(
         width: u32,
@@ -3974,6 +3997,9 @@ impl<'d> SvgRenderer<'d> {
             .and_then(|(w, h)| w.checked_mul(h))
             .and_then(|pixels| pixels.checked_mul(4))
             .unwrap_or(0);
+        let scratch_budget = (size / 4)
+            .saturating_mul(SCRATCH_PER_PIXEL)
+            .max(MIN_SCRATCH_PIXELS);
         Self {
             width,
             height,
@@ -3987,6 +4013,7 @@ impl<'d> SvgRenderer<'d> {
             clips,
             masks,
             mask_depth: 0,
+            scratch_budget,
             mask: None,
         }
     }
@@ -4139,6 +4166,18 @@ impl<'d> SvgRenderer<'d> {
         let Some((x0, y0, x1, y1)) = extent.pixels(self.width, self.height) else {
             return Some(Mask::nothing());
         };
+        // Its surface comes out of the drawing's budget for them; past it,
+        // the mask keeps nothing.
+        let area =
+            u64::from(x1.saturating_sub(x0)).saturating_mul(u64::from(y1.saturating_sub(y0)));
+        let Some(left) = usize::try_from(area)
+            .ok()
+            .and_then(|area| self.scratch_budget.checked_sub(area))
+        else {
+            self.scratch_budget = 0;
+            return Some(Mask::nothing());
+        };
+        self.scratch_budget = left;
         #[allow(
             clippy::cast_precision_loss,
             reason = "a pixel coordinate on the surface, far inside f32's exact range"
@@ -4156,6 +4195,7 @@ impl<'d> SvgRenderer<'d> {
         scratch.depth = self.depth;
         scratch.drawing.clone_from(&self.drawing);
         scratch.reuse_budget = self.reuse_budget;
+        scratch.scratch_budget = self.scratch_budget;
         // Nothing outside the rectangle is kept: the content is drawn cut to
         // it.
         let rect: Vec<Subpath> =
@@ -4167,8 +4207,10 @@ impl<'d> SvgRenderer<'d> {
         for child in &def.children {
             scratch.render_node(child, content, &ResolvedStyle::default());
         }
-        // What the mask's content drew through `<use>`s is spent.
+        // What the mask's content drew through `<use>`s, and on surfaces of
+        // its own, is spent.
         self.reuse_budget = scratch.reuse_budget;
+        self.scratch_budget = scratch.scratch_budget;
         let left = scratch
             .buffer
             .chunks_exact(4)

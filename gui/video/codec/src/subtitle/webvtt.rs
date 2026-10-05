@@ -30,16 +30,199 @@
 //! (`srt::escape`); ffmpeg writes `{` as ASS's `\{{}`, which only an ASS
 //! renderer reads.
 //!
-//! Not yet read: a cue's settings (`line:0`, `align:start`), which place it.
+//! **A cue's settings place it** (`line:0`, `align:start position:0%`),
+//! which ffmpeg ignores: as `{\anN}` at the cue's start, the one of SRT's
+//! nine places its text's anchor falls in ([`placement`]).
 
 use super::srt::{Op, Toggle};
 
 /// The elements cue text nests, the specification's eight.
 const ELEMENTS: [&str; 8] = ["c", "i", "b", "u", "ruby", "rt", "v", "lang"];
 
-/// The cue's steps.
-pub(crate) fn ops(text: &str) -> Vec<Op> {
-    let mut out = Vec::new();
+/// A line's height, as a share of the picture's: what a cue's line number
+/// counts in. Browsers set cue text 5% of the picture high, a line about a
+/// sixteenth more.
+const LINE_HEIGHT: f64 = 5.33;
+
+/// How a cue's text is aligned: the `align` setting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Align {
+    Start,
+    Center,
+    End,
+    Left,
+    Right,
+}
+
+/// Which point of the cue's box `position` names: its alignment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Anchor {
+    LineLeft,
+    Center,
+    LineRight,
+}
+
+/// Where the cue's `settings` put it, as SRT's `{\anN}` puts a cue: the
+/// place on a numeric keypad; `None` for bottom centre, SRT's own.
+///
+/// SRT has nine places and WebVTT a continuum: this is the one the text's
+/// anchor falls in, the picture cut in thirds each way. The anchor is where
+/// the specification lays a horizontal cue's text ("apply WebVTT cue
+/// settings"): across, its box -- `position` and `size`, the position its
+/// left edge, middle or right edge as `position`'s alignment or else `align`
+/// says, the size no wider than fits -- and in the box its left edge for
+/// `start` and `left`, its right for `end` and `right`, its middle for
+/// `center`; down, `line`, a percentage, or a line number counted from the
+/// top when it is not negative and from the bottom when it is. A setting
+/// the specification would pass over (`line:abc`, `position:50`) is passed
+/// over. A vertical cue (`vertical:rl`) has no place in SRT, and is put
+/// where a cue without settings goes.
+pub(crate) fn placement(settings: &str) -> Option<u8> {
+    let mut vertical = false;
+    let mut line: Option<f64> = None;
+    let mut position: Option<(f64, Option<Anchor>)> = None;
+    let mut size = 100.0;
+    let mut align = Align::Center;
+    let separators = [' ', '\t', '\n', '\r', '\u{c}'];
+    for setting in settings.split(separators).filter(|s| !s.is_empty()) {
+        let Some((name, value)) = setting.split_once(':') else {
+            continue;
+        };
+        match name {
+            "vertical" if matches!(value, "rl" | "lr") => vertical = true,
+            "line" => line = line_setting(value).or(line),
+            "position" => position = position_setting(value).or(position),
+            "size" => size = percentage(value).unwrap_or(size),
+            "align" => {
+                align = match value {
+                    "start" => Align::Start,
+                    "center" => Align::Center,
+                    "end" => Align::End,
+                    "left" => Align::Left,
+                    "right" => Align::Right,
+                    _ => align,
+                };
+            }
+            _ => {}
+        }
+    }
+    if vertical {
+        return None;
+    }
+    let (start, end) = (
+        matches!(align, Align::Start | Align::Left),
+        matches!(align, Align::End | Align::Right),
+    );
+    let (at, anchor) = position.unwrap_or((
+        if start {
+            0.0
+        } else if end {
+            100.0
+        } else {
+            50.0
+        },
+        None,
+    ));
+    let anchor = anchor.unwrap_or(if start {
+        Anchor::LineLeft
+    } else if end {
+        Anchor::LineRight
+    } else {
+        Anchor::Center
+    });
+    let widest = match anchor {
+        Anchor::LineLeft => 100.0 - at,
+        Anchor::LineRight => at,
+        Anchor::Center => 2.0 * at.min(100.0 - at),
+    };
+    let width = size.min(widest);
+    let left = match anchor {
+        Anchor::LineLeft => at,
+        Anchor::LineRight => at - width,
+        Anchor::Center => at - width / 2.0,
+    };
+    let x = if start {
+        left
+    } else if end {
+        left + width
+    } else {
+        left + width / 2.0
+    };
+    let y = line.unwrap_or(100.0);
+    let column = if x < 100.0 / 3.0 {
+        0
+    } else if x > 200.0 / 3.0 {
+        2
+    } else {
+        1
+    };
+    let row: u8 = if y < 100.0 / 3.0 {
+        7
+    } else if y < 200.0 / 3.0 {
+        4
+    } else {
+        1
+    };
+    let place = row.saturating_add(column);
+    (place != 2).then_some(place)
+}
+
+/// `line`'s value -- a line number, or a percentage, then an alignment --
+/// as how far down the picture its text's anchor is, as a percentage.
+fn line_setting(value: &str) -> Option<f64> {
+    let (at, alignment) = value
+        .split_once(',')
+        .map_or((value, None), |(a, b)| (a, Some(b)));
+    if alignment.is_some_and(|a| !matches!(a, "start" | "center" | "end")) {
+        return None;
+    }
+    if at.ends_with('%') {
+        return percentage(at);
+    }
+    let digits = at.strip_prefix('-').unwrap_or(at);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let n: f64 = at.parse().ok()?;
+    let lines = n * LINE_HEIGHT;
+    Some(if n < 0.0 { 100.0 + lines } else { lines }.clamp(0.0, 100.0))
+}
+
+/// `position`'s value: a percentage, then an alignment.
+fn position_setting(value: &str) -> Option<(f64, Option<Anchor>)> {
+    let (at, alignment) = value
+        .split_once(',')
+        .map_or((value, None), |(a, b)| (a, Some(b)));
+    let anchor = match alignment {
+        None => None,
+        Some("line-left") => Some(Anchor::LineLeft),
+        Some("center") => Some(Anchor::Center),
+        Some("line-right") => Some(Anchor::LineRight),
+        Some(_) => return None,
+    };
+    Some((percentage(at)?, anchor))
+}
+
+/// A WebVTT percentage: digits, a fraction if any, `%`; 0 to 100.
+fn percentage(value: &str) -> Option<f64> {
+    let number = value.strip_suffix('%')?;
+    let (whole, fraction) = number
+        .split_once('.')
+        .map_or((number, None), |(w, f)| (w, Some(f)));
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if !digits(whole) || fraction.is_some_and(|f| !digits(f)) {
+        return None;
+    }
+    number
+        .parse::<f64>()
+        .ok()
+        .filter(|p| (0.0..=100.0).contains(p))
+}
+
+/// The cue's steps: its place, if its `settings` give one other than bottom
+/// centre, then its text.
+pub(crate) fn ops(text: &str, settings: &str) -> Vec<Op> {
+    let mut out: Vec<Op> = placement(settings).map(Op::Align).into_iter().collect();
     let mut plain = String::new();
     // The elements open, innermost last.
     let mut open: Vec<&str> = Vec::new();
@@ -189,11 +372,47 @@ mod tests {
     use super::*;
 
     fn srt(text: &str) -> String {
+        placed(text, "")
+    }
+
+    fn placed(text: &str, settings: &str) -> String {
         let mut w = Writer::new();
-        for op in ops(text) {
+        for op in ops(text, settings) {
             w.op(op);
         }
         w.finish()
+    }
+
+    #[test]
+    fn settings_place_a_cue_in_the_third_its_anchor_falls_in() {
+        let cases = [
+            ("", None),
+            ("line:0", Some(8)),
+            ("line:-1", None),
+            ("line:7", Some(5)),
+            ("line:-7", Some(5)),
+            ("line:50%", Some(5)),
+            ("line:10%,end", Some(8)),
+            // YouTube's: left-aligned at the left edge.
+            ("align:start position:0%", Some(1)),
+            ("align:end", Some(3)),
+            ("align:left line:10%", Some(7)),
+            ("line:0 position:90% align:end", Some(9)),
+            ("align:center position:20%", Some(1)),
+            ("size:50% align:start", Some(1)),
+            // A box from 0 to 80%, its text centred at 40%: bottom centre.
+            ("position:80%,line-right", None),
+            // Settings the specification passes over.
+            ("line:6.5 position:50 size:120% align:middle", None),
+            ("line:0,bottom", None),
+            // No place in SRT for a vertical cue.
+            ("vertical:rl line:0", None),
+        ];
+        for (settings, place) in cases {
+            assert_eq!(placement(settings), place, "{settings:?}");
+        }
+        assert_eq!(placed("x", "line:0"), "{\\an8}x");
+        assert_eq!(placed("<i>x</i>", "align:end"), "{\\an3}<i>x</i>");
     }
 
     #[test]

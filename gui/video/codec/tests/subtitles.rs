@@ -141,6 +141,52 @@ fn overlapping_cues() {
     held_to_its_answer("overlap", "overlap.mkv", SubtitleFormat::SubRip);
 }
 
+#[test]
+fn timed_text_in_mp4_as_ffmpeg_writes_it() {
+    held_to_its_answer("movtext", "movtext.mp4", SubtitleFormat::MovText);
+}
+
+#[test]
+fn timed_text_style_runs() {
+    held_to_its_answer(
+        "movtext_styles",
+        "movtext_styles.mp4",
+        SubtitleFormat::MovText,
+    );
+}
+
+#[test]
+fn timed_text_with_a_styled_default() {
+    held_to_its_answer(
+        "movtext_default",
+        "movtext_default.mp4",
+        SubtitleFormat::MovText,
+    );
+}
+
+#[test]
+fn timed_text_justified() {
+    held_to_its_answer(
+        "movtext_justified",
+        "movtext_justified.mp4",
+        SubtitleFormat::MovText,
+    );
+}
+
+#[test]
+fn a_seek_in_timed_text_lands_on_the_cue_showing_then() {
+    let all = answers("movtext_styles.srt");
+    // Cue 4 shows from 5.5 s to 6.5 s; between cues, the next one.
+    let texts = |from: usize| {
+        all[from..]
+            .iter()
+            .map(|c| c.text.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(after_seek("movtext_styles.mp4", 6.0), texts(3));
+    assert_eq!(after_seek("movtext_styles.mp4", 6.7), texts(4));
+}
+
 /// The texts of the cues read after seeking `file` to `seconds`.
 fn after_seek(file: &str, seconds: f64) -> Vec<String> {
     let mut subtitles = Subtitles::open(File::open(data(file)).unwrap()).unwrap();

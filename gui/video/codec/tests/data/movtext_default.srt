@@ -1,0 +1,12 @@
+1
+00:00:01,000 --> 00:00:02,000
+<font face="Georgia" size="24" color="#ffff00"><b><i>{\an7}styled by default</i></b></font>
+
+2
+00:00:02,500 --> 00:00:03,500
+<font face="Georgia" size="24" color="#ffff00"><b><i>{\an7}</i></b><font color="#ffffff">plain part</font></font><font face="Georgia" size="24" color="#ffff00"><b><i> then styled</i></b></font>
+
+3
+00:00:04,000 --> 00:00:05,000
+<font face="Georgia" size="24" color="#ffff00"><b><i>{\an7}<font size="12">small</font></i></b></font>
+

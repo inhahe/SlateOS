@@ -36,6 +36,11 @@ def seeks(name):
     return f"seeks_in_{name}"
 
 
+# One track read alone (`Demuxer::select_tracks`), and the read-ahead.
+ALONE = "a_track_selected_alone_gives_the_packets_it_gives_among_the_others"
+ALONE_READS_OWN = "a_track_selected_alone_reads_its_own_samples_alone"
+
+
 INDEX = [
     (
         "PCM is not read in chunks",
@@ -274,6 +279,24 @@ PARSE = [
         "            d.frame_duration = sc.tts.first().map(|t| t.duration);",
         [packets("stts_negative")],
     ),
+    (
+        "a timed text sample entry is not subtitles",
+        "                if let Some(c) = subtitle_codec(format) {",
+        "                if let Some(c) = subtitle_codec(format).filter(|_| false) {",
+        [packets("mov_text")],
+    ),
+    (
+        "a subtitle track's setup is not kept",
+        "            d.config = setup;",
+        "            let _ = setup;",
+        [packets("mov_text")],
+    ),
+    (
+        "a subtitle track's setup runs from the sample entry's start",
+        "        let read = self.r.pos().saturating_sub(start);",
+        "        let read = 0;",
+        [packets("mov_text")],
+    ),
 ]
 
 DEMUX = [
@@ -312,6 +335,54 @@ DEMUX = [
         "            timestamp.wrapping_sub(sc.min_corrected_pts.wrapping_add(i64::from(sc.dts_shift)));",
         "            timestamp.wrapping_sub(0 * sc.min_corrected_pts.wrapping_add(i64::from(sc.dts_shift)));",
         [seeks("h264_bframes"), seeks("mpeg4_bframes")],
+    ),
+    (
+        "a track not selected is read and given",
+        "                || self.selected.as_ref().is_some_and(|s| !s.contains(&i));",
+        "                || false && self.selected.as_ref().is_some_and(|s| !s.contains(&i));",
+        [ALONE, ALONE_READS_OWN],
+    ),
+    (
+        "a track not selected is read, then let go",
+        "            if !discarded {\n                let pos",
+        "            if true {\n                let pos",
+        [ALONE_READS_OWN],
+    ),
+]
+
+TRACK = [
+    (
+        "QuickTime's text sample entry is not timed text",
+        '        b"tx3g" | b"text" => Some(Codec::MovText),',
+        '        b"tx3g" => Some(Codec::MovText),',
+        ["a_code_is_subtitles_by_ffmpegs_table"],
+    ),
+    (
+        "CEA-608 captions are not subtitles",
+        '        b"c608" => Some(Codec::Other),\n',
+        "",
+        ["a_code_is_subtitles_by_ffmpegs_table"],
+    ),
+]
+
+READER = [
+    (
+        "a new read-ahead reads on from where the old one had read to",
+        "        if let Err(e) = old.seek(SeekFrom::Start(self.pos)) {",
+        "        if let Err(e) = old.stream_position() {",
+        ["a_new_read_ahead_reads_on_from_where_reading_is", ALONE],
+    ),
+    (
+        "a new read-ahead keeps the old one's size",
+        "        self.inner = Some(BufReader::with_capacity(bytes, old.into_inner()));",
+        "        self.inner = Some(BufReader::with_capacity(READ_AHEAD, old.into_inner()));",
+        ["a_small_read_ahead_reads_little_past_what_is_read"],
+    ),
+    (
+        "a read-ahead that cannot be changed loses the source",
+        "            self.inner = Some(old);\n            return Err(e.into());",
+        "            return Err(e.into());",
+        ["a_read_ahead_that_cannot_be_changed_leaves_reading_as_it_was"],
     ),
 ]
 
@@ -355,6 +426,8 @@ if __name__ == "__main__":
         (SRC / "demux.rs", DEMUX),
         (SRC / "lib.rs", PROBE),
         (SRC / "rational.rs", RATIONAL),
+        (SRC / "track.rs", TRACK),
+        (SRC / "reader.rs", READER),
     ]
     names = [name for _, rows in tables for name, *_ in rows]
     unmatched = [o for o in only if not any(o in n for n in names)]

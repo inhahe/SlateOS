@@ -65,6 +65,20 @@ fn simple(relative: i16, key: bool, frame: &[u8]) -> Vec<u8> {
     block(1, relative, key, frame)
 }
 
+/// A BlockGroup of `track`, `relative` ticks into its Cluster: a key frame
+/// (no ReferenceBlock) and `addition` as its BlockAdditional 1.
+fn group(track: u8, relative: i16, frame: &[u8], addition: &[u8]) -> Vec<u8> {
+    let mut body = vec![0x80 | track];
+    body.extend(relative.to_be_bytes());
+    body.push(0);
+    body.extend_from_slice(frame);
+    let more = el(&[0xA6], &[uint(&[0xEE], 1), el(&[0xA5], addition)].concat());
+    el(
+        &[0xA0],
+        &[el(&[0xA1], &body), el(&[0x75, 0xA1], &more)].concat(),
+    )
+}
+
 fn cluster(time: u64, blocks: &[Vec<u8>]) -> Vec<u8> {
     el(CLUSTER, &[uint(&[0xE7], time), blocks.concat()].concat())
 }
@@ -476,19 +490,24 @@ impl<R: Seek> Seek for Counted<R> {
 
 /// A track read alone reads its own blocks and only the headers of the
 /// others: a film's sound, or its subtitles, read through a handle of their
-/// own, do not read the film's pictures over again.
+/// own, do not read the film's pictures over again -- a BlockGroup's
+/// additions (a picture's alpha) no more than its Block.
 #[test]
 fn a_track_selected_alone_reads_little_of_the_others() {
     // A second of video at 24 frames, 30 KiB a frame -- a film's size -- a
-    // frame of sound after each.
+    // frame of sound after each; every other frame a BlockGroup, its alpha
+    // as big as its picture.
     let clusters: Vec<Vec<u8>> = (0..4u8)
         .map(|c| {
             let blocks: Vec<Vec<u8>> = (0..6i16)
                 .flat_map(|f| {
-                    [
-                        block(1, f * 42, f == 0, &vec![c; 30 * 1024]),
-                        block(2, f * 42, true, b"sound"),
-                    ]
+                    let frame = vec![c; 30 * 1024];
+                    let picture = if f % 2 == 0 {
+                        block(1, f * 42, f == 0, &frame)
+                    } else {
+                        group(1, f * 42, &frame, &frame)
+                    };
+                    [picture, block(2, f * 42, true, b"sound")]
                 })
                 .collect();
             cluster(u64::from(c) * 250, &blocks)
@@ -515,6 +534,34 @@ fn a_track_selected_alone_reads_little_of_the_others() {
         read * 10 < size,
         "{read} of the file's {size} bytes read for its sound alone"
     );
+}
+
+/// A block naming a track the file does not declare is damage, to a track
+/// read alone as to all of them: not passed over as another track's, it is
+/// read whole and the reading resynchronises past it. ffprobe gives `a` and
+/// `c` here -- `b`, after the damage in its Cluster, is lost -- checked with
+/// a text track in place of the sound (FFmpeg's Opus parser drops these
+/// made-up packets; this demuxer has no parser).
+#[test]
+fn a_block_naming_no_track_is_damage_to_a_track_read_alone_too() {
+    let clusters = [
+        cluster(
+            0,
+            &[
+                block(2, 0, true, b"a"),
+                block(9, 10, true, b"x"),
+                block(2, 20, true, b"b"),
+            ],
+        ),
+        cluster(1000, &[block(2, 0, true, b"c")]),
+    ];
+    let bytes = file_of(&[video(), sound()], &clusters);
+    let all = every_packet(&mut Demuxer::open(Cursor::new(bytes.clone())).unwrap());
+    let data: Vec<&[u8]> = all.iter().map(|p| p.data.as_slice()).collect();
+    assert_eq!(data, [b"a".as_slice(), b"c"]);
+    let mut alone = Demuxer::open(Cursor::new(bytes)).unwrap();
+    alone.select_tracks(Some(&[2]));
+    assert_eq!(every_packet(&mut alone), all);
 }
 
 /// How much of a real film each track read alone reads, and how long it

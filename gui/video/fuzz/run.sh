@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run every lane F fuzz target in parallel for SECS seconds each (default 1200),
+# Run all seven lane F fuzz targets in parallel for SECS seconds each (default 1200),
 # at low priority, then report what each found. See README.md.
 #
 # The address sanitizer only where rav1d's `unsafe` code is reachable (image,
@@ -16,12 +16,15 @@ for t in image video; do
   nice -n 10 cargo +nightly fuzz run -O "$t" -- "${opts[@]}" \
     < /dev/null > "$HOME/fuzz/logs/$t.log" 2>&1 &
 done
-for t in sound matroska vp8 vp9; do
-  nice -n 10 cargo +nightly fuzz run -O -s none --target-dir "$HOME/fuzz/target-none" "$t" -- "${opts[@]}" \
+for t in sound matroska vp8 vp9 subtitles; do
+  # A target's dictionary of the tokens its parsers read, where it has one.
+  dict=()
+  [ -f "fuzz/$t.dict" ] && dict=(-dict="$HOME/fuzz/tree/fuzz/$t.dict")
+  nice -n 10 cargo +nightly fuzz run -O -s none --target-dir "$HOME/fuzz/target-none" "$t" -- "${opts[@]}" "${dict[@]}" \
     < /dev/null > "$HOME/fuzz/logs/$t.log" 2>&1 &
 done
 wait
-for t in image video sound matroska vp8 vp9; do
+for t in image video sound matroska vp8 vp9 subtitles; do
   echo "=== $t"
   grep -a -E "^stat::(number_of_executed_units|new_units_added)|SUMMARY|panicked at|Test unit written|ERROR: libFuzzer" \
     "$HOME/fuzz/logs/$t.log" | head -8

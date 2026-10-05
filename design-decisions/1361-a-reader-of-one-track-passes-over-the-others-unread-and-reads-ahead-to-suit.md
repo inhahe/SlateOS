@@ -58,7 +58,11 @@ of it. The sound does the same; the pictures read what they did.
   stream. With the passing-over, the second and third reads cost a few
   percent of the first.
 
-**Consequences.** MP4's demuxer can discard tracks the same way (FFmpeg's
-`mov_read_packet` reads nothing of a discarded stream's samples, and a
-sample is read by its place, so nothing is read past it). Until it does, a
-reader of one track of an MP4 file still reads every sample.
+**MP4 the same** (`mp4::Demuxer::select_tracks`, `set_read_ahead`): FFmpeg's
+`mov_read_packet` reads nothing of a discarded stream's samples, which
+still take their turns in the order of the packets, so a selected track's
+come out as among the others (every track of every MP4 fixture, held to
+it). The same minute of film as MP4 (AAC sound): the sound alone reads
+81.8% of the file 64 KiB ahead, 15.2% 4 KiB ahead, 3.8% 1 KiB ahead, at a
+read a video frame -- so the same 1 KiB. Ogg's pages carry their streams
+together, and are read whole.

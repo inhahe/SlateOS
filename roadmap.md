@@ -3678,6 +3678,24 @@ lane C's `guitk`.
   own buckets, matched on signature rather than by string so a regression
   cannot hide inside an exemption; that is what took `differ` from 1178 to 2
   and made the last two findable at all.
+  Strings the corpus had never asked found four more disagreements
+  (2026-10-05, §1359):
+  - A legacy `kern` table is now read across marks, as `hb_kern_machine_t`
+    reads it with `IgnoreMarks`, and inside the positioning pass, so an
+    attached accent stays on its letter. About ninety faces kern `T́o`
+    differently otherwise.
+  - A never-drawn glyph loses its advance before the attachments are
+    resolved. Otherwise an accent after an undrawable VS16 landed a letter
+    to the left, in 157 faces.
+  - Where a face classifies its glyphs, mark-ness comes from the `GDEF` class
+    alone. Linux Libertine's Graphite build and DejaVu Sans Mono Bold Oblique
+    then keep their accents' widths, as HarfBuzz does.
+  - Syriac's shaper is called off by `DFLT` alone, and a run whose shaper is
+    called off takes no joining forms.
+  The corpus gains those strings, words of N'Ko, Syriac and Mongolian, and
+  emoji sequences: a ZWJ family, a flag, a keycap and a skin tone. That makes
+  556 faces × 122 strings, with `differ` 0 and `misplaced` 1 (the same
+  survivor), at the em, at 16 ppem and at `wght=700`.
 
 - `[F]` Wayland-inspired compositor: GPU acceleration, currently a software
   rasterizer (lines ~4605, ~4619). **Measured 2026-09-13: this is the only way
@@ -3755,10 +3773,12 @@ lane C's `guitk`.
     lines. Every frame size now makes `vpxenc`'s frames.
     `[x]` Threads (§1342): each tile column on a thread of its own, into a
     strip with its own copy of the decisions' state, put together in column
-    order -- the same bytes on any number of threads, and `vpxenc`'s with
-    the same `--tile-columns` (two more reference encodes, four columns at
-    1280x720 and two at 651x357, match on one to four threads). By default a
-    picture has as many columns as its width allows, as `vpxenc`'s does.
+    order, and its bitstream written on a thread of its own as libvpx's
+    realtime `encode_tiles_mt` writes it -- the same bytes on any number of
+    threads, and `vpxenc`'s with the same `--tile-columns` (two more
+    reference encodes, four columns at 1280x720 and two at 651x357, match on
+    one to four threads). By default a picture has as many columns as its
+    width allows, as `vpxenc`'s does.
     `[-]` Speed: the hot paths rewritten to vectorise for SSE2, exactly --
     the sub-pixel variance, the quantisers (raster order and inverse scans),
     the 8x8 DCT (eight columns at once in 32 bits), the block measures; 2.3x
@@ -3814,7 +3834,7 @@ lane C's `guitk`.
   opens a file's pictures.
   - `[x]` Matroska and WebM, demultiplexed (`gui/video/matroska`,
     design-decisions §1345): written from RFC 9559 with FFmpeg's behaviour
-    where the RFC leaves a choice -- every packet of 37 fixtures and 78
+    where the RFC leaves a choice -- every packet of 48 fixtures and 97
     seeks held to `ffprobe`'s, and every frame of VP9, VP9 with alpha and
     AV1 played through it held to ffmpeg's decoders. The tree's one
     Matroska demuxer: `apps/mediaprobe`'s cases moved into its suite
@@ -3822,6 +3842,17 @@ lane C's `guitk`.
     sweep (`mutate.py`). A seek without Cues walks only as far as it must;
     with them, it goes by the Cues alone (§1348). What it leaves out:
     `known-issues/F-the-matroska-demuxer-leaves-out-what-no-webm-file-needs.md`.
+    - `[x]` Chapters, tags and attachments (2026-10-05, §1358): the file's,
+      each track's, chapter's and attachment's metadata as FFmpeg gives it
+      -- keys, values and their order, eleven files and 660 truncations held
+      to ffprobe's -- chapters with FFmpeg's ends, attachments (cover art,
+      fonts) read when asked for. For lane E's player and probe:
+      `requests/f-e-matroska-gives-chapters-tags-and-attachments.md`.
+    - `[x]` One track read alone (2026-10-05, §1361): `select_tracks` passes
+      over the other tracks' blocks unread, as FFmpeg passes over a
+      discarded stream's, and `set_read_ahead` suits the reading to it;
+      `videocodec`'s sound and subtitle readers read 4% of a 1080p film, not
+      all of it again beside the pictures.
   - `[x]` A frame-level API for a player (`gui/video/codec`, crate
     `videocodec`, design-decisions §1346): `Video::open(file)`, then
     `next_frame()` -- each picture in order with its time, duration and
@@ -3975,6 +4006,19 @@ lane C's `guitk`.
           leaving out two whole packets) held to ffprobe's blocks and
           libopus's samples, with seeks. design-decisions §1351.
         - `[ ]` AAC, which most MP4 files carry: a decoder of its own. Waits on open-questions F-Q9 (whether to include one, and from which code).
+  - `[x]` Subtitles (2026-10-05, design-decisions §1360):
+    `videocodec::Subtitles`, a Matroska or WebM film's text subtitles cue by
+    cue -- start, end, and the text as SRT markup whatever the format, in
+    the form `ffmpeg -c:s srt` writes, which lane E's player draws (agreed
+    with lane E). SubRip as ffmpeg reads it; ASS and SSA as libass shows
+    them -- styles from the script, sizes scaled to SRT's 288 lines,
+    libass's resets, weights and alignments, drawings and comments hidden;
+    WebVTT, WebM's and Matroska's, as its specification reads it. Eight
+    fixtures (ffmpeg and mkvmerge muxing; 325 cues) held to ffmpeg's SRT
+    cue for cue but for 53 departures, each checked against libass, HTML or
+    the specification; seeks give the cues still showing. Pictures of text
+    are refused by name. Not yet: WebVTT's placement, MP4's text tracks
+    (`known-issues/F-subtitles-leave-out-webvtt-placement-and-mp4s-text.md`).
 
 - `[-]` `[F]` **A display transport over channel IPC** for local clients,
   beside the TCP one. The point is the peer's identity: the kernel attests a

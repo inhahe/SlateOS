@@ -1,0 +1,34 @@
+# meta_ffmpeg.mkv: the metadata ffprobe shows (generate_fixtures.py).
+start 0
+format
+tag title=A film
+tag encoder=Lavf
+tag ARTIST=Someone
+tag COMMENT=Caf\xc3\xa9 \xe2\x98\x95
+stream 0 track
+tag title=The picture
+tag ENCODER=Lavc libvpx-vp9
+tag DURATION=00:00:00.400000000
+stream 1 track
+tag language=fre
+tag title=Sound
+tag ENCODER=Lavc libopus
+tag DURATION=00:00:00.408000000
+stream 2 picture png 217 42c022341743ddfe829c4c4cf0fdb278
+tag filename=m_cover.png
+tag mimetype=image/png
+stream 3 attachment ttf 17 d36de32da5913c6ef82c168d5dc92f02
+tag filename=m_font.ttf
+tag mimetype=application/x-truetype-font
+stream 4 attachment none 10 9d0568469d206c1aedf1b71f12f474bc
+tag filename=m_blob.bin
+tag mimetype=application/octet-stream
+stream 5 picture mjpeg 744 f3301870ac5617418cb04c7eabfc30c5
+tag filename=m_cover.jpg
+tag mimetype=image/jpeg
+tag title=A cover
+chapter 1 0 150000000
+tag title=Opening
+chapter 2 150000000 400000000
+tag title=Second part
+tag ARTIST=Guest

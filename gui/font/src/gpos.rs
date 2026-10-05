@@ -336,6 +336,28 @@ pub(crate) struct Run<'a> {
     /// [`Corrections::NONE`] asks for the uncorrected values, which is what a
     /// caller that knows neither must pass. See [`device`](crate::device).
     pub(crate) corrections: Corrections<'a>,
+    /// The legacy `kern` table, when the run's kerning has to come from it
+    /// because its script reaches no `GPOS` `kern` feature. `None` when the
+    /// lookups do the kerning, or when there is none.
+    pub(crate) legacy: Option<LegacyKern<'a>>,
+}
+
+/// The legacy `kern` table, read inside the positioning pass.
+///
+/// Inside it, between the lookups and the attachments, because that is where
+/// HarfBuzz reads it: `hb_ot_shape_plan_t::position` runs `GPOS` and then
+/// `hb_ot_layout_kern`, and only afterwards are the attachment offsets
+/// resolved. A mark attached across a kerned pair (`T`, an acute, `o`) is then
+/// measured back over the kerned advance and stays on its letter; read after
+/// the pass instead, it drifts by the half of the kern charged to the letter.
+pub(crate) struct LegacyKern<'a> {
+    /// The table's adjustment for a pair, in font units.
+    pub(crate) pair: &'a dyn Fn(u16, u16) -> i16,
+    /// Whether each glyph is a mark by class, which a pair is read across.
+    pub(crate) stepped_over: &'a [bool],
+    /// Whether each glyph is a tab, which is never half of a pair: its advance
+    /// is a layout decision, not a glyph width.
+    pub(crate) tabs: &'a [bool],
 }
 
 /// A face's `GPOS`, resolved once per script.
@@ -428,9 +450,22 @@ impl Positioning {
             }
             self.run_lookup(data, lookup, run, &mut out);
         }
+        if let Some(legacy) = &run.legacy {
+            kern_legacy(&mut out, run.glyphs, legacy);
+        }
         if !run.zero_marks_first {
             zero_marks(&mut out, run.marks);
         }
+        // A never-drawn character takes no room *before* the attachments are
+        // resolved, not after: a mark attached across one -- `a`, VS16, an
+        // acute -- has its offset measured back from its base over every
+        // advance in between, and an advance the ignorable loses afterwards
+        // leaves the mark that far short of its base. Measured on Cascadia
+        // Code, whose missing-glyph box is 1200 wide: the acute landed a whole
+        // letter to the left of its `a`. HarfBuzz's order is this one --
+        // `hb_ot_zero_width_default_ignorables` between the lookups and
+        // `propagate_attachment_offsets`.
+        zero_ignorables(&mut out, run.glyphs);
         propagate(&mut out, run.rtl);
         out
     }
@@ -1080,6 +1115,59 @@ fn zero_marks(out: &mut [Adjust], marks: &[bool]) {
     }
 }
 
+/// Kern the run from the legacy table: HarfBuzz's `hb_kern_machine_t`.
+///
+/// Each glyph pairs with the next one that is neither a mark nor a never-drawn
+/// character (`IgnoreMarks`, and the default ignorables every positioning
+/// matcher steps over), and the table's adjustment for the pair is split
+/// between them: half onto the left glyph's advance, the rest onto the right
+/// glyph's advance *and* its offset. `>> 1` floors toward negative infinity,
+/// so -27 splits as -14 and -13, which is HarfBuzz's arithmetic exactly; see
+/// [`ScaledFont::shape`](crate::scaled::ScaledFont::shape), which kerns the
+/// runs no `GPOS` reaches the same way, for why the split matters.
+fn kern_legacy(out: &mut [Adjust], glyphs: &[SubGlyph], legacy: &LegacyKern<'_>) {
+    let mut left: Option<usize> = None;
+    for (j, glyph) in glyphs.iter().enumerate() {
+        if glyph.ignorable.erased() || legacy.stepped_over.get(j).copied().unwrap_or(false) {
+            continue;
+        }
+        let tab = legacy.tabs.get(j).copied().unwrap_or(false);
+        if !tab && let Some(i) = left {
+            let first = glyphs.get(i).map_or(0, |g| g.gid);
+            let whole = i32::from((legacy.pair)(first, glyph.gid));
+            let half = whole >> 1;
+            let rest = whole.saturating_sub(half);
+            if let Some(a) = out.get_mut(i) {
+                a.x_advance = a.x_advance.saturating_add(half);
+                a.kern = a.kern.saturating_add(half);
+            }
+            if let Some(b) = out.get_mut(j) {
+                b.x_advance = b.x_advance.saturating_add(rest);
+                b.x_offset = b.x_offset.saturating_add(rest);
+            }
+        }
+        left = (!tab).then_some(j);
+    }
+}
+
+/// Take the advance and the offset from every glyph that is still a
+/// never-drawn character: HarfBuzz's `hb_ot_zero_width_default_ignorables`.
+///
+/// Its own attachment, if a lookup made one, is left in place: the chain is
+/// resolved from here like any other, which is how HarfBuzz comes to report
+/// Segoe UI Variable's attached CGJ at minus its base's advance.
+fn zero_ignorables(out: &mut [Adjust], glyphs: &[SubGlyph]) {
+    for (adjust, glyph) in out.iter_mut().zip(glyphs) {
+        if glyph.ignorable.erased() {
+            adjust.x_advance = 0;
+            adjust.y_advance = 0;
+            adjust.x_offset = 0;
+            adjust.y_offset = 0;
+            adjust.kern = 0;
+        }
+    }
+}
+
 /// Turn every attachment chain into an offset from the glyph's own pen.
 ///
 /// A mark records where it wants to be relative to its base's *origin*, but it
@@ -1362,6 +1450,7 @@ mod tests {
                     lang: None,
                     features,
                     corrections: Corrections::NONE,
+                    legacy: None,
                 },
             )[0]
             .x_offset
@@ -1993,6 +2082,179 @@ mod tests {
         assert_eq!(out[1].chain, 0);
     }
 
+    /// A `MarkBasePos` format 1 subtable: one mark, `mark`, with its anchor at
+    /// `mark_at`, and one base, `base`, with its anchor at `base_at`.
+    fn mark_on_base(base: u16, base_at: (i16, i16), mark: u16, mark_at: (i16, i16)) -> Vec<u8> {
+        let anchor = |(x, y): (i16, i16)| {
+            let mut a = Vec::new();
+            a.extend_from_slice(&be16(1)); // anchorFormat
+            a.extend_from_slice(&x.to_be_bytes());
+            a.extend_from_slice(&y.to_be_bytes());
+            a
+        };
+        let marks = coverage1(&[mark]);
+        let bases = coverage1(&[base]);
+        // MarkArray: one record, class 0, its anchor right after it.
+        let mut mark_array = Vec::new();
+        mark_array.extend_from_slice(&be16(1));
+        mark_array.extend_from_slice(&be16(0));
+        mark_array.extend_from_slice(&be16(6));
+        mark_array.extend(anchor(mark_at));
+        // BaseArray: one record with one anchor, for class 0.
+        let mut base_array = Vec::new();
+        base_array.extend_from_slice(&be16(1));
+        base_array.extend_from_slice(&be16(4));
+        base_array.extend(anchor(base_at));
+        let at_marks = 12;
+        let at_bases = at_marks + marks.len();
+        let at_mark_array = at_bases + bases.len();
+        let at_base_array = at_mark_array + mark_array.len();
+        let mut sub = Vec::new();
+        for v in [1, at_marks, at_bases, 1, at_mark_array, at_base_array] {
+            sub.extend_from_slice(&be16(u16::try_from(v).unwrap()));
+        }
+        sub.extend(marks);
+        sub.extend(bases);
+        sub.extend(mark_array);
+        sub.extend(base_array);
+        sub
+    }
+
+    /// Run `pos` over `ids` with `advances`, the glyphs `marks` names taking no
+    /// room, and the legacy table `legacy` if any.
+    fn apply_run(
+        pos: &Positioning,
+        data: &[u8],
+        run: &[SubGlyph],
+        advances: &[i32],
+        marks: &[bool],
+        legacy: Option<LegacyKern<'_>>,
+    ) -> Vec<Adjust> {
+        pos.apply(
+            data,
+            &Run {
+                glyphs: run,
+                advances,
+                marks,
+                zero_marks_first: false,
+                rtl: false,
+                script: None,
+                lang: None,
+                features: DEFAULT_FEATURES,
+                corrections: Corrections::NONE,
+                legacy,
+            },
+        )
+    }
+
+    #[test]
+    fn a_never_drawn_glyph_loses_its_width_before_a_mark_is_measured_across_it() {
+        // `a` (glyph 1, 1200 wide), then VS16 drawn as a missing-glyph box
+        // 1200 wide, then an acute (glyph 3) whose anchors put it 40 right of
+        // the `a`'s origin. The selector's width goes before the acute is
+        // measured back to its base, as HarfBuzz's
+        // `hb_ot_zero_width_default_ignorables` precedes
+        // `propagate_attachment_offsets` -- after, and the acute lands a whole
+        // missing-glyph box to the left of its letter.
+        let sub = mark_on_base(1, (540, 1000), 3, (500, 0));
+        let data = gpos_table_for(b"DFLT", b"mark", &[(MARK_BASE_POS, sub)]);
+        let pos = Positioning::parse(&data, span(0, data.len()), None).unwrap();
+        let mut run = glyphs(&[1, 0, 3]);
+        run[1].ignorable = crate::norm::Ignorable::Plain;
+        let out = apply_run(
+            &pos,
+            &data,
+            &run,
+            &[1200, 1200, 0],
+            &[false, false, true],
+            None,
+        );
+        assert_eq!((out[1].x_advance, out[1].x_offset), (0, 0));
+        // The pen reaches the acute 1200 along, past the `a` and a selector
+        // that takes no room, and the acute goes back 1160 of that.
+        assert_eq!((out[2].x_offset, out[2].y_offset), (40 - 1200, 1000));
+    }
+
+    #[test]
+    fn the_legacy_table_kerns_inside_the_pass_so_a_mark_stays_on_its_letter() {
+        // `T` (glyph 1, 500 wide), an acute (glyph 3) anchored 100 right of
+        // `T`'s origin, `o` (glyph 2, 400 wide); the legacy table kerns `T`
+        // and `o` by -27, across the acute.
+        let sub = mark_on_base(1, (600, 700), 3, (500, 0));
+        let data = gpos_table_for(b"DFLT", b"mark", &[(MARK_BASE_POS, sub)]);
+        let pos = Positioning::parse(&data, span(0, data.len()), None).unwrap();
+        let run = glyphs(&[1, 3, 2]);
+        let pair = |left: u16, right: u16| if (left, right) == (1, 2) { -27 } else { 0 };
+        let stepped_over = [false, true, false];
+        let tabs = [false; 3];
+        let out = apply_run(
+            &pos,
+            &data,
+            &run,
+            &[500, 0, 400],
+            &[false, true, false],
+            Some(LegacyKern {
+                pair: &pair,
+                stepped_over: &stepped_over,
+                tabs: &tabs,
+            }),
+        );
+        // HarfBuzz's split: `-27 >> 1` is -14 onto `T`, and the remaining -13
+        // onto `o`'s advance and its offset.
+        assert_eq!((out[0].x_advance, out[0].kern), (486, -14));
+        assert_eq!((out[2].x_advance, out[2].x_offset), (387, -13));
+        // The acute is measured back over `T`'s *kerned* advance, so it is still
+        // 100 right of `T`'s origin: kerned after the pass, it would sit 14
+        // left of where its anchors put it.
+        assert_eq!(out[1].x_offset, 100 - 486);
+    }
+
+    #[test]
+    fn the_legacy_table_pairs_nothing_with_a_tab_and_nothing_across_a_letter() {
+        let data = gpos_table_for(
+            b"DFLT",
+            b"mark",
+            &[(MARK_BASE_POS, mark_on_base(1, (0, 0), 3, (0, 0)))],
+        );
+        let pos = Positioning::parse(&data, span(0, data.len()), None).unwrap();
+        let pair = |_: u16, _: u16| -40;
+        let run = glyphs(&[1, 5, 2]);
+        // The middle glyph a tab: neither pair is kerned.
+        let out = apply_run(
+            &pos,
+            &data,
+            &run,
+            &[500, 500, 400],
+            &[false; 3],
+            Some(LegacyKern {
+                pair: &pair,
+                stepped_over: &[false; 3],
+                tabs: &[false, true, false],
+            }),
+        );
+        assert_eq!(
+            out.iter().map(|a| a.x_advance).collect::<Vec<_>>(),
+            [500, 500, 400]
+        );
+        // The middle glyph a letter: two pairs, each kerned on its own.
+        let out = apply_run(
+            &pos,
+            &data,
+            &run,
+            &[500, 500, 400],
+            &[false; 3],
+            Some(LegacyKern {
+                pair: &pair,
+                stepped_over: &[false; 3],
+                tabs: &[false; 3],
+            }),
+        );
+        assert_eq!(
+            out.iter().map(|a| a.x_advance).collect::<Vec<_>>(),
+            [480, 460, 380]
+        );
+    }
+
     /// A whole `GPOS` table holding `lookups` in LookupList order, of which
     /// only lookup 0 is reached by a feature.
     ///
@@ -2417,6 +2679,7 @@ mod tests {
                     lang: None,
                     features: DEFAULT_FEATURES,
                     corrections: Corrections::NONE,
+                    legacy: None,
                 },
             )
             .iter()
@@ -2448,6 +2711,7 @@ mod tests {
                 lang: None,
                 features: DEFAULT_FEATURES,
                 corrections: Corrections::NONE,
+                legacy: None,
             },
         )
         .iter()

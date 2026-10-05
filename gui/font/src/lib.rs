@@ -22,14 +22,15 @@
 //! # Dependencies and I/O
 //!
 //! Everything here is written in `alloc` terms — `alloc::vec::Vec`,
-//! `alloc::string::String` — rather than through the `std` prelude, because
-//! the intent is for this crate to be `no_std`. It is **not `no_std` yet**:
-//! the rasterizer and the metric scaling call `f32::sqrt`, `floor`, `ceil`,
-//! `round` and `mul_add`, which live in `std` and not in `core`, so the
-//! declaration would need a `libm` dependency that this workspace does not
-//! have. Tracked as `TD-FONT-NOT-ACTUALLY-NO-STD` in `known-issues.md`;
-//! please keep writing `alloc::` paths so that closing it stays a small
-//! change.
+//! `alloc::string::String` — rather than through the `std` prelude, but the
+//! crate links `std` and is not `no_std`: the rasterizer and the metric
+//! scaling call `f32::sqrt`, `floor`, `ceil`, `round` and `mul_add`, which
+//! live in `std` and not in `core`. Nothing needs it to be: SlateOS
+//! userspace has `std` (`x86_64-slateos` builds it), and the compositor, this
+//! crate's main user, uses `std` itself (`TD-FONT-NOT-ACTUALLY-NO-STD`,
+//! closed 2026-10-05). The `alloc::` paths cost nothing and keep the door
+//! open for a `no_std` user, which would then need `libm` for the float
+//! calls; please keep writing them.
 //!
 //! Regardless of that, this crate **does no I/O** and should not start. Font
 //! *discovery* — walking a directory, reading a file — belongs to the caller,

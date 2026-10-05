@@ -60,6 +60,19 @@ instruction set, and calling such a function takes `unsafe` once --
 including for SSE2, which every x86-64 processor has, so no run-time check
 would even be needed for it.
 
+**Also the rest of lane F's speed gaps** (added 2026-10-05), which come
+down to this same question. Everything that safe Rust can reach without the
+newer instructions has been done.
+
+| What | Today, one core | What the answer would change |
+|---|---|---|
+| VP9 *encoder* (remote desktop's video) | about libvpx's C speed, a third of its SIMD's | motion search and transforms in SSSE3/AVX2 |
+| MP3 | 1.25 times minimp3's cost | the synthesis filter's sums four at a time |
+| Lossy WebP | 5 to 12% behind libwebp | its inverse transform in 16-bit lanes |
+
+None of these holds anything up: each already runs many times faster than
+real time, or opens a photograph in well under a second.
+
 **Where it bites:** `gui/video/vp9/src/inter.rs` and `loopfilter.rs`, and
 `gui/video/vp8/src/loopfilter.rs` (each crate's `#![forbid(unsafe_code)]`
 would become a single module allowed it);

@@ -705,13 +705,13 @@ METADATA = [
         "a key set again keeps its place",
         "            self.entries.swap_remove(i);",
         "            self.entries.remove(i);",
-        [META_TAGS, META_ATTACHMENTS, "setting_a_key_moves_the_last_entry_into_its_place"],
+        [META_TAGS, "setting_a_key_moves_the_last_entry_into_its_place"],
     ),
     (
         "a key is matched with its case",
         ".filter(|(_, (k, _))| k.eq_ignore_ascii_case(key))",
         ".filter(|(_, (k, _))| k == key)",
-        [META_TAGS, META_ATTACHMENTS, META_FFMPEG],
+        [META_TAGS, META_ATTACHMENTS, META_TRAILING],
     ),
     (
         "nothing is renamed",
@@ -736,7 +736,7 @@ METADATA = [
         "a tag in a language is set under its plain name too",
         "        if t.default != 0 || lang.is_none() {",
         "        if true {",
-        [META_TAGS, META_TRAILING, "a_tag_is_keyed_by_language_prefix_and_nesting"],
+        [META_TAGS, "a_tag_is_keyed_by_language_prefix_and_nesting"],
     ),
     (
         "the default flag is ignored",
@@ -761,6 +761,12 @@ METADATA = [
         "            None => name.iter().take(MAX_KEY).copied().collect(),",
         "            None => name.to_vec(),",
         [META_TAGS, "a_key_stops_at_ffmpeg_s_buffer"],
+    ),
+    (
+        "a key behind a prefix is not cut at FFmpeg's buffer",
+        "                .take(MAX_KEY)\n",
+        "",
+        ["a_key_stops_at_ffmpeg_s_buffer"],
     ),
     (
         "the TargetType is no prefix",
@@ -936,10 +942,13 @@ NEST = [
         [META_TAGS],
     ),
     (
-        "a SimpleTag's language defaults to none",
-        "    tag.lang = Some(b\"und\".to_vec());\n",
-        "",
-        [META_TAGS, META_TRAILING],
+        # (A SimpleTag without a TagLanguage reads as `und` in FFmpeg, as none
+        # would: the two are the same to the conversion, so that default is
+        # no row. An empty TagLanguage is, being a language of its own.)
+        "an empty TagLanguage is a language, not undetermined",
+        "            ids::TAG_LANGUAGE => string(r, &f, Some(b\"und\"), &mut tag.lang)?,",
+        "            ids::TAG_LANGUAGE => string(r, &f, None, &mut tag.lang)?,",
+        [META_TAGS],
     ),
     (
         "the misspelt TagDefault is not read",

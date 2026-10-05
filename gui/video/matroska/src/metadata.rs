@@ -742,6 +742,8 @@ mod tests {
             tag("TITLE", Some("Titre"), "fre", 0),
             tag("TITLE", Some("Title"), "eng", 1),
             tag("GONE", None, "und", 0),
+            // In a language, and not the default: under no plain key.
+            tag("COMMENT", Some("Remarque"), "fre", 0),
         ];
         convert_tag(&tags, &mut m, Some(b"ALBUM"), &mut b);
         assert_eq!(
@@ -752,6 +754,7 @@ mod tests {
                 ("ALBUM/TITLE-fre", "Titre"),
                 ("ALBUM/TITLE", "Title"),
                 ("ALBUM/TITLE-eng", "Title"),
+                ("ALBUM/COMMENT-fre", "Remarque"),
             ])
         );
     }
@@ -764,6 +767,24 @@ mod tests {
         convert_tag(&[tag(&long, Some("v"), "fre", 0)], &mut m, None, &mut b);
         let (k, _) = m.iter().next().unwrap();
         assert_eq!(k.len(), 1023, "the language does not fit after it");
+        // A plain key, and one behind a prefix, are cut there too.
+        let mut m = Metadata::default();
+        convert_tag(&[tag(&long, Some("v"), "und", 0)], &mut m, None, &mut b);
+        let (k, _) = m.iter().next().unwrap();
+        assert_eq!(k.len(), 1023, "a plain key");
+        let mut m = Metadata::default();
+        convert_tag(
+            &[tag(&long, Some("v"), "und", 0)],
+            &mut m,
+            Some(b"ALBUM"),
+            &mut b,
+        );
+        let (k, _) = m.iter().next().unwrap();
+        assert_eq!(
+            (k.len(), &k[..6]),
+            (1023, &b"ALBUM/"[..]),
+            "behind a prefix"
+        );
     }
 
     #[test]
@@ -879,6 +900,16 @@ mod tests {
         assert_eq!(
             chapter_ends(&cs, None, None),
             [2_000_000_000, 1_000_000_000, 1_500_000_000, 2_000_000_000]
+        );
+        // The next chapter is the next to start, not the next in the file.
+        let cs = [
+            chapter(1, 0, None),
+            chapter(3, 2_000_000_000, None),
+            chapter(2, 1_000_000_000, None),
+        ];
+        assert_eq!(
+            chapter_ends(&cs, Some(5_000_000), Some(0)),
+            [1_000_000_000, 5_000_000_000, 2_000_000_000]
         );
     }
 }

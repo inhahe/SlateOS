@@ -371,6 +371,8 @@ fn tags_nest_no_deeper_than_ffmpeg_reads() {
         Some(&b"v"[..]),
         "the 13 before the 14th"
     );
+    let deeper = vec!["N"; 14].join("/");
+    assert_eq!(d.metadata().get(deeper.as_bytes()), None, "the 14th itself");
 }
 
 /// An attachment's bytes are read when asked for, and reading packets goes

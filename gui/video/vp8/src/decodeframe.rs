@@ -6,7 +6,9 @@
 //! reference frame), its residual added, and each row loop-filtered once the
 //! row below it is reconstructed, since intra prediction reads unfiltered
 //! pixels. The borders are then filled with copies of the edges, for the
-//! frames that will predict from this one.
+//! frames that will predict from this one. A frame of several partitions
+//! does its rows on several threads instead (`threading`), to the same
+//! pixels.
 //!
 //! What lasts between frames is here too ([`Common`]): the probabilities a
 //! frame may keep for the next, the segmentation and loop filter settings,
@@ -39,10 +41,10 @@
 
 use crate::Error;
 use crate::boolread::BoolDecoder;
-use crate::frame::Frame;
+use crate::frame::{Frame, Target};
 use crate::header::{START_CODE, Tag, VersionSetup};
 use crate::idct;
-use crate::inter::{self, Filter, InterContext};
+use crate::inter::{self, Filter, InterContext, Prior};
 use crate::intra;
 use crate::loopfilter::{self, Adjustments, LoopFilterInfo};
 use crate::modes::{
@@ -53,6 +55,7 @@ use crate::tables::{
     AC_QLOOKUP, COEF_UPDATE_PROBS, DC_QLOOKUP, DEFAULT_COEF_PROBS, DEFAULT_MV_CONTEXT,
     UV_MODE_PROB, YMODE_PROB,
 };
+use crate::threading::{self, Threading};
 use crate::tokens::{self, CoefProbs, Context};
 
 /// The probabilities a frame may update and the next frame keep: the parts
@@ -241,6 +244,13 @@ impl Common {
         self.above = vec![[0; 9]; self.mb_cols];
     }
 
+    /// The token contexts above each macroblock column, as the last frame
+    /// left them.
+    #[cfg(test)]
+    pub(crate) fn above(&self) -> &[Context] {
+        &self.above
+    }
+
     /// Free it, as libvpx's `vp8_de_alloc_frame_buffers` does when a new
     /// size cannot be allocated.
     pub(crate) fn deallocate(&mut self) {
@@ -275,15 +285,17 @@ pub(crate) struct Refs<'a> {
 }
 
 /// Decode `data` into `new`: libvpx's `vp8_decode_frame`. `stale` is what
-/// `new`'s buffer held before, if `new` is not that buffer. Returns whether
-/// the frame is corrupt: decoded past the end of a partition, or predicted
-/// from a corrupt frame.
+/// `new`'s buffer held before, if `new` is not that buffer. The macroblock
+/// rows decode on threads as `threading` allows. Returns whether the frame
+/// is corrupt: decoded past the end of a partition, or predicted from a
+/// corrupt frame.
 pub(crate) fn decode_frame(
     c: &mut Common,
     data: &[u8],
     new: &mut Frame,
     stale: Option<&Frame>,
     refs: &Refs<'_>,
+    threading: Threading,
 ) -> Result<bool, FrameError> {
     let [b0, b1, b2, ..] = *data else {
         return Err(corrupt("a frame shorter than its three-byte tag"));
@@ -423,6 +435,22 @@ pub(crate) fn decode_frame(
         };
         LoopFilterInfo::new(filter_level, sharpness, &adj)
     });
+    // libvpx's `vp8_mb_init_dequantizer`, for each segment a macroblock may
+    // name; without segmentation, each is the frame's.
+    let dequant = core::array::from_fn(|segment| {
+        let q = if c.seg.enabled {
+            let v = i32::from(c.seg.feature_data[0][segment]);
+            let q = if c.seg.absolute {
+                v
+            } else {
+                i32::from(c.quant.base) + v
+            };
+            q.clamp(0, 127)
+        } else {
+            i32::from(c.quant.base)
+        };
+        c.quant.dequant(q)
+    });
     let rows = Rows {
         filter: if setup.bilinear {
             Filter::Bilinear
@@ -432,8 +460,21 @@ pub(crate) fn decode_frame(
         fullpixel_mask: if setup.full_pixel { !7 } else { !0 },
         lf: lf.as_ref(),
         simple_filter,
+        key_frame: tag.key_frame,
+        mb_rows: c.mb_rows,
+        mb_cols: c.mb_cols,
+        coef_probs: &c.fc.coef_probs,
+        dequant,
     };
-    let corrupt_tokens = decode_mb_rows(c, &rows, &mut partitions, new, stale, refs);
+    let corrupt_tokens = decode_mb_rows(
+        &rows,
+        &mut c.grid,
+        &mut c.above,
+        &mut partitions,
+        (new, stale),
+        refs,
+        threading,
+    );
     let corrupted = bc.has_error() || corrupt_tokens;
 
     if !c.decoded_key_frame {
@@ -546,49 +587,71 @@ fn setup_token_decoder<'d>(
     Ok(parts.into_iter().map(BoolDecoder::new).collect())
 }
 
-/// What decoding the rows needs from the header.
-struct Rows<'a> {
-    filter: Filter,
-    fullpixel_mask: i16,
-    lf: Option<&'a LoopFilterInfo>,
-    simple_filter: bool,
+/// What decoding the rows needs from the header: the same for every
+/// macroblock, and shared by the threads that decode them.
+pub(crate) struct Rows<'a> {
+    pub(crate) filter: Filter,
+    pub(crate) fullpixel_mask: i16,
+    pub(crate) lf: Option<&'a LoopFilterInfo>,
+    pub(crate) simple_filter: bool,
+    pub(crate) key_frame: bool,
+    pub(crate) mb_rows: usize,
+    pub(crate) mb_cols: usize,
+    pub(crate) coef_probs: &'a CoefProbs,
+    /// By segment: its dequantisation factors.
+    dequant: [Dequant; 4],
 }
 
 /// A macroblock's coefficients and their end positions, which outlast it:
 /// libvpx's `qcoeff` and `eobs`. Reconstruction clears what it used, so the
 /// coefficients are zero between macroblocks.
-struct Residual {
+pub(crate) struct Residual {
     qcoeff: [[i16; 16]; 25],
     eobs: [u8; 25],
 }
 
-/// Decode, predict, reconstruct and filter every macroblock: libvpx's
-/// `decode_mb_rows`. Returns whether a token partition ran dry or a
-/// reference was corrupt.
+impl Residual {
+    pub(crate) fn new() -> Self {
+        Self {
+            qcoeff: [[0; 16]; 25],
+            eobs: [0; 25],
+        }
+    }
+}
+
+/// Decode, predict, reconstruct and filter every macroblock into `new`,
+/// whose buffer held `stale` before if it is not that buffer: libvpx's
+/// `decode_mb_rows`, or its `vp8mt_decode_mb_rows` on threads as
+/// `threading` allows when the frame has several token partitions. Returns
+/// whether a token partition ran dry or a reference was corrupt.
 fn decode_mb_rows(
-    c: &mut Common,
     rows: &Rows<'_>,
+    grid: &mut ModeGrid,
+    above: &mut [Context],
     partitions: &mut [BoolDecoder<'_>],
-    new: &mut Frame,
-    stale: Option<&Frame>,
+    (new, stale): (&mut Frame, Option<&Frame>),
     refs: &Refs<'_>,
+    threading: Threading,
 ) -> bool {
-    let (mb_rows, mb_cols) = (c.mb_rows, c.mb_cols);
+    if let Some(corrupted) =
+        threading::decode_mb_rows(rows, grid, above, partitions, new, refs, threading)
+    {
+        return corrupted;
+    }
+    let prior = stale.map_or(Prior::InPlace, Prior::Copy);
+    let (mb_rows, mb_cols) = (rows.mb_rows, rows.mb_cols);
     let mut corrupted = false;
-    let mut residual = Residual {
-        qcoeff: [[0; 16]; 25],
-        eobs: [0; 25],
-    };
+    let mut residual = Residual::new();
     new.setup_intra_top_line();
     for mb_row in 0..mb_rows {
         let part = mb_row % partitions.len().max(1);
         let mut left: Context = [0; 9];
         new.setup_intra_left(mb_row);
         for mb_col in 0..mb_cols {
-            let idx = c.grid.index(mb_row, mb_col);
-            let mut mi = c.grid.cells[idx];
+            let idx = grid.index(mb_row, mb_col);
+            let mut mi = grid.cells[idx];
             corrupted |= refs.corrupted[usize::from(mi.ref_frame & 3)];
-            let Some(bc) = partitions.get_mut(part) else {
+            let (Some(bc), Some(ctx)) = (partitions.get_mut(part), above.get_mut(mb_col)) else {
                 break;
             };
             let at = MbAt {
@@ -597,21 +660,21 @@ fn decode_mb_rows(
                 left_available: mb_col > 0,
                 up_available: mb_row > 0,
             };
-            decode_macroblock(
-                c,
+            let predicted = decode_macroblock(
                 rows,
                 &at,
                 &mut mi,
-                bc,
-                &mut left,
+                (bc, ctx, &mut left),
                 &mut residual,
-                new,
-                stale,
+                &mut new.target(),
+                prior,
                 refs,
             );
+            // Only a thread's band leaves a macroblock unpredicted.
+            debug_assert!(predicted, "a frame's own buffer always predicts");
             // Coefficients found to be none skip the loop filter's inner
             // edges, as a coded skip does.
-            c.grid.cells[idx].mb_skip_coeff = mi.mb_skip_coeff;
+            grid.cells[idx].mb_skip_coeff = mi.mb_skip_coeff;
             corrupted |= bc.has_error();
         }
         new.extend_mb_row(mb_row);
@@ -619,11 +682,11 @@ fn decode_mb_rows(
             if mb_row > 0 {
                 loopfilter::filter_row(
                     new,
-                    &c.grid,
+                    grid,
                     lfi,
                     mb_row - 1,
                     rows.simple_filter,
-                    c.key_frame,
+                    rows.key_frame,
                 );
                 if mb_row > 1 {
                     new.extend_row_left_right(mb_row - 2);
@@ -637,11 +700,11 @@ fn decode_mb_rows(
         if let Some(lfi) = rows.lf {
             loopfilter::filter_row(
                 new,
-                &c.grid,
+                grid,
                 lfi,
                 mb_rows - 1,
                 rows.simple_filter,
-                c.key_frame,
+                rows.key_frame,
             );
             if mb_rows > 1 {
                 new.extend_row_left_right(mb_rows - 2);
@@ -654,37 +717,38 @@ fn decode_mb_rows(
 }
 
 /// Where a macroblock is, and which of its neighbours exist.
-struct MbAt {
-    mb_row: usize,
-    mb_col: usize,
-    left_available: bool,
-    up_available: bool,
+pub(crate) struct MbAt {
+    pub(crate) mb_row: usize,
+    pub(crate) mb_col: usize,
+    pub(crate) left_available: bool,
+    pub(crate) up_available: bool,
 }
 
-/// One macroblock: libvpx's `decode_macroblock`.
+/// One macroblock: libvpx's `decode_macroblock`. `tokens` is the partition
+/// it reads its coefficients from and the token contexts above and left of
+/// it. `false`, with the macroblock half made, if its chroma is one libvpx
+/// leaves as the buffer held it and `prior` has nothing to leave.
 #[allow(
     clippy::too_many_arguments,
     reason = "libvpx's MACROBLOCKD, split into what each part of it is"
 )]
-fn decode_macroblock(
-    c: &mut Common,
+#[must_use]
+pub(crate) fn decode_macroblock(
     rows: &Rows<'_>,
     at: &MbAt,
     mi: &mut ModeInfo,
-    bc: &mut BoolDecoder<'_>,
-    left: &mut Context,
+    (bc, above, left): (&mut BoolDecoder<'_>, &mut Context, &mut Context),
     r: &mut Residual,
-    new: &mut Frame,
-    stale: Option<&Frame>,
+    new: &mut Target<'_>,
+    prior: Prior<'_>,
     refs: &Refs<'_>,
-) {
-    let above = &mut c.above[at.mb_col];
+) -> bool {
     if mi.mb_skip_coeff {
         tokens::reset_mb_tokens_context(mi.is_4x4, above, left);
     } else if !bc.has_error() {
         let eobtotal = tokens::decode_mb_tokens(
             bc,
-            &c.fc.coef_probs,
+            rows.coef_probs,
             mi.is_4x4,
             above,
             left,
@@ -697,66 +761,45 @@ fn decode_macroblock(
     // macroblock keeps the end positions of the one before; its
     // coefficients are all zero, so they add nothing.
 
-    let q = if c.seg.enabled {
-        let v = i32::from(c.seg.feature_data[0][usize::from(mi.segment_id & 3)]);
-        let q = if c.seg.absolute {
-            v
-        } else {
-            i32::from(c.quant.base) + v
-        };
-        q.clamp(0, 127)
-    } else {
-        i32::from(c.quant.base)
-    };
-    let d = c.quant.dequant(q);
-
+    let d = &rows.dequant[usize::from(mi.segment_id & 3)];
     let (mb_x, mb_y) = (at.mb_col * 16, at.mb_row * 16);
     let mode = mi.mode;
     if mi.ref_frame == INTRA_FRAME {
         for p in 1..3 {
-            let plane = &mut new.planes[p];
-            let (pos, stride) = (plane.at(mb_x / 2, mb_y / 2), plane.stride);
+            let (pos, stride) = (new.at(p, mb_x / 2, mb_y / 2), new.strides[p]);
             intra::predict_mb(
                 mi.uv_mode,
                 8,
                 at.left_available,
                 at.up_available,
-                &mut plane.data,
+                new.planes[p],
                 pos,
                 stride,
             );
         }
-        let y = &mut new.planes[0];
-        let (pos, stride) = (y.at(mb_x, mb_y), y.stride);
+        let (pos, stride) = (new.at(0, mb_x, mb_y), new.strides[0]);
+        let y = &mut *new.planes[0];
         if mode == B_PRED {
             if mi.mb_skip_coeff {
                 r.eobs = [0; 25];
             }
-            intra::down_copy_above_right(&mut y.data, pos, stride);
+            intra::down_copy_above_right(y, pos, stride);
             for i in 0..16 {
                 let b = pos + (i >> 2) * 4 * stride + (i & 3) * 4;
-                intra::predict_4x4(mi.bmodes[i], &mut y.data, b, stride);
+                intra::predict_4x4(mi.bmodes[i], y, b, stride);
                 match r.eobs[i] {
                     0 => {}
                     1 => {
                         let dc = (i32::from(r.qcoeff[i][0]) * i32::from(d.y1[0])) as i16;
-                        idct::dc_only_idct_add(dc, &mut y.data, b, stride);
+                        idct::dc_only_idct_add(dc, y, b, stride);
                         r.qcoeff[i][0] = 0;
                         r.qcoeff[i][1] = 0;
                     }
-                    _ => idct::dequant_idct_add(&mut r.qcoeff[i], &d.y1, &mut y.data, b, stride),
+                    _ => idct::dequant_idct_add(&mut r.qcoeff[i], &d.y1, y, b, stride),
                 }
             }
         } else {
-            intra::predict_mb(
-                mode,
-                16,
-                at.left_available,
-                at.up_available,
-                &mut y.data,
-                pos,
-                stride,
-            );
+            intra::predict_mb(mode, 16, at.left_available, at.up_available, y, pos, stride);
         }
     } else {
         let refp = match mi.ref_frame {
@@ -767,13 +810,15 @@ fn decode_macroblock(
         let ctx = InterContext {
             filter: rows.filter,
             fullpixel_mask: rows.fullpixel_mask,
-            edges: Edges::of(at.mb_row, at.mb_col, c.mb_rows, c.mb_cols),
+            edges: Edges::of(at.mb_row, at.mb_col, rows.mb_rows, rows.mb_cols),
         };
-        inter::predict_mb(&ctx, mi, refp, new, stale, mb_x, mb_y);
+        if !inter::predict_mb(&ctx, mi, refp, new, prior, mb_x, mb_y) {
+            return false;
+        }
     }
 
     if mi.mb_skip_coeff {
-        return;
+        return true;
     }
     if mode != B_PRED {
         let mut dq_y = &d.y1;
@@ -798,30 +843,29 @@ fn decode_macroblock(
             }
             dq_y = &d.y1_dc;
         }
-        let y = &mut new.planes[0];
-        let (pos, stride) = (y.at(mb_x, mb_y), y.stride);
+        let (pos, stride) = (new.at(0, mb_x, mb_y), new.strides[0]);
         idct::add_y_blocks(
             &mut r.qcoeff[..16],
             dq_y,
             &r.eobs[..16],
-            &mut y.data,
+            new.planes[0],
             pos,
             stride,
         );
     }
     for (p, blocks) in [(1, 16..20), (2, 20..24)] {
-        let plane = &mut new.planes[p];
-        let (pos, stride) = (plane.at(mb_x / 2, mb_y / 2), plane.stride);
+        let (pos, stride) = (new.at(p, mb_x / 2, mb_y / 2), new.strides[p]);
         let eobs = &r.eobs[blocks.clone()];
         idct::add_uv_blocks(
             &mut r.qcoeff[blocks],
             &d.uv,
             eobs,
-            &mut plane.data,
+            new.planes[p],
             pos,
             stride,
         );
     }
+    true
 }
 
 #[cfg(test)]
@@ -872,6 +916,181 @@ mod tests {
         assert_eq!(parts.len(), 4);
         assert!(!parts[0].has_error());
         assert!(parts[1..].iter().all(BoolDecoder::has_error));
+    }
+
+    /// Numerical Recipes' generator.
+    struct Lcg(u32);
+
+    impl Lcg {
+        fn below(&mut self, n: usize) -> usize {
+            self.0 = self.0.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (self.0 >> 8) as usize % n.max(1)
+        }
+
+        fn chance(&mut self, one_in: usize) -> bool {
+            self.below(one_in) == 0
+        }
+
+        fn byte(&mut self) -> u8 {
+            self.below(256) as u8
+        }
+
+        fn mv(&mut self, reach: usize) -> modes::Mv {
+            let mut part = || (self.below(2 * reach + 1) as i32 - reach as i32) as i16;
+            modes::Mv {
+                row: part(),
+                col: part(),
+            }
+        }
+    }
+
+    /// A frame of `w` x `h` pixels holding noise, borders and all.
+    fn noise(rng: &mut Lcg, w: u32, h: u32) -> Frame {
+        let mut f = Frame::new(w, h);
+        for plane in &mut f.planes {
+            plane.data.fill_with(|| rng.byte());
+        }
+        f
+    }
+
+    /// Modes at random: any intra mode, or any inter mode with vectors near
+    /// the macroblock or, if `wild`, far outside the picture.
+    fn random_mode(rng: &mut Lcg, key_frame: bool, wild: bool) -> ModeInfo {
+        let mut mi = ModeInfo {
+            segment_id: rng.below(4) as u8,
+            mb_skip_coeff: rng.chance(3),
+            ..ModeInfo::default()
+        };
+        if key_frame || rng.chance(3) {
+            mi.ref_frame = INTRA_FRAME;
+            mi.mode = rng.below(usize::from(B_PRED) + 1) as u8;
+            mi.uv_mode = rng.below(4) as u8;
+            for b in &mut mi.bmodes {
+                *b = rng.below(10) as u8;
+            }
+        } else {
+            mi.ref_frame = LAST_FRAME + rng.below(3) as u8;
+            mi.mode = modes::NEARESTMV + rng.below(5) as u8;
+            let reach = if wild { 2400 } else { 160 };
+            mi.mv = rng.mv(reach);
+            mi.partitioning = rng.below(4) as u8;
+            for b in &mut mi.bmvs {
+                *b = rng.mv(reach);
+            }
+            mi.need_to_clamp_mvs = rng.chance(2);
+        }
+        mi.is_4x4 = mi.mode == B_PRED || mi.mode == SPLITMV;
+        mi
+    }
+
+    #[test]
+    fn rows_decode_alike_on_any_number_of_threads() {
+        let mut rng = Lcg(0x0f08_7eed);
+        let (threaded, fell_back) = threading::TALLY.get();
+        for case in 0..240 {
+            let (w, h) = (8 + rng.below(90) as u32, 17 + rng.below(100) as u32);
+            let mut c = Common::new();
+            c.allocate(w, h);
+            let key_frame = rng.chance(4);
+            let wild = rng.chance(3);
+            for mb_row in 0..c.mb_rows {
+                for mb_col in 0..c.mb_cols {
+                    let idx = c.grid.index(mb_row, mb_col);
+                    c.grid.cells[idx] = random_mode(&mut rng, key_frame, wild);
+                }
+            }
+            let references = [
+                noise(&mut rng, w, h),
+                noise(&mut rng, w, h),
+                noise(&mut rng, w, h),
+            ];
+            let refs = Refs {
+                last: &references[0],
+                golden: &references[1],
+                altref: &references[2],
+                corrupted: [false, rng.chance(8), rng.chance(8), rng.chance(8)],
+            };
+            let count = 1 << rng.below(4);
+            let data: Vec<Vec<u8>> = (0..count)
+                .map(|_| (0..rng.below(400)).map(|_| rng.byte()).collect())
+                .collect();
+            let lfi = LoopFilterInfo::new(
+                rng.below(64) as u8,
+                rng.below(8) as u8,
+                &Adjustments::default(),
+            );
+            let quant = Quant {
+                base: rng.below(128) as u8,
+                ..Quant::default()
+            };
+            let rows = Rows {
+                filter: if rng.chance(2) {
+                    Filter::SixTap
+                } else {
+                    Filter::Bilinear
+                },
+                fullpixel_mask: if rng.chance(2) { !7 } else { !0 },
+                lf: (!rng.chance(5)).then_some(&lfi),
+                simple_filter: rng.chance(2),
+                key_frame,
+                mb_rows: c.mb_rows,
+                mb_cols: c.mb_cols,
+                coef_probs: &DEFAULT_COEF_PROBS,
+                dequant: core::array::from_fn(|_| quant.dequant(rng.below(128) as i32)),
+            };
+            // What the buffer held, and, half the time, the buffer the
+            // caller kept, which a fresh buffer takes the place of.
+            let prior = noise(&mut rng, w, h);
+            let stale = rng.chance(2).then(|| noise(&mut rng, w, h));
+            let run = |threads: usize| {
+                let mut new = prior.clone();
+                let mut grid = c.grid.clone();
+                let mut above = c.above.clone();
+                let mut partitions: Vec<BoolDecoder<'_>> =
+                    data.iter().map(|d| BoolDecoder::new(d)).collect();
+                let corrupted = decode_mb_rows(
+                    &rows,
+                    &mut grid,
+                    &mut above,
+                    &mut partitions,
+                    (&mut new, stale.as_ref()),
+                    &refs,
+                    Threading {
+                        threads,
+                        min_macroblocks: 0,
+                    },
+                );
+                let skips: Vec<bool> = grid.cells.iter().map(|m| m.mb_skip_coeff).collect();
+                (corrupted, new, skips, above)
+            };
+            let (corrupted, one, skips, above) = run(1);
+            for threads in [2, 3, 8] {
+                let what =
+                    format!("case {case} ({w}x{h}, {count} partitions) on {threads} threads");
+                let (corrupted_too, many, skips_too, above_too) = run(threads);
+                assert_eq!(corrupted, corrupted_too, "{what}");
+                for p in 0..3 {
+                    assert!(
+                        one.planes[p].data == many.planes[p].data,
+                        "{what}: plane {p} differs"
+                    );
+                }
+                assert!(skips == skips_too, "{what}: skip flags differ");
+                assert_eq!(above, above_too, "{what}");
+            }
+        }
+        let (threaded_now, fell_back_now) = threading::TALLY.get();
+        assert!(
+            threaded_now - threaded > 100,
+            "{} frames threaded",
+            threaded_now - threaded
+        );
+        // The version-3 macroblock whose chroma keeps what its buffer held.
+        assert!(
+            fell_back_now - fell_back > 10,
+            "{} frames fell back",
+            fell_back_now - fell_back
+        );
     }
 
     #[test]

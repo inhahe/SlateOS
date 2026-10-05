@@ -6,7 +6,10 @@
 //! luma size halved and rounded up each way.
 //!
 //! The committed vectors run on every `cargo test`; the full suite of 62
-//! runs with `--ignored` once `tools/fetch_vectors.py` has fetched it.
+//! runs with `--ignored` once `tools/fetch_vectors.py` has fetched it. Each
+//! decodes on one thread and on several: the vectors with token partitions
+//! decode their rows on threads of their own, which must make the same
+//! pictures.
 
 #![allow(
     clippy::indexing_slicing,
@@ -34,12 +37,20 @@ fn picture_md5(p: &Picture) -> String {
     md5::hex(&md5.finalize()).to_string()
 }
 
-/// Decode a vector; compare each picture with libvpx's. Returns how many
-/// pictures matched, or the first difference.
-fn check(path: &Path) -> Result<usize, String> {
+/// The thread counts every vector decodes with: one; two and four and
+/// eight, which divide the partition counts; and three, which does not, so
+/// a partition moves from thread to thread.
+const THREADS: [usize; 5] = [1, 2, 3, 4, 8];
+
+/// Decode a vector on up to `threads` threads; compare each picture with
+/// libvpx's. Returns how many pictures matched, or the first difference.
+fn check(path: &Path, threads: usize) -> Result<usize, String> {
     let v = common::read_vector(path)?;
     let want = common::read_md5s(&common::md5_path(path))?;
     let mut d = Decoder::new();
+    d.set_threads(threads);
+    // The vectors are small: without this, threads would not be used.
+    d.set_min_macroblocks_per_thread(0);
     let mut n = 0usize;
     for (i, frame) in v.frames.iter().enumerate() {
         let picture = d.decode(frame).map_err(|e| format!("frame {i}: {e}"))?;
@@ -72,8 +83,13 @@ fn check_all(dir: &Path) -> (usize, Vec<String>) {
     assert!(!vectors.is_empty(), "no vectors in {}", dir.display());
     let mut failures = Vec::new();
     for p in &vectors {
-        if let Err(e) = check(p) {
-            failures.push(format!("{}: {e}", p.file_name().unwrap().to_string_lossy()));
+        for threads in THREADS {
+            if let Err(e) = check(p, threads) {
+                failures.push(format!(
+                    "{} on {threads} threads: {e}",
+                    p.file_name().unwrap().to_string_lossy()
+                ));
+            }
         }
     }
     (vectors.len(), failures)

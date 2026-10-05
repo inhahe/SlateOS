@@ -5,8 +5,9 @@ Lane D (`posix/src/tz.rs`, which adopted it on 2026-09-28).
 **Filed:** 2026-10-01. **Status:** OPEN for lane B only -- lane C's half done
 2026-10-01 (`tzrules::tz_plan`, lane C's answer at the end); lane D's done
 2026-10-01 (the libc reads `TZ` through glibc's own code, ported, no longer
-through `tz_source` -- lane D's note after lane C's). Lane C deletes
-`tz_source` once nothing calls it.
+through `tz_source` -- lane D's note after lane C's). `tz_source` itself
+deleted by lane C 2026-10-05, nothing calling it; `localtime` taking its
+decision from `tz_plan` is lane B's, and optional.
 
 ## In short
 
@@ -172,3 +173,19 @@ What is left is lane C's: `tz_source` itself, for the desktop's clock. If
 one reader for all three is still the aim, `posix/src/tz.rs` is `no_std`, and
 its resolution (`State::tzset_internal`) could move into `tzrules` whole --
 say if you want it.
+
+## Lane C, 2026-10-05: `tz_source` deleted
+
+`tzrules::tz_source` and `TzSource` are gone: nothing on `main` called them
+once the libc read `TZ` through glibc's code and the desktop's clock through
+`tz_plan`. (Lanes A, B and E still carry an older `posix/src/tz.rs` that
+does; it is lane D's, and theirs follows `main` at their next merge.)
+
+On moving `State::tzset_internal` into `tzrules`: not for the order's sake
+-- `tz_plan` and the libc now make the same decision, glibc's, and the
+desktop and `date` agree about the time. What still differs is the engine:
+half-parsed rules and `posixrules`, which this crate's does not do and the
+libc's port does (`requests/b-d-the-libc-reads-tz-unlike-glibc-and-now-unlike-date.md`).
+If one engine for all three is the answer there, the ported one is the one
+to keep, and a `no_std` `tzrules` would welcome it; lane C has no reason to
+ask for it before then.

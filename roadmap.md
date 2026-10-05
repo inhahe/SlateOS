@@ -1838,7 +1838,8 @@ live.
   (lane B's report). `tzrules::tz_plan` is glibc's order and the clock reads
   through it; the libc's move (lane D) and `localtime`'s (lane B) are in
   `requests/b-cd-tz-source-tries-the-rule-before-the-file-and-glibc-does-the-opposite.md`,
-  after which `tz_source` is deleted.
+  after which `tz_source` is deleted. **Deleted 2026-10-05**: the libc reads
+  `TZ` through glibc's own code, ported (lane D), and nothing else called it.
 
 - `[C]` **"System (Auto)" switches between light and dark by the clock** --
   done 2026-09-25 (`design-decisions.md` §876). It had always meant dark. It is

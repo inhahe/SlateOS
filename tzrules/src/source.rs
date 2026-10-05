@@ -127,7 +127,7 @@ impl<'a> TzPlan<'a> {
 ///    `EST5EDT` is a file carrying the United States' rules as each year had
 ///    them, and a rule carrying only today's. At 1990-03-20 12:00 UTC the file
 ///    says 07:00 EST and the rule 08:00 EDT, and before 2026-10-01 this crate
-///    took the rule ([`tz_source`]) -- an hour off from Linux
+///    took the rule (`tz_source`, since deleted) -- an hour off from Linux
 ///    (`requests/b-cd-tz-source-tries-the-rule-before-the-file-and-glibc-does-the-opposite.md`).
 /// 5. **Otherwise the POSIX rule** (`CET-1CEST,M3.5.0,M10.5.0/3`) -- UTC if the
 ///    value is not one, or if the file it named was [`LOCALTIME`] itself.
@@ -187,62 +187,6 @@ fn zone_file(name: &[u8]) -> Option<ZoneFile<'_>> {
         Some(ZoneFile::Path(name))
     } else {
         Some(ZoneFile::Named(name))
-    }
-}
-
-/// What a `TZ` value names, in the order this crate used before 2026-10-01,
-/// which is **not glibc's**: a POSIX rule is tried before a file of the same
-/// name, a leading `:` means "a file, never a rule", and empty is UTC without
-/// looking for `Universal`. See [`tz_plan`], which replaces it.
-///
-/// Kept only while `posix/src/tz.rs` still calls it -- lane D's, asked to
-/// move in
-/// `requests/b-cd-tz-source-tries-the-rule-before-the-file-and-glibc-does-the-opposite.md`
-/// (lane C's answer, at its end) -- and to be deleted when nothing does. New
-/// code calls [`tz_plan`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TzSource<'a> {
-    /// UTC, because `TZ` asked for it by being set and empty.
-    Utc,
-    /// A POSIX rule, already parsed.
-    Rule(Tz),
-    /// A zoneinfo file, by its name under the zoneinfo directory -- `TZDIR`
-    /// if the caller honours it and it is set, else [`ZONEINFO_DIR`].
-    Named(&'a [u8]),
-    /// A zoneinfo file, by absolute path.
-    Path(&'a [u8]),
-    /// The machine's own zone: `TZ` is unset, so read [`LOCALTIME`].
-    System,
-    /// A file name that must not be opened -- a `..` component, a NUL, or
-    /// nothing after a `:` -- which resolves to UTC.
-    Refused,
-}
-
-/// What the `TZ` value `value` names, in the order before 2026-10-01 --
-/// superseded by [`tz_plan`]; see [`TzSource`]. `None` is `TZ` unset.
-#[must_use]
-pub fn tz_source(value: Option<&[u8]>) -> TzSource<'_> {
-    let Some(value) = value else {
-        return TzSource::System;
-    };
-    if value.is_empty() {
-        return TzSource::Utc;
-    }
-    if let Some(name) = value.strip_prefix(b":") {
-        return file_source(name);
-    }
-    if let Some(rule) = Tz::parse(value) {
-        return TzSource::Rule(rule);
-    }
-    file_source(value)
-}
-
-/// A zoneinfo file name, or its refusal, for [`tz_source`].
-fn file_source(name: &[u8]) -> TzSource<'_> {
-    match zone_file(name) {
-        Some(ZoneFile::Path(path)) => TzSource::Path(path),
-        Some(ZoneFile::Named(name)) if !name.is_empty() => TzSource::Named(name),
-        _ => TzSource::Refused,
     }
 }
 

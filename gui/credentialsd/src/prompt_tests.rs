@@ -133,6 +133,23 @@ fn the_window_names_the_program_and_what_it_asks_for() {
         assert!(words.iter().any(|w| w == want), "{want:?} in {words:?}");
     }
     assert!(!words.join(" ").contains("master password"));
+    // The domain is drawn whole -- never with room to cut it -- and the
+    // address beside it may be cut.
+    let (w, h) = app.initial_size();
+    let tree = app.render(w as f32, h as f32);
+    let room_of = |want: &str| {
+        tree.commands
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text {
+                    text, max_width, ..
+                } if text == want => Some(*max_width),
+                _ => None,
+            })
+            .expect("drawn")
+    };
+    assert_eq!(room_of("bank.example"), None);
+    assert!(room_of("https://bank.example/login").is_some());
     assert_eq!(app.title(), "Password request");
     assert_eq!(app.app_id(), "credentials");
     assert!(!app.resizable());

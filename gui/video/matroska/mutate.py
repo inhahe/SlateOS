@@ -75,6 +75,26 @@ SEGMENT = "the_segment_says_its_tick_and_its_length"
 STORED = "a_track_stored_as_this_cannot_undo_is_passed_over"
 NO_KEYS = "a_seek_in_a_track_without_key_frames_fails_and_reading_goes_on"
 CUES_MET = "cues_met_while_reading_are_passed_over"
+# Cues the SeekHead names twice, and Cues left unused after a failure.
+SEEKS_CUES_LAST_ENTRY = "seeks_in_cues_last_entry"
+SEEKS_CUES_BROKEN = "seeks_in_cues_broken"
+# The metadata: as ffprobe shows it (`tests/metadata.rs`), and the packets
+# of the same files (`tests/fixtures.rs`).
+META_FFMPEG = "metadata_of_ffmpeg_s_file"
+META_TAGS = "metadata_of_tags"
+META_CHAPTERS = "metadata_of_chapters"
+META_ATTACHMENTS = "metadata_of_attachments"
+META_INFO = "metadata_of_two_infos"
+META_DATE = "metadata_of_a_date"
+META_TWO_TRACKS = "metadata_of_two_tracks_elements"
+META_SEEK_HEAD = "metadata_through_the_seek_head"
+META_MISMATCH = "metadata_where_the_seek_head_names_the_wrong_element"
+META_TRAILING = "metadata_after_the_clusters"
+META_CUT = "metadata_cut_short_anywhere_is_ffmpeg_s"
+META_DAMAGE = "damage_before_the_first_cluster_keeps_what_was_read"
+META_DEEP = "tags_nest_no_deeper_than_ffmpeg_reads"
+META_INFO_PACKETS = "packets_of_meta_info"
+META_TWO_TRACKS_PACKETS = "packets_of_meta_two_tracks"
 
 # (name, old, new, [tests that must fail])
 BLOCK = [
@@ -157,10 +177,15 @@ EBML = [
         ["values_read_as_ebml_writes_them"],
     ),
     (
-        "a reserved ID is read as an ID",
-        "if value == 0 || value == (1u64 << value_bits) - 1 {",
-        "if false {",
-        ["a_damaged_header_is_an_error"],
+        "a reserved ID is damage",
+        "        let (_, id) = self.vint(4, true)?;\n",
+        "        let (id_len, id) = self.vint(4, true)?;\n"
+        "        let value_bits = id_len * 7;\n"
+        "        let value = id & ((1u64 << value_bits) - 1);\n"
+        "        if value == 0 || value == (1u64 << value_bits) - 1 {\n"
+        "            return Err(Error::Invalid(\"a reserved EBML ID\"));\n"
+        "        }\n",
+        ["packets_of_reserved_ids", "a_reserved_id_is_an_id"],
     ),
     (
         "a child may run past its parent",
@@ -327,24 +352,89 @@ DEMUX = [
     ),
     (
         "SeekHead positions count from the file's start",
-        "&& let Some(at) = pos.checked_add(base)",
-        "&& let Some(at) = Some(pos)",
-        [TRACKS_AT_THE_END, SPARSE],
+        "                .checked_add(self.segment_data)\n",
+        "                .checked_add(0)\n",
+        [TRACKS_AT_THE_END, SPARSE, META_SEEK_HEAD],
     ),
     (
         "Tracks after the Clusters are not looked for",
-        "                ids::TRACKS => !tracks_read,",
-        "                ids::TRACKS => false,",
+        "            ids::TRACKS => self.read_tracks(&h),\n",
+        "            ids::TRACKS => Ok(()),\n",
         [TRACKS_AT_THE_END],
     ),
     (
         "Cues the SeekHead points to are not noted",
-        "                ids::CUES => {\n"
-        "                    self.cues_at.get_or_insert(pos);\n"
-        "                    false\n"
-        "                }",
-        "                ids::CUES => false,",
+        "None if !cues_broken => level1.cues_unread(),",
+        "None if !cues_broken => None,",
         [SPARSE],
+    ),
+    (
+        "the first SeekHead entry naming the Cues is the one followed",
+        "            entry.pos = pos;\n",
+        "            if entry.pos == 0 {\n                entry.pos = pos;\n            }\n",
+        [SEEKS_CUES_LAST_ENTRY],
+    ),
+    (
+        "Cues are used after following the SeekHead has failed",
+        "                    cues_broken = true;\n",
+        "",
+        [SEEKS_CUES_BROKEN],
+    ),
+    (
+        "a second Info does not start its numbers afresh",
+        "        info.timestamp_scale = 1_000_000;\n        info.duration = None;\n",
+        "",
+        [META_INFO_PACKETS],
+    ),
+    (
+        "a second Tracks before the Clusters is not read",
+        "                    ids::TRACKS => self.read_tracks(&h)?,",
+        "                    ids::TRACKS if self.tracks.is_empty() => self.read_tracks(&h)?,\n"
+        "                    ids::TRACKS => {}",
+        [META_TWO_TRACKS_PACKETS, META_TWO_TRACKS],
+    ),
+    (
+        "Tags at a second position are not read",
+        "let by_position = id == ids::SEEK_HEAD || id == ids::TAGS;",
+        "let by_position = id == ids::SEEK_HEAD;",
+        [META_SEEK_HEAD],
+    ),
+    (
+        "Chapters already read are read again where the SeekHead points",
+        "let by_position = id == ids::SEEK_HEAD || id == ids::TAGS;",
+        "let by_position = true;",
+        [META_SEEK_HEAD],
+    ),
+    (
+        "an empty title is none",
+        "ids::TITLE => info.title = Some(r.string(c.size)?.unwrap_or_default()),",
+        "ids::TITLE => info.title = r.string(c.size)?,",
+        [META_DATE],
+    ),
+    (
+        "a DateUTC of another size is a date",
+        "                    info.date_utc = <[u8; 8]>::try_from(bytes.as_slice())\n"
+        "                        .ok()\n"
+        "                        .map(i64::from_be_bytes);",
+        "                    if let Ok(b) = <[u8; 8]>::try_from(bytes.as_slice()) {\n"
+        "                        info.date_utc = Some(i64::from_be_bytes(b));\n"
+        "                    }",
+        [META_INFO],
+    ),
+    (
+        "after damage before the first Cluster, the Segment's stated end still bounds it",
+        "                                        segment_ends = None;\n",
+        "",
+        ["after_damage_the_segment_runs_to_the_end_of_the_file"],
+    ),
+    (
+        "damage before the first Cluster refuses the file",
+        "                            Err(_) => {\n"
+        "                                // Past its four-byte ID, and one more.",
+        "                            Err(e) => {\n"
+        "                                return Err(e);\n"
+        "                                // Past its four-byte ID, and one more.",
+        [META_DAMAGE],
     ),
     # Reading the Clusters.
     (
@@ -592,6 +682,256 @@ DEMUX = [
     ),
 ]
 
+METADATA = [
+    # FFmpeg's dictionary.
+    (
+        "a key set again keeps its place",
+        "            self.entries.swap_remove(i);",
+        "            self.entries.remove(i);",
+        [META_TAGS, META_ATTACHMENTS, "setting_a_key_moves_the_last_entry_into_its_place"],
+    ),
+    (
+        "a key is matched with its case",
+        ".filter(|(_, (k, _))| k.eq_ignore_ascii_case(key))",
+        ".filter(|(_, (k, _))| k == key)",
+        [META_TAGS, META_ATTACHMENTS, META_FFMPEG],
+    ),
+    (
+        "nothing is renamed",
+        "            let k = renamed(&k).map_or(k, <[u8]>::to_vec);",
+        "",
+        [META_TAGS, "renaming_keeps_both_of_two_values_and_drops_a_repeat"],
+    ),
+    (
+        "renaming drops a second value of a key",
+        "            if seen.insert((k.to_ascii_lowercase(), v.clone())) {",
+        "            if seen.insert((k.to_ascii_lowercase(), Vec::new())) {",
+        [META_TAGS, "renaming_keeps_both_of_two_values_and_drops_a_repeat"],
+    ),
+    (
+        "the renaming pass is skipped after a key it renames",
+        "        if matches.next().is_some() || renamed(key).is_some() {",
+        "        if matches.next().is_some() {",
+        [META_TAGS, "renaming_keeps_both_of_two_values_and_drops_a_repeat"],
+    ),
+    # Tags.
+    (
+        "a tag in a language is set under its plain name too",
+        "        if t.default != 0 || lang.is_none() {",
+        "        if true {",
+        [META_TAGS, META_TRAILING, "a_tag_is_keyed_by_language_prefix_and_nesting"],
+    ),
+    (
+        "the default flag is ignored",
+        "        if t.default != 0 || lang.is_none() {",
+        "        if lang.is_none() {",
+        [META_TAGS, META_TRAILING, "a_tag_is_keyed_by_language_prefix_and_nesting"],
+    ),
+    (
+        "a nested tag's key leaves out its parent's",
+        "                convert_tag(&t.sub, metadata, Some(&key), budget);\n"
+        "            }\n"
+        "        }\n"
+        "        if let Some(lang) = lang {",
+        "                convert_tag(&t.sub, metadata, None, budget);\n"
+        "            }\n"
+        "        }\n"
+        "        if let Some(lang) = lang {",
+        [META_TAGS, META_TRAILING, "a_tag_is_keyed_by_language_prefix_and_nesting"],
+    ),
+    (
+        "a key is not cut at FFmpeg's buffer",
+        "            None => name.iter().take(MAX_KEY).copied().collect(),",
+        "            None => name.to_vec(),",
+        [META_TAGS, "a_key_stops_at_ffmpeg_s_buffer"],
+    ),
+    (
+        "the TargetType is no prefix",
+        "convert_tag(&t.tags, &mut file, target.kind.as_deref(), &mut budget);",
+        "convert_tag(&t.tags, &mut file, None, &mut budget);",
+        [META_TAGS, META_TRAILING],
+    ),
+    (
+        "a tag naming a track goes to the file",
+        "        } else if target.track != 0 {",
+        "        } else if false {",
+        [META_TAGS, META_TWO_TRACKS, META_FFMPEG],
+    ),
+    (
+        "a tag naming a chapter and a track goes to the track",
+        "        } else if target.chapter != 0 {",
+        "        } else if target.chapter != 0 && target.track == 0 {",
+        [META_TAGS],
+    ),
+    (
+        "a tag naming an attachment goes to the file",
+        "        if target.attachment != 0 {",
+        "        if false {",
+        [META_ATTACHMENTS, META_TRAILING],
+    ),
+    # The tracks' own metadata.
+    (
+        "a track's language `und` is shown",
+        "    if t.language != b\"und\" {",
+        "    if true {",
+        [META_TAGS],
+    ),
+    (
+        "a stereo mode FFmpeg does not name is shown",
+        "        if v.stereo_mode != 0\n",
+        "        if true\n",
+        [META_TAGS],
+    ),
+    # Chapters.
+    (
+        "chapters start in any order",
+        "if c.start != NOPTS && c.uid != 0 && (max_start == 0 || c.start > max_start) {",
+        "if c.start != NOPTS && c.uid != 0 {",
+        [META_CHAPTERS],
+    ),
+    (
+        "a chapter ending before it starts is kept",
+        "    if given && start > end {",
+        "    if false {",
+        [META_CHAPTERS],
+    ),
+    (
+        "a chapter left out does not count as started",
+        "            chapter = new_chapter(&mut chapters, &mut by_uid, c, &mut budget);\n"
+        "            max_start = c.start;",
+        "            chapter = new_chapter(&mut chapters, &mut by_uid, c, &mut budget);\n"
+        "            if chapter.is_some() {\n"
+        "                max_start = c.start;\n"
+        "            }",
+        [META_CHAPTERS],
+    ),
+    (
+        "a chapter's UID seen again makes another chapter",
+        "    let i = *by_uid.entry(atom.uid).or_insert_with(|| {",
+        "    let fresh = atom.uid ^ (chapters.len() as u64) << 32;\n"
+        "    let i = *by_uid.entry(fresh).or_insert_with(|| {",
+        [META_CHAPTERS],
+    ),
+    (
+        "a chapter's end is the file's though another starts before",
+        "            && next > c.start\n            && next < end\n",
+        "            && false\n",
+        [META_CHAPTERS, META_CUT, "a_chapter_without_an_end_ends_where_the_next_starts_or_the_file_ends"],
+    ),
+    (
+        "chapters end in the file's order, not their starts'",
+        "    order.sort_by(|&a, &b| start_of(a).cmp(&start_of(b)).then(uid(a).cmp(&uid(b))));",
+        "",
+        [META_CHAPTERS, "a_chapter_without_an_end_ends_where_the_next_starts_or_the_file_ends"],
+    ),
+    # Attachments.
+    (
+        "an attachment of no bytes is kept",
+        "        if size == 0 {\n            continue;\n        }\n",
+        "",
+        [META_ATTACHMENTS],
+    ),
+    (
+        "a media type is matched whole",
+        "            .find(|(name, _)| media_type.starts_with(name))",
+        "            .find(|(name, _)| media_type == *name)",
+        [META_ATTACHMENTS, "a_media_type_is_known_by_its_start"],
+    ),
+    (
+        "an attachment's description is not its title",
+        "            metadata.set(b\"title\", Some(d), &mut budget);",
+        "            let _ = d;",
+        [META_FFMPEG, META_TRAILING],
+    ),
+    # The file's.
+    (
+        "the muxing application is not the encoder",
+        "    file.set(b\"encoder\", info.muxing_app.as_deref(), &mut budget);",
+        "",
+        [META_FFMPEG, META_INFO, META_DATE],
+    ),
+    (
+        "creation_time's fraction is the remainder's absolute value",
+        "    let fraction = micros % 1_000_000;",
+        "    let fraction = (micros % 1_000_000).abs();",
+        ["creation_time_is_ffmpeg_s_down_to_its_quirks"],
+    ),
+]
+
+NEST = [
+    (
+        "a number cut short is not kept",
+        "    *out = v;\n    if short {",
+        "    if !short {\n        *out = v;\n    }\n    if short {",
+        [META_CUT, "a_number_cut_short_keeps_what_was_read"],
+    ),
+    (
+        "a string cut short empties its field",
+        "    if n > r.remaining() {\n        return Err(Error::Truncated);\n    }\n    let mut s",
+        "    if n > r.remaining() {\n        *out = None;\n        return Err(Error::Truncated);\n    }\n    let mut s",
+        [META_CUT, "a_string_is_empty_when_empty_and_untouched_when_cut"],
+    ),
+    (
+        "an empty string is no string",
+        "    *out = Some(s);\n    Ok(())",
+        "    *out = (!s.is_empty()).then_some(s);\n    Ok(())",
+        [META_TAGS, META_ATTACHMENTS, "a_string_is_empty_when_empty_and_untouched_when_cut"],
+    ),
+    (
+        "masters nest as deep as the file goes",
+        "    if levels >= MAX_LEVELS {",
+        "    if false {",
+        [META_DEEP, "tags_nest_only_as_deep_as_ffmpeg_reads"],
+    ),
+    (
+        "nested chapters are read",
+        "            // A nested atom too: FFmpeg reads only the top level.\n"
+        "            _ => skip(r, &f)?,",
+        "            ids::CHAPTER_ATOM => {\n"
+        "                let mut nested = RawChapter::default();\n"
+        "                read_atom(r, &f, levels, &mut nested)?;\n"
+        "                *c = nested;\n"
+        "            }\n"
+        "            _ => skip(r, &f)?,",
+        [META_CHAPTERS, "chapters_come_from_every_edition_and_only_their_top_level"],
+    ),
+    (
+        "only the first edition's chapters are read",
+        "        let in_edition = enter(levels)?;\n",
+        "        if !out.is_empty() {\n            skip(r, &edition)?;\n            continue;\n        }\n"
+        "        let in_edition = enter(levels)?;\n",
+        [META_CHAPTERS, "chapters_come_from_every_edition_and_only_their_top_level"],
+    ),
+    (
+        "the first ChapString is kept",
+        "                        string(r, &d, None, &mut c.title)?;",
+        "                        if c.title.is_none() {\n"
+        "                            string(r, &d, None, &mut c.title)?;\n"
+        "                        } else {\n"
+        "                            skip(r, &d)?;\n"
+        "                        }",
+        [META_CHAPTERS, META_CUT],
+    ),
+    (
+        "a second Targets keeps the first's UIDs",
+        "    target.track = 0;\n    target.chapter = 0;\n    target.attachment = 0;\n",
+        "",
+        [META_TAGS],
+    ),
+    (
+        "a SimpleTag's language defaults to none",
+        "    tag.lang = Some(b\"und\".to_vec());\n",
+        "",
+        [META_TAGS, META_TRAILING],
+    ),
+    (
+        "the misspelt TagDefault is not read",
+        "            ids::TAG_DEFAULT | ids::TAG_DEFAULT_BOGUS => uint(r, &f, 0, &mut tag.default)?,",
+        "            ids::TAG_DEFAULT => uint(r, &f, 0, &mut tag.default)?,",
+        [META_TAGS],
+    ),
+]
+
 if __name__ == "__main__":
     # A filter goes to the tables it names a row of, and only those: the
     # harness refuses a filter that selects nothing.
@@ -602,6 +942,8 @@ if __name__ == "__main__":
         (SRC / "track.rs", TRACK),
         (SRC / "cues.rs", CUES),
         (SRC / "demux.rs", DEMUX),
+        (SRC / "metadata.rs", METADATA),
+        (SRC / "nest.rs", NEST),
     ]
     names = [name for _, rows in tables for name, *_ in rows]
     unmatched = [o for o in only if not any(o in n for n in names)]

@@ -3810,7 +3810,7 @@ lane C's `guitk`.
   opens a file's pictures.
   - `[x]` Matroska and WebM, demultiplexed (`gui/video/matroska`,
     design-decisions §1345): written from RFC 9559 with FFmpeg's behaviour
-    where the RFC leaves a choice -- every packet of 37 fixtures and 78
+    where the RFC leaves a choice -- every packet of 45 fixtures and 92
     seeks held to `ffprobe`'s, and every frame of VP9, VP9 with alpha and
     AV1 played through it held to ffmpeg's decoders. The tree's one
     Matroska demuxer: `apps/mediaprobe`'s cases moved into its suite
@@ -3818,6 +3818,12 @@ lane C's `guitk`.
     sweep (`mutate.py`). A seek without Cues walks only as far as it must;
     with them, it goes by the Cues alone (§1348). What it leaves out:
     `known-issues/F-the-matroska-demuxer-leaves-out-what-no-webm-file-needs.md`.
+    - `[x]` Chapters, tags and attachments (2026-10-05, §1358): the file's,
+      each track's, chapter's and attachment's metadata as FFmpeg gives it
+      -- keys, values and their order, ten files and 660 truncations held
+      to ffprobe's -- chapters with FFmpeg's ends, attachments (cover art,
+      fonts) read when asked for. For lane E's player and probe:
+      `requests/f-e-matroska-gives-chapters-tags-and-attachments.md`.
   - `[x]` A frame-level API for a player (`gui/video/codec`, crate
     `videocodec`, design-decisions §1346): `Video::open(file)`, then
     `next_frame()` -- each picture in order with its time, duration and

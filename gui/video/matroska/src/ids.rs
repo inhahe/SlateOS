@@ -35,7 +35,40 @@ pub const TIMESTAMP_SCALE: Id = 0x2A_D7B1;
 pub const DURATION: Id = 0x4489;
 pub const TITLE: Id = 0x7BA9;
 pub const MUXING_APP: Id = 0x4D80;
-pub const WRITING_APP: Id = 0x5741;
+pub const DATE_UTC: Id = 0x4461;
+
+// Chapters.
+pub const EDITION_ENTRY: Id = 0x45B9;
+pub const CHAPTER_ATOM: Id = 0xB6;
+pub const CHAPTER_UID: Id = 0x73C4;
+pub const CHAPTER_TIME_START: Id = 0x91;
+pub const CHAPTER_TIME_END: Id = 0x92;
+pub const CHAPTER_DISPLAY: Id = 0x80;
+pub const CHAP_STRING: Id = 0x85;
+
+// Tags.
+pub const TAG: Id = 0x7373;
+pub const TARGETS: Id = 0x63C0;
+pub const TARGET_TYPE_VALUE: Id = 0x68CA;
+pub const TARGET_TYPE: Id = 0x63CA;
+pub const TAG_TRACK_UID: Id = 0x63C5;
+pub const TAG_CHAPTER_UID: Id = 0x63C4;
+pub const TAG_ATTACHMENT_UID: Id = 0x63C6;
+pub const SIMPLE_TAG: Id = 0x67C8;
+pub const TAG_NAME: Id = 0x45A3;
+pub const TAG_LANGUAGE: Id = 0x447A;
+pub const TAG_DEFAULT: Id = 0x4484;
+/// `TagDefault` as some writers misspelt its ID, which FFmpeg also reads.
+pub const TAG_DEFAULT_BOGUS: Id = 0x44B4;
+pub const TAG_STRING: Id = 0x4487;
+
+// Attachments.
+pub const ATTACHED_FILE: Id = 0x61A7;
+pub const FILE_DESCRIPTION: Id = 0x467E;
+pub const FILE_NAME: Id = 0x466E;
+pub const FILE_MEDIA_TYPE: Id = 0x4660;
+pub const FILE_DATA: Id = 0x465C;
+pub const FILE_UID: Id = 0x46AE;
 
 // Tracks.
 pub const TRACK_ENTRY: Id = 0xAE;
@@ -101,6 +134,9 @@ pub const CONTENT_ENCODING_TYPE: Id = 0x5033;
 pub const CONTENT_COMPRESSION: Id = 0x5034;
 pub const CONTENT_COMP_ALGO: Id = 0x4254;
 pub const CONTENT_COMP_SETTINGS: Id = 0x4255;
+pub const CONTENT_ENCRYPTION: Id = 0x5035;
+pub const CONTENT_ENC_ALGO: Id = 0x47E1;
+pub const CONTENT_ENC_KEY_ID: Id = 0x47E2;
 
 // Cues.
 pub const CUE_POINT: Id = 0xBB;

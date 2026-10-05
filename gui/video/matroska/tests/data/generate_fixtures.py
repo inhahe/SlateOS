@@ -40,11 +40,13 @@ of 2026-03-09 (git 9b7439c31b). Run from this directory:
 """
 
 import hashlib
+import json
 import os
 import struct
 import subprocess
 import sys
 import zlib
+from decimal import Decimal
 
 FFDIR = sys.argv[1] if len(sys.argv) > 1 else "D:/utils"
 FFMPEG = os.path.join(FFDIR, "ffmpeg.exe" if os.name == "nt" else "ffmpeg")
@@ -233,6 +235,18 @@ def synthetic():
     # Damage: a laced block whose sizes overrun it, inside the second
     # Cluster -- FFmpeg drops the rest of that Cluster and reads on from the
     # next.
+    # Elements of IDs the specification reserves -- value bits all ones
+    # (0xFF, 0x7FFF) or all zeros (0x80) -- between the Tracks and the first
+    # Cluster and inside it: FFmpeg reads each as an element it does not know
+    # and passes over it, so the file opens and the frame after them comes.
+    reserved = b"\xff\x82xx" + b"\x7f\xff\x82yy" + b"\x80\x82zz"
+    out["reserved_ids.mkv"] = segment(
+        INFO,
+        one,
+        reserved,
+        cluster(0, simple(1, 0, 0x80, frame(1, 6)), reserved, simple(1, 40, 0x00, frame(2, 6))),
+        cluster(100, simple(1, 0, 0x80, frame(3, 6))),
+    )
     out["damaged.mkv"] = segment(
         INFO,
         one,
@@ -655,6 +669,518 @@ def made_by_ffmpeg():
     return out
 
 
+# --- metadata -----------------------------------------------------------------
+#
+# Chapters, tags and attachments, and the metadata FFmpeg makes of them and
+# of the Info and the tracks: each `meta_*.mkv` answered in `meta_*.meta.txt`
+# (`meta_answer`), which `tests/metadata.rs` holds the crate to. Each file
+# puts one group of FFmpeg's rules to the test; the comments say which.
+
+
+def m_simple_tag(name=None, value=None, lang=None, default=None, bogus_default=None, subs=(), raw=b""):
+    body = b""
+    if name is not None:
+        body += el("45A3", name if isinstance(name, bytes) else name.encode())
+    if lang is not None:
+        body += el("447A", lang if isinstance(lang, bytes) else lang.encode())
+    if default is not None:
+        body += uint("4484", default)
+    if bogus_default is not None:
+        body += uint("44B4", bogus_default)
+    if value is not None:
+        body += el("4487", value if isinstance(value, bytes) else value.encode())
+    return el("67C8", body + b"".join(subs) + raw)
+
+
+def m_targets(kind=None, type_value=None, track=None, chapter=None, attachment=None):
+    body = b""
+    if type_value is not None:
+        body += uint("68CA", type_value)
+    if kind is not None:
+        body += el("63CA", kind.encode())
+    if track is not None:
+        body += uint("63C5", track)
+    if chapter is not None:
+        body += uint("63C4", chapter)
+    if attachment is not None:
+        body += uint("63C6", attachment)
+    return el("63C0", body)
+
+
+def m_tag(*children):
+    return el("7373", b"".join(children))
+
+
+def m_tags(*tags):
+    return el("1254C367", b"".join(tags))
+
+
+def m_atom(uid=None, start=None, end=None, titles=(), extra=b""):
+    body = b""
+    if uid is not None:
+        body += uint("73C4", uid)
+    if start is not None:
+        body += uint("91", start)
+    if end is not None:
+        body += uint("92", end)
+    for t in titles:
+        body += el("80", (el("85", t.encode()) if t is not None else b"") + el("437C", b"eng"))
+    return el("B6", body + extra)
+
+
+def m_chapters(*editions):
+    return el("1043A770", b"".join(el("45B9", uint("45BC", 1) + b"".join(atoms)) for atoms in editions))
+
+
+def m_attached(uid=None, name=None, mime=None, data=None, description=None):
+    body = b""
+    if description is not None:
+        body += el("467E", description.encode())
+    if name is not None:
+        body += el("466E", name.encode())
+    if mime is not None:
+        body += el("4660", mime.encode())
+    if data is not None:
+        body += el("465C", data)
+    if uid is not None:
+        body += uint("46AE", uid)
+    return el("61A7", body)
+
+
+def m_attachments(*files):
+    return el("1941A469", b"".join(files))
+
+
+def m_info(scale=1_000_000, title=None, muxer=None, date=None, duration=None):
+    body = b""
+    if scale is not None:
+        body += uint("2AD7B1", scale)
+    if title is not None:
+        body += el("7BA9", title.encode())
+    if muxer is not None:
+        body += el("4D80", muxer.encode())
+    body += el("5741", b"writer")
+    if date is not None:
+        body += el("4461", date)
+    if duration is not None:
+        body += el("4489", struct.pack(">d", duration))
+    return el("1549A966", body)
+
+
+def m_seek(id_hex, pos):
+    # Positions four bytes wide, so that a layout's sizes do not depend on them.
+    return el("4DBB", el("53AB", bytes.fromhex(id_hex)) + el("53AC", pos.to_bytes(4, "big")))
+
+
+def m_offsets(entries, parts):
+    """Where each of `parts` begins in the Segment's data, after the
+    SeekHead `m_laid_out` puts first."""
+    head = el("114D9B74", b"".join(m_seek(i, 0) for i, _ in entries))
+    offsets, pos = {}, len(head)
+    for name, b in parts:
+        offsets[name] = pos
+        pos += len(b)
+    return offsets
+
+
+def m_laid_out(entries, parts):
+    """A Segment's body: a SeekHead (`entries`: (ID, part name) pairs) and
+    then `parts` ((name, bytes) pairs) in order."""
+    offsets = m_offsets(entries, parts)
+    head = el("114D9B74", b"".join(m_seek(i, offsets[n]) for i, n in entries))
+    return head + b"".join(b for _, b in parts)
+
+
+def m_file(*children, size=None):
+    return EBML_HEADER + el("18538067", b"".join(children), size)
+
+
+def m_clusters():
+    return cluster(0, simple(1, 0, 0x80, frame(1, 12)), simple(1, 40, 0x00, frame(2, 12)))
+
+
+def m_snow(number, uid, extra=b"", video=b""):
+    """A Snow track, as `snow_track`, with its UID apart from its number."""
+    body = (
+        uint("D7", number)
+        + uint("73C5", uid)
+        + uint("83", 1)
+        + string("86", "V_SNOW")
+        + el("E0", uint("B0", 16) + uint("BA", 16) + video)
+    )
+    return el("AE", body + extra)
+
+
+def m_pictures():
+    """A PNG and a JPEG, as ffmpeg writes them: attached pictures FFmpeg
+    decodes when it probes them."""
+    out = {}
+    for ext in ("png", "jpg"):
+        name = f"m_picture.{ext}"
+        run(FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=16x16:rate=1",
+            "-frames:v", "1", "-flags", "+bitexact", "-fflags", "+bitexact", name)
+        with open(name, "rb") as f:
+            out[ext] = f.read()
+        os.remove(name)
+    return out
+
+
+# The metadata fixtures whose packets are answered too: those whose streams
+# are their tracks alone (an attachment is a stream to ffprobe).
+PACKETS_TOO = {"meta_tags.mkv", "meta_chapters.mkv", "meta_info.mkv", "meta_date.mkv", "meta_two_tracks.mkv"}
+
+
+def metadata_fixtures():
+    """The metadata fixtures: name -> bytes."""
+    out = {}
+    pics = m_pictures()
+
+    # Written by ffmpeg: the file's metadata, a stream's, chapters from an
+    # ffmetadata file (one with a key besides its title, which the muxer
+    # writes as a tag naming the chapter), and attachments of four kinds.
+    with open("m_meta.txt", "w", encoding="utf-8", newline="\n") as f:
+        f.write(";FFMETADATA1\ntitle=A film\nartist=Someone\ncomment=Café ☕\n\n"
+                "[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=150\ntitle=Opening\n\n"
+                "[CHAPTER]\nTIMEBASE=1/1000\nSTART=150\nEND=400\ntitle=Second part\nartist=Guest\n")
+    for ext, data in pics.items():
+        with open(f"m_cover.{ext}", "wb") as f:
+            f.write(data)
+    with open("m_font.ttf", "wb") as f:
+        f.write(b"not really a font")
+    with open("m_blob.bin", "wb") as f:
+        f.write(b"some bytes")
+    lavfi = ["-f", "lavfi", "-i"]
+    ffmpeg(
+        "meta_ffmpeg.mkv",
+        *lavfi, "testsrc=size=32x24:rate=10:duration=0.4",
+        *lavfi, "sine=frequency=440:sample_rate=48000:duration=0.4",
+        "-i", "m_meta.txt", "-map", "0", "-map", "1", "-map_metadata", "2", "-map_chapters", "2",
+        "-c:v", "libvpx-vp9", "-b:v", "30k", "-c:a", "libopus", "-b:a", "24k", "-ac", "1",
+        "-metadata:s:v:0", "title=The picture", "-metadata:s:a:0", "language=fre",
+        "-metadata:s:a:0", "title=Sound",
+        "-attach", "m_cover.png", "-metadata:s:2", "mimetype=image/png",
+        "-attach", "m_font.ttf", "-metadata:s:3", "mimetype=application/x-truetype-font",
+        "-attach", "m_blob.bin", "-metadata:s:4", "mimetype=application/octet-stream",
+        "-attach", "m_cover.jpg", "-metadata:s:5", "mimetype=image/jpeg", "-metadata:s:5", "title=A cover",
+    )
+    for n in ("m_meta.txt", "m_cover.png", "m_cover.jpg", "m_font.ttf", "m_blob.bin"):
+        os.remove(n)
+    with open("meta_ffmpeg.mkv", "rb") as f:
+        out["meta_ffmpeg.mkv"] = f.read()
+
+    # Tags: a TargetType's prefix, languages with and without the default
+    # flag (and its misspelt ID), nesting, a tag with no string removing its
+    # key, a key replaced whatever its case, the renamed keys -- PART_NUMBER
+    # beside a "track" already there, kept twice -- and tags for tracks: two
+    # tracks of one UID both take a tag, a tag for a UID no track has is
+    # dropped, a tag naming a chapter and a track goes to the (missing)
+    # chapter, and a second Targets starts its UIDs afresh. And the tracks'
+    # own metadata: a name, an empty one and none, a language, `und` and
+    # none, a stereo mode, an alpha mode, and an encrypted track's key ID.
+    encrypted = el("6D80", el("6240", uint("5031", 0) + uint("5032", 1) + uint("5033", 1)
+                              + el("5035", uint("47E1", 5) + el("47E2", b"\x01\x02\x03\x04\x05"))))
+    tracks = el("1654AE6B",
+                m_snow(1, 11, el("536E", b"Picture") + el("22B59C", b"fre"))
+                + m_snow(2, 22, el("536E", b"") + el("22B59C", b"und"))
+                + m_snow(3, 22, video=uint("53B8", 1) + uint("53C0", 1))
+                + m_snow(4, 44, encrypted)
+                + m_snow(5, 55, video=uint("53B8", 15))
+                + m_snow(6, 66, video=uint("53B8", 0)))
+    deep = m_simple_tag("A", "a", subs=[m_simple_tag("B", "b", lang="fre", subs=[m_simple_tag("C", "c")])])
+    tags = m_tags(
+        m_tag(m_targets(kind="ALBUM", type_value=50),
+              m_simple_tag("ARTIST", "Someone", subs=[m_simple_tag("SORT_WITH", "One, Some")]),
+              m_simple_tag("TITLE", "Titre", lang="fre", default=0),
+              m_simple_tag("TITLE", "Title", lang="eng", default=1),
+              m_simple_tag("TITLE", "Titel", lang="ger", bogus_default=1)),
+        m_tag(m_simple_tag("COMMENT", "first"),
+              m_simple_tag("GONE", "here"),
+              m_simple_tag("comment", "second"),
+              m_simple_tag("Gone"),
+              m_simple_tag("track", "5"),
+              m_simple_tag("PART_NUMBER", "7"),
+              m_simple_tag("LEAD_PERFORMER", "Lead"),
+              m_simple_tag(value="no name"),
+              m_simple_tag("", "empty name"),
+              m_simple_tag("EMPTY_LANG", "x", lang=""),
+              m_simple_tag("NUL_LANG", "y", lang=b"\0\0\0"),
+              m_simple_tag("NUL_VALUE", b"cut\0here"),
+              m_simple_tag("K" * 1100, "long", lang="fre"),
+              deep),
+        m_tag(m_simple_tag("PART_NUMBER", "5"), m_simple_tag("part_number", "9")),
+        m_tag(m_targets(kind=""), m_simple_tag("SLASHED", "s")),
+        m_tag(m_targets(track=22), m_simple_tag("TITLE", "Shared"), m_simple_tag("TAGGED", "yes")),
+        m_tag(m_targets(track=99), m_simple_tag("LOST", "track")),
+        m_tag(m_targets(track=11, chapter=5), m_simple_tag("LOST", "chapter")),
+        m_tag(m_targets(track=11), m_targets(kind="SECOND"), m_simple_tag("AFRESH", "global")),
+        m_tag(m_targets(track=44), m_simple_tag("ENCRYPTED", "track")),
+    )
+    out["meta_tags.mkv"] = m_file(m_info(title="Tagged", muxer="hand"), tracks, tags,
+                                  cluster(0, simple(1, 0, 0x80, frame(1, 8))))
+
+    # Chapters: two editions' top-level atoms, a nested atom left out, two
+    # displays (the last title kept), atoms without a UID or a start left
+    # out, a second start of 0 kept, a start before the last dropped, one
+    # ending before it starts dropped but counted as started, a UID seen
+    # again replacing its chapter in place (a display without a string
+    # removing its title), a UID of 2^63 and more (FFmpeg's ID negative), and
+    # ends filled in from the next start and the duration; tags for a
+    # chapter whose UID two atoms share, and for a chapter dropped.
+    big = (1 << 63) + 5
+    chapters = m_chapters(
+        [m_atom(1, 0, 1_000_000_000, ["One"], extra=m_atom(50, 100, None, ["Nested"])),
+         m_atom(2, 0, None, ["Two", "Deux"]),
+         m_atom(None, 1_500_000_000, None, ["No UID"]),
+         m_atom(3, None, None, ["No start"]),
+         m_atom(4, 2_000_000_000, 1_800_000_000, ["Backwards"]),
+         m_atom(5, 1_900_000_000, None, ["Too early"]),
+         m_atom(6, 2_500_000_000, None, ["Six"])],
+        [m_atom(2, 2_600_000_000, None, [None]),
+         m_atom(big, 2_800_000_000, None, ["Big"]),
+         m_atom(7, 2_900_000_000, 2_950_000_000, [])],
+    )
+    tags = m_tags(m_tag(m_targets(chapter=2), m_simple_tag("ARTIST", "Chap"), m_simple_tag("TWICE", "x")),
+                  m_tag(m_targets(chapter=4), m_simple_tag("LOST", "chapter")),
+                  m_tag(m_targets(chapter=big), m_simple_tag("BIG", "yes")))
+    out["meta_chapters.mkv"] = m_file(m_info(duration=3000.0), el("1654AE6B", snow_track(1)), chapters, tags,
+                                      m_clusters())
+
+    # Attachments: pictures (PNG; JPEG by a media type that only starts with
+    # its name), fonts (one by a media type starting with another's name),
+    # `binary`, one FFmpeg names nothing, one of an empty name; ones without
+    # a media type, without data and with empty data, which FFmpeg leaves
+    # out; two of one UID, which a tag for it names both of.
+    files = m_attachments(
+        m_attached(1, "cover.png", "image/png", pics["png"]),
+        m_attached(2, "font.ttf", "application/x-font-ttf", b"font bytes"),
+        m_attached(3, "", "binary", b"bin"),
+        m_attached(4, "no-type", None, b"x"),
+        m_attached(5, "no-data", "text/plain", None),
+        m_attached(6, "empty", "text/plain", b""),
+        m_attached(7, "photo.jpg", "image/jpeg; q=1", pics["jpg"], description="A photo"),
+        m_attached(8, "open.otf", "application/vnd.ms-opentype", b"otf bytes"),
+        m_attached(2, "font2.ttf", "application/x-truetype-font", b"second font"),
+        m_attached(9, "notes.txt", "text/plain", b"plain text"),
+    )
+    tags = m_tags(m_tag(m_targets(attachment=2), m_simple_tag("NOTE", "font tag")),
+                  m_tag(m_targets(attachment=4), m_simple_tag("LOST", "attachment")),
+                  m_tag(m_targets(attachment=7), m_simple_tag("TITLE", "Retitled")))
+    out["meta_attachments.mkv"] = m_file(m_info(), el("1654AE6B", snow_track(1)), files, tags, m_clusters())
+
+    # Two Infos before the first Cluster, both read: the second starts the
+    # timestamp scale and the duration afresh, and its empty MuxingApp and
+    # its four-byte DateUTC replace the first's -- so there is no
+    # creation_time -- while the title it lacks stays the first's. And a
+    # third file whose date FFmpeg shows.
+    date = struct.pack(">q", (1_577_934_245 - 978_307_200) * 1_000_000_000 + 678_901_234)
+    out["meta_info.mkv"] = m_file(
+        m_info(scale=500_000, title="first", muxer="muxer one", date=date, duration=4000.0),
+        m_info(scale=None, muxer="", date=b"\0\0\0\0", duration=2000.0),
+        el("1654AE6B", snow_track(1)), m_clusters())
+    out["meta_date.mkv"] = m_file(m_info(title="", muxer="dated", date=date), el("1654AE6B", snow_track(1)),
+                                  m_clusters())
+
+    # Two Tracks before the first Cluster: FFmpeg reads both, and a tag names
+    # the second's track.
+    out["meta_two_tracks.mkv"] = m_file(
+        m_info(), el("1654AE6B", m_snow(1, 11)), el("1654AE6B", m_snow(2, 22, el("536E", b"Second"))),
+        m_tags(m_tag(m_targets(track=22), m_simple_tag("FOUND", "yes"))),
+        cluster(0, simple(1, 0, 0x80, frame(1, 8)), simple(2, 0, 0x80, frame(2, 8))))
+
+    # Through the SeekHead: Tags at two positions after the Clusters, both
+    # read; Chapters there too, not read, as some were met before the
+    # Clusters; Attachments; an entry pointing at a Void, which reads as
+    # nothing; and a chained SeekHead, whose Tags are read too.
+    ch_linear = m_chapters([m_atom(1, 0, None, ["Linear"])])
+    ch_late = m_chapters([m_atom(2, 500_000_000, None, ["Late"])])
+    t1 = m_tags(m_tag(m_simple_tag("FIRST", "1")))
+    t2 = m_tags(m_tag(m_simple_tag("SECOND", "2")))
+    t3 = m_tags(m_tag(m_simple_tag("THIRD", "3")))
+    att = m_attachments(m_attached(1, "a.bin", "binary", b"late"))
+    void = el("EC", b"\0" * 4)
+    # The chained SeekHead, written once t3's position is known: its size
+    # does not depend on it.
+    stub = el("114D9B74", m_seek("1254C367", 0))
+    parts = [("ch1", ch_linear), ("info", m_info(duration=1000.0)), ("tracks", el("1654AE6B", snow_track(1))),
+             ("c", m_clusters()), ("t1", t1), ("ch2", ch_late), ("att", att), ("void", void), ("t2", t2),
+             ("sh2", stub), ("t3", t3)]
+    entries = [("1549A966", "info"), ("1654AE6B", "tracks"), ("1254C367", "t1"), ("1043A770", "ch2"),
+               ("1941A469", "att"), ("1254C367", "void"), ("1254C367", "t2"), ("114D9B74", "sh2")]
+    t3_at = m_offsets(entries, parts)["t3"]
+    parts[parts.index(("sh2", stub))] = ("sh2", el("114D9B74", m_seek("1254C367", t3_at)))
+    out["meta_seek_head.mkv"] = m_file(m_laid_out(entries, parts))
+
+    # A SeekHead entry naming Attachments that points at Tags: FFmpeg reads
+    # the Tags there, and takes the Attachments for read -- so the entry
+    # after it, at the real Attachments, is not followed.
+    t4 = m_tags(m_tag(m_simple_tag("READ_AS", "tags")))
+    att = m_attachments(m_attached(1, "never.bin", "binary", b"unread"))
+    parts = [("info", m_info()), ("tracks", el("1654AE6B", snow_track(1))), ("c", m_clusters()),
+             ("t4", t4), ("att", att)]
+    out["meta_seek_mismatch.mkv"] = m_file(m_laid_out(
+        [("1941A469", "t4"), ("1941A469", "att")], parts))
+
+    return out
+
+
+def e_cue_layouts():
+    """Cues the SeekHead points at twice, laid out as `e_three_seconds`:
+    three Clusters a second apart, then Cues -- 'bad' ones, every time at the
+    last Cluster, and good ones. FFmpeg takes the Cues from where the last
+    entry naming them points; and none at all once following the SeekHead
+    has failed, which marks its index broken -- so a seek walks."""
+    v = E_VIDEO
+    clusters = [
+        e_cluster(s * 1000, e_simple(v, 0, True, f"key{s}".encode()),
+                  e_simple(v, 40, False, f"inter{s}".encode()))
+        for s in range(3)
+    ]
+    tracks = e_two_tracks()
+
+    def head(entries):
+        return e_el("114D9B74", b"".join(
+            e_el("4DBB", e_el("53AB", bytes.fromhex(i)) + e_uint("53AC", p)) for i, p in entries))
+
+    def cues(points):
+        return e_el("1C53BB6B", b"".join(
+            e_el("BB", e_uint("B3", t) + e_el("B7", e_uint("F7", v) + e_uint("F1", p))) for t, p in points))
+
+    def build(kinds):
+        """`kinds`, the SeekHead's entries in order: 'bad' or 'good' Cues, or
+        'broken' Tags (a tag running past its parent)."""
+        at = len(head([("1C53BB6B", 0)] * len(kinds))) + len(E_INFO) + len(tracks)
+        starts = []
+        for c in clusters:
+            starts.append(at)
+            at += len(c)
+        made = {
+            "good": cues([(0, starts[0]), (1000, starts[1]), (2000, starts[2])]),
+            "bad": cues([(0, starts[2]), (1000, starts[2]), (2000, starts[2])]),
+            # A TagString of 8 bytes, with 2 left in its SimpleTag.
+            "broken": e_el("1254C367", e_el("7373", e_el("67C8", e_el("45A3", b"X") + b"\x44\x87\x88ab"))),
+        }
+        entries, tail = [], b""
+        for k in kinds:
+            entries.append(("1254C367" if k == "broken" else "1C53BB6B", at + len(tail)))
+            tail += made[k]
+        return E_HEADER + e_el("18538067", head(entries) + E_INFO + tracks + b"".join(clusters) + tail)
+
+    return {
+        "cues_last_entry.mkv": build(["bad", "good"]),
+        "cues_broken.mkv": build(["bad", "broken"]),
+    }
+
+
+def m_trailing():
+    """The file the truncation sweep cuts: metadata after the Clusters, found
+    through the SeekHead -- chapters, attachments (a picture among them) and
+    tags of the file, a track, a chapter and an attachment."""
+    pics = m_pictures()
+    chapters = m_chapters([m_atom(1, 0, 400_000_000, ["Start"]),
+                           m_atom(2, 400_000_000, None, ["Middle", "Milieu"]),
+                           m_atom(3, 700_000_000, 900_000_000, ["End"])])
+    files = m_attachments(m_attached(1, "cover.png", "image/png", pics["png"], description="Front"),
+                          m_attached(2, "f.ttf", "application/x-truetype-font", b"glyphs" * 5))
+    tags = m_tags(
+        m_tag(m_targets(kind="ALBUM"), m_simple_tag("ARTIST", "Someone", subs=[m_simple_tag("URL", "u")]),
+              m_simple_tag("TITLE", "Titre", lang="fre", default=1)),
+        m_tag(m_targets(track=1), m_simple_tag("PART_NUMBER", "3"), m_simple_tag("ENCODER", "x")),
+        m_tag(m_targets(chapter=2), m_simple_tag("TITLE", "Tagged middle")),
+        m_tag(m_targets(attachment=2), m_simple_tag("NOTE", "a font")),
+    )
+    parts = [("info", m_info(title="Trailing", muxer="hand", duration=1000.0)),
+             ("tracks", el("1654AE6B", snow_track(1))), ("c", m_clusters()),
+             ("ch", chapters), ("att", files), ("tags", tags)]
+    entries = [("1549A966", "info"), ("1654AE6B", "tracks"), ("1043A770", "ch"), ("1941A469", "att"),
+               ("1254C367", "tags")]
+    data = m_file(m_laid_out(entries, parts))
+    # Where the metadata begins: the sweep cuts from there to the end.
+    return data, data.index(chapters)
+
+
+def esc(b):
+    """Bytes as the answers write them: printable ASCII as it is, the rest
+    (and the backslash) as \\x and two hex digits."""
+    return "".join(chr(c) if 0x20 <= c < 0x7F and c != 0x5C else f"\\x{c:02x}" for c in b)
+
+
+def m_get(pairs, key, default=None):
+    for k, v in pairs:
+        if k == key:
+            return v
+    return default
+
+
+def meta_lines(name):
+    """What ffprobe shows of a file's metadata, a line each: `start` (the
+    file's start in microseconds, which FFmpeg ends chapters by), the file's
+    tags, each stream -- a track, an attachment or a picture, the last two
+    with their size and MD5 -- and its tags, then each chapter (its ID, start
+    and end in nanoseconds) and its tags. `refused` if ffprobe will not open
+    it."""
+    r = subprocess.run(
+        [FFPROBE, "-v", "quiet", "-show_format", "-show_streams", "-show_chapters", "-show_packets",
+         "-show_data_hash", "MD5", "-of", "json", name],
+        capture_output=True, text=True, encoding="utf-8",
+    )
+    if r.returncode != 0:
+        return ["refused"]
+    # Pairs, not dicts: a key may come twice in FFmpeg's metadata.
+    j = json.loads(r.stdout, object_pairs_hook=list)
+    fmt = m_get(j, "format", [])
+    start = m_get(fmt, "start_time")
+    lines = ["start " + ("none" if start in (None, "N/A") else str(int(Decimal(start) * 1_000_000)))]
+
+    def tag_lines(obj):
+        for k, v in m_get(obj, "tags", []):
+            lines.append("tag " + esc(k.encode()) + "=" + esc(v.encode()))
+
+    lines.append("format")
+    tag_lines(fmt)
+    packets = m_get(j, "packets", [])
+    for s in m_get(j, "streams", []):
+        index = m_get(s, "index")
+        codec = m_get(s, "codec_name") or "none"
+        if m_get(m_get(s, "disposition", []), "attached_pic", 0) == 1:
+            p = next(p for p in packets if m_get(p, "stream_index") == index)
+            lines.append(f"stream {index} picture {codec} {m_get(p, 'size')} "
+                         f"{m_get(p, 'data_hash').removeprefix('MD5:')}")
+        elif m_get(s, "codec_type") == "attachment":
+            lines.append(f"stream {index} attachment {codec} {m_get(s, 'extradata_size')} "
+                         f"{m_get(s, 'extradata_hash').removeprefix('MD5:')}")
+        else:
+            lines.append(f"stream {index} track")
+        tag_lines(s)
+    for c in m_get(j, "chapters", []):
+        lines.append(f"chapter {m_get(c, 'id')} {m_get(c, 'start')} {m_get(c, 'end')}")
+        tag_lines(c)
+    return lines
+
+
+def meta_answer(name):
+    lines = [f"# {name}: the metadata ffprobe shows (generate_fixtures.py)."] + meta_lines(name)
+    return "\n".join(lines) + "\n"
+
+
+def sweep_answer(name, data, first):
+    """Each cut of `data` from `first` to its end: the MD5 of `meta_lines`,
+    without its `start` line -- given apart, as the test needs it."""
+    lines = [f"# {name} cut short at each length from {first}: `start`, and the MD5 of the rest "
+             "of what ffprobe shows (generate_fixtures.py)."]
+    cut = "m_cut.mkv"
+    for n in range(first, len(data)):
+        with open(cut, "wb") as f:
+            f.write(data[:n])
+        got = meta_lines(cut)
+        if got == ["refused"]:
+            lines.append(f"cut {n} refused")
+            continue
+        text = "\n".join(got[1:]) + "\n"
+        lines.append(f"cut {n} {got[0].split(' ', 1)[1]} {hashlib.md5(text.encode()).hexdigest()}")
+    os.remove(cut)
+    return "\n".join(lines) + "\n"
+
+
 # --- the answers ---------------------------------------------------------------
 
 
@@ -735,6 +1261,8 @@ SEEKABLE = {
     # walked to, and a seek to 50 ms lands at the start.
     "zlib_laces.mkv": [0.05],
     "unlisted_cues.mkv": THREE_SECONDS,
+    "cues_last_entry.mkv": THREE_SECONDS,
+    "cues_broken.mkv": THREE_SECONDS,
 }
 
 
@@ -850,7 +1378,7 @@ def main():
         lines.append(f"{name} {projection_answer(name)}")
     with open("projections.txt", "w", encoding="utf-8", newline="\n") as f:
         f.write("\n".join(lines) + "\n")
-    files = {**made_by_ffmpeg(), **synthetic()}
+    files = {**made_by_ffmpeg(), **synthetic(), **e_cue_layouts()}
     for name, data in sorted(files.items()):
         with open(name, "wb") as f:
             f.write(data)
@@ -865,6 +1393,26 @@ def main():
         if name in SEEKABLE:
             with open(f"{base}.seek.txt", "w", encoding="utf-8", newline="\n") as f:
                 f.write(seek_answer(name))
+    meta = metadata_fixtures()
+    for name, data in sorted(meta.items()):
+        with open(name, "wb") as f:
+            f.write(data)
+        base = name.rsplit(".", 1)[0]
+        with open(f"{base}.meta.txt", "w", encoding="utf-8", newline="\n") as f:
+            f.write(meta_answer(name))
+        # Their packets too, where FFmpeg's streams are the tracks alone.
+        if name in PACKETS_TOO:
+            with open(f"{base}.txt", "w", encoding="utf-8", newline="\n") as f:
+                f.write(answer(name))
+        print(f"{name}: {len(data)} bytes, sha256 {hashlib.sha256(data).hexdigest()[:16]}")
+    trailing, first = m_trailing()
+    with open("meta_trailing.mkv", "wb") as f:
+        f.write(trailing)
+    with open("meta_trailing.meta.txt", "w", encoding="utf-8", newline="\n") as f:
+        f.write(meta_answer("meta_trailing.mkv"))
+    with open("meta_trailing.cut.txt", "w", encoding="utf-8", newline="\n") as f:
+        f.write(sweep_answer("meta_trailing.mkv", trailing, first))
+    print(f"meta_trailing.mkv: {len(trailing)} bytes, cut from {first}")
 
 
 if __name__ == "__main__":

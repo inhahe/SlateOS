@@ -290,6 +290,58 @@ fn packets_of_resync() {
     demuxes_as_ffmpeg_does("resync.mkv");
 }
 
+// The metadata fixtures (`tests/metadata.rs` holds their metadata), whose
+// packets show the tracks and their ticks read as FFmpeg reads them: a
+// second Info starting the timestamp scale afresh, a second Tracks adding
+// its track.
+
+#[test]
+fn packets_of_meta_info() {
+    demuxes_as_ffmpeg_does("meta_info.mkv");
+}
+
+#[test]
+fn packets_of_meta_two_tracks() {
+    demuxes_as_ffmpeg_does("meta_two_tracks.mkv");
+}
+
+#[test]
+fn packets_of_meta_tags() {
+    demuxes_as_ffmpeg_does("meta_tags.mkv");
+}
+
+#[test]
+fn packets_of_meta_chapters() {
+    demuxes_as_ffmpeg_does("meta_chapters.mkv");
+}
+
+#[test]
+fn packets_of_meta_date() {
+    demuxes_as_ffmpeg_does("meta_date.mkv");
+}
+
+// Cues the SeekHead points at twice -- the last entry's are FFmpeg's -- and
+// Cues FFmpeg leaves unused because following the SeekHead failed after
+// them.
+
+// Elements of reserved IDs, which FFmpeg passes over as ones it does not
+// know: before the first Cluster and inside it.
+
+#[test]
+fn packets_of_reserved_ids() {
+    demuxes_as_ffmpeg_does("reserved_ids.mkv");
+}
+
+#[test]
+fn packets_of_cues_last_entry() {
+    demuxes_as_ffmpeg_does("cues_last_entry.mkv");
+}
+
+#[test]
+fn packets_of_cues_broken() {
+    demuxes_as_ffmpeg_does("cues_broken.mkv");
+}
+
 /// Every byte of a file with Cues, a laced one, one of unknown sizes and a
 /// compressed one changed in turn -- its low bit, its high bit, and all of it
 /// -- then each cut short at every length: each opens and reads to its end,
@@ -305,6 +357,10 @@ fn a_damaged_file_is_read_or_refused_but_never_panics() {
         "vp9_alpha.webm",
         "cued.mkv",
         "lacings.mkv",
+        // Chapters, tags and attachments: before the Clusters, and after them
+        // through the SeekHead.
+        "meta_tags.mkv",
+        "meta_trailing.mkv",
     ] {
         let bytes = std::fs::read(data(name)).unwrap();
         let read_all = |data: &[u8], what: &dyn Fn() -> String| {
@@ -327,6 +383,13 @@ fn a_damaged_file_is_read_or_refused_but_never_panics() {
                     );
                 }
             };
+            // The metadata, made when the file was opened, and the
+            // attachments' bytes, read now: whatever they hold, no panic.
+            // (A failed read is as good an outcome as any here.)
+            let _ = d.chapter_ends(Some(0));
+            for i in 0..d.attachments().len() {
+                let _ = d.attachment_data(i);
+            }
             bounded(&mut d);
             if let Some(t) = d.tracks().first().map(|t| t.number) {
                 if d.seek(t, 50).is_ok() {
@@ -479,4 +542,14 @@ fn seeks_in_pre_roll() {
 #[test]
 fn seeks_in_delayed() {
     seeks_as_ffmpeg_does("delayed.mkv");
+}
+
+#[test]
+fn seeks_in_cues_last_entry() {
+    seeks_as_ffmpeg_does("cues_last_entry.mkv");
+}
+
+#[test]
+fn seeks_in_cues_broken() {
+    seeks_as_ffmpeg_does("cues_broken.mkv");
 }

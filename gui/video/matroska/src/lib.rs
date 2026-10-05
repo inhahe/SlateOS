@@ -18,6 +18,13 @@
 //! (each [`Demuxer::time_base`] seconds; the segment's `TimestampScale`
 //! nanoseconds in every file written today).
 //!
+//! What a file says of itself comes as FFmpeg gives it (the [`metadata`]
+//! module has its rules): the file's metadata ([`Demuxer::metadata`]: its
+//! title, tags), each track's ([`Track::metadata`]: language, name, tags),
+//! its chapters ([`Demuxer::chapters`], [`Demuxer::chapter_ends`]) and its
+//! attachments -- cover art, fonts -- whose bytes are read when asked for
+//! ([`Demuxer::attachments`], [`Demuxer::attachment_data`]).
+//!
 //! # Whose rules
 //!
 //! RFC 9559 (Matroska) and RFC 8794 (EBML) say what a file means, and this
@@ -43,21 +50,26 @@
 //!
 //! # Held to FFmpeg
 //!
-//! Every packet of 37 files, and the packets after 78 seeks, are ffprobe's
+//! Every packet of 45 files, and the packets after 92 seeks, are ffprobe's
 //! (`tests/fixtures.rs`, `tests/data/generate_fixtures.py`), and so is the
 //! display matrix -- or the refusal -- of 22 files' video projections
-//! ([`Video::display_matrix`], `tests/projection.rs`); what ffprobe cannot
-//! show is in `tests/beyond_ffprobe.rs`; and `mutate.py` breaks the code one
-//! rule at a time and checks the tests notice.
+//! ([`Video::display_matrix`], `tests/projection.rs`), and the metadata,
+//! chapters and attachments of ten files and of one cut short at each of 660
+//! lengths (`tests/metadata.rs`); what ffprobe cannot show is in
+//! `tests/beyond_ffprobe.rs` and `tests/metadata.rs`; and `mutate.py` breaks
+//! the code one rule at a time and checks the tests notice.
 
 mod block;
 mod cues;
 mod demux;
 mod ebml;
 mod ids;
+pub mod metadata;
+mod nest;
 mod track;
 
 pub use demux::{Demuxer, Packet, SegmentInfo};
+pub use metadata::{Attachment, AttachmentKind, Chapter, Metadata};
 pub use track::{Audio, Codec, Colour, Projection, Track, TrackKind, Video};
 
 /// Why a file could not be read.

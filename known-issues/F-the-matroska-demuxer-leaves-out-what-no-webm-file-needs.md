@@ -4,24 +4,33 @@
 with what doing it would take.
 
 **In short:** `gui/video/matroska` reads WebM files completely, and Matroska
-(`.mkv`) files as far as their pictures, sound and subtitles go. A few things
-Matroska allows and WebM does not are not read, and a few codecs whose packets
-FFmpeg rewrites on the way out come out as stored. None of the test files,
-nor any file ffmpeg writes as WebM, uses any of them.
+(`.mkv`) files as far as their pictures, sound, subtitles, chapters, tags and
+attachments go. A few things Matroska allows and WebM does not are not read,
+and a few codecs whose packets FFmpeg rewrites on the way out come out as
+stored. None of the test files, nor any file ffmpeg writes as WebM, uses any
+of them.
 
 **What is left out, and where it bites.**
 
 | What | Today | To do it |
 |---|---|---|
-| Tags, chapters, attachments (cover art, fonts for subtitles) | skipped | read `Tags`, `Chapters` and `Attachments` in `demux.rs`'s `read_top_level`, as FFmpeg turns them into metadata, chapters and attached pictures |
 | Tracks compressed with bzip2 or LZO | the track is marked unreadable (`Track::readable`) and its packets skipped | undo them in `track.rs`'s `Encoding::undo` (FFmpeg does) |
-| Encrypted tracks (WebM's for EME, which ffmpeg passes on still encrypted) | marked unreadable | nothing to decrypt with; a DRM question, not a demuxer one |
+| Encrypted tracks (WebM's for EME, which ffmpeg passes on still encrypted) | marked unreadable; the key ID is in the track's metadata (`enc_key_id`) | nothing to decrypt with; a DRM question, not a demuxer one |
 | WavPack, ProRes, RealMedia audio and WebVTT packets, which FFmpeg rebuilds from Matroska's form | given as stored | FFmpeg's `matroska_parse_wavpack`, `_prores`, `_rm_audio` and `_webvtt`, if those codecs are ever decoded here |
 | Several `ContentEncoding`s on one track | passed through as stored, as FFmpeg does | nothing: FFmpeg's own behaviour |
 | A source that cannot seek (a pipe, a live stream) | `Demuxer::open` measures the source, so it needs `Seek` | a streaming mode: the reader already knows where every element ends, but `open`'s SeekHead and the seek's index read ahead |
+| Several Cues elements before the first Cluster | the first is the index | FFmpeg reads each into one list of cue points and seeks by them all (its `matroska_index`, by its code: ffprobe cannot show it, as its probing indexes every key frame of a file small enough for a fixture); read each into `cues.rs`'s list and merge them as `av_add_index_entry` does (by time, a later entry at the same time replacing the earlier) |
+| A top-level element of unknown size other than a Cluster (the specification allows it of none) | refused before the first Cluster; ends following the SeekHead there | FFmpeg reads one until an element that cannot be inside it begins, as it reads a Cluster of unknown size |
+| A chapter without an end, in a file whose Info gives no duration | the last such chapter ends where it starts (`Demuxer::chapter_ends`) | FFmpeg estimates a duration from the streams' bit rates when probing; that needs the bit rates, which the demuxer does not know |
+| Damage in an Info or Tracks before the first Cluster | the file is refused | FFmpeg reads the Segment again from its start, which repeats every track before the damage (design-decisions §1358 for why that is not copied for chapters, tags and attachments); reading on after the damaged element, as there, would serve |
 
-**Where.** `gui/video/matroska/src/` (`demux.rs`, `track.rs`); the crate's
-module documentation says what it reads.
+**Where.** `gui/video/matroska/src/` (`demux.rs`, `track.rs`, `nest.rs`,
+`metadata.rs`); the crate's module documentation says what it reads.
+
+**Was here, fixed 2026-10-05:** chapters, tags and attachments were skipped.
+They are read now, and the metadata FFmpeg makes of them and of the Info
+and the tracks is given as ffprobe shows it (`Demuxer::metadata`,
+`chapters`, `attachments`, `Track::metadata`; design-decisions §1358).
 
 **Was here, fixed 2026-10-04:** a seek in a file without Cues read every
 Cluster's block headers to the end of the file, for every seek. It now walks

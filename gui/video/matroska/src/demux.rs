@@ -14,10 +14,16 @@ use std::io::{Read, Seek};
 use crate::block::{self, Block};
 use crate::cues::{self, Cue};
 use crate::ebml::{Header, Id, MAX_BINARY, Reader, Size};
+use crate::metadata::{Attachment, Chapter, Lists, Metadata, describe};
+use crate::nest::{self, SeekEntry};
 use crate::track::{Track, TrackKind, read_track};
 use crate::{Error, ids};
 
 /// The segment's description: `Info`.
+///
+/// A file with several Info elements before its first Cluster has each read
+/// in turn, as FFmpeg reads them: each starts the timestamp scale and the
+/// duration afresh, and the strings and the date keep their last value.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SegmentInfo {
     /// Nanoseconds in a tick, the unit of every timestamp: 1,000,000 (a
@@ -27,8 +33,15 @@ pub struct SegmentInfo {
     pub duration: Option<f64>,
     /// The file's title (`Title`), as written (UTF-8 by the specification,
     /// not checked), where it gives one -- the last, if it gives several, as
-    /// FFmpeg keeps the last.
+    /// FFmpeg keeps the last; empty for an empty one.
     pub title: Option<Vec<u8>>,
+    /// The program that wrote the file (`MuxingApp`), as written: FFmpeg's
+    /// `encoder`.
+    pub muxing_app: Option<Vec<u8>>,
+    /// When the file was written (`DateUTC`), in nanoseconds from
+    /// 2001-01-01 UTC, where its last `DateUTC` is the eight bytes it should
+    /// be: FFmpeg's `creation_time`.
+    pub date_utc: Option<i64>,
 }
 
 /// One frame of one track.
@@ -153,6 +166,11 @@ pub struct Demuxer<R> {
     doc_type: Option<Vec<u8>>,
     info: SegmentInfo,
     tracks: Vec<Track>,
+    /// The file's metadata, its chapters and its attachments, as FFmpeg
+    /// makes them (`metadata.rs`).
+    metadata: Metadata,
+    chapters: Vec<Chapter>,
+    attachments: Vec<Attachment>,
     /// Every `TrackEntry`'s number, the first of each, with its track's
     /// timing if FFmpeg reads the track: a block naming a number not here
     /// is damage, one naming an ignored track is ignored.
@@ -183,8 +201,80 @@ pub struct Demuxer<R> {
     walk: Walk,
 }
 
-/// The most SeekHead entries followed, chained SeekHeads included.
-const MAX_SEEK_ENTRIES: usize = 4096;
+/// FFmpeg's count of master elements open around a top-level element read
+/// before the first Cluster -- the Segment -- and around one read where a
+/// SeekHead points, where FFmpeg opens a stand-in level of its own too.
+/// FFmpeg nests masters 16 deep at most, so the second has a level less to
+/// nest tags in.
+const IN_SEGMENT: u32 = 1;
+const FROM_SEEK_HEAD: u32 = 2;
+
+/// FFmpeg's record of the Segment's top-level elements (`level1_elems`):
+/// where each was found and whether it has been read. One per ID, but one
+/// per position for SeekHeads and Tags, of which a file may have several; at
+/// most 64, past which a SeekHead's pointers to new ones are not followed.
+#[derive(Default)]
+struct Level1 {
+    entries: Vec<Level1Entry>,
+}
+
+struct Level1Entry {
+    id: Id,
+    pos: u64,
+    parsed: bool,
+}
+
+impl Level1 {
+    /// FFmpeg's `matroska_find_level1_elem`: the record of `id` (at `pos`,
+    /// for a SeekHead or Tags), made if there is none and room for one; none
+    /// for a Cluster, or an ID whose marker bit is not where its length puts
+    /// it.
+    fn find(&mut self, id: Id, pos: u64) -> Option<usize> {
+        let valid = matches!(id.checked_ilog2(), Some(7 | 14 | 21 | 28));
+        if !valid || id == ids::CLUSTER {
+            return None;
+        }
+        let by_position = id == ids::SEEK_HEAD || id == ids::TAGS;
+        if let Some(i) = self
+            .entries
+            .iter()
+            .position(|e| e.id == id && (e.pos == pos || !by_position))
+        {
+            return Some(i);
+        }
+        if self.entries.len() >= 64 {
+            return None;
+        }
+        self.entries.push(Level1Entry {
+            id,
+            pos: 0,
+            parsed: false,
+        });
+        Some(self.entries.len().saturating_sub(1))
+    }
+
+    /// A top-level element about to be read where it stands: its record
+    /// marked read, before it is -- as FFmpeg marks it.
+    fn met(&mut self, id: Id, pos: u64) {
+        if let Some(i) = self.find(id, pos)
+            && let Some(e) = self.entries.get_mut(i)
+        {
+            if e.pos == 0 {
+                e.pos = pos;
+            }
+            e.parsed = true;
+        }
+    }
+
+    /// Where the Cues are, if a SeekHead pointed at them and they have not
+    /// been read: the last place it pointed.
+    fn cues_unread(&self) -> Option<u64> {
+        self.entries
+            .iter()
+            .find(|e| e.id == ids::CUES && !e.parsed)
+            .map(|e| e.pos)
+    }
+}
 
 impl<R: Read + Seek> Demuxer<R> {
     /// Read `source`'s header, its segment's description and its tracks.
@@ -217,8 +307,13 @@ impl<R: Read + Seek> Demuxer<R> {
                 timestamp_scale: 1_000_000,
                 duration: None,
                 title: None,
+                muxing_app: None,
+                date_utc: None,
             },
             tracks: Vec::new(),
+            metadata: Metadata::default(),
+            chapters: Vec::new(),
+            attachments: Vec::new(),
             declared: Vec::new(),
             segment_data: segment.data,
             segment_end,
@@ -238,7 +333,7 @@ impl<R: Read + Seek> Demuxer<R> {
                 start: None,
             },
         };
-        d.read_description()?;
+        d.read_description(segment.end())?;
         if let Some(at) = d.first_cluster {
             d.r.seek_to(at)?;
             d.state = State::Segment;
@@ -269,6 +364,99 @@ impl<R: Read + Seek> Demuxer<R> {
         &self.tracks
     }
 
+    /// The file's metadata, as FFmpeg gives it: `title`, `encoder` and
+    /// `creation_time` from its Info, then its tags that name no track,
+    /// chapter or attachment.
+    pub fn metadata(&self) -> &Metadata {
+        &self.metadata
+    }
+
+    /// The file's chapters, as FFmpeg makes them: the first edition's and
+    /// every other's top-level chapters, each starting after the last
+    /// (see [`crate::metadata`]'s rules).
+    pub fn chapters(&self) -> &[Chapter] {
+        &self.chapters
+    }
+
+    /// Each chapter's end, in nanoseconds: its own where the file gives one;
+    /// where not, as FFmpeg fills it in -- the next chapter's start, or the
+    /// end of the file (its Info's duration after `start`, the
+    /// presentation's first timestamp in nanoseconds, which FFmpeg takes
+    /// from the first packets: 0 in nearly every file, and taken as 0 when
+    /// `None`), or with neither, the chapter's own start.
+    ///
+    /// FFmpeg estimates a duration from the bit rate where the Info gives
+    /// none; this does not, and ends such a file's last chapter where it
+    /// starts.
+    pub fn chapter_ends(&self, start: Option<i64>) -> Vec<i64> {
+        crate::metadata::chapter_ends(
+            &self.chapters,
+            self.duration_in_micros(),
+            start.map(nanos_to_micros),
+        )
+    }
+
+    /// FFmpeg's duration of the file in microseconds
+    /// (`AVFormatContext.duration`): the Info's duration in ticks times the
+    /// tick, in C's doubles, truncated; none if the Info gives none, or 0.
+    fn duration_in_micros(&self) -> Option<i64> {
+        let ticks = self.info.duration?;
+        #[allow(
+            clippy::float_cmp,
+            reason = "FFmpeg's test is for exactly 0, a duration it takes for none"
+        )]
+        let none = ticks == 0.0;
+        if none {
+            return None;
+        }
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "C's conversion of the uint64_t scale to double"
+        )]
+        let micros = ticks * self.info.timestamp_scale as f64 * 1000.0 / 1_000_000.0;
+        // C's conversion to int64_t: a value out of its range is the
+        // processor's INT64_MIN.
+        let limit = 2f64.powi(63);
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "the value is checked in range first"
+        )]
+        let micros = if micros.is_nan() || micros < -limit || micros >= limit {
+            i64::MIN
+        } else {
+            micros as i64
+        };
+        Some(micros)
+    }
+
+    /// The file's attachments FFmpeg keeps: those with a name, a media type
+    /// and data, in the file's order, up to FFmpeg's 1000 streams with the
+    /// tracks.
+    pub fn attachments(&self) -> &[Attachment] {
+        &self.attachments
+    }
+
+    /// The bytes of attachment `index` (in [`Self::attachments`]), read from
+    /// the file now. Reading packets goes on where it was.
+    ///
+    /// # Errors
+    ///
+    /// When there is no such attachment, or the source fails.
+    pub fn attachment_data(&mut self, index: usize) -> Result<Vec<u8>, Error> {
+        let a = self
+            .attachments
+            .get(index)
+            .ok_or(Error::Invalid("an attachment past the last"))?;
+        let (at, size) = (a.position, a.size);
+        let reading = self.r.pos();
+        let data = self
+            .r
+            .seek_to(at)
+            .and_then(|()| self.r.binary(Size::Known(size), MAX_BINARY));
+        self.r.seek_to(reading)?;
+        data
+    }
+
     /// A track's tick, `(num, den)`: `num / den` seconds, reduced. The
     /// segment's `TimestampScale` in nanoseconds, times the track's
     /// deprecated `TrackTimestampScale`.
@@ -284,10 +472,39 @@ impl<R: Read + Seek> Demuxer<R> {
     }
 
     /// The Segment's top-level elements up to the first Cluster, then what
-    /// the SeekHead points to that was not met.
-    fn read_description(&mut self) -> Result<(), Error> {
-        let mut seek_entries: Vec<(Id, u64)> = Vec::new();
-        let (mut info_read, mut tracks_read) = (false, false);
+    /// the SeekHead points to that was not met -- by FFmpeg's rules
+    /// (`matroska_read_header`, `matroska_execute_seekhead`):
+    ///
+    /// - Before the first Cluster, every top-level element met is read, a
+    ///   second Info or Tracks too (FFmpeg's "Duplicate element" is a
+    ///   warning, not a refusal): a second Info starts its numbers afresh, a
+    ///   second Tracks adds its tracks, and so do further Chapters, Tags and
+    ///   Attachments.
+    /// - Then each SeekHead entry in turn, chained SeekHeads' too: one is
+    ///   followed if FFmpeg's record of that element ([`Level1`]) is not
+    ///   yet read -- an Info, Tracks, Chapters or Attachments read anywhere
+    ///   already is not read again, a SeekHead or Tags at a new position is
+    ///   -- and whatever top-level element stands where it points is read,
+    ///   be it the one named or not. The Cues are left for the first seek,
+    ///   from where the last entry naming them points.
+    /// - A damaged SeekHead, Chapters, Tags or Attachments keeps what was
+    ///   read of it. Met before the first Cluster, reading goes on from the
+    ///   next top-level element found after its ID (where FFmpeg comes to on
+    ///   its second pass; FFmpeg first goes back to the start of the
+    ///   Segment and reads it all again, which repeats every track before
+    ///   the damage, and that is not followed here). Met through a SeekHead,
+    ///   the SeekHead is followed no further, and its Cues are not used --
+    ///   FFmpeg marks its index broken.
+    /// - A damaged Info or Tracks refuses the file, as it always has here.
+    fn read_description(&mut self, segment_ends: Option<u64>) -> Result<(), Error> {
+        // Where the Segment says it ends, which bounds its top-level elements
+        // until a resynchronisation: after one, FFmpeg takes the Segment for
+        // one of unknown size, read to the end of the file.
+        let mut segment_ends = segment_ends;
+        let mut lists = Lists::default();
+        let mut level1 = Level1::default();
+        // Cues read where they stand, which FFmpeg reads at once.
+        let mut cues_read: Option<u64> = None;
         self.r.seek_to(self.segment_data)?;
         while self.r.pos() < self.segment_end {
             let Some(h) = self.r.header()? else { break };
@@ -295,145 +512,242 @@ impl<R: Read + Seek> Demuxer<R> {
                 self.first_cluster = Some(h.start);
                 break;
             }
-            self.read_top_level(&h, &mut seek_entries, &mut info_read, &mut tracks_read)?;
             let end = h
                 .end()
                 .ok_or(Error::Invalid("a top-level element of unknown size"))?;
-            self.r.seek_to(end.min(self.segment_end))?;
-        }
-        // What the SeekHead points to, chained SeekHeads included; Cues are
-        // left until a seek wants them.
-        let mut i = 0;
-        while let Some(&(id, pos)) = seek_entries.get(i) {
-            i = i.saturating_add(1);
-            if i > MAX_SEEK_ENTRIES {
-                break;
-            }
-            let wanted = match id {
-                ids::INFO => !info_read,
-                ids::TRACKS => !tracks_read,
-                ids::SEEK_HEAD => true,
-                ids::CUES => {
-                    self.cues_at.get_or_insert(pos);
-                    false
+            let mut next = end.min(self.segment_end);
+            if ids::is_top_level(h.id) {
+                level1.met(h.id, h.start);
+                match h.id {
+                    ids::INFO => self.read_info(&h)?,
+                    ids::TRACKS => self.read_tracks(&h)?,
+                    ids::CUES => {
+                        cues_read.get_or_insert(h.start);
+                    }
+                    _ => {
+                        let read = if segment_ends.is_some_and(|e| end > e) {
+                            Err(Error::Invalid("an element running past its Segment"))
+                        } else {
+                            self.read_listed(&h, IN_SEGMENT, &mut lists)
+                        };
+                        match read {
+                            Ok(()) => {}
+                            Err(Error::Io(kind)) => return Err(Error::Io(kind)),
+                            Err(_) => {
+                                // Past its four-byte ID, and one more.
+                                match self.find_top_level(h.start.saturating_add(5))? {
+                                    Some(at) => {
+                                        next = at;
+                                        // As FFmpeg, a Segment resynchronised
+                                        // in is read to the end of the file,
+                                        // its stated end no longer a bound.
+                                        self.segment_end = self.r.len();
+                                        segment_ends = None;
+                                    }
+                                    None => break,
+                                }
+                            }
+                        }
+                    }
                 }
-                _ => false,
+            }
+            self.r.seek_to(next)?;
+        }
+
+        let mut cues_broken = false;
+        let mut i = 0;
+        while let Some(SeekEntry { id, pos }) = lists.seek.get(i).copied() {
+            i = i.saturating_add(1);
+            // FFmpeg's checks: an ID of up to four bytes, and a position that
+            // stays within int64_t when the Segment's start is added.
+            let Ok(id) = Id::try_from(id) else { continue };
+            let Some(pos) = pos
+                .checked_add(self.segment_data)
+                .filter(|&p| i64::try_from(p).is_ok())
+            else {
+                continue;
             };
-            if !wanted || pos >= self.segment_end {
+            let Some(k) = level1.find(id, pos) else {
+                continue;
+            };
+            let Some(entry) = level1.entries.get_mut(k) else {
+                continue;
+            };
+            if entry.parsed {
                 continue;
             }
-            // A damaged pointer is passed over, as FFmpeg stops following
-            // its SeekHead but keeps reading.
-            let seen_before = seek_entries.len();
-            let read = self.r.seek_to(pos).and_then(|()| {
-                let h = self.r.header()?.ok_or(Error::Truncated)?;
-                if h.id != id {
-                    return Ok(());
+            entry.pos = pos;
+            if id == ids::CUES {
+                continue;
+            }
+            match self.read_at(pos, &mut level1, &mut lists, &mut cues_read) {
+                Ok(()) => {}
+                Err(Error::Io(kind)) => return Err(Error::Io(kind)),
+                Err(_) => {
+                    cues_broken = true;
+                    break;
                 }
-                // A SeekHead pointing at itself, or one already read, adds
-                // nothing new; the cap above bounds a loop of them.
-                self.read_top_level(&h, &mut seek_entries, &mut info_read, &mut tracks_read)
-            });
-            if read.is_err() {
-                seek_entries.truncate(seen_before);
-                break;
+            }
+            if let Some(entry) = level1.entries.get_mut(k) {
+                entry.parsed = true;
             }
         }
+        self.cues_at = match cues_read {
+            Some(at) => Some(at),
+            None if !cues_broken => level1.cues_unread(),
+            None => None,
+        };
         if self.info.timestamp_scale == 0 {
             self.info.timestamp_scale = 1_000_000;
         }
         self.time_tracks();
+        let described = describe(&self.info, &mut self.tracks, &lists);
+        self.metadata = described.metadata;
+        self.chapters = described.chapters;
+        self.attachments = described.attachments;
         Ok(())
     }
 
-    /// Read one of the Segment's top-level elements, if it is one this
-    /// reads; the caller moves past it.
-    fn read_top_level(
+    /// What FFmpeg reads where a SeekHead entry points: the top-level
+    /// element there, whichever it is -- a Cluster, or an element it does
+    /// not know, read as nothing.
+    fn read_at(
         &mut self,
-        h: &Header,
-        seek_entries: &mut Vec<(Id, u64)>,
-        info_read: &mut bool,
-        tracks_read: &mut bool,
+        pos: u64,
+        level1: &mut Level1,
+        lists: &mut Lists,
+        cues_read: &mut Option<u64>,
     ) -> Result<(), Error> {
-        match h.id {
-            ids::SEEK_HEAD => {
-                let base = self.segment_data;
-                self.r.children(h, |r, seek| {
-                    if seek.id != ids::SEEK {
-                        return Ok(());
-                    }
-                    let (mut id, mut pos) = (None, None);
-                    r.children(seek, |r, f| {
-                        match f.id {
-                            ids::SEEK_ID => {
-                                let bytes = r.binary(f.size, 4)?;
-                                id = Some(bytes.iter().fold(0u32, |a, &b| (a << 8) | u32::from(b)));
-                            }
-                            ids::SEEK_POSITION => pos = Some(r.uint(f.size, 0)?),
-                            _ => {}
-                        }
-                        Ok(())
-                    })?;
-                    if let (Some(id), Some(pos)) = (id, pos)
-                        && seek_entries.len() < MAX_SEEK_ENTRIES
-                        && let Some(at) = pos.checked_add(base)
-                    {
-                        seek_entries.push((id, at));
-                    }
-                    Ok(())
-                })?;
-            }
-            ids::INFO if !*info_read => {
-                *info_read = true;
-                let info = &mut self.info;
-                self.r.children(h, |r, c| {
-                    match c.id {
-                        ids::TIMESTAMP_SCALE => info.timestamp_scale = r.uint(c.size, 1_000_000)?,
-                        ids::DURATION => info.duration = Some(r.float(c.size, 0.0)?),
-                        // Kept: lane E's mediaprobe shows a file's title.
-                        ids::TITLE => info.title = r.string(c.size)?,
-                        // Read as FFmpeg reads them, and kept by nothing:
-                        // nothing here shows who wrote a file
-                        // (design-decisions §856).
-                        ids::MUXING_APP | ids::WRITING_APP => {
-                            r.string(c.size)?;
-                        }
-                        _ => {}
-                    }
-                    Ok(())
-                })?;
-                // FFmpeg reads a duration that is not a number as none.
-                if self.info.duration.is_some_and(f64::is_nan) {
-                    self.info.duration = None;
-                }
-            }
-            ids::TRACKS if !*tracks_read => {
-                *tracks_read = true;
-                let (mut tracks, mut declared) = (Vec::new(), Vec::new());
-                self.r.children(h, |r, entry| {
-                    if entry.id != ids::TRACK_ENTRY {
-                        return Ok(());
-                    }
-                    let (number, track) = read_track(r, entry)?;
-                    declared.push((number, track.is_some()));
-                    if let Some(t) = track {
-                        tracks.push(t);
-                    }
-                    Ok(())
-                })?;
-                self.tracks = tracks;
-                // Timing comes once the TimestampScale is certain.
-                self.declared = declared
-                    .into_iter()
-                    .map(|(n, read)| (n, read.then_some(placeholder_timing())))
-                    .collect();
-            }
+        self.r.seek_to(pos)?;
+        let id = nest::read_id(&mut self.r)?;
+        if id == ids::CLUSTER {
+            // FFmpeg stops at a Cluster's ID, its size unread.
+            return Ok(());
+        }
+        let size = nest::read_size(&mut self.r)?;
+        let h = Header {
+            id,
+            size,
+            start: pos,
+            data: self.r.pos(),
+        };
+        if !ids::is_top_level(id) {
+            return nest::skip_any(&mut self.r, &h);
+        }
+        level1.met(id, pos);
+        if h.end().is_none() {
+            // FFmpeg tries to read one of unknown size, which the
+            // specification forbids; this refuses it.
+            return Err(Error::Invalid("a top-level element of unknown size"));
+        }
+        match id {
+            ids::INFO => self.read_info(&h),
+            ids::TRACKS => self.read_tracks(&h),
             ids::CUES => {
-                self.cues_at.get_or_insert(h.start);
+                // Read at once by FFmpeg: these are its index then.
+                cues_read.get_or_insert(pos);
+                Ok(())
             }
-            _ => {}
+            _ => self.read_listed(&h, FROM_SEEK_HEAD, lists),
+        }
+    }
+
+    /// A SeekHead, Chapters, Tags or Attachments element into `lists`.
+    fn read_listed(&mut self, h: &Header, levels: u32, lists: &mut Lists) -> Result<(), Error> {
+        match h.id {
+            ids::SEEK_HEAD => nest::read_seek_head(&mut self.r, h, levels, &mut lists.seek),
+            ids::CHAPTERS => nest::read_chapters(&mut self.r, h, levels, &mut lists.chapters),
+            ids::TAGS => nest::read_tags(&mut self.r, h, levels, &mut lists.tags),
+            ids::ATTACHMENTS => {
+                nest::read_attachments(&mut self.r, h, levels, &mut lists.attachments)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// An Info element, as FFmpeg reads each one it meets: the timestamp
+    /// scale and duration start afresh; the strings and the date keep their
+    /// last value.
+    fn read_info(&mut self, h: &Header) -> Result<(), Error> {
+        let info = &mut self.info;
+        info.timestamp_scale = 1_000_000;
+        info.duration = None;
+        self.r.children(h, |r, c| {
+            match c.id {
+                ids::TIMESTAMP_SCALE => info.timestamp_scale = r.uint(c.size, 1_000_000)?,
+                ids::DURATION => info.duration = Some(r.float(c.size, 0.0)?),
+                // FFmpeg reads an empty string as one, not as none.
+                ids::TITLE => info.title = Some(r.string(c.size)?.unwrap_or_default()),
+                ids::MUXING_APP => info.muxing_app = Some(r.string(c.size)?.unwrap_or_default()),
+                ids::DATE_UTC => {
+                    let bytes = r.binary(c.size, MAX_BINARY)?;
+                    info.date_utc = <[u8; 8]>::try_from(bytes.as_slice())
+                        .ok()
+                        .map(i64::from_be_bytes);
+                }
+                _ => {}
+            }
+            Ok(())
+        })?;
+        // FFmpeg reads a duration that is not a number as none.
+        if self.info.duration.is_some_and(f64::is_nan) {
+            self.info.duration = None;
         }
         Ok(())
+    }
+
+    /// A Tracks element: its tracks added to those of any before it, as
+    /// FFmpeg adds them.
+    fn read_tracks(&mut self, h: &Header) -> Result<(), Error> {
+        let (mut tracks, mut declared) = (Vec::new(), Vec::new());
+        self.r.children(h, |r, entry| {
+            if entry.id != ids::TRACK_ENTRY {
+                return Ok(());
+            }
+            let (number, track) = read_track(r, entry)?;
+            declared.push((number, track.is_some()));
+            if let Some(t) = track {
+                tracks.push(t);
+            }
+            Ok(())
+        })?;
+        self.tracks.extend(tracks);
+        // Timing comes once the TimestampScale is certain.
+        self.declared.extend(
+            declared
+                .into_iter()
+                .map(|(n, read)| (n, read.then_some(placeholder_timing()))),
+        );
+        Ok(())
+    }
+
+    /// Where the next of the Segment's top-level elements begins, at or
+    /// after `from`, found by its ID as FFmpeg's `matroska_resync` finds one.
+    #[allow(
+        clippy::arithmetic_side_effects,
+        reason = "positions are within the file (`at` stays under its length, and an ID is found only after four bytes of the scan, so its start is at or past where the scan began)"
+    )]
+    fn find_top_level(&mut self, from: u64) -> Result<Option<u64>, Error> {
+        let mut at = from;
+        let len = self.r.len();
+        let mut window = 0u32;
+        let mut filled = 0;
+        let mut buf = vec![0u8; 64 * 1024];
+        while at < len {
+            self.r.seek_to(at)?;
+            let n = usize::try_from((len - at).min(64 * 1024)).unwrap_or(64 * 1024);
+            let chunk = buf.get_mut(..n).unwrap_or_default();
+            self.r.read_into(chunk)?;
+            for (i, &b) in chunk.iter().enumerate() {
+                window = (window << 8) | u32::from(b);
+                filled += 1;
+                if filled >= 4 && ids::is_top_level(window) {
+                    return Ok(Some(at + u64::try_from(i).unwrap_or(0) - 3));
+                }
+            }
+            at += u64::try_from(n).unwrap_or(1);
+        }
+        Ok(None)
     }
 
     /// Each read track's time base and codec delay in its ticks, as
@@ -830,39 +1144,22 @@ impl<R: Read + Seek> Demuxer<R> {
     ///
     /// The frames a damaged block gave before its damage stay queued, as
     /// FFmpeg delivers the laces it queued before one failed.
-    #[allow(
-        clippy::arithmetic_side_effects,
-        reason = "positions are within the file (`at` stays under its length, and an ID is found only after four bytes of the scan, so its start is at or past where the scan began); `filled` counts bytes read"
-    )]
     fn resync(&mut self) -> Result<bool, Error> {
-        let mut at = self.last_good.saturating_add(1);
-        let len = self.r.len();
-        let mut window = 0u32;
-        let mut filled = 0;
-        let mut buf = vec![0u8; 64 * 1024];
-        while at < len {
-            self.r.seek_to(at)?;
-            let n = usize::try_from((len - at).min(64 * 1024)).unwrap_or(64 * 1024);
-            let chunk = buf.get_mut(..n).unwrap_or_default();
-            self.r.read_into(chunk)?;
-            for (i, &b) in chunk.iter().enumerate() {
-                window = (window << 8) | u32::from(b);
-                filled += 1;
-                if filled >= 4 && ids::is_top_level(window) {
-                    let start = at + u64::try_from(i).unwrap_or(0) - 3;
-                    self.r.seek_to(start)?;
-                    self.last_good = start;
-                    // As FFmpeg, a segment resynchronised into is read to
-                    // the end of the file, its stated end aside.
-                    self.segment_end = len;
-                    self.state = State::Segment;
-                    return Ok(true);
-                }
+        match self.find_top_level(self.last_good.saturating_add(1))? {
+            Some(start) => {
+                self.r.seek_to(start)?;
+                self.last_good = start;
+                // As FFmpeg, a segment resynchronised into is read to the
+                // end of the file, its stated end aside.
+                self.segment_end = self.r.len();
+                self.state = State::Segment;
+                Ok(true)
             }
-            at += u64::try_from(n).unwrap_or(1);
+            None => {
+                self.state = State::Done;
+                Ok(false)
+            }
         }
-        self.state = State::Done;
-        Ok(false)
     }
 
     /// Go to the latest key frame of `track` at or before `timestamp` (in
@@ -1117,6 +1414,22 @@ fn counts(level: Level, h: &Header) -> bool {
         _ => return false,
     };
     size <= limit
+}
+
+/// Nanoseconds as FFmpeg's microseconds: `av_rescale_q`, a half rounded
+/// away from zero.
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "an i64 and 500 add within an i128, and the quotient is a thousandth of an i64"
+)]
+fn nanos_to_micros(ns: i64) -> i64 {
+    let n = i128::from(ns);
+    let micros = if n >= 0 {
+        (n + 500) / 1000
+    } else {
+        -((500 - n) / 1000)
+    };
+    i64::try_from(micros).unwrap_or(i64::MIN)
 }
 
 /// The FFmpeg-shaped stand-in for a read track's timing until the

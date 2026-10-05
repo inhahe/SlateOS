@@ -177,25 +177,23 @@ impl<R: Read + Seek> Reader<R> {
 
     /// The next element's header, or `None` at the end of the source.
     ///
+    /// An ID may be any value, those the specification reserves (value bits
+    /// all ones or all zeros) too: FFmpeg reads such an element as one it
+    /// does not know and passes over it, rather than taking it for damage.
+    ///
     /// # Errors
     ///
     /// When the header is damaged or cut short.
     #[allow(
         clippy::arithmetic_side_effects,
-        reason = "an ID is 1 to 4 bytes and a size 1 to 8, so the value bits are 7 to 56: every shift is in range and every mask at least 1"
+        reason = "a size is 1 to 8 bytes, so its value bits are 7 to 56: the shift is in range and the mask at least 1"
     )]
     pub fn header(&mut self) -> Result<Option<Header>, Error> {
         if self.remaining() == 0 {
             return Ok(None);
         }
         let start = self.pos;
-        let (id_len, id) = self.vint(4, true)?;
-        // An ID whose value bits are all ones or all zeros is reserved.
-        let value_bits = id_len * 7;
-        let value = id & ((1u64 << value_bits) - 1);
-        if value == 0 || value == (1u64 << value_bits) - 1 {
-            return Err(Error::Invalid("a reserved EBML ID"));
-        }
+        let (_, id) = self.vint(4, true)?;
         let (size_len, size) = self.vint(8, false)?;
         let size = if size == (1u64 << (size_len * 7)) - 1 {
             Size::Unknown
@@ -433,8 +431,21 @@ mod tests {
             reader(&[0x08, 1, 2, 3, 4, 0x81]).header().is_err(),
             "a 5-byte ID"
         );
-        assert!(reader(&[0xff, 0x81]).header().is_err(), "a reserved ID");
         assert!(reader(&[0x1a, 0x45]).header().is_err(), "cut short");
+    }
+
+    #[test]
+    fn a_reserved_id_is_an_id() {
+        // Value bits all ones (0xFF, 0x7FFF) or all zeros (0x80): FFmpeg reads
+        // each as an element it does not know.
+        for (bytes, id) in [
+            (&[0xffu8, 0x81, 0][..], 0xff),
+            (&[0x7f, 0xff, 0x81, 0], 0x7fff),
+            (&[0x80, 0x81, 0], 0x80),
+        ] {
+            let h = reader(bytes).header().unwrap().unwrap();
+            assert_eq!((h.id, h.size), (id, Size::Known(1)), "{bytes:02x?}");
+        }
     }
 
     #[test]

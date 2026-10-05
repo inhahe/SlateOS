@@ -64,6 +64,7 @@ fix.
 |---|---|---|---|
 | 2026-10-05 | 20 minutes, all six with the address sanitizer | image 78k, video 19k, sound 34k, matroska 418k, vp8 38k, vp9 16k | nothing |
 | 2026-10-05 | 30 minutes, `subtitles` alone (its PGS and VobSub readers new), no sanitizer | subtitles 392k (stopped at 12 minutes by the find) | an MP4 timed-text track claiming 3.9 billion samples of one size: `mp4` asked for 46 GB and was killed (fixed: design-decisions §1364; `mp4/tests/data/found_tx3g_claims_billions.mp4`) |
+| 2026-10-05 | 30 minutes, `mp4` (new) and `subtitles` (DVB new), no sanitizer | mp4 7.3M, subtitles 1.5M | two 33 KB MP4s each seeking for 8-9 seconds under instrumentation (0.4 s optimized): FFmpeg's index search walks a run of discarded entries once for each entry of it, and so did `mp4` -- with its edit lists' walks, quadratic in a crafted file's index (fixed, FFmpeg's answers kept: design-decisions §1366; `mp4/tests/data/found_seek_over_discards.mp4`) |
 
 That round reported one input as slow: a 640x480 AVIF taking over 10
 seconds, with six fuzzers sharing a busy machine. On its own it ran in 3.9

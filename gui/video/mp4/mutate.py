@@ -40,6 +40,10 @@ def seeks(name):
 ALONE = "a_track_selected_alone_gives_the_packets_it_gives_among_the_others"
 ALONE_READS_OWN = "a_track_selected_alone_reads_its_own_samples_alone"
 
+# FFmpeg's walks over an index, held to the walks as FFmpeg writes them.
+SEARCH_IS_FFMPEGS = "the_search_answers_as_ffmpegs_walking_search_does"
+EDIT_SEARCH_IS_FFMPEGS = "an_edits_search_answers_as_ffmpegs_walking_one_does"
+
 # The room the file's length leaves the indexes, and FFmpeg's ceilings.
 ROOM = "a_track_takes_no_more_entries_than_the_room_left"
 FILE_ROOM = "a_files_tracks_take_no_more_entries_than_it_has_bytes"
@@ -91,21 +95,86 @@ INDEX = [
     ),
     (
         "a search does not step over discarded entries",
-        "        while at(m).is_some_and(|e| e.flags & DISCARD != 0) && m < b && m < nb - 1 {",
-        "        while false && at(m).is_some_and(|e| e.flags & DISCARD != 0) && m < b && m < nb - 1 {",
-        ["the_search_steps_over_discarded_entries_as_ffmpeg_does", seeks("two_edits")],
+        "        if at(m).is_some_and(|e| e.flags & DISCARD != 0) && m < b && m < nb - 1 {",
+        "        if false && at(m).is_some_and(|e| e.flags & DISCARD != 0) && m < b && m < nb - 1 {",
+        ["the_search_steps_over_discarded_entries_as_ffmpeg_does", seeks("two_edits"), SEARCH_IS_FFMPEGS],
     ),
     (
         "a backward search does not go back to a key frame",
-        "            m += if backward { -1 } else { 1 };",
-        "            m += 1;",
-        ["the_search_finds_key_frames_backward_and_forward", seeks("av1")],
+        "            m = if backward {\n                walks\n                    .key_to(from)",
+        "            m = if false {\n                walks\n                    .key_to(from)",
+        ["the_search_finds_key_frames_backward_and_forward", seeks("av1"), SEARCH_IS_FFMPEGS],
+    ),
+    # The walks in one step (`Walks`, `Offsets`): each held to FFmpeg's
+    # walks an entry at a time, on random indexes, with the tables built at
+    # once and partway through. The bound itself, SHORT_WALK, has no row:
+    # unbounded, the scale tests do not fail, they run for hours, and the
+    # harness would wait out its timeout three times to call that caught.
+    (
+        "the step over discarded entries ignores the upper bound's time",
+        "            m = if stop == b && at(b).is_some_and(|e| e.timestamp >= wanted) {",
+        "            m = if false && stop == b && at(b).is_some_and(|e| e.timestamp >= wanted) {",
+        ["the_search_steps_over_discarded_entries_as_ffmpeg_does", SEARCH_IS_FFMPEGS],
+    ),
+    (
+        "the step over discarded entries does not stop at the last",
+        "            let stop = kept.min(b).min(nb - 1);",
+        "            let stop = kept.min(b);",
+        [SEARCH_IS_FFMPEGS],
+    ),
+    (
+        "the table of the next kept entry is one off",
+        "            next = u32::try_from(i).ok()?;",
+        "            next = u32::try_from(i + 1).ok()?;",
+        [SEARCH_IS_FFMPEGS, EDIT_SEARCH_IS_FFMPEGS],
+    ),
+    (
+        "the table of the last key frame says the one after it",
+        "            last = u32::try_from(i).ok()?.checked_add(1)?;",
+        "            last = u32::try_from(i).ok()?.checked_add(2)?;",
+        [SEARCH_IS_FFMPEGS, EDIT_SEARCH_IS_FFMPEGS],
+    ),
+    (
+        "an edit's search goes back over no entries of its time",
+        "                Some(before) if time(before) == time(i) => i = before,",
+        "                Some(before) if false && time(before) == time(i) => i = before,",
+        [EDIT_SEARCH_IS_FFMPEGS],
+    ),
+    (
+        "an edit's search back over its time takes no key frame",
+        "        let earliest = if any { start } else { walks.key_from(start) };",
+        "        let earliest = if any { start } else { found };",
+        [EDIT_SEARCH_IS_FFMPEGS],
+    ),
+    (
+        "an entry past a run of no samples is in no run",
+        "            return if self.stuck {",
+        "            return if false {",
+        [EDIT_SEARCH_IS_FFMPEGS],
+    ),
+    (
+        "a long walk back finds the first key frame shown in time",
+        "        self.descend(node * 2 + 1, mid, high, to, pts)\n            .or_else(|| self.descend(node * 2, low, mid, to, pts))",
+        "        self.descend(node * 2, low, mid, to, pts)\n            .or_else(|| self.descend(node * 2 + 1, mid, high, to, pts))",
+        [EDIT_SEARCH_IS_FFMPEGS],
+    ),
+    (
+        "a long walk back takes a frame as shown at its decoding time",
+        "                *leaf = Some(e.timestamp.wrapping_add(i64::from(t.offset)));",
+        "                *leaf = Some(e.timestamp);",
+        [EDIT_SEARCH_IS_FFMPEGS],
+    ),
+    (
+        "an edit's dropped frames count back by the durations an edit before left",
+        "                buffer.clear();",
+        "                let _ = buffer;",
+        [packets("edits_stale_discards"), "an_edits_discarded_frames_count_back_by_their_own_durations"],
     ),
     (
         "an edit's first key frame ignores the composition offsets",
-        "        if self.has_ctts && index >= 0 {",
-        "        if false && self.has_ctts && index >= 0 {",
-        [packets("edit_before_key_shows"), packets("edit_at_shown_key")],
+        "        if self.has_ctts {\n            (*tts_index, *tts_sample) = offsets.position(index);",
+        "        if false {\n            (*tts_index, *tts_sample) = offsets.position(index);",
+        [packets("edit_before_key_shows"), packets("edit_at_shown_key"), EDIT_SEARCH_IS_FFMPEGS],
     ),
     (
         "sound's edit is not searched a second early",

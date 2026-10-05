@@ -77,6 +77,13 @@
 //! -- is held to that, and what is read of it is FFmpeg's still: the
 //! samples the file holds, then its end. FFmpeg's own ceilings -- the
 //! entries its allocator lets it index -- are kept exactly.
+//!
+//! What a file costs to read is bounded the same way. FFmpeg's lookups in
+//! an index walk it an entry at a time -- in its search, and once an edit in
+//! its edit lists -- and a file made for it makes each walk the index's
+//! length: quadratic, to seek in or to open. Here each walk is one step,
+//! from a table built the first time a walk is long, with FFmpeg's answers
+//! (design-decisions §1366).
 
 mod demux;
 mod index;

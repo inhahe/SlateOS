@@ -1,9 +1,10 @@
 //! A file's sound, block by block: [`Sound`].
 //!
-//! It reads the file's packets in order -- from a Matroska, WebM or MP4 file
-//! (`container.rs`) -- keeps those of its sound track, decodes them, and
-//! gives back each packet's samples with their time: 16-bit, interleaved, in
-//! the stream's channel order -- for more than two channels, Vorbis's (5.1:
+//! It reads the file's packets in order -- from a Matroska, WebM, MP4, Ogg,
+//! FLAC or MPEG audio file (`container.rs`) -- keeps those of its sound
+//! track, decodes them, and gives back each packet's samples with their
+//! time: interleaved, at the stream's depth (**Samples**, below), in the
+//! stream's channel order -- for more than two channels, Vorbis's (5.1:
 //! front left, centre, front right, rear left, rear right, LFE), which RFC
 //! 7845 takes for Opus too. Opus is decoded by `gui/video/opus`, libopus's
 //! decoder ported and held to it sample for sample, at 48 kHz (Opus's own
@@ -75,13 +76,30 @@
 //! not decode is silence as long as the last block, as for Vorbis. FLAC has
 //! no delay and no padding: nothing is trimmed.
 //!
+//! **MPEG audio** (MP3, MP2, MP1) is decoded by `gui/video/mp3`, minimp3's
+//! decoder ported and held to it sample for sample, a frame a packet. An
+//! `.mp3` file's packets are FFmpeg's (`mp3::Reader`): its LAME tag's
+//! encoder delay and the decoder's 529 samples dropped from the start, its
+//! padding less 529 from the end, a block timed by its packet's time on
+//! FFmpeg's clock. A frame that does not decode -- damaged, or needing main
+//! data a lost frame held -- is silence as long as the frame, where FFmpeg
+//! drops its sound; a frame of the other channel count than the stream's
+//! first is made the stream's (a mono frame both channels, a stereo one
+//! their mean), and one of another rate is silence. A seek goes back far
+//! enough for the bit reservoir and the filterbank -- in an `.mp3` file its
+//! reader's own reckoning, in Matroska and MP4 700 ms, the most the
+//! reservoir can reach back at 8 kbit/s and two frames -- so that the first
+//! block after it is what reading through gives.
+//!
 //! **Samples** are `i32`s at the stream's own depth
-//! ([`SoundInfo::bits_per_sample`]): 16 bits for Opus and Vorbis, whose
-//! reference decoders give 16, and FLAC's own -- 24-bit audio stays 24-bit.
+//! ([`SoundInfo::bits_per_sample`]): 16 bits for Opus, Vorbis and MPEG
+//! audio, whose reference decoders give 16, and FLAC's own -- 24-bit audio
+//! stays 24-bit.
 //!
 //! What plays: Opus and Vorbis, in Matroska, WebM and Ogg; Opus in MP4; FLAC
-//! in `.flac` files, Ogg, Matroska and MP4. A file whose sound is AAC or MP3
-//! is refused by the codec's name ([`crate::Error::SoundCodec`]).
+//! in `.flac` files, Ogg, Matroska and MP4; MPEG audio in `.mp3`, `.mp2`
+//! and `.mp1` files, Matroska and MP4. A file whose sound is AAC is refused
+//! by the codec's name ([`crate::Error::SoundCodec`]).
 
 use std::io::{Read, Seek};
 
@@ -93,6 +111,12 @@ const OPUS_RATE: u64 = 48_000;
 
 /// The most samples a channel one Opus packet holds: 120 ms.
 const OPUS_MAX_PACKET: usize = 5760;
+
+/// How far before a seek's time an MPEG audio track in Matroska or MP4 is
+/// read from: 511 bytes of main data the bit reservoir may reach back at the
+/// lowest rate, 8 kbit/s (511 ms), and two of MPEG-2.5's longest frames
+/// (144 ms) for the frame before and the filterbank's overlap.
+const MP3_PRE_ROLL: u64 = 700_000_000;
 
 /// A file's sound, as [`Sound::info`] describes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -133,6 +157,8 @@ enum Decoder {
     Flac(Box<flac::Decoder>),
     /// A `.flac` file, whose reader (the container) decodes its frames.
     FlacFile,
+    /// MPEG audio, a frame a packet (or several).
+    Mp3(Box<mp3::Decoder>),
 }
 
 /// A file's sound track, decoded block by block.
@@ -255,8 +281,12 @@ impl<R: Read + Seek> Sound<R> {
     fn open_with(source: R, track: Option<u64>) -> Result<Self, Error> {
         let mut demuxer = Container::open(source)?;
         let sounds = demuxer.sounds();
-        let decodable =
-            |c: SoundCodec| matches!(c, SoundCodec::Opus | SoundCodec::Vorbis | SoundCodec::Flac);
+        let decodable = |c: SoundCodec| {
+            matches!(
+                c,
+                SoundCodec::Opus | SoundCodec::Vorbis | SoundCodec::Flac | SoundCodec::Mp3
+            )
+        };
         let chosen: &SoundTrack = match track {
             Some(n) => sounds.iter().find(|t| t.number == n),
             // Decodable first, then enabled, then marked default; the file's
@@ -266,6 +296,18 @@ impl<R: Read + Seek> Sound<R> {
                 .min_by_key(|t| (!decodable(t.codec), !t.enabled, !t.default)),
         }
         .ok_or(Error::NoSound)?;
+        let (key, time_base) = (chosen.key, chosen.time_base);
+        let chosen = chosen.clone();
+        // The track's first packet: where the start's skip comes off, and
+        // the first frame an MPEG audio track's rate and channels are read
+        // from.
+        let mut pending = None;
+        while let Some(sample) = demuxer.next_packet()? {
+            if sample.track == key {
+                pending = Some(sample);
+                break;
+            }
+        }
         let mut bits = 16;
         let (decoder, rate, channels, pre_skip, max_packet) = match chosen.codec {
             SoundCodec::Opus => {
@@ -327,6 +369,23 @@ impl<R: Read + Seek> Sound<R> {
                     },
                 )
             }
+            SoundCodec::Mp3 => {
+                let first = pending
+                    .as_ref()
+                    .and_then(|s| s.data.first_chunk::<4>())
+                    .or_else(|| chosen.config.first_chunk::<4>())
+                    .and_then(|h| mp3::Header::parse(u32::from_be_bytes(*h)))
+                    .ok_or(Error::Mp3)?;
+                (
+                    Decoder::Mp3(Box::new(mp3::Decoder::new())),
+                    u64::from(first.sample_rate),
+                    first.channels,
+                    0,
+                    mp3::MAX_SAMPLES_PER_FRAME
+                        .checked_div(first.channels)
+                        .unwrap_or(mp3::MAX_SAMPLES_PER_FRAME),
+                )
+            }
             other => return Err(Error::SoundCodec(other)),
         };
         let start_skip = if chosen.codec_delay > 0 {
@@ -343,7 +402,6 @@ impl<R: Read + Seek> Sound<R> {
             bits_per_sample: bits,
             duration: demuxer.duration(),
         };
-        let (key, time_base) = (chosen.key, chosen.time_base);
         // A Vorbis packet decodes only after the one before it (the first
         // after a reset only primes the overlap), which starts at most a long
         // block before the time: at least that much pre-roll, whatever the
@@ -355,15 +413,10 @@ impl<R: Read + Seek> Sound<R> {
                 (1, 1_000_000_000),
             )),
             Decoder::Opus(_) | Decoder::Flac(_) | Decoder::FlacFile => chosen.seek_pre_roll,
+            // An `.mp3` file's reader goes back itself, by its frames' bytes.
+            Decoder::Mp3(_) if matches!(demuxer, Container::Mp3(_)) => 0,
+            Decoder::Mp3(_) => MP3_PRE_ROLL,
         };
-        // The track's first packet: where the start's skip comes off.
-        let mut pending = None;
-        while let Some(sample) = demuxer.next_packet()? {
-            if sample.track == key {
-                pending = Some(sample);
-                break;
-            }
-        }
         Ok(Self {
             demuxer,
             key,
@@ -442,6 +495,7 @@ impl<R: Read + Seek> Sound<R> {
         match &mut self.decoder {
             Decoder::Opus(d) => d.reset(),
             Decoder::Vorbis(d) => d.reset(),
+            Decoder::Mp3(d) => d.reset(),
             // A FLAC frame stands alone.
             Decoder::Flac(_) | Decoder::FlacFile => {}
         }
@@ -487,7 +541,8 @@ impl<R: Read + Seek> Sound<R> {
                         Decoder::Flac(Box::new(flac::Decoder::new(Some(&info)))),
                     )
                 }),
-            Decoder::FlacFile => return,
+            // Neither gives a new setup in band.
+            Decoder::FlacFile | Decoder::Mp3(_) => return,
             Decoder::Vorbis(_) => xiph_headers(config)
                 .ok_or(Error::Vorbis(vorbis::Error::BadHeader))
                 .and_then(|[id, _, setup]| vorbis::Decoder::new(id, setup).map_err(Error::Vorbis))
@@ -559,6 +614,14 @@ impl<R: Read + Seek> Sound<R> {
             },
             // Its frames come from its reader, never as packets.
             Decoder::FlacFile => Ok(0),
+            Decoder::Mp3(d) => decode_mp3(
+                d,
+                data,
+                channels,
+                self.rate,
+                self.target.is_some(),
+                &mut self.pcm,
+            ),
             Decoder::Vorbis(d) => match d.decode(data, &mut self.pcm) {
                 Ok(n) => Ok(n),
                 Err(e) => {
@@ -696,7 +759,7 @@ impl<R: Read + Seek> Sound<R> {
     fn samples(&self, from: usize, to: usize) -> Option<Vec<i32>> {
         match self.decoder {
             Decoder::Flac(_) | Decoder::FlacFile => self.wide.get(from..to).map(<[i32]>::to_vec),
-            Decoder::Opus(_) | Decoder::Vorbis(_) => self
+            Decoder::Opus(_) | Decoder::Vorbis(_) | Decoder::Mp3(_) => self
                 .pcm
                 .get(from..to)
                 .map(|s| s.iter().map(|&v| i32::from(v)).collect()),
@@ -734,6 +797,88 @@ impl<R: Read + Seek> Sound<R> {
             time: time::to_ns(ticks, (1, self.rate)),
             samples,
         }))
+    }
+}
+
+/// One MPEG audio packet's frames decoded into `pcm` -- `channels` to a
+/// sample at `rate`, a frame of another channel count made the stream's --
+/// and how many samples a channel; or, where a frame did not decode, the
+/// damage and the samples with that frame's silence in. A frame waiting on
+/// the bit reservoir while a seek's pre-roll is read (`seeking`) is not
+/// damage: it is before the seek's time, and gives nothing.
+fn decode_mp3(
+    d: &mut mp3::Decoder,
+    data: &[u8],
+    channels: usize,
+    rate: u64,
+    seeking: bool,
+    pcm: &mut Vec<i16>,
+) -> Result<usize, (Error, usize)> {
+    pcm.clear();
+    let mut frame = [0i16; mp3::MAX_SAMPLES_PER_FRAME];
+    let mut rest = data;
+    let mut damaged = false;
+    while !rest.is_empty() {
+        let (n, info) = d.decode_frame(rest, Some(&mut frame));
+        if info.frame_bytes == 0 {
+            break;
+        }
+        rest = rest.get(info.frame_bytes..).unwrap_or_default();
+        if info.channels == 0 {
+            // No frame in what is left: junk.
+            continue;
+        }
+        if n == 0 && info.needs_reservoir && seeking {
+            continue;
+        }
+        if n == 0 || u64::from(info.hz) != rate {
+            // Silence, as long as the frame at the stream's rate.
+            let samples = match info.layer {
+                1 => 384usize,
+                3 if info.hz <= 24_000 => 576,
+                _ => 1152,
+            };
+            let at_rate = usize::try_from(
+                u64::try_from(samples)
+                    .unwrap_or(0)
+                    .saturating_mul(rate)
+                    .checked_div(u64::from(info.hz))
+                    .unwrap_or(0),
+            )
+            .unwrap_or(0);
+            pcm.resize(
+                pcm.len().saturating_add(at_rate.saturating_mul(channels)),
+                0,
+            );
+            damaged = true;
+            continue;
+        }
+        let decoded = frame
+            .get(..n.saturating_mul(info.channels))
+            .unwrap_or_default();
+        match (info.channels, channels) {
+            (from, to) if from == to => pcm.extend_from_slice(decoded),
+            (1, 2) => {
+                for &s in decoded {
+                    pcm.extend_from_slice(&[s, s]);
+                }
+            }
+            (2, 1) => {
+                for pair in decoded.chunks_exact(2) {
+                    if let [left, right] = *pair {
+                        let mean = i32::from(left).saturating_add(i32::from(right)) >> 1;
+                        pcm.push(i16::try_from(mean).unwrap_or(0));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let samples = pcm.len().checked_div(channels).unwrap_or(0);
+    if damaged {
+        Err((Error::Mp3, samples))
+    } else {
+        Ok(samples)
     }
 }
 

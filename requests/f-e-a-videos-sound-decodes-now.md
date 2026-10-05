@@ -5,8 +5,9 @@
 Vorbis)
 **Updated:** 2026-10-04, lane F -- Vorbis plays too; the sample rate is now
 the stream's; Opus in MP4; Ogg files -- `.opus`, `.ogg`, `.oga` -- for the
-music player as well; FLAC, and samples as `i32` at the stream's depth
-(below, "Update").
+music player as well; FLAC, and samples as `i32` at the stream's depth;
+MP3 -- `.mp3`, `.mp2`, `.mp1` files, MP3 in Matroska and MP4 (below,
+"Update").
 
 **In short:** the video player can have its file's sound: `videocodec::Sound`,
 opened on the same file as `videocodec::Video`, gives back the sound block
@@ -143,3 +144,40 @@ and MP4. With the Ogg update above, the music player can open and play its
 For tags and cover art a music player shows, `flac::Reader::open(file)?
 .metadata()` gives a `.flac` file's Vorbis comments (`comments.get("TITLE")`)
 and pictures (`pictures`, the front cover `kind == 3`) directly.
+
+## Update, 2026-10-04: MP3
+
+`Sound::open` plays MPEG audio: `.mp3` files (and `.mp2`, `.mp1`), and MP3
+in Matroska and MP4 -- the music player's commonest files. The decoder is
+minimp3's, ported (`gui/video/mp3`, held to minimp3 bit for bit on its 83
+test streams and 50 of our own); an `.mp3` file is taken apart as FFmpeg
+takes it apart and timed and trimmed as FFmpeg times and trims it
+(design-decisions §1355, and §1351's MPEG audio addendum).
+
+What a caller sees:
+
+- **`SoundCodec::Mp3`** is decoded now (MP2 and MP1 report as it too).
+  Only `SoundCodec::Aac` is still refused by name.
+- **Gapless playback**: a LAME-encoded file's encoder delay and padding are
+  dropped, as FFmpeg drops them, so an album's tracks join without a gap.
+  The first block is not at 0 but at the end of what was dropped -- 25 ms
+  into a 44.1 kHz LAME file, which is ffprobe's start time for it. A
+  player that shows a track's position should count from the first block's
+  time.
+- **`SoundInfo::duration`**: from the Xing, Info or VBRI frame's count of
+  frames where the file has one (every LAME file does); otherwise an
+  estimate from the file's size and its first frame's bit rate, as FFmpeg
+  estimates it -- exact for a constant bit rate, rough for a variable one
+  with no Xing frame (rare).
+- **Damage** is concealed with silence as long as the frame and counted in
+  `Sound::damaged`, with the new **`Error::Mp3`** as `last_damage`. A file
+  with junk or broken frames in it plays everything that decodes.
+- **Tags**: ID3v2 tags in front, and ID3v1 and APE tags at the end, are
+  passed over; their contents (title, artist, cover art) are not read by
+  `Sound`. Ask lane F if the music player wants a reader of them in
+  `gui/video/mp3`, as `flac::Reader` gives a FLAC file's.
+- **Samples** are 16-bit (`bits_per_sample` 16), as for Opus and Vorbis.
+
+With the updates above, the music player can play `.mp3`, `.flac`, `.ogg`,
+`.oga` and `.opus` files through `Sound` alone; `.m4a` (AAC) waits on the
+operator's answer to open-questions F-Q9.

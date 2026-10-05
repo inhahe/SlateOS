@@ -198,7 +198,9 @@ pub enum ContainerError {
 impl fmt::Display for ContainerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unknown => f.write_str("the file is not a Matroska, WebM, MP4, Ogg or FLAC file"),
+            Self::Unknown => {
+                f.write_str("the file is not a Matroska, WebM, MP4, Ogg, FLAC or MPEG audio file")
+            }
             Self::Io(kind) => write!(f, "the file cannot be read: {kind}"),
             Self::Matroska(e) => write!(f, "{e}"),
             Self::Mp4(e) => write!(f, "{e}"),
@@ -243,7 +245,7 @@ pub enum SoundCodec {
     /// Not decoded here yet.
     Aac,
     Flac,
-    /// Not decoded here yet.
+    /// MPEG audio: MP3, and Layers II and I (MP2, MP1).
     Mp3,
     /// Any other.
     Other,
@@ -269,7 +271,8 @@ impl fmt::Display for SoundCodec {
 #[non_exhaustive]
 pub enum Error {
     /// The file could not be read: the source failed, the file is not
-    /// Matroska (WebM), MP4 or Ogg, or its headers are damaged.
+    /// Matroska (WebM), MP4, Ogg, FLAC or MPEG audio, or its headers are
+    /// damaged.
     Container(ContainerError),
     /// The file has no video track, or not the one asked for.
     NoVideo,
@@ -300,6 +303,9 @@ pub enum Error {
     /// A FLAC track's setup is not a FLAC stream's description, or a frame
     /// did not decode (as libFLAC would report it).
     Flac(flac::Status),
+    /// An MPEG audio track's first frame has no header, or a frame did not
+    /// decode (minimp3 says no more than that).
+    Mp3,
 }
 
 impl fmt::Display for Error {
@@ -327,6 +333,9 @@ impl fmt::Display for Error {
             Self::Opus(e) => write!(f, "the sound could not be decoded: {e}"),
             Self::Vorbis(e) => write!(f, "the sound could not be decoded: {e}"),
             Self::Flac(e) => write!(f, "the sound could not be decoded: {e}"),
+            Self::Mp3 => {
+                f.write_str("the sound could not be decoded: an MPEG audio frame is damaged")
+            }
         }
     }
 }

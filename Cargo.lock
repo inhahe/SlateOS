@@ -4530,6 +4530,7 @@ dependencies = [
  "flac",
  "matroska",
  "md5",
+ "mp3",
  "mp4",
  "ogg",
  "opus",

@@ -32,6 +32,10 @@ Where the answers come from -- none of it from the crate itself:
   times FFmpeg starts again at every link, is each link's answer made from
   that link alone, its times moved on to follow the last link's end
   (`chain_answer`).
+- **MPEG audio's samples** are minimp3's (gui/video/mp3's
+  `tools/reference.c --packets`, the decoder gui/video/mp3 is held to bit
+  for bit), each packet decoded alone as `Sound` decodes it, trimmed by
+  FFmpeg's side data (`mp3_answer`).
 - **FLAC's samples** are FFmpeg's decode of it (`ffmpeg -f s32le`): FLAC is
   lossless, so every correct decoder's samples are the same samples, and
   gui/video/flac is held to libFLAC itself in its own tests.
@@ -135,6 +139,22 @@ FIXTURES = [
      "flac", 44100, ["-sample_fmt", "s16"]),
     ("flac_ogg.oga", [SINE.format(a=0.3, f=262), SINE.format(a=0.3, f=392) + "+" + CLICKS], 0.77,
      "flac", 44100, ["-sample_fmt", "s16"]),
+    # MPEG audio: .mp3 files as ffmpeg writes them -- an ID3v2 tag and an
+    # Info or Xing frame whose LAME tag gives the delay and padding FFmpeg
+    # trims -- at MPEG-1's 1152 samples a frame and MPEG-2's 576 (where the
+    # delay runs across two packets), a VBR one; a Layer II file; and MP3 in
+    # Matroska and MP4.
+    ("mp3_tagged_stereo.mp3", [SINE.format(a=0.3, f=330) + "+" + CLICKS,
+                               SINE.format(a=0.3, f=550) + "+0.05*sin(2*PI*5100*t)"], 1.31,
+     "libmp3lame", 44100, ["-b:a", "128k"]),
+    ("mp3_vbr_mono_22k.mp3", ["0.4*sin(2*PI*180*t)*(0.5+0.5*sin(2*PI*3*t))+" + CLICKS], 0.97,
+     "libmp3lame", 22050, ["-q:a", "4"]),
+    ("mp2_stereo.mp2", [SINE.format(a=0.3, f=262), SINE.format(a=0.3, f=392) + "+" + CLICKS], 0.83,
+     "mp2", 48000, ["-b:a", "192k"]),
+    ("mp3_mka.mka", [SINE.format(a=0.3, f=440), SINE.format(a=0.25, f=660) + "+" + CLICKS], 0.91,
+     "libmp3lame", 44100, ["-b:a", "160k"]),
+    ("mp3_mp4.mp4", [SINE.format(a=0.3, f=330), SINE.format(a=0.3, f=495)], 0.79,
+     "libmp3lame", 48000, ["-b:a", "128k"]),
 ]
 
 # Chained Ogg files: each link made as a file of its own (name, signal,
@@ -520,6 +540,54 @@ def flac_answer(name, ffmpeg, ffprobe):
     write_answer(name, stream, frames, bytes(pcm), bits)
 
 
+def mp3_answer(name, ffprobe, reference):
+    """An MPEG audio fixture's answer: FFmpeg's blocks, and minimp3's samples
+    (gui/video/mp3's `tools/reference.c` in its `--packets` mode, the
+    decoder gui/video/mp3 is held to bit for bit) of each packet ffprobe
+    dumps, given to the decoder alone as `Sound` gives them, trimmed as
+    FFmpeg trims them -- the LAME tag's delay and padding, as each packet's
+    skip side data -- and checked against FFmpeg's count of what is left.
+    (FFmpeg's own decoder is a floating-point one, a unit or so off
+    minimp3's.)"""
+    info = json.loads(run([ffprobe, "-hide_banner", "-loglevel", "error", "-select_streams", "a",
+                           "-show_streams", "-show_packets", "-of", "json", name]))
+    dump = json.loads(run(["wsl", "-d", "Ubuntu", "--", "ffprobe", "-hide_banner", "-loglevel", "error",
+                           "-select_streams", "a", "-show_packets", "-show_data",
+                           "-of", "json", wsl_path(name)]))
+    if [packet_key(p) for p in info["packets"]] != [packet_key(p) for p in dump["packets"]]:
+        sys.exit(f"{name}: the two ffprobes list different packets")
+    stream = info["streams"][0]
+    channels = int(stream["channels"])
+    frames = json.loads(run([ffprobe, "-hide_banner", "-loglevel", "error", "-select_streams", "a",
+                             "-show_frames", "-show_entries", "frame=pts,nb_samples",
+                             "-of", "json", name]))["frames"]
+    bit = bytearray()
+    for theirs in dump["packets"]:
+        data = hexdump_bytes(theirs["data"])
+        bit += struct.pack(">II", len(data), 0) + data
+    with tempfile.TemporaryDirectory(dir=".") as tmp:
+        with open(os.path.join(tmp, "in.bit"), "wb") as f:
+            f.write(bit)
+        lines = run(["wsl", "-d", "Ubuntu", "--", "bash", "-c",
+                     f"{reference} --packets {shlex.quote(wsl_path(os.path.join(tmp, 'in.bit')))} "
+                     f"{shlex.quote(wsl_path(os.path.join(tmp, 'out.pcm')))}"]).decode().split("\n")
+        with open(os.path.join(tmp, "out.pcm"), "rb") as f:
+            pcm = f.read()
+    decoded = [line.split() for line in lines if line.startswith("packet ")]
+    if len(decoded) != len(info["packets"]):
+        sys.exit(f"{name}: {len(info['packets'])} packets, the reference decoded {len(decoded)}")
+    packets = []
+    for (_, samples, chans), p in zip(decoded, info["packets"]):
+        if int(samples) and int(chans) != channels:
+            sys.exit(f"{name}: a frame of {chans} channels in a stream of {channels}")
+        packets.append((int(samples), skip_data(p), packet_discarded(p)))
+    out = ffmpeg_trim(pcm, packets, channels, 0)
+    total = sum(int(f["nb_samples"]) for f in frames)
+    if total * 2 * channels != len(out):
+        sys.exit(f"{name}: FFmpeg keeps {total} samples, the trimming here {len(out) // (2 * channels)}")
+    write_answer(name, stream, frames, out)
+
+
 def last_granule(data):
     """An Ogg file's last page's granule position."""
     at = data.rfind(b"OggS")
@@ -562,6 +630,7 @@ def main():
     ap.add_argument("--ffmpeg", default="")
     ap.add_argument("--reference", default="~/opusref/reference")
     ap.add_argument("--vorbis-reference", default="~/vorbisref/build/reference")
+    ap.add_argument("--mp3-reference", default="~/mp3ref/reference")
     ap.add_argument("--answers-only", action="store_true",
                     help="work out the answers of the files there are, encoding nothing")
     ap.add_argument("names", nargs="*", help="the fixtures to make (all, if none)")
@@ -585,6 +654,8 @@ def main():
             vorbis_answer(name, ffmpeg, ffprobe, args.vorbis_reference)
         elif encoder == "flac":
             flac_answer(name, ffmpeg, ffprobe)
+        elif encoder in ("libmp3lame", "mp2"):
+            mp3_answer(name, ffprobe, args.mp3_reference)
         else:
             opus_answer(name, ffprobe, args.reference)
     for name, links in CHAINS.items():

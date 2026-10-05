@@ -78,6 +78,6 @@ reads as the standard says (below).
 **Where it lives.** `gui/video/mp3`; fixtures and their generator in
 `tests/data`; minimp3's vectors through the ignored `tests/vectors.rs`.
 
-**How to reverse.** The crate stands alone; `videocodec` is to be its first
-user. Either departure is one line in the crate and one in
+**How to reverse.** `videocodec`'s `Sound` is its one user (§1351's MPEG
+audio addendum). Either departure is one line in the crate and one in
 `tools/patch_minimp3.py`.

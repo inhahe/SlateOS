@@ -26,7 +26,7 @@ use std::path::PathBuf;
 
 use videocodec::{Error, Sound, SoundCodec};
 
-const FIXTURES: [&str; 23] = [
+const FIXTURES: [&str; 28] = [
     "opus_stereo.webm",
     "opus_mono_voip.webm",
     "opus_short_frames.mka",
@@ -50,6 +50,11 @@ const FIXTURES: [&str; 23] = [
     "flac_51.mka",
     "flac_mp4.mp4",
     "flac_ogg.oga",
+    "mp3_tagged_stereo.mp3",
+    "mp3_vbr_mono_22k.mp3",
+    "mp2_stereo.mp2",
+    "mp3_mka.mka",
+    "mp3_mp4.mp4",
 ];
 
 fn data(name: &str) -> PathBuf {
@@ -114,6 +119,8 @@ fn codec(name: &str) -> SoundCodec {
         SoundCodec::Opus
     } else if name.starts_with("flac") {
         SoundCodec::Flac
+    } else if name.starts_with("mp3") || name.starts_with("mp2") {
+        SoundCodec::Mp3
     } else {
         SoundCodec::Vorbis
     }
@@ -177,7 +184,7 @@ fn every_fixture_plays_as_ffmpeg_and_its_reference_decoder_play_it() {
         assert_eq!(
             (pcm.len(), fnv1a64(&pcm)),
             (e.bytes, e.digest),
-            "{name}: the samples, as libopus, Tremor or libFLAC decodes them"
+            "{name}: the samples, as libopus, Tremor, libFLAC or minimp3 decodes them"
         );
     }
 }
@@ -228,8 +235,10 @@ fn a_seek_starts_at_the_first_sample_at_or_after_its_time() {
     // decoder remembers nothing but the last block, which the pre-roll
     // decodes: its blocks are the whole decode's, to the bit, from the
     // first; a FLAC frame stands alone, and a `.flac` file's reader seeks to
-    // the sample. (A seek that reaches back to the stream's start decodes
-    // what opening it decodes, to the bit.)
+    // the sample; an MPEG audio decoder needs the frames whose main data the
+    // bit reservoir holds, which the seek goes back for, and then gives the
+    // whole decode's samples to the bit. (A seek that reaches back to the
+    // stream's start decodes what opening it decodes, to the bit.)
     for name in [
         "opus_stereo.webm",
         "opus_mono_voip.webm",
@@ -250,6 +259,11 @@ fn a_seek_starts_at_the_first_sample_at_or_after_its_time() {
         "flac_51.mka",
         "flac_mp4.mp4",
         "flac_ogg.oga",
+        "mp3_tagged_stereo.mp3",
+        "mp3_vbr_mono_22k.mp3",
+        "mp2_stereo.mp2",
+        "mp3_mka.mka",
+        "mp3_mp4.mp4",
     ] {
         let e = expected(name);
         let channels = e.channels;

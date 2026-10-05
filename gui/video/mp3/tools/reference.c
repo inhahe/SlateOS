@@ -28,11 +28,53 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+
+/*
+ * `reference --packets <in> <pcm out>`: the decoding videocodec's `Sound`
+ * does, a packet at a time. <in> holds packets, each its length (32 bits,
+ * big-endian), four bytes of 0 and its bytes; each is given to the decoder
+ * alone, and its samples written out. One line a packet:
+ *
+ *   packet <samples a channel> <channels>
+ */
+static int packets(const char *in_path, const char *out_path)
+{
+    FILE *in = fopen(in_path, "rb"), *out = fopen(out_path, "wb");
+    if (!in || !out) {
+        perror(!in ? in_path : out_path);
+        return 1;
+    }
+    static mp3dec_t dec;
+    mp3dec_init(&dec);
+    int16_t pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
+    uint8_t head[8];
+    while (fread(head, 1, 8, in) == 8) {
+        uint32_t len = ((uint32_t)head[0] << 24) | ((uint32_t)head[1] << 16) | ((uint32_t)head[2] << 8) | head[3];
+        uint8_t *data = malloc(len ? len : 1);
+        if (!data || fread(data, 1, len, in) != len) {
+            fprintf(stderr, "a packet cut short\n");
+            return 1;
+        }
+        mp3dec_frame_info_t info = { 0 };
+        int samples = mp3dec_decode_frame(&dec, data, (int)len, pcm, &info);
+        int channels = samples ? info.channels : 0;
+        if (samples)
+            fwrite(pcm, 2, (size_t)samples * channels, out);
+        printf("packet %d %d\n", samples, channels);
+        free(data);
+    }
+    fclose(in);
+    fclose(out);
+    return 0;
+}
 
 int main(int argc, char **argv)
 {
+    if (argc == 4 && !strcmp(argv[1], "--packets"))
+        return packets(argv[2], argv[3]);
     if (argc < 2) {
-        fprintf(stderr, "usage: reference <file> [<pcm out>]\n");
+        fprintf(stderr, "usage: reference <file> [<pcm out>] | reference --packets <in> <pcm out>\n");
         return 2;
     }
     FILE *f = fopen(argv[1], "rb");

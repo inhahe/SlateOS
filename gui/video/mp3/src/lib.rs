@@ -76,6 +76,10 @@ pub struct FrameInfo {
     pub layer: u32,
     /// The bit rate in kbit/s; 0 for a free-format stream.
     pub bitrate_kbps: u32,
+    /// The frame gave no samples because the main data it takes from the
+    /// frames before it is not in the bit reservoir -- after a reset, or
+    /// after a frame lost -- rather than because it is damaged.
+    pub needs_reservoir: bool,
 }
 
 /// An MPEG audio decoder: minimp3's `mp3dec_t` and `mp3dec_decode_frame`.
@@ -157,7 +161,10 @@ impl Decoder {
         };
         match outcome {
             Outcome::Decoded => (samples, info),
-            Outcome::NoReservoir => (0, info),
+            Outcome::NoReservoir => {
+                info.needs_reservoir = true;
+                (0, info)
+            }
             Outcome::Invalid => {
                 st.header[0] = 0;
                 (0, info)

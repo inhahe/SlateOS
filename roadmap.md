@@ -3914,10 +3914,14 @@ lane C's `guitk`.
       of seven kinds), minimp3's 83 vectors (`tests/vectors.rs`), 600
       fuzzed files. Two misread bits read as the standard says, the
       reference patched to match. design-decisions §1355.
-    - `[ ]` MP3 in `videocodec::Sound`: `.mp3` files (an ID3v2 tag passed
-      over, the Xing/LAME frame's gapless delay and padding trimmed as
-      FFmpeg trims them, seeks), and MP3 in Matroska and MP4 -- the music
-      player's commonest files.
+    - `[x]` MP3 in `videocodec::Sound`: `.mp3`, `.mp2` and `.mp1` files
+      taken apart as FFmpeg takes them apart (`mp3::Reader`: ID3v2 tags,
+      the Xing/Info/VBRI frame, FFmpeg's MPEG audio parser simulated, held
+      to ffprobe's packets on 45 files), the LAME tag's gapless delay and
+      padding trimmed as FFmpeg trims them, exact seeks past the bit
+      reservoir; MP3 in Matroska and MP4. Five fixtures held to ffprobe's
+      blocks and minimp3's samples, with seeks. design-decisions §1351,
+      §1355.
     - `[-]` In `videocodec`, and out to the speakers: a file's sound decoded
       beside its pictures.
       - `[x]` `videocodec::Sound`: a Matroska or WebM file's Opus track,

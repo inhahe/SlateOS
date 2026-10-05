@@ -1,6 +1,6 @@
-//! The file's container -- Matroska (WebM among them), MP4, Ogg, or a
-//! native FLAC file -- told apart by its first bytes as FFmpeg tells them,
-//! and read through one face:
+//! The file's container -- Matroska (WebM among them), MP4, Ogg, a native
+//! FLAC file, or an MPEG audio one (`.mp3`, `.mp2`, `.mp1`) -- told apart by
+//! its first bytes as FFmpeg tells them, and read through one face:
 //! its video tracks described alike ([`Track`]), its sound tracks
 //! ([`SoundTrack`]), its packets given alike ([`Sample`]), and a seek.
 //!
@@ -10,7 +10,15 @@
 //! `fLaC` marker, past an ID3v2 tag as libavformat skips one before probing;
 //! anything else is MP4 when FFmpeg's MP4 probe would take it for one
 //! (`mp4::probe`, over as much of the file as FFmpeg reads to decide, a
-//! mebibyte), and otherwise not a file this plays.
+//! mebibyte), else MPEG audio when FFmpeg's MP3 probe would take it, past
+//! its ID3v2 tags (`mp3::is_mpeg_audio`), and otherwise not a file this
+//! plays.
+//!
+//! **An MPEG audio file** is taken apart by `mp3::Reader`, as FFmpeg's MP3
+//! demuxer and parser take it apart: a packet a frame (any junk before a
+//! frame dropped, as is what is left at the end holding none), timed on
+//! FFmpeg's clock, the LAME tag's delay and padding given as each packet's
+//! skip and discard.
 //!
 //! **A FLAC file** is read by libFLAC's reader (`flac::Reader`), which finds
 //! its frames by decoding them: it gives no packets, and `Sound` takes its
@@ -41,6 +49,7 @@ pub(crate) enum Container<R> {
     Mp4(Box<mp4::Demuxer<R>>),
     Ogg(Box<OggFile<R>>),
     Flac(Box<flac::Reader<R>>),
+    Mp3(Box<mp3::Reader<R>>),
 }
 
 /// An Ogg file, and the times libavformat would fill in for its packets.
@@ -188,6 +197,9 @@ impl<R: Read + Seek> Container<R> {
             Ok(Self::Flac(Box::new(flac::Reader::open(source)?)))
         } else if mp4::probe(&head) {
             Ok(Self::Mp4(Box::new(mp4::Demuxer::open(source)?)))
+        } else if mp3::is_mpeg_audio(&mut source).map_err(|e| ContainerError::Io(e.kind()))? {
+            let reader = mp3::Reader::open(source).map_err(|e| ContainerError::Io(e.kind()))?;
+            Ok(Self::Mp3(Box::new(reader)))
         } else {
             Err(ContainerError::Unknown)
         }
@@ -216,7 +228,7 @@ impl<R: Read + Seek> Container<R> {
                 .filter(|(_, s)| s.codec == ogg::Codec::Theora)
                 .filter_map(|(i, s)| theora_track(i, s))
                 .collect(),
-            Self::Flac(_) => Vec::new(),
+            Self::Flac(_) | Self::Mp3(_) => Vec::new(),
         }
     }
 
@@ -236,7 +248,11 @@ impl<R: Read + Seek> Container<R> {
                             matroska::Codec::Vorbis => SoundCodec::Vorbis,
                             _ if t.codec_id.starts_with(b"A_AAC") => SoundCodec::Aac,
                             _ if t.codec_id == b"A_FLAC" => SoundCodec::Flac,
-                            _ if t.codec_id == b"A_MPEG/L3" => SoundCodec::Mp3,
+                            _ if [&b"A_MPEG/L3"[..], b"A_MPEG/L2", b"A_MPEG/L1"]
+                                .contains(&t.codec_id.as_slice()) =>
+                            {
+                                SoundCodec::Mp3
+                            }
                             _ => SoundCodec::Other,
                         },
                         config: t.codec_private.clone(),
@@ -302,6 +318,24 @@ impl<R: Read + Seek> Container<R> {
                 })
                 .into_iter()
                 .collect(),
+            // One stream: its packets' times are FFmpeg's ticks, and its
+            // reader goes back itself, far enough for the bit reservoir.
+            Self::Mp3(r) => r
+                .info()
+                .first
+                .map(|first| SoundTrack {
+                    number: 1,
+                    key: 0,
+                    codec: SoundCodec::Mp3,
+                    config: first.raw.to_be_bytes().to_vec(),
+                    enabled: true,
+                    default: true,
+                    time_base: (1, mp3::TICKS_PER_SECOND),
+                    codec_delay: 0,
+                    seek_pre_roll: 0,
+                })
+                .into_iter()
+                .collect(),
         }
     }
 
@@ -333,6 +367,13 @@ impl<R: Read + Seek> Container<R> {
                     time::duration_to_ns(info.total_samples, (1, u64::from(info.sample_rate)))
                 })
             }
+            // The Xing, Info or VBRI frame's count of frames; else estimated
+            // from the file's size at the first frame's bit rate, as FFmpeg
+            // estimates it.
+            Self::Mp3(r) => r
+                .info()
+                .duration
+                .map(|ticks| time::duration_to_ns(ticks, (1, mp3::TICKS_PER_SECOND))),
         }
     }
 
@@ -386,6 +427,33 @@ impl<R: Read + Seek> Container<R> {
             Self::Ogg(f) => Ok(f.next_sample()?),
             // Its frames are `Sound`'s to read (`flac::Reader`).
             Self::Flac(_) => Ok(None),
+            Self::Mp3(r) => loop {
+                let Some(p) = r.next_packet().map_err(|e| ContainerError::Io(e.kind()))? else {
+                    return Ok(None);
+                };
+                // What holds no whole frame -- junk, the end of a file cut
+                // short -- FFmpeg's decoder refuses whole ("Header missing",
+                // an incomplete frame): it plays nothing, and is not damage.
+                // Junk before a frame is dropped and the frame decoded, where
+                // FFmpeg's decoder, given both, refuses both.
+                let Some(frame) = p.frame_bytes() else {
+                    continue;
+                };
+                return Ok(Some(Sample {
+                    track: 0,
+                    time: Some(p.pts),
+                    duration: u64::try_from(p.duration).unwrap_or(0),
+                    keyframe: true,
+                    discard: false,
+                    data: frame.to_vec(),
+                    alpha: None,
+                    new_config: None,
+                    discard_padding: 0,
+                    discard_samples: p.discard_padding,
+                    skip_samples: p.skip_samples,
+                    position: p.position,
+                }));
+            },
         }
     }
 
@@ -420,6 +488,7 @@ impl<R: Read + Seek> Container<R> {
             }
             // `Sound` seeks its reader itself, to the sample.
             Self::Flac(_) => Ok(()),
+            Self::Mp3(r) => r.seek(ticks).map_err(|e| ContainerError::Io(e.kind())),
         }
     }
 }

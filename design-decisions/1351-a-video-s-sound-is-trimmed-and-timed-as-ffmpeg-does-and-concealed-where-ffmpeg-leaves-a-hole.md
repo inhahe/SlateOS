@@ -154,8 +154,49 @@ Matroska, MP4, Ogg) are held to ffprobe's blocks and FFmpeg's samples
   type per depth (every caller handles each). Nothing outside lane F used
   `Sound` yet, so the type changed with nothing to migrate.
 
+**MPEG audio, 2026-10-04.** MP3 plays, and MP2 and MP1 with it
+(`gui/video/mp3`, minimp3 ported, §1355): `.mp3`, `.mp2` and `.mp1` files,
+and MPEG audio in Matroska and MP4, a frame a packet, 16-bit.
+
+- **An `.mp3` file is taken apart as FFmpeg takes it apart** (`mp3::Reader`,
+  held to ffprobe's packets on 45 files): ID3v2 tags passed over, the Xing,
+  Info or VBRI frame read and not played, the demuxer's search past junk,
+  then FFmpeg's MPEG audio parser simulated -- its 1024-byte reads, a packet
+  ending at each frame's end, junk carried into the next packet, ID3v1 and
+  APE tags left out at the end. Each packet is timed on FFmpeg's clock
+  (1/14 112 000 s). The gapless trims are FFmpeg's: the LAME tag's encoder
+  delay and the decoder's 529 samples off the start (the first block of a
+  LAME file at 44.1 kHz is 25 ms in, where ffprobe's start time is), its
+  padding less 529 off the end where the frame count says the stream ends.
+  *Alternatives:* minimp3's own `mp3dec_ex` -- the same trims, but its sync
+  wants ten frames that agree before it trusts one, and loses whole runs of
+  a file with junk in it (most of one fixture) where FFmpeg's parser loses
+  only the frame the junk sits in; or timing by the samples decoded, which
+  is the same on a clean file and drifts on a damaged one.
+- **Where it is not FFmpeg's:** junk before a frame is dropped and the
+  frame decoded, where FFmpeg's decoder refuses the packet ("Header
+  missing") and loses the frame; a frame that does not decode, or needs main
+  data a lost frame held, is silence as long as the frame (FFmpeg drops it);
+  free-format files, which FFmpeg will not open, play, their frames sized
+  as minimp3 sizes them; a file of one frame plays (FFmpeg's search for
+  junk reads past the end and refuses it); after a seek the packets are
+  timed as reading through times them (FFmpeg's new parser does not know a
+  frame's length yet, and puts a packet of junk at length 0, and those
+  after it a frame early). A frame of the other channel count than the
+  stream's first is made the stream's (mono both channels, stereo their
+  mean); one of another rate is silence.
+- **Seeks are exact:** an `.mp3` file's reader goes back by its frames'
+  bytes until the 511 bytes of main data the bit reservoir can reach back
+  are covered for the frame before the target, and one more; in Matroska
+  and MP4, 700 ms (511 bytes at 8 kbit/s and two of the longest frames).
+  The first block after a seek is the whole decode's, to the bit.
+- Five fixtures (a LAME-tagged stereo file, an MPEG-2 VBR mono one whose
+  delay runs across two packets, Layer II, MP3 in Matroska and in MP4) are
+  held to ffprobe's blocks and minimp3's samples, each packet decoded alone
+  as `Sound` decodes it, with seeks.
+
 **What it does not do yet.** AAC (MP4's commonest codec) is refused by
-name, as is MP3; and nothing plays the samples: the speakers need the kernel's PCM
+name; and nothing plays the samples: the speakers need the kernel's PCM
 interface (`kernel/src/audio_alsa.rs`, lane A's) reachable from a
 program.
 

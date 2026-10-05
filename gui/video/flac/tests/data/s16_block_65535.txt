@@ -1,0 +1,22 @@
+# s16_block_65535.flac: what libFLAC 1.5.0 makes of it (generate_fixtures.py)
+meta 0 34
+info 65535 65535 9096 91871 8000 1 16 72000
+meta 3 18
+meta 4 40
+meta 1 8192
+frame 0 65535 1 16 8000 805e32ffcdf2b3c9
+frame 65535 6465 1 16 8000 d8fbcd698d369a9a
+end FLAC__STREAM_DECODER_END_OF_STREAM ok
+seek 0
+frame 0 65535 1 16 8000 805e32ffcdf2b3c9
+frame 65535 6465 1 16 8000 d8fbcd698d369a9a
+seek 24000
+frame 24000 41535 1 16 8000 3cbce0814fe66b95
+frame 65535 6465 1 16 8000 d8fbcd698d369a9a
+seek 36001
+frame 36001 29534 1 16 8000 8e36aaf24c0e7a79
+frame 65535 6465 1 16 8000 d8fbcd698d369a9a
+seek 71999
+frame 71999 1 1 16 8000 a2c79a56a17ac416
+seek 72005
+seek-failed

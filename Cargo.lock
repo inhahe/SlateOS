@@ -1298,6 +1298,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "flac"
+version = "0.1.0"
+dependencies = [
+ "md5",
+]
+
+[[package]]
 name = "flashcards"
 version = "0.1.0"
 dependencies = [

@@ -3891,6 +3891,17 @@ lane C's `guitk`.
       FFmpeg, 24 with made-up setups no encoder writes) decoded whole, with
       damaged packets and with damaged setup headers, 1496 results in all,
       refusals included. design-decisions §1352.
+    - `[x]` The FLAC decoder, `gui/video/flac`: libFLAC 1.5.0's decoder
+      ported -- every bit depth 4 to 32 (the 33-bit side channel), one to
+      eight channels, every predictor, Rice and Rice2, wasted bits, every
+      header code; metadata (tags, pictures, seek table); a native-file
+      reader with seeking and the MD5 check; libFLAC's handling of damage.
+      Held to libFLAC line for line on 47 files made here (encoder settings,
+      odd depths and rates, damage of nine kinds, with seeks) and on all 86
+      of the IETF's conformance files (`tools/ietf.py`). design-decisions
+      §1354.
+    - `[ ]` FLAC in `videocodec::Sound`: `.flac` files, and FLAC in Ogg,
+      Matroska and MP4 -- the music player's lossless files.
     - `[-]` In `videocodec`, and out to the speakers: a file's sound decoded
       beside its pictures.
       - `[x]` `videocodec::Sound`: a Matroska or WebM file's Opus track,

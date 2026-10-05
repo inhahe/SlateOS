@@ -1,0 +1,22 @@
+# s16_noise_verbatim.flac: what libFLAC 1.5.0 makes of it (generate_fixtures.py)
+meta 0 34
+info 4096 4096 1268 16394 44100 2 16 4410
+meta 3 18
+meta 4 40
+meta 1 8192
+frame 0 4096 2 16 44100 a4d029257f6b4649
+frame 4096 314 2 16 44100 bfe49f37f6492326
+end FLAC__STREAM_DECODER_END_OF_STREAM ok
+seek 0
+frame 0 4096 2 16 44100 a4d029257f6b4649
+frame 4096 314 2 16 44100 bfe49f37f6492326
+seek 1470
+frame 1470 2626 2 16 44100 216aa3d9e882eb82
+frame 4096 314 2 16 44100 bfe49f37f6492326
+seek 2206
+frame 2206 1890 2 16 44100 fc68084df5e967f2
+frame 4096 314 2 16 44100 bfe49f37f6492326
+seek 4409
+frame 4409 1 2 16 44100 ebb9f1ad2042d136
+seek 4415
+seek-failed

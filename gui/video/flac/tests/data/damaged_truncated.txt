@@ -1,0 +1,15 @@
+# damaged_truncated.flac: what libFLAC 1.5.0 makes of it (generate_fixtures.py)
+meta 0 34
+info 1152 1152 1358 3358 44100 2 16 15434
+meta 3 18
+meta 4 40
+meta 1 8192
+frame 0 1152 2 16 44100 abee6271e6d5303d
+frame 1152 1152 2 16 44100 6f1cada6988e48f0
+frame 2304 1152 2 16 44100 e292ca30bcfce091
+frame 3456 1152 2 16 44100 de52ac0cbaa81f15
+frame 4608 1152 2 16 44100 957ed293ade90f79
+frame 5760 1152 2 16 44100 f3f819e44cbe77b8
+frame 6912 1152 2 16 44100 4cfebf5120795da8
+error lost-sync
+end FLAC__STREAM_DECODER_END_OF_STREAM bad

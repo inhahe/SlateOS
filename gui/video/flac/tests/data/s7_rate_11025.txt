@@ -1,0 +1,18 @@
+# s7_rate_11025.flac: what libFLAC 1.5.0 makes of it (generate_fixtures.py)
+meta 0 34
+info 4096 4096 1941 1941 11025 1 7 2205
+meta 3 18
+meta 4 84
+meta 1 8192
+frame 0 2205 1 7 11025 604e9461338380ef
+end FLAC__STREAM_DECODER_END_OF_STREAM ok
+seek 0
+frame 0 2205 1 7 11025 604e9461338380ef
+seek 735
+frame 735 1470 1 7 11025 873f01dc6e900d3b
+seek 1103
+frame 1103 1102 1 7 11025 ad8f50225104de49
+seek 2204
+frame 2204 1 1 7 11025 ad8009f1e43c8e54
+seek 2210
+seek-failed

@@ -2376,7 +2376,7 @@ below and read the same kernel views, so the two can never disagree._
 - [ ] Reminder/calendar/alarm program (custom Python/fastpy — see decision below)
 
 _Custom music player in Python (fastpy). foobar2000 is closed source. Features:_
-- _Audio decoding via FFmpeg/libav FFI (not custom decoders)_ — `[~]` for Opus and Vorbis, superseded: `gui/video/opus` is libopus's decoder and `gui/video/vorbis` Tremor, each ported to Rust (design-decisions §1350, §1352), the tree building with no C compiler (§1339); the rest (FLAC, MP3, AAC) still undecided.
+- _Audio decoding via FFmpeg/libav FFI (not custom decoders)_ — `[~]` for Opus and Vorbis, superseded: `gui/video/opus` is libopus's decoder, `gui/video/vorbis` Tremor and `gui/video/flac` libFLAC, each ported to Rust (design-decisions §1350, §1352, §1354), the tree building with no C compiler (§1339); MP3 and AAC still to come (AAC waits on open-questions F-Q9).
 - _Library browser, album art, metadata editing_
 - _Equalizer_
 - _User-customizable layout using the toolkit's dockable panel widget (drag-and-drop panels, add/remove, slide splitters) — simpler than foobar2000's layout system_

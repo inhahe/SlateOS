@@ -14,8 +14,10 @@ members = [
     # libyuv's and libavif's conversions and scaling their pictures are
     # drawn with; codec (videocodec), the one a program calls for a file's
     # frames; and opus, libopus's decoder for their sound, ported as vp9 was
-    # (§1350), and vorbis, Tremor's, ported the same way (§1352).
+    # (§1350), and vorbis, Tremor's, ported the same way (§1352), and flac,
+    # libFLAC's.
     "gui/video/codec",
+    "gui/video/flac",
     "gui/video/matroska",
     "gui/video/mp4",
     "gui/video/ogg",

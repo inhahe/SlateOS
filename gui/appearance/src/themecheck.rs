@@ -80,7 +80,7 @@ pub const MAX_DEPTH: usize = 8;
 
 /// Every axis a theme can cover, by the name `meta.supports` gives it: the
 /// sections that carry one and the folders that do.
-pub const AXES: [&str; 9] = [
+pub const AXES: [&str; 10] = [
     themes::DARK_SECTION,
     themes::TERMINAL_DARK_SECTION,
     themes::SYNTAX_DARK_SECTION,
@@ -88,17 +88,18 @@ pub const AXES: [&str; 9] = [
     themes::ANIMATION_SECTION,
     themes::DECORATIONS_SECTION,
     themes::PANEL_SECTION,
+    themes::WALLPAPERS_SECTION,
     icons::ICONS_DIR,
     cursors::CURSORS_DIR,
 ];
 
 /// Axes the theme format names that this desktop does not have yet --
-/// `roadmap-detailed.md`'s sounds, wallpapers and fonts. A theme listing one
-/// is ahead of the desktop, not wrong.
-const PLANNED_AXES: [&str; 3] = ["sounds", "wallpapers", "fonts"];
+/// `roadmap-detailed.md`'s sounds and fonts. A theme listing one is ahead of
+/// the desktop, not wrong.
+const PLANNED_AXES: [&str; 2] = ["sounds", "fonts"];
 
 /// The sections the theme file is read for.
-const SECTIONS: [&str; 11] = [
+const SECTIONS: [&str; 12] = [
     themes::META_SECTION,
     themes::DARK_SECTION,
     themes::LIGHT_SECTION,
@@ -110,7 +111,14 @@ const SECTIONS: [&str; 11] = [
     themes::ANIMATION_SECTION,
     themes::DECORATIONS_SECTION,
     themes::PANEL_SECTION,
+    themes::WALLPAPERS_SECTION,
 ];
+
+/// The largest wallpaper read to see that it is a picture. Not a limit the
+/// desktop has -- it decodes whatever the compositor could hold -- but the
+/// one a theme browser downloading a theme needs: a lossless photograph of a
+/// whole 8K screen is under it.
+pub const MAX_WALLPAPER_BYTES: u64 = 64 * 1024 * 1024;
 
 /// The four colours text is drawn in, which the palette holds to the text
 /// floor: the theme's value is where each starts, not what is drawn.
@@ -407,6 +415,7 @@ impl Checker {
         if has_cursors {
             self.check_cursors();
         }
+        self.check_wallpapers(file.as_ref().and_then(|file| file.wallpapers.as_ref()));
         if let Some(file) = &file {
             self.check_screenshots(&file.meta);
             self.check_contrast(&file.colors);
@@ -795,6 +804,7 @@ impl Checker {
             (themes::ANIMATION_SECTION, file.motion.is_some()),
             (themes::DECORATIONS_SECTION, file.decorations.is_some()),
             (themes::PANEL_SECTION, file.panel.is_some()),
+            (themes::WALLPAPERS_SECTION, file.wallpapers.is_some()),
         ];
         for (section, sets) in sections {
             if doc.contains(&[section]) && !sets {
@@ -1172,6 +1182,123 @@ impl Checker {
                     format!(
                         "is larger than the {} bytes a cursor may be: the desktop passes it over",
                         cursors::MAX_CURSOR_BYTES
+                    ),
+                );
+                false
+            }
+            Err(err) => {
+                self.error(&at, format!("could not be read ({err})"));
+                false
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // Wallpapers
+    // ------------------------------------------------------------------------
+
+    /// The pictures the theme bundles in its `wallpapers/` folder -- a theme
+    /// list offers each -- and the ones its `wallpapers` section recommends,
+    /// each a picture inside the folder that the desktop can show. The axis
+    /// is covered when a recommendation is.
+    fn check_wallpapers(&mut self, recommended: Option<&themes::WallpaperNames>) {
+        let dir = Path::new(themes::WALLPAPERS_DIR);
+        let inside: Vec<Entry> = self
+            .entries
+            .iter()
+            .filter(|entry| entry.rel.starts_with(dir) && entry.rel != dir)
+            .cloned()
+            .collect();
+        // The folder's pictures that decoded, so a recommendation of one is
+        // not decoded twice.
+        let mut pictures = BTreeSet::new();
+        for entry in inside {
+            self.accounted.insert(entry.rel.clone());
+            if entry.rel.parent() != Some(dir) {
+                continue;
+            }
+            if entry.kind == Kind::Dir {
+                self.warning(
+                    &place(&entry.rel),
+                    format!(
+                        "is a folder inside `{}/`, which nothing looks in: a theme's pictures are its files",
+                        themes::WALLPAPERS_DIR
+                    ),
+                );
+            } else if self.check_picture(&entry.rel) {
+                pictures.insert(entry.rel);
+            }
+        }
+
+        let Some(names) = recommended else {
+            return;
+        };
+        let at = themes::FILE_NAME;
+        let mut shown = false;
+        for (mode, name) in [("dark", &names.dark), ("light", &names.light)] {
+            let Some(name) = name else {
+                continue;
+            };
+            let quoted = themes::quoted(name);
+            let Some(path) = themes::confined(&self.root, name) else {
+                self.error(
+                    at,
+                    format!("the {mode} wallpaper `{quoted}` is outside the theme's folder: a theme cannot reach outside its folder"),
+                );
+                continue;
+            };
+            let rel: PathBuf = path
+                .strip_prefix(&self.root)
+                .unwrap_or(&path)
+                .components()
+                .filter(|part| matches!(part, Component::Normal(_)))
+                .collect();
+            self.accounted.insert(rel.clone());
+            if !self.readable(&rel) {
+                if !self.is_entry(&rel, &[Kind::Link]) {
+                    self.warning(
+                        at,
+                        format!("the {mode} wallpaper `{quoted}` is not in the theme's folder: it is not shown"),
+                    );
+                }
+                continue;
+            }
+            // A picture in `wallpapers/` was decoded with the folder above.
+            let decoded = if rel.parent() == Some(dir) {
+                pictures.contains(&rel)
+            } else {
+                self.check_picture(&rel)
+            };
+            shown |= decoded;
+        }
+        if shown {
+            self.covers.insert(themes::WALLPAPERS_SECTION);
+        }
+    }
+
+    /// One picture: within [`MAX_WALLPAPER_BYTES`], and one the desktop can
+    /// decode. Whether it is.
+    fn check_picture(&mut self, rel: &Path) -> bool {
+        let at = place(rel);
+        if !self.readable(rel) {
+            return false;
+        }
+        match read_within(&self.root.join(rel), MAX_WALLPAPER_BYTES) {
+            Ok(Some(bytes)) => match imagecodec::decode(&bytes, imagecodec::Limits::default()) {
+                Ok(_) => true,
+                Err(err) => {
+                    self.error(
+                        &at,
+                        format!("is not a picture this desktop can show ({err})"),
+                    );
+                    false
+                }
+            },
+            Ok(None) => {
+                self.error(
+                    &at,
+                    format!(
+                        "is larger than the {MAX_WALLPAPER_BYTES} bytes a theme's wallpaper may be"
                     ),
                 );
                 false

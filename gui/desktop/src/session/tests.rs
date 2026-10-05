@@ -3737,6 +3737,60 @@ fn a_scheduled_wallpaper_wins_over_a_picture_and_a_folder() {
     );
 }
 
+/// **A theme's wallpaper is the one shown, for the mode the desktop is drawn
+/// in** -- its night picture in dark mode and its day picture in light, where
+/// the fixed picture would be -- while a time-of-day schedule still comes
+/// first, and the built-in theme, which recommends none, leaves the user's
+/// own picture (design-decisions §1471).
+#[test]
+fn a_themes_wallpaper_is_shown_for_the_mode() {
+    let (mut session, _desktop, _turn) = session();
+    let (own, night, day, scheduled) = (
+        fixture("rgba8"),
+        fixture("rgb8"),
+        fixture("gray8"),
+        fixture("palette8_trns"),
+    );
+    {
+        let appearance = &mut session.shell_mut().appearance;
+        appearance.wallpaper = Some(own.clone());
+        appearance.wallpaper_theme = appearance::themes::WallpaperTheme::from_pictures(
+            "aurora",
+            Some(night.clone()),
+            Some(day.clone()),
+        );
+        appearance.theme_mode = appearance::ThemeMode::Dark;
+    }
+    session.sync_wallpaper();
+    let shown = |session: &mut Session| {
+        session
+            .wallpaper_mut()
+            .current_image_path()
+            .map(std::path::Path::to_path_buf)
+    };
+    assert_eq!(shown(&mut session), Some(night.clone()), "dark mode");
+
+    session.shell_mut().appearance.theme_mode = appearance::ThemeMode::Light;
+    session.sync_wallpaper();
+    assert_eq!(shown(&mut session), Some(day), "light mode");
+
+    session.shell_mut().appearance.wallpaper_schedule = vec![appearance::ScheduledWallpaper {
+        from: appearance::TimeOfDay::MIDNIGHT,
+        image: scheduled.clone(),
+    }];
+    session.sync_wallpaper();
+    assert_eq!(
+        shown(&mut session),
+        Some(scheduled),
+        "the schedule comes first"
+    );
+
+    session.shell_mut().appearance.wallpaper_schedule.clear();
+    session.shell_mut().appearance.wallpaper_theme = appearance::themes::WallpaperTheme::built_in();
+    session.sync_wallpaper();
+    assert_eq!(shown(&mut session), Some(own), "the user's own picture");
+}
+
 /// **A schedule with two pictures wakes the desktop at its next edge**, and
 /// no later: nothing else would change the picture at 18:00 on a desktop
 /// nobody is touching.

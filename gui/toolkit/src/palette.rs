@@ -229,22 +229,32 @@ pub const LIGHT_LINK: Color = LIGHT_BLUE;
 /// nothing is drawn *on* a border -- so this is far above what it must clear.
 pub const LIGHT_BORDER: Color = LIGHT_TEXT;
 
-/// The pale end of the two answers [`readable_on`] can give.
+/// The pale end of the two answers [`readable_on`] can give: "as pale as this
+/// desktop ever goes", the value you want when the background is not a
+/// palette surface at all.
 ///
-/// Equal to [`LIGHT_BASE`] and to nothing else on purpose — it is a separate
-/// constant because it means a different thing. `LIGHT_BASE` is the Latte
-/// palette's page; this is "as pale as this desktop ever goes", the value you
-/// want when the background is not a palette surface at all. If Latte's base
-/// were ever retuned, this must not follow it.
-pub const LIGHT_EXTREME: Color = Color::from_hex(0xEFF1F5);
+/// One step paler in each channel than [`LIGHT_BASE`], the Latte palette's
+/// page, and equal to no role of either palette -- on purpose. It reads as
+/// the same colour, so a label on an accent and the page beside it do not
+/// look like two different whites; and it is not the same *value*, so
+/// `appearance::palette_check` can tell a label's computed ink from a
+/// leftover Latte page colour in a dark window. When the two were equal the
+/// check had to accept the page colour in every module that labels a fill,
+/// and could not refuse a module declaring it as its own
+/// (`requests/e-c-palette-check-a-derived-colour-can-hide-a-leftover.md`,
+/// design-decisions §1470). Paler rather than darker, so no contrast it
+/// answers for drops.
+pub const LIGHT_EXTREME: Color = Color::from_hex(0xF0F2F6);
 
-/// The dark end of the two answers [`readable_on`] can give.
+/// The dark end of the two answers [`readable_on`] can give: the
+/// high-contrast accessibility black.
 ///
-/// Shares its value with Mocha [`CRUST`], and that coincidence has a cost
-/// worth knowing about: the shell's conversion sweep must allow this value in
-/// a *light* render, which means it cannot tell a deliberate dark extreme from
-/// a leftover `CRUST` constant. See `gui/desktop/src/palette_check.rs`.
-pub const DARK_EXTREME: Color = Color::from_hex(0x11111B);
+/// One step darker in each channel than Mocha [`CRUST`], and equal to no
+/// role of either palette, on the terms of [`LIGHT_EXTREME`]: the same
+/// colour to the eye as a crust beside it, a different value to the palette
+/// check, which can then refuse a leftover `CRUST` constant in a light
+/// window instead of accepting it as a label's ink.
+pub const DARK_EXTREME: Color = Color::from_hex(0x10101A);
 
 /// Black-ish or white-ish, whichever can be read on `bg`.
 ///

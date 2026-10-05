@@ -31,8 +31,9 @@
 //! on a loaded developer machine in a debug build, and the regressions worth
 //! catching are orders of magnitude -- a mask rebuilt per shape instead of per
 //! clip, a gradient's stops searched per pixel per stop, a `<use>` expanded
-//! afresh each time it is drawn. The measurement is the best of three runs,
-//! since load can only push a sample up.
+//! afresh each time it is drawn. The measurement is the fastest of many
+//! short runs (see `per_draw`), since load can only push a sample up and a
+//! short run can escape it altogether.
 // A benchmark divides and asserts on the result; the defensive lints that
 // forbid that in production code are off here, as `CLAUDE.md` prescribes for
 // test code.
@@ -41,18 +42,27 @@
 use guitk::svg::SvgDocument;
 use std::time::Instant;
 
-/// Microseconds to draw `svg` at `size` by `size`, the best of three runs of
-/// `n` draws each, after one draw to warm up.
-fn per_draw(svg: &str, size: u32, n: u32) -> f64 {
+/// Microseconds to draw `svg` at `size` by `size`: `runs` runs of `per_run`
+/// draws each, after one draw to warm up, and the fastest run's figure.
+///
+/// For the reasons `gui/appearance`'s `resolve_cost.rs` gives at its own
+/// `per_call`: load can only push a sample up, so the smallest is the one the
+/// host touched least; and a run short enough to fit inside one of the
+/// scheduler's time slices can finish untouched however busy the machine is,
+/// where three long runs can each be slowed from start to end -- which is
+/// what failed that test on 2026-10-05. A draw at 48 pixels takes a
+/// millisecond or three, so a run there is two draws; one at 256 takes tens
+/// of milliseconds, so a run is a single draw, the shortest there can be.
+fn per_draw(svg: &str, size: u32, runs: u32, per_run: u32) -> f64 {
     let doc = SvgDocument::parse(svg).unwrap();
     std::hint::black_box(doc.render(size, size));
-    (0..3)
+    (0..runs)
         .map(|_| {
             let start = Instant::now();
-            for _ in 0..n {
+            for _ in 0..per_run {
                 std::hint::black_box(doc.render(size, size));
             }
-            start.elapsed().as_secs_f64() * 1e6 / f64::from(n)
+            start.elapsed().as_secs_f64() * 1e6 / f64::from(per_run)
         })
         .fold(f64::INFINITY, f64::min)
 }
@@ -119,22 +129,22 @@ const PATTERNED: &str = r##"<svg viewBox="0 0 48 48"><defs>
 #[test]
 fn drawing_an_icon_stays_cheap() {
     // Ceilings in microseconds: twenty times what was measured.
-    let cases: [(&str, &str, u32, u32, f64); 12] = [
-        ("patterned", PATTERNED, 48, 20, 60_000.0),
-        ("patterned", PATTERNED, 256, 5, 1_650_000.0),
-        ("masked", MASKED, 48, 20, 50_000.0),
-        ("masked", MASKED, 256, 5, 1_100_000.0),
-        ("flat", FLAT, 48, 20, 25_000.0),
-        ("flat", FLAT, 256, 5, 400_000.0),
-        ("gradients", GRADIENTS, 48, 20, 30_000.0),
-        ("gradients", GRADIENTS, 256, 5, 700_000.0),
-        ("clipped", CLIPPED, 48, 20, 45_000.0),
-        ("clipped", CLIPPED, 256, 5, 900_000.0),
-        ("reused", REUSED, 48, 20, 35_000.0),
-        ("reused", REUSED, 256, 5, 450_000.0),
+    let cases: [(&str, &str, u32, u32, u32, f64); 12] = [
+        ("patterned", PATTERNED, 48, 30, 2, 60_000.0),
+        ("patterned", PATTERNED, 256, 15, 1, 1_650_000.0),
+        ("masked", MASKED, 48, 30, 2, 50_000.0),
+        ("masked", MASKED, 256, 15, 1, 1_100_000.0),
+        ("flat", FLAT, 48, 30, 2, 25_000.0),
+        ("flat", FLAT, 256, 15, 1, 400_000.0),
+        ("gradients", GRADIENTS, 48, 30, 2, 30_000.0),
+        ("gradients", GRADIENTS, 256, 15, 1, 700_000.0),
+        ("clipped", CLIPPED, 48, 30, 2, 45_000.0),
+        ("clipped", CLIPPED, 256, 15, 1, 900_000.0),
+        ("reused", REUSED, 48, 30, 2, 35_000.0),
+        ("reused", REUSED, 256, 15, 1, 450_000.0),
     ];
-    for (name, svg, size, n, ceiling) in cases {
-        let us = per_draw(svg, size, n);
+    for (name, svg, size, runs, per_run, ceiling) in cases {
+        let us = per_draw(svg, size, runs, per_run);
         println!("{name} at {size}: {us:.0} us (ceiling {ceiling:.0})");
         assert!(
             us < ceiling,

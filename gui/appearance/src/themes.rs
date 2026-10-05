@@ -16,7 +16,9 @@
 //! [`AnimationTheme`] and its `animation` section; the window-decorations
 //! axis, the shape of every window's frame, is [`DecorationTheme`] and its
 //! `window-decorations` section; the taskbar-panel axis, the taskbar's finish
-//! and spacing, is [`PanelTheme`] and its `taskbar-panel` section.
+//! and spacing, is [`PanelTheme`] and its `taskbar-panel` section; the
+//! wallpaper axis, the pictures it recommends for the desktop in each mode,
+//! is [`WallpaperTheme`] and its `wallpapers` section and folder.
 //!
 //! # A theme on disk
 //!
@@ -129,11 +131,13 @@ mod animation;
 mod decorations;
 mod panel;
 mod values;
+mod wallpaper;
 mod widgets;
 
 pub use animation::AnimationTheme;
 pub use decorations::DecorationTheme;
 pub use panel::PanelTheme;
+pub use wallpaper::{WALLPAPERS_DIR, WALLPAPERS_SECTION, WallpaperNames, WallpaperTheme};
 pub use widgets::WidgetTheme;
 
 /// The built-in theme's name: what `theme.colors` holds when the user has
@@ -353,6 +357,9 @@ pub enum ThemeError {
     NoDecorations,
     /// The file was read but has no usable `taskbar-panel` section.
     NoPanel,
+    /// The file was read but recommends no wallpaper that is in the theme's
+    /// folder.
+    NoWallpapers,
 }
 
 impl fmt::Display for ThemeError {
@@ -372,6 +379,7 @@ impl fmt::Display for ThemeError {
             Self::NoAnimation => f.write_str("sets no animation"),
             Self::NoDecorations => f.write_str("sets no window frames"),
             Self::NoPanel => f.write_str("sets no taskbar panel"),
+            Self::NoWallpapers => f.write_str("recommends no wallpaper"),
         }
     }
 }
@@ -426,6 +434,10 @@ pub struct ThemeFile {
     /// one; `None` when it has no such section, or one that sets nothing
     /// usable.
     pub panel: Option<PanelStyle>,
+    /// The wallpapers its `wallpapers` section recommends, as it names them
+    /// ([`WallpaperTheme`] finds them); `None` when it has no such section,
+    /// or one that names no picture.
+    pub wallpapers: Option<WallpaperNames>,
     /// What in it was not understood and so was ignored -- a colour this
     /// desktop has no role for, a value that is not a colour. For the theme's
     /// author, and for a theme browser to show them: the theme is used without
@@ -462,6 +474,7 @@ pub fn parse(text: &str) -> ThemeFile {
     let motion = animation::read(&doc, &mut warnings);
     let decorations = decorations::read(&doc, &mut warnings);
     let panel = panel::read(&doc, &mut warnings);
+    let wallpapers = wallpaper::read(&doc, &mut warnings);
     ThemeFile {
         meta,
         colors,
@@ -469,6 +482,7 @@ pub fn parse(text: &str) -> ThemeFile {
         motion,
         decorations,
         panel,
+        wallpapers,
         warnings: warnings.finish(),
     }
 }
@@ -698,8 +712,10 @@ pub(crate) fn read_theme_bytes(path: &Path) -> Result<Vec<u8>, ThemeError> {
 
 /// What the settings read from `doc` depend on besides the document itself:
 /// the files of the themes chosen for the axes read with them -- the colours,
-/// the widget style and the animation -- where each was found, and what it
-/// holds. The dependency fingerprint of [`crate::watcher`].
+/// the widget style, the animation, the window frames, the taskbar panel and
+/// the wallpapers -- where each was found, and what it holds; and which of
+/// the wallpaper theme's recommended pictures are there. The dependency
+/// fingerprint of [`crate::watcher`].
 ///
 /// A theme chosen for several axes is one file, and is counted once.
 pub(crate) fn fingerprint(doc: &Document) -> Vec<u8> {
@@ -711,6 +727,7 @@ pub(crate) fn fingerprint(doc: &Document) -> Vec<u8> {
         crate::animation_theme_name(doc),
         crate::decoration_theme_name(doc),
         crate::panel_theme_name(doc),
+        crate::wallpaper_theme_name(doc),
     ]
     .into_iter()
     .flatten()
@@ -728,6 +745,15 @@ pub(crate) fn fingerprint(doc: &Document) -> Vec<u8> {
             out.extend_from_slice(b"\0\0");
         }
         out.extend_from_slice(&part);
+    }
+    // Outside the loop: the pictures count even when the wallpaper theme's
+    // file was counted for another axis.
+    if let Some(id) = crate::wallpaper_theme_name(doc) {
+        let pictures = wallpaper::fingerprint(&id);
+        if !pictures.is_empty() {
+            out.extend_from_slice(b"\0\0");
+            out.extend_from_slice(&pictures);
+        }
     }
     out
 }
@@ -928,6 +954,12 @@ pub struct ThemeInfo {
     /// Whether it has a usable `taskbar-panel` section: the taskbar's finish
     /// and spacing.
     pub has_panel: bool,
+    /// Whether its `wallpapers` section recommends a picture that is in its
+    /// folder: what choosing it for the wallpaper axis shows.
+    pub has_wallpapers: bool,
+    /// The pictures its [`WALLPAPERS_DIR`] bundles, by name: what a list can
+    /// offer as pictures to choose, recommended or not.
+    pub wallpapers: Vec<PathBuf>,
     /// What in its file was ignored.
     pub warnings: Vec<String>,
     /// Why it could not be read, if it could not. A theme that cannot be read
@@ -991,6 +1023,14 @@ impl ThemeInfo {
                 .dir
                 .as_ref()
                 .is_some_and(|dir| dir.join(crate::icons::ICONS_DIR).is_dir())
+    }
+
+    /// Whether it can be chosen for the wallpaper axis: it was read, and
+    /// recommends a picture that is in its folder. Not the built-in theme,
+    /// which recommends none -- choosing it is choosing your own picture.
+    #[must_use]
+    pub fn provides_wallpapers(&self) -> bool {
+        self.problem.is_none() && self.has_wallpapers
     }
 }
 
@@ -1080,6 +1120,8 @@ fn built_in_info(dirs: &ThemeDirs) -> ThemeInfo {
             has_animation: true,
             has_decorations: true,
             has_panel: true,
+            has_wallpapers: false,
+            wallpapers: Vec::new(),
             warnings: Vec::new(),
             problem: None,
         }
@@ -1087,13 +1129,15 @@ fn built_in_info(dirs: &ThemeDirs) -> ThemeInfo {
     // Whatever its file says, the built-in theme's colours, icons, controls,
     // motion, window frames and taskbar panel are compiled in: it covers both
     // modes, draws every icon, control, frame and bar, moves everything, and
-    // cannot fail to load.
+    // cannot fail to load. And it recommends no wallpaper: choosing it for
+    // that axis is choosing your own picture (`WallpaperTheme::built_in`).
     info.has_dark = true;
     info.has_light = true;
     info.has_widget_style = true;
     info.has_animation = true;
     info.has_decorations = true;
     info.has_panel = true;
+    info.has_wallpapers = false;
     info.problem = None;
     info
 }
@@ -1119,17 +1163,28 @@ fn describe(
                     )),
                 }
             }
+            // As choosing it would find them: a recommendation counts when it
+            // is a picture in the theme's folder (`WallpaperTheme::load`).
+            let has_wallpapers = file.wallpapers.as_ref().is_some_and(|names| {
+                [&names.dark, &names.light]
+                    .into_iter()
+                    .flatten()
+                    .any(|name| confined(&dir, name).is_some_and(|path| path.is_file()))
+            });
+            let wallpapers = wallpaper::bundled(&dir);
             ThemeInfo {
                 id: id.to_owned(),
                 name: file.meta.name.clone().unwrap_or(shown),
                 origin,
-                dir: Some(dir),
                 has_dark: !file.colors.dark.is_empty(),
                 has_light: !file.colors.light.is_empty(),
                 has_widget_style: file.widget_style.is_some(),
                 has_animation: file.motion.is_some(),
                 has_decorations: file.decorations.is_some(),
                 has_panel: file.panel.is_some(),
+                has_wallpapers,
+                wallpapers,
+                dir: Some(dir),
                 meta: file.meta,
                 screenshots,
                 warnings,
@@ -1140,7 +1195,6 @@ fn describe(
             id: id.to_owned(),
             name: shown,
             origin,
-            dir: Some(dir),
             meta: ThemeMeta::default(),
             screenshots: Vec::new(),
             has_dark: false,
@@ -1149,6 +1203,9 @@ fn describe(
             has_animation: false,
             has_decorations: false,
             has_panel: false,
+            has_wallpapers: false,
+            wallpapers: wallpaper::bundled(&dir),
+            dir: Some(dir),
             warnings: Vec::new(),
             problem: Some(err),
         },

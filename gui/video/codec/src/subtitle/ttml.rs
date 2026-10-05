@@ -1932,9 +1932,20 @@ mod tests {
         assert_eq!(placement(1, &region((10, 5), (80, 15), 0)), 8);
         assert_eq!(placement(0, &region((0, 0), (100, 100), 0)), 7);
         assert_eq!(placement(2, &region((0, 40), (100, 20), 1)), 6);
-        // The anchor exactly at a third is in the next.
         assert_eq!(placement(0, &region((0, 0), (100, 100), 1)), 4);
         assert_eq!(placement(0, &region((100, 0), (0, 0), 0)), 9);
+        // An anchor exactly at a third is in the next: a line centred in a
+        // region two thirds wide from the left edge is anchored at 1/3
+        // across, and one in a region two thirds high from the top, its
+        // lines at the middle, at 1/3 down.
+        let thirds = Region {
+            id: String::new(),
+            place: [Ratio::ZERO, Ratio::ZERO, secs(2, 3), secs(2, 3)],
+            display_align: 1,
+            styles: Specified::default(),
+        };
+        assert_eq!(placement(1, &thirds), 5);
+        assert_eq!(placement(0, &thirds), 4);
     }
 
     #[test]

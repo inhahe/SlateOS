@@ -573,6 +573,12 @@ mod tests {
                 b"<a x='1' x='2'/>",
                 XmlError::Malformed("an attribute given twice"),
             ),
+            // A namespace declaration twice: an attribute twice, though no
+            // name of the element's resolves through it.
+            (
+                b"<a xmlns:p='urn:x' xmlns:p='urn:y'/>",
+                XmlError::Malformed("an attribute given twice"),
+            ),
             (
                 b"<a x=1/>",
                 XmlError::Malformed("an attribute's value not quoted"),

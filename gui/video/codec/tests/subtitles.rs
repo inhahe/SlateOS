@@ -475,6 +475,20 @@ fn ttml_without_regions() {
     ttml_held_to_its_answer("ttml_default");
 }
 
+/// Which formats give text and which pictures, and which are read at all:
+/// what the choice of a film's track to show goes by, text first.
+#[test]
+fn which_formats_are_text_which_pictures_and_which_read() {
+    use SubtitleFormat::{Ass, Dvb, MovText, Other, Pgs, Ssa, SubRip, Ttml, VobSub, WebVtt};
+    for format in [SubRip, Ass, Ssa, WebVtt, MovText, Ttml] {
+        assert!(format.is_text() && format.is_read(), "{format}");
+    }
+    for format in [Pgs, VobSub, Dvb] {
+        assert!(!format.is_text() && format.is_read(), "{format}");
+    }
+    assert!(!Other.is_text() && !Other.is_read());
+}
+
 /// A seek back after reading forgets what was read: the cues read again are
 /// the same cues, none twice -- from part way through, and from the end,
 /// where a cue reaching the last sample's end was still open.

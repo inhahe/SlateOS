@@ -2418,7 +2418,7 @@ TTML_BASIC = f"""<?xml version="1.0" encoding="UTF-8"?>
     <div region="bottom">
       <p xml:id="plain" begin="00:00:01.000" end="00:00:02.500">Plain text</p>
       <p xml:id="styles" begin="3s" end="4s"><span tts:fontWeight="bold">bold</span>, <span tts:fontStyle="italic">italic</span>, <span tts:textDecoration="underline">under</span>, <span tts:textDecoration="lineThrough">struck</span></p>
-      <p xml:id="referenced" begin="5s" end="6s" style="loud">loud yellow <span style="quiet">quiet cyan</span> loud again</p>
+      <p xml:id="referenced" begin="5s" end="6s" style="loud">loud yellow <span style="quiet">quiet cyan</span> <span style="quiet" tts:color="lime">its own lime</span> loud again</p>
       <p xml:id="broken" begin="7s" end="8s">two<br/>lines</p>
       <p xml:id="spaced" begin="9s" end="10s">   spaced
          out   </p>
@@ -2813,7 +2813,7 @@ def make_ttml(name, source, cut=None):
         if cut is not None:
             sys.exit(f"{out}: its samples, each the whole document, read otherwise than the document")
         print(f"note: {out}: MP4Box's samples show {len(cues)} cues of the document's {len(whole)}, "
-              f"and {damaged} of them are no XML (see the TTML notes above)")
+              f"and {damaged} of its samples no XML (see the TTML notes above)")
     write_cues(os.path.join(HERE, f"{name}.cues"), f"{name}.mp4", cues, damaged)
     print("wrote", out, f"{len(cues)} cues")
 

@@ -1,12 +1,14 @@
-"""Mutation test for videocodec's subtitles: Blu-ray's PGS and DVD's VobSub
-pictures, and the reader that gives their cues.
+"""Mutation test for videocodec's subtitles: Blu-ray's PGS, DVD's VobSub and
+DVB's pictures; WebVTT and TTML in MP4, with the XML TTML is read from and
+the joining of their cues' pieces; and the reader that gives every format's
+cues.
 
-Each row puts back one way of not showing what FFmpeg shows -- a rule of its
-`pgssub` decoder dropped, a colour rounded otherwise, a crop made as FFmpeg
-makes it -- or of not giving the cues a player needs, and names the tests
-that have to notice: the fixtures' (`tests/subtitles.rs`, held to FFmpeg's
-sub2video pictures by `tests/data/generate_subtitle_fixtures.py`) and the
-module's own.
+Each row puts back one way of not showing what the reference shows -- a rule
+of FFmpeg's `pgssub` decoder dropped, a colour rounded otherwise, a crop made
+as FFmpeg makes it, a TTML time read otherwise than ttconv reads it -- or of
+not giving the cues a player needs, and names the tests that have to notice:
+the fixtures' (`tests/subtitles.rs`, held to their references' answers by
+`tests/data/generate_subtitle_fixtures.py`) and the module's own.
 
 Breaks one piece of production code at a time and checks that the tests
 which claim to cover it are the ones that fail.  A test that passes against
@@ -148,6 +150,7 @@ TTML_REGIONS = "ttml_regions"
 TTML_DEFAULT = "ttml_without_regions"
 TTML_SEEK = "a_seek_in_ttml_gives_the_cues_showing_then"
 TTML_FORGETS = "a_seek_in_ttml_forgets_what_was_read"
+FORMATS = "which_formats_are_text_which_pictures_and_which_read"
 
 # (name, old, new, [tests that must fail])
 PICTURES = [
@@ -642,7 +645,10 @@ JOINED = [
 ]
 
 # TTML: its times, its documents worked out paragraph by paragraph, its
-# styles, regions and white space, and how it is said.
+# styles, regions and white space, and how it is said. The stretches test
+# (TT_STRETCHES) holds the paragraph-by-paragraph working to the
+# whole-document one over the same parsed document, so it names only the
+# rows of the former: a document read wrongly is read wrongly by both.
 TTML = [
     # Times.
     (
@@ -680,13 +686,13 @@ TTML = [
         "a sequence's children all begin with it",
         "    let implicit_begin = if parent.seq {",
         "    let implicit_begin = if false && parent.seq {",
-        [TT_SEQ, TT_STRETCHES, TTML_TIMING, TTML_TIMING_SPLIT],
+        [TT_SEQ, TTML_TIMING, TTML_TIMING_SPLIT],
     ),
     (
         "a parallel container ends with its first child to end",
         "                        (Some(a), Some(b)) => Some(a.max(b)),",
         "                        (Some(a), Some(b)) => Some(a.min(b)),",
-        [TT_STRETCHES, TTML_TIMING],
+        [TT_LATE, TTML_TIMING],
     ),
     (
         "a container beginning late ends early, as ttconv's",
@@ -860,7 +866,7 @@ LIB = [
         "TTML is not text",
         "            Self::SubRip | Self::Ass | Self::Ssa | Self::WebVtt | Self::MovText | Self::Ttml",
         "            Self::SubRip | Self::Ass | Self::Ssa | Self::WebVtt | Self::MovText",
-        [TTML_MP4, TTML_DEFAULT],
+        [FORMATS],
     ),
 ]
 

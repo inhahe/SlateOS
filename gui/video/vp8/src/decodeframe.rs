@@ -51,6 +51,7 @@ use crate::modes::{
     self, ALTREF_FRAME, B_PRED, Edges, GOLDEN_FRAME, INTRA_FRAME, LAST_FRAME, MVP_COUNT, ModeGrid,
     ModeHeader, ModeInfo, SPLITMV,
 };
+use crate::pipeline;
 use crate::tables::{
     AC_QLOOKUP, COEF_UPDATE_PROBS, DC_QLOOKUP, DEFAULT_COEF_PROBS, DEFAULT_MV_CONTEXT,
     UV_MODE_PROB, YMODE_PROB,
@@ -633,9 +634,11 @@ fn decode_mb_rows(
     refs: &Refs<'_>,
     threading: Threading,
 ) -> bool {
-    if let Some(corrupted) =
-        threading::decode_mb_rows(rows, grid, above, partitions, new, refs, threading)
-    {
+    let threaded = match partitions {
+        [one] => pipeline::decode_mb_rows(rows, grid, above, one, new, refs, threading),
+        _ => threading::decode_mb_rows(rows, grid, above, partitions, new, refs, threading),
+    };
+    if let Some(corrupted) = threaded {
         return corrupted;
     }
     let prior = stale.map_or(Prior::InPlace, Prior::Copy);

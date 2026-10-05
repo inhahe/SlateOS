@@ -10,8 +10,9 @@
 //!
 //! -- printing frames per second for 217 frames of 1080p film coded as VP8
 //! at 5 Mbit/s (`tools/make_bench_stream.py`), twice: as most encoders code
-//! it, in one token partition, which decodes on one thread; and in eight,
-//! which decodes on up to eight. The whole stream is decoded three times,
+//! it, in one token partition, which decodes on one thread or on two (the
+//! second takes its loop filter); and in eight, which decodes on up to
+//! eight. The whole stream is decoded three times,
 //! the decoder made fresh each time, and the fastest kept. Only decoding is
 //! timed: the frames are read out of their file first.
 //!
@@ -86,10 +87,11 @@ fn bench_vp8_decode() {
     let v = common::read_vector(&dir.join("bench-film-1080p.ivf"))
         .expect("python gui/video/vp8/tools/make_bench_stream.py");
     println!(
-        "{}x{}, one partition: {:.1} fps on one thread; libvpx {:.1} as plain C, {:.1} with SIMD",
+        "{}x{}, one partition: {:.1} fps on one thread, {:.1} on two (the loop filter on the second); libvpx {:.1} as plain C, {:.1} with SIMD, on one",
         v.width,
         v.height,
         fps(&v.frames, 1),
+        fps(&v.frames, 2),
         LIBVPX.0,
         LIBVPX.1
     );

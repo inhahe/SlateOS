@@ -316,8 +316,8 @@ gui/desktop/src/touchpad.rs
 gui/desktop/src/update_settings.rs
 gui/desktop/src/user_accounts.rs
 gui/desktop/src/window_peek.rs
+gui/filechooser/src/service.rs
 gui/imagecodec/src/avif/animation.rs
-gui/imagecodec/src/encode.rs
 gui/remote/src/reader.rs
 gui/toolkit/src/codeview.rs
 gui/toolkit/src/dirtree.rs

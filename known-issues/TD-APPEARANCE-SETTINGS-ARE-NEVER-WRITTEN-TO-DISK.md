@@ -1,5 +1,8 @@
 ## TD-APPEARANCE-SETTINGS-ARE-NEVER-WRITTEN-TO-DISK
 
+**Status:** OPEN -- repaired on lane C's branch 2026-10-05 (the last
+section); closes when that change reaches main after a boot test.
+
 **What.** `gui/desktop/src/appearance_settings.rs` presents a full settings
 model — `FontSettings { ui_font, mono_font, ui_size, mono_size, hinting,
 subpixel, smoothing }`, theme, wallpaper — with an apply/revert flow built on
@@ -154,3 +157,23 @@ behind a newly added field the way the hand-written check did.
 file" and light-accent sections of `gui/desktop/src/appearance_settings.rs`;
 `DesktopTheme` and `DesktopShell::{set_appearance, load_appearance}` in
 `gui/desktop/src/main.rs`; `yamldoc/src/lib.rs`.
+
+**Repaired 2026-10-05 (lane C): the shell was the last process measuring in
+a face nobody chose.** Item 2's premise went away while this entry stood: the
+compositor installs the families `appearance.yaml` names into its own cache
+(`Compositor::set_appearance`), and every application applies them before it
+lays anything out (`oswindow`'s `hand_over`, through `FontSettings::apply`).
+The shell did not -- `DesktopShell::set_appearance` set the scale, the motion
+and the caret and never the fonts -- so with any family but the default the
+desktop measured its labels in the default face and the compositor drew them
+in the chosen one: a wider face ran the taskbar's labels past their tiles and
+cut them where they did not need cutting, and centred text sat off centre.
+`set_appearance` now applies the fonts first, before anything it updates
+measures text (`set_appearance_installs_the_fonts_in_this_process`). Item 3 is
+gone too: the panels kept were rewritten or deleted (`git log` on
+`gui/desktop/src/*_settings.rs`), and none keeps a pending copy it calls saved.
+And every setting item 1 listed as read by nothing has its reader: the
+compositor draws the corners, the shadows and the pointer's size and scheme,
+the shell the icon size and the scale, and the motion every animator is given
+carries the animation speed. The Settings window is its own program
+(`apps/settings`).

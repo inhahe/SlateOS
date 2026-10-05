@@ -3035,6 +3035,22 @@ impl DesktopShell {
     /// read. It is one line, and it is here rather than at the call sites so
     /// that a later appearance change cannot forget it.
     pub fn set_appearance(&mut self, appearance: AppearanceSettings) {
+        // The user's font families, and how glyphs are rasterized, in *this*
+        // process -- first, before anything below measures text. The
+        // compositor draws the desktop's text in the families the settings
+        // name (it installs them in its own cache), and the desktop lays that
+        // text out by measuring it here. Until this the shell never applied
+        // them, so with any family but the default it measured every label in
+        // the default face and had it drawn in the user's: a wider face ran
+        // the taskbar's labels past their tiles, a narrower one was cut where
+        // it fitted, and centred text sat off centre. Every application
+        // applies them the same way (`oswindow`'s `hand_over`).
+        //
+        // The outcome is not acted on: a family this machine does not have
+        // leaves the working face in place -- in the compositor too, which
+        // looks in the same font directories -- and the Settings font page is
+        // where that is said.
+        let _ = appearance.fonts.apply();
         self.theme = DesktopTheme::from_settings(&appearance);
         // How things move, to every animator the shell owns: the animation
         // theme at the user's speed (design-decisions §1446). Pushed from here
@@ -15296,6 +15312,29 @@ mod theme_tests {
 
         assert_eq!(dark.len(), light.len());
         assert_ne!(format!("{dark:?}"), format!("{light:?}"));
+    }
+
+    /// The shell installs the user's fonts in its own process, as every
+    /// application does: it lays out the text the compositor draws by
+    /// measuring it here, and measuring in a face other than the one drawn
+    /// puts labels past their tiles and off centre.
+    ///
+    /// Observed through how glyphs are rasterized -- the one part of the font
+    /// state a test can change without changing the face every other test in
+    /// this binary measures with. The toolkit starts unhinted, the settings'
+    /// default is hinted, and nothing in this binary but `set_appearance`
+    /// applies them; nor does anything here set hinting off, so the answer
+    /// cannot depend on which test ran first.
+    #[test]
+    fn set_appearance_installs_the_fonts_in_this_process() {
+        let mut shell = DesktopShell::new(800, 600);
+        let s = settings();
+        assert!(s.fonts.hinting, "the test needs settings that hint");
+        shell.set_appearance(s);
+        assert!(
+            guitk::text::rendering().hinting,
+            "the settings' fonts were not applied in the shell's process"
+        );
     }
 }
 

@@ -5747,7 +5747,10 @@ impl DesktopShell {
     }
 
     /// [`handle_press_with`](Self::handle_press_with), with no modifier key
-    /// held.
+    /// held: the tests' shorthand. Every press the shell is handed comes with
+    /// the modifiers held at the time (`handle_mouse_with`), so nothing else
+    /// calls it -- and kept outside the tests it was dead code.
+    #[cfg(test)]
     fn handle_press(&mut self, x: f32, y: f32, button: MouseButton) -> ShellAction {
         self.handle_press_with(x, y, button, guitk::event::Modifiers::NONE)
     }

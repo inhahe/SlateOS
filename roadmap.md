@@ -2228,6 +2228,17 @@ live.
   been copied"), the desktop's included. **Lane E:** the programs' own
   (`requests/c-e-say-why-a-control-is-disabled.md`).
 
+- `[x]` `[C]` **The toolkit's controls follow the user's text size**
+  (`design-decisions.md` §1474; `roadmap-detailed.md` *Tier 2 -- Font
+  Preferences*) -- done 2026-10-05. The size chosen in Settings reached
+  the desktop's own text and the window titles and stopped there: every
+  menu, tooltip, dialog, tab and menu bar, button, check box, drop-down and
+  switch drew at 13 pixels. Each now draws its text at the user's size and
+  is laid out round it, the Run box with them. **Lane E:** programs laying
+  out from the toolkit's sizes (`requests/c-e-lay-out-from-the-text-size.md`).
+  **Operator:** where the display's scale is applied (C-Q34) -- programs
+  apply none today.
+
 - `[x]` `[C]` **A photo frame on the desktop** (`design-decisions.md` §1452)
   -- done 2026-09-30. "Add widget > Photo frame" shows the Pictures folder's
   pictures -- the folder the start menu's Pictures place opens -- in name

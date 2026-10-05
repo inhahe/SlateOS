@@ -15,6 +15,7 @@ use crate::scrollbar;
 use crate::step;
 use crate::style::CornerRadii;
 use crate::surface::Surface;
+use crate::text::scaled;
 
 // ─── Catppuccin Mocha palette ───────────────────────────────────────────────
 
@@ -44,6 +45,20 @@ const SEPARATOR_HEIGHT: f32 = 9.0;
 const ICON_COLUMN_WIDTH: f32 = 28.0;
 /// A row's picture, square, centred in [`ICON_COLUMN_WIDTH`].
 const ICON_SIZE: u32 = 16;
+
+/// A row's picture at the user's text size ([`scaled`]), in whole pixels:
+/// what a menu asks its owner for, and draws.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "sixteen at a scale the text size bounds to a few times either way: a \
+              positive side of a few dozen pixels, rounded before it is narrowed"
+)]
+fn icon_side() -> u32 {
+    scaled(ICON_SIZE as f32).round().max(1.0) as u32
+}
+
 const SHORTCUT_PADDING: f32 = 40.0;
 const HORIZONTAL_PADDING: f32 = 8.0;
 const VERTICAL_PADDING: f32 = 4.0;
@@ -400,7 +415,7 @@ impl ContextMenu {
 
         // Consumed even when there is nothing to scroll: the wheel must not
         // fall through a popup to whatever it is covering.
-        self.set_scroll(self.scroll + crate::wheel::pixels(dy, ITEM_HEIGHT));
+        self.set_scroll(self.scroll + crate::wheel::pixels(dy, scaled(ITEM_HEIGHT)));
         // The rows moved under a pointer that did not: a reason waiting, or
         // showing, would now be about some other row. The next move finds
         // the row it is over.
@@ -780,11 +795,11 @@ impl ContextMenu {
             }
             match item {
                 MenuItem::Separator => {
-                    let line_y = current_y + SEPARATOR_HEIGHT / 2.0;
+                    let line_y = current_y + scaled(SEPARATOR_HEIGHT) / 2.0;
                     cmds.push(RenderCommand::Line {
-                        x1: self.x + HORIZONTAL_PADDING,
+                        x1: self.x + scaled(HORIZONTAL_PADDING),
                         y1: line_y,
-                        x2: self.x + self.width - HORIZONTAL_PADDING,
+                        x2: self.x + self.width - scaled(HORIZONTAL_PADDING),
                         y2: line_y,
                         color: palette.surface1,
                         width: 1.0,
@@ -809,7 +824,7 @@ impl ContextMenu {
                             self.x + 4.0,
                             current_y,
                             self.width - 8.0,
-                            ITEM_HEIGHT,
+                            scaled(ITEM_HEIGHT),
                             4.0,
                             Surface::Selected,
                         );
@@ -820,16 +835,16 @@ impl ContextMenu {
                     } else {
                         palette.overlay0
                     };
-                    let text_y = current_y + (ITEM_HEIGHT - FONT_SIZE) / 2.0;
+                    let text_y = current_y + (scaled(ITEM_HEIGHT) - scaled(FONT_SIZE)) / 2.0;
 
                     // Check mark, or else the row's picture.
                     if let Some(true) = checked {
                         cmds.push(RenderCommand::Text {
-                            x: self.x + HORIZONTAL_PADDING + 4.0,
+                            x: self.x + scaled(HORIZONTAL_PADDING) + scaled(4.0),
                             y: text_y,
                             text: "\u{2713}".to_string(), // checkmark
                             color: palette.ink(palette.blue),
-                            font_size: FONT_SIZE,
+                            font_size: scaled(FONT_SIZE),
                             font_weight: FontWeightHint::Bold,
                             max_width: None,
                             overflow: TextOverflow::Clip,
@@ -840,11 +855,11 @@ impl ContextMenu {
 
                     // Label.
                     cmds.push(RenderCommand::Text {
-                        x: self.x + HORIZONTAL_PADDING + ICON_COLUMN_WIDTH,
+                        x: self.x + scaled(HORIZONTAL_PADDING) + scaled(ICON_COLUMN_WIDTH),
                         y: text_y,
                         text: label.clone(),
                         color: text_color,
-                        font_size: FONT_SIZE,
+                        font_size: scaled(FONT_SIZE),
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
                         overflow: TextOverflow::Clip,
@@ -854,12 +869,12 @@ impl ContextMenu {
                     if let Some(shortcut_text) = shortcut {
                         cmds.push(RenderCommand::Text {
                             x: self.x + self.width
-                                - HORIZONTAL_PADDING
-                                - Self::estimate_text_width(shortcut_text, FONT_SIZE),
+                                - scaled(HORIZONTAL_PADDING)
+                                - Self::estimate_text_width(shortcut_text, scaled(FONT_SIZE)),
                             y: text_y,
                             text: shortcut_text.clone(),
                             color: palette.subtext0,
-                            font_size: FONT_SIZE,
+                            font_size: scaled(FONT_SIZE),
                             font_weight: FontWeightHint::Regular,
                             max_width: None,
                             overflow: TextOverflow::Clip,
@@ -883,7 +898,7 @@ impl ContextMenu {
                             self.x + 4.0,
                             current_y,
                             self.width - 8.0,
-                            ITEM_HEIGHT,
+                            scaled(ITEM_HEIGHT),
                             4.0,
                             Surface::Selected,
                         );
@@ -894,16 +909,16 @@ impl ContextMenu {
                     } else {
                         palette.overlay0
                     };
-                    let text_y = current_y + (ITEM_HEIGHT - FONT_SIZE) / 2.0;
+                    let text_y = current_y + (scaled(ITEM_HEIGHT) - scaled(FONT_SIZE)) / 2.0;
                     self.push_icon(&mut cmds, icon.as_deref(), current_y, icons);
 
                     // Label.
                     cmds.push(RenderCommand::Text {
-                        x: self.x + HORIZONTAL_PADDING + ICON_COLUMN_WIDTH,
+                        x: self.x + scaled(HORIZONTAL_PADDING) + scaled(ICON_COLUMN_WIDTH),
                         y: text_y,
                         text: label.clone(),
                         color: text_color,
-                        font_size: FONT_SIZE,
+                        font_size: scaled(FONT_SIZE),
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
                         overflow: TextOverflow::Clip,
@@ -911,11 +926,13 @@ impl ContextMenu {
 
                     // Submenu arrow indicator.
                     cmds.push(RenderCommand::Text {
-                        x: self.x + self.width - HORIZONTAL_PADDING - SUBMENU_ARROW_WIDTH,
+                        x: self.x + self.width
+                            - scaled(HORIZONTAL_PADDING)
+                            - scaled(SUBMENU_ARROW_WIDTH),
                         y: text_y,
                         text: "\u{25B8}".to_string(), // right-pointing triangle
                         color: text_color,
-                        font_size: FONT_SIZE,
+                        font_size: scaled(FONT_SIZE),
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
                         overflow: TextOverflow::Clip,
@@ -1052,17 +1069,18 @@ impl ContextMenu {
         row_y: f32,
         icons: &dyn Fn(&str, u32) -> Option<u64>,
     ) {
-        let Some(image_id) = icon.and_then(|name| icons(name, ICON_SIZE)) else {
+        let px = icon_side();
+        let Some(image_id) = icon.and_then(|name| icons(name, px)) else {
             return;
         };
         #[allow(
             clippy::cast_precision_loss,
-            reason = "a sixteen-pixel side is exact in an f32"
+            reason = "a side of a few dozen pixels is exact in an f32"
         )]
-        let side = ICON_SIZE as f32;
+        let side = px as f32;
         cmds.push(RenderCommand::Image {
-            x: self.x + HORIZONTAL_PADDING + (ICON_COLUMN_WIDTH - side) / 2.0,
-            y: row_y + (ITEM_HEIGHT - side) / 2.0,
+            x: self.x + scaled(HORIZONTAL_PADDING) + (scaled(ICON_COLUMN_WIDTH) - side) / 2.0,
+            y: row_y + (scaled(ITEM_HEIGHT) - side) / 2.0,
             width: side,
             height: side,
             image_id,
@@ -1078,35 +1096,35 @@ impl ContextMenu {
                 MenuItem::Action {
                     label, shortcut, ..
                 } => {
-                    let label_w = Self::estimate_text_width(label, FONT_SIZE);
+                    let label_w = Self::estimate_text_width(label, scaled(FONT_SIZE));
                     max_label_w = max_label_w.max(label_w);
                     if let Some(sc) = shortcut {
-                        let sc_w = Self::estimate_text_width(sc, FONT_SIZE);
+                        let sc_w = Self::estimate_text_width(sc, scaled(FONT_SIZE));
                         max_shortcut_w = max_shortcut_w.max(sc_w);
                     }
                 }
                 MenuItem::Submenu { label, .. } => {
-                    let label_w = Self::estimate_text_width(label, FONT_SIZE);
+                    let label_w = Self::estimate_text_width(label, scaled(FONT_SIZE));
                     max_label_w = max_label_w.max(label_w);
                     // Account for arrow indicator.
-                    max_shortcut_w = max_shortcut_w.max(SUBMENU_ARROW_WIDTH);
+                    max_shortcut_w = max_shortcut_w.max(scaled(SUBMENU_ARROW_WIDTH));
                 }
                 MenuItem::Separator => {}
             }
         }
 
         let shortcut_space = if max_shortcut_w > 0.0 {
-            SHORTCUT_PADDING + max_shortcut_w
+            scaled(SHORTCUT_PADDING) + max_shortcut_w
         } else {
             0.0
         };
 
-        let width = HORIZONTAL_PADDING * 2.0
-            + ICON_COLUMN_WIDTH
+        let width = scaled(HORIZONTAL_PADDING) * 2.0
+            + scaled(ICON_COLUMN_WIDTH)
             + max_label_w
             + shortcut_space
-            + HORIZONTAL_PADDING;
-        width.max(MIN_MENU_WIDTH)
+            + scaled(HORIZONTAL_PADDING);
+        width.max(scaled(MIN_MENU_WIDTH))
     }
 
     /// Width of `text`, as the compositor will actually draw it.
@@ -1128,10 +1146,10 @@ impl ContextMenu {
     /// [`Self::y_offset_for_index`] to hang a submenu. Four walks of one list
     /// is four chances for three of them to be right; when they disagree the
     /// user clicks one row and gets the one above it.
-    const fn item_height(item: &MenuItem) -> f32 {
+    fn item_height(item: &MenuItem) -> f32 {
         match item {
-            MenuItem::Separator => SEPARATOR_HEIGHT,
-            _ => ITEM_HEIGHT,
+            MenuItem::Separator => scaled(SEPARATOR_HEIGHT),
+            _ => scaled(ITEM_HEIGHT),
         }
     }
 
@@ -1144,7 +1162,7 @@ impl ContextMenu {
     /// would be a second description of where the rows are.
     fn strip(&self) -> RowStrip {
         RowStrip::new(
-            self.y + VERTICAL_PADDING - self.scroll,
+            self.y + scaled(VERTICAL_PADDING) - self.scroll,
             self.items.iter().map(Self::item_height),
         )
     }
@@ -1152,7 +1170,7 @@ impl ContextMenu {
     /// How tall the menu would be if the screen were unbounded — every row plus
     /// the padding above and below them.
     fn content_height(&self) -> f32 {
-        self.strip().total_height() + VERTICAL_PADDING * 2.0
+        self.strip().total_height() + scaled(VERTICAL_PADDING) * 2.0
     }
 
     /// How tall the menu actually is on screen. Equal to
@@ -1164,7 +1182,7 @@ impl ContextMenu {
 
     /// Top of the region the rows are drawn in and hit-tested against.
     fn viewport_top(&self) -> f32 {
-        self.y + VERTICAL_PADDING
+        self.y + scaled(VERTICAL_PADDING)
     }
 
     /// One past the bottom of that region. Never above
@@ -1172,7 +1190,7 @@ impl ContextMenu {
     /// own padding gets a zero-height row region rather than a negative-height
     /// one, because a negative-height clip is not a small clip.
     fn viewport_bottom(&self) -> f32 {
-        (self.y + self.panel_height() - VERTICAL_PADDING).max(self.viewport_top())
+        (self.y + self.panel_height() - scaled(VERTICAL_PADDING)).max(self.viewport_top())
     }
 
     /// Height of the row region — what the renderer clips to.
@@ -1365,7 +1383,7 @@ impl Tooltip {
             visible: false,
             delay_ms: DEFAULT_TOOLTIP_DELAY_MS,
             hover_start: None,
-            max_width: DEFAULT_TOOLTIP_MAX_WIDTH,
+            max_width: scaled(DEFAULT_TOOLTIP_MAX_WIDTH),
             viewport: FALLBACK_VIEWPORT,
         }
     }
@@ -1392,14 +1410,14 @@ impl Tooltip {
             let tip_width = self.compute_width();
             let tip_height = self.compute_height();
 
-            let mut tip_x = x + TOOLTIP_OFFSET_X;
-            let mut tip_y = y + TOOLTIP_OFFSET_Y;
+            let mut tip_x = x + scaled(TOOLTIP_OFFSET_X);
+            let mut tip_y = y + scaled(TOOLTIP_OFFSET_Y);
 
             if tip_x + tip_width > self.viewport.0 {
-                tip_x = (x - tip_width - TOOLTIP_OFFSET_X).max(0.0);
+                tip_x = (x - tip_width - scaled(TOOLTIP_OFFSET_X)).max(0.0);
             }
             if tip_y + tip_height > self.viewport.1 {
-                tip_y = (y - tip_height - TOOLTIP_OFFSET_Y).max(0.0);
+                tip_y = (y - tip_height - scaled(TOOLTIP_OFFSET_Y)).max(0.0);
             }
 
             self.x = tip_x;
@@ -1493,19 +1511,19 @@ impl Tooltip {
 
         // Text (each wrapped line).
         let lines = self.wrap_text();
-        let mut text_y = self.y + TOOLTIP_PADDING;
+        let mut text_y = self.y + scaled(TOOLTIP_PADDING);
         for line in &lines {
             cmds.push(RenderCommand::Text {
-                x: self.x + TOOLTIP_PADDING,
+                x: self.x + scaled(TOOLTIP_PADDING),
                 y: text_y,
                 text: line.clone(),
                 color: palette.text,
-                font_size: TOOLTIP_FONT_SIZE,
+                font_size: scaled(TOOLTIP_FONT_SIZE),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(self.max_width),
                 overflow: TextOverflow::Ellipsis,
             });
-            text_y += TOOLTIP_LINE_HEIGHT;
+            text_y += scaled(TOOLTIP_LINE_HEIGHT);
         }
 
         cmds
@@ -1517,15 +1535,16 @@ impl Tooltip {
         let lines = self.wrap_text();
         let max_line_width: f32 = lines
             .iter()
-            .map(|l| crate::text::width(l, TOOLTIP_FONT_SIZE))
+            .map(|l| crate::text::width(l, scaled(TOOLTIP_FONT_SIZE)))
             .fold(0.0_f32, f32::max);
-        (max_line_width + TOOLTIP_PADDING * 2.0).min(self.max_width + TOOLTIP_PADDING * 2.0)
+        (max_line_width + scaled(TOOLTIP_PADDING) * 2.0)
+            .min(self.max_width + scaled(TOOLTIP_PADDING) * 2.0)
     }
 
     fn compute_height(&self) -> f32 {
         let lines = self.wrap_text();
         let line_count = lines.len().max(1);
-        line_count as f32 * TOOLTIP_LINE_HEIGHT + TOOLTIP_PADDING * 2.0
+        line_count as f32 * scaled(TOOLTIP_LINE_HEIGHT) + scaled(TOOLTIP_PADDING) * 2.0
     }
 
     /// Word-wrap at `max_width` pixels.
@@ -1538,7 +1557,7 @@ impl Tooltip {
         crate::text::wrap(
             &self.text,
             self.max_width,
-            TOOLTIP_FONT_SIZE,
+            scaled(TOOLTIP_FONT_SIZE),
             FontWeightHint::Regular,
         )
     }
@@ -2871,6 +2890,48 @@ mod tests {
         }]);
         assert_eq!(menu.items().len(), 2);
         assert!(menu.width() > narrow);
+    }
+
+    /// **A menu, and a tooltip, follow the user's text size**: at twice the
+    /// size the rows are twice as tall and every label twice as large, and
+    /// the menu is wider -- the text does not spill out of rows laid out for
+    /// the old size. On this test's thread alone.
+    #[test]
+    fn a_menu_and_a_tooltip_follow_the_text_size() {
+        let measure = || {
+            let mut menu = ContextMenu::new(sample_items());
+            menu.show(10.0, 10.0, SCREEN);
+            let sizes: Vec<f32> = texts_sized(&menu.render(&Palette::for_mode(false)));
+            (menu.item_rect(0).unwrap().h, menu.width(), sizes)
+        };
+        let (row, width, sizes) = measure();
+        assert!(sizes.iter().all(|size| *size == FONT_SIZE), "{sizes:?}");
+
+        crate::text::set_base_size(crate::text::DEFAULT_SIZE * 2.0);
+        let (big_row, big_width, big_sizes) = measure();
+        assert_eq!(big_row, row * 2.0);
+        assert!(big_width > width * 1.5, "{big_width} against {width}");
+        assert!(
+            big_sizes.iter().all(|size| *size == FONT_SIZE * 2.0),
+            "{big_sizes:?}"
+        );
+
+        let mut tooltip = Tooltip::new("Tip");
+        tooltip.start_hover(50.0, 50.0, 0, SCREEN);
+        tooltip.tick(10_000);
+        let tip = texts_sized(&tooltip.render(&Palette::for_mode(false)));
+        assert_eq!(tip, [TOOLTIP_FONT_SIZE * 2.0]);
+    }
+
+    /// The size of every piece of text in `commands`.
+    fn texts_sized(commands: &[RenderCommand]) -> Vec<f32> {
+        commands
+            .iter()
+            .filter_map(|command| match command {
+                RenderCommand::Text { font_size, .. } => Some(*font_size),
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]

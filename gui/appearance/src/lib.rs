@@ -1212,7 +1212,8 @@ impl FontSettings {
         }
     }
 
-    /// Draw in these families from now on, in *this* process.
+    /// Draw in these families from now on, in *this* process -- and at
+    /// `ui_size`, which the toolkit's controls follow, on this thread.
     ///
     /// `guitk`'s font selection is per-process global state, and its own
     /// documentation is explicit about the consequence: "callers must apply
@@ -1241,6 +1242,13 @@ impl FontSettings {
         // compositor's was hinted. The colour-emoji palette is the theme's,
         // which this section does not know, so the one in force is kept.
         guitk::text::set_rendering(self.rendering(guitk::text::rendering().palette));
+        // And the size: the toolkit's controls draw their text at it, and lay
+        // their rows and boxes out round it (`guitk::text::scaled`). Until
+        // this they drew at 13 pixels whatever the user chose, so a larger
+        // size reached the desktop's own text and the window titles and left
+        // every menu, tooltip, button and field behind. On this thread: the
+        // one that lays the program's windows out.
+        let _changed = guitk::text::set_base_size(self.ui_size);
         // Asking first, because installing is not free: `set_font_family`
         // reloads the faces and drops every rasterized glyph, so calling it
         // for the family already in use would throw the cache away to arrive
@@ -3675,6 +3683,22 @@ mod tests {
         assert!(r.hinting, "hinting did not reach the toolkit's cache");
         assert!(r.smoothing);
         assert_eq!(r.subpixel, guitk::text::Subpixel::Rgb);
+    }
+
+    /// **Applying the fonts sets the toolkit's text size**, on the thread
+    /// that applies them -- the one that lays the program's windows out -- so
+    /// the toolkit's controls follow the user's size. The families stay the
+    /// defaults here, as every caller of `apply` in this binary leaves them.
+    #[test]
+    fn applying_the_fonts_sets_the_toolkits_text_size() {
+        let fonts = FontSettings {
+            ui_size: 20.0,
+            ..FontSettings::default()
+        };
+        let _ = fonts.apply();
+        assert!((guitk::text::base_size() - 20.0).abs() < f32::EPSILON);
+        let _ = FontSettings::default().apply();
+        assert!((guitk::text::base_size() - guitk::text::DEFAULT_SIZE).abs() < f32::EPSILON);
     }
 
     /// One mapping from the settings to a rasterizer's terms, field by field.

@@ -29,6 +29,7 @@
 //! [`tabs`]: crate::tabs
 //! [`pathbar`]: crate::pathbar
 
+use std::cell::Cell;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 pub use osfont::colr::ColourPalette;
@@ -460,6 +461,69 @@ pub fn family_installed(family: &str) -> bool {
 #[must_use]
 pub fn family_fixed_pitch(family: &str) -> bool {
     font_db().is_fixed_pitch(family)
+}
+
+/// The size, in pixels, the toolkit's controls are laid out for: ordinary
+/// interface text at the size it is drawn when the user has chosen none
+/// (`appearance`'s `fonts.ui_size`, 13 by default).
+pub const DEFAULT_SIZE: f32 = 13.0;
+
+/// The least and the most [`set_base_size`] takes -- the bounds the
+/// appearance settings hold the user's size to.
+pub const BASE_SIZE_RANGE: (f32, f32) = (8.0, 32.0);
+
+std::thread_local! {
+    /// The user's interface text size on this thread: [`DEFAULT_SIZE`] until
+    /// set. Per thread rather than per process, as the program's clipboard is
+    /// (`crate::clipboard`): a program's windows are laid out and drawn on
+    /// the thread that runs its event loop, so that thread's size is the
+    /// program's -- and tests, each on a thread of its own, can lay a control
+    /// out at another size without moving one a test beside it measures.
+    static BASE_SIZE: Cell<f32> = const { Cell::new(DEFAULT_SIZE) };
+}
+
+/// Draw interface text at `px` from now on, on this thread: the size
+/// ordinary text is drawn at, which every control's text, and the rows and
+/// boxes laid out round it, follow ([`scaled`]). Held to
+/// [`BASE_SIZE_RANGE`]; a size that is not a number is ignored. Returns
+/// whether it changed.
+///
+/// What `appearance`'s `FontSettings::apply` calls with the user's size, in
+/// every program, before laying anything out.
+pub fn set_base_size(px: f32) -> bool {
+    if !px.is_finite() {
+        return false;
+    }
+    let px = px.clamp(BASE_SIZE_RANGE.0, BASE_SIZE_RANGE.1);
+    BASE_SIZE.with(|size| {
+        let changed = size.get().to_bits() != px.to_bits();
+        size.set(px);
+        changed
+    })
+}
+
+/// The size ordinary interface text is drawn at on this thread, in pixels:
+/// the user's, or [`DEFAULT_SIZE`].
+#[must_use]
+pub fn base_size() -> f32 {
+    BASE_SIZE.with(Cell::get)
+}
+
+/// How much larger than the toolkit was laid out for the user's text is:
+/// [`base_size`] over [`DEFAULT_SIZE`], 1 at the default.
+#[must_use]
+pub fn size_scale() -> f32 {
+    base_size() / DEFAULT_SIZE
+}
+
+/// `px`, a size a control was laid out for at [`DEFAULT_SIZE`], at the
+/// user's text size: a label's size, the row round it, the gap beside it --
+/// so a larger text size makes larger controls rather than text spilling out
+/// of controls the old size. Hairlines -- borders, rules -- stay as they
+/// are: a line is not text.
+#[must_use]
+pub fn scaled(px: f32) -> f32 {
+    px * size_scale()
 }
 
 /// Runs `f` with the font for `size` and `weight`.
@@ -2277,6 +2341,30 @@ mod tests {
         }
         assert!(!family_installed("NoSuchFamily-8f3a2c"));
         assert!(!family_fixed_pitch("NoSuchFamily-8f3a2c"));
+    }
+
+    /// **The interface's text size is the thread's, held to its range**: the
+    /// default until set; what is laid out round text scaled in proportion; a
+    /// size out of range held to it, one that is not a number ignored -- and
+    /// another thread keeping its own.
+    #[test]
+    fn the_base_size_is_the_threads_and_scales_what_is_laid_out_round_text() {
+        assert_eq!(base_size(), DEFAULT_SIZE);
+        assert_eq!(scaled(28.0), 28.0);
+        assert!(set_base_size(26.0));
+        assert!(!set_base_size(26.0), "unchanged");
+        assert_eq!(size_scale(), 2.0);
+        assert_eq!(scaled(28.0), 56.0);
+        let other = std::thread::spawn(base_size).join().unwrap();
+        assert_eq!(other, DEFAULT_SIZE, "another thread keeps its own");
+
+        set_base_size(100.0);
+        assert_eq!(base_size(), BASE_SIZE_RANGE.1);
+        set_base_size(1.0);
+        assert_eq!(base_size(), BASE_SIZE_RANGE.0);
+        assert!(!set_base_size(f32::NAN));
+        assert!(!set_base_size(f32::INFINITY));
+        assert_eq!(base_size(), BASE_SIZE_RANGE.0);
     }
 
     /// **The process's fallbacks are what its font directories resolve to**,

@@ -1,6 +1,6 @@
 ## D-SPIKES-PORTS-CONFIGURE-AGAINST-ZIGS-MUSL — the ported programs' configure scripts look for functions in zig's musl, not in our libc, so each port is built for a C library it does not run on (lane D, 2026-10-05)
 
-**Status:** OPEN — CPython's fixed (known-issues-resolved/D-SPIKES-CPYTHON-WAS-CONFIGURED-FOR-MUSL-NOT-FOR-OUR-LIBC.md) and make's (2026-10-05, below); coreutils and bash to do.
+**Status:** OPEN — CPython's fixed (known-issues-resolved/D-SPIKES-CPYTHON-WAS-CONFIGURED-FOR-MUSL-NOT-FOR-OUR-LIBC.md) make's and bash's (2026-10-05, below); coreutils to do.
 
 **In short:** before a program is built, its `configure` script asks the C
 library what it can do -- is there a `renameat2`, an `fts_open`, an
@@ -19,7 +19,7 @@ differently, than our library allows.
 | port | answered "no", ours has it | what that costs |
 |---|---|---|
 | coreutils 9.5 (gnulib) | `canonicalize_file_name`, `error`, `fts_open`, `group_member`, `random_r`, `rawmemchr`, `renameat2`, `rpmatch`, `sysctl`, `timespec_getres`, `wmempcpy` | gnulib compiles its own replacement for each; its `renameat2` cannot make `RENAME_NOREPLACE` atomic, so `mv -n` can still clobber in a race |
-| bash 5.2 | `arc4random`, `argz_count`, `argz_next`, `argz_stringify` | none that shows: `$SRANDOM` reaches `arc4random` only when `getrandom` fails |
+| bash 5.2 | `arc4random`, `argz_count`, `argz_next`, `argz_stringify` | none that shows: `$SRANDOM` reaches `arc4random` only when `getrandom` fails -- fixed, see the end |
 | GNU make 4.4.1 | `sigsetmask` | none that shows -- fixed, see the end |
 | pkgconf 2.3.0 | none | |
 | CPython 3.12.3 | `close_range`, `getwd`, `sem_clockwait`, `tmpnam_r`, and five run tests | fixed: see the resolved entry |
@@ -59,3 +59,16 @@ Configuring through the wrapper first needed the wrapper fixed: it put
 `posix/include` in front of the build's own `-I` directories, which hid make's
 own `lib/glob.h` (gnulib's, as coreutils' will be) and stopped the build. It
 comes after them now (`scripts/test-link-wrappers.sh` case 5).
+
+**bash, fixed 2026-10-05.** `scripts/bash-spike/cross2.sh` was cross
+already, with each run test answered from measured facts; only its compiler
+was musl's. Through the wrapper, configure finds `arc4random` (and
+`argz.h`), `config.h` otherwise unchanged; the build's own link is a SlateOS
+bash, and `slatelink.sh`'s relink has nothing missing or duplicated. Two
+consequences handled in the same change: bash 5.2's inverted `strtoimax` test
+(it adds its own strtoimax when the C library has one) is undone between
+configure and the first make, as `cross3.sh` -- now folded in -- did after a
+failed one; and the copy of bash that runs on Linux (`build/spike/
+bash-musl.elf`, for measurements under WSL) is now a separate link of the same
+objects against musl, with `musl-shim.c` supplying the `arc4random` musl has
+not got.

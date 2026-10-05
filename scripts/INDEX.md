@@ -19,7 +19,6 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/basenc-diff.sh` | basenc-diff.sh — compare our `base64`, `base32` and `basenc` against GNU's, |
 | `scripts/bash-spike/checksyms.sh` | Confirm the three functions the spike originally had to shim are now real |
 | `scripts/bash-spike/cross2.sh` | Cross-compile bash 5.2 -> x86_64-linux-musl (the ABI SlateOS's libc.a targets). |
-| `scripts/bash-spike/cross3.sh` | Continue the cross build after the strtoimax collision. |
 | `scripts/bash-spike/quality.sh` | Linking is not working: how many symbols bash actually uses are real |
 | `scripts/bash-spike/run.sh` | The shebang was missing until 2026-09-02 — the only one of the five |
 | `scripts/bash-spike/runbash.sh` | Does the cross-compiled musl bash actually execute? Run it on Linux first — |
@@ -511,4 +510,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_501 scripts._
+_500 scripts._

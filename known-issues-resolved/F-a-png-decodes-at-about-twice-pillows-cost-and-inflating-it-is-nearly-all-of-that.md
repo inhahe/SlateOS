@@ -1,7 +1,18 @@
 ### [F] A PNG decodes at about twice Pillow's cost, and inflating it is nearly all of that -- 2026-09-26
 
-**Status:** OPEN — the part left is not lane F's code: waiting on lanes A and B
-(`requests/f-ab-inflate-decodes-a-bit-at-a-time-five-times-slower-than-zlib-ng.md`).
+**Status:** FIXED 2026-10-05 — a PNG now decodes at Pillow's cost. Lane B's
+table-driven inflate (`f1984c425`, on `main` since its boot-tested publish)
+answered the request below.
+
+**Fixed** (measured 2026-10-05 as below, the minimum of nine runs on a busy
+machine): the 2000x1500 photograph takes 0.371 billion cycles of the decoding
+thread against Pillow 12.3.0's 0.367 to 0.377, and its RGBA version 0.395
+against 0.385 to 0.406. The pixels are unchanged. What is left would put it
+ahead of Pillow rather than level with it: the chunk CRC, still
+byte-at-a-time, is `requests/f-a-crc32-reads-a-byte-at-a-time-and-eight-at-a-time-is-five-times-faster.md`
+(lane A's, open).
+
+**As it was:**
 
 **In short:** opening a big PNG costs about twice what Pillow (libpng-class C)
 spends on it. A 2000x1500 photograph: 0.88 billion cycles of the decoding

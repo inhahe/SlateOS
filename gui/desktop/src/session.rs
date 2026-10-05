@@ -2801,6 +2801,9 @@ impl<T: Transport> ShellSession<T> {
             // see `sync_wallpaper`, where the guard stops an unrelated
             // settings change re-decoding a full-screen photograph.
             self.sync_wallpaper();
+            // And the greeter's background, for the same reason: a style
+            // chosen in Settings reached the greeter only at the next start.
+            self.sync_login_background();
             // The icons, in the old colours and perhaps the old theme's
             // pictures: dropped, to be drawn again as the next frames ask.
             self.drop_icons();
@@ -3043,10 +3046,11 @@ impl<T: Transport> ShellSession<T> {
     /// `SameAsDesktop` current as a rotation advances. Doing it here as well
     /// would read the file twice for one change.
     ///
-    /// Runs even when no greeter is up. The screen is built once, in `start`,
-    /// and only when the machine has accounts to offer; a session that adopted
-    /// the setting only while the greeter existed would show the default the
-    /// first time the machine locked.
+    /// Called wherever a greeter is built or the setting may have changed: at
+    /// start (`load_appearance`), at each appearance change
+    /// (`adopt_appearance_change`), and at log-out, whose greeter is built
+    /// afresh with the default and is drawn as the user chose only because
+    /// this tells it.
     fn sync_login_background(&mut self) {
         let want = self.shell.appearance.login_background.clone();
         if let Some(screen) = self.login.as_mut() {
@@ -4072,6 +4076,10 @@ impl<T: Transport> ShellSession<T> {
         if self.login.is_some() {
             // Nobody is using the desktop until somebody signs in again.
             self.shell.set_user_name("");
+            // Drawn as the user chose, not as a greeter starts: one built
+            // here kept the default background, since only a start told the
+            // greeter the setting.
+            self.sync_login_background();
             // In the settings of the one leaving, the only ones there are.
             self.sound_event("desktop-logout");
         }

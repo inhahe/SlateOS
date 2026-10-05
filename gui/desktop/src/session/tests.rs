@@ -7577,6 +7577,25 @@ fn heard(session: &Session) -> Vec<String> {
         .collect()
 }
 
+/// **The login screen a log-out brings back is drawn as the user chose** --
+/// the login background in their settings, not the default. The greeter
+/// built at log-out started from the default, and only a start told a
+/// greeter the setting.
+#[test]
+fn the_login_screen_a_log_out_brings_back_has_the_chosen_background() {
+    let (mut session, desktop, _dir, _turn) = session_with_login();
+    type_password(&desktop, &mut session, "password");
+    assert!(!session.is_locked());
+    let chosen = appearance::LoginBackground::SolidColor(guitk::color::Color::rgb(10, 20, 30));
+    session.shell_mut().appearance.login_background = chosen.clone();
+    session.act(crate::ShellAction::LogOut).expect("log out");
+    assert_eq!(
+        session.login().expect("a login screen").config.background,
+        chosen,
+        "the greeter came back in the default background"
+    );
+}
+
 /// **Signing in and out are heard**: `desktop-login` when a password lets
 /// someone in, `desktop-logout` when they leave -- and nothing while the
 /// login screen waits, nor for a password it refuses.

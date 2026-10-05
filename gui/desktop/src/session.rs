@@ -109,6 +109,12 @@ use crate::{DesktopShell, ShellAction, ShellRequest, WindowRequest};
 /// `design-decisions.md` §521 §1.
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
+/// The title of the notice saying something the desktop keeps could not be
+/// written -- a layout, the start menu's pins, the Run box's history, the
+/// notifications -- the body naming which, and why
+/// ([`ShellSession::report_save`]).
+const NOT_SAVED_TITLE: &str = "Not saved";
+
 /// Whether `held` -- what a slot last asked the decoding thread for, as an
 /// image id and a path -- is the request `job` answers.
 ///
@@ -2577,6 +2583,13 @@ impl<T: Transport> ShellSession<T> {
             let saved = self.shell.save_run_history();
             self.report_save("The Run box's history", saved);
         }
+        // And the notifications, which one arriving, read or dismissed has
+        // changed. A failure is said once (`report_save`), and the notice
+        // saying it is retried with the next change rather than looping.
+        if self.shell.notification_history_dirty() {
+            let saved = self.shell.save_notification_history();
+            self.report_save("The notifications", saved);
+        }
 
         // The shell writes `appearance.yaml` itself for the quick toggles --
         // night light is one -- and the compositor reads that file rather than
@@ -2711,6 +2724,9 @@ impl<T: Transport> ShellSession<T> {
         // that looks like it was never saved, and the user's only recourse is
         // to set it a second time and distrust it.
         self.shell.load_notification_rules();
+        // And the notifications themselves, kept from before the desktop
+        // started -- after the rules, which say how long they are kept.
+        self.shell.load_notification_history();
         // Quiet hours saved before the last logout are in force now if the
         // hour says so. Without this the desktop would be noisy from login
         // until whatever else happened to tick it, which at three in the
@@ -2869,6 +2885,11 @@ impl<T: Transport> ShellSession<T> {
     /// something that had nothing to do with the wallpaper -- until the next
     /// wallpaper that loaded cleared it, after which the same failure was
     /// news again on every change.
+    ///
+    /// Titled [`NOT_SAVED_TITLE`], the body saying what: the title said
+    /// "Desktop layout not saved" while the layouts were all it reported,
+    /// and went on saying it of the start menu's pins, the Run box's
+    /// history and the notifications.
     fn report_save(&mut self, what: &'static str, saved: std::io::Result<()>) {
         let err = match saved {
             Ok(()) => {
@@ -2881,7 +2902,7 @@ impl<T: Transport> ShellSession<T> {
         if self.save_errors.get(what) == Some(&message) {
             return;
         }
-        self.post_desktop_notice("Desktop layout not saved", &message);
+        self.post_desktop_notice(NOT_SAVED_TITLE, &message);
         self.save_errors.insert(what, message);
     }
 

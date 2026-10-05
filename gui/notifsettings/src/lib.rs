@@ -29,8 +29,9 @@
 //! with the compositor, and the reason it can be read by a settings
 //! application that has no business knowing what focus mode is on.
 //!
-//! **The notifications themselves.** A message is not a setting. They live and
-//! die within one session and belong to whoever is holding them.
+//! **The notifications themselves.** A message is not a setting. The desktop
+//! keeps them, in its data directory (`desktop::notif_history`); this crate
+//! carries only how long ([`HistoryRetention`]).
 //!
 //! # Layout
 //!
@@ -43,6 +44,8 @@
 //!     importance: priority
 //!     sound: false
 //!     banner: true
+//! history:
+//!   days: 7
 //! ```
 //!
 //! An app with no entry uses [`AppRule::new`], so a fresh install has an
@@ -326,6 +329,45 @@ impl QuietHours {
 // The settings
 // ============================================================================
 
+/// How long the desktop keeps a notification it has shown, across the
+/// desktop restarting: `history.days` in the file.
+///
+/// The pane keeps a notification until it is dismissed; this is how much of
+/// that survives a restart -- a logout, a reboot. A notification older than
+/// this many days is forgotten when the desktop next reads or writes its
+/// history (`desktop::notif_history`). Nought keeps none: the pane starts
+/// empty every time, for a user who would rather what a notification said
+/// not be written down at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HistoryRetention {
+    /// Days a notification is kept, at most [`Self::MAX_DAYS`].
+    pub days: u16,
+}
+
+impl HistoryRetention {
+    /// The longest a notification is kept: a year.
+    pub const MAX_DAYS: u16 = 365;
+
+    /// Whether anything is kept across a restart.
+    #[must_use]
+    pub const fn keeps_any(self) -> bool {
+        self.days > 0
+    }
+
+    /// The age, in seconds, past which a notification is forgotten.
+    #[must_use]
+    pub fn max_age_secs(self) -> u64 {
+        u64::from(self.days).saturating_mul(24 * 60 * 60)
+    }
+}
+
+impl Default for HistoryRetention {
+    /// A week, as the notification centres a user knows keep theirs.
+    fn default() -> Self {
+        Self { days: 7 }
+    }
+}
+
 /// Every program-specific rule the user has set.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NotifSettings {
@@ -337,6 +379,8 @@ pub struct NotifSettings {
     /// rendered as rows, and a map would reorder them on every save according
     /// to something no one chose.
     pub apps: Vec<AppRule>,
+    /// How long a notification is kept across the desktop restarting.
+    pub history: HistoryRetention,
 }
 
 impl NotifSettings {
@@ -428,7 +472,18 @@ impl NotifSettings {
             }
             apps.push(rule);
         }
-        Self { quiet_hours, apps }
+        let mut history = HistoryRetention::default();
+        if let Some(days) = doc.get_i64(&["history", "days"]) {
+            // Held to the range rather than refused: a hand-edited 1000 is a
+            // user asking for "as long as there is", not for the default.
+            history.days = u16::try_from(days.clamp(0, i64::from(HistoryRetention::MAX_DAYS)))
+                .unwrap_or(HistoryRetention::MAX_DAYS);
+        }
+        Self {
+            quiet_hours,
+            apps,
+            history,
+        }
     }
 
     /// Fold the settings back into the document they came from.
@@ -465,6 +520,7 @@ impl NotifSettings {
             doc.set_bool(&["apps", name, "sound"], rule.sound);
             doc.set_bool(&["apps", name, "banner"], rule.banner);
         }
+        doc.set_i64(&["history", "days"], i64::from(self.history.days));
     }
 }
 
@@ -975,5 +1031,51 @@ mod tests {
             assert_eq!(Importance::from_yaml_name(p.yaml_name()), Some(p));
             assert!(!p.label().is_empty());
         }
+    }
+
+    /// **How long notifications are kept is a week until the file says
+    /// otherwise**, held to nought..a year when it says something outside
+    /// that, the week again when it says something that is no number; and
+    /// what is written is read back.
+    #[test]
+    fn the_history_retention_reads_and_writes() {
+        let days = |text: &str| {
+            NotifSettings::read_from(&Document::parse(text))
+                .history
+                .days
+        };
+        assert_eq!(days(""), 7, "nothing written");
+        assert_eq!(days("history:\n  days: 30\n"), 30);
+        assert_eq!(days("history:\n  days: 0\n"), 0);
+        assert_eq!(days("history:\n  days: 365\n"), 365);
+        assert_eq!(days("history:\n  days: 1000\n"), 365, "past a year");
+        assert_eq!(days("history:\n  days: -3\n"), 0, "less than nothing");
+        assert_eq!(days("history:\n  days: 99999999999999\n"), 365);
+        assert_eq!(days("history:\n  days: forever\n"), 7, "no number");
+
+        let mut before = NotifSettings::default();
+        before.history.days = 30;
+        let mut doc = Document::parse("# mine\nhistory:\n  days: 7  # a week\n");
+        before.write_into(&mut doc);
+        let text = doc.to_text();
+        assert!(text.contains("# mine"), "{text}");
+        assert_eq!(NotifSettings::read_from(&Document::parse(&text)), before);
+    }
+
+    /// **Nought keeps none, and a day is a day of seconds.**
+    #[test]
+    fn a_retention_knows_what_it_keeps() {
+        assert!(!HistoryRetention { days: 0 }.keeps_any());
+        assert!(HistoryRetention { days: 1 }.keeps_any());
+        assert_eq!(HistoryRetention { days: 0 }.max_age_secs(), 0);
+        assert_eq!(HistoryRetention { days: 2 }.max_age_secs(), 2 * 86_400);
+        assert_eq!(
+            HistoryRetention {
+                days: HistoryRetention::MAX_DAYS
+            }
+            .max_age_secs(),
+            365 * 86_400
+        );
+        assert_eq!(HistoryRetention::default(), HistoryRetention { days: 7 });
     }
 }

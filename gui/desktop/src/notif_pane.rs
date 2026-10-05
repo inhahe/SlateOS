@@ -111,7 +111,7 @@ const PANE_WIDTH: f32 = 380.0;
 const SLIDE_MS: u32 = 200;
 
 /// Maximum number of stored notifications.
-const MAX_NOTIFICATIONS: usize = 50;
+pub(crate) const MAX_NOTIFICATIONS: usize = 50;
 
 /// Padding inside the pane.
 const PANE_PADDING: f32 = 16.0;
@@ -620,6 +620,11 @@ pub struct NotificationPane {
     /// *why* the wheel and the arrow keys could scroll the list past its end
     /// into unbounded empty space with no way back but Home.
     screen_height: f32,
+    /// Counts every change to the notifications -- one arriving, one read,
+    /// dismissed or cleared -- so whoever keeps them on disk
+    /// (`crate::notif_history`) can tell from a number whether there is
+    /// anything new to write, without comparing the lists.
+    revision: u64,
 }
 
 impl NotificationPane {
@@ -640,12 +645,50 @@ impl NotificationPane {
             motion: Motion::STANDARD,
             slide_from: 0.0,
             screen_height: DEFAULT_SCREEN_HEIGHT,
+            revision: 0,
         }
     }
 
     // ========================================================================
     // Public API
     // ========================================================================
+
+    /// A number that changes whenever the notifications do: one arriving,
+    /// one read, dismissed or cleared, the whole list restored.
+    #[must_use]
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// The notifications changed: say so to whoever compares
+    /// [`revision`](Self::revision).
+    fn changed(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    /// Put back notifications kept from before the desktop started --
+    /// newest first, at most the pane's own cap -- each under a fresh id and
+    /// with its program's settings made, as a notification arriving gets.
+    /// Nothing pops up: they are history, not news.
+    pub fn restore(&mut self, kept: Vec<Notification>) {
+        let mut restored = Vec::with_capacity(kept.len().min(MAX_NOTIFICATIONS));
+        for mut notif in kept.into_iter().take(MAX_NOTIFICATIONS) {
+            notif.id = self.ids.issue_infallible();
+            if !self
+                .app_settings
+                .iter()
+                .any(|s| s.app_name == notif.app_name)
+            {
+                self.app_settings
+                    .push(AppNotifSettings::new(&notif.app_name));
+            }
+            restored.push(notif);
+        }
+        self.notifications = restored;
+        self.scroll_offset = 0.0;
+        self.hovered_notif = None;
+        self.changed();
+    }
 
     /// Open the pane, at once.
     ///
@@ -820,6 +863,7 @@ impl NotificationPane {
         if self.notifications.len() > MAX_NOTIFICATIONS {
             self.notifications.truncate(MAX_NOTIFICATIONS);
         }
+        self.changed();
 
         id
     }
@@ -1065,7 +1109,10 @@ impl NotificationPane {
     pub fn mark_read(&mut self, id: u64) -> bool {
         match self.notifications.iter_mut().find(|n| n.id == id) {
             Some(notif) => {
-                notif.read = true;
+                if !notif.read {
+                    notif.read = true;
+                    self.changed();
+                }
                 true
             }
             None => false,
@@ -2224,7 +2271,10 @@ impl NotificationPane {
             self.events.push(NotifPaneEvent::NotificationDismissed(id));
         } else if let Some(notif) = self.notifications.get_mut(idx) {
             // Click on notification body.
-            notif.read = true;
+            let was_read = core::mem::replace(&mut notif.read, true);
+            if !was_read {
+                self.changed();
+            }
             self.events.push(NotifPaneEvent::NotificationClicked(id));
         }
     }
@@ -2278,11 +2328,13 @@ impl NotificationPane {
         self.scroll_offset = 0.0;
         self.hovered_notif = None;
         self.events.push(NotifPaneEvent::ClearAll);
+        self.changed();
     }
 
     fn dismiss_notification(&mut self, idx: usize) {
         if idx < self.notifications.len() {
             self.notifications.remove(idx);
+            self.changed();
             // The list just got shorter, which can put the offset past its new
             // end -- dismissing the last few cards would otherwise leave the
             // pane showing blank space.
@@ -3551,6 +3603,102 @@ mod tests {
         pane.push_notification(make_notif("A", "1", 100));
         pane.dismiss_notification(99); // should not panic
         assert_eq!(pane.notifications.len(), 1);
+    }
+
+    // ========================================================================
+    // History: what changes, and what comes back (`crate::notif_history`)
+    // ========================================================================
+
+    /// **Every change to the notifications moves the revision** -- one
+    /// arriving, read, dismissed, all cleared -- **and nothing else does**:
+    /// reading one already read, reading or dismissing one that is not there,
+    /// drawing. The revision is how the shell knows there is something new
+    /// to write, so a change it misses is a notification lost at the next
+    /// restart, and a non-change it counts is a write for nothing.
+    #[test]
+    fn every_change_to_the_notifications_moves_the_revision() {
+        let mut pane = NotificationPane::new();
+        let mut last = pane.revision();
+        let mut moved = |pane: &NotificationPane| {
+            let now = pane.revision();
+            let did = now != last;
+            last = now;
+            did
+        };
+        let first = pane.push_notification(make_notif("A", "1", 100));
+        assert!(moved(&pane), "an arrival");
+        pane.push_notification(make_notif("B", "2", 200));
+        assert!(moved(&pane), "a second arrival");
+        assert!(pane.mark_read(first));
+        assert!(moved(&pane), "a read");
+        assert!(pane.mark_read(first));
+        assert!(!moved(&pane), "a read of one already read");
+        assert!(!pane.mark_read(999));
+        assert!(!moved(&pane), "a read of none");
+        drop(pane.render(&test_palette(), SCREEN_W, TEST_SCREEN_H));
+        assert!(!moved(&pane), "drawing");
+        pane.dismiss_notification(99);
+        assert!(!moved(&pane), "a dismissal of none");
+        pane.dismiss_notification(0);
+        assert!(moved(&pane), "a dismissal");
+        pane.clear_all();
+        assert!(moved(&pane), "clearing");
+    }
+
+    /// **Opening a notification by its card reads it, which is a change --
+    /// once.** The click marks it read in the pane, not through `mark_read`.
+    #[test]
+    fn reading_a_notification_by_its_card_is_a_change_once() {
+        let mut pane = scrollable_pane(2);
+        let y = painted_card_tops(&pane)[0] + NOTIF_CARD_HEIGHT / 2.0;
+        let before = pane.revision();
+        assert!(click_at(&mut pane, y).is_some());
+        let after = pane.revision();
+        assert_ne!(after, before, "read by a click");
+        assert!(click_at(&mut pane, y).is_some());
+        assert_eq!(pane.revision(), after, "already read");
+    }
+
+    /// **Restored notifications come back newest first, at most the pane's
+    /// cap, each under an id of its own that no later one is given, and each
+    /// program with its settings** -- what an arriving notification gets --
+    /// and they replace what the pane held.
+    #[test]
+    fn restored_notifications_take_fresh_ids_and_their_programs_settings() {
+        let mut pane = NotificationPane::new();
+        pane.push_notification(make_notif("Old", "before", 50));
+        let kept: Vec<Notification> = (0..MAX_NOTIFICATIONS + 5)
+            .map(|i| {
+                let app = if i % 2 == 0 { "Mail" } else { "Chat" };
+                let mut n = make_notif(app, &format!("n{i}"), 10_000 - i as u64);
+                n.id = 7;
+                n
+            })
+            .collect();
+        let before = pane.revision();
+        pane.restore(kept);
+        assert_ne!(pane.revision(), before, "a restore is a change");
+
+        let list = pane.notifications();
+        assert_eq!(list.len(), MAX_NOTIFICATIONS);
+        assert_eq!(list[0].title, "n0", "newest first");
+        assert!(list.iter().all(|n| n.title != "before"), "replaced");
+        let mut ids: Vec<u64> = list.iter().map(|n| n.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), MAX_NOTIFICATIONS, "two share an id");
+        let names: Vec<&str> = pane
+            .app_settings()
+            .iter()
+            .map(|s| s.app_name.as_str())
+            .collect();
+        assert!(
+            names.contains(&"Mail") && names.contains(&"Chat"),
+            "{names:?}"
+        );
+
+        let next = pane.push_notification(make_notif("Mail", "new", 20_000));
+        assert!(!ids.contains(&next), "a later one was given a restored id");
     }
 
     // ========================================================================

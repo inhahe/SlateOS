@@ -108,6 +108,7 @@ pub mod login_screen;
 pub mod multimon;
 pub mod network_indicator;
 pub mod network_settings;
+pub mod notif_history;
 pub mod notif_pane;
 pub mod osd;
 pub mod overview;
@@ -2395,6 +2396,11 @@ pub struct DesktopShell {
     /// edited from here. `focus_assist::app_overrides` is the copy the
     /// decision is made against; this is the copy that can be written back.
     notif: notifsettings::NotifFile,
+    /// The pane's [`revision`](notif_pane::NotificationPane::revision) the
+    /// notification history was last written at (`notif_history`); `None`
+    /// where it must be written whatever the pane says -- the retention
+    /// changed, so what is kept on disk may no longer be what it allows.
+    notif_history_saved: Option<u64>,
     /// Theme configuration, derived from [`appearance`](Self::appearance).
     ///
     /// Never assign to this directly: it would disagree with `appearance` at
@@ -2940,6 +2946,8 @@ impl DesktopShell {
             taskbar: taskbar::TaskbarState::new(taskbar::TaskbarConfig::default()),
             schedule_snooze: None,
             notif: notifsettings::NotifFile::new(),
+            // Nothing written yet; nothing to write until something changes.
+            notif_history_saved: Some(0),
             theme: DesktopTheme::default(),
             datetime: datetime_settings::DateTimeSettings::default(),
             system_zone: Tz::utc(),
@@ -3137,6 +3145,44 @@ impl DesktopShell {
         }
     }
 
+    /// Put back the notifications kept from before the desktop started --
+    /// those the user's retention keeps (`notif_history`) -- with no toast
+    /// for any of them: they are history, not news. After
+    /// [`load_notification_rules`](Self::load_notification_rules), which
+    /// says how long that is.
+    pub fn load_notification_history(&mut self) {
+        let kept = notif_history::load(Self::unix_now(), self.notif.settings.history);
+        self.notifications.restore(kept);
+        self.notif_history_saved = Some(self.notifications.revision());
+    }
+
+    /// Whether the notifications changed since the history was last written,
+    /// or the retention did ([`save_notification_history`](Self::save_notification_history)).
+    #[must_use]
+    pub fn notification_history_dirty(&self) -> bool {
+        self.notif_history_saved != Some(self.notifications.revision())
+    }
+
+    /// Write the notifications as the history kept on disk -- those the
+    /// user's retention keeps; none but the file's header where it keeps
+    /// none.
+    ///
+    /// Counted as written before the write is tried: a failure is reported
+    /// by the caller once, and tried again at the next change rather than at
+    /// every pump.
+    ///
+    /// # Errors
+    ///
+    /// The write's own.
+    pub fn save_notification_history(&mut self) -> std::io::Result<()> {
+        self.notif_history_saved = Some(self.notifications.revision());
+        notif_history::store(
+            self.notifications.notifications(),
+            Self::unix_now(),
+            self.notif.settings.history,
+        )
+    }
+
     /// Re-read the rules if the file changed, and say whether they differ.
     ///
     /// Answers on the *settings*, not on the file, for the reason
@@ -3167,6 +3213,11 @@ impl DesktopShell {
         }
         if quiet_changed {
             self.focus.set_quiet_hours(&file.settings.quiet_hours);
+        }
+        // A shorter retention -- or none -- is to be honoured on disk now, not
+        // at the next notification: written again whatever the pane says.
+        if file.settings.history != self.notif.settings.history {
+            self.notif_history_saved = None;
         }
         let changed = apps_changed || quiet_changed;
         // Adopted either way: the document is what a later save splices into,

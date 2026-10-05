@@ -147,6 +147,136 @@ fn overlapping_cues() {
     held_to_its_answer("overlap", "overlap.mkv", SubtitleFormat::SubRip);
 }
 
+/// WebVTT in MP4 (`wvtt`), as MP4Box writes it: the cues of `webvtt`'s
+/// `.vtt`, each a sample of its own, read as WebM's are.
+#[test]
+fn webvtt_in_mp4() {
+    held_to_its_answer("webvtt_mp4", "webvtt_mp4.mp4", SubtitleFormat::WebVtt);
+}
+
+#[test]
+fn webvtt_overlapping_cues() {
+    held_to_its_answer(
+        "webvtt_overlap",
+        "webvtt_overlap.webm",
+        SubtitleFormat::WebVtt,
+    );
+}
+
+/// The same cues in MP4, where WebVTT cuts them into a sample for every
+/// stretch between one cue's start or end and the next, every cue in each
+/// sample it shows through: joined again, they are WebM's cues, in its
+/// order.
+#[test]
+fn webvtt_in_mp4_cut_into_samples_is_joined_again() {
+    held_to_its_answer(
+        "webvtt_overlap_mp4",
+        "webvtt_overlap_mp4.mp4",
+        SubtitleFormat::WebVtt,
+    );
+}
+
+/// And in fragments, as DASH and HLS segments carry it.
+#[test]
+fn webvtt_in_mp4_fragments() {
+    held_to_its_answer(
+        "webvtt_overlap_fragments",
+        "webvtt_overlap_fragments.mp4",
+        SubtitleFormat::WebVtt,
+    );
+}
+
+/// A seek into WebVTT in MP4 gives the cues showing at the time -- each
+/// beginning, as far as the samples after the seek say, at the sample the
+/// seek landed in -- then the rest.
+#[test]
+fn a_seek_in_webvtt_in_mp4_gives_the_cues_showing_then() {
+    let file = "webvtt_overlap_mp4.mp4";
+    assert_eq!(
+        after_seek(file, 5.5),
+        [
+            "{\\an8}long, under all but the last",
+            "the same text",
+            "the same text",
+            "after them all, past a stretch of none",
+            "first of a pair",
+            "second of a pair"
+        ]
+    );
+    assert_eq!(
+        after_seek(file, 11.0),
+        [
+            "after them all, past a stretch of none",
+            "first of a pair",
+            "second of a pair"
+        ]
+    );
+    assert_eq!(after_seek(file, 0.0).len(), 8);
+    assert!(after_seek(file, 60.0).is_empty());
+    let mut subtitles = Subtitles::open(File::open(data(file)).unwrap()).unwrap();
+    subtitles.seek(5_500_000_000).unwrap();
+    let first = subtitles.next_cue().unwrap().unwrap();
+    assert_eq!(
+        (first.start, first.end),
+        (5_000_000_000, 10_000_000_000),
+        "the long cue, from the sample the seek landed in"
+    );
+}
+
+/// A seek while a cue still shows forgets it: the samples read after the
+/// seek are joined to nothing read before it.
+#[test]
+fn a_seek_in_webvtt_in_mp4_forgets_the_cue_showing_before_it() {
+    let file = File::open(data("webvtt_overlap_mp4.mp4")).unwrap();
+    let mut subtitles = Subtitles::open(file).unwrap();
+    subtitles.seek(14_500_000_000).unwrap();
+    // The first of the pair is given while the second still shows.
+    let first = subtitles.next_cue().unwrap().unwrap();
+    assert_eq!(first.text, "first of a pair");
+    subtitles.seek(14_500_000_000).unwrap();
+    let texts: Vec<String> = read_all(&mut subtitles)
+        .into_iter()
+        .map(|c| c.text)
+        .collect();
+    assert_eq!(texts, ["first of a pair", "second of a pair"]);
+}
+
+/// A sample of WebVTT in MP4 that cannot be read shows nothing, and is
+/// counted: the cues showing end where it begins, and one in the samples
+/// on both sides of it is two cues.
+#[test]
+fn a_damaged_webvtt_sample_in_mp4_shows_nothing_and_is_counted() {
+    let mut bytes = std::fs::read(data("webvtt_overlap_mp4.mp4")).unwrap();
+    // The short cue is in one sample alone, 2 s to 3 s: its text's box made
+    // to run past its cue.
+    let text = b"short, inside the long";
+    let at = bytes
+        .windows(4 + text.len())
+        .position(|w| &w[..4] == b"payl" && &w[4..] == text)
+        .expect("the cue's text box");
+    bytes[at - 4..at].copy_from_slice(&0xFFFFu32.to_be_bytes());
+    let mut subtitles = Subtitles::open(std::io::Cursor::new(bytes)).unwrap();
+    let mut got = Vec::new();
+    while let Some(cue) = subtitles.next_cue().unwrap() {
+        got.push((cue.start / 1_000_000, cue.end / 1_000_000, cue.text));
+    }
+    let long = "{\\an8}long, under all but the last".to_owned();
+    assert_eq!(
+        got[..3],
+        [
+            (1000, 2000, long.clone()),
+            (3000, 10_000, long),
+            (
+                3000,
+                4000,
+                "{\\an1}begun with the short, ended after it".to_owned()
+            ),
+        ]
+    );
+    assert_eq!(got.len(), 8, "{got:?}");
+    assert_eq!(subtitles.damaged(), 1);
+}
+
 #[test]
 fn timed_text_in_mp4_as_ffmpeg_writes_it() {
     held_to_its_answer("movtext", "movtext.mp4", SubtitleFormat::MovText);

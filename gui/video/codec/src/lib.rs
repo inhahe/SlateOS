@@ -292,7 +292,8 @@ pub enum SubtitleFormat {
     Ass,
     /// SubStation Alpha (`S_TEXT/SSA`).
     Ssa,
-    /// WebVTT (`D_WEBVTT/SUBTITLES` in WebM, `S_TEXT/WEBVTT`).
+    /// WebVTT (`D_WEBVTT/SUBTITLES` in WebM, `S_TEXT/WEBVTT`; `wvtt` in
+    /// MP4).
     WebVtt,
     /// 3GPP timed text, MP4's (`tx3g`; QuickTime's `text`).
     MovText,

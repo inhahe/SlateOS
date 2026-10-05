@@ -151,7 +151,8 @@ counts["mp4"] = add_files("mp4", "gui/video/mp4/tests/data", (".mp4", ".mov")) +
     "mp4", "gui/video/codec/tests/data", (".mp4", ".mov", ".m4a"))
 
 # The subtitle fixtures: SubRip, ASS, SSA and WebVTT tracks, ffmpeg's and
-# mkvmerge's; MP4's timed text; Blu-ray's PGS and DVD's VobSub pictures.
+# mkvmerge's; MP4's timed text and WebVTT (MP4Box's); Blu-ray's PGS, DVD's
+# VobSub and DVB's pictures.
 n = 0
 codec_data = os.path.join(SRC, "gui/video/codec/tests/data")
 for name in sorted(os.listdir(codec_data)):

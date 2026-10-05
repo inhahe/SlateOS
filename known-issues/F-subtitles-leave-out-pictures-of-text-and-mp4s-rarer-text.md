@@ -4,20 +4,29 @@
 with what doing it would take.
 
 **In short:** `videocodec::Subtitles` reads a film's text subtitles --
-SubRip, ASS, SSA and WebVTT in Matroska and WebM, 3GPP timed text in MP4 --
+SubRip, ASS, SSA and WebVTT in Matroska and WebM, 3GPP timed text and
+WebVTT in MP4 --
 into SRT markup for lane E's player (design-decisions §1360), and Blu-ray's,
 DVD's and DVB's pictures of text as images (§1362, §1363, §1365). Two text
-formats MP4 can hold are not read.
+formats MP4 can hold are not read, nor DVD's own colours where a rip
+gives them.
 
 | What | Today | To do it |
 |---|---|---|
 | DVD subtitles' `custom colors` (VSFilter's recolouring, in the `.idx`) | ignored, as FFmpeg ignores it | the four colours the line gives in place of the palette's, `tridx` marking the transparent -- if a real rip needs it |
-| MP4's WebVTT (`wvtt`, ISO 14496-30, what DASH and HLS segments carry) and TTML (`stpp`) | not subtitles to `gui/video/mp4`, which makes `tx3g` and `text` subtitles as FFmpeg's table does; a film with only these has "no subtitles" | `wvtt`: its `vttc` boxes (`payl` the cue text, `sttg` its settings, `iden`) into the WebVTT reader; `stpp`: an XML reader for TTML's `<p>` and `<span>`, a larger task |
+| MP4's TTML (`stpp`, what broadcasters' DASH segments carry) | not subtitles to `gui/video/mp4`, which makes `tx3g` and `text` subtitles as FFmpeg's table does; a film with only these has "no subtitles" | an XML reader for TTML's `<p>` and `<span>`, its timing and styles; FFmpeg has no TTML decoder to hold it to |
 | CEA-608 captions in MP4 (`c608`) | a subtitle track of format `Other`, refused | a 608 decoder (byte pairs, roll-up and pop-on captions) |
 
 **Where.** `gui/video/codec/src/subtitle.rs` and `subtitle/` (`vobsub.rs`);
 `gui/video/codec/src/container.rs` (`subtitles`); `gui/video/mp4/src/track.rs`
 (`subtitle_codec`).
+
+**Was here, fixed 2026-10-05:** MP4's WebVTT (`wvtt`, ISO/IEC 14496-30,
+what DASH and HLS segments carry) was not read: FFmpeg's table makes such a
+track data, and FFmpeg reads none of it. It is read now, its samples' cues
+-- cut wherever another cue begins or ends -- joined again and read as
+WebM's are (`subtitle/isovtt.rs`, design-decisions §1367), held to the same
+cues in WebM through MP4Box, the format's reference implementation.
 
 **Was here, fixed 2026-10-05:** DVB's subtitles -- the pictures of text a
 recording of digital television carries -- were refused by name. They now

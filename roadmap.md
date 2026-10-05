@@ -4054,7 +4054,14 @@ lane C's `guitk`.
       CLUTs, a region's background before its objects, the non-modifying
       colour, several display sets in a block. Five fixtures written
       segment by segment, in a Matroska file of the generator's own.
-    - `[ ]` MP4's WebVTT and TTML
+    - `[x]` MP4's WebVTT (`wvtt`, 2026-10-05, design-decisions §1367): what
+      DASH and HLS segments carry, which FFmpeg does not read. Each sample
+      the cues showing through it, a cue cut wherever another begins or
+      ends; the pieces joined again and read as WebM's cues are. Held to
+      the same cues in WebM, through MP4Box (GPAC, the format's reference
+      implementation, built from source): plain, overlapping, fragmented,
+      and a seek.
+    - `[ ]` MP4's TTML (`stpp`)
       (`known-issues/F-subtitles-leave-out-pictures-of-text-and-mp4s-rarer-text.md`).
 
 - `[-]` `[F]` **A display transport over channel IPC** for local clients,

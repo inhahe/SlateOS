@@ -3,7 +3,7 @@
 Coverage-guided fuzzing (libFuzzer, through `cargo fuzz`) of everything in
 lane F that reads a file a stranger made: every picture format `imagecodec`
 opens, every video and sound file `videocodec` plays, the subtitles it reads
-(SubRip, ASS, SSA, WebVTT; MP4's timed text; Blu-ray's, DVD's and DVB's
+(SubRip, ASS, SSA, WebVTT; MP4's timed text and WebVTT; Blu-ray's, DVD's and DVB's
 pictures), the Matroska and MP4 demuxers on their own, and the VP8 and VP9
 decoders on raw packets. A decoder here must return an error for any input
 it cannot use. A panic, a hang or a runaway

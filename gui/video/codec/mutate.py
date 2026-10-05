@@ -92,6 +92,21 @@ DVB_DAMAGE = "dvb_damage_taken_as_ffmpeg_takes_it"
 DVB_SEEK = "a_seek_in_dvb_pictures_reads_from_where_they_begin_afresh"
 DVB_FORGETS = "a_seek_in_dvb_pictures_forgets_what_was_read"
 
+# WebVTT in MP4: each sample the cues showing through it, joined again
+# (isovtt.rs).
+VTT_SAMPLE = "a_sample_is_its_cues_in_order_and_an_empty_one_none"
+VTT_SIZES = "a_box_of_size_zero_runs_to_the_end_and_one_of_size_one_is_long"
+VTT_WHOLE = "a_cue_split_across_samples_is_whole_again"
+VTT_CONTIGUOUS = "a_cue_goes_on_only_into_the_sample_its_last_one_ended_at"
+VTT_TWICE = "two_cues_alike_in_one_sample_are_two_cues"
+VTT_ORDER = "cues_come_in_the_order_they_began"
+VTT_TOGETHER = "cues_that_began_together_come_in_their_samples_order"
+
+WEBVTT_MP4 = "webvtt_in_mp4"
+WEBVTT_JOINED = "webvtt_in_mp4_cut_into_samples_is_joined_again"
+WEBVTT_MP4_FORGETS = "a_seek_in_webvtt_in_mp4_forgets_the_cue_showing_before_it"
+WEBVTT_MP4_DAMAGE = "a_damaged_webvtt_sample_in_mp4_shows_nothing_and_is_counted"
+
 # (name, old, new, [tests that must fail])
 PICTURES = [
     (
@@ -345,6 +360,31 @@ READER = [
         "            Reader::Dvb(_) => 0,",
         [DVB_DAMAGE],
     ),
+    # WebVTT in MP4.
+    (
+        "MP4's WebVTT is read as Matroska's",
+        '            SubtitleFormat::WebVtt if chosen.codec_id == b"wvtt" => {',
+        "            SubtitleFormat::WebVtt if false => {",
+        [WEBVTT_MP4, WEBVTT_JOINED],
+    ),
+    (
+        "MP4's WebVTT gives no cue still showing at the track's end",
+        "            let whole = joined.finish();",
+        "            let whole: Vec<isovtt::Whole> = {\n                let _ = joined.finish();\n                Vec::new()\n            };",
+        [WEBVTT_MP4, WEBVTT_JOINED],
+    ),
+    (
+        "damage in MP4's WebVTT is not counted",
+        "        if !readable {",
+        "        if false && !readable {",
+        [WEBVTT_MP4_DAMAGE],
+    ),
+    (
+        "a seek in MP4's WebVTT keeps the cues showing before it",
+        "            Reader::IsoVtt(joined) => joined.clear(),",
+        "            Reader::IsoVtt(_) => {}",
+        [WEBVTT_MP4_FORGETS],
+    ),
 ]
 
 DVD = [
@@ -461,6 +501,82 @@ DVD = [
         "            for floor in [0x4, 0x10, 0x40] {",
         "            for floor in [0x4, 0x10, 0x100] {",
         [DVD_CODES],
+    ),
+]
+
+# WebVTT in MP4's samples, and their cues joined again. Two pieces have no
+# row, their mutants doing nothing: the check of a box's size before its
+# body is taken (`get` refuses the same sizes), and the count of cues begun
+# set back by a seek (only its order is ever compared).
+ISOVTT = [
+    (
+        "a cue's identifier is not read",
+        '                b"iden" => &mut cue.id,',
+        '                b"iden" => continue,',
+        [VTT_SAMPLE, WEBVTT_JOINED],
+    ),
+    (
+        "a cue's settings are not read",
+        '                b"sttg" => &mut cue.settings,',
+        '                b"sttg" => continue,',
+        [VTT_SAMPLE, WEBVTT_MP4, WEBVTT_JOINED],
+    ),
+    (
+        "a box of size zero is damage",
+        "            0 => (8, rest.len()),",
+        "            0 => return None,",
+        [VTT_SIZES],
+    ),
+    (
+        "a box of size one keeps its size in its body",
+        "                (16, usize::try_from(large).ok()?)",
+        "                (8, usize::try_from(large).ok()?)",
+        [VTT_SIZES],
+    ),
+    (
+        "each piece of a cue is a cue of its own",
+        "                .position(|((_, s), &taken)| !taken && s.end == start && s.cue == cue);",
+        "                .position(|((_, s), &taken)| false && !taken && s.end == start && s.cue == cue);",
+        [VTT_WHOLE, WEBVTT_JOINED],
+    ),
+    (
+        "a cue goes on into a sample apart from its last",
+        "                .position(|((_, s), &taken)| !taken && s.end == start && s.cue == cue);",
+        "                .position(|((_, s), &taken)| !taken && s.cue == cue);",
+        [VTT_CONTIGUOUS],
+    ),
+    (
+        "two cues alike in a sample go on as one",
+        "                .position(|((_, s), &taken)| !taken && s.end == start && s.cue == cue);",
+        "                .position(|((_, s), &taken)| s.end == start && s.cue == cue);",
+        [VTT_TWICE],
+    ),
+    (
+        "an ended cue is given before one that began earlier",
+        "            .take_while(|e| first_showing.is_none_or(|first| place(e) < first))",
+        "            .take_while(|e| first_showing.is_none_or(|first| true || place(e) < first))",
+        [VTT_WHOLE, VTT_ORDER, WEBVTT_JOINED],
+    ),
+    (
+        "cues that began together come in the order they ended",
+        "        let place = |(order, w): &(u64, Whole)| (w.start, *order);",
+        "        let place = |(_, w): &(u64, Whole)| (w.start, 0);",
+        [VTT_TOGETHER],
+    ),
+]
+
+CONTAINER = [
+    (
+        "MP4's WebVTT is not offered as subtitles",
+        '                        || (t.kind == mp4::TrackKind::Data && t.codec_tag == *b"wvtt")',
+        "                        || false",
+        [WEBVTT_MP4, WEBVTT_JOINED],
+    ),
+    (
+        "MP4's WebVTT is offered as a format not read",
+        '                        } else if t.codec_tag == *b"wvtt" {',
+        "                        } else if false {",
+        [WEBVTT_MP4],
     ),
 ]
 
@@ -797,7 +913,9 @@ if __name__ == "__main__":
         (SRC / "subtitle" / "pgs.rs", PICTURES),
         (SRC / "subtitle" / "vobsub.rs", DVD),
         (SRC / "subtitle" / "dvb.rs", DVB_ROWS),
+        (SRC / "subtitle" / "isovtt.rs", ISOVTT),
         (SRC / "subtitle.rs", READER),
+        (SRC / "container.rs", CONTAINER),
         (SRC / "lib.rs", LIB),
     ]
     names = [name for _, rows in tables for name, *_ in rows]

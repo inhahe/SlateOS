@@ -151,3 +151,13 @@
 "\x22"
 "\xf0"
 "\x00\x00"
+# WebVTT in MP4 (ISO/IEC 14496-30): the sample entry, and the boxes a
+# sample's cues are made of.
+"wvtt"
+"vttc"
+"vtte"
+"vtta"
+"payl"
+"sttg"
+"iden"
+"ctim"

@@ -32,6 +32,12 @@ that encoder never writes -- a styled default, justification, colours,
 fonts, style runs out of order. ffmpeg's SRT of each is the answer, as for
 the rest.
 
+MP4's WebVTT (`wvtt`), which ffmpeg does not read: `webvtt_mp4.mp4` and
+`webvtt_overlap*.mp4` are GPAC's MP4Box's, the format's reference
+implementation, from the same `.vtt` as a WebM fixture, whose answer is
+theirs -- a cue cut into samples wherever another begins or ends, which
+the reader joins again, plain, overlapping and in fragments.
+
 Blu-ray's PGS, pictures of text, which ffmpeg cannot write: `pgs*.mkv` are
 written here segment by segment (`PgsSet`, `make_pgs`) and muxed by
 mkvmerge. Their answer, NAME.states, is a list of pictures: the canvas
@@ -55,7 +61,9 @@ answer is the generator's drawing; `vobsub_damage`'s is ffmpeg's alone.
 
 Run from this directory, on Windows, with gyan.dev's ffmpeg (2026-03-09, git
 9b7439c31b) and MKVToolNix's mkvmerge 99.0 on PATH (or in the MKVMERGE
-environment variable): `python generate_subtitle_fixtures.py`.
+environment variable), and GPAC's MP4Box (26.08-DEV, git a23ae2d) built in
+WSL (MP4BOX): `python generate_subtitle_fixtures.py`, or `--webvtt` or
+`--dvb` for those fixtures alone.
 """
 
 import hashlib
@@ -64,9 +72,16 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MKVMERGE = os.environ.get("MKVMERGE", "mkvmerge")
+# GPAC's MP4Box, the reference implementation of WebVTT in MP4 (`wvtt`,
+# ISO/IEC 14496-30), which ffmpeg does not read: built from source in WSL
+# (github.com/gpac/gpac, `./configure --static-bin && make`), there being no
+# Windows build that installs without an administrator. A command line run
+# under `wsl -d Ubuntu --`.
+MP4BOX = os.environ.get("MP4BOX", "~/gpac/bin/gcc/MP4Box")
 
 # --- SubRip: markup, as players have written it for twenty years ---
 SUBRIP = [
@@ -485,6 +500,25 @@ OVERLAP = [
     (12000, 13000, "after them all"),
 ]
 
+# WebVTT cues overlapping, which WebVTT in MP4 cuts into a sample for every
+# stretch between one cue's start or end and the next -- each cue in every
+# sample it shows through, a sample saying so where none shows -- for a
+# reader to join again: (start, end, identifier, settings, text). Two cues
+# beginning together come in the file's order; two alike but for their
+# identifier are two, the one after the other.
+WEBVTT_OVERLAP = [
+    (1000, 10000, "long", "line:0", "long, under all but the last"),
+    (2000, 3000, "", "", "short, inside the long"),
+    (2000, 4000, "", "align:start position:0%", "begun with the short, ended after it"),
+    (5000, 6000, "a", "", "the same text"),
+    (6000, 7000, "b", "", "the same text"),
+    (12000, 13000, "", "", "after them all, past a stretch of none"),
+    # A pair: the first ends while the second still shows, so a reader
+    # gives it out with the second still on screen.
+    (14000, 16000, "", "", "first of a pair"),
+    (15000, 17000, "", "", "second of a pair"),
+]
+
 # Fixture name -> {cue number: the answer, where it is not ffmpeg's}, each
 # checked by hand against libass (ASS, SSA), HTML and libass through ffmpeg's
 # own SubRip decoder (SubRip), or the WebVTT specification.
@@ -602,6 +636,17 @@ DEPARTURES = {
 # Matroska's WebVTT is WebM's cues, so its answers too; and mkvmerge stores
 # a cue's text without the spaces around it.
 DEPARTURES["webvtt_mkv"] = {**DEPARTURES["webvtt"], 7: 'spaced'}
+# MP4's WebVTT is the same cues again, split into samples and joined; and
+# MP4Box stores a cue's text without the spaces after it -- those before it
+# the reader passes over, as in WebM.
+DEPARTURES["webvtt_mp4"] = {**DEPARTURES["webvtt"], 7: 'spaced'}
+DEPARTURES["webvtt_overlap"] = {
+    # Placed by their settings, as in `webvtt`.
+    1: '{\\an8}long, under all but the last',
+    3: '{\\an1}begun with the short, ended after it',
+}
+DEPARTURES["webvtt_overlap_mp4"] = DEPARTURES["webvtt_overlap"]
+DEPARTURES["webvtt_overlap_fragments"] = DEPARTURES["webvtt_overlap"]
 DEPARTURES["movtext_styles"] = {
     # Timed text is plain text: `<i>` and `{\an8}` in it are characters,
     # kept from reading as SRT markup.
@@ -656,6 +701,28 @@ def mkvmerge(out, src, *options):
         sys.exit(f"mkvmerge {out} {src} failed:\n{r.stdout}{r.stderr}")
 
 
+def mp4box(out, src, *options):
+    """`src`, a .vtt, imported by MP4Box as the one track of a new MP4,
+    `out`, its cues split into samples as ISO/IEC 14496-30 has them -- with
+    `-for-test`, which writes no date and no version, so the same source
+    makes the same file. Run in WSL, from a scratch directory whose path
+    has no spaces."""
+    scratch = tempfile.mkdtemp(prefix="mp4box")
+    try:
+        shutil.copyfile(src, os.path.join(scratch, "in.vtt"))
+        drive, rest = os.path.splitdrive(scratch)
+        where = "/mnt/" + drive.rstrip(":").lower() + rest.replace(os.sep, "/")
+        command = f"cd '{where}' && {MP4BOX} -for-test -add in.vtt -new out.mp4 {' '.join(options)}"
+        r = subprocess.run(["wsl", "-d", "Ubuntu", "--", "bash", "-c", command],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace")
+        made = os.path.join(scratch, "out.mp4")
+        if r.returncode != 0 or not os.path.exists(made):
+            sys.exit(f"MP4Box {out} {src} failed:\n{r.stdout}{r.stderr}")
+        shutil.copyfile(made, out)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
 def cues_of(srt):
     """An SRT file's cues, each [number, times, text]."""
     if "\r" in srt:
@@ -668,13 +735,15 @@ def cues_of(srt):
     return cues
 
 
-def make(name, source_ext, source, container, muxer="ffmpeg", answer_from=None, codec="copy"):
+def make(name, source_ext, source, container, muxer="ffmpeg", answer_from=None, codec="copy",
+         options=()):
     """Mux `source` into NAME.container -- with ffmpeg (`codec` its subtitle
-    codec), with mkvmerge, or, for muxer "written", by `source` itself, a
-    function writing the file -- then write ffmpeg's SRT of it
-    (NAME.ffmpeg.srt) and the answer (NAME.srt): ffmpeg's, its DEPARTURES
-    made. A track this ffmpeg cannot read takes its SRT from fixture
-    `answer_from`, made already, which holds the same cues."""
+    codec), with mkvmerge, with MP4Box (`options` its own), or, for muxer
+    "written", by `source` itself, a function writing the file -- then write
+    ffmpeg's SRT of it (NAME.ffmpeg.srt) and the answer (NAME.srt):
+    ffmpeg's, its DEPARTURES made. A track this ffmpeg cannot read takes its
+    SRT from fixture `answer_from`, made already, which holds the same
+    cues."""
     src = os.path.join(HERE, f"{name}.source.{source_ext}")
     out = os.path.join(HERE, f"{name}.{container}")
     if muxer == "written":
@@ -683,6 +752,8 @@ def make(name, source_ext, source, container, muxer="ffmpeg", answer_from=None, 
         write(src, source)
         if muxer == "mkvmerge":
             mkvmerge(out, src)
+        elif muxer == "mp4box":
+            mp4box(out, src, *options)
         else:
             ffmpeg("-i", src, "-c:s", codec, "-fflags", "+bitexact", "-flags", "+bitexact", out)
         os.remove(src)
@@ -2283,6 +2354,30 @@ def make_mixed():
     print("wrote", path("dvb_and_pgs.mkv"))
 
 
+def webvtt_main():
+    """The WebVTT fixtures, in WebM, Matroska and MP4 (`python
+    generate_subtitle_fixtures.py --webvtt` makes them alone)."""
+    cues = [("", text) for text in WEBVTT] + WEBVTT_PLACED
+    vtt = "WEBVTT\n\n" + "".join(f"{vtt_time(1000 + 1500 * i)} --> {vtt_time(2000 + 1500 * i)}"
+                                  f"{' ' + settings if settings else ''}\n{text}\n\n"
+                                  for i, (settings, text) in enumerate(cues))
+    make("webvtt", "vtt", vtt, "webm")
+    make("webvtt_mkv", "vtt", vtt, "mkv", muxer="mkvmerge", answer_from="webvtt")
+    # WebVTT in MP4 (`wvtt`), which ffmpeg does not read: MP4Box's, the
+    # format's reference implementation, from the same .vtt -- the answer
+    # ffmpeg's for the same cues in WebM.
+    make("webvtt_mp4", "vtt", vtt, "mp4", muxer="mp4box", answer_from="webvtt")
+    overlap = "WEBVTT\n\n" + "".join(f"{ident + chr(10) if ident else ''}{vtt_time(start)} --> {vtt_time(end)}"
+                                      f"{' ' + settings if settings else ''}\n{text}\n\n"
+                                      for start, end, ident, settings, text in WEBVTT_OVERLAP)
+    make("webvtt_overlap", "vtt", overlap, "webm")
+    make("webvtt_overlap_mp4", "vtt", overlap, "mp4", muxer="mp4box", answer_from="webvtt_overlap")
+    # Fragmented, as DASH and HLS segments carry it: a fragment every two
+    # seconds, cues cut at none of them.
+    make("webvtt_overlap_fragments", "vtt", overlap, "mp4", muxer="mp4box", answer_from="webvtt_overlap",
+         options=("-frag", "2000"))
+
+
 def main():
     # One cue a second and a half apart, a second long.
     def srt_of(texts):
@@ -2305,12 +2400,7 @@ def main():
                      for i, (style, text) in enumerate(SSA))
     make("ssa", "ssa", SSA_HEADER + events, "mkv", muxer="mkvmerge")
 
-    cues = [("", text) for text in WEBVTT] + WEBVTT_PLACED
-    vtt = "WEBVTT\n\n" + "".join(f"{vtt_time(1000 + 1500 * i)} --> {vtt_time(2000 + 1500 * i)}"
-                                  f"{' ' + settings if settings else ''}\n{text}\n\n"
-                                  for i, (settings, text) in enumerate(cues))
-    make("webvtt", "vtt", vtt, "webm")
-    make("webvtt_mkv", "vtt", vtt, "mkv", muxer="mkvmerge", answer_from="webvtt")
+    webvtt_main()
 
     overlap = "".join(f"{i + 1}\n{srt_time(start)} --> {srt_time(end)}\n{text}\n\n"
                       for i, (start, end, text) in enumerate(OVERLAP))
@@ -2344,5 +2434,7 @@ def main():
 if __name__ == "__main__":
     if "--dvb" in sys.argv:
         dvb_main()
+    elif "--webvtt" in sys.argv:
+        webvtt_main()
     else:
         main()

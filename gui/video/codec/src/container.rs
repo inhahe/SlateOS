@@ -436,13 +436,21 @@ impl<R: Read + Seek> Container<R> {
                 .tracks()
                 .iter()
                 .enumerate()
-                .filter(|(_, t)| t.kind == mp4::TrackKind::Subtitle)
+                // WebVTT (`wvtt`), which FFmpeg's demuxer and so `mp4` make
+                // a data track -- FFmpeg reads none of it -- is subtitles
+                // here.
+                .filter(|(_, t)| {
+                    t.kind == mp4::TrackKind::Subtitle
+                        || (t.kind == mp4::TrackKind::Data && t.codec_tag == *b"wvtt")
+                })
                 .filter_map(|(i, t)| {
                     Some(SubtitleTrack {
                         number: u64::from(t.id),
                         key: u64::try_from(i).ok()?,
                         format: if t.codec == mp4::Codec::MovText {
                             SubtitleFormat::MovText
+                        } else if t.codec_tag == *b"wvtt" {
+                            SubtitleFormat::WebVtt
                         } else {
                             SubtitleFormat::Other
                         },

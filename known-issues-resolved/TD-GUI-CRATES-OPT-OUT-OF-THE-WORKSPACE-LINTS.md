@@ -1,5 +1,9 @@
 ## TD-GUI-CRATES-OPT-OUT-OF-THE-WORKSPACE-LINTS (lane C, 2026-08-17) - **fixed**
 
+**Status:** FIXED (lane C). Re-checked 2026-10-05: every crate under `gui/`
+sets `[lints] workspace = true`, the five in the table below included, and
+none keeps a lint policy of its own. Filed among the resolved that day.
+
 **What.** `CLAUDE.md` requires every crate to enable `clippy::all` +
 `clippy::pedantic` and five defensive lints (`unwrap_used`, `expect_used`,
 `panic`, `indexing_slicing`, `arithmetic_side_effects`). The workspace root

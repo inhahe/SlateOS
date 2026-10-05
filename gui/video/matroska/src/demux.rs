@@ -489,15 +489,16 @@ impl<R: Read + Seek> Demuxer<R> {
     ///   -- and whatever top-level element stands where it points is read,
     ///   be it the one named or not. The Cues are left for the first seek,
     ///   from where the last entry naming them points.
-    /// - A damaged SeekHead, Chapters, Tags or Attachments keeps what was
-    ///   read of it. Met before the first Cluster, reading goes on from the
+    /// - A damaged Info, SeekHead, Chapters, Tags or Attachments keeps what
+    ///   was read of it. Met before the first Cluster, reading goes on from the
     ///   next top-level element found after its ID (where FFmpeg comes to on
     ///   its second pass; FFmpeg first goes back to the start of the
     ///   Segment and reads it all again, which repeats every track before
     ///   the damage, and that is not followed here). Met through a SeekHead,
     ///   the SeekHead is followed no further, and its Cues are not used --
     ///   FFmpeg marks its index broken.
-    /// - A damaged Info or Tracks refuses the file, as it always has here.
+    /// - A damaged Tracks refuses the file, as it always has here: FFmpeg's
+    ///   second pass would list each track before the damage twice.
     fn read_description(&mut self, segment_ends: Option<u64>) -> Result<(), Error> {
         // Where the Segment says it ends, which bounds its top-level elements
         // until a resynchronisation: after one, FFmpeg takes the Segment for
@@ -521,7 +522,6 @@ impl<R: Read + Seek> Demuxer<R> {
             if ids::is_top_level(h.id) {
                 level1.met(h.id, h.start);
                 match h.id {
-                    ids::INFO => self.read_info(&h)?,
                     ids::TRACKS => self.read_tracks(&h)?,
                     ids::CUES => cues_read.push(h.start),
                     _ => {
@@ -599,6 +599,10 @@ impl<R: Read + Seek> Demuxer<R> {
         } else {
             level1.cues_unread().into_iter().collect()
         };
+        // FFmpeg reads a duration that is not a number as none.
+        if self.info.duration.is_some_and(f64::is_nan) {
+            self.info.duration = None;
+        }
         if self.info.timestamp_scale == 0 {
             self.info.timestamp_scale = 1_000_000;
         }
@@ -643,7 +647,6 @@ impl<R: Read + Seek> Demuxer<R> {
             return Err(Error::Invalid("a top-level element of unknown size"));
         }
         match id {
-            ids::INFO => self.read_info(&h),
             ids::TRACKS => self.read_tracks(&h),
             ids::CUES => {
                 // Read at once by FFmpeg: these are its index then.
@@ -654,9 +657,11 @@ impl<R: Read + Seek> Demuxer<R> {
         }
     }
 
-    /// A SeekHead, Chapters, Tags or Attachments element into `lists`.
+    /// An Info element into the segment's description, or a SeekHead,
+    /// Chapters, Tags or Attachments element into `lists`.
     fn read_listed(&mut self, h: &Header, levels: u32, lists: &mut Lists) -> Result<(), Error> {
         match h.id {
+            ids::INFO => nest::read_info(&mut self.r, h, levels, &mut self.info),
             ids::SEEK_HEAD => nest::read_seek_head(&mut self.r, h, levels, &mut lists.seek),
             ids::CHAPTERS => nest::read_chapters(&mut self.r, h, levels, &mut lists.chapters),
             ids::TAGS => nest::read_tags(&mut self.r, h, levels, &mut lists.tags),
@@ -665,37 +670,6 @@ impl<R: Read + Seek> Demuxer<R> {
             }
             _ => Ok(()),
         }
-    }
-
-    /// An Info element, as FFmpeg reads each one it meets: the timestamp
-    /// scale and duration start afresh; the strings and the date keep their
-    /// last value.
-    fn read_info(&mut self, h: &Header) -> Result<(), Error> {
-        let info = &mut self.info;
-        info.timestamp_scale = 1_000_000;
-        info.duration = None;
-        self.r.children(h, |r, c| {
-            match c.id {
-                ids::TIMESTAMP_SCALE => info.timestamp_scale = r.uint(c.size, 1_000_000)?,
-                ids::DURATION => info.duration = Some(r.float(c.size, 0.0)?),
-                // FFmpeg reads an empty string as one, not as none.
-                ids::TITLE => info.title = Some(r.string(c.size)?.unwrap_or_default()),
-                ids::MUXING_APP => info.muxing_app = Some(r.string(c.size)?.unwrap_or_default()),
-                ids::DATE_UTC => {
-                    let bytes = r.binary(c.size, MAX_BINARY)?;
-                    info.date_utc = <[u8; 8]>::try_from(bytes.as_slice())
-                        .ok()
-                        .map(i64::from_be_bytes);
-                }
-                _ => {}
-            }
-            Ok(())
-        })?;
-        // FFmpeg reads a duration that is not a number as none.
-        if self.info.duration.is_some_and(f64::is_nan) {
-            self.info.duration = None;
-        }
-        Ok(())
     }
 
     /// A Tracks element: its tracks added to those of any before it, as

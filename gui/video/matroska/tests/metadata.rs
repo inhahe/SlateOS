@@ -153,6 +153,11 @@ fn metadata_of_a_date() {
 }
 
 #[test]
+fn metadata_of_a_damaged_info() {
+    holds_to_ffprobe("meta_damaged_info.mkv");
+}
+
+#[test]
 fn metadata_of_two_tracks_elements() {
     holds_to_ffprobe("meta_two_tracks.mkv");
 }

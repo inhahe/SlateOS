@@ -50,12 +50,12 @@
 //!
 //! # Held to FFmpeg
 //!
-//! Every packet of 47 files, and the packets after 97 seeks, are ffprobe's
+//! Every packet of 48 files, and the packets after 97 seeks, are ffprobe's
 //! (`tests/fixtures.rs`, `tests/data/generate_fixtures.py`), and so is the
 //! display matrix -- or the refusal -- of 22 files' video projections
 //! ([`Video::display_matrix`], `tests/projection.rs`), and the metadata,
-//! chapters and attachments of ten files and of one cut short at each of 660
-//! lengths (`tests/metadata.rs`); what ffprobe cannot show is in
+//! chapters and attachments of eleven files and of one cut short at each of
+//! 660 lengths (`tests/metadata.rs`); what ffprobe cannot show is in
 //! `tests/beyond_ffprobe.rs` and `tests/metadata.rs`; and `mutate.py` breaks
 //! the code one rule at a time and checks the tests notice.
 

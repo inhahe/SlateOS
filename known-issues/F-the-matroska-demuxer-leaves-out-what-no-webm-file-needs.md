@@ -21,10 +21,14 @@ of them.
 | A source that cannot seek (a pipe, a live stream) | `Demuxer::open` measures the source, so it needs `Seek` | a streaming mode: the reader already knows where every element ends, but `open`'s SeekHead and the seek's index read ahead |
 | A top-level element of unknown size other than a Cluster (the specification allows it of none) | refused before the first Cluster; ends following the SeekHead there | FFmpeg reads one until an element that cannot be inside it begins, as it reads a Cluster of unknown size |
 | A chapter without an end, in a file whose Info gives no duration | the last such chapter ends where it starts (`Demuxer::chapter_ends`) | FFmpeg estimates a duration from the streams' bit rates when probing; that needs the bit rates, which the demuxer does not know |
-| Damage in an Info or Tracks before the first Cluster | the file is refused | FFmpeg reads the Segment again from its start, which repeats every track before the damage (design-decisions §1358 for why that is not copied for chapters, tags and attachments); reading on after the damaged element, as there, would serve |
+| Damage in a Tracks before the first Cluster | the file is refused | FFmpeg reads the Segment again from its start, which lists every track before the damage twice (design-decisions §1358 for why that is not copied); keeping the tracks read before the damage, once, and reading on after the element -- as for a damaged Info -- would serve, with each track's fields read as FFmpeg's partial `TrackEntry` holds them |
 
 **Where.** `gui/video/matroska/src/` (`demux.rs`, `track.rs`, `nest.rs`,
 `metadata.rs`); the crate's module documentation says what it reads.
+
+**Was here, fixed 2026-10-05:** a damaged Info before the first Cluster
+refused the file. It keeps the fields read before the damage and reading
+goes on, as FFmpeg plays it (`meta_damaged_info.mkv`).
 
 **Was here, fixed 2026-10-05:** with several Cues elements before the first
 Cluster, the first alone was the index, where FFmpeg seeks by all of them

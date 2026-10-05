@@ -827,7 +827,8 @@ def m_pictures():
 
 # The metadata fixtures whose packets are answered too: those whose streams
 # are their tracks alone (an attachment is a stream to ffprobe).
-PACKETS_TOO = {"meta_tags.mkv", "meta_chapters.mkv", "meta_info.mkv", "meta_date.mkv", "meta_two_tracks.mkv"}
+PACKETS_TOO = {"meta_tags.mkv", "meta_chapters.mkv", "meta_info.mkv", "meta_date.mkv", "meta_two_tracks.mkv",
+               "meta_damaged_info.mkv"}
 
 
 def metadata_fixtures():
@@ -986,6 +987,13 @@ def metadata_fixtures():
         el("1654AE6B", snow_track(1)), m_clusters())
     out["meta_date.mkv"] = m_file(m_info(title="", muxer="dated", date=date), el("1654AE6B", snow_track(1)),
                                   m_clusters())
+
+    # An Info damaged partway, before the first Cluster -- its MuxingApp runs
+    # past it: FFmpeg keeps the fields read before the damage (a tick of half
+    # a millisecond, the title) and reads on, the Tracks once.
+    bad_child = bytes.fromhex("4D80") + vint(100) + b"lost"
+    damaged = el("1549A966", uint("2AD7B1", 500_000) + string("7BA9", "kept") + bad_child)
+    out["meta_damaged_info.mkv"] = m_file(damaged, el("1654AE6B", snow_track(1)), m_clusters())
 
     # Two Tracks before the first Cluster: FFmpeg reads both, and a tag names
     # the second's track.

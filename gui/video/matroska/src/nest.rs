@@ -24,7 +24,7 @@
 use std::io::{Read, Seek};
 
 use crate::ebml::{Header, Id, MAX_BINARY, MAX_STRING, Reader, Size, vint_len};
-use crate::{Error, ids};
+use crate::{Error, SegmentInfo, ids};
 
 /// How deep master elements nest at most, the Segment counted: FFmpeg's
 /// `EBML_MAX_DEPTH`.
@@ -224,6 +224,101 @@ fn string<R: Read + Seek>(
         s.truncate(nul);
     }
     *out = Some(s);
+    Ok(())
+}
+
+/// A float into `out`, as FFmpeg's `ebml_read_float`: `default` if empty;
+/// 4 or 8 bytes, big-endian; refused, `out` untouched, at any other length;
+/// and if the file ends inside it, what was read, the missing bytes zeros --
+/// kept, and an error.
+pub(crate) fn float<R: Read + Seek>(
+    r: &mut Reader<R>,
+    h: &Header,
+    default: f64,
+    out: &mut Option<f64>,
+) -> Result<(), Error> {
+    let n = size_of(h);
+    if n == 0 {
+        *out = Some(default);
+        return Ok(());
+    }
+    if n != 4 && n != 8 {
+        return Err(Error::Invalid("a float of another length than 0, 4 or 8"));
+    }
+    let mut bytes = [0u8; 8];
+    let mut short = false;
+    let len = if n == 8 { 8 } else { 4 };
+    for b in bytes.iter_mut().take(len) {
+        match byte(r)? {
+            Some(v) => *b = v,
+            None => short = true,
+        }
+    }
+    *out = Some(if n == 4 {
+        let [a, b, c, d, ..] = bytes;
+        f64::from(f32::from_be_bytes([a, b, c, d]))
+    } else {
+        f64::from_be_bytes(bytes)
+    });
+    if short {
+        return Err(Error::Truncated);
+    }
+    Ok(())
+}
+
+/// `DateUTC` into `out`: the date where the element is the eight bytes it
+/// should be, none at any other length -- as FFmpeg reads the bytes and uses
+/// them only when there are eight -- and none, with an error, if the file
+/// ends inside it (FFmpeg's `ebml_read_binary` empties the field then).
+fn date<R: Read + Seek>(r: &mut Reader<R>, h: &Header, out: &mut Option<i64>) -> Result<(), Error> {
+    let n = size_of(h);
+    if n > MAX_BINARY {
+        return Err(Error::Invalid("a binary element too large"));
+    }
+    if n > r.remaining() {
+        *out = None;
+        return Err(Error::Truncated);
+    }
+    if n == 8 {
+        let mut b = [0u8; 8];
+        r.read_into(&mut b)?;
+        *out = Some(i64::from_be_bytes(b));
+    } else {
+        *out = None;
+        r.seek_to(h.data.saturating_add(n))?;
+    }
+    Ok(())
+}
+
+/// An Info element into `info`, as FFmpeg reads each one it meets: the
+/// timestamp scale and the duration start afresh (FFmpeg's defaults: a
+/// millisecond, and no duration), and the strings and the date keep their
+/// last value unless this Info gives one.
+///
+/// # Errors
+///
+/// When it is damaged; what was read before stays in `info`.
+pub(crate) fn read_info<R: Read + Seek>(
+    r: &mut Reader<R>,
+    h: &Header,
+    levels: u32,
+    info: &mut SegmentInfo,
+) -> Result<(), Error> {
+    enter(levels)?;
+    info.timestamp_scale = 1_000_000;
+    info.duration = None;
+    let end = end_of(h)?;
+    r.seek_to(h.data)?;
+    while let Some(c) = child(r, end).map_err(|b| b.error)? {
+        match c.id {
+            ids::TIMESTAMP_SCALE => uint(r, &c, 1_000_000, &mut info.timestamp_scale)?,
+            ids::DURATION => float(r, &c, 0.0, &mut info.duration)?,
+            ids::TITLE => string(r, &c, None, &mut info.title)?,
+            ids::MUXING_APP => string(r, &c, None, &mut info.muxing_app)?,
+            ids::DATE_UTC => date(r, &c, &mut info.date_utc)?,
+            _ => skip(r, &c)?,
+        }
+    }
     Ok(())
 }
 
@@ -739,6 +834,30 @@ mod tests {
         let (mut r, h) = top(&[0x85, 0x83, b'a', 0, b'b']);
         string(&mut r, &h, None, &mut s).unwrap();
         assert_eq!(s.as_deref(), Some(&b"a"[..]), "up to its first NUL");
+    }
+
+    #[test]
+    fn a_float_is_four_or_eight_bytes_and_kept_as_far_as_read() {
+        // 1.0 as a 4-byte and an 8-byte float.
+        let (mut r, h) = top(&[0x44, 0x89, 0x84, 0x3f, 0x80, 0, 0]);
+        let mut d = None;
+        float(&mut r, &h, 9.0, &mut d).unwrap();
+        assert_eq!(d, Some(1.0));
+        let (mut r, h) = top(&[0x44, 0x89, 0x88, 0x3f, 0xf0, 0, 0, 0, 0, 0, 0]);
+        float(&mut r, &h, 9.0, &mut d).unwrap();
+        assert_eq!(d, Some(1.0));
+        let (mut r, h) = top(&[0x44, 0x89, 0x80]);
+        float(&mut r, &h, 9.0, &mut d).unwrap();
+        assert_eq!(d, Some(9.0), "empty: the default");
+        // Three bytes: refused, untouched.
+        let (mut r, h) = top(&[0x44, 0x89, 0x83, 1, 2, 3]);
+        let mut d = Some(7.0);
+        assert!(float(&mut r, &h, 9.0, &mut d).is_err());
+        assert_eq!(d, Some(7.0));
+        // Cut short after two of eight bytes: those two, then zeros.
+        let (mut r, h) = top(&[0x44, 0x89, 0x88, 0x40, 0x08]);
+        assert_eq!(float(&mut r, &h, 9.0, &mut d), Err(Error::Truncated));
+        assert_eq!(d, Some(3.0));
     }
 
     #[test]

@@ -320,6 +320,11 @@ fn packets_of_meta_date() {
     demuxes_as_ffmpeg_does("meta_date.mkv");
 }
 
+#[test]
+fn packets_of_meta_damaged_info() {
+    demuxes_as_ffmpeg_does("meta_damaged_info.mkv");
+}
+
 // Cues the SeekHead points at twice -- the last entry's are FFmpeg's -- and
 // Cues FFmpeg leaves unused because following the SeekHead failed after
 // them.

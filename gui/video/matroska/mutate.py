@@ -96,6 +96,8 @@ META_CUT = "metadata_cut_short_anywhere_is_ffmpeg_s"
 META_DAMAGE = "damage_before_the_first_cluster_keeps_what_was_read"
 META_DEEP = "tags_nest_no_deeper_than_ffmpeg_reads"
 META_INFO_PACKETS = "packets_of_meta_info"
+META_DAMAGED_INFO = "metadata_of_a_damaged_info"
+META_DAMAGED_INFO_PACKETS = "packets_of_meta_damaged_info"
 META_TWO_TRACKS_PACKETS = "packets_of_meta_two_tracks"
 
 # (name, old, new, [tests that must fail])
@@ -347,10 +349,13 @@ CUES = [
 DEMUX = [
     # Reading the description.
     (
-        "the timestamp scale is a millisecond whatever the file says",
-        "ids::TIMESTAMP_SCALE => info.timestamp_scale = r.uint(c.size, 1_000_000)?,",
-        "ids::TIMESTAMP_SCALE => {\n                            r.uint(c.size, 1_000_000)?;\n                        }",
-        [TICK, SEGMENT],
+        "a damaged Info before the Clusters refuses the file",
+        "                    ids::TRACKS => self.read_tracks(&h)?,\n"
+        "                    ids::CUES => cues_read.push(h.start),",
+        "                    ids::INFO => nest::read_info(&mut self.r, &h, IN_SEGMENT, &mut self.info)?,\n"
+        "                    ids::TRACKS => self.read_tracks(&h)?,\n"
+        "                    ids::CUES => cues_read.push(h.start),",
+        [META_DAMAGED_INFO, META_DAMAGED_INFO_PACKETS],
     ),
     (
         "SeekHead positions count from the file's start",
@@ -398,12 +403,6 @@ DEMUX = [
         [SEEKS_CUES_BROKEN],
     ),
     (
-        "a second Info does not start its numbers afresh",
-        "        info.timestamp_scale = 1_000_000;\n        info.duration = None;\n",
-        "",
-        [META_INFO_PACKETS],
-    ),
-    (
         "a second Tracks before the Clusters is not read",
         "                    ids::TRACKS => self.read_tracks(&h)?,",
         "                    ids::TRACKS if self.tracks.is_empty() => self.read_tracks(&h)?,\n"
@@ -421,22 +420,6 @@ DEMUX = [
         "let by_position = id == ids::SEEK_HEAD || id == ids::TAGS;",
         "let by_position = true;",
         [META_SEEK_HEAD],
-    ),
-    (
-        "an empty title is none",
-        "ids::TITLE => info.title = Some(r.string(c.size)?.unwrap_or_default()),",
-        "ids::TITLE => info.title = r.string(c.size)?,",
-        [META_DATE],
-    ),
-    (
-        "a DateUTC of another size is a date",
-        "                    info.date_utc = <[u8; 8]>::try_from(bytes.as_slice())\n"
-        "                        .ok()\n"
-        "                        .map(i64::from_be_bytes);",
-        "                    if let Ok(b) = <[u8; 8]>::try_from(bytes.as_slice()) {\n"
-        "                        info.date_utc = Some(i64::from_be_bytes(b));\n"
-        "                    }",
-        [META_INFO],
     ),
     (
         "after damage before the first Cluster, the Segment's stated end still bounds it",
@@ -882,6 +865,42 @@ METADATA = [
 ]
 
 NEST = [
+    # The Info.
+    (
+        "the timestamp scale is a millisecond whatever the file says",
+        "            ids::TIMESTAMP_SCALE => uint(r, &c, 1_000_000, &mut info.timestamp_scale)?,",
+        "            ids::TIMESTAMP_SCALE => skip(r, &c)?,",
+        [TICK, SEGMENT],
+    ),
+    (
+        "a second Info does not start its numbers afresh",
+        "    info.timestamp_scale = 1_000_000;\n    info.duration = None;\n",
+        "",
+        [META_INFO_PACKETS],
+    ),
+    (
+        "an empty title is none",
+        "            ids::TITLE => string(r, &c, None, &mut info.title)?,",
+        "            ids::TITLE => {\n"
+        "                string(r, &c, None, &mut info.title)?;\n"
+        "                if info.title.as_ref().is_some_and(Vec::is_empty) {\n"
+        "                    info.title = None;\n"
+        "                }\n"
+        "            }",
+        [META_DATE],
+    ),
+    (
+        "a DateUTC of another size is a date",
+        "    } else {\n        *out = None;\n        r.seek_to(h.data.saturating_add(n))?;\n",
+        "    } else {\n        r.seek_to(h.data.saturating_add(n))?;\n",
+        [META_INFO],
+    ),
+    (
+        "a float cut short is not kept",
+        "    *out = Some(if n == 4 {",
+        "    if short {\n        return Err(Error::Truncated);\n    }\n    *out = Some(if n == 4 {",
+        ["a_float_is_four_or_eight_bytes_and_kept_as_far_as_read"],
+    ),
     (
         "a number cut short is not kept",
         "    *out = v;\n    if short {",

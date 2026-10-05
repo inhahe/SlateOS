@@ -43,7 +43,11 @@ listed once.
   then reads on from the damaged element's ID. Here the damaged element
   keeps what was read, and reading goes on from the next top-level element
   found after its ID: where FFmpeg's second pass goes on from, without the
-  repetition. (A damaged Info or Tracks still refuses the file, as before.)
+  repetition. A damaged Info is read the same way -- which is FFmpeg's
+  whole answer for it, its second pass reading the same Info again and
+  the Tracks after it once (`meta_damaged_info.mkv`). A damaged Tracks
+  still refuses the file, as before: FFmpeg's second pass would list
+  each of its tracks before the damage twice.
 - *Bounded.* FFmpeg's dictionary costs a search of the whole list per
   change; a file built to hold hundreds of thousands of tags for one
   dictionary would take FFmpeg, and an exact copy, hours. Past 2^28 units of
@@ -71,7 +75,7 @@ listed once.
   file, but what it gives is a file with each of its tracks twice -- a
   player shows two video tracks, one never playing -- and twice each
   attachment. Copying it would copy a fault.
-- *Refusing the file* is what a damaged Info or Tracks already does here;
+- *Refusing the file* is what a damaged Tracks already does here;
   for damaged tags it would refuse a file that played before this change,
   over metadata.
 - *Dropping the element whole* loses the chapters or tags before the
@@ -91,7 +95,7 @@ FFmpeg does not know, where this used to take it for damage and lose the
 frames after it up to the next Cluster -- or the whole file, before the
 first (`reserved_ids.mkv`).
 
-**Held to.** `gui/video/matroska/tests/metadata.rs` (ten files' metadata
+**Held to.** `gui/video/matroska/tests/metadata.rs` (eleven files' metadata
 and the 660 cuts against ffprobe, and what ffprobe cannot show, the
 departure above among it), `tests/fixtures.rs` (the packets and seeks of
 the new files), and `mutate.py`'s rows for each rule.

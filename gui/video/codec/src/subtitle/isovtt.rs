@@ -19,8 +19,10 @@
 //! order, so that two cues showing through a split in the other order are
 //! ended and begun again. Here a cue goes on wherever it is in the sample.
 
+use super::joined;
+
 /// A cue as a sample carries it (`vttc`).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) struct SampleCue {
     /// The cue's identifier (`iden`); empty where it has none.
     pub id: String,
@@ -87,95 +89,40 @@ fn boxes(data: &[u8]) -> Option<Vec<([u8; 4], &[u8])>> {
 
 /// A cue showing: from when its first sample began to when its last ended,
 /// in the track's ticks.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Whole {
-    pub start: i64,
-    pub end: i64,
-    pub cue: SampleCue,
-}
+pub(crate) type Whole = joined::Whole<i64, SampleCue>;
 
-/// A track's cues made whole again from its samples.
+/// A track's cues made whole again from its samples: each sample's cues
+/// pieces as long as the sample ([`joined::Joined`]).
 ///
 /// Given in the order they began, as every reader's cues are: a cue that
 /// has ended waits while one that began before it still shows. Cues that
 /// began together come in the order their first sample carries them, which
 /// is the order the `.vtt` they were made from gives them.
 #[derive(Debug, Default)]
-pub(crate) struct Joined {
-    /// The cues showing at the last sample's end, each with its place in
-    /// the order cues began.
-    showing: Vec<(u64, Whole)>,
-    /// Cues ended, waiting for those that began before them.
-    ended: Vec<(u64, Whole)>,
-    /// The place the next cue to begin takes.
-    next: u64,
-}
+pub(crate) struct Joined(joined::Joined<i64, SampleCue>);
 
 impl Joined {
     /// A sample from `start` to `end` (ticks) carrying `cues`: each of them
-    /// the last sample showed, to its end, goes on; the others begin. The
+    /// the last sample showed, to its end, goes on -- each at most once, so
+    /// that two alike in a sample are two cues -- and the others begin. The
     /// cues showing that it does not carry end where their last sample did.
     /// Answers the cues ended that can now be given, in the order they
     /// began.
     pub(crate) fn sample(&mut self, start: i64, end: i64, cues: Vec<SampleCue>) -> Vec<Whole> {
-        // Each cue showing goes on at most once: two alike in a sample are
-        // two cues, and so are two alike in the one before.
-        let mut going_on = vec![false; self.showing.len()];
-        let mut begun = Vec::new();
-        for cue in cues {
-            let found = self
-                .showing
-                .iter()
-                .zip(&going_on)
-                .position(|((_, s), &taken)| !taken && s.end == start && s.cue == cue);
-            match found.and_then(|i| going_on.get_mut(i)) {
-                Some(taken) => *taken = true,
-                None => begun.push(cue),
-            }
-        }
-        let mut still = Vec::with_capacity(self.showing.len().saturating_add(begun.len()));
-        for ((order, whole), on) in self.showing.drain(..).zip(going_on) {
-            if on {
-                still.push((order, Whole { end, ..whole }));
-            } else {
-                self.ended.push((order, whole));
-            }
-        }
-        for cue in begun {
-            still.push((self.next, Whole { start, end, cue }));
-            self.next = self.next.saturating_add(1);
-        }
-        self.showing = still;
-        self.release()
+        self.0
+            .sample(end, cues.into_iter().map(|cue| (start, end, cue)).collect())
     }
 
     /// The track's end: every cue still showing has ended, where its last
     /// sample did. Answers every cue not yet given, in the order they began.
     pub(crate) fn finish(&mut self) -> Vec<Whole> {
-        self.ended.append(&mut self.showing);
-        self.release()
+        self.0.finish()
     }
 
     /// Everything forgotten: after a seek, the samples read next are from
     /// elsewhere in the track.
     pub(crate) fn clear(&mut self) {
-        self.showing.clear();
-        self.ended.clear();
-        self.next = 0;
-    }
-
-    /// The ended cues that began before every cue still showing, in the
-    /// order they began.
-    fn release(&mut self) -> Vec<Whole> {
-        let place = |(order, w): &(u64, Whole)| (w.start, *order);
-        self.ended.sort_by_key(place);
-        let first_showing = self.showing.iter().map(place).min();
-        let ready = self
-            .ended
-            .iter()
-            .take_while(|e| first_showing.is_none_or(|first| place(e) < first))
-            .count();
-        self.ended.drain(..ready).map(|(_, w)| w).collect()
+        self.0.clear();
     }
 }
 
@@ -408,10 +355,20 @@ mod tests {
                 Whole {
                     start: 0,
                     end: 10,
-                    cue: a
+                    cue: a.clone()
                 },
             ]
         );
+        // Both alike in the next sample too: both go on, neither taken
+        // twice.
+        joined.sample(0, 10, vec![a.clone(), a.clone()]);
+        joined.sample(10, 20, vec![a.clone(), a.clone()]);
+        let both = Whole {
+            start: 0,
+            end: 20,
+            cue: a,
+        };
+        assert_eq!(joined.finish(), [both.clone(), both]);
     }
 
     #[test]

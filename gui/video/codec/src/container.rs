@@ -449,6 +449,8 @@ impl<R: Read + Seek> Container<R> {
                         key: u64::try_from(i).ok()?,
                         format: if t.codec == mp4::Codec::MovText {
                             SubtitleFormat::MovText
+                        } else if t.codec == mp4::Codec::Ttml {
+                            SubtitleFormat::Ttml
                         } else if t.codec_tag == *b"wvtt" {
                             SubtitleFormat::WebVtt
                         } else {

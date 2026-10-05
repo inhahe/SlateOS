@@ -37,6 +37,9 @@ pub enum Codec {
     /// 3GPP timed text (`tx3g`; QuickTime's `text`): MP4's subtitles, what
     /// `ffmpeg -c:s mov_text`, HandBrake and phones write.
     MovText,
+    /// TTML (`stpp`, ISO/IEC 14496-30): a TTML document a sample, what
+    /// broadcasters' DASH segments carry.
+    Ttml,
     #[default]
     Other,
 }
@@ -46,6 +49,7 @@ pub enum Codec {
 pub(crate) fn subtitle_codec(tag: [u8; 4]) -> Option<Codec> {
     match &tag {
         b"tx3g" | b"text" => Some(Codec::MovText),
+        b"stpp" => Some(Codec::Ttml),
         // CEA-608 closed captions, which no player here reads.
         b"c608" => Some(Codec::Other),
         _ => None,
@@ -281,6 +285,8 @@ mod tests {
         // 3GPP timed text, as MP4 and QuickTime name it.
         assert_eq!(subtitle_codec(*b"tx3g"), Some(Codec::MovText));
         assert_eq!(subtitle_codec(*b"text"), Some(Codec::MovText));
+        // TTML, which FFmpeg's table names though it has no decoder.
+        assert_eq!(subtitle_codec(*b"stpp"), Some(Codec::Ttml));
         // Subtitles, but none read here.
         assert_eq!(subtitle_codec(*b"c608"), Some(Codec::Other));
         // Not in FFmpeg's table: a data track with these stays one.

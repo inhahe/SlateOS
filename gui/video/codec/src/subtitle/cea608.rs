@@ -10,7 +10,9 @@
 //! `cdt2` atom's header and pairs among them.)
 //!
 //! **Whose rules.** Neither FFmpeg's decoder nor CCExtractor is right
-//! throughout, so this follows the rules a decoder is held to: 47 CFR
+//! throughout -- FFmpeg ignores Backspace and Erase Non-Displayed Memory and
+//! mixes CC2 into CC1, CCExtractor ignores parity -- so this follows the
+//! rules a decoder is held to: 47 CFR
 //! 79.101, the FCC's, for every command -- a character failing parity a
 //! solid block, a control code repeated in the very next pair ignored as
 //! its redundant copy (and not when pairs apart), Backspace erasing one

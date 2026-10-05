@@ -2843,10 +2843,11 @@ def ttml_main():
 #
 #   - ffmpeg's ccaption_dec (the gyan.dev build above) on pop-on and roll-up
 #     timing and text. It also mixes CC2's commands into CC1's screen,
-#     ignores Backspace, lets a PAC's indent wipe the row, drops a character
-#     of bad parity, swaps the broken bar and the vertical bar, puts every
-#     caption at the top left, and starts a roll-up or paint-on caption at
-#     the command before it even with nothing on the screen.
+#     ignores Backspace and Erase Non-Displayed Memory, lets a PAC's indent
+#     wipe the row, drops a character of bad parity, swaps the broken bar
+#     and the vertical bar, puts every caption at the top left, and starts a
+#     roll-up or paint-on caption at the command before it even with nothing
+#     on the screen.
 #   - CCExtractor 0.94 (Ubuntu's package, unpacked in WSL without
 #     installing: CCEXTRACTOR) on Backspace, Delete to End of Row, indents,
 #     tab offsets and channels. It groups roll-up lines otherwise, ignores

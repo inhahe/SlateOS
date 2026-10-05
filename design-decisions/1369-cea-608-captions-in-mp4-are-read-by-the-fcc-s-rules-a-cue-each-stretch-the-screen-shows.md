@@ -10,8 +10,9 @@ iTunes episodes keep them as a caption track. SlateOS's video library
 refused that track. It reads it now. The two programs that read such
 captions -- FFmpeg, and CCExtractor, the usual caption extractor -- each
 show some captions otherwise than a television does: FFmpeg ignores
-backspaces, mixes a second caption channel into the first, and puts every
-caption at the top of the picture. So this one follows the FCC's own rules
+backspaces and the command that throws a loaded caption away, mixes a
+second caption channel into the first, and puts every caption at the top
+of the picture. So this one follows the FCC's own rules
 for caption decoders, and each test file is checked against whichever of
 the two programs is right about what that file holds.
 
@@ -69,7 +70,7 @@ bytes, in a `cdat` atom for the first field (channels CC1 and CC2) and
 | | For | Against |
 |---|---|---|
 | **The FCC's rules, checked against both readers (chosen)** | What a television shows; every rule has its text to point at | No single external oracle: each fixture says which reader it is checked against, and the rules alone decide the few things neither keeps |
-| FFmpeg's output, with departures | One oracle, as the other formats have | Departures for Backspace, channels, PACs, parity, placement, tables and paint-on timing: most of what a caption does |
+| FFmpeg's output, with departures | One oracle, as the other formats have | Departures for Backspace, Erase Non-Displayed Memory, channels, PACs, parity, placement, tables and paint-on timing: most of what a caption does |
 | CCExtractor's output | Right about most commands | Groups roll-up lines otherwise, ignores parity, its own glyphs for quotes and corners, and crashes reading every caption MP4 tried |
 | A cue for every change, as a television updates its screen | Exactly what a television shows | A cue per character pair while captions are typed; the player draws text, not a terminal |
 
@@ -79,6 +80,8 @@ on cue times and text against FFmpeg (pop-on, styles, roll-up) or
 CCExtractor (pop-on, every character, paint-on: Backspace, Delete to End of
 Row, tab offsets, PACs), with each departure printed and its reason given:
 - FFmpeg begins a roll-up line at a blank screen.
+- FFmpeg shows a caption loaded and then thrown away (Erase Non-Displayed
+  Memory) with the next.
 - Six glyphs CCExtractor writes otherwise.
 
 Two fixtures, `cea608_modes` (switching style, a window moved) and

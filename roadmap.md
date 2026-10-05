@@ -6046,12 +6046,6 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [-] `[F]` Video-encoded capture fallback (VP9 for games/video, §1332: libvpx, threaded; hardware where found) -- *(Lane F 2026-10-04: the compositor's stream codes buffer windows as VP9, §1343; the service that reads it is not built.)*
 
 ### 3.4 Window manager / desktop shell
-- [x] `[C]` Desktop with draggable icons (snap-to-grid or free placement)
-  - [x] Grid snapping (cells sized by the icon-size setting), free placement + auto-arrange modes, chosen from the desktop menu's View submenu and saved in `deskicons.yaml` — **really done 2026-09-25**: this line was ticked from the start while the only modes were a snap and an always-sorted arrange, with no way to choose; see lane C's entry above and `design-decisions.md` §869
-  - [x] Rubber-band selection, Ctrl+A select all, Ctrl+Click toggle -- **really done 2026-10-05**: Ctrl+click (and a rubber band dragged with Ctrl held) was not reachable until then, because the desktop was never told that Ctrl is held; lane F put the modifiers on every pointer event and the shell now reads them (`known-issues/TD-C-CTRL-CLICK-CANNOT-ADD-A-DESKTOP-ICON-TO-THE-SELECTION.md`). Corrected 2026-09-25
-  - [x] Drag-and-drop repositioning with ghost indicator, multi-select drag
-  - [x] Default icons (This PC, Recycle Bin, Documents, Home), icon types (9 variants)
-  - [x] Double-click activate, right-click context menu, F2 rename, Delete -- **really done 2026-09-25**: ticked from the start, when only the double-click reached anything, and it asked for a folder to be *executed* and did nothing for This PC or the Recycle Bin. Opening, the icon's own right-click menu (Open, Rename, Pin to taskbar, Remove from desktop), Delete and F2 rename in place are all real now.
 - [ ] Theme color API for applications — **was marked `[x]` on the strength of a `ThemeColors` helper no application ever held**, deleted 2026-09-03 with the rest (§810). Unchecked 2026-09-03: applications do *not* get their colours from an API, they each write out their own copy of the dark palette — 2,258 `const NAME: Color` across 135 files, tracked as `TD-C-EVERY-APPLICATION-CARRIES-ITS-OWN-COPY-OF-THE-PALETTE-TOO`, which is what actually has to be done for this item to be true. The API it should be built on is `appearance::Palette`, not a toolkit type.
 
 ### 3.5 GUI toolkit / widget API

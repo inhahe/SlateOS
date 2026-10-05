@@ -1286,6 +1286,12 @@ prerequisite that is no longer in `roadmap.md` is done: look for it here, or
 - [x] Default apps settings (default_apps.rs: 12 content categories, 10 built-in apps, per-category/extension handlers, app register/unregister, 3-tab panel)
 - [x] Backup settings (backup_settings.rs: full/incremental/differential/mirror, 5 frequencies, local/network targets, source/exclusion management, retention policies, history, 5-tab panel)
 - [x] Device settings (device_settings.rs: 10 device categories, 6 device statuses, 5 driver states, power management, device preferences, hardware report export, 4-tab panel, 20 tests)
+- [x] `[C]` Desktop with draggable icons (snap-to-grid or free placement)
+  - [x] Grid snapping (cells sized by the icon-size setting), free placement + auto-arrange modes, chosen from the desktop menu's View submenu and saved in `deskicons.yaml` — **really done 2026-09-25**: this line was ticked from the start while the only modes were a snap and an always-sorted arrange, with no way to choose; see lane C's entry above and `design-decisions.md` §869
+  - [x] Rubber-band selection, Ctrl+A select all, Ctrl+Click toggle -- **really done 2026-10-05**: Ctrl+click (and a rubber band dragged with Ctrl held) was not reachable until then, because the desktop was never told that Ctrl is held; lane F put the modifiers on every pointer event and the shell now reads them (`known-issues/TD-C-CTRL-CLICK-CANNOT-ADD-A-DESKTOP-ICON-TO-THE-SELECTION.md`). Corrected 2026-09-25
+  - [x] Drag-and-drop repositioning with ghost indicator, multi-select drag
+  - [x] Default icons (This PC, Recycle Bin, Documents, Home), icon types (9 variants)
+  - [x] Double-click activate, right-click context menu, F2 rename, Delete -- **really done 2026-09-25**: ticked from the start, when only the double-click reached anything, and it asked for a folder to be *executed* and did nothing for This PC or the Recycle Bin. Opening, the icon's own right-click menu (Open, Rename, Pin to taskbar, Remove from desktop), Delete and F2 rename in place are all real now.
 
 # OS Development Roadmap — SIX-AGENT EDITION
 ## Phase 3: Graphics and GUI

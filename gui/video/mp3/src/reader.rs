@@ -230,12 +230,10 @@ pub struct Info {
     /// the count says there are: FFmpeg's `first_discard_sample` and
     /// `last_discard_sample`.
     pub discard: Option<(u64, u64)>,
-    /// How long the stream plays, in ticks: by the frame count, or else
-    /// estimated, as FFmpeg estimates it, from the file's size and the
-    /// first frame's bit rate.
+    /// How long the stream plays, in ticks: by the frame count, or else --
+    /// where `frames` is `None` -- estimated, as FFmpeg estimates it, from
+    /// the file's size and the first frame's bit rate.
     pub duration: Option<u64>,
-    /// Whether `duration` is that estimate.
-    pub duration_estimated: bool,
     /// A free-format stream's frame size, padding aside: not a format FFmpeg
     /// reads; found as minimp3 finds it.
     pub free_format: Option<usize>,
@@ -681,7 +679,6 @@ impl<R: Read + Seek> Reader<R> {
             if bit_rate > 0 {
                 let bits = size.saturating_sub(off) * 8;
                 reader.info.duration = Some(rescale(bits, TICKS_PER_SECOND, bit_rate));
-                reader.info.duration_estimated = true;
             }
         }
         Ok(reader)

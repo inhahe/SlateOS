@@ -1,0 +1,26 @@
+# speex.spx: what the Ogg demuxer makes of it (generate_fixtures.py).
+stream 0 speex 1/16000
+packet 0 N/A 0 70 175 _ d7b57668a4a1aeb0c02934ad4e3656f1 0 0 -
+packet 0 N/A 0 70 175 _ cccd2121611d468161092a88878b8353 0 0 -
+packet 0 N/A 0 70 175 _ a307c93cd184fd08f2a30026e57c95b0 0 0 -
+packet 0 N/A 0 70 175 _ 13df0b2b684faaf27373b886d775bace 0 0 -
+packet 0 N/A 0 70 175 _ e3afd6833a08c8da9457a00b4f646fa1 0 0 -
+packet 0 N/A 0 70 175 _ 4741101ffe19af36d27c9ed32e97902b 0 0 -
+packet 0 N/A 0 70 175 _ e364d18e2804ed09333e0423c48f317f 0 0 -
+packet 0 N/A 0 70 175 _ af02cd86eb567bb073fcb53ee113eee7 0 0 -
+packet 0 N/A 0 70 175 _ 6611144611a3a57374ab17ef070e92ba 0 0 -
+packet 0 N/A 0 70 175 _ 534798c2dda736c3110bd4bef24cf88e 0 0 -
+packet 0 N/A 0 70 175 _ 5e01e2fa499380e3af22edcedb7a5c71 0 0 -
+packet 0 N/A 0 70 175 _ 1de44d6b3bd3ae8aed5704e2b0f5718b 0 0 -
+packet 0 N/A 0 70 175 _ a7920a4b0eeda1bef1d64d07beece5f6 0 0 -
+packet 0 N/A 0 70 175 _ 4200bb8e4449380f6d04fc7769dca88e 0 0 -
+packet 0 N/A 0 70 175 _ e0a213db09b1d4f76c146df3d094ce6a 0 0 -
+packet 0 N/A 0 70 175 _ dbff49bae3b37d19cd8115b9dc89303b 0 0 -
+packet 0 N/A 0 70 175 _ 1e607247d22ef397bcbbf3b4f4df7671 0 0 -
+packet 0 N/A 0 70 175 _ 4a0fdba07bc2cf12d936abaaa7d71129 0 0 -
+packet 0 N/A 0 70 175 _ 9ff78060538962cec2a999bdc3b71c50 0 0 -
+packet 0 N/A 0 70 175 _ aabf615cede2ac579aa32a91f89d34cc 0 0 -
+packet 0 N/A 0 70 175 _ 3aa112abfb9a5902e1faa38394d5a53e 0 0 -
+packet 0 N/A 0 70 175 _ 154686c09798560fc50cdb49a43f8905 0 0 -
+packet 0 N/A 0 70 175 _ f77d1f1245af59b3bab78978b8b4f111 0 0 -
+packet 0 N/A 0 70 175 _ 6b10af9c52e8b4b815d730af66a2bdd2 0 0 -

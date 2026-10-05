@@ -2721,6 +2721,14 @@ name = "offloop"
 version = "0.1.0"
 
 [[package]]
+name = "ogg"
+version = "0.1.0"
+dependencies = [
+ "md5",
+ "vorbis",
+]
+
+[[package]]
 name = "oils"
 version = "0.1.0"
 dependencies = [

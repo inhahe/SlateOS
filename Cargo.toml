@@ -9,7 +9,8 @@ members = [
     # rav1d, the AV1 decoder, vendored (`gui/video/rav1d/VENDORED.md`); the
     # second, vp9, libvpx's VP9 decoder ported (design-decisions.md §1339),
     # and vp8 its VP8 decoder, ported the same way; matroska, the Matroska
-    # and WebM demuxer their packets come from, and mp4 the MP4 one; yuv,
+    # and WebM demuxer their packets come from, mp4 the MP4 one and ogg the
+    # Ogg one; yuv,
     # libyuv's and libavif's conversions and scaling their pictures are
     # drawn with; codec (videocodec), the one a program calls for a file's
     # frames; and opus, libopus's decoder for their sound, ported as vp9 was
@@ -17,6 +18,7 @@ members = [
     "gui/video/codec",
     "gui/video/matroska",
     "gui/video/mp4",
+    "gui/video/ogg",
     "gui/video/opus",
     "gui/video/rav1d",
     "gui/video/vorbis",

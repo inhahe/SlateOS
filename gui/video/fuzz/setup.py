@@ -84,6 +84,10 @@ targets = os.path.join(harness, "fuzz_targets")
 if os.path.isdir(targets):
     shutil.rmtree(targets)
 shutil.copytree(os.path.join(HERE, "fuzz_targets"), targets)
+# Each target's dictionary of the tokens its parsers read, where it has one.
+for name in os.listdir(HERE):
+    if name.endswith(".dict"):
+        shutil.copy2(os.path.join(HERE, name), os.path.join(harness, name))
 
 # --- seeds ---
 MAX_SEED = 256 * 1024
@@ -140,6 +144,16 @@ counts["sound"] = sum(add_files("sound", s) for s in (
 ))
 counts["matroska"] = add_files("matroska", "gui/video/matroska/tests/data") + add_files(
     "matroska", "gui/video/vp9/tests/data", (".webm",))
+
+# The subtitle fixtures: SubRip, ASS, SSA and WebVTT tracks, ffmpeg's and
+# mkvmerge's.
+n = 0
+codec_data = os.path.join(SRC, "gui/video/codec/tests/data")
+for name in sorted(os.listdir(codec_data)):
+    if name.startswith(("subrip", "ass", "ssa", "webvtt", "overlap")) and name.endswith((".mkv", ".webm")):
+        shutil.copy2(os.path.join(codec_data, name), os.path.join(seed_dir("subtitles"), name))
+        n += 1
+counts["subtitles"] = n
 
 n = 0
 for dirpath, _, names in os.walk(os.path.join(SRC, "gui/video/vp8/tests/data")):

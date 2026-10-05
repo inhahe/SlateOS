@@ -4051,6 +4051,10 @@ lane C's `guitk`.
       eight threads as on one at 1080p, 1.6 at 360p, smaller pictures left
       on one. Each row in a band of its own, rows exchanging edges through
       mailboxes of atomic words: no `unsafe`. design-decisions.md §1356.
+    - `[x]` A frame of one partition -- encoders' default, on one thread in
+      libvpx -- has its loop filter on a second thread, a row behind its
+      macroblocks: 1.3 times as fast at 1080p, the same pictures.
+      design-decisions.md §1357.
     - `[x]` In `videocodec`: WebM's VP8, alpha included, coloured as FFmpeg
       reads VP8 (BT.601 at any size, its clamping bit the range); five
       fixtures held to ffmpeg and libavif frame by frame.

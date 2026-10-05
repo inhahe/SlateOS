@@ -193,13 +193,14 @@ impl Decoder {
     /// frame on. A new decoder uses as many as the machine has cores.
     ///
     /// A frame's token partitions are what decode in parallel, a row of
-    /// macroblocks to each, so a frame of one partition -- what encoders
-    /// make unless asked for more (`vpxenc --token-parts`) -- decodes on
-    /// one thread whatever this says, as libvpx's do. A small frame decodes
-    /// on fewer than this too: a thread for each 150 macroblocks at most
-    /// (16x16 pixels each; a 640x360 picture has 920), below which starting
-    /// a thread costs more than it saves. The pictures are the same however
-    /// many threads make them.
+    /// macroblocks to each. A frame of one partition -- what encoders make
+    /// unless asked for more (`vpxenc --token-parts`) -- decodes on two
+    /// threads at most, its macroblocks on one and its loop filter on the
+    /// other; libvpx's decodes on one. A small frame decodes on fewer
+    /// threads too: a thread for each 150 macroblocks at most (16x16 pixels
+    /// each; a 640x360 picture has 920), below which starting a thread costs
+    /// more than it saves. The pictures are the same however many threads
+    /// make them.
     pub fn set_threads(&mut self, threads: usize) {
         self.threading.threads = threads.max(1);
     }
@@ -629,6 +630,29 @@ mod tests {
         assert_eq!(decode(MIN_MACROBLOCKS_PER_THREAD), 0);
         // Eight partitions, nine rows: threads, when allowed any frame.
         assert_eq!(decode(0), frames.len());
+    }
+
+    #[test]
+    fn a_frame_of_one_partition_is_filtered_on_a_second_thread() {
+        let vectors = committed_vectors();
+        let (_, frames) = vectors
+            .iter()
+            .find(|(name, _)| name == "vp80-00-comprehensive-001.ivf")
+            .unwrap();
+        let decode = |threads| {
+            let before = crate::pipeline::PIPELINED.get();
+            let mut d = Decoder::new();
+            d.set_threads(threads);
+            d.set_min_macroblocks_per_thread(0);
+            for frame in frames {
+                d.decode(frame).unwrap();
+            }
+            crate::pipeline::PIPELINED.get() - before
+        };
+        assert_eq!(decode(1), 0);
+        // One partition throughout; all but the frames it codes with the
+        // loop filter off, which leave the second thread nothing to do.
+        assert!(decode(2) > frames.len() * 3 / 4);
     }
 
     #[test]

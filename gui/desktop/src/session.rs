@@ -697,6 +697,9 @@ impl<T: Transport> ShellSession<T> {
         shell.load_pinned();
         shell.load_start_menu();
         shell.load_shortcuts();
+        // The Run box's history, which its Up key walks: written on every
+        // run, and never read back until this (`C-RUN-HISTORY-IS-NOT-PERSISTED`).
+        shell.load_run_history();
         shell.populate_icons();
         let bar = shell.taskbar_rect();
 
@@ -2568,6 +2571,11 @@ impl<T: Transport> ShellSession<T> {
         if self.shell.take_start_menu_dirty() {
             let saved = self.shell.save_start_menu();
             self.report_save("The start menu's pinned and recently used programs", saved);
+        }
+        // And the Run box's history, which a command run from it has moved.
+        if self.shell.take_run_history_dirty() {
+            let saved = self.shell.save_run_history();
+            self.report_save("The Run box's history", saved);
         }
 
         // The shell writes `appearance.yaml` itself for the quick toggles --

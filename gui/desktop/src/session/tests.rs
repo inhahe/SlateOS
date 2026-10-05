@@ -786,6 +786,43 @@ fn a_program_started_from_its_pin_is_recently_used() {
     });
 }
 
+/// **A command run from the Run box is there the next session**: the
+/// session writes the box's history once the box has run something, and a
+/// session started again reads it back (`C-RUN-HISTORY-IS-NOT-PERSISTED`).
+/// Both halves through sessions, for the reason
+/// `a_session_starts_with_what_was_saved` gives: a loader nothing calls is
+/// tested and lost.
+#[test]
+fn a_command_run_from_the_run_box_is_there_next_session() {
+    settingsfile::testing::with_scratch_config("session-run-history", |_root| {
+        let (mut first, _d1, _turn) = session();
+        {
+            let shell = first.shell_mut();
+            shell.run_dialog.show();
+            let press = |key: Key, text: &str| guitk::event::KeyEvent {
+                key,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: text.to_owned(),
+            };
+            for ch in "/bin/ls".chars() {
+                drop(shell.handle_hotkey(&press(Key::Unknown(0), &ch.to_string())));
+            }
+            let outcome = shell.handle_hotkey(&press(Key::Enter, ""));
+            assert_eq!(outcome.launches.len(), 1, "the box ran nothing");
+        }
+        first.pump().expect("pump");
+        drop(first);
+
+        let (restarted, _d2, _turn) = session();
+        assert_eq!(
+            restarted.shell().run_dialog.history(),
+            [std::ffi::OsString::from("/bin/ls")],
+            "the command did not come back"
+        );
+    });
+}
+
 /// **"Show desktop" asks for every window**: a press on the strip sends the
 /// compositor one request per window, not the first alone.
 #[test]
@@ -5612,8 +5649,18 @@ fn opening_the_run_box_maps_the_surface_it_is_drawn_on() {
 /// worked without this: the box opened, took the text, resolved it and reported
 /// an `Execute` — which the shell then had no channel to hand back, so the
 /// command was resolved and dropped.
+///
+/// In a scratch configuration, since running a command writes the box's
+/// history.
 #[test]
 fn a_command_confirmed_with_enter_reaches_the_launcher() {
+    settingsfile::testing::with_scratch_config("session-run-box-enter", |_root| {
+        a_command_confirmed_with_enter_reaches_the_launcher_here();
+    });
+}
+
+/// The body of [`a_command_confirmed_with_enter_reaches_the_launcher`].
+fn a_command_confirmed_with_enter_reaches_the_launcher_here() {
     let (mut session, desktop, _turn) = session();
     let panel = session.panel().window();
 

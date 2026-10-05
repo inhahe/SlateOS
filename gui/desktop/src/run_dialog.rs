@@ -4,11 +4,12 @@
 //! that lets users type a command to execute. Supports text editing, command
 //! history, fuzzy autocomplete, and path resolution.
 //!
-//! The history lives in memory for the life of the shell and is **not** written
-//! anywhere. It used to claim persistence, on the strength of a `history_path`
-//! field that nothing ever read; the field is gone. Persisting it would need
-//! the same shape as the file chooser's listing — the shell performs no
-//! filesystem I/O of its own — and is tracked in known-issues.md.
+//! The history is kept across sessions by the shell, not here: this module
+//! holds it and does no filesystem I/O. `DesktopShell::load_run_history`
+//! hands it what `runbox.yaml` holds at start, and the session writes it back
+//! (`DesktopShell::save_run_history`) whenever the box has run something --
+//! each entry's bytes, percent-encoded (design-decisions §426), so a command
+//! naming a file whose name is not text comes back as it ran.
 //!
 //! # Usage from the desktop shell
 //!
@@ -595,13 +596,21 @@ impl RunDialog {
         self.trim_history();
     }
 
-    /// Load a history read from somewhere else.
+    /// Load a history read from somewhere else -- oldest first, as bytes,
+    /// for the reason [`add_to_history`](Self::add_to_history) takes them.
     ///
-    /// Nothing calls this yet — the history is not persisted (see the module
-    /// documentation) — but whatever eventually does must hand over bytes, for
-    /// the reason [`add_to_history`](Self::add_to_history) takes them.
+    /// A file edited by hand may say a command twice: it is kept once, where
+    /// it was run last, as running it again would have left it. Only the
+    /// newest few hundred entries are looked at, so a file of millions costs
+    /// no more than one of fifty.
     pub fn load_history(&mut self, commands: Vec<OsString>) {
-        self.history = commands;
+        let newest = commands.len().saturating_sub(MAX_HISTORY.saturating_mul(4));
+        let mut history: Vec<OsString> = Vec::with_capacity(MAX_HISTORY);
+        for command in commands.into_iter().skip(newest) {
+            history.retain(|h| *h != command);
+            history.push(command);
+        }
+        self.history = history;
         self.trim_history();
     }
 
@@ -1667,6 +1676,23 @@ mod tests {
     // ====================================================================
     // History cycling tests
     // ====================================================================
+
+    /// **A history read back keeps each command once, where it ran last**,
+    /// as running it again would have left it -- and of a file of thousands,
+    /// the newest fifty.
+    #[test]
+    fn a_loaded_history_keeps_each_command_once_where_it_ran_last() {
+        let mut dialog = RunDialog::new();
+        dialog.load_history(["ls", "pwd", "ls", "cat"].map(OsString::from).to_vec());
+        assert_eq!(dialog.history(), ["pwd", "ls", "cat"].map(OsString::from));
+        let many: Vec<OsString> = (0..10_000)
+            .map(|i| OsString::from(format!("cmd{i}")))
+            .collect();
+        dialog.load_history(many);
+        assert_eq!(dialog.history().len(), MAX_HISTORY);
+        assert_eq!(dialog.history().first(), Some(&OsString::from("cmd9950")));
+        assert_eq!(dialog.history().last(), Some(&OsString::from("cmd9999")));
+    }
 
     #[test]
     fn test_history_cycling() {

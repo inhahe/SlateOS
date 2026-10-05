@@ -210,6 +210,15 @@ const TASKBAR_CONFIG_NAME: &str = "taskbar";
 /// The file the programs pinned to the start menu live in.
 const START_MENU_CONFIG_NAME: &str = "startmenu";
 
+/// The file the Run box's history lives in.
+const RUN_HISTORY_CONFIG_NAME: &str = "runbox";
+
+/// Marks the Run box's history as percent-encoded (design-decisions §426):
+/// an entry is a command line as bytes, and may name a file whose name is
+/// not text. A file without the marker -- one written by hand -- is read as
+/// it stands.
+const RUN_HISTORY_ENCODING: &str = "percent";
+
 /// The programs on the taskbar of a desktop that has never saved its pins:
 /// the kernel's `fs::pinnedapps` defaults, carried when the program lists
 /// became one (`gui/programs/INVENTORY.md` section 7, design-decisions §1425),
@@ -2541,6 +2550,9 @@ pub struct DesktopShell {
     /// report one until this surface existed, which is what
     /// [`HotkeyOutcome::launches`] is for.
     pub run_dialog: run_dialog::RunDialog,
+    /// Whether the Run box ran something since its history was last written
+    /// ([`save_run_history`](Self::save_run_history)).
+    run_history_dirty: bool,
     /// The shell's file chooser, while it is up: put up by the Run box's
     /// Browse button, or by "Choose folder…" on a photo frame's menu --
     /// [`chooser_for`](Self::chooser_for) says which, and so where its answer
@@ -2952,6 +2964,7 @@ impl DesktopShell {
             // centred on the screen it is opened on instead, in
             // `toggle_run_dialog`.
             run_dialog: run_dialog::RunDialog::new(),
+            run_history_dirty: false,
             chooser: None,
             chooser_for: ChooserFor::RunBox,
             chooser_listed: None,
@@ -4652,6 +4665,57 @@ impl DesktopShell {
     /// clearing the flag.
     pub fn take_start_menu_dirty(&mut self) -> bool {
         core::mem::take(&mut self.start_menu_dirty)
+    }
+
+    /// Read the Run box's history back from `runbox.yaml` -- oldest first,
+    /// each entry the bytes of a command line, percent-encoded where the
+    /// file says it is (§426) -- so Up finds yesterday's commands.
+    pub fn load_run_history(&mut self) {
+        let doc = config::load(RUN_HISTORY_CONFIG_NAME);
+        let Some(entries) = doc.get_seq(&["history"]) else {
+            return;
+        };
+        let encoded = doc
+            .get_str(&["encoding"])
+            .is_some_and(|v| v.trim() == RUN_HISTORY_ENCODING);
+        let history = entries
+            .iter()
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| {
+                if encoded {
+                    pathcodec::os_string_from_bytes(pathcodec::decode_bytes(entry))
+                } else {
+                    std::ffi::OsString::from(entry)
+                }
+            })
+            .collect();
+        self.run_dialog.load_history(history);
+    }
+
+    /// Whether the Run box's history needs writing, clearing the flag.
+    pub fn take_run_history_dirty(&mut self) -> bool {
+        core::mem::take(&mut self.run_history_dirty)
+    }
+
+    /// Write the Run box's history to `runbox.yaml`, its entries' bytes
+    /// percent-encoded so a command naming a file whose name is not text
+    /// comes back as it ran.
+    ///
+    /// # Errors
+    ///
+    /// The write's own error. The history still holds for this session.
+    pub fn save_run_history(&self) -> std::io::Result<()> {
+        let mut doc = config::load(RUN_HISTORY_CONFIG_NAME);
+        let entries: Vec<String> = self
+            .run_dialog
+            .history()
+            .iter()
+            .map(|entry| pathcodec::encode_bytes(entry.as_encoded_bytes()))
+            .collect();
+        let entries: Vec<&str> = entries.iter().map(String::as_str).collect();
+        doc.set_str(&["encoding"], RUN_HISTORY_ENCODING);
+        doc.set_seq(&["history"], &entries);
+        config::store(RUN_HISTORY_CONFIG_NAME, &doc)
     }
 
     /// Write the programs pinned to the start menu, and the ones recently
@@ -8168,7 +8232,11 @@ impl DesktopShell {
         let mut launches = Vec::new();
         for event in self.run_dialog.drain_events() {
             match event {
-                run_dialog::RunDialogEvent::Execute(request) => launches.push(request),
+                // Run, so put in the history -- which is to be written.
+                run_dialog::RunDialogEvent::Execute(request) => {
+                    self.run_history_dirty = true;
+                    launches.push(request);
+                }
                 run_dialog::RunDialogEvent::Browse => self.open_run_box_chooser(),
                 // No answer needed — the dialog has already hidden itself by the
                 // time it reports these — but they must still be drained, or the
@@ -20586,6 +20654,94 @@ mod run_box_wiring_tests {
                 dir: None,
             }]
         );
+    }
+
+    /// **The Run box's history outlives the desktop**: a command run marks
+    /// it to be written, and a desktop started again finds it under Up
+    /// (`C-RUN-HISTORY-IS-NOT-PERSISTED`).
+    #[test]
+    fn the_run_box_history_outlives_the_desktop() {
+        appearance::config::testing::with_scratch_config("run-box-history", |_root| {
+            let mut s = shell();
+            assert!(!s.take_run_history_dirty(), "nothing has run");
+            drop(s.handle_hotkey(&super_r()));
+            drop(run_line(&mut s, "terminal --title \"a: b\" # c"));
+            assert!(s.take_run_history_dirty(), "a run is to be written");
+            assert!(!s.take_run_history_dirty(), "and once");
+            s.save_run_history().expect("saved");
+
+            let mut restarted = shell();
+            restarted.load_run_history();
+            assert_eq!(
+                restarted.run_dialog.history(),
+                [std::ffi::OsString::from("terminal --title \"a: b\" # c")]
+            );
+        });
+    }
+
+    /// **Every kind of command line comes back as it was** -- the ones YAML
+    /// would read as something else, the ones `pathcodec` escapes, and
+    /// one that looks like an escape already.
+    #[test]
+    fn every_kind_of_command_line_comes_back_as_it_was() {
+        appearance::config::testing::with_scratch_config("run-box-history-lines", |_root| {
+            let lines = [
+                "ls -la",
+                "echo \"a: b\" # c",
+                "'quoted'",
+                "- dash",
+                "[x] {y}",
+                "100%",
+                "%41",
+                "null",
+                "true",
+                "123",
+                " spaced ",
+                "caf\u{e9}",
+                "tab\there",
+            ]
+            .map(std::ffi::OsString::from);
+            let mut s = shell();
+            s.run_dialog.load_history(lines.to_vec());
+            s.save_run_history().expect("saved");
+            let mut restarted = shell();
+            restarted.load_run_history();
+            assert_eq!(restarted.run_dialog.history(), lines);
+        });
+    }
+
+    /// **A command naming a file whose name is not text comes back as it
+    /// ran**, byte for byte. Only where a name can be any bytes.
+    #[cfg(unix)]
+    #[test]
+    fn a_command_line_that_is_not_text_comes_back() {
+        use std::os::unix::ffi::OsStringExt;
+        appearance::config::testing::with_scratch_config("run-box-history-bytes", |_root| {
+            let line = std::ffi::OsString::from_vec(b"/usr/bin/view caf\xe9.png".to_vec());
+            let mut s = shell();
+            s.run_dialog.load_history(vec![line.clone()]);
+            s.save_run_history().expect("saved");
+            let mut restarted = shell();
+            restarted.load_run_history();
+            assert_eq!(restarted.run_dialog.history(), [line]);
+        });
+    }
+
+    /// **A history written by hand, without the encoding's marker, is read
+    /// as it stands**, a `%` and all.
+    #[test]
+    fn a_run_history_written_by_hand_is_read_as_it_stands() {
+        appearance::config::testing::with_scratch_config("run-box-history-hand", |_root| {
+            let path = appearance::config::path_for("runbox").expect("a path");
+            std::fs::create_dir_all(path.parent().expect("a folder")).expect("made");
+            std::fs::write(&path, "history:\n  - ls\n  - caf%41\n  - ls\n").expect("written");
+            let mut s = shell();
+            s.load_run_history();
+            assert_eq!(
+                s.run_dialog.history(),
+                ["caf%41", "ls"].map(std::ffi::OsString::from)
+            );
+        });
     }
 
     /// **A Run box line that cannot start brings the box back**, on the line

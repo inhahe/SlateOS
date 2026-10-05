@@ -1,5 +1,21 @@
 ### C-RUN-HISTORY-IS-NOT-PERSISTED — 2026-09-03 — OPEN
 
+**Status:** OPEN — repaired on lane C's branch 2026-10-05; closes when that
+change reaches main after a boot test. The history is kept in `runbox.yaml`
+(`history`, oldest first), each entry's bytes percent-encoded behind an
+`encoding: percent` marker (design-decisions §426, as the wallpaper's path
+is) rather than the NUL-separated file proposed below: the settings files
+already carry paths that are not text that way, are written atomically, and
+stay readable. `DesktopShell::load_run_history` at start,
+`save_run_history` after each pump in which the box ran something.
+`RunDialog::load_history` keeps each command once, where it ran last, and
+reads only the newest few hundred entries of a long file. Tests:
+`the_run_box_history_outlives_the_desktop`,
+`every_kind_of_command_line_comes_back_as_it_was` (YAML's own characters,
+`%`, a tab), `a_command_line_that_is_not_text_comes_back` (Unix),
+`a_run_history_written_by_hand_is_read_as_it_stands`,
+`a_loaded_history_keeps_each_command_once_where_it_ran_last`.
+
 **In short:** the Run box's command history is forgotten when the desktop shell
 restarts. Press Up to find the thing you ran yesterday and it is not there. It
 has never been saved; until 2026-09-03 there was a `history_path` setting that

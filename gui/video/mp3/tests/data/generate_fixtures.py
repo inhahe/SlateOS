@@ -45,6 +45,7 @@ Run from this directory, with these in WSL:
 """
 
 import argparse
+import json
 import math
 import os
 import shlex
@@ -312,8 +313,14 @@ FIXTURES = {
     "lame_attacks_mpeg2_22050": ("mp3", "ffmpeg", 22050, 1, 1.0, "attacks", ["-c:a", "libmp3lame", "-b:a", "48k"]),
     "lame_noreservoir_44100": ("mp3", "ffmpeg", 44100, 2, 0.5, "music", ["-c:a", "libmp3lame", "-b:a", "128k", "-reservoir", "0"]),
     # With FFmpeg's ID3v2 tag and LAME's Xing/Info frame in front, as an
-    # .mp3 from FFmpeg comes.
+    # .mp3 from FFmpeg comes: the Info tag after MPEG-1 stereo's side
+    # information, MPEG-1 mono's and MPEG-2 mono's (32, 17 and 9 bytes).
     "lame_tagged_44100": ("mp3", "ffmpeg", 44100, 2, 0.5, "music", ["-c:a", "libmp3lame", "-b:a", "128k", "-write_xing", "1"]),
+    "lame_tagged_mono_48000": ("mp3", "ffmpeg", 48000, 1, 0.5, "music", ["-c:a", "libmp3lame", "-b:a", "64k", "-write_xing", "1"]),
+    "lame_tagged_mono_22050": ("mp3", "ffmpeg", 22050, 1, 0.5, "attacks", ["-c:a", "libmp3lame", "-b:a", "32k", "-write_xing", "1"]),
+    # LAME's own VBR file: its Xing frame (frames, bytes, table of
+    # contents) and LAME tag (delay and padding).
+    "lame_vbr_tagged_44100": ("mp3", "lame", 44100, 2, 1.0, "music", ["-V", "4"]),
     # Layer III, LAME 3.100's command line: free format, CRC, dual channel.
     "lame_freeformat_44100": ("mp3", "lame", 44100, 2, 0.5, "music", ["-t", "--freeformat", "-b", "400"]),
     "lame_freeformat_mpeg2_24000": ("mp3", "lame", 24000, 1, 0.5, "music", ["-t", "--freeformat", "-b", "200"]),
@@ -357,11 +364,72 @@ DAMAGED = {
 }
 
 
+# The file's start and end as the reader meets them, built from other
+# fixtures: name: (source, extension, how).
+SHAPED = {
+    # Three ID3v2 tags in front -- an ID3v2.4 tag with a footer, an ID3v2.3
+    # tag with an extended header, and the file's own -- before an Info frame.
+    "id3v2_tags_in_front": ("lame_tagged_44100.mp3", "mp3", "id3v2"),
+    # 3000 bytes of junk before the first frame, a frame's look-alike in it
+    # whose next frame does not follow: passed over by the demuxer's search.
+    "junk_in_front": ("lame_cbr128_joint_44100.mp3", "mp3", "junk"),
+    # A Fraunhofer VBRI frame in front, made here (no encoder at hand writes
+    # one): its frame and byte counts read, the frame not played.
+    "vbri_in_front": ("lame_cbr128_joint_44100.mp3", "mp3", "vbri"),
+    # A tagged file with another joined to it: the Info frame's byte count
+    # is a sixteenth short of the file and more, and FFmpeg takes its frame
+    # count for the first file's -- none, then, and no end trimmed.
+    "joined_after_tagged": ("lame_tagged_44100.mp3", "mp3", "joined"),
+    # One frame and nothing else: FFmpeg's search reads past the end and
+    # refuses the file; the reader opens it.
+    "one_frame": ("mp2_192_stereo_48000.mp2", "mp2", "one_frame"),
+}
+
+
+def shape(name, source, ext, how):
+    with open(source, "rb") as fh:
+        data = fh.read()
+    if how == "id3v2":
+        def synchsafe(n):
+            return bytes([(n >> 21) & 0x7f, (n >> 14) & 0x7f, (n >> 7) & 0x7f, n & 0x7f])
+        body = b"TIT2" + synchsafe(9) + b"\x00\x00" + b"\x03a title"
+        v24 = b"ID3\x04\x00\x10" + synchsafe(len(body)) + body + b"3DI\x04\x00\x10" + synchsafe(len(body))
+        ext_header = struct.pack(">IH", 6, 0) + bytes(4)
+        frame = b"TPE1" + struct.pack(">I", 9) + b"\x00\x00" + b"\x00an artist"[:9]
+        v23_body = ext_header + frame + bytes(20)
+        v23 = b"ID3\x03\x00\x40" + synchsafe(len(v23_body)) + v23_body
+        data = v24 + v23 + data
+    elif how == "junk":
+        lcg = Lcg(41)
+        junk = bytearray(lcg.below(256) & 0x7f for _ in range(3000))
+        junk[1000:1004] = data[:4]
+        data = bytes(junk) + data
+    elif how == "vbri":
+        size = 417
+        frames = len(data) // size
+        frame = bytearray(data[:4]) + bytes(size - 4)
+        frame[36:40] = b"VBRI"
+        frame[40:42] = struct.pack(">H", 1)
+        frame[42:46] = struct.pack(">HH", 1105, 80)
+        frame[46:50] = struct.pack(">I", len(data))
+        frame[50:54] = struct.pack(">I", frames)
+        data = bytes(frame) + data
+    elif how == "joined":
+        with open("lame_cbr128_joint_44100.mp3", "rb") as fh:
+            data = data + fh.read()
+    elif how == "one_frame":
+        data = data[:576]
+    with open(f"{name}.{ext}", "wb") as fh:
+        fh.write(data)
+
+
 def extension(name):
     if name in FIXTURES:
         return FIXTURES[name][0]
     if name in LAYER1:
         return "mp1"
+    if name in SHAPED:
+        return SHAPED[name][1]
     return DAMAGED[name][1]
 
 
@@ -370,6 +438,37 @@ def answer(name):
     out = wsl(f"{REFERENCE} {path}")
     with open(f"{name}.txt", "wb") as fh:
         fh.write(out)
+    packets(name, path)
+
+
+def packets(name, path):
+    """ffprobe's packets for the reader's test, as NAME.packets:
+
+        stream <start_pts> <duration_ts>
+        packet <pts> <duration> <size> <pos> <skip_samples> <discard_padding>
+
+    -- or no file, where FFmpeg will not open the stream (free format, a
+    file of one frame)."""
+    r = subprocess.run(
+        ["wsl", "-d", "Ubuntu", "--", "bash", "-c",
+         "ffprobe -v error -show_entries stream=start_pts,duration_ts:packet=pts,duration,size,pos:packet_side_data "
+         f"-of json {path}"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    probe = json.loads(r.stdout.decode("utf-8") or "{}") if r.returncode == 0 else {}
+    streams = probe.get("streams") or []
+    if os.path.exists(f"{name}.packets"):
+        os.unlink(f"{name}.packets")
+    if not streams:
+        return
+    lines = [f"stream {streams[0].get('start_pts', '-')} {streams[0].get('duration_ts', '-')}"]
+    for pk in probe.get("packets", []):
+        skip = discard = 0
+        for sd in pk.get("side_data_list") or []:
+            if sd.get("side_data_type") == "Skip Samples":
+                skip, discard = int(sd.get("skip_samples", 0)), int(sd.get("discard_padding", 0))
+        lines.append(f"packet {pk['pts']} {pk['duration']} {pk['size']} {pk['pos']} {skip} {discard}")
+    with open(f"{name}.packets", "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("\n".join(lines) + "\n")
 
 
 def main():
@@ -378,7 +477,7 @@ def main():
     ap.add_argument("names", nargs="*")
     args = ap.parse_args()
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
-    names = args.names or list(FIXTURES) + list(LAYER1) + list(DAMAGED)
+    names = args.names or list(FIXTURES) + list(LAYER1) + list(DAMAGED) + list(SHAPED)
     for name in names:
         if not args.answers_only:
             if name in FIXTURES:
@@ -388,6 +487,8 @@ def main():
                 encode(name, ext, rate, channels, seconds, style, how, extra)
             elif name in LAYER1:
                 layer1(name, *LAYER1[name])
+            elif name in SHAPED:
+                shape(name, *SHAPED[name])
             else:
                 source, ext, how, seed = DAMAGED[name]
                 damage(name, source, ext, how, seed)

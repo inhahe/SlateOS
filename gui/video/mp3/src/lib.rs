@@ -3,6 +3,13 @@
 //! (`MINIMP3_NO_SIMD`) sample for sample (minimp3, by lieff, CC0:
 //! `licenses/minimp3-LICENSE`).
 //!
+//! [`Reader`] takes an `.mp3`, `.mp2` or `.mp1` file apart into packets as
+//! FFmpeg does -- its demuxer and MPEG audio parser, ID3v2 tags, the
+//! Xing/Info/VBRI frame and the LAME tag's gapless delay and padding, junk
+//! between frames -- and times and trims them as FFmpeg does, held to
+//! ffprobe's packets (`tests/reader.rs`); see the `reader` module. Each
+//! packet's frame is then the decoder's to decode.
+//!
 //! [`Decoder::decode_frame`] is `mp3dec_decode_frame`: it finds the next
 //! frame in the bytes it is given -- syncing as minimp3 does, on a header
 //! that the following frames' headers agree with -- decodes it into 16-bit
@@ -37,11 +44,15 @@ mod frame;
 mod header;
 mod l12;
 mod l3;
+mod reader;
 mod synth;
 mod tables;
 
 use frame::{Outcome, Scratch, State};
 use header::{HDR_SIZE, Hdr};
+pub use reader::{
+    DECODER_DELAY, Header, Info, Packet, Reader, TICKS_PER_SECOND, is_mpeg_audio, probe,
+};
 
 /// The most samples a frame decodes to: 1152 a channel, two channels.
 pub const MAX_SAMPLES_PER_FRAME: usize = 1152 * 2;

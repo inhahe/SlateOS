@@ -51,6 +51,9 @@ fixtures!(
     lame_attacks_mpeg2_22050,
     lame_noreservoir_44100,
     lame_tagged_44100,
+    lame_tagged_mono_48000,
+    lame_tagged_mono_22050,
+    lame_vbr_tagged_44100,
     lame_freeformat_44100,
     lame_freeformat_mpeg2_24000,
     lame_crc_dual_48000,
@@ -86,6 +89,13 @@ fixtures!(
     damaged_layer2_garbage,
     damaged_layer1_bitflips,
     damaged_freeformat_cut,
+    // The file's start and end: ID3v2 tags, junk, a VBRI frame, a joined
+    // file, a file of one frame.
+    id3v2_tags_in_front,
+    junk_in_front,
+    vbri_in_front,
+    joined_after_tagged,
+    one_frame,
 );
 
 /// Every answer in `tests/data` has its test above, so that a fixture added

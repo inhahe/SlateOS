@@ -2026,15 +2026,18 @@ live.
   the git common directory beside the halts. The `CLAUDE.md` paragraph that
   would make it a rule is put to the operator as C-Q31.
 
-- `[C]` **A program may ask the password manager for a password -- with a key
-  for it, and the user's consent** -- open, **waiting on lane A for the
-  capability's shape** (C-Q25, §1417;
-  `requests/c-a-a-capability-to-ask-the-credential-service-for-a-password.md`).
-  In the credential service (`gui/credentials`): the request over the service's
-  IPC (`SYS_SERVICE_CONNECT`), refused without the capability, and a prompt
-  naming the asking program (`SYS_CHANNEL_PEER_CRED`) to allow or refuse. The
-  service today is an in-process model with no transport, and its vault waits on
-  the ported cipher and password hash (lane E's question to lane A).
+- `[-] [C]` **A program may ask the password manager for a password -- with a
+  key for it, and the user's consent** (C-Q25, §1417, §1464). Lane A built the
+  key (§1518: the kernel answers whether a connection's peer holds the
+  service's key). **Built** in `gui/credentials`' library: the protocol, a
+  program's `ask`, and the service's judgement -- key, then the user asked
+  (once / until the vault locks / refuse, the master password typed into the
+  same prompt), quiet after a refusal, the best login -- tested against
+  stand-ins for the kernel, the vault and the prompt. **Left:** the prompt
+  window; the vault, **waiting on lane E** to share the password manager's
+  (`requests/c-e-share-the-password-vault-with-the-credential-service.md`);
+  then the daemon that registers the service, and deleting the old store's
+  own vault and cipher (`src/main.rs`).
 
 - `[C]` **A settings service that tells open windows when a setting
   changes** -- **done 2026-09-28** (C-Q26, §1418, §1434). Beside

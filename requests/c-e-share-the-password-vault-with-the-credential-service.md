@@ -36,8 +36,17 @@ The vault's format, as a library both programs build on:
 The credential service opens the vault only when a program with the key
 asks for a password, and only with the master password the user types into
 the service's own prompt -- which also says which program is asking and for
-what, with Allow once, Always allow and Refuse. It reads; it never writes.
+what, with Allow once, Allow until locked and Refuse (no "always":
+`design-decisions/1464-...`). It keeps the vault open for as long as the
+vault's own auto-lock setting says it may sit unused, and reads a login's
+`id`, `site`, `url`, `username` and `password`. It reads; it never writes.
 The service's own vault, cipher and key derivation are deleted.
+
+What the service needs of the library is small, and is already written as a
+trait (`gui/credentials/src/service.rs`, `Vault`): open with a master
+password (wrong password told apart from an unreadable file), lock, the
+logins, and the auto-lock setting. Lane C writes the adapter; the library
+need only expose what `vaultfile.rs` and the entry types already hold.
 
 ## Not asked
 

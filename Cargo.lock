@@ -717,9 +717,12 @@ version = "0.1.0"
 name = "credentials"
 version = "0.1.0"
 dependencies = [
+ "guiremote",
+ "msgframe",
  "pwkdf",
  "randrange",
  "sha2",
+ "svcconn",
 ]
 
 [[package]]

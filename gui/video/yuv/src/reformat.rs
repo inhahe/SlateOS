@@ -29,6 +29,7 @@
 //! `gui/imagecodec/licenses/libavif-LICENSE.txt` (that crate's manifest names
 //! libavif, once for the tree, as `scripts/gather-notices.py` requires).
 
+use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::convert::{self as libyuv, Constants, Eight, Planes, Rows, Ten};
@@ -790,29 +791,55 @@ fn lookup<T: Sample>(table: &[f32], sample: T, max: u32) -> f32 {
 
 /// `AVIF_CLAMP(v, 0.0f, 1.0f)`. `f32::clamp` agrees with the C's
 /// comparisons everywhere, a NaN passing through and -0.0 staying -0.0.
+#[inline(always)]
 fn clamp_unit(v: f32) -> f32 {
     v.clamp(0.0, 1.0)
 }
 
-/// `(uint8_t)(0.5f + (c * 255.0f))`.
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::arithmetic_side_effects,
-    reason = "c is within 0..=1 (or NaN, which the C's conversion also makes 0 on x86), so the value is within 0.5..=255.5 and truncates to a byte"
-)]
-fn to_byte(c: f32) -> u32 {
-    u32::from((0.5f32 + c * 255.0) as u8)
-}
-
-/// The colour-difference equations shared by the fast and slow paths:
-/// `R = Y + 2(1 - kr) Cr`, `B = Y + 2(1 - kb) Cb` and G from the two.
+/// `(uint8_t)(0.5f + (c * 255.0f))`: `c` is within 0..=1 (or NaN, which
+/// the C's conversion also makes 0 on x86), so the value is within
+/// 0.5..=255.5 and truncates to a byte.
+///
+/// Computed without `as`, whose saturating conversion the compiler will not
+/// vectorise for SSE2 -- it kept every floating-point path a pixel at a
+/// time. Below 2^23, adding and subtracting 2^23 rounds a value to a whole
+/// number (ties to even); a step down where that rounded up gives the
+/// floor, which is what truncation is for a value that is not negative; and
+/// 2^23 plus that has it in its low bits. NaN goes to 0 and everything else
+/// into 0..=255.5 first, which is where `as u8` saturates it to, so the two
+/// agree on every float (a test checks all of them in 0..=1, and an ignored
+/// one every other).
 #[allow(
     clippy::arithmetic_side_effects,
     reason = "floating-point arithmetic, which cannot overflow into undefined behaviour"
 )]
+#[inline(always)]
+fn to_byte(c: f32) -> u32 {
+    const TWO_TO_23: f32 = 8_388_608.0;
+    let x = 0.5f32 + c * 255.0;
+    let x = if x.is_nan() { 0.0 } else { x.clamp(0.0, 255.5) };
+    let rounded = (x + TWO_TO_23) - TWO_TO_23;
+    let floor = if rounded > x { rounded - 1.0 } else { rounded };
+    (floor + TWO_TO_23).to_bits() & 0xff
+}
+
+/// [`rgb_of`] with the weights from `state`: what the per-pixel paths the
+/// tests hold the row paths to call.
+#[cfg(test)]
 fn coefficients_rgb(state: &State, y: f32, cb: f32, cr: f32) -> [f32; 3] {
-    let (kr, kg, kb) = (state.kr, state.kg, state.kb);
+    rgb_of(state.kr, state.kg, state.kb, y, cb, cr)
+}
+
+/// The colour-difference equations shared by the fast and slow paths:
+/// `R = Y + 2(1 - kr) Cr`, `B = Y + 2(1 - kb) Cb` and G from the two. The
+/// weights are values rather than read from the state, so that a row loop
+/// keeps them in registers.
+#[inline(always)]
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "floating-point arithmetic, which cannot overflow into undefined behaviour"
+)]
+fn rgb_of(kr: f32, kg: f32, kb: f32, y: f32, cb: f32, cr: f32) -> [f32; 3] {
     let r = y + (2.0 * (1.0 - kr)) * cr;
     let b = y + (2.0 * (1.0 - kb)) * cb;
     let g = y - ((2.0 * ((kr * (1.0 - kr) * cr) + (kb * (1.0 - kb) * cb))) / kg);
@@ -821,6 +848,12 @@ fn coefficients_rgb(state: &State, y: f32, cb: f32, cr: f32) -> [f32; 3] {
 
 /// `avifImageYUV8ToRGB8Color`, `avifImageYUV16ToRGB8Color` and their `Mono`
 /// twins: libavif's per-pixel path for 4:4:4 and grey.
+///
+/// A row at a time: its samples' table values gathered into rows of floats
+/// first, then the arithmetic over those, a loop the compiler runs several
+/// pixels at a time -- each pixel's operations libavif's, in its order, so
+/// the same bits. Looked up and computed in one loop per pixel, a 1080p
+/// frame took 31 ms on one thread.
 fn fast_path<T: Sample>(
     picture: &Picture<'_, T>,
     state: &State,
@@ -831,21 +864,32 @@ fn fast_path<T: Sample>(
 ) {
     let (luma, chroma) = tables(state);
     let max = state.max_channel;
+    let mut ys = vec![0f32; width];
+    let mut cbs = vec![0f32; width];
+    let mut crs = vec![0f32; width];
     for (j, row) in (first..).zip(out.chunks_exact_mut(width.max(1))) {
         let y_row = picture.y.row(j);
-        let (u_row, v_row) = match (picture.u, picture.v) {
-            (Some(u), Some(v)) if has_color => (u.row(j), v.row(j)),
-            _ => (&[][..], &[][..]),
+        for (o, &y) in ys.iter_mut().zip(y_row) {
+            *o = lookup(&luma, y, max);
+        }
+        // Chroma a sample has none of counts 0, as libavif's would.
+        cbs.fill(0.0);
+        crs.fill(0.0);
+        if let (Some(u), Some(v), true) = (picture.u, picture.v, has_color) {
+            gather(&chroma, u.row(j), max, &mut cbs);
+            gather(&chroma, v.row(j), max, &mut crs);
+        }
+        // As many pixels as the row has luma for, over slices of one length:
+        // the shape the compiler vectorises.
+        let n = row.len().min(y_row.len());
+        let (Some(row), Some(ys), Some(cbs), Some(crs)) =
+            (row.get_mut(..n), ys.get(..n), cbs.get(..n), crs.get(..n))
+        else {
+            continue;
         };
-        for (i, (px, &y)) in row.iter_mut().zip(y_row).enumerate() {
-            let y = lookup(&luma, y, max);
-            let (cb, cr) = if has_color {
-                let at = |r: &[T]| r.get(i).map_or(0.0, |&s| lookup(&chroma, s, max));
-                (at(u_row), at(v_row))
-            } else {
-                (0.0, 0.0)
-            };
-            let [r, g, b] = coefficients_rgb(state, y, cb, cr);
+        let (kr, kg, kb) = (state.kr, state.kg, state.kb);
+        for (px, ((&y, &cb), &cr)) in row.iter_mut().zip(ys.iter().zip(cbs).zip(crs)) {
+            let [r, g, b] = rgb_of(kr, kg, kb, y, cb, cr);
             *px = (*px & 0xff00_0000)
                 | (to_byte(clamp_unit(r)) << 16)
                 | (to_byte(clamp_unit(g)) << 8)
@@ -854,14 +898,43 @@ fn fast_path<T: Sample>(
     }
 }
 
+/// `table`'s values for `samples` into the start of `out`.
+fn gather<T: Sample>(table: &[f32], samples: &[T], max: u32, out: &mut [f32]) {
+    for (o, &s) in out.iter_mut().zip(samples) {
+        *o = lookup(table, s, max);
+    }
+}
+
+/// The table values of a chroma row as libavif's slow path reads them,
+/// `count` of them from column 0: a sample past the plane's row, or a row
+/// past its last, reads as code 0.
+fn chroma_row<T: Sample>(
+    table: &[f32],
+    plane: Option<Plane<'_, T>>,
+    row: usize,
+    max: u32,
+    out: &mut Vec<f32>,
+    count: usize,
+) {
+    let samples = plane.map_or(&[][..], |p| p.row(row));
+    out.clear();
+    out.extend((0..count).map(|c| lookup(table, samples.get(c).copied().unwrap_or_default(), max)));
+}
+
 /// `avifImageYUVAnyToRGBAnySlow`: every combination, one pixel at a time --
 /// chroma upsampled bilinearly from the four nearest samples, and alpha
 /// premultiplication undone in floating point.
+///
+/// A row at a time, as [`fast_path`] goes: the two chroma rows a row weighs
+/// looked up once (libavif looks up four samples of each plane for every
+/// pixel), each pixel's chroma weighed from them, and the colour equations
+/// then run over the row -- each pixel's operations libavif's, in its order.
+/// Looked up and computed in one loop per pixel, a 1080p frame took 92 ms on
+/// one thread.
 #[allow(
     clippy::arithmetic_side_effects,
     clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    reason = "indices stay within the planes by the adjacency rules (checked by get), samples are under 2^16 and exact as f32, and the rounded YCgCo values are small"
+    reason = "indices stay within the rows by the adjacency rules (and the rows hold one column past the last the picture reads), and samples are under 2^16, exact as f32"
 )]
 fn slow_path<T: Sample>(
     picture: &Picture<'_, T>,
@@ -879,30 +952,53 @@ fn slow_path<T: Sample>(
     // The whole picture's height: the adjacency at its last row depends on
     // it, whichever band this is.
     let height = picture.height;
-    let sample = |plane: Option<Plane<'_, T>>, row: usize, col: usize| -> T {
-        plane
-            .and_then(|p| p.row(row).get(col).copied())
-            .unwrap_or_default()
-    };
     let (shift_x, shift_y) = (state.shift_x, state.shift_y);
+    // Chroma columns a row reads: up to one past the nearest of its last
+    // pixel.
+    let columns = (width.saturating_sub(1) >> shift_x) + 2;
+    let (mut near_u, mut far_u, mut near_v, mut far_v) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let mut ys = vec![0f32; width];
+    let mut unorm = vec![0u32; width];
+    let mut cbs = vec![0.5f32; width];
+    let mut crs = vec![0.5f32; width];
     for (j, row) in (first..).zip(out.chunks_exact_mut(width.max(1))) {
         let uv_j = if has_color { j >> shift_y } else { 0 };
         let y_row = picture.y.row(j);
-        let a_row = picture.alpha.map(|a| a.row(j));
-        for (i, (px, &y_sample)) in row.iter_mut().zip(y_row).enumerate() {
-            let unorm_y: u32 = y_sample.into();
-            let unorm_y = unorm_y.min(max);
-            let y = lookup(&luma, y_sample, max);
-            let (mut cb, mut cr) = (0.5f32, 0.5f32);
-            if has_color {
-                let uv_i = i >> shift_x;
-                if picture.format == Format::Yuv444 {
-                    cb = lookup(&chroma, sample(u_plane, uv_j, uv_i), max);
-                    cr = lookup(&chroma, sample(v_plane, uv_j, uv_i), max);
+        let n = row.len().min(y_row.len());
+        for ((o, u), &y) in ys.iter_mut().zip(unorm.iter_mut()).zip(y_row) {
+            let code: u32 = y.into();
+            *u = code.min(max);
+            *o = lookup(&luma, y, max);
+        }
+        if has_color {
+            chroma_row(&chroma, u_plane, uv_j, max, &mut near_u, columns);
+            chroma_row(&chroma, v_plane, uv_j, max, &mut near_v, columns);
+            if picture.format == Format::Yuv444 {
+                for (i, (cb, cr)) in cbs.iter_mut().zip(crs.iter_mut()).enumerate().take(n) {
+                    let uv_i = i >> shift_x;
+                    *cb = near_u.get(uv_i).copied().unwrap_or(0.0);
+                    *cr = near_v.get(uv_i).copied().unwrap_or(0.0);
+                }
+            } else {
+                // The chroma row next to the nearest, towards this one; at
+                // the picture's first and last rows, and across 4:2:2, the
+                // nearest again.
+                let adj_row = if j == 0
+                    || (j == height - 1 && j % 2 != 0)
+                    || picture.format == Format::Yuv422
+                {
+                    uv_j
+                } else if j % 2 != 0 {
+                    uv_j + 1
                 } else {
-                    // The nearest chroma sample, its neighbour along the row
-                    // and down the column towards this pixel, and the one
-                    // diagonal; at the edges, the nearest again.
+                    uv_j - 1
+                };
+                chroma_row(&chroma, u_plane, adj_row, max, &mut far_u, columns);
+                chroma_row(&chroma, v_plane, adj_row, max, &mut far_v, columns);
+                for (i, (cb, cr)) in cbs.iter_mut().zip(crs.iter_mut()).enumerate().take(n) {
+                    let uv_i = i >> shift_x;
+                    // And the column next to the nearest, likewise.
                     let adj_col = if i == 0 || (i == width - 1 && i % 2 != 0) {
                         uv_i
                     } else if i % 2 != 0 {
@@ -910,66 +1006,144 @@ fn slow_path<T: Sample>(
                     } else {
                         uv_i - 1
                     };
-                    let adj_row = if j == 0
-                        || (j == height - 1 && j % 2 != 0)
-                        || picture.format == Format::Yuv422
-                    {
-                        uv_j
-                    } else if j % 2 != 0 {
-                        uv_j + 1
-                    } else {
-                        uv_j - 1
+                    let weigh = |near: &[f32], far: &[f32]| {
+                        let at = |r: &[f32], c: usize| r.get(c).copied().unwrap_or(0.0);
+                        (at(near, uv_i) * (9.0 / 16.0))
+                            + (at(near, adj_col) * (3.0 / 16.0))
+                            + (at(far, uv_i) * (3.0 / 16.0))
+                            + (at(far, adj_col) * (1.0 / 16.0))
                     };
-                    let weigh = |plane: Option<Plane<'_, T>>| {
-                        let at = |r: usize, c: usize| lookup(&chroma, sample(plane, r, c), max);
-                        (at(uv_j, uv_i) * (9.0 / 16.0))
-                            + (at(uv_j, adj_col) * (3.0 / 16.0))
-                            + (at(adj_row, uv_i) * (3.0 / 16.0))
-                            + (at(adj_row, adj_col) * (1.0 / 16.0))
-                    };
-                    cb = weigh(u_plane);
-                    cr = weigh(v_plane);
+                    *cb = weigh(&near_u, &far_u);
+                    *cr = weigh(&near_v, &far_v);
                 }
             }
-            let [r, g, b] = if has_color {
-                match state.mode {
-                    Mode::Identity => [cr, y, cb],
-                    Mode::YCgCo => {
-                        let t = y - cb;
-                        [t + cr, y + cb, t - cr]
-                    }
-                    Mode::YCgCoRe | Mode::YCgCoRo => {
-                        let yy = i32::try_from(unorm_y).unwrap_or(0);
-                        let cg = floor(cb * max_f + 0.5);
-                        let co = floor(cr * max_f + 0.5);
-                        let t = yy - (cg >> 1);
-                        let g = (t + cg).clamp(0, 255) as f32;
-                        let b = (t - (co >> 1)).clamp(0, 255) as f32;
-                        let r = clamp_float(b + co as f32, 255.0);
-                        [r / 255.0, g / 255.0, b / 255.0]
-                    }
-                    Mode::Coefficients => coefficients_rgb(state, y, cb, cr),
-                }
-            } else {
-                [y, y, y]
-            };
-            let (mut r, mut g, mut b) = (clamp_unit(r), clamp_unit(g), clamp_unit(b));
-            if unmultiply {
-                let a: u32 = a_row.and_then(|a| a.get(i).copied()).map_or(0, Into::into);
-                let alpha = clamp_unit(a.min(max) as f32 / max_f);
-                if alpha == 0.0 {
-                    (r, g, b) = (0.0, 0.0, 0.0);
-                } else if alpha < 1.0 {
-                    let undo = |c: f32| {
-                        let c = c / alpha;
-                        if c < 1.0 { c } else { 1.0 }
-                    };
-                    (r, g, b) = (undo(r), undo(g), undo(b));
-                }
+        }
+        let alpha = if unmultiply {
+            picture.alpha.map(|a| a.row(j))
+        } else {
+            None
+        };
+        let colour = Colour {
+            ys: &ys,
+            unorm: &unorm,
+            cbs: &cbs,
+            crs: &crs,
+        };
+        let row = row.get_mut(..n).unwrap_or_default();
+        // The colour equations, chosen once a row so that each loop is one
+        // the compiler can run several pixels at a time.
+        match (has_color, state.mode) {
+            (false, _) => finish_row(row, colour, alpha, unmultiply, max, |y, _, _, _| [y, y, y]),
+            (true, Mode::Identity) => {
+                finish_row(row, colour, alpha, unmultiply, max, |y, cb, cr, _| {
+                    [cr, y, cb]
+                });
             }
-            *px = (*px & 0xff00_0000) | (to_byte(r) << 16) | (to_byte(g) << 8) | to_byte(b);
+            (true, Mode::YCgCo) => {
+                finish_row(row, colour, alpha, unmultiply, max, |y, cb, cr, _| {
+                    let t = y - cb;
+                    [t + cr, y + cb, t - cr]
+                });
+            }
+            (true, Mode::YCgCoRe | Mode::YCgCoRo) => {
+                finish_row(row, colour, alpha, unmultiply, max, |_, cb, cr, unorm_y| {
+                    ycgco_r(unorm_y, cb, cr, max_f)
+                });
+            }
+            (true, Mode::Coefficients) => {
+                let (kr, kg, kb) = (state.kr, state.kg, state.kb);
+                finish_row(row, colour, alpha, unmultiply, max, |y, cb, cr, _| {
+                    rgb_of(kr, kg, kb, y, cb, cr)
+                });
+            }
         }
     }
+}
+
+/// A row's luma and chroma, as [`slow_path`] has looked them up and weighed
+/// them: luma's table values and its codes, and chroma's values.
+#[derive(Clone, Copy)]
+struct Colour<'a> {
+    ys: &'a [f32],
+    unorm: &'a [u32],
+    cbs: &'a [f32],
+    crs: &'a [f32],
+}
+
+/// The end of [`slow_path`] for a row: `rgb` of each pixel's luma value,
+/// chroma values and luma code; clamped; premultiplication undone by
+/// `alpha` if `unmultiply`; and into the pixel's colour bytes.
+#[inline(always)]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::arithmetic_side_effects,
+    reason = "alpha codes are under 2^16, exact as f32; the division is floating point, as libavif's"
+)]
+fn finish_row<T: Sample>(
+    row: &mut [u32],
+    colour: Colour<'_>,
+    alpha: Option<&[T]>,
+    unmultiply: bool,
+    max: u32,
+    rgb: impl Fn(f32, f32, f32, u32) -> [f32; 3],
+) {
+    let max_f = max as f32;
+    // Slices of one length, the shape the compiler vectorises.
+    let n = row.len();
+    let (Some(ys), Some(unorm), Some(cbs), Some(crs)) = (
+        colour.ys.get(..n),
+        colour.unorm.get(..n),
+        colour.cbs.get(..n),
+        colour.crs.get(..n),
+    ) else {
+        return;
+    };
+    let values = ys.iter().zip(unorm).zip(cbs.iter().zip(crs));
+    if !unmultiply {
+        for (px, ((&y, &unorm_y), (&cb, &cr))) in row.iter_mut().zip(values) {
+            let [r, g, b] = rgb(y, cb, cr, unorm_y);
+            *px = (*px & 0xff00_0000)
+                | (to_byte(clamp_unit(r)) << 16)
+                | (to_byte(clamp_unit(g)) << 8)
+                | to_byte(clamp_unit(b));
+        }
+        return;
+    }
+    for (i, (px, ((&y, &unorm_y), (&cb, &cr)))) in row.iter_mut().zip(values).enumerate() {
+        let [r, g, b] = rgb(y, cb, cr, unorm_y);
+        let (mut r, mut g, mut b) = (clamp_unit(r), clamp_unit(g), clamp_unit(b));
+        let a: u32 = alpha.and_then(|a| a.get(i).copied()).map_or(0, Into::into);
+        let alpha = clamp_unit(a.min(max) as f32 / max_f);
+        if alpha == 0.0 {
+            (r, g, b) = (0.0, 0.0, 0.0);
+        } else if alpha < 1.0 {
+            let undo = |c: f32| {
+                let c = c / alpha;
+                if c < 1.0 { c } else { 1.0 }
+            };
+            (r, g, b) = (undo(r), undo(g), undo(b));
+        }
+        *px = (*px & 0xff00_0000) | (to_byte(r) << 16) | (to_byte(g) << 8) | to_byte(b);
+    }
+}
+
+/// The YCgCo-R equations (`AVIF_REFORMAT_MODE_YCGCO_RE` and `_RO`) for a
+/// pixel: luma's code, chroma's values, the depth's largest code.
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    reason = "the luma code is under 2^16 and the rounded chroma small, so the integer arithmetic stays far inside i32; the clamped values are bytes, exact as f32"
+)]
+fn ycgco_r(unorm_y: u32, cb: f32, cr: f32, max_f: f32) -> [f32; 3] {
+    let yy = i32::try_from(unorm_y).unwrap_or(0);
+    let cg = floor(cb * max_f + 0.5);
+    let co = floor(cr * max_f + 0.5);
+    let t = yy - (cg >> 1);
+    let g = (t + cg).clamp(0, 255) as f32;
+    let b = (t - (co >> 1)).clamp(0, 255) as f32;
+    let r = clamp_float(b + co as f32, 255.0);
+    [r / 255.0, g / 255.0, b / 255.0]
 }
 
 /// `(int)floorf(v)` for the small values the YCgCo-R equations round
@@ -1009,6 +1183,161 @@ mod tests {
     use super::*;
     use alloc::format;
     use alloc::vec;
+
+    // libavif's floating-point paths as they were first ported, a pixel at
+    // a time: what the rows-at-a-time paths must reproduce bit for bit.
+    /// `avifImageYUV8ToRGB8Color`, `avifImageYUV16ToRGB8Color` and their `Mono`
+    /// twins: libavif's per-pixel path for 4:4:4 and grey.
+    fn fast_path_reference<T: Sample>(
+        picture: &Picture<'_, T>,
+        state: &State,
+        has_color: bool,
+        width: usize,
+        first: usize,
+        out: &mut [u32],
+    ) {
+        let (luma, chroma) = tables(state);
+        let max = state.max_channel;
+        for (j, row) in (first..).zip(out.chunks_exact_mut(width.max(1))) {
+            let y_row = picture.y.row(j);
+            let (u_row, v_row) = match (picture.u, picture.v) {
+                (Some(u), Some(v)) if has_color => (u.row(j), v.row(j)),
+                _ => (&[][..], &[][..]),
+            };
+            for (i, (px, &y)) in row.iter_mut().zip(y_row).enumerate() {
+                let y = lookup(&luma, y, max);
+                let (cb, cr) = if has_color {
+                    let at = |r: &[T]| r.get(i).map_or(0.0, |&s| lookup(&chroma, s, max));
+                    (at(u_row), at(v_row))
+                } else {
+                    (0.0, 0.0)
+                };
+                let [r, g, b] = coefficients_rgb(state, y, cb, cr);
+                *px = (*px & 0xff00_0000)
+                    | (to_byte(clamp_unit(r)) << 16)
+                    | (to_byte(clamp_unit(g)) << 8)
+                    | to_byte(clamp_unit(b));
+            }
+        }
+    }
+
+    /// `avifImageYUVAnyToRGBAnySlow`: every combination, one pixel at a time --
+    /// chroma upsampled bilinearly from the four nearest samples, and alpha
+    /// premultiplication undone in floating point.
+    #[allow(
+        clippy::arithmetic_side_effects,
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        reason = "indices stay within the planes by the adjacency rules (checked by get), samples are under 2^16 and exact as f32, and the rounded YCgCo values are small"
+    )]
+    fn slow_path_reference<T: Sample>(
+        picture: &Picture<'_, T>,
+        state: &State,
+        unmultiply: bool,
+        width: usize,
+        first: usize,
+        out: &mut [u32],
+    ) {
+        let (luma, chroma) = tables(state);
+        let max = state.max_channel;
+        let max_f = max as f32;
+        let (u_plane, v_plane) = (picture.u, picture.v);
+        let has_color = u_plane.is_some() && v_plane.is_some() && picture.format != Format::Yuv400;
+        // The whole picture's height: the adjacency at its last row depends on
+        // it, whichever band this is.
+        let height = picture.height;
+        let sample = |plane: Option<Plane<'_, T>>, row: usize, col: usize| -> T {
+            plane
+                .and_then(|p| p.row(row).get(col).copied())
+                .unwrap_or_default()
+        };
+        let (shift_x, shift_y) = (state.shift_x, state.shift_y);
+        for (j, row) in (first..).zip(out.chunks_exact_mut(width.max(1))) {
+            let uv_j = if has_color { j >> shift_y } else { 0 };
+            let y_row = picture.y.row(j);
+            let a_row = picture.alpha.map(|a| a.row(j));
+            for (i, (px, &y_sample)) in row.iter_mut().zip(y_row).enumerate() {
+                let unorm_y: u32 = y_sample.into();
+                let unorm_y = unorm_y.min(max);
+                let y = lookup(&luma, y_sample, max);
+                let (mut cb, mut cr) = (0.5f32, 0.5f32);
+                if has_color {
+                    let uv_i = i >> shift_x;
+                    if picture.format == Format::Yuv444 {
+                        cb = lookup(&chroma, sample(u_plane, uv_j, uv_i), max);
+                        cr = lookup(&chroma, sample(v_plane, uv_j, uv_i), max);
+                    } else {
+                        // The nearest chroma sample, its neighbour along the row
+                        // and down the column towards this pixel, and the one
+                        // diagonal; at the edges, the nearest again.
+                        let adj_col = if i == 0 || (i == width - 1 && i % 2 != 0) {
+                            uv_i
+                        } else if i % 2 != 0 {
+                            uv_i + 1
+                        } else {
+                            uv_i - 1
+                        };
+                        let adj_row = if j == 0
+                            || (j == height - 1 && j % 2 != 0)
+                            || picture.format == Format::Yuv422
+                        {
+                            uv_j
+                        } else if j % 2 != 0 {
+                            uv_j + 1
+                        } else {
+                            uv_j - 1
+                        };
+                        let weigh = |plane: Option<Plane<'_, T>>| {
+                            let at = |r: usize, c: usize| lookup(&chroma, sample(plane, r, c), max);
+                            (at(uv_j, uv_i) * (9.0 / 16.0))
+                                + (at(uv_j, adj_col) * (3.0 / 16.0))
+                                + (at(adj_row, uv_i) * (3.0 / 16.0))
+                                + (at(adj_row, adj_col) * (1.0 / 16.0))
+                        };
+                        cb = weigh(u_plane);
+                        cr = weigh(v_plane);
+                    }
+                }
+                let [r, g, b] = if has_color {
+                    match state.mode {
+                        Mode::Identity => [cr, y, cb],
+                        Mode::YCgCo => {
+                            let t = y - cb;
+                            [t + cr, y + cb, t - cr]
+                        }
+                        Mode::YCgCoRe | Mode::YCgCoRo => {
+                            let yy = i32::try_from(unorm_y).unwrap_or(0);
+                            let cg = floor(cb * max_f + 0.5);
+                            let co = floor(cr * max_f + 0.5);
+                            let t = yy - (cg >> 1);
+                            let g = (t + cg).clamp(0, 255) as f32;
+                            let b = (t - (co >> 1)).clamp(0, 255) as f32;
+                            let r = clamp_float(b + co as f32, 255.0);
+                            [r / 255.0, g / 255.0, b / 255.0]
+                        }
+                        Mode::Coefficients => coefficients_rgb(state, y, cb, cr),
+                    }
+                } else {
+                    [y, y, y]
+                };
+                let (mut r, mut g, mut b) = (clamp_unit(r), clamp_unit(g), clamp_unit(b));
+                if unmultiply {
+                    let a: u32 = a_row.and_then(|a| a.get(i).copied()).map_or(0, Into::into);
+                    let alpha = clamp_unit(a.min(max) as f32 / max_f);
+                    if alpha == 0.0 {
+                        (r, g, b) = (0.0, 0.0, 0.0);
+                    } else if alpha < 1.0 {
+                        let undo = |c: f32| {
+                            let c = c / alpha;
+                            if c < 1.0 { c } else { 1.0 }
+                        };
+                        (r, g, b) = (undo(r), undo(g), undo(b));
+                    }
+                }
+                *px = (*px & 0xff00_0000) | (to_byte(r) << 16) | (to_byte(g) << 8) | to_byte(b);
+            }
+        }
+    }
 
     /// Planes for a `width` x `height` picture of `format`, every sample
     /// 128.
@@ -1258,6 +1587,176 @@ mod tests {
     }
 
     /// Planes of varied samples, for a picture of `format` at `depth`.
+    /// What [`to_byte`] stands for: the C's conversion, which Rust's `as`
+    /// gives the same answers as on x86.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the cast is the reference: it saturates"
+    )]
+    fn to_byte_by_cast(c: f32) -> u32 {
+        u32::from((0.5f32 + c * 255.0) as u8)
+    }
+
+    #[test]
+    fn to_byte_truncates_as_the_cast_does() {
+        let mut checked = 0;
+        let mut check = |c: f32| {
+            assert_eq!(
+                to_byte(c),
+                to_byte_by_cast(c),
+                "{c:e} ({:#010x})",
+                c.to_bits()
+            );
+            checked += 1;
+        };
+        // A stride through every bit pattern: the signs, both infinities,
+        // subnormals, NaNs.
+        for bits in (0..=u32::MAX).step_by(65_537) {
+            check(f32::from_bits(bits));
+        }
+        for special in [0.0, -0.0, 1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            check(special);
+        }
+        // Around every value at which the truncation steps up a byte, where
+        // a wrong rounding would show: 64 floats each side.
+        for k in 0..=256u16 {
+            let at = (f32::from(k) - 0.5) / 255.0;
+            let bits = at.to_bits();
+            for d in 0..=128 {
+                check(f32::from_bits(bits.wrapping_add(d).wrapping_sub(64)));
+            }
+        }
+        assert!(checked > 90_000, "{checked} checked");
+    }
+
+    /// [`to_byte`] against the cast on every float: four billion, so run it
+    /// in release -- `cargo test -p yuv --release -- --ignored`.
+    #[test]
+    #[ignore = "every 32-bit pattern: run in release with --ignored"]
+    fn to_byte_truncates_as_the_cast_does_for_every_float() {
+        for bits in 0..=u32::MAX {
+            let c = f32::from_bits(bits);
+            assert_eq!(to_byte(c), to_byte_by_cast(c), "{bits:#010x}");
+        }
+    }
+
+    /// Numerical Recipes' generator.
+    fn lcg(seed: &mut u32) -> u32 {
+        *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        *seed >> 8
+    }
+
+    /// Random pictures through the floating-point paths, a row at a time and
+    /// as first ported, a pixel at a time: every format, the depths, every
+    /// matrix that reaches them, either range, with and without alpha
+    /// (premultiplied too), and deep samples past their depth now and then.
+    /// The same pixels, alpha bytes included, from the same starting pixels.
+    #[test]
+    fn the_float_paths_convert_as_they_did_a_pixel_at_a_time() {
+        fn compare<T: Sample + TryFrom<u32>>(seed: &mut u32, depth: u8, case: usize) -> bool {
+            let format = [
+                Format::Yuv444,
+                Format::Yuv422,
+                Format::Yuv420,
+                Format::Yuv400,
+            ][case % 4];
+            let matrix = [
+                MC_FCC,
+                MC_SMPTE240,
+                MC_YCGCO,
+                MC_YCGCO_RE,
+                MC_YCGCO_RO,
+                MC_IDENTITY,
+                MC_BT709,
+                MC_CHROMA_DERIVED_NCL,
+            ][(lcg(seed) % 8) as usize];
+            let (width, height) = (1 + (lcg(seed) % 23) as usize, 1 + (lcg(seed) % 9) as usize);
+            let (cw, ch) = match format {
+                Format::Yuv444 | Format::Yuv400 => (width, height),
+                Format::Yuv422 => (width.div_ceil(2), height),
+                Format::Yuv420 => (width.div_ceil(2), height.div_ceil(2)),
+            };
+            let max = (1u32 << depth) - 1;
+            let mut plane = |w: usize, h: usize| PlaneBuf {
+                width: w,
+                height: h,
+                samples: (0..w * h)
+                    .map(|_| {
+                        let s = lcg(seed);
+                        let v = if depth > 8 && s.is_multiple_of(16) {
+                            s
+                        } else {
+                            s % (max + 1)
+                        };
+                        T::try_from(v & 0xffff).ok().unwrap_or_default()
+                    })
+                    .collect(),
+            };
+            let (y, u, v, a) = (
+                plane(width, height),
+                plane(cw, ch),
+                plane(cw, ch),
+                plane(width, height),
+            );
+            let colour = format != Format::Yuv400;
+            let alpha = lcg(seed).is_multiple_of(2);
+            let picture = Picture {
+                width,
+                height,
+                depth,
+                format,
+                matrix,
+                primaries: [CP_BT709, CP_BT470BG, CP_BT2020][(lcg(seed) % 3) as usize],
+                full_range: lcg(seed).is_multiple_of(2),
+                y: y.view(),
+                u: colour.then(|| u.view()),
+                v: colour.then(|| v.view()),
+                alpha: alpha.then(|| a.view()),
+                alpha_premultiplied: alpha && lcg(seed).is_multiple_of(2),
+            };
+            let Ok(state) = prepare(&picture) else {
+                return false;
+            };
+            let start: Vec<u32> = (0..width * height).map(|_| lcg(seed) << 8).collect();
+            let has_color = colour;
+            let what = format!(
+                "case {case}: {width}x{height} {depth}-bit {format:?} matrix {matrix} range {} alpha {alpha}",
+                picture.full_range
+            );
+            if !has_color || format == Format::Yuv444 {
+                let (mut got, mut want) = (start.clone(), start.clone());
+                fast_path(&picture, &state, has_color, width, 0, &mut got);
+                fast_path_reference(&picture, &state, has_color, width, 0, &mut want);
+                assert_eq!(got, want, "fast path, {what}");
+            }
+            for unmultiply in [false, picture.alpha_premultiplied] {
+                let (mut got, mut want) = (start.clone(), start.clone());
+                slow_path(&picture, &state, unmultiply, width, 0, &mut got);
+                slow_path_reference(&picture, &state, unmultiply, width, 0, &mut want);
+                assert_eq!(got, want, "slow path, unmultiply {unmultiply}, {what}");
+                // A band, from a row other than the first.
+                if height > 2 {
+                    let mut band = start[width..2 * width].to_vec();
+                    slow_path(&picture, &state, unmultiply, width, 1, &mut band);
+                    assert_eq!(band, got[width..2 * width], "slow path band, {what}");
+                }
+            }
+            true
+        }
+        let mut seed = 0x0f10_a7ed;
+        let mut compared = 0;
+        for case in 0..3000 {
+            compared += usize::from(match case % 4 {
+                0 => compare::<u8>(&mut seed, 8, case),
+                1 => compare::<u16>(&mut seed, 10, case),
+                2 => compare::<u16>(&mut seed, 12, case),
+                _ => compare::<u16>(&mut seed, 16, case),
+            });
+        }
+        assert!(compared > 1000, "{compared} pictures converted");
+    }
+
     fn varied<T: Copy + Default + TryFrom<u32>>(
         format: Format,
         width: usize,

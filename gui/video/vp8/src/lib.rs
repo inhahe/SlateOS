@@ -42,7 +42,8 @@
 //! - `loopfilter`: smoothing across block edges.
 //! - `frame`: the planes frames are decoded into, borders and all.
 //! - `threading`: a frame's macroblock rows on several threads, when it has
-//!   several token partitions.
+//!   several token partitions; `pipeline`: its loop filter on a thread of
+//!   its own, when it has one; `band`: the copy of a row each decodes into.
 //! - `decoder`: the frame loop -- the four buffers the frame being decoded
 //!   and the three references share, and which frames show.
 //!
@@ -66,8 +67,10 @@
 //! (`threading`). The same film in eight partitions decodes 2.9 times as
 //! fast on eight threads as on one (2.5 times at 720p, 1.6 at 360p; smaller
 //! pictures, which a thread costs more than it saves, stay on one). A frame
-//! of one partition -- what encoders make unless asked for more -- decodes
-//! on one thread, in libvpx too.
+//! of one partition -- what encoders make unless asked for more -- cannot
+//! share its rows so (libvpx decodes it on one thread), but its loop filter
+//! runs on a second thread, a row behind its macroblocks (`pipeline`): 1.3
+//! times as fast at 1080p, 1.2 at 360p, the pictures again the same.
 //!
 //! # What a hostile stream can do
 //!
@@ -95,6 +98,7 @@
 
 #![forbid(unsafe_code)]
 
+mod band;
 mod boolread;
 mod decodeframe;
 mod decoder;
@@ -105,6 +109,7 @@ mod inter;
 mod intra;
 mod loopfilter;
 mod modes;
+mod pipeline;
 // Generated from libvpx by `tools/gen_tables.py`, which formats what it
 // writes, so regenerating and diffing compares like with like.
 mod tables;

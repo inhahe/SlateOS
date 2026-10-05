@@ -44,6 +44,11 @@
 //! [`draw_box`] draws the box alone, for a control that is a check box in
 //! another's room -- an on/off switch under a theme that draws switches as
 //! boxes (`crate::switch`).
+//!
+//! A label is drawn whole by [`draw`]. In a panel narrower than it might be,
+//! [`draw_in`] holds the whole control to the room it has and cuts the label
+//! at its end with an ellipsis, and [`hit_in`] holds the press region to the
+//! same room -- as `crate::radio`'s do for an option.
 
 use crate::color::Color;
 use crate::disabled::DISABLED_OPACITY;
@@ -137,11 +142,29 @@ pub fn box_rect(x: f32, y: f32, h: f32) -> Rect {
 /// words "Show hidden files" ticks the box, as it does everywhere.
 #[must_use]
 pub fn hit(x: f32, y: f32, h: f32, label: &str) -> Rect {
+    hit_to(x, y, h, label, None)
+}
+
+/// [`hit`], for a checkbox drawn with [`draw_in`]: held to `room` pixels
+/// from `x`, so a click past the cut-off end of its label does not reach it.
+/// Never less than the box itself, however little room there is.
+#[must_use]
+pub fn hit_in(x: f32, y: f32, h: f32, room: f32, label: &str) -> Rect {
+    hit_to(x, y, h, label, Some(room))
+}
+
+fn hit_to(x: f32, y: f32, h: f32, label: &str, room: Option<f32>) -> Rect {
     let region = grab::handle(box_rect(x, y, h));
-    let right = (x + width(label)).max(region.right());
+    let wanted = room.map_or(width(label), |room| width(label).min(room));
+    let right = (x + wanted).max(region.right());
     let top = region.y.min(y);
     let bottom = region.bottom().max(y + h);
     Rect::new(region.x, top, right - region.x, bottom - top)
+}
+
+/// How much of a row `room` wide is the label's, after the box and the gap.
+pub(crate) fn label_room(room: f32) -> f32 {
+    (room - SIZE - LABEL_GAP).max(0.0)
 }
 
 /// Whether `key` flips a checkbox that has the keyboard: Space, pressed, with
@@ -207,20 +230,87 @@ pub fn draw(
     state: State,
     focus_ring: f32,
 ) {
+    draw_to(sink, p, (x, y, h), None, label, check, state, focus_ring);
+}
+
+/// [`draw`], with the whole checkbox -- box, gap and label -- held to `room`
+/// pixels from `x`: a label longer than that is cut at its end with an
+/// ellipsis, the mark that says text was cut, rather than running on past
+/// its panel. Test a press against [`hit_in`] with the same room.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "draw's, and the room its label has"
+)]
+pub fn draw_in(
+    sink: &mut impl CommandSink,
+    p: &Palette,
+    (x, y, h): (f32, f32, f32),
+    room: f32,
+    label: &str,
+    check: CheckState,
+    state: State,
+    focus_ring: f32,
+) {
+    draw_to(
+        sink,
+        p,
+        (x, y, h),
+        Some(room),
+        label,
+        check,
+        state,
+        focus_ring,
+    );
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "draw_in's, with the room optional"
+)]
+fn draw_to(
+    sink: &mut impl CommandSink,
+    p: &Palette,
+    (x, y, h): (f32, f32, f32),
+    room: Option<f32>,
+    label: &str,
+    check: CheckState,
+    state: State,
+    focus_ring: f32,
+) {
     let colours = paint(p, state);
     let b = box_rect(x, y, h);
     draw_box(sink, p, b, check, state, focus_ring, colours.mark);
     if !label.is_empty() {
-        sink.emit(RenderCommand::Text {
-            x: b.right() + LABEL_GAP,
-            y: y + (h - FONT_SIZE) / 2.0,
-            text: label.to_string(),
-            color: fade(colours.label, state),
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        sink.emit(label_text(
+            (b.right() + LABEL_GAP, y + (h - FONT_SIZE) / 2.0),
+            label,
+            fade(colours.label, state),
+            room,
+        ));
+    }
+}
+
+/// A checkbox's or radio button's label at `(x, y)`: cut with an ellipsis to
+/// fit the label's share of `room` when there is one, else drawn whole.
+pub(crate) fn label_text(
+    (x, y): (f32, f32),
+    label: &str,
+    color: Color,
+    room: Option<f32>,
+) -> RenderCommand {
+    RenderCommand::Text {
+        x,
+        y,
+        text: label.to_string(),
+        color,
+        font_size: FONT_SIZE,
+        font_weight: FontWeightHint::Regular,
+        max_width: room.map(label_room),
+        overflow: if room.is_some() {
+            TextOverflow::Ellipsis
+        } else {
+            TextOverflow::Clip
+        },
     }
 }
 
@@ -322,7 +412,12 @@ pub fn draw_box(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::panic, clippy::expect_used, clippy::indexing_slicing)]
+    #![allow(
+        clippy::panic,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::float_cmp
+    )]
 
     use super::*;
     use crate::event::Modifiers;
@@ -567,5 +662,65 @@ mod tests {
         let mut ctrl = key(Key::Space);
         ctrl.modifiers.ctrl = true;
         assert!(!toggles(&ctrl));
+    }
+
+    /// The label a checkbox drew, with the room it was given and how it is
+    /// cut.
+    fn label_of(cmds: &[RenderCommand]) -> (String, Option<f32>, TextOverflow) {
+        cmds.iter()
+            .find_map(|c| match c {
+                RenderCommand::Text {
+                    text,
+                    max_width,
+                    overflow,
+                    ..
+                } => Some((text.clone(), *max_width, *overflow)),
+                _ => None,
+            })
+            .expect("a label")
+    }
+
+    /// **Given room, a label is cut to it with an ellipsis, and a press past
+    /// the cut misses** -- requests/e-c-a-check-box-or-radio-label-runs-past-
+    /// its-room.md. Without room it is drawn whole, as before; with less room
+    /// than the box, the box can still be pressed.
+    #[test]
+    fn given_room_a_label_is_cut_to_it() {
+        let p = Palette::for_mode(false);
+        let label = "Quick Scan - Recycle bin + inode tables (faster)";
+        let mut cmds = Vec::new();
+        draw_in(
+            &mut cmds,
+            &p,
+            (10.0, 20.0, HEIGHT),
+            120.0,
+            label,
+            CheckState::Checked,
+            State::default(),
+            2.0,
+        );
+        let (text, room, overflow) = label_of(&cmds);
+        assert_eq!(text, label);
+        assert_eq!(room, Some(120.0 - SIZE - LABEL_GAP));
+        assert_eq!(overflow, TextOverflow::Ellipsis);
+        assert_eq!(
+            label_of(&drawn(CheckState::Checked, State::default())).1,
+            None
+        );
+        // The press region ends where the room does, not where the label would.
+        let whole = hit(10.0, 20.0, HEIGHT, label);
+        let held = hit_in(10.0, 20.0, HEIGHT, 120.0, label);
+        assert!(whole.right() > 130.0 + 1.0, "{whole:?}");
+        assert!((held.right() - 130.0).abs() < 1e-3, "{held:?}");
+        assert_eq!((held.x, held.y, held.h), (whole.x, whole.y, whole.h));
+        // A short label that fits is pressed as without room.
+        assert_eq!(
+            hit_in(10.0, 20.0, HEIGHT, 400.0, "OK"),
+            hit(10.0, 20.0, HEIGHT, "OK")
+        );
+        // No room for the label: the box, grown as a handle, still is.
+        let boxed = hit_in(10.0, 20.0, HEIGHT, 0.0, label);
+        assert_eq!(boxed, hit(10.0, 20.0, HEIGHT, ""));
+        assert_eq!(label_room(1.0), 0.0);
     }
 }

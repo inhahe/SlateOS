@@ -36,7 +36,7 @@ use crate::disabled::DISABLED_OPACITY;
 use crate::event::{Key, KeyEvent};
 use crate::frame::Rect;
 use crate::palette::{Palette, legible_on};
-use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
+use crate::render::RenderCommand;
 use crate::step;
 use crate::style::CornerRadii;
 use crate::surface::CommandSink;
@@ -214,6 +214,13 @@ pub fn hit(x: f32, y: f32, h: f32, label: &str) -> Rect {
     crate::checkbox::hit(x, y, h, label)
 }
 
+/// [`hit`], for an option drawn with [`draw_in`]: held to `room` pixels from
+/// `x`, never less than the circle.
+#[must_use]
+pub fn hit_in(x: f32, y: f32, h: f32, room: f32, label: &str) -> Rect {
+    crate::checkbox::hit_in(x, y, h, room, label)
+}
+
 /// Draw one option whose row starts at `(x, y)` and is `h` tall.
 #[allow(
     clippy::too_many_arguments,
@@ -223,6 +230,53 @@ pub fn draw(
     sink: &mut impl CommandSink,
     p: &Palette,
     (x, y, h): (f32, f32, f32),
+    label: &str,
+    chosen: bool,
+    state: State,
+    focus_ring: f32,
+) {
+    draw_to(sink, p, (x, y, h), None, label, chosen, state, focus_ring);
+}
+
+/// [`draw`], with the whole option -- circle, gap and label -- held to
+/// `room` pixels from `x`: a longer label is cut at its end with an
+/// ellipsis rather than running on past its panel. Test a press against
+/// [`hit_in`] with the same room.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "draw's, and the room its label has"
+)]
+pub fn draw_in(
+    sink: &mut impl CommandSink,
+    p: &Palette,
+    (x, y, h): (f32, f32, f32),
+    room: f32,
+    label: &str,
+    chosen: bool,
+    state: State,
+    focus_ring: f32,
+) {
+    draw_to(
+        sink,
+        p,
+        (x, y, h),
+        Some(room),
+        label,
+        chosen,
+        state,
+        focus_ring,
+    );
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "draw_in's, with the room optional"
+)]
+fn draw_to(
+    sink: &mut impl CommandSink,
+    p: &Palette,
+    (x, y, h): (f32, f32, f32),
+    room: Option<f32>,
     label: &str,
     chosen: bool,
     state: State,
@@ -290,16 +344,12 @@ pub fn draw(
         });
     }
     if !label.is_empty() {
-        sink.emit(RenderCommand::Text {
-            x: c.right() + LABEL_GAP,
-            y: y + (h - FONT_SIZE) / 2.0,
-            text: label.to_string(),
-            color: fade(p.text),
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        sink.emit(crate::checkbox::label_text(
+            (c.right() + LABEL_GAP, y + (h - FONT_SIZE) / 2.0),
+            label,
+            fade(p.text),
+            room,
+        ));
     }
 }
 
@@ -473,5 +523,65 @@ mod tests {
             | RenderCommand::Text { color, .. } => color.a < u8::MAX,
             _ => true,
         }));
+    }
+
+    /// **Given room, an option's label is cut to it with an ellipsis, and a
+    /// press past the cut misses**; without room it is drawn whole.
+    #[test]
+    fn given_room_a_label_is_cut_to_it() {
+        let p = Palette::for_mode(false);
+        let label = "Deep Scan - Sector-by-sector signature detection (thorough)";
+        let label_of = |room: Option<f32>| {
+            let mut cmds = Vec::new();
+            match room {
+                Some(room) => draw_in(
+                    &mut cmds,
+                    &p,
+                    (10.0, 20.0, HEIGHT),
+                    room,
+                    label,
+                    true,
+                    State::default(),
+                    2.0,
+                ),
+                None => draw(
+                    &mut cmds,
+                    &p,
+                    (10.0, 20.0, HEIGHT),
+                    label,
+                    true,
+                    State::default(),
+                    2.0,
+                ),
+            }
+            cmds.into_iter()
+                .find_map(|c| match c {
+                    RenderCommand::Text {
+                        text,
+                        max_width,
+                        overflow,
+                        ..
+                    } => Some((text, max_width.is_some(), overflow)),
+                    _ => None,
+                })
+                .expect("a label")
+        };
+        let cut = label_of(Some(150.0));
+        assert_eq!(
+            cut,
+            (
+                label.to_owned(),
+                true,
+                crate::render::TextOverflow::Ellipsis
+            )
+        );
+        let whole = label_of(None);
+        assert_eq!(
+            whole,
+            (label.to_owned(), false, crate::render::TextOverflow::Clip)
+        );
+        let held = hit_in(10.0, 20.0, HEIGHT, 150.0, label);
+        assert!((held.right() - 160.0).abs() < 1e-3, "{held:?}");
+        assert!(hit(10.0, 20.0, HEIGHT, label).right() > held.right());
     }
 }

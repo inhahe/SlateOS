@@ -50,9 +50,22 @@
 //!   URL -- PNG, JPEG, GIF, WebP, BMP, ICO or TIFF -- fitted into its
 //!   viewport by its `preserveAspectRatio` (the `image` module says what of
 //!   them is drawn; a drawing's references to other files are not followed)
+//! - Dashes: `stroke-dasharray` and `stroke-dashoffset`, measured in the
+//!   shape's user space, and `pathLength` (the `dash` module says what of
+//!   them is drawn)
+//! - `visibility` (a hidden group's child may show again), `paint-order`,
+//!   and `vector-effect: non-scaling-stroke` -- a stroke measured in the
+//!   outermost `<svg>`'s CSS pixels, however the shape is transformed
+//! - Blending: `mix-blend-mode` mixes what an element draws with what is
+//!   under it, by any of Compositing and Blending's sixteen modes, and
+//!   `isolation: isolate` -- or a layer an opacity or a filter already makes
+//!   -- keeps that to what a group holds
 //! - Container elements: the outermost svg, its viewBox fitted to the pixels
 //!   as its `preserveAspectRatio` says; an svg inside it, placed in a
-//!   viewport of its own; g (with inheritance)
+//!   viewport of its own; g (with inheritance); `a`, drawn as a g; `switch`,
+//!   the first of its children whose conditions hold -- `systemLanguage` and
+//!   `requiredExtensions`, which decide on any element whether it is drawn
+//!   (the `conditions` module)
 //! - Color parsing: hex, named colors, rgb(), rgba(), none, transparent, currentColor
 //! - XML namespaces: an element is SVG's by its namespace, not by how it is
 //!   written -- `<svg:rect>` with `svg` bound to SVG's namespace is drawn,
@@ -79,7 +92,9 @@ use core::f32::consts::PI;
 use std::collections::HashMap;
 
 mod clip;
+mod conditions;
 mod css;
+mod dash;
 mod effects;
 mod filter;
 mod image;
@@ -90,6 +105,8 @@ mod mask;
 #[cfg(test)]
 mod namespace_tests;
 mod paint;
+#[cfg(test)]
+mod painting_tests;
 mod pattern;
 #[cfg(test)]
 mod use_tests;
@@ -98,6 +115,7 @@ mod viewport_tests;
 
 pub use clip::Clip;
 use clip::{ClipPath, MAX_CLIP_DEPTH, Mask, Referable, clip_path_frame, may_clip};
+pub use effects::BlendMode;
 use filter::{FilterDef, FilterLists, MAX_FILTER_PIXELS, Target};
 use image::{Picture, Pictures};
 use marker::{MarkerDef, Orient, Reference};
@@ -105,6 +123,7 @@ use mask::{MaskDef, kept, mask_frame};
 use paint::{Defs, Gradient};
 use pattern::{MAX_TILE_SIDE, PatternDef, Tile};
 use std::rc::Rc;
+use std::sync::Arc;
 
 // ─── Error Types ─────────────────────────────────────────────────────────────
 
@@ -1207,6 +1226,97 @@ pub struct SvgStyle {
     pub marker_start: Option<MarkerRef>,
     pub marker_mid: Option<MarkerRef>,
     pub marker_end: Option<MarkerRef>,
+    /// The stroke's dashes: `None` where the element does not say, which
+    /// inherits.
+    pub stroke_dasharray: Option<Dashes>,
+    /// How far into its dashes the stroke starts, in user units: inherited.
+    pub stroke_dashoffset: Option<f32>,
+    /// The length the element says its shape has (`pathLength`), which its
+    /// dashes are measured against: its own, not inherited.
+    pub path_length: Option<f32>,
+    /// Whether the element is shown (`visibility`): `Some(false)` for
+    /// `hidden` or `collapse`. Inherited -- and a child may say `visible`
+    /// again, so a hidden group's children are still walked.
+    pub visibility: Option<bool>,
+    /// The order a shape's fill, stroke and markers are painted in
+    /// (`paint-order`): inherited.
+    pub paint_order: Option<PaintOrder>,
+    /// Whether the element's stroke is measured in the host's space rather
+    /// than its own (`vector-effect: non-scaling-stroke`): its own, not
+    /// inherited.
+    pub non_scaling_stroke: bool,
+    /// How what the element draws is mixed with what is under it
+    /// (`mix-blend-mode`): its own, not inherited.
+    pub mix_blend_mode: BlendMode,
+    /// Whether what the element draws is mixed among itself before it is
+    /// laid on what is under it (`isolation: isolate`): its own.
+    pub isolate: bool,
+}
+
+/// One of the three things a shape paints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaintPart {
+    Fill,
+    Stroke,
+    Markers,
+}
+
+/// The order a shape paints its parts in (`paint-order`), the first painted
+/// first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PaintOrder(pub [PaintPart; 3]);
+
+impl PaintOrder {
+    /// SVG's own: the fill, then the stroke, then the markers.
+    pub const NORMAL: Self = Self([PaintPart::Fill, PaintPart::Stroke, PaintPart::Markers]);
+
+    /// What a `paint-order` value says: `normal`, or one to three of `fill`,
+    /// `stroke` and `markers` in the order to paint them, the ones it leaves
+    /// out following in their normal order. `None` for anything else -- a
+    /// word twice, or one it does not know -- which is not said.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        let value = value.trim();
+        if value == "normal" {
+            return Some(Self::NORMAL);
+        }
+        let mut order: Vec<PaintPart> = Vec::with_capacity(3);
+        for word in value.split_ascii_whitespace() {
+            let part = match word {
+                "fill" => PaintPart::Fill,
+                "stroke" => PaintPart::Stroke,
+                "markers" => PaintPart::Markers,
+                _ => return None,
+            };
+            if order.contains(&part) {
+                return None;
+            }
+            order.push(part);
+        }
+        if order.is_empty() {
+            return None;
+        }
+        for part in Self::NORMAL.0 {
+            if !order.contains(&part) {
+                order.push(part);
+            }
+        }
+        let [a, b, c] = order.as_slice() else {
+            return None;
+        };
+        Some(Self([*a, *b, *c]))
+    }
+}
+
+/// A stroke's dashes (`stroke-dasharray`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Dashes {
+    /// None: `none`, or a list whose lengths sum to nought.
+    Solid,
+    /// The lengths, in user units, of a dash, a gap, a dash... -- even in
+    /// number, none negative, summing to more than nought. Shared, so that
+    /// handing it down a document's tree costs nothing.
+    Pattern(Arc<[f32]>),
 }
 
 /// What a `marker-start`, `marker-mid` or `marker-end` says.
@@ -1249,6 +1359,14 @@ impl Default for SvgStyle {
             marker_start: None,
             marker_mid: None,
             marker_end: None,
+            stroke_dasharray: None,
+            stroke_dashoffset: None,
+            path_length: None,
+            visibility: None,
+            paint_order: None,
+            non_scaling_stroke: false,
+            mix_blend_mode: BlendMode::Normal,
+            isolate: false,
         }
     }
 }
@@ -1525,6 +1643,36 @@ impl SvgDocument {
         })
     }
 
+    /// How many of `width` by `height` pixels one of the drawing's CSS
+    /// pixels covers, across and down: the size its `width` and `height`
+    /// say -- its view box's where they do not -- stretched to the pixels.
+    /// What a non-scaling stroke is measured in, as a browser zoomed to fit
+    /// the drawing to those pixels would measure it.
+    fn host_scale(&self, width: u32, height: u32) -> (f32, f32) {
+        let (_, _, shown_w, shown_h) = self.viewbox();
+        let (css_w, css_h) = match &self.root {
+            SvgNode::Svg {
+                width: w,
+                height: h,
+                ..
+            } => (w.unwrap_or(shown_w), h.unwrap_or(shown_h)),
+            _ => (shown_w, shown_h),
+        };
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a surface's side, far inside f32's exact range"
+        )]
+        let per = |pixels: u32, css: f32| {
+            let scale = pixels as f32 / css;
+            if scale.is_finite() && scale > 0.0 {
+                scale
+            } else {
+                1.0
+            }
+        };
+        (per(width, css_w), per(height, css_h))
+    }
+
     /// Get the viewBox (min_x, min_y, width, height).
     /// Returns (0, 0, width, height) if no explicit viewBox is set.
     pub fn viewbox(&self) -> (f32, f32, f32, f32) {
@@ -1560,6 +1708,7 @@ impl SvgDocument {
             _ => AspectRatio::DEFAULT,
         };
         let pixels = (0.0, 0.0, renderer.width as f32, renderer.height as f32);
+        renderer.host = self.host_scale(renderer.width, renderer.height);
         if let Some(fit) = fit_view_box(self.viewbox(), aspect, pixels) {
             renderer.render_node(&self.root, fit, &ResolvedStyle::default());
         }
@@ -1585,6 +1734,14 @@ struct ResolvedStyle {
     stroke_opacity: f32,
     /// The markers on a shape's first, middle and last vertices.
     markers: [Option<usize>; 3],
+    /// The stroke's dash pattern, in user units; `None` for a solid stroke.
+    dashes: Option<Arc<[f32]>>,
+    /// How far into `dashes` the stroke starts.
+    dash_offset: f32,
+    /// Whether a shape is shown (`visibility`).
+    visible: bool,
+    /// The order a shape paints its fill, stroke and markers in.
+    paint_order: PaintOrder,
 }
 
 impl Default for ResolvedStyle {
@@ -1602,6 +1759,10 @@ impl Default for ResolvedStyle {
             fill_opacity: 1.0,
             stroke_opacity: 1.0,
             markers: [None; 3],
+            dashes: None,
+            dash_offset: 0.0,
+            visible: true,
+            paint_order: PaintOrder::NORMAL,
         }
     }
 }
@@ -1609,7 +1770,16 @@ impl Default for ResolvedStyle {
 impl ResolvedStyle {
     fn with_overrides(&self, style: &SvgStyle) -> Self {
         let [start, mid, end] = self.markers;
+        let dashes = match &style.stroke_dasharray {
+            Some(Dashes::Solid) => None,
+            Some(Dashes::Pattern(pattern)) => Some(Arc::clone(pattern)),
+            None => self.dashes.clone(),
+        };
         Self {
+            dashes,
+            dash_offset: style.stroke_dashoffset.unwrap_or(self.dash_offset),
+            visible: style.visibility.unwrap_or(self.visible),
+            paint_order: style.paint_order.unwrap_or(self.paint_order),
             fill: style.fill.unwrap_or(self.fill),
             fill_rule: style.fill_rule.unwrap_or(self.fill_rule),
             stroke: style.stroke.unwrap_or(self.stroke),
@@ -2939,9 +3109,11 @@ fn build_clip_path(elem: &XmlElement, b: Builder<'_>) -> ClipPath {
 
 fn build_node(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
     // `display: none` takes the element and everything in it out of the
-    // drawing, and a definition is not drawn where it stands.
+    // drawing, a definition is not drawn where it stands, and nor is an
+    // element whose conditions do not hold (`conditions`).
     if NOT_DRAWN.contains(&elem.tag.as_str())
         || property(elem, "display").is_some_and(|value| value == "none")
+        || !conditions::hold(elem)
     {
         return Ok(nothing());
     }
@@ -2963,7 +3135,9 @@ fn build_node(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
     };
     match elem.tag.as_str() {
         "svg" => build_svg(elem, b),
-        "g" => build_group(elem, b),
+        // A link is a group: what it holds, with its transform and style.
+        "g" | "a" => build_group(elem, b),
+        "switch" => build_switch(elem, b),
         "rect" | "circle" | "ellipse" | "line" | "polyline" | "polygon" | "path" | "use"
         | "image" => build_shape(elem, b),
         // Unknown elements treated as groups (e.g., <defs>, <title>).
@@ -3144,6 +3318,20 @@ fn build_inner_svg(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgErro
 
 fn build_group(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
     let children = build_children(elem, b.inner())?;
+    group_node(elem, b, children)
+}
+
+/// A `<switch>`: a group holding the first of its children `conditions`
+/// chooses, and none of the rest.
+fn build_switch(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
+    let children = match elem
+        .children
+        .iter()
+        .find(|child| conditions::candidate(child))
+    {
+        Some(chosen) => vec![build_node(chosen, b.inner())?],
+        None => Vec::new(),
+    };
     group_node(elem, b, children)
 }
 
@@ -3448,6 +3636,24 @@ fn parse_style_attrs(elem: &XmlElement, b: Builder<'_>) -> Result<SvgStyle, SvgE
         marker_start: marker_property(elem, "marker-start", b.tables.markers),
         marker_mid: marker_property(elem, "marker-mid", b.tables.markers),
         marker_end: marker_property(elem, "marker-end", b.tables.markers),
+        stroke_dasharray: property(elem, "stroke-dasharray")
+            .and_then(|value| dash::dasharray(value, b.viewport)),
+        stroke_dashoffset: property(elem, "stroke-dashoffset")
+            .and_then(|value| dash::dashoffset(value, b.viewport)),
+        // An attribute, not a property: no style sheet sets it.
+        path_length: elem.attr("pathLength").and_then(dash::path_length),
+        visibility: keyword(
+            property(elem, "visibility"),
+            &[("visible", true), ("hidden", false), ("collapse", false)],
+        ),
+        paint_order: property(elem, "paint-order").and_then(PaintOrder::parse),
+        non_scaling_stroke: property(elem, "vector-effect") == Some("non-scaling-stroke"),
+        // Not inherited: unsaid, or a mode it does not know, is the initial
+        // value.
+        mix_blend_mode: property(elem, "mix-blend-mode")
+            .and_then(BlendMode::named)
+            .unwrap_or(BlendMode::Normal),
+        isolate: property(elem, "isolation") == Some("isolate"),
     })
 }
 
@@ -4489,6 +4695,18 @@ struct SvgRenderer<'d> {
     /// What the clips and masks around the node being drawn leave of each
     /// pixel: coverage is multiplied by it. `None` where nothing is clipped.
     mask: Option<Rc<Mask>>,
+    /// How many of this surface's pixels one unit of the host's space covers,
+    /// across and down: the outermost `<svg>`'s CSS pixels, which a
+    /// non-scaling stroke is measured in.
+    host: (f32, f32),
+}
+
+/// How a layer is laid on the surface under it: how opaque, and mixed with
+/// what is there how.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Look {
+    opacity: f32,
+    blend: BlendMode,
 }
 
 /// The mask that was in force round a clipped element, to put back once the
@@ -4555,6 +4773,8 @@ impl<'d> SvgRenderer<'d> {
             filter_pixels: MAX_FILTER_PIXELS,
             marking: Vec::new(),
             mask: None,
+            // Until a document is drawn on it (`SvgDocument::draw`).
+            host: (1.0, 1.0),
         }
     }
 
@@ -4579,6 +4799,7 @@ impl<'d> SvgRenderer<'d> {
         scratch.pattern_depth = self.pattern_depth;
         scratch.filter_pixels = self.filter_pixels;
         scratch.marking.clone_from(&self.marking);
+        scratch.host = self.host;
         Some(scratch)
     }
 
@@ -4688,12 +4909,17 @@ impl<'d> SvgRenderer<'d> {
     /// works on the whole of it; and under an opacity, where what it draws
     /// overlaps itself -- two children, or a stroke over its fill -- and
     /// the opacity is of the whole, not of each part, so an overlap does
-    /// not show through. Answers whether it did: `false` where neither
-    /// applies, and the node is drawn as it stands.
+    /// not show through. And under a blend mode, which mixes the whole with
+    /// what is under it, and under `isolation: isolate`, which keeps the
+    /// blend modes of what it holds to what it holds: a layer starts empty,
+    /// so what is drawn on it mixes with nothing but itself. Answers whether
+    /// it did: `false` where none of these applies, and the node is drawn as
+    /// it stands -- onto whatever surface it stands on, so a blend mode in
+    /// it mixes with all that surface holds.
     ///
     /// The node's own clip and mask, already in force, are laid over the
     /// layer as it goes onto the surface -- after the filter, as the order
-    /// SVG gives them has it: filter, clip, mask, opacity.
+    /// SVG gives them has it: filter, clip, mask, opacity, blend.
     fn render_layered(
         &mut self,
         node: &SvgNode,
@@ -4706,31 +4932,35 @@ impl<'d> SvgRenderer<'d> {
         let doc = self.doc;
         let filters = style.filter.and_then(|place| doc.filter_lists.get(place));
         let opacity = style.opacity.clamp(0.0, 1.0);
-        if filters.is_none() && !(opacity < 1.0 && overlaps_itself(node, parent_style)) {
+        let blend = style.mix_blend_mode;
+        let isolated = style.isolate || blend != BlendMode::Normal;
+        if filters.is_none() && !isolated && !(opacity < 1.0 && overlaps_itself(node, parent_style))
+        {
             return false;
         }
         if opacity <= 0.0 {
             // Nothing of it is seen, filtered or not.
             return true;
         }
+        let look = Look { opacity, blend };
         match filters {
-            Some(places) => self.render_filtered(node, transform, parent_style, places, opacity),
-            None => self.render_faded(node, transform, parent_style, opacity),
+            Some(places) => self.render_filtered(node, transform, parent_style, places, look),
+            None => self.render_faded(node, transform, parent_style, look),
         }
         true
     }
 
     /// Draw `node` on a layer covering what it draws, and lay it on the
-    /// surface at `opacity`. Where the drawing's budget for scratch surfaces
-    /// cannot pay for the layer, each paint is drawn at the opacity instead,
-    /// as it was before layers: an overlap shows through, but nothing is
-    /// lost.
+    /// surface as `look` says. Where the drawing's budget for scratch
+    /// surfaces cannot pay for the layer, each paint is drawn at the opacity
+    /// instead, as it was before layers: an overlap shows through, and a
+    /// blend mode is not mixed, but nothing is lost.
     fn render_faded(
         &mut self,
         node: &SvgNode,
         transform: Transform,
         parent_style: &ResolvedStyle,
-        opacity: f32,
+        look: Look,
     ) {
         let Some((x0, y0, x1, y1)) = self.layer_pixels(node, transform, parent_style) else {
             return;
@@ -4748,11 +4978,11 @@ impl<'d> SvgRenderer<'d> {
         layer.render_content(node, shift.then(transform), parent_style, false);
         self.absorb(&layer);
         let (width, height) = (layer.width, layer.height);
-        self.lay(&layer.buffer, (width, height), origin, 1.0, opacity);
+        self.lay(&layer.buffer, (width, height), origin, 1.0, look);
     }
 
     /// Draw `node` on a layer covering its filters' regions, apply them, and
-    /// lay the result on the surface at `opacity`. Nothing is drawn where
+    /// lay the result on the surface as `look` says. Nothing is drawn where
     /// the filters say the element is not ([`filter`] says when), or where
     /// the budget for scratch surfaces cannot pay for the layer or the
     /// filters' work.
@@ -4762,7 +4992,7 @@ impl<'d> SvgRenderer<'d> {
         transform: Transform,
         parent_style: &ResolvedStyle,
         places: &[usize],
-        opacity: f32,
+        look: Look,
     ) {
         // Under a clip or mask that leaves nothing, nothing is seen.
         if self
@@ -4829,6 +5059,8 @@ impl<'d> SvgRenderer<'d> {
         let Some(mut layer) = self.scratch(lw, lh) else {
             return;
         };
+        // A layer drawn smaller has fewer pixels to the host's unit.
+        layer.host = (self.host.0 * scale, self.host.1 * scale);
         layer.render_content(node, to_layer.then(transform), parent_style, false);
         self.absorb(&layer);
         let (Ok(width), Ok(height)) = (usize::try_from(lw), usize::try_from(lh)) else {
@@ -4844,7 +5076,7 @@ impl<'d> SvgRenderer<'d> {
         if !self.apply_filters(places, &mut pixels, &target) {
             return;
         }
-        self.lay(&pixels, (lw, lh), (x0, y0), scale, opacity);
+        self.lay(&pixels, (lw, lh), (x0, y0), scale, look);
     }
 
     /// The pixels of the surface what `node` draws can reach -- its shapes
@@ -4951,7 +5183,13 @@ impl<'d> SvgRenderer<'d> {
                 let stroked =
                     resolved.stroke_paint().is_some() && !matches!(node, SvgNode::Image { .. });
                 let margin = if stroked {
-                    let (sx, sy) = combined.axis_scales();
+                    // A non-scaling stroke is as wide in the host's space,
+                    // whatever transforms the shape.
+                    let (sx, sy) = if style.non_scaling_stroke {
+                        self.host
+                    } else {
+                        combined.axis_scales()
+                    };
                     let reach = match resolved.line_join {
                         LineJoin::Miter => resolved.miter_limit.max(core::f32::consts::SQRT_2),
                         LineJoin::Round | LineJoin::Bevel => core::f32::consts::SQRT_2,
@@ -4976,17 +5214,12 @@ impl<'d> SvgRenderer<'d> {
 
     /// Lay `pixels` -- a layer `size` wide and high, straight `[r, g, b,
     /// a]` -- on the surface, its corner at `origin` and `scale` of its
-    /// pixels to one of the surface's, at `opacity` and under the clips and
-    /// masks in force. A layer at the surface's own scale on whole pixels is
-    /// copied pixel for pixel; any other is sampled between its pixels.
-    fn lay(
-        &mut self,
-        pixels: &[u8],
-        size: (u32, u32),
-        origin: (f32, f32),
-        scale: f32,
-        opacity: f32,
-    ) {
+    /// pixels to one of the surface's, at `look`'s opacity, mixed with what
+    /// is under it by its blend mode, and under the clips and masks in
+    /// force. A layer at the surface's own scale on whole pixels is copied
+    /// pixel for pixel; any other is sampled between its pixels.
+    fn lay(&mut self, pixels: &[u8], size: (u32, u32), origin: (f32, f32), scale: f32, look: Look) {
+        let Look { opacity, blend } = look;
         let (lw, lh) = size;
         if lw == 0 || lh == 0 || scale <= 0.0 {
             return;
@@ -5030,6 +5263,10 @@ impl<'d> SvgRenderer<'d> {
                 };
                 let alpha = (a * share).clamp(0.0, 1.0);
                 if alpha <= 0.0 {
+                    continue;
+                }
+                if blend != BlendMode::Normal {
+                    self.mix_pixel(x, y, [r * share, g * share, b * share, alpha], blend);
                     continue;
                 }
                 let channel = |c: f32| (c / a).clamp(0.0, 1.0);
@@ -5352,6 +5589,11 @@ impl<'d> SvgRenderer<'d> {
         };
         let combined = transform.then(local_transform(node));
         let resolved = parent_style.with_own(style, own_opacity);
+        // Hidden: nothing of it -- fill, stroke, markers or picture -- as
+        // browsers draw it.
+        if !resolved.visible {
+            return;
+        }
         // A picture is its one paint: no fill, no stroke.
         if let SvgNode::Image {
             x,
@@ -5375,10 +5617,24 @@ impl<'d> SvgRenderer<'d> {
             return;
         }
         let outline = shape_outline(node, combined);
-        self.paint(&outline, &resolved, combined);
-        // After the fill and the stroke, as SVG paints them.
-        if resolved.has_markers() && marker::markable(node) {
-            self.draw_markers(node, combined, &resolved);
+        // The fill, the stroke and the markers, in the order `paint-order`
+        // gives: SVG's own unless it says otherwise.
+        for part in resolved.paint_order.0 {
+            match part {
+                PaintPart::Fill => self.paint_fill(&outline, &resolved, combined),
+                PaintPart::Stroke => self.paint_stroke(
+                    &outline,
+                    &resolved,
+                    combined,
+                    style.path_length,
+                    style.non_scaling_stroke,
+                ),
+                PaintPart::Markers => {
+                    if resolved.has_markers() && marker::markable(node) {
+                        self.draw_markers(node, combined, &resolved);
+                    }
+                }
+            }
         }
     }
 
@@ -5529,14 +5785,9 @@ impl<'d> SvgRenderer<'d> {
         }
     }
 
-    /// Fill and stroke one shape, `subpaths` in device space, as `style` says.
-    ///
-    /// The fill first, as SVG paints them. `transform` is the one the shape
-    /// was carried to device space by: a stroke's width is a length in user
-    /// space, so it grows and shrinks with the drawing. It was drawn in device
-    /// pixels, so every icon's lines were two pixels thick at every size --
-    /// too heavy at 16 and hairlines at 64.
-    fn paint(&mut self, subpaths: &[Subpath], style: &ResolvedStyle, transform: Transform) {
+    /// Fill one shape, `subpaths` in device space, as `style` says;
+    /// `transform` is the one the shape was carried to device space by.
+    fn paint_fill(&mut self, subpaths: &[Subpath], style: &ResolvedStyle, transform: Transform) {
         if subpaths.is_empty() {
             return;
         }
@@ -5548,20 +5799,70 @@ impl<'d> SvgRenderer<'d> {
                 subpaths.iter().map(|s| s.points.as_slice()).collect();
             self.fill_shape(&outlines, style.fill_rule, &fill);
         }
-        if let Some(stroke) = style
+    }
+
+    /// Stroke one shape, `subpaths` in device space, as `style` says.
+    ///
+    /// `transform` is the one the shape was carried to device space by: a
+    /// stroke's width is a length in user space, so it grows and shrinks
+    /// with the drawing. It was drawn in device pixels, so every icon's lines
+    /// were two pixels thick at every size -- too heavy at 16 and hairlines
+    /// at 64. A non-scaling stroke (`non_scaling`) is the exception: its
+    /// width is in the host's space, the outermost `<svg>`'s CSS pixels,
+    /// whatever transforms the shape.
+    ///
+    /// A dashed stroke is cut into its dashes first, measured in the same
+    /// space as its width; `path_length` is the length the element says its
+    /// shape has, if it says.
+    fn paint_stroke(
+        &mut self,
+        subpaths: &[Subpath],
+        style: &ResolvedStyle,
+        transform: Transform,
+        path_length: Option<f32>,
+        non_scaling: bool,
+    ) {
+        if subpaths.is_empty() {
+            return;
+        }
+        let Some(stroke) = style
             .stroke_paint()
             .and_then(|(paint, alpha)| self.fill_for(paint, alpha, subpaths, transform))
-        {
-            let geometry = StrokeGeometry {
-                width: style.stroke_width * transform.length_scale(),
-                cap: style.line_cap,
-                join: style.line_join,
-                miter_limit: style.miter_limit,
-            };
-            let polygons = stroke_polygons(subpaths, geometry);
-            let outlines: Vec<&[(f32, f32)]> = polygons.iter().map(Vec::as_slice).collect();
-            self.fill_shape(&outlines, FillRule::NonZero, &stroke);
-        }
+        else {
+            return;
+        };
+        // The space the stroke is measured in, carried to the pixels.
+        let space = if non_scaling {
+            Transform::scale(self.host.0, self.host.1)
+        } else {
+            transform
+        };
+        let geometry = StrokeGeometry {
+            width: style.stroke_width * space.length_scale(),
+            cap: style.line_cap,
+            join: style.line_join,
+            miter_limit: style.miter_limit,
+        };
+        let dashed = style
+            .dashes
+            .as_deref()
+            .zip(space.inverse())
+            .and_then(|(pattern, inverse)| {
+                dash::Dashing {
+                    pattern,
+                    offset: style.dash_offset,
+                    path_length,
+                    // A step on the pixels, as long as it is in that space.
+                    measure: |(dx, dy): (f32, f32)| {
+                        (inverse.a * dx + inverse.b * dy).hypot(inverse.c * dx + inverse.d * dy)
+                    },
+                    cap: style.line_cap,
+                }
+                .cut(subpaths)
+            });
+        let polygons = stroke_polygons(dashed.as_deref().unwrap_or(subpaths), geometry);
+        let outlines: Vec<&[(f32, f32)]> = polygons.iter().map(Vec::as_slice).collect();
+        self.fill_shape(&outlines, FillRule::NonZero, &stroke);
     }
 
     /// What `paint` at `alpha` of itself draws on the shape whose device
@@ -5825,6 +6126,29 @@ impl<'d> SvgRenderer<'d> {
         let [r, g, b, a] = *pixel;
         let result = color.over(Color::rgba(r, g, b, a));
         *pixel = [result.r, result.g, result.b, result.a];
+    }
+
+    /// Lay `source` -- premultiplied, 0 to 1 -- on the pixel at `(x, y)`,
+    /// mixed with what is there by `mode`, as Compositing and Blending
+    /// Level 1 says: in sRGB, the colours as they are stored.
+    fn mix_pixel(&mut self, x: u32, y: u32, source: [f32; 4], mode: BlendMode) {
+        let Some(pixel) = self.pixel_mut(x, y) else {
+            return;
+        };
+        let [r, g, b, a] = pixel.map(|c| f32::from(c) / 255.0);
+        let [mr, mg, mb, ma] = effects::blend_pixel(source, [r * a, g * a, b * a, a], mode);
+        // Each held to 0..=255 by the clamp, rounded first.
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "held to 0..=255 and rounded first"
+        )]
+        let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+        *pixel = if ma > 0.0 {
+            [byte(mr / ma), byte(mg / ma), byte(mb / ma), byte(ma)]
+        } else {
+            [0; 4]
+        };
     }
 }
 

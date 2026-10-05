@@ -708,9 +708,12 @@ fn valid(px: Pixel) -> Pixel {
     ]
 }
 
-/// An `feBlend` mode: Compositing and Blending Level 1's blend modes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum BlendMode {
+/// Compositing and Blending Level 1's blend modes: an `feBlend`'s `mode`,
+/// and an element's `mix-blend-mode`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BlendMode {
+    /// The source over the backdrop.
+    #[default]
     Normal,
     Multiply,
     Screen,
@@ -770,8 +773,9 @@ pub(super) fn blend(source: &Image, backdrop: &Image, mode: BlendMode, area: Are
     out
 }
 
-/// One pixel of [`blend`].
-fn blend_pixel(s: Pixel, b: Pixel, mode: BlendMode) -> Pixel {
+/// One pixel of [`blend`]: `s` over `b`, both premultiplied, mixed by
+/// `mode` where they overlap.
+pub(super) fn blend_pixel(s: Pixel, b: Pixel, mode: BlendMode) -> Pixel {
     let (sa, ba) = (s[3], b[3]);
     let straight = |p: Pixel| -> [f32; 3] {
         if p[3] > 0.0 {

@@ -278,6 +278,11 @@ pub enum FontWeightHint {
 /// look: every glyph advances the same distance, so a caller may treat text as
 /// a grid. A terminal is the case that needs it — with a proportional face,
 /// column 40 of row 3 does not sit above column 40 of row 4.
+///
+/// [`Ui`](FontFamily::Ui) and [`Mono`](FontFamily::Mono) are the *user's*
+/// fonts, whichever families the settings name. [`Named`](FontFamily::Named)
+/// is for text whose font the *drawing* names instead: a document's runs, a
+/// font picker's preview of each family it lists.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum FontFamily {
     /// The system UI face. Proportional; what everything is drawn in unless
@@ -286,6 +291,32 @@ pub enum FontFamily {
     Ui,
     /// A fixed-pitch face.
     Mono,
+    /// The family of this name -- "Noto Serif".
+    ///
+    /// Both processes load it by one rule, [`crate::text::ensure_family`]:
+    /// the program before measuring a run in it, the compositor before
+    /// drawing one, so the two agree about the face as they do about the UI
+    /// face. A name this machine has no font for draws in the UI face --
+    /// the answer for a document from another machine -- and says so to
+    /// nobody; a picker lists only installed families
+    /// ([`crate::text::available_families`]), so it never offers one.
+    Named(FamilyName),
+}
+
+/// A font family's name, short enough to travel inline in a render tree --
+/// see [`FontFamily::Named`]. Re-exported so a program can name a family
+/// without depending on the font crate.
+pub use osfont::system::FamilyName;
+
+impl FontFamily {
+    /// The family called `name`, or `None` for a name no family can have
+    /// here: an empty one, or one longer than [`FamilyName::MAX_LEN`] bytes.
+    /// Text whose family is `None` is drawn in [`Ui`](Self::Ui), as a named
+    /// family this machine lacks would be.
+    #[must_use]
+    pub fn named(name: &str) -> Option<Self> {
+        FamilyName::new(name).map(Self::Named)
+    }
 }
 
 impl RenderCommand {
@@ -800,6 +831,30 @@ pub fn content_bottom(cmds: &[RenderCommand]) -> Option<f32> {
 )]
 mod tests {
     use super::*;
+
+    /// **A family is named by any name that fits inline**, kept as given,
+    /// and by no name that cannot be one: empty, or past
+    /// [`FamilyName::MAX_LEN`] bytes -- counted in bytes, so a name of
+    /// two-byte characters runs out at half the characters.
+    #[test]
+    fn a_family_is_named_by_a_name_that_fits() {
+        let FontFamily::Named(name) = FontFamily::named("Noto Serif").unwrap() else {
+            panic!("not a named family");
+        };
+        assert_eq!(name.as_str(), "Noto Serif");
+        assert_eq!(FontFamily::named(""), None);
+        let longest = "x".repeat(FamilyName::MAX_LEN);
+        assert!(FontFamily::named(&longest).is_some());
+        assert_eq!(FontFamily::named(&format!("{longest}x")), None);
+        let wide = "é".repeat(FamilyName::MAX_LEN / 2 + 1);
+        assert_eq!(FontFamily::named(&wide), None, "{} bytes", wide.len());
+        assert_ne!(
+            FontFamily::named("Noto Serif"),
+            FontFamily::named("Noto Sans"),
+            "two families are one"
+        );
+        assert_eq!(FontFamily::default(), FontFamily::Ui);
+    }
 
     /// **Fading scales the alpha of every colour a command draws** -- a
     /// rich text's spans as well as its base colour -- and leaves what has

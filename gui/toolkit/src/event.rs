@@ -524,6 +524,19 @@ impl Modifiers {
         self.super_key || self.ctrl != self.alt
     }
 
+    /// Whether nothing but Shift is held: a key pressed so is the key itself
+    /// -- Enter, Space, Escape, Tab, a letter bound as itself -- and not a
+    /// command for the window or the desktop, as Alt+Space (the window menu)
+    /// and Windows+Enter are. What a control asks before a bare key acts:
+    /// a dialog whose focused button took Alt+Space as Space pressed it.
+    ///
+    /// Shift may be held: Shift+Tab walks back, and a capital letter typed
+    /// is still typed.
+    #[must_use]
+    pub const fn is_plain(self) -> bool {
+        !self.ctrl && !self.alt && !self.super_key
+    }
+
     /// Shift alone.
     #[must_use]
     pub const fn shift() -> Self {
@@ -583,22 +596,23 @@ mod tests {
     }
 
     /// **A command is Ctrl or Alt on its own, or anything with the Windows
-    /// key; a Ctrl chord is Ctrl without either** -- across all eight ways
-    /// the three can be held. Ctrl and Alt together are AltGr.
+    /// key; a Ctrl chord is Ctrl without either; a plain key has none of the
+    /// three** -- across all eight ways they can be held. Ctrl and Alt
+    /// together are AltGr: no command, and not plain.
     #[test]
     fn a_command_and_a_ctrl_chord_across_every_way_to_hold_them() {
-        // (ctrl, alt, super) -> (command, ctrl chord)
+        // (ctrl, alt, super) -> (command, ctrl chord, plain)
         let table = [
-            ((false, false, false), (false, false)),
-            ((true, false, false), (true, true)),
-            ((false, true, false), (true, false)),
-            ((true, true, false), (false, false)),
-            ((false, false, true), (true, false)),
-            ((true, false, true), (true, false)),
-            ((false, true, true), (true, false)),
-            ((true, true, true), (true, false)),
+            ((false, false, false), (false, false, true)),
+            ((true, false, false), (true, true, false)),
+            ((false, true, false), (true, false, false)),
+            ((true, true, false), (false, false, false)),
+            ((false, false, true), (true, false, false)),
+            ((true, false, true), (true, false, false)),
+            ((false, true, true), (true, false, false)),
+            ((true, true, true), (true, false, false)),
         ];
-        for ((ctrl, alt, super_key), (command, chord)) in table {
+        for ((ctrl, alt, super_key), (command, chord, plain)) in table {
             let m = Modifiers {
                 ctrl,
                 alt,
@@ -607,10 +621,12 @@ mod tests {
             };
             assert_eq!(m.is_command(), command, "{m:?}");
             assert_eq!(m.is_ctrl_chord(), chord, "{m:?}");
-            // Shift changes neither.
+            assert_eq!(m.is_plain(), plain, "{m:?}");
+            // Shift changes none of them.
             let shifted = Modifiers { shift: true, ..m };
             assert_eq!(shifted.is_command(), command, "{shifted:?}");
             assert_eq!(shifted.is_ctrl_chord(), chord, "{shifted:?}");
+            assert_eq!(shifted.is_plain(), plain, "{shifted:?}");
         }
     }
 

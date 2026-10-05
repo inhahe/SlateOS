@@ -541,12 +541,14 @@ impl ModalOverlay {
         None
     }
 
-    /// Handle a key event. Returns `Dismissed` if Escape triggered.
+    /// Handle a key event. Returns `Dismissed` if Escape triggered -- Escape
+    /// itself, not Alt+Escape or Windows+Escape, which are the desktop's
+    /// ([`Modifiers::is_plain`](crate::event::Modifiers::is_plain)).
     pub fn handle_key(&self, event: &KeyEvent) -> Option<DialogResult> {
         if !self.active || !event.pressed {
             return None;
         }
-        if self.dismiss_on_escape && event.key == Key::Escape {
+        if self.dismiss_on_escape && event.key == Key::Escape && event.modifiers.is_plain() {
             return Some(DialogResult::Dismissed);
         }
         None
@@ -838,6 +840,15 @@ impl AlertDialog {
         if let Some(result) = self.overlay.handle_key(event) {
             self.result = Some(result);
             self.overlay.hide();
+            return EventResult::Consumed;
+        }
+
+        // A key held with Ctrl, Alt or the Windows key is a command for the
+        // window or the desktop -- Alt+Space is the window menu -- and presses
+        // no button: taken as Space, it pressed whichever had the keyboard,
+        // which in the disk imager's confirmation can be "Write". Still the
+        // dialog's, though: it is modal.
+        if !event.modifiers.is_plain() {
             return EventResult::Consumed;
         }
 
@@ -1509,8 +1520,14 @@ impl InputDialog {
             return EventResult::Consumed;
         }
 
+        // A bare key's meaning -- Escape cancels, Enter accepts, Space presses,
+        // Tab moves -- is not a command's: Alt+Enter, Windows+Escape and the
+        // like are the window's or the desktop's, and do nothing here. Typed
+        // text asks the same question for itself (`KeyEvent::typed`).
+        let plain = event.modifiers.is_plain();
+
         // Escape handling.
-        if event.key == Key::Escape {
+        if event.key == Key::Escape && plain {
             self.result = Some(DialogResult::Cancel);
             self.overlay.hide();
             return EventResult::Consumed;
@@ -1520,6 +1537,7 @@ impl InputDialog {
             InputFocus::TextField => {
                 self.handle_text_input(event);
             }
+            InputFocus::OkButton | InputFocus::CancelButton if !plain => {}
             InputFocus::OkButton | InputFocus::CancelButton => match event.key {
                 Key::Enter | Key::Space => {
                     if self.focused_element == InputFocus::OkButton {
@@ -1541,13 +1559,17 @@ impl InputDialog {
 
     /// Handle text input when the text field is focused.
     fn handle_text_input(&mut self, event: &KeyEvent) -> EventResult {
+        let plain = event.modifiers.is_plain();
         match event.key {
-            Key::Tab => {
+            Key::Tab if plain => {
                 self.cycle_focus(event.modifiers.shift);
             }
-            Key::Enter => {
+            Key::Enter if plain => {
                 self.try_accept();
             }
+            // A command's Tab or Enter is not the field's either: nothing to
+            // type, nothing to move.
+            Key::Tab | Key::Enter => {}
             // The caret's offset is a *byte* offset: `String::insert` and
             // `String::remove` index by bytes, and both panic outright on an
             // offset that is not a character boundary. So every edit below moves
@@ -2312,7 +2334,13 @@ impl ProgressDialog {
 
         match event {
             Event::Key(key_event) => {
-                if key_event.pressed && key_event.key == Key::Escape && self.cancelable {
+                // Escape itself: Alt+Escape and Windows+Escape are the
+                // desktop's, and cancel no work.
+                if key_event.pressed
+                    && key_event.key == Key::Escape
+                    && key_event.modifiers.is_plain()
+                    && self.cancelable
+                {
                     self.cancelled = true;
                     self.overlay.hide();
                 }
@@ -5656,5 +5684,140 @@ mod tests {
             }
         }
         assert!(!dialog.is_cancelled());
+    }
+
+    // --- Keys held with a command modifier ---
+
+    /// `k` pressed with `modifiers`, carrying `text` as the compositor
+    /// hands it over.
+    fn chorded(k: Key, modifiers: Modifiers, text: &str) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_string(),
+        })
+    }
+
+    /// The three command modifiers, alone.
+    fn commands() -> [Modifiers; 3] {
+        [
+            Modifiers::alt(),
+            Modifiers::super_key(),
+            Modifiers {
+                ctrl: true,
+                ..Modifiers::NONE
+            },
+        ]
+    }
+
+    /// The disk imager's confirmation before it overwrites a drive: Write,
+    /// then Cancel, with the keyboard on Cancel.
+    fn write_the_drive() -> AlertDialog {
+        let mut d = AlertDialog::destructive("Confirm Write", "Erase the drive?", "Write");
+        d.show();
+        d
+    }
+
+    /// **A key held with Alt, Ctrl or the Windows key presses no button and
+    /// dismisses nothing** -- Alt+Space is the window menu, not Space -- with
+    /// the keyboard on Cancel or on Write; the bare keys still work, and
+    /// Shift+Tab still walks back
+    /// (`requests/e-c-the-toolkit-dialogs-answer-a-chorded-enter-space-and-escape.md`).
+    #[test]
+    fn a_command_presses_no_button_and_dismisses_nothing() {
+        for modifiers in commands() {
+            for (k, text) in [
+                (Key::Space, " "),
+                (Key::Enter, "\r"),
+                (Key::Escape, "\u{1b}"),
+                (Key::Tab, "\t"),
+            ] {
+                for on_write in [false, true] {
+                    let mut d = write_the_drive();
+                    if on_write {
+                        d.handle_event(&key_press(Key::Tab));
+                        assert_eq!(d.focused_button(), 0);
+                    }
+                    let focus = d.focused_button();
+                    assert_eq!(
+                        d.handle_event(&chorded(k, modifiers, text)),
+                        EventResult::Consumed
+                    );
+                    assert_eq!(d.result(), None, "{k:?} with {modifiers:?}");
+                    assert!(d.is_active(), "{k:?} with {modifiers:?}");
+                    assert_eq!(d.focused_button(), focus, "{k:?} with {modifiers:?}");
+                }
+            }
+        }
+        // The bare keys, and Shift+Tab, as before.
+        let mut d = write_the_drive();
+        d.handle_event(&key_press(Key::Tab));
+        d.handle_event(&chorded(Key::Tab, Modifiers::shift(), "\t"));
+        assert_eq!(d.focused_button(), 1);
+        d.handle_event(&key_press(Key::Tab));
+        d.handle_event(&key_press(Key::Space));
+        assert_eq!(d.result(), Some(&DialogResult::Ok));
+        let mut d = write_the_drive();
+        d.handle_event(&key_press(Key::Escape));
+        assert_eq!(d.result(), Some(&DialogResult::Dismissed));
+    }
+
+    /// **The input dialog answers only a bare Enter, Escape, Space and Tab**,
+    /// and types nothing for a shortcut it does not know -- Ctrl+S carries
+    /// its `s` from the compositor
+    /// (`requests/e-cf-a-toolkit-field-types-the-letter-of-a-shortcut-it-does-not-know.md`,
+    /// lane E's addendum).
+    #[test]
+    fn the_input_dialog_answers_only_bare_keys() {
+        for modifiers in commands() {
+            let mut d = InputDialog::prompt("Rename", "New name:", "");
+            d.show();
+            d.set_input_text("report");
+            for (k, text) in [
+                (Key::Enter, "\r"),
+                (Key::Escape, "\u{1b}"),
+                (Key::Tab, "\t"),
+                (Key::S, "s"),
+                (Key::X, "x"),
+            ] {
+                d.handle_event(&chorded(k, modifiers, text));
+                assert_eq!(d.result(), None, "{k:?} with {modifiers:?}");
+                assert!(d.is_active(), "{k:?} with {modifiers:?}");
+                assert_eq!(d.input_text(), "report", "{k:?} with {modifiers:?}");
+            }
+            // On the buttons too.
+            d.handle_event(&key_press(Key::Tab));
+            for (k, text) in [(Key::Enter, "\r"), (Key::Space, " ")] {
+                d.handle_event(&chorded(k, modifiers, text));
+                assert_eq!(d.result(), None, "{k:?} with {modifiers:?} on OK");
+            }
+        }
+        // Bare keys, and Shift held while typing, as before.
+        let mut d = InputDialog::prompt("Rename", "New name:", "");
+        d.show();
+        d.handle_event(&chorded(Key::R, Modifiers::shift(), "R"));
+        d.handle_event(&key_press(Key::Enter));
+        assert_eq!(d.result(), Some(&DialogResult::Text("R".into())));
+        let mut d = InputDialog::prompt("Rename", "New name:", "");
+        d.show();
+        d.handle_event(&key_press(Key::Escape));
+        assert_eq!(d.result(), Some(&DialogResult::Cancel));
+    }
+
+    /// **Work in progress is cancelled by Escape itself**, not by
+    /// Alt+Escape or Windows+Escape.
+    #[test]
+    fn progress_is_cancelled_by_escape_itself() {
+        for modifiers in commands() {
+            let mut d = ProgressDialog::indeterminate("Copying", "3 of 9").with_cancel();
+            d.show();
+            d.handle_event(&chorded(Key::Escape, modifiers, "\u{1b}"));
+            assert!(!d.is_cancelled(), "{modifiers:?}");
+        }
+        let mut d = ProgressDialog::indeterminate("Copying", "3 of 9").with_cancel();
+        d.show();
+        d.handle_event(&key_press(Key::Escape));
+        assert!(d.is_cancelled());
     }
 }

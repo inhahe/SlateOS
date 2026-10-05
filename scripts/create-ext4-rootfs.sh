@@ -1150,6 +1150,10 @@ else
     # stands for the three, which are always linked and staged together.
     spike_rebuild_if_behind "$ROOT_DIR/build/spike/opt-slateos.elf" \
         scripts/llvm-spike/slatelink.sh
+    # Oils' relink is seconds: slatelink.sh links the objects run.sh compiled
+    # against the new libc.a and stages the stripped binary again.
+    spike_rebuild_if_behind "$ROOT_DIR/build/spike/oils-for-unix-slateos.elf" \
+        scripts/oils-spike/slatelink.sh
 fi
 
 # --- GNU bash 5.2, cross-compiled and linked against OUR OWN libc -------------
@@ -1347,6 +1351,47 @@ elif [ -e "$CMAKE_SLATE" ]; then
 else
     echo "[rootfs] NOTE: $CMAKE_SLATE not found — /bin/cmake will be absent"
     echo "[rootfs]       (build it with: wsl -d Ubuntu -- bash scripts/cmake-spike/run.sh)"
+fi
+
+# --- Oils 0.38.0, OSH and YSH, likewise linked against OUR OWN libc ----------
+# Genuine Oils, upstream's C++ unmodified (scripts/oils-spike/, lane B's port):
+# OSH, which runs bash scripts, and YSH, its newer language. The operator
+# decided it becomes SlateOS's default shell (design-decisions.md §1043), with
+# our Rust OSH kept as a fallback; this puts it on the image, so a rung can
+# show it runs (requests/b-ad-genuine-oils-staged-and-run-at-boot.md).
+#
+# ONE binary under two names. It picks its language from the name it was run
+# by -- `ysh` is YSH, anything else is told by its first argument
+# (`oils-for-unix osh -c ...`) -- so /bin/ysh is a hard link, as the multi-call
+# aliases further down are, with a copy only if the link fails.
+#
+# NOT /bin/osh, and not /bin/sh. /bin/osh is our Rust OSH's name until genuine
+# Oils has run here and the Rust one is renamed -- a later step, taken with
+# /bin/sh, in that order (the request above).
+#
+# Staleness: the rule bash's has -- absent is honest (NOTE), older than libc.a
+# is a lie (fatal); the relink pass above is what normally keeps it fresh.
+# PROGRAM: /bin/oils-for-unix, /bin/ysh -- Oils 0.38.0: OSH, which runs bash scripts, and YSH, its newer language. (scripts/oils-spike/)
+OILS_SLATE="$ROOT_DIR/build/spike/oils-for-unix-slateos.elf"
+OILS_STALE=0
+if [ -e "$OILS_SLATE" ]; then
+    cp -L "$OILS_SLATE" "$STAGE/bin/oils-for-unix"
+    chmod 0755 "$STAGE/bin/oils-for-unix"
+    rm -f "$STAGE/bin/ysh"
+    ln "$STAGE/bin/oils-for-unix" "$STAGE/bin/ysh" 2>/dev/null \
+        || cp -L "$STAGE/bin/oils-for-unix" "$STAGE/bin/ysh"
+    echo "[rootfs] staged Oils 0.38.0 (linked against our libc.a): /bin/oils-for-unix," \
+         "/bin/ysh ($(stat -c %s "$STAGE/bin/oils-for-unix") bytes)"
+    if [ -e "$ROOT_DIR/toolchain/sysroot/lib/libc.a" ] \
+       && [ "$ROOT_DIR/toolchain/sysroot/lib/libc.a" -nt "$OILS_SLATE" ]; then
+        echo "[rootfs] WARNING: oils-for-unix-slateos.elf is OLDER than the sysroot libc.a — it links a"
+        echo "[rootfs]          stale libc and proves nothing about the current one. Relink it:"
+        echo "[rootfs]            wsl -d Ubuntu --exec bash scripts/oils-spike/slatelink.sh"
+        OILS_STALE=1
+    fi
+else
+    echo "[rootfs] NOTE: $OILS_SLATE not found — /bin/oils-for-unix and /bin/ysh will be absent"
+    echo "[rootfs]       (build it with: wsl -d Ubuntu --exec bash scripts/oils-spike/run.sh)"
 fi
 
 # --- eSpeak NG 1.52, likewise linked against OUR OWN libc --------------------
@@ -2246,6 +2291,22 @@ if [ "$LLVM_STALE" -gt 0 ]; then
         echo "[rootfs]        against a libc that is no longer in the build. Relink them, a"
         echo "[rootfs]        minute from the objects already compiled:"
         echo "[rootfs]          wsl -d Ubuntu -- bash scripts/llvm-spike/slatelink.sh"
+        echo "[rootfs]        Or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
+        exit 1
+    fi
+fi
+
+if [ "$OILS_STALE" -gt 0 ]; then
+    if [ "${ALLOW_STALE_FIXTURES:-0}" = "1" ]; then
+        echo "[rootfs] WARNING: oils-for-unix-slateos.elf is stale (see above);" \
+             "continuing because ALLOW_STALE_FIXTURES=1"
+    else
+        echo "[rootfs] ERROR: build/spike/oils-for-unix-slateos.elf is STALE."
+        echo "[rootfs]        It links an older libc.a than the one in the sysroot, so"
+        echo "[rootfs]        /bin/oils-for-unix and /bin/ysh on the image would be built"
+        echo "[rootfs]        against a libc that is no longer in the build. Relink it:"
+        echo "[rootfs]          wsl -d Ubuntu --exec bash scripts/oils-spike/slatelink.sh"
+        echo "[rootfs]        (normally run for you -- this means that relink failed.)"
         echo "[rootfs]        Or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
         exit 1
     fi

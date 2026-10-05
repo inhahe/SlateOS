@@ -295,6 +295,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/oils-spec/sh_spec.py` | Oils' spec-test harness, ported from Python 2 to Python 3 to run on SlateOS. |
 | `scripts/oils-spec/validate.sh` | Prove the Python 3 spec harness judges every case as upstream's does. |
 | `scripts/oils-spike/run.sh` | Cross-compile genuine Oils (oils-for-unix) and link it against SlateOS's libc.a. |
+| `scripts/oils-spike/slatelink.sh` | Link genuine Oils' built objects against the CURRENT libc.a, and stage it. |
 | `scripts/open-requests.py` | List the `requests/` entries addressed to a lane that are still open. |
 | `scripts/option-gap-ref.sh` | The reference half of `scripts/option-gap.sh`, run where the reference lives |
 | `scripts/option-gap.sh` | Options the reference implementation has that OURS REJECTS AS UNKNOWN. |
@@ -510,4 +511,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_500 scripts._
+_501 scripts._

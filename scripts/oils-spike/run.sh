@@ -25,15 +25,20 @@
 #    and C++ fixture here: it is what declares what SlateOS's libc has and
 #    musl's does not -- FNM_EXTMATCH among them. So the musl-linked binary
 #    `_build/oils.sh` leaves behind does NOT match extended globs (musl's
-#    fnmatch ignores the flag); only the SlateOS link below does. Do not test
-#    one and conclude about the other.
+#    fnmatch ignores the flag); only the SlateOS link does. Do not test one and
+#    conclude about the other.
 #
 # 3. --eh-frame-hdr. The generated C++ raises and catches exceptions for every
 #    shell error. libunwind finds a static program's unwind tables through the
 #    PT_GNU_EH_FRAME segment, which only that flag makes; without it the link
 #    succeeds and every `throw` terminates the shell (services/ctest-cxx-throw
-#    is the fixture that proves the chain). The script checks the segment is
-#    there.
+#    is the fixture that proves the chain). The link wrapper passes it, and
+#    slatelink.sh checks the segment is there.
+#
+# THE LINK IS slatelink.sh'S. This builds the objects -- the minutes -- and
+# then runs it: the link against SlateOS's libc.a, its checks, and the
+# stripped copy in build/spike/. The rootfs recipe runs slatelink.sh alone to
+# relink these objects whenever libc.a moves, as it does bash's and CPython's.
 #
 # WHAT THIS ANSWERS, AND WHAT IT DOES NOT
 #
@@ -115,61 +120,12 @@ _build/oils.sh --cxx slatecxx --without-readline >build.log 2>&1
 echo "BUILD_EXIT=$?"
 grep -E "error:" build.log | head -20
 
-OBJS="$(find _build/obj/slatecxx-opt-sh -name '*.o' | sort | tr '\n' ' ')"
-echo "OBJ_COUNT=$(echo "$OBJS" | wc -w)"
-if [ -z "${OBJS// /}" ]; then
+if [ -z "$(find _build/obj/slatecxx-opt-sh -name '*.o' -print -quit 2>/dev/null)" ]; then
     echo "NO_OBJECTS -- the build above failed; see $WORK/oils-for-unix-$VER/build.log"
     exit 1
 fi
 
-CXXRT="$(slate_zig_cxx_runtime)" || exit 1
-echo "CXX_RUNTIME_ARCHIVES:"
-printf '%s\n' "$CXXRT"
-
-# -nostdlib: SlateOS's libc, not zig's musl. libc.a twice: it is Rust-built and
-# its members' references are not topologically ordered (cmake-spike/run.sh).
-# shellcheck disable=SC2086  # word splitting is what builds the object list
-"$SLATE_ZIG" c++ --target=x86_64-linux-musl -static -nostdlib \
-    -Wl,--eh-frame-hdr -Wl,--gc-sections \
-    -o oils-for-unix-slateos $OBJS $CXXRT "$SYSROOT/libc.a" "$SYSROOT/libc.a" \
-    2>slate-link.log
-echo "SLATE_LINK_EXIT=$?"
-
-MISSING="$WORK/missing.txt"
-grep -oP "undefined symbol: \K.*" slate-link.log | sort -u >"$MISSING"
-echo "MISSING_COUNT=$(wc -l <"$MISSING")"
-head -40 "$MISSING"
-# Counted separately, and never inferred from MISSING_COUNT: the two measure
-# opposite failures (cmake-spike/run.sh explains the run that taught this).
-DUPES="$WORK/dupes.txt"
-grep -oP "duplicate symbol: \K.*" slate-link.log | sort -u >"$DUPES"
-echo "DUPLICATE_COUNT=$(wc -l <"$DUPES")"
-head -40 "$DUPES"
-grep -v "undefined symbol\|duplicate symbol\|^>>>" slate-link.log | head -20
-
-if [ ! -x oils-for-unix-slateos ]; then
-    echo "NO_SLATE_BINARY"
-    exit 1
-fi
-file oils-for-unix-slateos
-readelf -h oils-for-unix-slateos | grep -E "Type|Entry"
-# `grep >/dev/null`, not `grep -q`: under pipefail, -q exits at the first
-# match, readelf dies of SIGPIPE, and the pipeline reads as a failure -- the
-# first run of this script reported a missing segment that was there.
-if ! readelf -lW oils-for-unix-slateos | grep GNU_EH_FRAME >/dev/null; then
-    echo "NO_EH_FRAME_HDR -- every exception would terminate the shell (point 3 above)"
-    exit 1
-fi
-echo "UNSTRIPPED_BYTES=$(stat -c %s oils-for-unix-slateos)"
-
-# --strip-debug, not --strip-all, as for CPython and CMake (design-decisions.md
-# §344): the symbol table is what turns a fault address on the serial console
-# into a function name.
-mkdir -p "$SLATE_SPIKE" || exit 1
-STAGED="$SLATE_SPIKE/oils-for-unix-slateos.elf"
-strip --strip-debug -o "$STAGED" oils-for-unix-slateos 2>/dev/null \
-    || "$SLATE_ZIG" objcopy --strip-debug oils-for-unix-slateos "$STAGED" \
-    || { echo "STRIP_FAILED"; exit 1; }
-echo "STAGED_BYTES=$(stat -c %s "$STAGED")"
-ls -l "$STAGED"
+# The link, its checks and the stripped copy in build/spike/: slatelink.sh's,
+# which the rootfs recipe also runs alone whenever libc.a moves.
+bash "$SLATE_ROOT/scripts/oils-spike/slatelink.sh" || exit 1
 echo "SLATE_OILS_BUILT $VER"

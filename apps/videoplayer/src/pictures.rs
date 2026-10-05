@@ -42,9 +42,13 @@ use std::sync::atomic::{AtomicI64, Ordering};
 #[cfg(test)]
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::task::Waker;
 use std::thread;
+
+use guitk::canvas::WireBytes;
+
+use crate::grade::Grade;
 
 pub use videocodec::{Frame, SeekMode};
 
@@ -57,6 +61,40 @@ pub const QUEUE: usize = 2;
 /// the window attaches it (`App::attach_waker`) -- which may be after a film
 /// named on the command line has started decoding.
 pub type WakerSlot = Arc<OnceLock<Waker>>;
+
+/// The Adjustments tab's grade, shared with every film's thread, which puts
+/// each picture through it as it is converted: `None` for none.
+pub type GradeSlot = Arc<Mutex<Option<Arc<Grade>>>>;
+
+/// A picture ready to go on screen: graded, and its pixels in the
+/// compositor's byte order already -- eight megabytes a full-HD picture,
+/// copied on the thread rather than on the window's.
+pub struct Ready {
+    /// When it is shown, in nanoseconds on the film's clock.
+    pub time: i64,
+    /// How long, in nanoseconds; 0 where the file does not say.
+    pub duration: u64,
+    pub width: u32,
+    pub height: u32,
+    /// `width * height` pixels, for `ImageChange::Upload` as `Argb8888`.
+    pub bytes: WireBytes,
+}
+
+impl Ready {
+    /// `frame` through `grade`, if there is one, and into the wire's order.
+    fn of(mut frame: Frame, grade: Option<&Grade>) -> Self {
+        if let Some(grade) = grade {
+            grade.apply(&mut frame);
+        }
+        Self {
+            time: frame.time,
+            duration: frame.duration,
+            width: frame.width,
+            height: frame.height,
+            bytes: WireBytes::from_le_argb(&frame.pixels),
+        }
+    }
+}
 
 /// The longest the thread passes pictures over before converting one anyway.
 ///
@@ -133,7 +171,7 @@ enum Ask {
 enum Delivery {
     Frame {
         seek: u64,
-        frame: Frame,
+        frame: Ready,
     },
     /// No pictures after the last handed over.
     End {
@@ -168,7 +206,7 @@ pub struct Pictures {
     /// The newest seek's number. Frames stamped with an older one are dropped.
     seek: u64,
     /// The next frame, taken from the queue and not yet due.
-    next: Option<Frame>,
+    next: Option<Ready>,
     /// Nothing shown since the last seek, or since the film was opened: the
     /// first frame to come is shown whatever its time.
     fresh: bool,
@@ -186,14 +224,14 @@ impl Pictures {
     /// # Errors
     ///
     /// When the thread cannot be started.
-    pub fn start<S: Source>(source: S, waker: WakerSlot) -> io::Result<Self> {
+    pub fn start<S: Source>(source: S, waker: WakerSlot, grade: GradeSlot) -> io::Result<Self> {
         let (asks, asked) = mpsc::channel();
         let (out, delivered) = mpsc::sync_channel(QUEUE);
         let clock = Arc::new(AtomicI64::new(0));
         let theirs = Arc::clone(&clock);
         thread::Builder::new()
             .name(String::from("videoplayer-pictures"))
-            .spawn(move || decode(source, &asked, &out, &theirs, &waker))?;
+            .spawn(move || decode(source, &asked, &out, &theirs, &waker, &grade))?;
         Ok(Self {
             asks,
             delivered,
@@ -238,7 +276,7 @@ impl Pictures {
     /// The frame to show at `now`, if it is not the one shown already: the
     /// latest of those come that are due by then, or the first after a seek.
     /// Frames passed over in between are dropped.
-    pub fn show_at(&mut self, now: i64) -> Option<Frame> {
+    pub fn show_at(&mut self, now: i64) -> Option<Ready> {
         self.clock.store(now, Ordering::Relaxed);
         let mut shown = None;
         loop {
@@ -291,7 +329,7 @@ impl Pictures {
 
     /// The next frame of the newest seek, from the queue; the end or a
     /// failure, noted, along the way.
-    fn take(&mut self) -> Option<Frame> {
+    fn take(&mut self) -> Option<Ready> {
         loop {
             match self.delivered.try_recv() {
                 Ok(delivery) => {
@@ -315,7 +353,7 @@ impl Pictures {
 
     /// One delivery: a frame of the newest seek, or nothing -- the end or a
     /// failure noted, anything of an older seek dropped.
-    fn accept(&mut self, delivery: Delivery) -> Option<Frame> {
+    fn accept(&mut self, delivery: Delivery) -> Option<Ready> {
         match delivery {
             Delivery::Frame { seek, frame } if seek == self.seek => Some(frame),
             Delivery::End { seek } if seek == self.seek => {
@@ -339,10 +377,17 @@ fn decode<S: Source>(
     out: &SyncSender<Delivery>,
     clock: &AtomicI64,
     waker: &OnceLock<Waker>,
+    grade: &Mutex<Option<Arc<Grade>>>,
 ) {
     let mut seek = 0_u64;
     let mut ahead: Ahead<S::Picture> = Ahead::Nothing;
     let mut asked: Option<Ask> = None;
+    // The first picture after a seek is the one the seek asked for, and the
+    // window shows it whatever the clock says (`Pictures::fresh`). Passing
+    // it over against a clock the window has not moved yet -- a drag's first
+    // key frame, measured against where the film was before the drag --
+    // showed the picture after it instead, whenever this thread won the race.
+    let mut first_since_seek = true;
     loop {
         // The newest seek asked for: an older one waiting behind it is moot.
         loop {
@@ -359,6 +404,7 @@ fn decode<S: Source>(
         }) = asked.take()
         {
             seek = number;
+            first_since_seek = true;
             ahead = match source.seek(time, mode) {
                 Ok(()) => Ahead::Nothing,
                 Err(why) => Ahead::Failed(why),
@@ -405,7 +451,7 @@ fn decode<S: Source>(
         let mut picture = picture;
         let mut interrupted = false;
         let passing_since = std::time::Instant::now();
-        loop {
+        while !first_since_seek {
             match asks.try_recv() {
                 Ok(ask) => {
                     // A seek makes this picture moot as well.
@@ -441,9 +487,13 @@ fn decode<S: Source>(
             ahead = Ahead::Nothing;
             continue;
         }
+        first_since_seek = false;
 
         let delivery = match source.convert(&picture) {
-            Ok(frame) => Delivery::Frame { seek, frame },
+            Ok(frame) => Delivery::Frame {
+                seek,
+                frame: Ready::of(frame, current(grade).as_deref()),
+            },
             Err(why) => {
                 // No picture of the film would convert either: it is said,
                 // and the thread waits for a seek -- which will meet the same.
@@ -461,6 +511,16 @@ fn decode<S: Source>(
                 Err(_) => return,
             }
         }
+    }
+}
+
+/// The grade in `slot` now. A slot whose lock was poisoned -- a panic while
+/// it was held, which a build that aborts on panic never sees -- still holds
+/// the last grade put in it, and that is used.
+fn current(slot: &Mutex<Option<Arc<Grade>>>) -> Option<Arc<Grade>> {
+    match slot.lock() {
+        Ok(grade) => grade.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
     }
 }
 
@@ -579,7 +639,8 @@ mod tests {
     #[test]
     fn the_first_picture_shows_at_once_and_the_rest_when_due() {
         let (film, _) = Film::new(&[0, 40, 80, 120]);
-        let mut pictures = Pictures::start(film, WakerSlot::default()).unwrap();
+        let mut pictures =
+            Pictures::start(film, WakerSlot::default(), GradeSlot::default()).unwrap();
         assert_eq!(shown_at(&mut pictures, 0), Some(0));
         assert_eq!(shown_at(&mut pictures, 39), None, "not due yet");
         assert_eq!(pictures.due(), Some(40));
@@ -591,7 +652,8 @@ mod tests {
     #[test]
     fn a_film_that_starts_late_shows_its_first_picture_at_once() {
         let (film, _) = Film::new(&[1_000, 1_040]);
-        let mut pictures = Pictures::start(film, WakerSlot::default()).unwrap();
+        let mut pictures =
+            Pictures::start(film, WakerSlot::default(), GradeSlot::default()).unwrap();
         assert_eq!(shown_at(&mut pictures, 0), Some(1_000));
         assert_eq!(shown_at(&mut pictures, 500), None);
     }
@@ -600,7 +662,8 @@ mod tests {
     fn a_picture_the_clock_has_left_behind_is_not_converted() {
         let times: Vec<i64> = (0..10).map(|i| i * 40).collect();
         let (film, converted) = Film::new(&times);
-        let mut pictures = Pictures::start(film, WakerSlot::default()).unwrap();
+        let mut pictures =
+            Pictures::start(film, WakerSlot::default(), GradeSlot::default()).unwrap();
         assert_eq!(shown_at(&mut pictures, 0), Some(0));
         // The clock jumps on while the thread waits on a full queue: once
         // freed -- by the window taking from the queue, which it does only
@@ -623,7 +686,8 @@ mod tests {
     fn a_seek_shows_the_picture_at_its_time_and_nothing_from_before_it() {
         let times: Vec<i64> = (0..100).map(|i| i * 40).collect();
         let (film, _) = Film::new(&times);
-        let mut pictures = Pictures::start(film, WakerSlot::default()).unwrap();
+        let mut pictures =
+            Pictures::start(film, WakerSlot::default(), GradeSlot::default()).unwrap();
         assert_eq!(shown_at(&mut pictures, 0), Some(0));
         // Let the thread fill the queue with the start of the film.
         std::thread::sleep(Duration::from_millis(50));
@@ -640,9 +704,39 @@ mod tests {
     }
 
     #[test]
+    fn the_picture_a_seek_asks_for_is_not_passed_over_for_a_clock_left_behind() {
+        // The window moves the clock after it asks for a seek -- a drag
+        // holds it -- so the thread can decode the seek's picture while the
+        // clock still says where the film was. That picture is shown
+        // whatever the clock says, so it must not be passed over against it.
+        let times: Vec<i64> = (0..100).map(|i| i * 40).collect();
+        let (film, _) = Film::new(&times);
+        let mut pictures =
+            Pictures::start(film, WakerSlot::default(), GradeSlot::default()).unwrap();
+        // A picture handed over first, so that the seek below is not the
+        // film's start, where the thread begins as if just sought.
+        assert!(pictures.wait(Duration::from_secs(10)), "nothing came");
+        // Only the clock matters here: it is left at 3 s, whatever shows.
+        let _whatever_shows = pictures.show_at(3_000);
+        pictures.seek(400, SeekMode::KeyFrame);
+        while pictures.due().is_none() {
+            assert!(
+                pictures.wait(Duration::from_secs(10)),
+                "nothing came after the seek"
+            );
+        }
+        let due = pictures.due().unwrap_or(i64::MAX);
+        assert!(
+            due <= 400,
+            "the seek's picture was passed over for the one at {due}"
+        );
+    }
+
+    #[test]
     fn a_seek_after_the_end_plays_again() {
         let (film, _) = Film::new(&[0, 40]);
-        let mut pictures = Pictures::start(film, WakerSlot::default()).unwrap();
+        let mut pictures =
+            Pictures::start(film, WakerSlot::default(), GradeSlot::default()).unwrap();
         assert_eq!(shown_at(&mut pictures, 100), Some(40));
         assert!(pictures.ended());
         pictures.seek(0, SeekMode::Exact);
@@ -654,7 +748,8 @@ mod tests {
     fn a_failure_is_said_after_the_pictures_before_it() {
         let (mut film, _) = Film::new(&[0, 40, 80]);
         film.fail_at = Some(2);
-        let mut pictures = Pictures::start(film, WakerSlot::default()).unwrap();
+        let mut pictures =
+            Pictures::start(film, WakerSlot::default(), GradeSlot::default()).unwrap();
         assert_eq!(shown_at(&mut pictures, 0), Some(0));
         assert_eq!(pictures.failed(), None, "said before its pictures");
         assert_eq!(shown_at(&mut pictures, 100), Some(40));
@@ -680,7 +775,7 @@ mod tests {
         // for the window to take what is queued -- after the waker is in.
         let (film, _) = Film::new(&[0, 40, 80, 120]);
         let slot = WakerSlot::default();
-        let mut pictures = Pictures::start(film, Arc::clone(&slot)).unwrap();
+        let mut pictures = Pictures::start(film, Arc::clone(&slot), GradeSlot::default()).unwrap();
         // Attached after the film started, as a window attaches it after a
         // film named on its command line has started.
         assert!(slot.set(Waker::from(Arc::clone(&count))).is_ok());
@@ -719,7 +814,7 @@ mod tests {
         let wakes = Arc::new(Wakes(std::sync::atomic::AtomicUsize::new(0)));
         let slot = WakerSlot::default();
         assert!(slot.set(Waker::from(Arc::clone(&wakes))).is_ok());
-        let mut pictures = Pictures::start(film, slot).unwrap();
+        let mut pictures = Pictures::start(film, slot, GradeSlot::default()).unwrap();
         assert_eq!(shown_at(&mut pictures, 0), Some(0));
         // The queue full behind the picture held: the thread is waiting to
         // hand over the next.
@@ -753,7 +848,8 @@ mod tests {
         let times: Vec<i64> = (0..10_000).map(|i| i * 40).collect();
         let (mut film, converted) = Film::new(&times);
         film.delay = Duration::from_millis(2);
-        let mut pictures = Pictures::start(film, WakerSlot::default()).unwrap();
+        let mut pictures =
+            Pictures::start(film, WakerSlot::default(), GradeSlot::default()).unwrap();
         // The clock far past the film: every picture is behind it.
         let far = i64::MAX / 2;
         let deadline = std::time::Instant::now() + WAIT;
@@ -776,12 +872,47 @@ mod tests {
         );
     }
 
+    /// **The thread puts each picture through the grade in the slot**, as
+    /// it stands when the picture is converted: black lifted to white with
+    /// brightness at its top, and back to black when the grade is taken out.
+    #[test]
+    fn each_picture_goes_through_the_grade_in_the_slot() {
+        let (film, _) = Film::new(&[0, 40, 80, 120]);
+        let grade = GradeSlot::default();
+        let lift = crate::VideoAdjustments {
+            brightness: 1.0,
+            ..crate::VideoAdjustments::default()
+        };
+        *grade.lock().unwrap() = Grade::new(&lift).map(Arc::new);
+        let mut pictures = Pictures::start(film, WakerSlot::default(), Arc::clone(&grade)).unwrap();
+        let colour = |ready: &Ready| ready.bytes.as_slice().get(..3).map(<[u8]>::to_vec);
+        let first = loop {
+            if let Some(ready) = pictures.show_at(0) {
+                break ready;
+            }
+            assert!(pictures.wait(WAIT));
+        };
+        assert_eq!(colour(&first), Some(vec![255, 255, 255]), "not lifted");
+        *grade.lock().unwrap() = None;
+        // The queue already holds pictures graded before; a seek starts the
+        // film again under the grade as it is now.
+        pictures.seek(0, SeekMode::Exact);
+        let again = loop {
+            if let Some(ready) = pictures.show_at(0) {
+                break ready;
+            }
+            assert!(pictures.wait(WAIT));
+        };
+        assert_eq!(colour(&again), Some(vec![0, 0, 0]), "still lifted");
+    }
+
     /// **Two seeks in a row land on the second**, the first passed over.
     #[test]
     fn two_seeks_in_a_row_land_on_the_second() {
         let times: Vec<i64> = (0..100).map(|i| i * 40).collect();
         let (film, _) = Film::new(&times);
-        let mut pictures = Pictures::start(film, WakerSlot::default()).unwrap();
+        let mut pictures =
+            Pictures::start(film, WakerSlot::default(), GradeSlot::default()).unwrap();
         assert_eq!(shown_at(&mut pictures, 0), Some(0));
         pictures.seek(1_000, SeekMode::Exact);
         pictures.seek(3_000, SeekMode::Exact);
@@ -793,7 +924,7 @@ mod tests {
     fn dropping_the_pictures_ends_the_thread() {
         let times: Vec<i64> = (0..1_000).map(|i| i * 40).collect();
         let (film, converted) = Film::new(&times);
-        let pictures = Pictures::start(film, WakerSlot::default()).unwrap();
+        let pictures = Pictures::start(film, WakerSlot::default(), GradeSlot::default()).unwrap();
         std::thread::sleep(Duration::from_millis(50));
         drop(pictures);
         std::thread::sleep(Duration::from_millis(50));

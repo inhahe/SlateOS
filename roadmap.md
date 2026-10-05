@@ -2921,7 +2921,12 @@ word; text inside them that says "lane C" is history.
   - adoption, program by program: the slider, the switch, checkbox, radio
     button and drop-down, and the dock (`c-e-the-toolkit-has-a-slider-now.md`,
     `c-e-the-toolkit-has-switches-checkboxes-radio-buttons-and-drop-downs.md`,
-    `c-e-the-toolkit-has-a-dock.md`);
+    `c-e-the-toolkit-has-a-dock.md`). The slider, 2026-10-04: the mixer's
+    faders, the video player's seek bar, volume and Adjustments, the
+    camera's seven settings and the password manager's generator length
+    (its auto-lock already was); `slides` and `photomanager` have no slider
+    -- lane C's counts matched "SlideRight" -- so left are settings,
+    colorpicker and paint;
   - lane B's two, forwarded by lane C (`c-b-your-two-requests-to-c-are-lane-es.md`;
     the requests themselves are on lane B's branch): the terminal answers
     how wide it will draw a run of text -- **done** (e99d960e6, OSC 7730,
@@ -2974,9 +2979,13 @@ word; text inside them that says "lane C" is history.
     (`requests/e-ad-no-application-can-reach-the-sound-device.md`). Then
     the sound becomes the clock (design-decisions §1234), and the volume
     and the Equalizer tab act;
-  - `[ ]` the Adjustments tab's sliders move, and the picture is shown
+  - `[x]` the Adjustments tab's sliders move, and the picture is shown
     through them -- brightness, contrast, saturation, hue, gamma and
-    sharpness, applied on the decoding thread;
+    sharpness, applied on the decoding thread -- 2026-10-04: the toolkit's
+    slider for each (and for the seek bar and the volume), the keys Up and
+    Down to choose one and its own keys to move it, Reset All; the grade
+    (`src/grade.rs`) is one table and one matrix a pixel, and a sharpening
+    pass where asked, and a paused picture is decoded again through it;
   - `[ ]` a screenshot of the picture on screen, in the Settings tab's
     format;
   - `[ ]` Resume Playback: where a film was left is kept, and it opens

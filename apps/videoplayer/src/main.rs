@@ -8,6 +8,7 @@
 //! the display are the player's own. Not yet: H.264 and HEVC pictures (most
 //! MP4 files) and any sound, which have nowhere to come from or go to.
 
+mod grade;
 mod pictures;
 
 use appearance::Edge;
@@ -18,18 +19,20 @@ use pathtext::ShowPath;
 // the same four floats under `width`/`height`, with the same half-open
 // `contains`. See `known-issues.md`
 // `TD-C-TEN-RECTANGLE-TYPES-IN-THREE-SPELLINGS`.
+use grade::Grade;
 use guitk::color::Color;
 use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
+use guitk::slider::{Look, Placement, Slider, SliderEvent};
 use guitk::style::CornerRadii;
 use guitk::text;
 use mediaprobe::Codec;
 use oswindow::app::{self, App, ImageChange, Response};
 use oswindow::{Event, RenderTree};
-use pictures::{Frame, Pictures, SeekMode, WakerSlot};
+use pictures::{GradeSlot, Pictures, Ready, SeekMode, WakerSlot};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::task::Waker;
@@ -56,11 +59,10 @@ const CONTROLS_HEIGHT: f32 = 80.0;
 const SEEK_BAR_OFFSET: f32 = 8.0;
 /// How far the seek bar is inset from either window edge.
 const SEEK_BAR_INSET: f32 = 16.0;
-/// How thick the seek bar is drawn.
+/// How thick the seek bar is drawn. A 6px line is not a thing a pointer can
+/// reliably land on, so the band that answers a click is the toolkit
+/// slider's target round it (`seek_bar`), at least 24 pixels tall.
 const SEEK_BAR_HEIGHT: f32 = 6.0;
-/// How thick it is to grab. A 6px line is not a thing a pointer can reliably
-/// land on, so the band that answers a click is taller than the one drawn.
-const SEEK_BAR_GRAB_HEIGHT: f32 = 18.0;
 /// Height of the tab strip along the top.
 const TAB_BAR_HEIGHT: f32 = 36.0;
 /// Y the player's own content starts at, below the tab strip.
@@ -85,6 +87,27 @@ const PICTURE_POLL: std::time::Duration = std::time::Duration::from_micros(16_66
 const SOONEST_TICK: std::time::Duration = std::time::Duration::from_millis(1);
 /// The number the film's picture is uploaded under, in this window's images.
 const PICTURE_IMAGE: u64 = 1;
+/// The seek bar's thumb, across.
+const SEEK_THUMB: f32 = 14.0;
+/// The volume bar's thumb, across.
+const VOLUME_THUMB: f32 = 12.0;
+/// The Adjustments tab's thumbs, across.
+const ADJUST_THUMB: f32 = 14.0;
+/// Where the Adjustments tab's sliders start, after their names.
+const ADJUST_BAR_X: f32 = 140.0;
+/// The width of the ring round an Adjustments slider's thumb while it has
+/// the keyboard.
+const FOCUS_RING: f32 = 2.0;
+/// The Adjustments tab's sliders, in the order drawn: the name, the least
+/// and the most it can be set to, and the step a key moves it by.
+const ADJUSTMENTS: [(&str, f64, f64, f64); 6] = [
+    ("Brightness", -1.0, 1.0, 0.01),
+    ("Contrast", 0.0, 2.0, 0.01),
+    ("Saturation", 0.0, 3.0, 0.01),
+    ("Hue", -180.0, 180.0, 1.0),
+    ("Gamma", 0.1, 3.0, 0.01),
+    ("Sharpness", 0.0, 2.0, 0.01),
+];
 /// What the window says instead of a picture, with no file open.
 ///
 /// Three lines. The third is about the playlist, which outlives the window:
@@ -135,10 +158,12 @@ const MIN_WINDOW_HEIGHT: f32 = 320.0;
 /// the panel that configured it.
 const NO_SCREENSHOTS: &str = "Not applied: this player takes no screenshots yet.";
 
-/// What the Adjustments tab says under its sliders: nothing moves them, and
-/// the picture is shown as it was decoded.
-const ADJUSTMENTS_NOT_APPLIED: &str =
-    "Not applied: these cannot be changed yet, and the picture is shown as decoded.";
+/// What the Adjustments tab says under its heading: how its sliders are
+/// moved, and that the picture follows them. Until 2026-10-04 it said they
+/// could not be changed -- nothing took a press or a key on the tab, and no
+/// picture was decoded to change.
+const ADJUSTMENTS_HINT: &str =
+    "Up and Down choose an adjustment, Left and Right move it: the picture follows.";
 
 /// What the Equalizer tab says: there is no sound for it to shape.
 const EQUALIZER_NOT_APPLIED: &str = "Not applied: no sound plays here yet.";
@@ -1746,6 +1771,43 @@ impl VideoAdjustments {
     pub fn reset(&mut self) {
         *self = Self::default();
     }
+
+    /// The adjustment on row `row` of the tab, in [`ADJUSTMENTS`]' order.
+    #[must_use]
+    pub fn get(&self, row: usize) -> f32 {
+        match row {
+            0 => self.brightness,
+            1 => self.contrast,
+            2 => self.saturation,
+            3 => self.hue,
+            4 => self.gamma,
+            _ => self.sharpness,
+        }
+    }
+
+    /// Set the adjustment on row `row`, held to its range.
+    pub fn set(&mut self, row: usize, value: f32) {
+        let (min, max) = ADJUSTMENTS.get(row).map_or((0.0, 0.0), |&(_, lo, hi, _)| {
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "the ranges are small numbers f32 holds exactly enough"
+            )]
+            (lo as f32, hi as f32)
+        });
+        let value = if value.is_finite() {
+            value.clamp(min, max)
+        } else {
+            self.get(row)
+        };
+        match row {
+            0 => self.brightness = value,
+            1 => self.contrast = value,
+            2 => self.saturation = value,
+            3 => self.hue = value,
+            4 => self.gamma = value,
+            _ => self.sharpness = value,
+        }
+    }
 }
 
 impl Default for VideoAdjustments {
@@ -2833,6 +2895,29 @@ fn fraction_of(length: Duration, fraction: f64) -> Duration {
     Duration::from_millis(ms)
 }
 
+/// `position` in milliseconds, the seek bar's unit.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "a film's milliseconds are far inside f64's exact range"
+)]
+fn millis(position: Duration) -> f64 {
+    position.as_millis() as f64
+}
+
+/// The position `ms` milliseconds in, rounded; none before the start.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "rounded and held to zero and above first; a film's milliseconds fit u64"
+)]
+fn from_millis(ms: f64) -> Duration {
+    Duration::from_millis(if ms.is_finite() {
+        ms.round().max(0.0) as u64
+    } else {
+        0
+    })
+}
+
 /// `position` in nanoseconds, the pictures' unit.
 fn nanos(position: Duration) -> i64 {
     i64::try_from(position.as_millis()).map_or(i64::MAX, |ms| ms.saturating_mul(1_000_000))
@@ -2849,13 +2934,18 @@ fn nanos(position: Duration) -> i64 {
 fn start_pictures(
     path: &Path,
     waker: &WakerSlot,
+    grade: &GradeSlot,
 ) -> Result<(Pictures, videocodec::VideoInfo), String> {
     let file =
         std::fs::File::open(path).map_err(|e| format!("the file could not be opened: {e}"))?;
     let video = videocodec::Video::open(file).map_err(|e| e.to_string())?;
     let info = *video.info();
-    let pictures = Pictures::start(video, std::sync::Arc::clone(waker))
-        .map_err(|e| format!("the decoder could not be started: {e}"))?;
+    let pictures = Pictures::start(
+        video,
+        std::sync::Arc::clone(waker),
+        std::sync::Arc::clone(grade),
+    )
+    .map_err(|e| format!("the decoder could not be started: {e}"))?;
     Ok((pictures, info))
 }
 
@@ -3025,6 +3115,21 @@ pub struct VideoPlayerApp {
     waker: WakerSlot,
     /// The film's pictures stopped being read: said once, when it happened.
     failure_said: bool,
+    /// The Adjustments tab's grade, shared with each film's decoding thread,
+    /// which puts every picture through it.
+    grade: GradeSlot,
+    /// The seek bar: the toolkit's slider over the film's length in
+    /// milliseconds, holding the state of a drag of it. Set from the clock
+    /// before each input and each drawing, but mid-drag.
+    seek_slider: Slider,
+    /// The volume bar, from silence to the most boost.
+    volume_slider: Slider,
+    /// The Adjustments tab's sliders, in [`ADJUSTMENTS`]' order.
+    adjust_sliders: Vec<Slider>,
+    /// The Adjustments tab's slider with the keyboard.
+    pub adjust_row: usize,
+    /// The Adjustments slider a drag is moving, while one is.
+    adjust_dragging: Option<usize>,
     /// Whether a change on the Settings tab is written to the settings file.
     /// Only in the window [`keep_settings`](Self::keep_settings) was called
     /// on -- the one `main` opens -- so no test writes the developer's own.
@@ -3122,6 +3227,16 @@ impl VideoPlayerApp {
             pending_images: Vec::new(),
             waker: WakerSlot::default(),
             failure_said: false,
+            grade: GradeSlot::default(),
+            seek_slider: Slider::new(0.0, 0.0, 0.0),
+            volume_slider: Slider::new(0.0, f64::from(Volume::MAX), f64::from(Volume::NORMAL))
+                .with_step(1.0),
+            adjust_sliders: ADJUSTMENTS
+                .iter()
+                .map(|&(_, lo, hi, step)| Slider::new(lo, hi, lo).with_step(step))
+                .collect(),
+            adjust_row: 0,
+            adjust_dragging: None,
             keeps_settings: false,
             picker: FilePicker::default(),
         }
@@ -3244,7 +3359,7 @@ impl VideoPlayerApp {
             self.decodes = false;
             return;
         };
-        match start_pictures(&path, &self.waker) {
+        match start_pictures(&path, &self.waker, &self.grade) {
             Ok((pictures, info)) => {
                 self.pictures = Some(pictures);
                 self.picture_info = Some(info);
@@ -3285,7 +3400,7 @@ impl VideoPlayerApp {
         let frame = self.pictures.as_mut().and_then(|p| p.show_at(now));
         let changed = frame.is_some();
         if let Some(frame) = frame {
-            self.show_picture(&frame);
+            self.show_picture(frame);
         }
         let failed = self
             .pictures
@@ -3304,7 +3419,7 @@ impl VideoPlayerApp {
 
     /// Put `frame` on screen: uploaded as [`PICTURE_IMAGE`], in place of any
     /// upload of an earlier picture not sent yet.
-    fn show_picture(&mut self, frame: &Frame) {
+    fn show_picture(&mut self, frame: Ready) {
         let lasts = if frame.duration > 0 {
             frame.duration
         } else {
@@ -3324,7 +3439,7 @@ impl VideoPlayerApp {
             height: frame.height,
             stride: frame.width.saturating_mul(4),
             format: oswindow::PixelFormat::Argb8888,
-            bytes: guitk::canvas::WireBytes::from_le_argb(&frame.pixels),
+            bytes: frame.bytes,
         });
     }
 
@@ -3864,6 +3979,16 @@ impl VideoPlayerApp {
 
     /// Run whatever the keystroke is bound to.
     fn handle_key(&mut self, event: &KeyEvent) -> bool {
+        // A slider being dragged has the keyboard: Escape takes the drag
+        // back, and the rest wait for the button.
+        if let Some(taken) = self.drag_key(event) {
+            return taken;
+        }
+        // On the Adjustments tab the arrows are the sliders'.
+        if self.active_tab == PlayerTab::Adjustments && self.adjustments_key(event) {
+            self.wake_controls();
+            return true;
+        }
         let Some(shortcut) = Shortcuts::for_event(event) else {
             return false;
         };
@@ -4149,17 +4274,11 @@ impl VideoPlayerApp {
             .map(|(tab, _)| tab)
     }
 
-    /// The strip of the window that seeks when clicked or dragged.
+    /// The strip of the window that seeks when clicked or dragged: the
+    /// seek bar's target, taller than the line it is drawn as and past
+    /// its thumb at both ends.
     pub fn seek_bar(&self) -> Rect {
-        let drawn_y = self.controls_top() + SEEK_BAR_OFFSET;
-        Rect {
-            x: SEEK_BAR_INSET,
-            // Centred on the line that is drawn, so the grab band reaches as
-            // far above it as below.
-            y: drawn_y - (SEEK_BAR_GRAB_HEIGHT - SEEK_BAR_HEIGHT) / 2.0,
-            w: (self.width - SEEK_BAR_INSET * 2.0).max(1.0),
-            h: SEEK_BAR_GRAB_HEIGHT,
-        }
+        self.seek_placement().hit()
     }
 
     /// Y the control bar starts at.
@@ -4167,13 +4286,18 @@ impl VideoPlayerApp {
         self.height - CONTROLS_HEIGHT
     }
 
-    /// Where along the file a point on the seek bar is.
-    fn seek_fraction_at(&self, x: f32) -> f64 {
-        let bar = self.seek_bar();
-        f64::from(((x - bar.x) / bar.w).clamp(0.0, 1.0))
-    }
-
     fn handle_mouse(&mut self, event: &MouseEvent) -> bool {
+        // A drag has the pointer wherever it goes, until the button comes up:
+        // the seek bar's, the volume's, an adjustment's.
+        if self.seek_slider.is_dragging() {
+            return self.seek_bar_mouse(event);
+        }
+        if self.volume_slider.is_dragging() {
+            return self.volume_mouse(event);
+        }
+        if let Some(row) = self.adjust_dragging {
+            return self.adjust_mouse(row, event);
+        }
         match event.kind {
             MouseEventKind::Press(MouseButton::Left) => {
                 self.wake_controls();
@@ -4181,46 +4305,112 @@ impl VideoPlayerApp {
                     self.active_tab = tab;
                     return true;
                 }
-                if self.seek_bar().contains(event.x, event.y) {
-                    // A press on the bar starts a drag: the preview follows the
-                    // pointer, and the picture with it -- the key frame at or
-                    // before the time under the pointer, which costs nothing
-                    // more to decode -- and the clock only moves when it is
-                    // let go, so dragging across a film does not seek to
-                    // every pixel of the way there.
-                    self.seeking = true;
-                    self.preview(event.x);
-                    return true;
+                // The bars are the Player tab's: on another tab the place
+                // they would be is that tab's.
+                match self.active_tab {
+                    PlayerTab::Player => self.seek_bar_mouse(event) || self.volume_mouse(event),
+                    PlayerTab::Adjustments => self.adjustments_press(event),
+                    _ => false,
                 }
-                false
             }
             MouseEventKind::Move => {
                 let woke = !self.controls_visible;
                 self.wake_controls();
-                if self.seeking {
-                    self.preview(event.x);
-                    return true;
-                }
-                woke
-            }
-            MouseEventKind::Release(MouseButton::Left) => {
-                if !self.seeking {
-                    return false;
-                }
-                self.seeking = false;
-                self.seek_preview_position = None;
-                self.seek_to_fraction(self.seek_fraction_at(event.x));
-                true
+                // Every slider is told, so that a light going out on one and
+                // coming on on another are both drawn.
+                let lit = match self.active_tab {
+                    PlayerTab::Player => {
+                        let seek = self.seek_bar_mouse(event);
+                        let volume = self.volume_mouse(event);
+                        seek || volume
+                    }
+                    PlayerTab::Adjustments => {
+                        let mut lit = false;
+                        for row in 0..ADJUSTMENTS.len() {
+                            lit |= self.adjust_mouse(row, event);
+                        }
+                        lit
+                    }
+                    _ => false,
+                };
+                woke || lit
             }
             _ => false,
         }
     }
 
-    /// Follow a drag along the seek bar to `x`: the time there, and the key
-    /// frame at or before it, which the picture's thread passes over
+    // ========================================================================
+    // The sliders: the toolkit's (`c-e-the-toolkit-has-a-slider-now.md`)
+    // ========================================================================
+
+    /// The seek bar as the toolkit's slider draws and reads it: the line
+    /// along the top of the control bar.
+    fn seek_placement(&self) -> Placement {
+        Placement::horizontal(
+            Rect {
+                x: SEEK_BAR_INSET,
+                y: self.controls_top() + SEEK_BAR_OFFSET,
+                w: (self.width - SEEK_BAR_INSET * 2.0).max(1.0),
+                h: SEEK_BAR_HEIGHT,
+            },
+            SEEK_THUMB,
+        )
+    }
+
+    /// The seek bar as it stands: set to the clock -- or, mid-drag, where
+    /// the drag has it -- over the film's length in milliseconds. `None`
+    /// with no length to seek in.
+    fn seek_slider_now(&self) -> Option<Slider> {
+        let length = self.length()?;
+        let mut slider = self.seek_slider.clone();
+        if !slider.is_dragging() {
+            slider.set_range(0.0, millis(length));
+            slider.set_value(millis(self.position));
+        }
+        Some(slider)
+    }
+
+    /// A pointer event for the seek bar. Returns whether the bar took it.
+    fn seek_bar_mouse(&mut self, event: &MouseEvent) -> bool {
+        let Some(slider) = self.seek_slider_now() else {
+            return false;
+        };
+        self.seek_slider = slider;
+        let placement = self.seek_placement();
+        let response = self.seek_slider.handle_mouse(&placement, event);
+        self.seek_moved(response.event());
+        response.is_taken()
+    }
+
+    /// What a seek bar event does -- the toolkit's three words are the
+    /// player's protocol: `Changed` while a drag moves, the picture showing
+    /// the key frame there and the clock staying; `Confirmed` when it is let
+    /// go, the clock going there; `Cancelled` by Escape, the picture going
+    /// back to the clock. And the drag's end, however it ended.
+    fn seek_moved(&mut self, event: Option<SliderEvent>) {
+        self.seeking = self.seek_slider.is_dragging();
+        match event {
+            Some(SliderEvent::Changed(ms)) => self.preview_to(from_millis(ms)),
+            Some(SliderEvent::Confirmed(ms)) => {
+                self.seek_preview_position = None;
+                self.jump_to(from_millis(ms));
+            }
+            Some(SliderEvent::Cancelled(_)) => {
+                self.seek_preview_position = None;
+                let here = self.position;
+                self.jump_to(here);
+            }
+            None => {}
+        }
+        if !self.seeking {
+            self.seek_preview_position = None;
+        }
+    }
+
+    /// Follow a drag along the seek bar to `at`: the time named there, and
+    /// the key frame at or before it, which the picture's thread passes over
     /// everything to reach -- a newer drag supersedes an older one unshown.
-    fn preview(&mut self, x: f32) {
-        let at = self.preview_at(x);
+    fn preview_to(&mut self, at: Duration) {
         let moved = self.seek_preview_position != Some(at);
         self.seek_preview_position = Some(at);
         if moved && let Some(pictures) = &mut self.pictures {
@@ -4229,11 +4419,221 @@ impl VideoPlayerApp {
         }
     }
 
-    /// The position a point on the seek bar names.
-    fn preview_at(&self, x: f32) -> Duration {
-        let fraction = self.seek_fraction_at(x);
-        self.length()
-            .map_or(Duration::ZERO, |length| fraction_of(length, fraction))
+    /// The volume bar, where the control bar's row of buttons draws it.
+    fn volume_placement(&self) -> Placement {
+        let buttons = self.controls_top() + SEEK_BAR_OFFSET + SEEK_BAR_HEIGHT + 8.0 + 18.0;
+        Placement::horizontal(
+            Rect {
+                x: 40.0,
+                y: buttons + 12.0,
+                w: 80.0,
+                h: 4.0,
+            },
+            VOLUME_THUMB,
+        )
+    }
+
+    /// The volume bar as it stands: set to the volume, but mid-drag.
+    fn volume_slider_now(&self) -> Slider {
+        let mut slider = self.volume_slider.clone();
+        if !slider.is_dragging() {
+            slider.set_value(f64::from(self.volume.level()));
+        }
+        slider
+    }
+
+    /// A pointer event for the volume bar. Returns whether the bar took it.
+    fn volume_mouse(&mut self, event: &MouseEvent) -> bool {
+        self.volume_slider = self.volume_slider_now();
+        let placement = self.volume_placement();
+        let response = self.volume_slider.handle_mouse(&placement, event);
+        self.volume_moved(response.event());
+        response.is_taken()
+    }
+
+    /// What a volume bar event does: the level it carries, said; kept in the
+    /// settings once it settles.
+    fn volume_moved(&mut self, event: Option<SliderEvent>) {
+        let Some(event) = event else {
+            return;
+        };
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "rounded and held to the volume's range first"
+        )]
+        let level = event.value().round().clamp(0.0, f64::from(Volume::MAX)) as u32;
+        self.volume.set_level(level);
+        self.show_osd(&format!("Volume: {}", self.volume.label()));
+        if matches!(event, SliderEvent::Confirmed(_) | SliderEvent::Cancelled(_)) {
+            self.save_settings();
+        }
+    }
+
+    /// Where the Adjustments tab draws row `row`'s slider.
+    fn adjust_placement(&self, row: usize) -> Placement {
+        #[allow(clippy::cast_precision_loss, reason = "six rows")]
+        let sy = CONTENT_TOP + 60.0 + row as f32 * 50.0;
+        Placement::horizontal(
+            Rect {
+                x: ADJUST_BAR_X,
+                y: sy + 8.0,
+                w: (self.width - 200.0).max(1.0),
+                h: 6.0,
+            },
+            ADJUST_THUMB,
+        )
+    }
+
+    /// Row `row`'s slider as it stands: set to the adjustment, but mid-drag.
+    fn adjust_slider_now(&self, row: usize) -> Option<Slider> {
+        let mut slider = self.adjust_sliders.get(row)?.clone();
+        if !slider.is_dragging() {
+            slider.set_value(f64::from(self.video_adjustments.get(row)));
+        }
+        Some(slider)
+    }
+
+    /// A pointer event for row `row`'s slider. Returns whether it took it.
+    fn adjust_mouse(&mut self, row: usize, event: &MouseEvent) -> bool {
+        let Some(slider) = self.adjust_slider_now(row) else {
+            self.adjust_dragging = None;
+            return false;
+        };
+        let placement = self.adjust_placement(row);
+        let Some(stored) = self.adjust_sliders.get_mut(row) else {
+            return false;
+        };
+        *stored = slider;
+        let response = stored.handle_mouse(&placement, event);
+        let dragging = stored.is_dragging();
+        self.adjust_dragging = dragging.then_some(row);
+        if let Some(event) = response.event() {
+            self.adjust_row = row;
+            self.adjusted(row, event.value());
+        }
+        response.is_taken()
+    }
+
+    /// A press on the Adjustments tab: a slider, or Reset All.
+    fn adjustments_press(&mut self, event: &MouseEvent) -> bool {
+        if self.reset_button().contains(event.x, event.y) {
+            self.video_adjustments.reset();
+            self.regrade();
+            self.show_osd("Adjustments reset");
+            return true;
+        }
+        for row in 0..ADJUSTMENTS.len() {
+            if self.adjust_placement(row).hit().contains(event.x, event.y) {
+                self.adjust_row = row;
+                return self.adjust_mouse(row, event);
+            }
+        }
+        false
+    }
+
+    /// The Adjustments tab's Reset All button.
+    fn reset_button(&self) -> Rect {
+        #[allow(clippy::cast_precision_loss, reason = "six rows")]
+        let y = CONTENT_TOP + 60.0 + ADJUSTMENTS.len() as f32 * 50.0 + 10.0;
+        Rect {
+            x: ADJUST_BAR_X,
+            y,
+            w: 100.0,
+            h: 30.0,
+        }
+    }
+
+    /// Row `row`'s adjustment set to `value`, and the picture put through it.
+    fn adjusted(&mut self, row: usize, value: f64) {
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "an adjustment is a small number, which f32 holds to its step"
+        )]
+        let value = value as f32;
+        self.video_adjustments.set(row, value);
+        self.regrade();
+    }
+
+    /// The pictures put through the adjustments as they now are: the grade
+    /// every film's thread applies, replaced; and a picture standing still --
+    /// paused, stopped -- decoded again through it, so the change shows at
+    /// once. A playing film shows it from its next pictures.
+    fn regrade(&mut self) {
+        let grade = Grade::new(&self.video_adjustments).map(std::sync::Arc::new);
+        match self.grade.lock() {
+            Ok(mut slot) => *slot = grade,
+            // Poisoned only by a panic while held, which a build that aborts
+            // on panic never sees; the slot is still the one to write.
+            Err(poisoned) => *poisoned.into_inner() = grade,
+        }
+        if self.state != PlaybackState::Playing && self.pictures.is_some() {
+            let here = self.position;
+            self.jump_to(here);
+        }
+    }
+
+    /// A key on the Adjustments tab: Up and Down choose the slider, and the
+    /// slider's own keys -- Left and Right a step, Page Up and Page Down a
+    /// page, Home and End the ends -- move it. Returns whether it took it.
+    fn adjustments_key(&mut self, event: &KeyEvent) -> bool {
+        if !textline::is_plain(event.modifiers) {
+            return false;
+        }
+        match event.key {
+            Key::Up => {
+                self.adjust_row = self.adjust_row.saturating_sub(1);
+                true
+            }
+            Key::Down => {
+                self.adjust_row = self
+                    .adjust_row
+                    .saturating_add(1)
+                    .min(ADJUSTMENTS.len().saturating_sub(1));
+                true
+            }
+            Key::Left | Key::Right | Key::Home | Key::End | Key::PageUp | Key::PageDown => {
+                let row = self.adjust_row;
+                let Some(slider) = self.adjust_slider_now(row) else {
+                    return false;
+                };
+                let Some(stored) = self.adjust_sliders.get_mut(row) else {
+                    return false;
+                };
+                *stored = slider;
+                let response = stored.handle_key(event);
+                if let Some(moved) = response.event() {
+                    self.adjusted(row, moved.value());
+                }
+                response.is_taken()
+            }
+            _ => false,
+        }
+    }
+
+    /// A key while a slider is being dragged: Escape takes the drag back,
+    /// and the rest wait for the button. Returns whether a drag was on.
+    fn drag_key(&mut self, event: &KeyEvent) -> Option<bool> {
+        if self.seek_slider.is_dragging() {
+            let response = self.seek_slider.handle_key(event);
+            self.seek_moved(response.event());
+            return Some(response.is_taken());
+        }
+        if self.volume_slider.is_dragging() {
+            let response = self.volume_slider.handle_key(event);
+            self.volume_moved(response.event());
+            return Some(response.is_taken());
+        }
+        let row = self.adjust_dragging?;
+        let stored = self.adjust_sliders.get_mut(row)?;
+        let response = stored.handle_key(event);
+        if !stored.is_dragging() {
+            self.adjust_dragging = None;
+        }
+        if let Some(moved) = response.event() {
+            self.adjusted(row, moved.value());
+        }
+        Some(response.is_taken())
     }
 
     pub fn render_commands(&self) -> Vec<RenderCommand> {
@@ -4651,67 +5051,64 @@ impl VideoPlayerApp {
         self.palette
             .push_surface(cmds, 0.0, y, self.width, height, 0.0, Surface::Card);
 
-        // Seek bar. The x and width come from the same rectangle the mouse
-        // is hit-tested against, so a click lands where the line was drawn.
-        let bar = self.seek_bar();
-        let seek_y = y + SEEK_BAR_OFFSET;
-        let seek_x = bar.x;
-        let seek_w = bar.w;
-        let seek_h = SEEK_BAR_HEIGHT;
-
-        // Seek track background
-        self.palette.push_surface(
-            cmds,
-            seek_x,
-            seek_y,
-            seek_w,
-            seek_h,
-            3.0,
-            Surface::ControlTrack,
-        );
-
-        // Buffer progress (slightly ahead of play position)
-        let buffer_frac = (self.progress_fraction() + 0.05).min(1.0);
-        self.palette.push_surface(
-            cmds,
-            seek_x,
-            seek_y,
-            seek_w * buffer_frac as f32,
-            seek_h,
-            3.0,
-            Surface::ControlTrack,
-        );
-
-        // Play progress
-        let progress = self.progress_fraction() as f32;
-        cmds.push(RenderCommand::FillRect {
-            x: seek_x,
-            y: seek_y,
-            width: seek_w * progress,
-            height: seek_h,
-            color: self.palette.blue,
-            corner_radii: CornerRadii::all(3.0),
+        // The seek bar: the toolkit's slider, set to the clock -- or where a
+        // drag has it -- on the same placement the pointer is read against.
+        // With no length to seek in, it is drawn disabled. (It drew a second,
+        // "buffer" fill a twentieth ahead of the clock, over a file read from
+        // the disk, which buffers nothing a bar could show.)
+        let placement = self.seek_placement();
+        let track = placement.track;
+        let (seek_x, seek_y, seek_w, seek_h) = (track.x, track.y, track.w, track.h);
+        let slider = self.seek_slider_now().unwrap_or_else(|| {
+            let mut idle = Slider::new(0.0, 0.0, 0.0);
+            // A slider just made has no drag for the change to cancel, so
+            // there is no event to act on.
+            let _no_drag = idle.set_state(guitk::disabled::DisabledState::Disabled {
+                reason: Some(String::from("no film is open")),
+            });
+            idle
         });
+        slider.draw(
+            cmds,
+            &self.palette,
+            &placement,
+            Look::accent(&self.palette, self.palette.surface0),
+            false,
+            0.0,
+        );
+
+        // Chapter marks, over the bar.
+        if let Some(length) = self.length() {
+            for chapter in &self.chapters {
+                let frac = chapter.start.progress_of(length).min(1.0) as f32;
+                let marker_x = seek_x + seek_w * frac;
+                cmds.push(RenderCommand::FillRect {
+                    x: marker_x - 1.0,
+                    y: seek_y - 1.0,
+                    width: 2.0,
+                    height: seek_h + 2.0,
+                    color: self.palette.yellow,
+                    corner_radii: CornerRadii::ZERO,
+                });
+            }
+        }
 
         // The timestamp under the pointer.
         //
         // `seek_preview_position` is maintained through a *drag* -- set on
         // press, followed on move, cleared on release -- and nothing drew it.
         // That is not a missing nicety, it is the missing half of a deliberate
-        // design: the comment on the press arm says "the preview follows the
-        // pointer and the picture only moves when it is let go, so dragging
-        // across a film does not seek to every pixel of the way there". The
-        // whole point of not seeking continuously is that the preview tells
-        // you where you are. Without it the user drags blind and finds out
-        // where they landed by arriving there, which is strictly worse than
-        // the continuous seeking this was built to avoid.
+        // design: the clock only moves when the drag is let go, so dragging
+        // across a film does not seek to every pixel of the way there -- and
+        // the whole point of not seeking continuously is that the preview
+        // tells you where you are.
         //
         // Positioned from the previewed *time* rather than from the pointer's
         // x, so the label sits over the frame that will actually be sought to
         // even if the two ever diverge. Clamped to the bar so it stays legible
         // at either end instead of sliding off the window.
-        if let (Some(preview), Some(file)) = (self.seek_preview_position, &self.current_file) {
-            let frac = preview.progress_of(file.duration) as f32;
+        if let (Some(preview), Some(length)) = (self.seek_preview_position, self.length()) {
+            let frac = preview.progress_of(length).min(1.0) as f32;
             let label_w = 48.0;
             let x = (seek_x + seek_w * frac - label_w / 2.0)
                 .clamp(seek_x, (seek_x + seek_w - label_w).max(seek_x));
@@ -4726,33 +5123,6 @@ impl VideoPlayerApp {
                 overflow: TextOverflow::Clip,
             });
         }
-
-        // Chapter markers
-        if let Some(file) = &self.current_file {
-            for chapter in &self.chapters {
-                let frac = chapter.start.progress_of(file.duration) as f32;
-                let marker_x = seek_x + seek_w * frac;
-                cmds.push(RenderCommand::FillRect {
-                    x: marker_x - 1.0,
-                    y: seek_y - 1.0,
-                    width: 2.0,
-                    height: seek_h + 2.0,
-                    color: self.palette.yellow,
-                    corner_radii: CornerRadii::ZERO,
-                });
-            }
-        }
-
-        // Seek handle
-        let handle_x = seek_x + seek_w * progress;
-        cmds.push(RenderCommand::FillRect {
-            x: handle_x - 6.0,
-            y: seek_y - 3.0,
-            width: 12.0,
-            height: 12.0,
-            color: self.palette.blue,
-            corner_radii: CornerRadii::all(6.0),
-        });
 
         // Time display
         let time_y = seek_y + seek_h + 8.0;
@@ -4858,35 +5228,27 @@ impl VideoPlayerApp {
             overflow: TextOverflow::Clip,
         });
 
-        // Volume bar
-        let vol_bar_x = vol_x + 24.0;
-        let vol_bar_w = 80.0;
-        let vol_bar_h = 4.0;
-        let vol_bar_y = btn_y + 12.0;
-
-        cmds.push(RenderCommand::FillRect {
-            x: vol_bar_x,
-            y: vol_bar_y,
-            width: vol_bar_w,
-            height: vol_bar_h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(2.0),
-        });
-
-        let vol_frac = self.volume.fraction() as f32;
-        let vol_color = if self.volume.effective_level() > Volume::NORMAL {
+        // Volume bar: the toolkit's slider, peach past the normal level.
+        let volume = self.volume_placement();
+        let vol_bar_x = volume.track.x;
+        let vol_bar_w = volume.track.w;
+        let fill = if self.volume.effective_level() > Volume::NORMAL {
             self.palette.peach
         } else {
             self.palette.green
         };
-        cmds.push(RenderCommand::FillRect {
-            x: vol_bar_x,
-            y: vol_bar_y,
-            width: vol_bar_w * vol_frac,
-            height: vol_bar_h,
-            color: vol_color,
-            corner_radii: CornerRadii::all(2.0),
-        });
+        self.volume_slider_now().draw(
+            cmds,
+            &self.palette,
+            &volume,
+            Look {
+                track: self.palette.surface0,
+                fill,
+                alpha: u8::MAX,
+            },
+            false,
+            0.0,
+        );
 
         cmds.push(RenderCommand::Text {
             x: vol_bar_x + vol_bar_w + 8.0,
@@ -5681,7 +6043,7 @@ impl VideoPlayerApp {
         cmds.push(RenderCommand::Text {
             x: 20.0,
             y: top + 42.0,
-            text: ADJUSTMENTS_NOT_APPLIED.to_owned(),
+            text: ADJUSTMENTS_HINT.to_owned(),
             font_size: 11.0,
             color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
@@ -5689,76 +6051,41 @@ impl VideoPlayerApp {
             overflow: TextOverflow::Ellipsis,
         });
 
-        let adj = &self.video_adjustments;
-        let sliders = [
-            ("Brightness", adj.brightness, -1.0, 1.0),
-            ("Contrast", adj.contrast, 0.0, 2.0),
-            ("Saturation", adj.saturation, 0.0, 3.0),
-            ("Hue", adj.hue, -180.0, 180.0),
-            ("Gamma", adj.gamma, 0.1, 3.0),
-            ("Sharpness", adj.sharpness, 0.0, 2.0),
-        ];
-
-        let slider_w = self.width - 200.0;
+        // Each adjustment: its name, the toolkit's slider -- ringed on the
+        // row the keyboard has -- and its value.
         let label_x = 20.0;
-        let bar_x = 140.0;
-
-        for (i, (name, value, min_val, max_val)) in sliders.iter().enumerate() {
-            let sy = top + 60.0 + i as f32 * 50.0;
-
+        for (row, &(name, ..)) in ADJUSTMENTS.iter().enumerate() {
+            let placement = self.adjust_placement(row);
+            let track = placement.track;
+            let focused = row == self.adjust_row;
             cmds.push(RenderCommand::Text {
                 x: label_x,
-                y: sy + 4.0,
+                y: track.y - 4.0,
                 text: name.to_string(),
                 font_size: 13.0,
                 color: self.palette.text,
-                font_weight: FontWeightHint::Regular,
+                font_weight: if focused {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(110.0),
                 overflow: TextOverflow::Ellipsis,
             });
-
-            // Slider track
-            cmds.push(RenderCommand::FillRect {
-                x: bar_x,
-                y: sy + 8.0,
-                width: slider_w,
-                height: 6.0,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(3.0),
-            });
-
-            // Slider fill
-            let range = max_val - min_val;
-            let frac = if range > 0.0 {
-                (value - min_val) / range
-            } else {
-                0.0
-            };
-            cmds.push(RenderCommand::FillRect {
-                x: bar_x,
-                y: sy + 8.0,
-                width: slider_w * frac,
-                height: 6.0,
-                color: self.palette.blue,
-                corner_radii: CornerRadii::all(3.0),
-            });
-
-            // Slider handle
-            let handle_x = bar_x + slider_w * frac;
-            cmds.push(RenderCommand::FillRect {
-                x: handle_x - 5.0,
-                y: sy + 4.0,
-                width: 10.0,
-                height: 14.0,
-                color: self.palette.lavender,
-                corner_radii: CornerRadii::all(5.0),
-            });
-
-            // Value
+            if let Some(slider) = self.adjust_slider_now(row) {
+                slider.draw(
+                    cmds,
+                    &self.palette,
+                    &placement,
+                    Look::accent(&self.palette, self.palette.surface0),
+                    focused,
+                    FOCUS_RING,
+                );
+            }
             cmds.push(RenderCommand::Text {
-                x: bar_x + slider_w + 12.0,
-                y: sy + 4.0,
-                text: format!("{value:.2}"),
+                x: track.right() + 12.0,
+                y: track.y - 4.0,
+                text: format!("{:.2}", self.video_adjustments.get(row)),
                 font_size: 12.0,
                 color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
@@ -5767,9 +6094,10 @@ impl VideoPlayerApp {
             });
         }
 
-        // Reset button
-        let reset_y = top + 60.0 + sliders.len() as f32 * 50.0 + 10.0;
-        let is_default = adj.is_default();
+        // Reset All: lit while there is something to reset.
+        let reset = self.reset_button();
+        let reset_y = reset.y;
+        let is_default = self.video_adjustments.is_default();
         let reset_bg = if is_default {
             self.palette.surface0
         } else {
@@ -5782,16 +6110,16 @@ impl VideoPlayerApp {
         };
 
         cmds.push(RenderCommand::FillRect {
-            x: bar_x,
-            y: reset_y,
-            width: 100.0,
-            height: 30.0,
+            x: reset.x,
+            y: reset.y,
+            width: reset.w,
+            height: reset.h,
             color: reset_bg,
             corner_radii: CornerRadii::all(6.0),
         });
         cmds.push(RenderCommand::Text {
-            x: bar_x + 20.0,
-            y: reset_y + 8.0,
+            x: reset.x + 20.0,
+            y: reset.y + 8.0,
             text: "Reset All".to_string(),
             font_size: 12.0,
             color: reset_fg,
@@ -10211,7 +10539,9 @@ as many times as before",
         app.seek_to(Duration::from_millis(650));
         settle(&mut app);
         drop(app.take_images());
-        let bar = app.seek_bar();
+        // Fractions of the track the bar is drawn on, which the slider reads
+        // a press against -- not of the taller, wider target round it.
+        let bar = app.seek_placement().track;
         let at = |fraction: f32| bar.x + bar.w * fraction;
         let y = bar.y + bar.h / 2.0;
         // 0.8 s long: 20% is 0.16 s, whose key frame is the one at the start
@@ -10277,7 +10607,7 @@ as many times as before",
             0
         }
 
-        fn convert(&mut self, (): &()) -> Result<Frame, String> {
+        fn convert(&mut self, (): &()) -> Result<videocodec::Frame, String> {
             Err(String::from("nothing to convert"))
         }
 
@@ -10293,7 +10623,8 @@ as many times as before",
         let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
         app.current_file = Some(sample_media_file());
         app.decodes = true;
-        app.pictures = Some(Pictures::start(Unreadable, WakerSlot::default()).unwrap());
+        app.pictures =
+            Some(Pictures::start(Unreadable, WakerSlot::default(), GradeSlot::default()).unwrap());
         app.play();
         settle(&mut app);
         assert_eq!(
@@ -10480,7 +10811,7 @@ as many times as before",
             0
         }
 
-        fn convert(&mut self, (): &()) -> Result<Frame, String> {
+        fn convert(&mut self, (): &()) -> Result<videocodec::Frame, String> {
             Err(String::from("nothing to convert"))
         }
 
@@ -10505,7 +10836,12 @@ as many times as before",
         app.current_file = Some(sample_media_file());
         app.decodes = true;
         app.pictures = Some(
-            Pictures::start(Sought(std::sync::Arc::clone(&log)), WakerSlot::default()).unwrap(),
+            Pictures::start(
+                Sought(std::sync::Arc::clone(&log)),
+                WakerSlot::default(),
+                GradeSlot::default(),
+            )
+            .unwrap(),
         );
         let sought = |app: &mut VideoPlayerApp| {
             // The seek is the thread's; its end, handed over after, says it
@@ -10525,5 +10861,227 @@ as many times as before",
             MouseEventKind::Press(MouseButton::Left),
         ));
         assert_eq!(sought(&mut app).1, SeekMode::KeyFrame, "a drag");
+    }
+
+    // == The sliders (2026-10-04, c-e-the-toolkit-has-a-slider-now.md) ========
+
+    /// **A press on the seek bar's thumb takes hold of it without seeking**:
+    /// the picture and the clock stay until the thumb is dragged.
+    #[test]
+    fn a_press_on_the_seek_bars_thumb_holds_it_where_it_is() {
+        let dir = Scratch::new("seek-thumb");
+        let mut app = film_open(&dir);
+        app.seek_to(Duration::from_millis(400));
+        settle(&mut app);
+        let placement = app.seek_placement();
+        let (x, y) = placement.thumb_rect(0.5).centre();
+        app.handle_event(&mouse(x + 2.0, y, MouseEventKind::Press(MouseButton::Left)));
+        assert!(app.seeking, "the thumb was not taken hold of");
+        assert_eq!(
+            app.seek_preview_position, None,
+            "a press on the thumb moved it"
+        );
+        app.handle_event(&mouse(
+            x + 2.0,
+            y,
+            MouseEventKind::Release(MouseButton::Left),
+        ));
+        assert!(!app.seeking);
+        assert_eq!(app.position, Duration::from_millis(400), "the clock moved");
+    }
+
+    /// **Escape takes a seek bar drag back**: no seek, and the picture goes
+    /// back to the clock from the key frame the drag showed.
+    #[test]
+    fn escape_takes_a_seek_bar_drag_back() {
+        let dir = Scratch::new("seek-escape");
+        let mut app = film_open(&dir);
+        let bar = app.seek_placement().track;
+        let y = bar.y + bar.h / 2.0;
+        app.handle_event(&mouse(
+            bar.x + bar.w * 0.7,
+            y,
+            MouseEventKind::Press(MouseButton::Left),
+        ));
+        settle(&mut app);
+        assert_eq!(shown_until(&app), Some(500), "the drag's key frame");
+        app.handle_event(&press(Key::Escape));
+        assert!(!app.seeking, "Escape left the drag on");
+        assert_eq!(app.seek_preview_position, None);
+        settle(&mut app);
+        assert_eq!(app.position, Duration::ZERO, "Escape seeked");
+        assert_eq!(
+            shown_until(&app),
+            Some(100),
+            "the picture stayed at the drag"
+        );
+        // The button coming up afterwards seeks nothing either.
+        app.handle_event(&mouse(
+            bar.x + bar.w * 0.7,
+            y,
+            MouseEventKind::Release(MouseButton::Left),
+        ));
+        assert_eq!(app.position, Duration::ZERO);
+    }
+
+    /// **The bars are the Player tab's**: a press where the seek bar would be,
+    /// on another tab, seeks nothing.
+    #[test]
+    fn the_seek_bar_answers_only_on_the_player_tab() {
+        let mut app = loaded();
+        app.active_tab = PlayerTab::Settings;
+        let bar = app.seek_placement().track;
+        let pressed = app.handle_event(&mouse(
+            bar.x + bar.w / 2.0,
+            bar.y + bar.h / 2.0,
+            MouseEventKind::Press(MouseButton::Left),
+        ));
+        assert!(!app.seeking && app.seek_preview_position.is_none());
+        assert!(
+            !pressed,
+            "a press on the Settings tab's empty space was taken"
+        );
+    }
+
+    /// **The volume bar drags**, and says the level it is at.
+    #[test]
+    fn the_volume_bar_drags() {
+        let mut app = loaded();
+        let bar = app.volume_placement().track;
+        let y = bar.y + bar.h / 2.0;
+        // Press at the left end -- silence -- then drag to the middle.
+        app.handle_event(&mouse(bar.x, y, MouseEventKind::Press(MouseButton::Left)));
+        assert_eq!(app.volume.level(), 0);
+        app.handle_event(&mouse(bar.x + bar.w / 2.0, y, MouseEventKind::Move));
+        assert_eq!(app.volume.level(), Volume::MAX / 2);
+        app.handle_event(&mouse(
+            bar.x + bar.w / 2.0,
+            y,
+            MouseEventKind::Release(MouseButton::Left),
+        ));
+        assert_eq!(app.volume.level(), Volume::MAX / 2);
+        assert!(
+            app.osd_message
+                .as_deref()
+                .is_some_and(|m| m.starts_with("Volume")),
+            "{:?}",
+            app.osd_message
+        );
+    }
+
+    /// **The Adjustments tab's keys move its sliders, and the picture with
+    /// them**: Down to Saturation, Home to none of it, and the red picture
+    /// on screen is grey -- decoded again through the grade, the film being
+    /// paused.
+    #[test]
+    fn an_adjustment_moved_with_the_keys_changes_the_picture() {
+        let dir = Scratch::new("adjust-keys");
+        let mut app = film_open(&dir);
+        drop(app.take_images());
+        app.active_tab = PlayerTab::Adjustments;
+        app.handle_event(&press(Key::Down));
+        app.handle_event(&press(Key::Down));
+        assert_eq!(app.adjust_row, 2, "Down did not reach Saturation");
+        app.handle_event(&press(Key::Home));
+        assert_eq!(app.video_adjustments.saturation, 0.0);
+        settle(&mut app);
+        let (_, _, rgb) = uploaded(&mut app).expect("the picture was not shown again");
+        assert!(
+            rgb[0] == rgb[1] && rgb[1] == rgb[2],
+            "red without its colour is not grey: {rgb:?}"
+        );
+        // Down stops at the last slider.
+        for _ in 0..10 {
+            app.handle_event(&press(Key::Down));
+        }
+        assert_eq!(app.adjust_row, ADJUSTMENTS.len() - 1);
+        for _ in 0..3 {
+            app.handle_event(&press(Key::Up));
+        }
+        assert_eq!(app.adjust_row, 2);
+        // Right, a step back up; the clock never moved.
+        app.handle_event(&press(Key::Right));
+        assert!((app.video_adjustments.saturation - 0.01).abs() < 1e-6);
+        assert_eq!(
+            app.position,
+            Duration::ZERO,
+            "a key on the tab seeked the film"
+        );
+    }
+
+    /// **An adjustment drags**, and Reset All puts the picture back.
+    #[test]
+    fn an_adjustment_drags_and_reset_all_puts_the_picture_back() {
+        let dir = Scratch::new("adjust-drag");
+        let mut app = film_open(&dir);
+        drop(app.take_images());
+        app.active_tab = PlayerTab::Adjustments;
+        // Brightness, pressed three quarters along: half of the lift.
+        let track = app.adjust_placement(0).track;
+        let y = track.y + track.h / 2.0;
+        app.handle_event(&mouse(
+            track.x + track.w * 0.75,
+            y,
+            MouseEventKind::Press(MouseButton::Left),
+        ));
+        app.handle_event(&mouse(
+            track.x + track.w * 0.75,
+            y,
+            MouseEventKind::Release(MouseButton::Left),
+        ));
+        assert!((app.video_adjustments.brightness - 0.5).abs() < 0.01);
+        settle(&mut app);
+        let (_, _, lifted) = uploaded(&mut app).expect("the picture was not shown again");
+        assert!(lifted[1] > 100 && lifted[2] > 100, "not lifted: {lifted:?}");
+        let reset = app.reset_button();
+        app.handle_event(&mouse(
+            reset.x + reset.w / 2.0,
+            reset.y + reset.h / 2.0,
+            MouseEventKind::Press(MouseButton::Left),
+        ));
+        assert!(app.video_adjustments.is_default());
+        settle(&mut app);
+        let (_, _, back) = uploaded(&mut app).expect("the picture was not shown again");
+        assert!(red(back), "Reset All left the picture lifted: {back:?}");
+    }
+
+    /// **Escape takes an adjustment's drag back.**
+    #[test]
+    fn escape_takes_an_adjustment_drag_back() {
+        let mut app = loaded();
+        app.active_tab = PlayerTab::Adjustments;
+        let track = app.adjust_placement(1).track;
+        let y = track.y + track.h / 2.0;
+        app.handle_event(&mouse(track.x, y, MouseEventKind::Press(MouseButton::Left)));
+        assert_eq!(
+            app.video_adjustments.contrast, 0.0,
+            "the press did not move it"
+        );
+        assert_eq!(app.adjust_row, 1, "the keyboard did not follow the press");
+        app.handle_event(&press(Key::Escape));
+        assert!(
+            (app.video_adjustments.contrast - 1.0).abs() < 1e-6,
+            "Escape did not take it back"
+        );
+    }
+
+    /// **A press that moves nothing still chooses the slider**: on the
+    /// thumb, which takes hold without a value changing, the keys go to the
+    /// slider pressed.
+    #[test]
+    fn a_press_on_an_adjustments_thumb_gives_it_the_keys() {
+        let mut app = loaded();
+        app.active_tab = PlayerTab::Adjustments;
+        assert_eq!(app.adjust_row, 0);
+        // Row 2 is saturation.
+        let before = app.video_adjustments.saturation;
+        let frac = app.adjust_slider_now(2).map_or(0.5, |s| s.fraction());
+        let (cx, cy) = app.adjust_placement(2).thumb_rect(frac).centre();
+        app.handle_event(&mouse(cx, cy, MouseEventKind::Press(MouseButton::Left)));
+        assert_eq!(app.adjust_row, 2, "the keyboard did not follow the press");
+        assert!(
+            (app.video_adjustments.saturation - before).abs() < 1e-6,
+            "a press on the thumb moved it"
+        );
     }
 }

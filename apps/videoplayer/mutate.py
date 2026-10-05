@@ -21,7 +21,10 @@ on a thread of their own (`src/pictures.rs`, swept by `PICTURES_MUTATIONS`)
 and taken as the player's clock reaches them; every jump of the clock moves
 the picture with it; the film ends when its last picture's time is up; and
 each settings row that changes nothing says its own reason, the one they
-shared -- "nothing here decodes video" -- having stopped being true.
+shared -- "nothing here decodes video" -- having stopped being true.  The
+same day the seek bar, the volume and the Adjustments tab became the
+toolkit's slider, and the adjustments are applied to the picture
+(`src/grade.rs`, swept by `GRADE_MUTATIONS`).
 
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
@@ -617,9 +620,9 @@ PICTURES_MUTATIONS = [
     ),
     (
         "the clock is not told to the thread",
-        "    pub fn show_at(&mut self, now: i64) -> Option<Frame> {\n"
+        "    pub fn show_at(&mut self, now: i64) -> Option<Ready> {\n"
         "        self.clock.store(now, Ordering::Relaxed);\n",
-        "    pub fn show_at(&mut self, now: i64) -> Option<Frame> {\n",
+        "    pub fn show_at(&mut self, now: i64) -> Option<Ready> {\n",
         [LEFT_BEHIND],
     ),
     (
@@ -670,10 +673,186 @@ PICTURES_MUTATIONS = [
     # them together.
 ]
 
+# The sliders (2026-10-04, c-e-the-toolkit-has-a-slider-now.md): the seek
+# bar, the volume and the Adjustments tab's six are the toolkit's; the
+# adjustments are applied to the picture (src/grade.rs), on the thread.
+SEEK_THUMB_T = "a_press_on_the_seek_bars_thumb_holds_it_where_it_is"
+SEEK_ESCAPE = "escape_takes_a_seek_bar_drag_back"
+SEEK_TABS = "the_seek_bar_answers_only_on_the_player_tab"
+VOLUME_DRAG = "the_volume_bar_drags"
+ADJUST_KEYS = "an_adjustment_moved_with_the_keys_changes_the_picture"
+ADJUST_DRAG = "an_adjustment_drags_and_reset_all_puts_the_picture_back"
+ADJUST_ESCAPE = "escape_takes_an_adjustment_drag_back"
+
+MUTATIONS += [
+    (
+        "the seek bar answers on every tab",
+        "                    PlayerTab::Adjustments => self.adjustments_press(event),\n                    _ => false,\n",
+        "                    PlayerTab::Adjustments => self.adjustments_press(event),\n                    _ => self.seek_bar_mouse(event),\n",
+        [SEEK_TABS],
+    ),
+    (
+        "a key during a drag is the player's",
+        "        if let Some(taken) = self.drag_key(event) {\n            return taken;\n        }\n",
+        "",
+        [SEEK_ESCAPE, ADJUST_ESCAPE],
+    ),
+    (
+        "Escape leaves the seek bar's drag on",
+        "            let response = self.seek_slider.handle_key(event);\n",
+        "            let response = guitk::slider::Response::Taken;\n",
+        [SEEK_ESCAPE],
+    ),
+    (
+        "a drag taken back leaves the picture at the drag",
+        "            Some(SliderEvent::Cancelled(_)) => {\n                self.seek_preview_position = None;\n                let here = self.position;\n                self.jump_to(here);\n",
+        "            Some(SliderEvent::Cancelled(_)) => {\n                self.seek_preview_position = None;\n",
+        [SEEK_ESCAPE],
+    ),
+    (
+        "the volume bar moves no volume",
+        "        self.volume.set_level(level);\n",
+        "        let _ = level;\n",
+        [VOLUME_DRAG],
+    ),
+    (
+        "an adjustment changes no picture",
+        "            Ok(mut slot) => *slot = grade,\n",
+        "            Ok(_) => drop(grade),\n",
+        [ADJUST_KEYS, ADJUST_DRAG],
+    ),
+    (
+        "a paused picture keeps the old adjustments",
+        "        if self.state != PlaybackState::Playing && self.pictures.is_some() {\n",
+        "        if false {\n",
+        [ADJUST_KEYS, ADJUST_DRAG],
+    ),
+    (
+        "the Adjustments tab's keys are the player's",
+        "        if self.active_tab == PlayerTab::Adjustments && self.adjustments_key(event) {\n",
+        "        if false && self.adjustments_key(event) {\n",
+        [ADJUST_KEYS],
+    ),
+    (
+        "Down goes past the last slider",
+        "                    .min(ADJUSTMENTS.len().saturating_sub(1));\n",
+        ";\n",
+        [ADJUST_KEYS],
+    ),
+    (
+        "a key moves the first slider whichever has the keyboard",
+        "                let response = stored.handle_key(event);\n                if let Some(moved) = response.event() {\n                    self.adjusted(row, moved.value());\n",
+        "                let response = stored.handle_key(event);\n                if let Some(moved) = response.event() {\n                    self.adjusted(0, moved.value());\n",
+        [ADJUST_KEYS],
+    ),
+    (
+        "Reset All resets nothing",
+        "            self.video_adjustments.reset();\n",
+        "",
+        [ADJUST_DRAG],
+    ),
+    (
+        "a press on a slider leaves the keyboard where it was",
+        "            if self.adjust_placement(row).hit().contains(event.x, event.y) {\n                self.adjust_row = row;\n",
+        "            if self.adjust_placement(row).hit().contains(event.x, event.y) {\n",
+        # A press on a track sets the row through the slider's event as well;
+        # only a press on the thumb, which moves nothing, leans on this line.
+        ["a_press_on_an_adjustments_thumb_gives_it_the_keys"],
+    ),
+    (
+        "an adjustment's drag goes on after the release",
+        "        self.adjust_dragging = dragging.then_some(row);\n",
+        "        if dragging {\n            self.adjust_dragging = Some(row);\n        }\n",
+        [ADJUST_DRAG],
+    ),
+]
+
+# The grade (src/grade.rs).
+GRADE_SRC = Path(__file__).parent / "src" / "grade.rs"
+NEUTRAL = "neutral_adjustments_are_no_grade"
+BRIGHT = "brightness_lifts_and_lowers_every_channel"
+CONTRAST = "contrast_turns_about_the_middle"
+GAMMA = "gamma_above_one_lifts_the_middle_and_keeps_the_ends"
+COLOUR = "no_saturation_is_grey_and_a_half_turn_of_hue_is_the_complement"
+SHARP = "sharpness_raises_an_edge_and_leaves_flat_colour_and_the_border"
+
+GRADE_MUTATIONS = [
+    (
+        "neutral adjustments still grade every picture",
+        "        if !(tonal || colour || sharp) {\n            return None;\n        }\n",
+        "",
+        [NEUTRAL],
+    ),
+    (
+        "brightness adds nothing",
+        "        let v = ((v - 0.5) * contrast + 0.5 + brightness).clamp(0.0, 1.0);\n",
+        "        let v = ((v - 0.5) * contrast + 0.5).clamp(0.0, 1.0);\n",
+        [BRIGHT],
+    ),
+    (
+        "contrast turns about black",
+        "        let v = ((v - 0.5) * contrast + 0.5 + brightness).clamp(0.0, 1.0);\n",
+        "        let v = (v * contrast + brightness).clamp(0.0, 1.0);\n",
+        [CONTRAST],
+    ),
+    (
+        "gamma bends the wrong way",
+        "        let v = v.powf(1.0 / gamma);\n",
+        "        let v = v.powf(gamma);\n",
+        [GAMMA],
+    ),
+    (
+        "saturation and hue are not applied",
+        "            matrix: colour.then(|| colour_matrix(saturation, hue)),\n",
+        "            matrix: None,\n",
+        [COLOUR],
+    ),
+    (
+        "hue turns the other way",
+        "    let (sin, cos) = hue_degrees.to_radians().sin_cos();\n",
+        "    let (sin, cos) = (-hue_degrees).to_radians().sin_cos();\n",
+        [COLOUR],
+    ),
+    (
+        "sharpness is not applied",
+        "        if self.sharpen > 0 {\n",
+        "        if false {\n",
+        [SHARP],
+    ),
+    (
+        "an edge is smoothed rather than sharpened",
+        "                let lift = (9 * c - sum).saturating_mul(amount) / (9 * ONE);\n",
+        "                let lift = (sum - 9 * c).saturating_mul(amount) / (9 * ONE);\n",
+        [SHARP],
+    ),
+]
+
+PICTURES_MUTATIONS += [
+    # 2026-10-04: the thread passed the first picture after a seek over
+    # against a clock the window had not moved yet, so a seek-bar drag
+    # sometimes showed the frame after the key frame it asked for.
+    (
+        "the picture a seek asks for is passed over like any other",
+        "            first_since_seek = true;\n            ahead = match source.seek(time, mode) {\n",
+        "            ahead = match source.seek(time, mode) {\n",
+        ["the_picture_a_seek_asks_for_is_not_passed_over_for_a_clock_left_behind"],
+    ),
+    (
+        "a picture is not put through the grade",
+        "        if let Some(grade) = grade {\n            grade.apply(&mut frame);\n        }\n",
+        "",
+        ["each_picture_goes_through_the_grade_in_the_slot"],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:]
     worst = 0
-    for src, rows in ((SRC, MUTATIONS), (PICTURES_SRC, PICTURES_MUTATIONS)):
+    for src, rows in (
+        (SRC, MUTATIONS),
+        (PICTURES_SRC, PICTURES_MUTATIONS),
+        (GRADE_SRC, GRADE_MUTATIONS),
+    ):
         mine = [o for o in only if any(o in name for name, *_ in rows)]
         if only and not mine:
             continue
